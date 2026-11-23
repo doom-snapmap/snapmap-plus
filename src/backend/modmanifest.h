@@ -321,6 +321,16 @@ size_t sh_modmanifest_current_choices(char **out);
  * Returns their count. */
 size_t sh_modmanifest_rows_choices(const sh_modmanifest_list *rows, char **out);
 
+/* The rows a save of a map placing `names` would write now (the save's own rule: the placed names' closure, the open
+ * map's map-level rows, its pinned rows kept), without a map text. The count, -1 on failure; *out to free. */
+int sh_modmanifest_rows_for(const char *const *names, size_t count, sh_modmanifest_list *out);
+
+/* The publish's pin step (modpin.h), bound while a publish is armed: called by the save with the rows it will write
+ * (a copy) and the saved text; returns 1 when it pinned them (the save writes the pinned copy), 0 to write the rows as
+ * they are. NULL unbinds. */
+typedef int (*sh_modmanifest_pin_fn)(sh_modmanifest_list *rows, const char *json, size_t length);
+void sh_modmanifest_set_pin(sh_modmanifest_pin_fn pin);
+
 /* The listing: the builds a map declares to the map scope (modserve.h sh_modserve_scope_set), in order. One rule for
  * every mode (the editor's load and Play entry, a hub, My Maps or published launch, a co-op lobby's launch, a rawmap
  * import): per row, the build that serves it (the one the editor substituted, else the one the place resolver names,

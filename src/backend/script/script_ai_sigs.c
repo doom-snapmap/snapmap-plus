@@ -179,7 +179,15 @@
  *                      whose atom is the name's gets the float through the store at +0x52 (VK 0x1417574D0 /
  *                      GL 0x141758620: the bound member at row +0x10 when the row's short +10 is below 0, else
  *                      the web's own memory +0x598 at that index); al 1 when found. The game's snippets call it
- *                      on the animator at ai +0x222B8 (VK 0x1404B02A0). Called. (snaphak-re reports/R-AR7) */
+ *                      on the animator at ai +0x222B8 (VK 0x1404B02A0). Called. (snaphak-re reports/R-AR7)
+ *   AiUpdateRelations  VK 0x1404AA490  GL 0x1404A8C10  the senses' UpdateRelations (senses): empties the relation
+ *                      table (rows +0x28, count +0x30: lea rbx,[rcx+0x28] at +0x24; mov [rbx+8],0 at +0x28) and fills
+ *                      it from the perceived entities, reading the faction at entity +0x4EC0 (+0x39). Present for those
+ *                      offsets; ai:relations reads the table (snaphak-re reports/R-TG1).
+ *   AiBestRelation     VK 0x1404AAD10  GL 0x1404A9490  the engine's pick from a relation list (senses, list): the
+ *                      nearest entity of the most hostile emotion; a row's emotion at +8 (+0x63), its entity at
+ *                      +0x10 (+0x6C), 0x28 bytes a row (+0xD9), starting from EMOTION_MAX 14 (+0x41). Present for
+ *                      those offsets; the Enemy SDK's enemy_target.lua makes the same pick. */
 #include <stddef.h>
 #include <string.h>
 #include "script_api_ai.h"
@@ -388,6 +396,15 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "41 8B D0 4C 39 08 74 16 41 FF C0 48 FF C2 48 83 C0 18 49 3B D2 7C EC 32 C0 48 83 C4 28 C3 "
       "48 8D 91 98 05 00 00 49 63 C0 48 8D 0C 40 49 8D 0C CB E8 ?? ?? ?? ?? B0 01 48 83 C4 28 C3",
       0x170A950u, 0x170B3C0u },
+    { "AiUpdateRelations",
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 83 EC 70 48 C7 44 24 20 FE FF FF FF 48 89 9C 24 C8 00 00 00 "
+      "48 8B F1 48 8D 59 28 C7 43 08 00 00 00 00 83 79 18 00 7D 21 48 8B 51 08 48 81 C2 C0 4E 00 00",
+      0x4AA490u, 0x4A8C10u },
+    { "AiBestRelation",
+      "48 89 6C 24 18 48 89 7C 24 20 41 54 41 56 41 57 48 83 EC 30 48 8B 41 08 4C 8B F2 33 D2 0F 29 74 24 20 "
+      "48 8B 88 08 08 00 00 48 8B 01 FF 90 80 00 00 00 F3 0F 10 35 ?? ?? ?? ?? 33 ED 4C 8B E0 8B FD 44 8D 7D 0E "
+      "41 39 6E 08",
+      0x4AAD10u, 0x4A9490u },
     { NULL, NULL, 0, 0 }
 };
 

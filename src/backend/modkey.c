@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <time.h>
 
 #include "modkey.h"
@@ -283,12 +284,30 @@ int sh_key_save(const sh_key *k, const char *folder, char **why)
     return ok;
 }
 
+/* The text sh_key_name_header made, decoded (malloc'd), or NULL when it is not one. */
+static char *mk_percent_decode(const char *in)
+{
+    size_t n = strlen(in), i, w = 0;
+    char *out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    for (i = 0; i < n; i++) {
+        if (in[i] == '%' && i + 2 < n + 0 && isxdigit((unsigned char)in[i + 1]) && isxdigit((unsigned char)in[i + 2])) {
+            char hex[3] = { in[i + 1], in[i + 2], 0 };
+            out[w++] = (char)strtoul(hex, NULL, 16);
+            i += 2;
+        } else if (in[i] == '%') { free(out); return NULL; }
+        else out[w++] = in[i];
+    }
+    out[w] = 0;
+    return out;
+}
+
 int sh_key_load(const char *path, sh_key **out, char **why)
 {
     size_t len = 0;
     unsigned char *text, *raw = NULL;
     mpj *root = NULL;
-    const mpj *prot, *pub, *created;
+    const mpj *prot, *pub, *created, *nmv;
     DWORD n = 0;
     DATA_BLOB in, plain = { 0 };
     sh_key *k = NULL;
@@ -314,6 +333,11 @@ int sh_key_load(const char *path, sh_key **out, char **why)
             /* The point is the file's public half; CNG checks it belongs to the scalar on import. */
             ok = mk_b64url_decode(pub->text, k->point, 65) && k->point[0] == 4 && mk_import(k) && !strcmp(k->pub, pub->text);
             k->created = created && mpj_is_num(created) ? mpj_int(created) : 0;
+            if (ok && (nmv = mpj_get(root, "name")) != NULL && nmv->type == MPJ_STR && nmv->text[0]) {
+                /* the name as it was last presented, stored percent-encoded (sh_key_save) */
+                char *plain_name = mk_percent_decode(nmv->text);
+                if (plain_name) { k->name = plain_name; }
+            }
         }
         if (plain.pbData) { SecureZeroMemory(plain.pbData, plain.cbData); LocalFree(plain.pbData); }
     }

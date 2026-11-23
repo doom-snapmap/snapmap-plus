@@ -62,9 +62,7 @@
 /* The store lock (recursive per thread): the mods folder's named lock
  * (store_lock.h; the record lock is the same mutex), shared with every other
  * process on the folder (a second game, the store tool, which holds it for
- * its whole run). modsync_store_lock and modsync_store_unlock (modsync.h)
-
- * take the same lock. A thread that finds it held logs one "MODS: store:
+ * its whole run). A thread that finds it held logs one "MODS: store:
  * waiting" line and waits. The counts below are this process's. */
 
 void modstore_lock(void);

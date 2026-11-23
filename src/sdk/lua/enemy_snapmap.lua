@@ -6,12 +6,10 @@
 -- show health, teleport) acts on it. What the engine leaves to the stock AI's own state machine, which a
 -- script-driven demon does not run, this module does (R-SM1, R-SM2):
 --
--- Spawn Behavior (the engine writes it into the stock AI's settings, DOOM 2016 0x140737180):
---   default   the demon takes the nearest enemy it can see
---   ambush    the same, but only an enemy within 768 units (the engine's ambush perception radius)
---   hunt      the nearest enemy, seen or not (the engine forces awareness of the player)
---   defend    as default, and it holds a position within 512 units of where it was placed (the engine's defend
---             radius; its role is ROLE_DEFEND)
+-- Spawn Behavior (the engine writes it into the stock AI's settings, DOOM 2016 0x140737180): default, ambush (the
+-- engine's 768-unit perception radius) and hunt (the engine forces awareness) act through the demon's perception,
+-- which the engine runs whatever drives the demon; defend also holds a position within 512 units of where it was
+-- placed (the engine's defend radius; its role is ROLE_DEFEND), which this module does.
 --
 -- Follow orders (SnapMap's Follow action, idSnapMapAction_FollowPath, writes them into the demon's temp memory for
 -- the stock FSM's snapmap state, which takes and removes them): e:snapmap_order() takes one the same way. While an
@@ -25,23 +23,23 @@
 -- the position no walk covers in one think (SnapMap's Teleport To, or the engine moving the demon) ends the order and
 -- the current move, and a defender defends where it now stands.
 --
--- An enemy is a player, or a demon of another team when the map's author gave this demon a team (the editor's Team
--- property: demons of two teams fight each other). The same team never fights itself, and the last attacker is taken
--- first.
+-- Who the demon fights is DOOM 2016's choice (enemy_target.lua): the engine's own social relations, so players, bots,
+-- the editor's Team (demons of two teams fight each other, one team never fights itself) and a demon that hurt it
+-- all come from the engine. A demon without an enemy, or whose enemy left 2016's combat band (killed, removed, its
+-- team changed), takes 2016's pick; the brain's own conditions re-pick as the fight goes on.
 --
--- Every read goes through the script API's general calls (e:get, e:class, entities, e:snapmap_order); on a Snapmap+
--- without them the demon behaves as "default" against players and hears no Follow order.
+-- Every read goes through the script API's general calls (e:get, e:class, entities, e:snapmap_order,
+-- e:relations); on a Snapmap+ without them the demon hears no Follow order and finds no enemy.
+
+local target = require("enemy_target")
 
 local P = {}
 
-P.AMBUSH_RADIUS = 768
 P.DEFEND_RADIUS = 512
-P.SIGHT = 4096          -- how far a demon looks for demons of another team
 P.LINK_WAIT = 3         -- seconds a new demon is looked for among the placed objects
 P.ORDER_ARRIVE = 64     -- a path or position order is done this close to its goal
 P.JUMP = 256            -- a move past this in one think is the engine's (a teleport): no demon walks it
 
-local REAL = { TEAM_ONE = true, TEAM_TWO = true, TEAM_THREE = true, TEAM_FOUR = true }
 local records = setmetatable({}, { __mode = "k" })
 
 local function field(e, path)
@@ -101,49 +99,13 @@ function P.of(e)
   return s
 end
 
---- The entity's team as the game names it (TEAM_ONE ... TEAM_NONE), or nil when unreadable.
-function P.team(e) return field(e, "team") end
-
---- true when demon e fights `other`.
-function P.hostile(e, other)
-  if other == nil or other == e then return false end
-  local mine, theirs = P.team(e), P.team(other)
-  if REAL[mine] and mine == theirs then return false end
-  if other:is_player() then return true end
-  return (REAL[mine] and REAL[theirs]) and true or false
-end
-
-local function is_demon(x)
-  local ok, t = pcall(function() return x:monster_type() end)
-  return ok and t ~= nil
-end
-
---- Give demon e an enemy when it has none (the engine gives a script-driven demon none).
--- b: the brain's record of e (b.attacker is the last entity that hurt it).
-function P.acquire(A, e, b)
-  if A.enemy(e) ~= nil then return end
-  local s = P.of(e)
-  local t = b and b.attacker or nil
-  if t ~= nil and (not A.alive(t) or not P.hostile(e, t)) then t = nil end
-  if t == nil then
-    local best, best_d
-    local function consider(x)
-      if x == e or not A.alive(x) or not P.hostile(e, x) then return end
-      local d = A.distance(e, x)
-      if s.behavior == "ambush" and d > P.AMBUSH_RADIUS then return end
-      if s.behavior ~= "hunt" and not A.can_see(e, x) then return end
-      if best == nil or d < best_d then best, best_d = x, d end
-    end
-    local players = rawget(_G, "players")
-    for _, p in ipairs(players and players() or {}) do consider(p) end
-    if REAL[P.team(e)] then
-      for _, x in ipairs(A.entities_near(A.position(e), P.SIGHT) or {}) do
-        if not x:is_player() and is_demon(x) then consider(x) end
-      end
-    end
-    t = best
-  end
-  if t ~= nil then A.set_enemy(e, t) end
+--- Give demon e 2016's enemy when it holds none in 2016's combat band (the engine gives a script-driven demon none:
+-- its state machines pick, and a scripted demon runs none of them). An enemy it has lost sight of is kept.
+function P.acquire(A, e)
+  local t = A.enemy(e)
+  if target.holds(A, e, t, target.COMBAT) then return end
+  local _, pick = target.available(A, e, target.COMBAT)
+  if pick ~= nil and pick ~= t then A.set_enemy(e, pick) end
 end
 
 --- pos, pulled back to within `radius` of `home` on the ground plane.
@@ -168,9 +130,8 @@ function P.order_goal(A, e)
 end
 
 --- One think of SnapMap's rules for demon e (call it each think before the brain decides): a new Follow order is
--- taken, a teleport noticed, an order that arrived ended, and an enemy given when it has none (P.acquire). b: the
--- brain's record of e.
-function P.think(A, e, b)
+-- taken, a teleport noticed, an order that arrived ended, and 2016's enemy given when it holds none (P.acquire).
+function P.think(A, e)
   local s = P.of(e)
   local pos = A.position(e)
   -- a teleport: the engine moved the demon farther than it walked
@@ -186,7 +147,7 @@ function P.think(A, e, b)
   end
   local goal = P.order_goal(A, e)
   if goal and pos and s.order.kind ~= "entity" and dist2d(pos, goal) <= P.ORDER_ARRIVE then s.order = nil end
-  P.acquire(A, e, b)
+  P.acquire(A, e)
 end
 
 --- Make the adapter honour SnapMap: a Follow order's goal takes every move the brain asks for, a defending demon's

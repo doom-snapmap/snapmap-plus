@@ -262,6 +262,16 @@ static void check_image(const char *path)
         }
         if (rva[SH_COMBAT_SIG_PROJECTILE_LAUNCH])
             CHECK(call_in(base, launch_at, 0x400, rva[SH_COMBAT_SIG_PROJECTILE_LAUNCH]) == launch_at + 0x32C);
+        /* idAI2's Damage is slot SH_COMBAT_DAMAGE_VSLOT of its vtable (by its RTTI name) and passes its arguments on to
+         * the idAI2 body (which calls Damage_Apply above) */
+        if (rva[SH_COMBAT_SIG_AI_DAMAGE]) {
+            uint32_t vt = vtable_of(base, size, image_base, ".?AVidAI2@@");
+            uint64_t slot = 0;
+            CHECK(vt != 0);
+            if (vt) memcpy(&slot, base + vt + SH_COMBAT_DAMAGE_VSLOT * 8, 8);
+            CHECK(slot - image_base == rva[SH_COMBAT_SIG_AI_DAMAGE]);
+            CHECK(call_in(base, rva[SH_COMBAT_SIG_AI_DAMAGE], 0x40, damage) != 0);
+        }
         if (rva[SH_COMBAT_SIG_RADIUS_DAMAGE])
             CHECK(call_in(base, radius_handler, 0x200, rva[SH_COMBAT_SIG_RADIUS_DAMAGE]) != 0);
         /* idEntity StartFX / StopFX: each loads the entity's FX manager (lea rcx,[rbx+0x30]) and calls its start

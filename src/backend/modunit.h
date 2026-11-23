@@ -75,7 +75,7 @@
 #define SH_UNIT_MODULE 3
 #define SH_UNIT_MOD    4
 
-/* A request players of a map asked for and did not get (modsync.h "asked"), and the decl whose load asked ("" or
+/* A request players of a map asked for and did not get (the store's asked list, 3.8), and the decl whose load asked ("" or
  * NULL when not known); either may name the namespace it was served under: the walk reads any mods/<x>/ as the
  * build's own. */
 typedef struct sh_unit_asked { const char *request, *by; } sh_unit_asked;

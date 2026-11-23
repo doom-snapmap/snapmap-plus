@@ -21,8 +21,14 @@
 #define WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY 4
 #endif
 
-/* SPEC-distribution 5.22: the store counts clients by this, and refuses retired ones. */
-#define MN_AGENT        L"snapmap-plus/1.0"
+/* SPEC-distribution 5.22: the store counts clients by this, and refuses retired ones. The release tag the build
+ * stamps (build.ps1 -Version), "dev" for a local build. */
+#ifndef SNAPMAP_PLUS_VERSION
+#define SNAPMAP_PLUS_VERSION "dev"
+#endif
+#define MN_WIDEN2(x)    L##x
+#define MN_WIDEN(x)     MN_WIDEN2(x)
+#define MN_AGENT        L"snapmap-plus/" MN_WIDEN(SNAPMAP_PLUS_VERSION)
 #define MN_CHUNK        (256u * 1024u)
 #define MN_ERROR_BODY   (64u * 1024u)
 #define MN_SMALL_BODY   (64u * 1024u)
@@ -105,6 +111,7 @@ const char *modnet_code_text(int code)
     case MODNET_E_BLOCKED:     return "blocked by takedown";
     case MODNET_E_UNAVAILABLE: return "the mod store is unavailable";
     case MODNET_E_GAME:        return "it needs game content this game does not hold";
+    case MODNET_E_RETIRED:     return "this version of Snapmap+ is retired by the mod store";
     default:                   return "error";
     }
 }
@@ -366,13 +373,66 @@ static int mn_cancelled(const modnet_io *io)
     return io && io->cancel && InterlockedCompareExchange(io->cancel, 0, 0) != 0;
 }
 
+/* ------------------------------------------------------------ the product's version against the store's minimum */
+
+static SRWLOCK g_min_lock = SRWLOCK_INIT;
+static char g_min_seen[64];
+static volatile LONG g_min_told;
+
+/* Each dot-separated number of `a` against `b`'s ("1.2.10" > "1.2.9"); a part that is not a number compares as text.
+ * "dev" is never older than anything: a local build is the newest. */
+int modnet_version_cmp(const char *a, const char *b)
+{
+    if (!a || !b) return 0;
+    if (!_stricmp(a, "dev")) return _stricmp(b, "dev") ? 1 : 0;
+    if (!_stricmp(b, "dev")) return -1;
+    while (*a == 'v' || *a == 'V') a++;
+    while (*b == 'v' || *b == 'V') b++;
+    while (*a || *b) {
+        char *ea, *eb;
+        unsigned long x = strtoul(a, &ea, 10), y = strtoul(b, &eb, 10);
+        if (ea != a && eb != b) { if (x != y) return x < y ? -1 : 1; a = ea; b = eb; }
+        else { int c = (unsigned char)*a - (unsigned char)*b; if (c) return c < 0 ? -1 : 1; if (*a) a++; if (*b) b++; continue; }
+        if (*a == '.' || *a == '-') a++;
+        if (*b == '.' || *b == '-') b++;
+    }
+    return 0;
+}
+
+static void mn_minimum_seen(const wchar_t *value)
+{
+    char v[64];
+    int n = WideCharToMultiByte(CP_UTF8, 0, value, -1, v, (int)sizeof v, NULL, NULL);
+    if (n <= 1) return;
+    if (modnet_version_cmp(SNAPMAP_PLUS_VERSION, v) >= 0) return;
+    AcquireSRWLockExclusive(&g_min_lock);
+    strcpy_s(g_min_seen, sizeof g_min_seen, v);
+    ReleaseSRWLockExclusive(&g_min_lock);
+}
+
+int modnet_newer_needed(void)
+{
+    int seen;
+    AcquireSRWLockShared(&g_min_lock);
+    seen = g_min_seen[0] != 0;
+    ReleaseSRWLockShared(&g_min_lock);
+    if (!seen) return 0;
+    return InterlockedCompareExchange(&g_min_told, 1, 0) == 0;
+}
+
+const char *modnet_version(void) { return SNAPMAP_PLUS_VERSION; }
+
 static int mn_winhttp_error(modnet_result *r, const char *step)
 {
     DWORD e = GetLastError();
     if (e == ERROR_WINHTTP_TIMEOUT) return mn_fail(r, MODNET_E_TIMEOUT, "%s timed out", step);
     if (e == ERROR_WINHTTP_OPERATION_CANCELLED) return mn_fail(r, MODNET_E_CANCELLED, NULL);
     if (e == ERROR_WINHTTP_SECURE_FAILURE) return mn_fail(r, MODNET_E_NET, "%s: TLS failure", step);
-    if (e == ERROR_WINHTTP_NAME_NOT_RESOLVED) return mn_fail(r, MODNET_E_NET, "%s: the store host could not be resolved", step);
+    if (e == ERROR_WINHTTP_NAME_NOT_RESOLVED) {
+        /* No name resolves: this computer is not connected (S2), as against a store that does not answer (S4). */
+        r->offline = 1;
+        return mn_fail(r, MODNET_E_NET, "%s: the store host could not be resolved", step);
+    }
     if (e == ERROR_WINHTTP_CANNOT_CONNECT) return mn_fail(r, MODNET_E_NET, "%s: cannot connect to the store", step);
     return mn_fail(r, MODNET_E_NET, "%s failed (winhttp %lu)", step, e);
 }
@@ -485,6 +545,23 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
         goto done;
     }
     r->status = (int)status;
+    {
+        /* A busy store says when to ask again (seconds); the client waits it out (SPEC-distribution 10.3). */
+        wchar_t ra[32];
+        DWORD n = sizeof ra;
+        if (WinHttpQueryHeaders(req, WINHTTP_QUERY_RETRY_AFTER, WINHTTP_HEADER_NAME_BY_INDEX, ra, &n,
+                                WINHTTP_NO_HEADER_INDEX)) {
+            unsigned long secs = wcstoul(ra, NULL, 10);
+            r->retry_after_ms = secs > 86400ul ? 86400000ull : (unsigned long long)secs * 1000ull;
+        }
+    }
+    {
+        /* D41: the oldest product the store still serves; remembered for the once-per-start notice. */
+        wchar_t mv[64];
+        DWORD n = sizeof mv;
+        if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CUSTOM, L"X-Snapmap-Plus-Minimum", mv, &n, WINHTTP_NO_HEADER_INDEX))
+            mn_minimum_seen(mv);
+    }
     {
         wchar_t cl[32];
         DWORD n = sizeof cl;
@@ -631,6 +708,7 @@ static int mn_status_fail(modnet_result *r, const unsigned char *body, size_t le
     else if (s == 413) code = MODNET_E_TOO_LARGE;
     else if (s == 429) code = MODNET_E_RATE;
     else if (s == 451) code = MODNET_E_BLOCKED;
+    else if (s == 410) code = MODNET_E_RETIRED;
     else if (s >= 500 && s < 600) code = MODNET_E_UNAVAILABLE;
     else code = MODNET_E_HTTP;
     /* The store's own sentence is the message, alone; the status stays in
@@ -721,555 +799,6 @@ static int mn_set_add(mn_hashset *s, const char *h)
     s->v[s->n][MODNET_HASH_HEX] = 0;
     s->n++;
     return 1;
-}
-
-int modnet_head_build(const char *hash, unsigned long long *size, unsigned *scripts, const modnet_io *io,
-                      modnet_result *r)
-{
-    modnet_result local;
-    char route[96];
-    unsigned char *resp = NULL;
-    unsigned long long length = 0;
-    size_t rlen = 0;
-    mn_req q;
-    double t0;
-    int code;
-    if (!r) r = &local;
-    mn_begin(r, &t0);
-    if (size) *size = 0;
-    if (scripts) *scripts = 0;
-    if (!modnet_valid_hash(hash)) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/build/%s", hash);
-    memset(&q, 0, sizeof q);
-    q.verb = L"HEAD";
-    q.route = route;
-    q.head = 1;
-    q.length = &length;
-    q.scripts = scripts;
-    code = mn_exchange(&q, &resp, &rlen, io, r);
-    if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, NULL, 0, "build");
-    else if (code == MODNET_OK && size) *size = length;
-    free(resp);
-    return mn_end(r, t0, code);
-}
-
-/* Progress of one request of an upload in parts, as progress of the whole
- * archive: `base` bytes are already at the store. */
-/* One small JSON request of an upload in parts ({"size":N} to `route`). */
-static int mn_parts_post(const char *route, unsigned long long size, DWORD receive_ms, unsigned char **resp, size_t *rlen,
-                         const modnet_io *io, modnet_result *r)
-{
-    char body[64];
-    mn_req q;
-    modnet_io quiet;   /* the cancel flag only: progress follows the archive's bytes */
-    quiet.cancel = io ? io->cancel : NULL;
-    quiet.progress = NULL;
-    quiet.context = NULL;
-    _snprintf_s(body, sizeof body, _TRUNCATE, "{\"size\":%llu}", size);
-    memset(&q, 0, sizeof q);
-    q.verb = L"POST";
-    q.route = route;
-    q.content_type = "application/json";
-    q.body = (const unsigned char *)body;
-    q.body_len = strlen(body);
-    q.max_response = MN_SMALL_BODY;
-    q.receive_ms = receive_ms;
-    return mn_exchange(&q, resp, rlen, &quiet, r);
-}
-
-/* The store's account of an upload in parts: {"partSize","parts","have":[...]},
- * or {"stored":true} when it holds the build already. `have` (malloc'd, one
- * flag per part) is set when it is not stored. */
-static int mn_parts_state(const unsigned char *resp, size_t rlen, unsigned long long size, unsigned long long *part_size,
-                          unsigned *parts, unsigned char **have, int *stored)
-{
-    mpj *root = mpj_parse((const char *)resp, rlen);
-    const mpj *ps, *pn, *hv, *st;
-    int ok = 0, i;
-    *have = NULL;
-    *stored = 0;
-    if (!root || root->type != MPJ_OBJ) goto done;
-    st = mpj_get(root, "stored");
-    if (st && st->type == MPJ_BOOL && st->b) { *stored = 1; ok = 1; goto done; }
-    ps = mpj_get(root, "partSize");
-    pn = mpj_get(root, "parts");
-    hv = mpj_get(root, "have");
-    if (!ps || !mpj_is_num(ps) || mpj_int(ps) < 1 || !pn || !mpj_is_num(pn) || mpj_int(pn) < 1 || !hv || hv->type != MPJ_ARR)
-        goto done;
-    *part_size = (unsigned long long)mpj_int(ps);
-    *parts = (unsigned)mpj_int(pn);
-    if ((size + *part_size - 1) / *part_size != *parts) goto done;
-    *have = (unsigned char *)calloc(*parts, 1);
-    if (!*have) goto done;
-    for (i = 0; i < hv->n; i++) {
-        long long n = mpj_int(hv->items[i]);
-        if (n >= 1 && (unsigned long long)n <= *parts) (*have)[n - 1] = 1;
-    }
-    ok = 1;
-done:
-    mpj_free(root);
-    return ok;
-}
-
-/* The parts of one upload, sent by several workers at once. */
-typedef struct mn_parts_job {
-    const char *hash;
-    HANDLE file;                    /* the caller's handle; each worker reopens it for its own position */
-    unsigned long long size, part_size;
-    unsigned parts;
-    const unsigned char *have;      /* parts the store held when the upload started */
-    const modnet_io *outer;
-    CRITICAL_SECTION lock;
-    unsigned next;                  /* the next part to consider */
-    unsigned long long held;        /* bytes of the parts the store holds now */
-    unsigned long long inflight[MODNET_PART_WORKERS];
-    volatile long stop;             /* the caller cancelled */
-    int code;                       /* the first failure, MODNET_OK when none */
-    int status;
-    char message[512];
-    unsigned long long sent;
-    unsigned requests, parts_sent;
-} mn_parts_job;
-
-typedef struct mn_parts_worker { mn_parts_job *job; unsigned slot; } mn_parts_worker;
-
-static void mn_parts_progress(void *ctx, unsigned long long done, unsigned long long total)
-{
-    mn_parts_worker *w = (mn_parts_worker *)ctx;
-    mn_parts_job *j = w->job;
-    unsigned long long sum;
-    unsigned i;
-    (void)total;
-    if (j->outer && j->outer->cancel && *j->outer->cancel) InterlockedExchange(&j->stop, 1);
-    if (!j->outer || !j->outer->progress) return;
-    EnterCriticalSection(&j->lock);          /* the caller's progress is called by one thread at a time */
-    j->inflight[w->slot] = done;
-    sum = j->held;
-    for (i = 0; i < MODNET_PART_WORKERS; i++) sum += j->inflight[i];
-    j->outer->progress(j->outer->context, sum, j->size);
-    LeaveCriticalSection(&j->lock);
-}
-
-static void mn_parts_failed(mn_parts_job *j, int code, const char *message)
-{
-    EnterCriticalSection(&j->lock);
-    if (j->code == MODNET_OK) {
-        j->code = code;
-        strncpy_s(j->message, sizeof j->message, message ? message : "", _TRUNCATE);
-    }
-    LeaveCriticalSection(&j->lock);
-}
-
-/* One worker: take the next part the store lacks and send it, until none is
- * left, a part fails or the caller cancels. A failure stops only the taking
- * of new parts: the parts already on their way finish, and the store keeps
- * them for the next start. */
-static DWORD WINAPI mn_parts_worker_proc(void *ctx)
-{
-    mn_parts_worker *w = (mn_parts_worker *)ctx;
-    mn_parts_job *j = w->job;
-    HANDLE h = ReOpenFile(j->file, GENERIC_READ, FILE_SHARE_READ, FILE_FLAG_SEQUENTIAL_SCAN);
-    if (h == INVALID_HANDLE_VALUE) {
-        mn_parts_failed(j, MODNET_E_ARG, "the archive file cannot be read");
-        return 0;
-    }
-    for (;;) {
-        char route[160];
-        wchar_t extra[64];
-        modnet_io sub;
-        modnet_result r;
-        mn_req q;
-        unsigned char *resp = NULL;
-        size_t rlen = 0;
-        unsigned n = 0;
-        unsigned long long at, len;
-        int code, more = 0;
-        EnterCriticalSection(&j->lock);
-        while (j->next < j->parts && j->have[j->next]) j->next++;
-        if (j->next < j->parts && j->code == MODNET_OK && !j->stop) { n = j->next++; more = 1; }
-        LeaveCriticalSection(&j->lock);
-        if (!more) break;
-        at = j->part_size * n;
-        len = n + 1 < j->parts ? j->part_size : j->size - at;
-        _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/build/%s/parts/%u", j->hash, n + 1);
-        _snwprintf_s(extra, 64, _TRUNCATE, L"X-Build-Size: %llu\r\n", j->size);
-        sub.cancel = &j->stop;
-        sub.progress = mn_parts_progress;
-        sub.context = w;
-        memset(&r, 0, sizeof r);
-        memset(&q, 0, sizeof q);
-        q.verb = L"PUT";
-        q.route = route;
-        q.content_type = "application/octet-stream";
-        q.headers = extra;
-        q.body_file = h;
-        q.body_offset = at;
-        q.body_len = (size_t)len;
-        q.max_response = MN_SMALL_BODY;
-        code = mn_exchange(&q, &resp, &rlen, &sub, &r);
-        if (code == MODNET_OK && r.status != 200) code = mn_status_fail(&r, resp, rlen, "part");
-        free(resp);
-        EnterCriticalSection(&j->lock);
-        j->sent += r.sent;
-        j->requests += r.requests;
-        j->status = r.status;
-        j->inflight[w->slot] = 0;
-        if (code == MODNET_OK) { j->held += len; j->parts_sent++; }
-        LeaveCriticalSection(&j->lock);
-        if (code != MODNET_OK) { mn_parts_failed(j, code, r.message); break; }
-    }
-    CloseHandle(h);
-    free(t_mn_message);                      /* this thread's last message, kept in the job when it mattered */
-    t_mn_message = NULL;
-    return 0;
-}
-
-/* Send every part the store lacks, MODNET_PART_WORKERS at a time. */
-static int mn_send_parts(const char *hash, HANDLE file, unsigned long long size, unsigned long long part_size,
-                         unsigned parts, const unsigned char *have, unsigned long long held, const modnet_io *io,
-                         modnet_result *r)
-{
-    mn_parts_job j;
-    mn_parts_worker workers[MODNET_PART_WORKERS];
-    HANDLE threads[MODNET_PART_WORKERS];
-    unsigned missing = 0, n, count, started = 0;
-    int code;
-    for (n = 0; n < parts; n++) if (!have[n]) missing++;
-    if (!missing) return MODNET_OK;
-    memset(&j, 0, sizeof j);
-    j.hash = hash;
-    j.file = file;
-    j.size = size;
-    j.part_size = part_size;
-    j.parts = parts;
-    j.have = have;
-    j.outer = io;
-    j.held = held;
-    j.code = MODNET_OK;
-    InitializeCriticalSection(&j.lock);
-    count = missing < MODNET_PART_WORKERS ? missing : MODNET_PART_WORKERS;
-    for (n = 0; n < count; n++) { workers[n].job = &j; workers[n].slot = n; }
-    for (n = 1; n < count; n++) {            /* the caller's thread is the first worker */
-        threads[started] = CreateThread(NULL, 0, mn_parts_worker_proc, &workers[n], 0, NULL);
-        if (threads[started]) started++;
-    }
-    {
-        char *mine = t_mn_message;           /* the worker frees its thread's message: keep the caller's */
-        t_mn_message = NULL;
-        mn_parts_worker_proc(&workers[0]);
-        t_mn_message = mine;
-    }
-    if (started) WaitForMultipleObjects(started, threads, TRUE, INFINITE);
-    for (n = 0; n < started; n++) CloseHandle(threads[n]);
-    DeleteCriticalSection(&j.lock);
-    r->sent += j.sent;
-    r->requests += j.requests;
-    r->parts += j.parts_sent;
-    if (j.status) r->status = j.status;
-    if (mn_cancelled(io)) code = mn_fail(r, MODNET_E_CANCELLED, NULL);
-    else if (j.code != MODNET_OK) code = mn_fail(r, j.code, "%s", j.message[0] ? j.message : modnet_code_text(j.code));
-    else code = MODNET_OK;
-    return code;
-}
-
-/* An archive larger than one request, in parts: start (or resume), send the
- * parts the store does not hold, complete. A failure a retry could fix
- * starts again, and the store's answer then names the parts already held. */
-static int mn_put_parts(const char *hash, HANDLE h, unsigned long long size, const modnet_io *io, modnet_result *r)
-{
-    char start[128], complete[128];
-    int tries, code = MODNET_E_PROTOCOL;
-    _snprintf_s(start, sizeof start, _TRUNCATE, "/mods/build/%s/parts", hash);
-    _snprintf_s(complete, sizeof complete, _TRUNCATE, "/mods/build/%s/complete", hash);
-    for (tries = 0; tries < MN_PART_TRIES; tries++) {
-        unsigned char *resp = NULL, *have = NULL;
-        size_t rlen = 0;
-        unsigned long long part_size = 0, held = 0;
-        unsigned parts = 0, n;
-        int stored = 0;
-        code = mn_parts_post(start, size, 0, &resp, &rlen, io, r);
-        if (code == MODNET_OK && r->status != 200 && r->status != 201) code = mn_status_fail(r, resp, rlen, "parts");
-        else if (code == MODNET_OK && !mn_parts_state(resp, rlen, size, &part_size, &parts, &have, &stored))
-            code = mn_fail(r, MODNET_E_PROTOCOL, "the store's answer to an upload in parts is malformed");
-        free(resp);
-        if (code != MODNET_OK) { free(have); if (code == MODNET_E_CANCELLED || !modnet_transient(code)) return code; continue; }
-        if (stored) { r->created = 0; return MODNET_OK; }
-        for (n = 0; n < parts; n++) if (have[n]) held += n + 1 < parts ? part_size : size - part_size * n;
-        code = mn_send_parts(hash, h, size, part_size, parts, have, held, io, r);
-        free(have);
-        if (code == MODNET_OK) {
-            double t0 = mn_now_ms();
-            resp = NULL;
-            code = mn_parts_post(complete, size, MN_COMPLETE_MS, &resp, &rlen, io, r);
-            r->check_ms += mn_now_ms() - t0;
-            if (code == MODNET_OK) {
-                if (r->status == 201) r->created = 1;
-                else if (r->status != 200) code = mn_status_fail(r, resp, rlen, "complete");
-            }
-            free(resp);
-            if (code == MODNET_OK) return MODNET_OK;
-        }
-        /* The upload was abandoned or its parts did not join (404, 409): the
-         * next start says what the store holds. */
-        if (code == MODNET_E_CANCELLED || (!modnet_transient(code) && code != MODNET_E_NOT_FOUND)) return code;
-    }
-    return code;
-}
-
-int modnet_put_build(const char *hash, const char *path, unsigned long long size, const modnet_io *io,
-                     modnet_result *r)
-{
-    modnet_result local;
-    char route[96];
-    unsigned char *resp = NULL;
-    size_t rlen = 0;
-    wchar_t *wpath;
-    HANDLE h;
-    LARGE_INTEGER actual;
-    mn_req q;
-    double t0;
-    int code;
-    if (!r) r = &local;
-    mn_begin(r, &t0);
-    if (!modnet_valid_hash(hash) || !path || !path[0] || !size) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    wpath = sh_mb_wpath(path);
-    if (!wpath) return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL));
-    h = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-    free(wpath);
-    if (h == INVALID_HANDLE_VALUE)
-        return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "the build archive cannot be opened (error %lu)", GetLastError()));
-    if (!GetFileSizeEx(h, &actual) || (unsigned long long)actual.QuadPart != size) {
-        CloseHandle(h);
-        return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "the build archive is not the size given"));
-    }
-    if (size > MODNET_PART_SIZE) {
-        code = mn_put_parts(hash, h, size, io, r);
-        CloseHandle(h);
-        return mn_end(r, t0, code);
-    }
-    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/build/%s", hash);
-    memset(&q, 0, sizeof q);
-    q.verb = L"PUT";
-    q.route = route;
-    q.content_type = MODNET_ARCHIVE_TYPE;
-    q.body_file = h;
-    q.body_len = (size_t)size;
-    q.max_response = MN_SMALL_BODY;
-    code = mn_exchange(&q, &resp, &rlen, io, r);
-    CloseHandle(h);
-    if (code == MODNET_OK) {
-        if (r->status == 201) r->created = 1;
-        else if (r->status != 200) code = mn_status_fail(r, resp, rlen, "build");
-    }
-    free(resp);
-    return mn_end(r, t0, code);
-}
-
-int modnet_get_build(const char *hash, const char *out_path, const modnet_io *io, modnet_result *r)
-{
-    modnet_result local;
-    char route[96];
-    unsigned char *resp = NULL;
-    size_t rlen = 0;
-    wchar_t *wpath;
-    HANDLE h;
-    mn_req q;
-    double t0;
-    int code;
-    if (!r) r = &local;
-    mn_begin(r, &t0);
-    if (!modnet_valid_hash(hash) || !out_path || !out_path[0]) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    wpath = sh_mb_wpath(out_path);
-    if (!wpath) return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL));
-    SetFileAttributesW(wpath, FILE_ATTRIBUTE_NORMAL);
-    h = CreateFileW(wpath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
-                    NULL);
-    if (h == INVALID_HANDLE_VALUE) {
-        code = mn_fail(r, MODNET_E_ARG, "the download cannot be written (error %lu)", GetLastError());
-        free(wpath);
-        return mn_end(r, t0, code);
-    }
-    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/build/%s", hash);
-    memset(&q, 0, sizeof q);
-    q.verb = L"GET";
-    q.route = route;
-    q.max_response = ~0ull;   /* any size: it streams to the file */
-    q.sink = h;
-    code = mn_exchange(&q, &resp, &rlen, io, r);
-    if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "build");
-    else if (code == MODNET_OK && r->received == 0)
-        code = mn_fail(r, MODNET_E_PROTOCOL, "build %.16s: the store sent nothing", hash);
-    if (code == MODNET_OK && !FlushFileBuffers(h))
-        code = mn_fail(r, MODNET_E_ARG, "the download cannot be written (error %lu)", GetLastError());
-    CloseHandle(h);
-    if (code != MODNET_OK) DeleteFileW(wpath);
-    free(wpath);
-    free(resp);
-    return mn_end(r, t0, code);
-}
-
-int modnet_claim(const char *ref, const char *const *builds, int n, const char *secret,
-                 char claim_out[MODNET_CLAIM_HEX + 1], char secret_out[MODNET_HASH_HEX + 1],
-                 const modnet_io *io, modnet_result *r)
-{
-    modnet_result local;
-    mn_hashset set = {0};
-    mn_buf body = {0};
-    unsigned char *resp = NULL;
-    size_t rlen = 0;
-    mn_req q;
-    double t0;
-    int code, i;
-    if (!r) r = &local;
-    mn_begin(r, &t0);
-    if (claim_out) claim_out[0] = 0;
-    if (secret_out) secret_out[0] = 0;
-    if (!claim_out || !secret_out || !modnet_valid_ref(ref) || n <= 0 || !builds || (secret && !modnet_valid_hash(secret)))
-        return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    for (i = 0; i < n; i++) {
-        if (!modnet_valid_hash(builds[i])) { free(set.v); return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "bad build hash")); }
-        if (!mn_set_has(&set, builds[i]) && !mn_set_add(&set, builds[i])) { free(set.v); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
-    }
-    mn_puts(&body, "{\"builds\":[");
-    for (i = 0; i < set.n; i++) {
-        if (i) mn_puts(&body, ",");
-        mn_puts(&body, "\"");
-        mn_put(&body, set.v[i], MODNET_HASH_HEX);
-        mn_puts(&body, "\"");
-    }
-    mn_puts(&body, "],\"ref\":");
-    mn_put_json_string(&body, ref);
-    if (secret) { mn_puts(&body, ",\"secret\":\""); mn_puts(&body, secret); mn_puts(&body, "\""); }
-    mn_puts(&body, "}");
-    free(set.v);
-    if (body.bad) { free(body.p); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
-    memset(&q, 0, sizeof q);
-    q.verb = L"POST";
-    q.route = "/mods/claim";
-    q.content_type = "application/json";
-    q.body = (const unsigned char *)body.p;
-    q.body_len = body.n;
-    q.max_response = MN_SMALL_BODY;
-    code = mn_exchange(&q, &resp, &rlen, io, r);
-    SecureZeroMemory(body.p, body.n);
-    free(body.p);
-    if (code == MODNET_OK && r->status != 200 && r->status != 201) code = mn_status_fail(r, resp, rlen, "claim");
-    else if (code == MODNET_OK) {
-        mpj *root = mpj_parse((const char *)resp, rlen);
-        const mpj *c = root && root->type == MPJ_OBJ ? mpj_get(root, "claim") : NULL;
-        const mpj *s = root && root->type == MPJ_OBJ ? mpj_get(root, "secret") : NULL;
-        if (!c || c->type != MPJ_STR || !mn_valid_hex(c->text, MODNET_CLAIM_HEX) ||
-            !s || s->type != MPJ_STR || !modnet_valid_hash(s->text) || (secret && strcmp(s->text, secret) != 0))
-            code = mn_fail(r, MODNET_E_PROTOCOL, "claim: the answer is not a claim id and secret");
-        else {
-            strcpy_s(claim_out, MODNET_CLAIM_HEX + 1, c->text);
-            strcpy_s(secret_out, MODNET_HASH_HEX + 1, s->text);
-            r->created = r->status == 201;
-        }
-        mpj_free(root);
-    }
-    if (resp) { SecureZeroMemory(resp, rlen); free(resp); }
-    return mn_end(r, t0, code);
-}
-
-int modnet_release(const char *claim, const char *secret, const modnet_io *io, modnet_result *r)
-{
-    modnet_result local;
-    char body[160];
-    unsigned char *resp = NULL;
-    size_t rlen = 0;
-    mn_req q;
-    double t0;
-    int code;
-    if (!r) r = &local;
-    mn_begin(r, &t0);
-    if (!mn_valid_hex(claim, MODNET_CLAIM_HEX) || !modnet_valid_hash(secret)) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    _snprintf_s(body, sizeof body, _TRUNCATE, "{\"claim\":\"%s\",\"secret\":\"%s\"}", claim, secret);
-    memset(&q, 0, sizeof q);
-    q.verb = L"POST";
-    q.route = "/mods/release";
-    q.content_type = "application/json";
-    q.body = (const unsigned char *)body;
-    q.body_len = strlen(body);
-    q.max_response = MN_SMALL_BODY;
-    code = mn_exchange(&q, &resp, &rlen, io, r);
-    SecureZeroMemory(body, sizeof body);
-    if (code == MODNET_OK && r->status != 204 && r->status != 200) code = mn_status_fail(r, resp, rlen, "release");
-    free(resp);
-    return mn_end(r, t0, code);
-}
-
-int modnet_report_asked(const char *hash, const char *request, const char *by, const modnet_io *io, modnet_result *r)
-{
-    modnet_result local;
-    mn_buf body = {0};
-    unsigned char *resp = NULL;
-    size_t rlen = 0;
-    char *route;
-    mn_req q;
-    double t0;
-    int code;
-    if (!r) r = &local;
-    mn_begin(r, &t0);
-    if (!modnet_valid_hash(hash) || !request || !request[0]) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    mn_puts(&body, "{\"by\":");
-    mn_put_json_string(&body, by ? by : "");
-    mn_puts(&body, ",\"request\":");
-    mn_put_json_string(&body, request);
-    mn_puts(&body, "}");
-    route = sh_textf("/mods/build/%s/asked", hash);
-    if (body.bad || !route) { free(body.p); free(route); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
-    memset(&q, 0, sizeof q);
-    q.verb = L"POST";
-    q.route = route;
-    q.content_type = "application/json";
-    q.body = (const unsigned char *)body.p;
-    q.body_len = body.n;
-    q.max_response = MN_SMALL_BODY;
-    code = mn_exchange(&q, &resp, &rlen, io, r);
-    if (code == MODNET_OK && r->status != 204 && r->status != 200) code = mn_status_fail(r, resp, rlen, "asked");
-    free(resp);
-    free(body.p);
-    free(route);
-    return mn_end(r, t0, code);
-}
-
-int modnet_list_asked(const char *claim, const char *secret, char **json, const modnet_io *io, modnet_result *r)
-{
-    modnet_result local;
-    char body[160];
-    unsigned char *resp = NULL;
-    size_t rlen = 0;
-    mn_req q;
-    double t0;
-    int code;
-    if (!r) r = &local;
-    mn_begin(r, &t0);
-    if (json) *json = NULL;
-    if (!json || !mn_valid_hex(claim, MODNET_CLAIM_HEX) || !modnet_valid_hash(secret))
-        return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    _snprintf_s(body, sizeof body, _TRUNCATE, "{\"claim\":\"%s\",\"secret\":\"%s\"}", claim, secret);
-    memset(&q, 0, sizeof q);
-    q.verb = L"POST";
-    q.route = "/mods/asked";
-    q.content_type = "application/json";
-    q.body = (const unsigned char *)body;
-    q.body_len = strlen(body);
-    q.max_response = ~0ull;   /* as many as players asked for */
-    code = mn_exchange(&q, &resp, &rlen, io, r);
-    SecureZeroMemory(body, sizeof body);
-    if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "asked");
-    else if (code == MODNET_OK) {
-        char *text = (char *)malloc(rlen + 1);
-        if (!text) code = mn_fail(r, MODNET_E_NOMEM, NULL);
-        else {
-            if (rlen) memcpy(text, resp, rlen);
-            text[rlen] = 0;
-            *json = text;
-        }
-    }
-    free(resp);
-    return mn_end(r, t0, code);
 }
 
 /* ------------------------------------------------------------ units ----- */

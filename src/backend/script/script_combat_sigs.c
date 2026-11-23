@@ -41,7 +41,14 @@
  *                       fading (bit 0x10); otherwise it re-arms the action in place (clears bits 0x04 and 0x10,
  *                       sets 0x08 and 0x02, new times) and never stops the action's sound. The update then starts
  *                       a sound item again while bit 0x04 is clear and stores the new handle at action +0xB0 over
- *                       the old one. Detoured; 19-byte window. */
+ *                       the old one. Detoured; 19-byte window.
+ *   CombatAiDamage      VK 0x140424D30  GL 0x140423B90  idAI2's Damage(ai, inflictor, attacker, parms, scale,
+ *                       direction*, hit*): slot 130 of idAI2's vtable (VK 0x142035B30, GL 0x14204F900) in both
+ *                       images, the same virtual as the player's. It passes its arguments on to the idAI2 body
+ *                       (VK 0x1403F8C40 / GL 0x1403F8120) with a hit count of 1; the body records the damage and
+ *                       its calculate (VK 0x1403FB1D0) applies the team rule: in a SnapMap mode an attacker of the
+ *                       victim's own team, other than TEAM_NONE, does no damage. Compared, not called directly:
+ *                       a demon whose vtable holds it is damaged through it (snaphak-re R-TG1). */
 #include <stddef.h>
 #include <string.h>
 #include <windows.h>
@@ -82,6 +89,10 @@ const sig_entry SH_COMBAT_SIGNATURES[] = {
       "40 55 53 56 57 41 55 41 56 41 57 48 8D AC 24 70 FF FF FF 48 81 EC 90 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 "
       "48 89 45 D0 4C 8B AD 00 01 00 00 4D 8B F8 48 63 C2 4D 8B F1 48 69 F8 70 05 00 00",
       0x16ECC80u, 0x16ED600u },
+    { "CombatAiDamage",
+      "48 83 EC 48 48 8B 84 24 80 00 00 00 F3 0F 10 44 24 70 C7 44 24 38 01 00 00 00 48 89 44 24 30 48 8B 44 24 78 "
+      "48 89 44 24 28 F3 0F 11 44 24 20 E8 ?? ?? ?? ?? 48 83 C4 48 C3",
+      0x424D30u, 0x423B90u },
     { NULL, NULL, 0, 0 }
 };
 

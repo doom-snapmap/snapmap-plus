@@ -9,6 +9,7 @@
 #include "snapmap_plus_iface.h"
 #include "../common/text.h"
 #include "modui.h"
+#include "modclaim.h"
 #include "modcache.h"
 #include "feature_health.h"
 #include "modbundle.h"
@@ -487,15 +488,6 @@ int sh_modui_scripts(const char *salt, char *out, int out_cap, int *needed)
     return r;
 }
 
-/* The design's sentence for the one download approval of a map whose mods
- * carry scripts. */
-void sh_modui_scripts_approval(unsigned files, char *out, size_t cap)
-{
-    if (!out || !cap) return;
-    _snprintf_s(out, cap, _TRUNCATE, "These mods include scripts (%u file%s). Scripts run only inside this map and cannot "
-                "read or change your files.", files, files == 1 ? "" : "s");
-}
-
 #ifndef SH_MODUI_PURE
 int sh_modui_scripted_maps_allowed(void)
 {
@@ -920,13 +912,12 @@ static int mu_model_build(mu_model *m)
 
 /* ------------------------------------------------------------------ published maps */
 
-/* The record's claims (modsync: a published item's uploaded bundle set) and
- * links (modpublish: which saved map an item was published from). Only the
- * bundle hashes and times are read; a claim's secret is never kept. */
+/* The record's claims (modclaim.h: a published item's claim of its units, with the namespaces they serve) and links
+ * (modpublish: which saved map an item was published from). No secret is ever stored. */
 typedef struct mu_claim {
     char *ref;                   /* malloc'd */
     long long updated;
-    char (*hashes)[SH_MB_HASH_HEX + 1];
+    char (*salts)[SH_MODMANIFEST_SALT_CAP];
     int count;
 } mu_claim;
 
@@ -943,7 +934,7 @@ typedef struct mu_record {
 static void mu_record_free(mu_record *r)
 {
     size_t i;
-    for (i = 0; i < r->claim_count; i++) { free(r->claims[i].hashes); free(r->claims[i].ref); }
+    for (i = 0; i < r->claim_count; i++) { free(r->claims[i].salts); free(r->claims[i].ref); }
     for (i = 0; i < r->link_count; i++) { free(r->links[i].item); free(r->links[i].cloud); free(r->links[i].local); }
     free(r->claims);
     free(r->links);
@@ -964,39 +955,29 @@ static void mu_record_load(const mu_model *m, mu_record *r)
     int i, k, got;
     memset(r, 0, sizeof *r);
     if (!m->root_ok) return;
-    got = sh_mb_record_get(m->root, "claims", &text);
+    got = sh_mb_record_get(m->root, MODCLAIM_CLAIMS_SECTION, &text);
     r->claims_read = got >= 0;
     x = got == 1 && text ? mpj_parse(text, strlen(text)) : NULL;
-    if (text) { SecureZeroMemory(text, strlen(text)); free(text); text = NULL; }
+    free(text);
+    text = NULL;
     if (x && x->type == MPJ_OBJ && x->n) {
         r->claims = (mu_claim *)calloc((size_t)x->n, sizeof *r->claims);
         for (i = 0; r->claims && i < x->n; i++) {
-            const mpj *c = x->items[i], *h = mpj_get(c, "bundles");
+            const mpj *c = x->items[i], *h = mpj_get(c, "mods");
             mu_claim *cl = &r->claims[r->claim_count];
-            if (!c || c->type != MPJ_OBJ || !strncmp(x->keys[i], "publish-pending-", 16)) continue;
+            if (!c || c->type != MPJ_OBJ) continue;
             if (!(cl->ref = sh_text(x->keys[i]))) continue;
-            cl->updated = mpj_int(mpj_get(c, "updated"));
+            cl->updated = mpj_int(mpj_get(c, "at"));
             if (h && h->type == MPJ_ARR && h->n) {
-                cl->hashes = (char (*)[SH_MB_HASH_HEX + 1])calloc((size_t)h->n, sizeof *cl->hashes);
-                for (k = 0; cl->hashes && k < h->n; k++)
-                    if (h->items[k] && h->items[k]->type == MPJ_STR) {
-                        /* A build hash has one form; anything else names no build. */
-                        if (strlen(h->items[k]->text) != SH_MB_HASH_HEX) continue;
-                        strcpy_s(cl->hashes[cl->count], SH_MB_HASH_HEX + 1, h->items[k]->text);
-                        cl->count++;
-                    }
+                cl->salts = (char (*)[SH_MODMANIFEST_SALT_CAP])calloc((size_t)h->n, sizeof *cl->salts);
+                for (k = 0; cl->salts && k < h->n; k++)
+                    if (h->items[k] && h->items[k]->type == MPJ_STR && strlen(h->items[k]->text) == SH_MODMANIFEST_SALT_LEN)
+                        strcpy_s(cl->salts[cl->count++], SH_MODMANIFEST_SALT_CAP, h->items[k]->text);
             }
             r->claim_count++;
         }
     }
-    if (x) {
-        /* The tree holds the secrets' text too; clear it before release. */
-        for (i = 0; x->type == MPJ_OBJ && i < x->n; i++) {
-            mpj *s = mpj_get(x->items[i], "secret");
-            if (s && s->type == MPJ_STR && s->text) SecureZeroMemory(s->text, strlen(s->text));
-        }
-        mpj_free(x);
-    }
+    mpj_free(x);
     x = sh_mb_record_get(m->root, "links", &text) == 1 && text ? mpj_parse(text, strlen(text)) : NULL;
     free(text);
     if (x && x->type == MPJ_OBJ && x->n) {
@@ -1016,16 +997,17 @@ static void mu_record_load(const mu_model *m, mu_record *r)
     mpj_free(x);
 }
 
-/* How many claims' build sets name entry i's build. */
+/* How many of this computer's published maps claim content of entry i's namespace. */
 static unsigned mu_published_maps(const mu_model *m, const mu_record *r, int entry)
 {
     size_t i;
     int k;
     unsigned n = 0;
+    const sh_ms_entry *e = entry >= 0 && (size_t)entry < m->list.count ? &m->list.items[entry] : NULL;
+    if (!e || e->place[0]) return 0;
     for (i = 0; i < r->claim_count; i++) {
         int hit = 0;
-        for (k = 0; k < r->claims[i].count && !hit; k++)
-            hit = mu_find_hash(m, r->claims[i].hashes[k]) == entry;
+        for (k = 0; k < r->claims[i].count && !hit; k++) hit = !_stricmp(r->claims[i].salts[k], e->salt);
         n += hit;
     }
     return n;
@@ -2098,7 +2080,7 @@ static void mu_put_entity_names(mu_buf *b, const mu_model *m, const mu_map *mp, 
 
 /* "asked": what players of the published map asked for of a mod and did
  * not get, because the map carried only part of the mod: the record's
- * "asked" section under the item (modsync.h modsync_asked_refresh),
+ * "asked" section under the item (written by the product before units; nothing writes it now),
  * [{"mod","request","by"}], the mod named by its name. */
 static void mu_put_asked(mu_buf *b, const mu_model *m, const char *item)
 {
@@ -3058,6 +3040,7 @@ static void mu_remove_marked(const mu_model *m, unsigned char *removing, mu_remo
         sh_modserve_refresh rf;
         char why[200];
         if (mu_rescan(&rf, why, sizeof why) < 0) mu_log("uninstall: %s", why);
+        sh_cache_sweep_async();   /* a mod uninstalled: the content cache is swept (5.17) */
     }
     modstore_unlock();
 }
@@ -3404,6 +3387,22 @@ static int mu_scope_source(int when)
     if (when == SH_MODSERVE_AT_PLAY) mu_launch_play_begin();
     if (!InterlockedCompareExchange(&g_scope_editor, 0, 0)) return 0;
     return mu_listing_live();
+}
+
+int sh_modui_placed_names(char ***names, size_t *count)
+{
+    const sh_modui_engine *e = mu_engine();
+    mu_names placed;
+    if (!names || !count) return -1;
+    *names = NULL;
+    *count = 0;
+    if (!mu_on_main() || !e->placed_names) return -1;
+    memset(&placed, 0, sizeof placed);
+    if (e->placed_names(mu_names_add, &placed) < 0 || placed.oom) { mu_names_free(&placed); return -1; }
+    free(placed.slots);
+    *names = placed.items;
+    *count = placed.count;
+    return (int)placed.count;
 }
 
 int sh_modui_scope_launch(const char *why)
@@ -4710,7 +4709,7 @@ static int mu_content(const char *arg)
         sh_cache_sweep_stats st;
         double mb;
         memset(&st, 0, sizeof st);
-        (void)sh_cache_sweep(1, NULL, 0, &st);
+        (void)sh_cache_sweep_kept(1, &st);
         mb = (double)st.bytes_removed / (1024.0 * 1024.0);
         message = st.bytes_removed ? sh_textf("Removed %.1f MB of content of maps you only played; playing one of them again gets it back.", mb)
                                    : sh_text("No map you only played had content to remove.");

@@ -8,7 +8,7 @@ param(
                            "cvars.c", "commands.c", "cmd_lists.c", "clipboard.c",
                            "config.c", "config_json.c",
                            "entity.c", "cheatkeep.c", "typeinfo.c", "preview.c", "megapreview.c", "imgpreview.c", "prefabpreview.c", "soundpreview.c", "bcn.c", "patch.c", "x64_len.c", "target_any.c", "wiring_cleandirect.c", "swf_textedit.c", "ui_bridge.c",
-                           "iface_engine.c", "editor_delete.c", "editor_undo.c", "apply_engine.c", "prefab_grab.c", "fly_to.c", "module_prefab.c", "module_prefab_map.c", "prefab_mods.c", "prefab_block.c", "timeline_tile.c", "modserve.c", "modregistry.c", "modregistry_choices.c", "modserve_engine.c", "modtypeinfo.c", "modledger.c", "modswf.c", "modsound.c", "modhud.c", "modhud_scene.c", "modscene_place.c", "modscene_decl.c", "modcontent.c", "modscene_sigs.c", "modpublished.c", "modlobby.c", "modpublish.c", "modunit.c", "modpin.c", "modcache.c", "modkey.c", "event_registry.c", "budget_table.c", "mp_json.c", "../common/snapmap_plus_iface.c",
+                           "iface_engine.c", "editor_delete.c", "editor_undo.c", "apply_engine.c", "prefab_grab.c", "fly_to.c", "module_prefab.c", "module_prefab_map.c", "prefab_mods.c", "prefab_block.c", "timeline_tile.c", "modserve.c", "modregistry.c", "modregistry_choices.c", "modserve_engine.c", "modtypeinfo.c", "modledger.c", "modswf.c", "modsound.c", "modhud.c", "modhud_scene.c", "modscene_place.c", "modscene_decl.c", "modcontent.c", "modscene_sigs.c", "modpublished.c", "modlobby.c", "modpublish.c", "modunit.c", "modpin.c", "modclaim.c", "modcache.c", "modkey.c", "event_registry.c", "budget_table.c", "mp_json.c", "../common/snapmap_plus_iface.c",
                            "../common/log_rotate.c",
                            # The backend owns the SnapStack command handlers and stores.
                            "snapstack.c", "json_patch.c",
@@ -36,7 +36,7 @@ param(
                            # Mod bundles, the local mods store, the sh_mods command and the Mods tab.
                            "modbundle.c", "modsalt.c", "modauthor.c", "strkeys.c", "modbankinfo.c", "modstock.c", "modprog.c", "modlook.c", "sdk.c", "sdkparse.c", "sdkvalues.c", "modeffect.c", "modenv.c", "modwound.c", "sdk_runtime.c", "programs/programs_layered.c", "programs/programs_particles.c", "parmslots.c", "parmslots_rule.c", "particlemotion.c", "particlemotion_sim.c", "particlemotion_planes.c", "particlemotion_sigs.c", "cachewrites.c", "cachewrites_rule.c", "cachewrites_sigs.c", "clip_events.c", "clip_events_rule.c", "clip_events_sigs.c", "attach_tags.c", "attach_tags_rule.c", "attach_tags_sigs.c", "level_templates.c", "level_templates_rule.c", "level_templates_sigs.c", "kill_score.c", "kill_score_rule.c", "kill_score_sigs.c", "sync_clock.c", "sync_clock_rule.c", "sync_clock_sigs.c", "modstore.c", "modcmd.c", "modui.c", "modmap.c",
                            # The mod store client (WinHTTP), upload/download, the rawmap ZIP export and the ZIP form.
-                           "modnet.c", "modsync.c", "modexport.c", "modzip.c",
+                           "modnet.c", "modexport.c", "modzip.c",
                            # Mod virtual-texture families, and the sh_vt diagnostic.
                            "modvt.c", "vt_harness.c",
                            # Owner-bound companions a mod declares for its tiles.

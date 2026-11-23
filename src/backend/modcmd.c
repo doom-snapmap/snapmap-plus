@@ -12,7 +12,7 @@
 #include "overrides.h"
 #include "backend_log.h"
 #include "modnet.h"
-#include "modsync.h"
+#include "modclaim.h"
 #include "modmanifest.h"
 #include "modexport.h"
 #include "rawmap.h"
@@ -483,81 +483,46 @@ static void mc_async_line(const char *fmt, ...)
     if (run) run(NULL, mc_outbox_flush_main, NULL, 1500, &res);
 }
 
-static double mc_mib(unsigned long long b) { return (double)b / (1024.0 * 1024.0); }
 
 /* One job at a time; its arguments live here until the job ends. */
-typedef enum { MC_JOB_PUSH, MC_JOB_RELEASE, MC_JOB_RETRY } mc_job_kind;
+typedef enum { MC_JOB_RELEASE, MC_JOB_RETRY } mc_job_kind;
 
 typedef struct mc_job {
     mc_job_kind kind;
     char verb[16];
-    char mod[MODSYNC_MOD_MAX + 1];   /* push: "<salt>@<build hash>" */
-    char *label;                     /* push: the folder under mods\\ (malloc'd) */
-    char *ref;                       /* malloc'd */
-    unsigned last_quarter;
+    char *ref;                       /* release: the published item (malloc'd) */
     ULONGLONG started;
 } mc_job;
 
 static mc_job g_mc_job;
 
-/* A progress line at each quarter of a transfer. */
-static void mc_job_progress(void *ctx, unsigned long long done, unsigned long long total)
-{
-    mc_job *j = (mc_job *)ctx;
-    unsigned q;
-    if (!total) return;
-    q = (unsigned)(done * 4 / total);
-    if (q > 4) q = 4;
-    if (q <= j->last_quarter || q == 4) return;
-    j->last_quarter = q;
-    mc_async_line("MODS: %s: %.1f of %.1f MiB", j->verb, mc_mib(done), mc_mib(total));
-}
-
+/* The publisher's side of the store (modclaim.h): a release of this computer's claim, or the queue and the repair a
+ * start runs. */
 static int mc_job_run(void *ctx, const modnet_io *io)
 {
     mc_job *j = (mc_job *)ctx;
-    modsync_stats st;
-    int ok = 0;
+    char *why = NULL;
+    int ok = 0, code;
     switch (j->kind) {
-    case MC_JOB_PUSH: {
-        const char *m = j->mod;
-        ok = modsync_upload_builds(&m, 1, j->ref, io, &st);
-        /* A release of this build raced the claim (409): its archive went,
-         * so it is uploaded again once. */
-        if (!ok && st.code == MODNET_E_CONFLICT) {
-            mc_async_line("MODS: push %s: the store released the build meanwhile; uploading it again", j->label);
-            memset(&st, 0, sizeof st);
-            ok = modsync_upload_builds(&m, 1, j->ref, io, &st);
-        }
-        if (ok) {
-            mc_async_line("MODS: push %s: done in %.0f ms: the archive %s, %llu byte(s) up, %s", j->label, st.ms,
-                          st.builds_sent ? "was sent" : "was already stored", st.bytes_up,
-                          st.reclaimed ? "its claim renewed" : "claimed");
-            mc_async_line("MODS: push %s: the time: asking the store %.0f ms, writing the archive %.0f ms, sending it "
-                          "%.0f ms (%u part(s)), the store's check %.0f ms, the claim %.0f ms", j->label, st.ask_ms,
-                          st.archive_ms, st.send_ms, st.parts, st.check_ms, st.claim_ms);
-        }
-        else
-            mc_async_line("MODS: push %s: FAILED after %.0f ms (%llu byte(s) up): %s%s", j->label, st.ms, st.bytes_up,
-                          modsync_cause(&st), st.queued ? "; queued for 'sh_mods retry'" : "");
-        break;
-    }
     case MC_JOB_RELEASE:
-        ok = modsync_release(j->ref, io, &st);
-        if (ok) mc_async_line("MODS: release: released in %.0f ms%s%s", st.ms, modsync_cause(&st)[0] ? "; " : "",
-                              modsync_cause(&st));
-        else mc_async_line("MODS: release: FAILED: %s", modsync_cause(&st));
+        code = modclaim_release(j->ref, io, &why);
+        ok = code == MODNET_OK;
+        if (ok) mc_async_line("MODS: release: the claim of '%s' is released (%.0f ms)", j->ref,
+                              (double)(GetTickCount64() - j->started));
+        else mc_async_line("MODS: release: FAILED: %s", why ? why : modnet_code_text(code));
         break;
     case MC_JOB_RETRY: {
-        unsigned done = 0, dropped = 0;
-        int left = modsync_retry_pending(io, &done, &dropped, &st);
-        ok = left == 0;
-        if (left < 0) mc_async_line("MODS: retry: the pending section of mods\\snapmap-plus.json cannot be read");
-        else mc_async_line("MODS: retry: %u upload(s) done, %u dropped, %d still queued (%.0f ms)", done, dropped, left,
-                           (double)(GetTickCount64() - j->started));
+        modclaim_launch_stats st;
+        memset(&st, 0, sizeof st);
+        code = modclaim_launch(io, &st);
+        ok = code == MODNET_OK && st.left == 0;
+        mc_async_line("MODS: retry: %u queued claim(s) and release(s) retried, %u settled, %d still queued; %u published "
+                      "map(s) repaired, %u unit(s) sent (%.0f ms)", st.retried, st.settled, st.left < 0 ? 0 : st.left,
+                      st.repaired, st.uploaded, (double)(GetTickCount64() - j->started));
         break;
     }
     }
+    free(why);
     return ok;
 }
 
@@ -569,47 +534,17 @@ static void mc_job_launch(const mc_job *spec)
         mc_line("MODS: %s: '%s' is still running; wait for it or run 'sh_mods cancel'", spec->verb, busy);
         return;
     }
-    free(g_mc_job.label);
     free(g_mc_job.ref);
     g_mc_job = *spec;
-    g_mc_job.label = spec->label ? _strdup(spec->label) : NULL;
     g_mc_job.ref = spec->ref ? _strdup(spec->ref) : NULL;
-    g_mc_job.last_quarter = 0;
     g_mc_job.started = GetTickCount64();
-    started = modnet_job_start(spec->verb, mc_job_run, NULL, mc_job_progress, &g_mc_job, &g_mc_job);
+    started = modnet_job_start(spec->verb, mc_job_run, NULL, NULL, NULL, &g_mc_job);
     if (started == 1) mc_line("MODS: %s: started in the background; the result prints here when it is done", spec->verb);
     else if (started == 0) mc_line("MODS: %s: another job is running", spec->verb);
     else mc_line("MODS: %s: the worker thread could not be started", spec->verb);
 }
 
-/* A usable built mod named by its folder under mods\, its salt, or
- * "<salt>@<build hash>": "<salt>@<hash>" in mod, its folder in label. A root
- * folder answers first. */
-static int mc_find_build(const char *name, char mod[MODSYNC_MOD_MAX + 1], char **label)
-{
-    char salt[MODSYNC_SALT_HEX + 1], hash[MODNET_HASH_HEX + 1];
-    sh_ms_list l;
-    size_t i;
-    int found = 0, pass, exact = modsync_parse_mod(name, salt, hash);
-    modsync_store_lock();
-    if (sh_ms_enumerate(&l)) {
-        for (pass = 0; pass < 2 && !found; pass++)
-            for (i = 0; i < l.count && !found; i++) {
-                const sh_ms_entry *e = &l.items[i];
-                if (!sh_ms_entry_usable(e) || (pass == 0) != (e->place[0] == 0)) continue;
-                if (exact ? (!strcmp(e->salt, salt) && !strcmp(e->bundle.hash, hash)) : sh_ms_entry_matches(e, name)) {
-                    _snprintf_s(mod, MODSYNC_MOD_MAX + 1, _TRUNCATE, "%s@%s", e->salt, e->bundle.hash);
-                    found = (*label = _strdup(e->name)) != NULL;
-                }
-            }
-        sh_ms_list_free(&l);
-    }
-    modsync_store_unlock();
-    return found;
-}
-
-/* push, release, retry, export, import, cancel. Returns 1 when the verb is
- * one of them. */
+/* release, retry, export, import, cancel. Returns 1 when the verb is one of them. */
 static int mc_store_command(idCmdArgs *a, const char *verb)
 {
     mc_job spec;
@@ -624,27 +559,10 @@ static int mc_store_command(idCmdArgs *a, const char *verb)
         else mc_line("MODS: cancel: nothing is running");
         return 1;
     }
-    if (!_stricmp(verb, "push")) {
-        const char *name = cmd_argv(a, 2);
-        spec.ref = mc_join_args(a, 3);
-        if (!name || !name[0] || !spec.ref || !spec.ref[0])
-            sh_printf("usage: sh_mods push \"<mod folder>\" \"<ref>\"\n");
-        else if (!modnet_valid_ref(spec.ref))
-            mc_line("MODS: push: %s", MODNET_REF_RULE);
-        else if (!mc_find_build(name, spec.mod, &spec.label))
-            mc_line("MODS: push %s: no built mod has that name ('sh_mods list' shows them)", name);
-        else {
-            spec.kind = MC_JOB_PUSH;
-            mc_line("MODS: push mods\\%s under ref '%s'", spec.label, spec.ref);
-            mc_job_launch(&spec);
-        }
-        free(spec.ref);
-        free(spec.label);
-        return 1;
-    }
     if (!_stricmp(verb, "release")) {
         spec.ref = mc_join_args(a, 2);
-        if (!spec.ref || !spec.ref[0]) sh_printf("usage: sh_mods release \"<ref>\"\n");
+        if (!spec.ref || !spec.ref[0]) sh_printf("usage: sh_mods release \"<published item id>\"\n");
+        else if (!modclaim_known(spec.ref)) mc_line("MODS: release: this computer holds no claim of '%s'", spec.ref);
         else {
             spec.kind = MC_JOB_RELEASE;
             mc_job_launch(&spec);
@@ -653,10 +571,7 @@ static int mc_store_command(idCmdArgs *a, const char *verb)
         return 1;
     }
     if (!_stricmp(verb, "retry")) {
-        int n = modsync_pending_count();
-        if (n == 0) { mc_line("MODS: retry: no upload is queued"); return 1; }
         spec.kind = MC_JOB_RETRY;
-        mc_line("MODS: retry: %d queued upload(s)", n);
         mc_job_launch(&spec);
         return 1;
     }
@@ -810,7 +725,6 @@ int sh_modcmd_register(void)
 {
     const char *root = sh_ms_root();
     modexport_set_stock(mc_import_stock, NULL);
-    modsync_set_stock(mc_import_stock, NULL);   /* the stock check for installs of received content */
     sh_modserve_set_build_cause(sh_ms_build_cause);
     if (root) mc_line("MODS: sh_mods ready; store %s", root);
     else mc_line("MODS: sh_mods ready; the store folder cannot be resolved");

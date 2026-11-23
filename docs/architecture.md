@@ -498,11 +498,14 @@ Mods are installed under `%LOCALAPPDATA%\snapmap-plus\mods\`. A mod is a folder
 holding `mod.json` and folders named for what its files are (see
 [The mod folder](#the-mod-folder)); the product maps each file and every name
 its texts write to the engine's request paths and names under the mod's salt.
-Mods reach other machines two ways: each build a published map names is
-uploaded to the Community API's mod store as one archive when the map is
-published, and a player who opens that map is asked first and downloads only
-what they approve in the dialog, verified against the map's row (`modnet.c`,
-`modsync.c`, `modpublished.c`; see [The mod store transport](#the-mod-store-transport) and
+Mods reach other machines two ways: the units a published map's rows name
+(see [Units](#units)) are uploaded to the Community API's mod store when the
+map is published, after one question that sizes what the store lacks, and a
+player who opens that map gets the units it needs with no question, under the
+game's own progress line, each checked against the hash the map names
+(`modnet.c`, `modclaim.c`, `modpublish.c`, `modcache.c`, `modpublished.c`; see
+[The mod store transport](#the-mod-store-transport),
+[Publishing a map with mods](#publishing-a-map-with-mods) and
 [Published maps and missing mods](#published-maps-and-missing-mods)); that
 transport is for publications only. An exported rawmap or prefab is a ZIP that
 carries each mod exactly as it sits in the mods folder, its folder with
@@ -883,8 +886,8 @@ These backend files share the work:
   `modmap.c` reads the open map's entities, wires and Timeline references from
   its serialized JSON for it.
 - `modpublished.c` holds a published or My Maps launch whose manifest names a
-  mod no installed folder serves (the asset rule, below), asks the player, and
-  fetches and resumes it or drops it, as in
+  mod no installed folder serves (the asset rule, below), fetches the units
+  its rows name with no question, and resumes it or drops it, as in
   [Published maps and missing mods](#published-maps-and-missing-mods).
   It also holds a rawmap load whose mods are missing, as in
   [Rawmaps that name mods](#rawmaps-that-name-mods), and a prefab placement
@@ -934,9 +937,10 @@ These backend files share the work:
 - `companion.c` reads the `companions` key of every admitted bundle's author
   block and `companion_engine.c` spawns them, as in
   [Owner-bound companions](#owner-bound-companions).
-- `modpublish.c` uploads a map's bundles when the map is published, claims
-  them under the published item, releases the claim at unpublish, and refuses
-  a copy to My Maps that the map service would reject, as in
+- `modpublish.c` holds a publish of a map with mod rows while it uploads the
+  units the store lacks, pins the publish's save to those units, claims them
+  under the published item, releases the claim at unpublish, and refuses a
+  copy to My Maps that the map service would reject, as in
   [Publishing a map with mods](#publishing-a-map-with-mods).
 
 The store. A folder is `mod.json` plus folders by kind (above). `mod.json` is format 2
@@ -970,7 +974,7 @@ builds it. The
 product writes the block by splicing: the old member is cut from the end of
 the member before it, the new one appended after the author's last member, so
 the author's bytes, order and formatting never change. The canonical manifest
-is derived from both blocks in memory, for the hash and for the upload. There is no
+is derived from both blocks in memory, for the hash. There is no
 blob store and there are no hard links: a mod's files live in its own
 folders only.
 
@@ -1133,7 +1137,7 @@ a `.lwo`, `.ase`, `.ma`, `.obj`, `.fbx` or `.bmodel` path), the file that
 provides it under its cooked request (`sh_mb_model_key`:
 `cooked/model/<stem>.bmodel`), carried or a stock pointer. So a mod whose only
 content unlocks a blacklisted stock model an author placed by path is named by
-the map and uploaded with it. A name whose provider is a shadow of editor-time
+the map and travels with it. A name whose provider is a shadow of editor-time
 content (`sh_mb_editor_time`: the snapEditor*, snapPropertyInspector* and
 snapPalette decl types, the editor's own movies) names no bundle: such a
 shadow changes what the author can set, never what plays, so an author's
@@ -1145,8 +1149,11 @@ The player side of the same rule: a row is served only by an installed build
 other (an install drops nothing).
 
 `mods\snapmap-plus.json` is the product's one record:
-`claims`, `links`, `pending`, `migration` and `places` (each map's place,
-above), each section written whole under one lock. The
+`map-claims`, `map-pending` (both `modclaim.c`, see [Publishing a map with
+mods](#publishing-a-map-with-mods)), `links`, `migration` and `places` (each
+map's place, above), each section written whole under one lock. The `claims`
+and `pending` sections the store tool's migration folds in from earlier
+releases' files are not read by the product. The
 build cache, aliases, snapshots and first-build renames of earlier releases
 are gone: the block's `tree` is the rebuild rule's key.
 A record another program holds open is waited for, up to a second. A read
@@ -1159,8 +1166,9 @@ section is written, and a new one started; the line names the aside file.
 The player reads the same failure where they acted: install and uninstall in
 the Mods tab (and their console verbs) add "Snapmap+ could not update its
 records: <file> could not be used (<why>); close any program using that file
-and try again." to their result, and a publish whose claim could not be saved
-shows that sentence as its upload cause (`sh_mb_record_why`).
+and try again." to their result (`sh_mb_record_why`). A claim the publish could
+not record is a log line (`MODS: publish: the claim of '<item>' could not be
+recorded`).
 
 Removal goes to the Windows Recycle Bin. Uninstall, Remove and the removal of
 covered builds move the folder there (`sh_ms_delete_mod_folder`: a mod
@@ -1182,8 +1190,8 @@ result text ("Its folder was deleted because the Recycle Bin could not take it
 Bin". The product never brings a folder back: a map that still needs it
 refuses to open with the asset rule's sentence until the player restores the
 folder from the Recycle Bin by hand (the next Refresh builds it again) or the
-download offer of a published map, a rawmap or a prefab installs
-it again. Uninstall also clears the open map's undo history (see [The Mods
+rawmap or prefab ZIP import that carries it installs it again; a published
+map's content downloads into the content cache, not into the mods folder. Uninstall also clears the open map's undo history (see [The Mods
 tab's map scope](#the-mods-tabs-map-scope)), so Ctrl+Z cannot bring back what
 used the mod.
 
@@ -1332,7 +1340,7 @@ build of the 15 converted folders takes about 10 s, so it never runs on the
 boot thread; the same folders built this way carry the same bundle hashes as an
 in-game rescan's. The thread waits until the startup install has released the
 store (`sh_ms_boot_release`, at the end of the install in `dllmain.c`): the
-install takes the store itself (the publish launch reads the upload queue and
+install takes the store itself (the publish launch reads the claim queue and
 the claims), and a build holding it delayed the startup by the build's length.
 While it builds, the thread hands the store to any operation waiting for it
 between two folders, so an editor map open in that time waits one folder's
@@ -2421,19 +2429,17 @@ feature.
   it to the file by the author's spelling (`sh_mb_script_file_name`). The
   Entities tab names a Script node's script and offers its mod's input and
   output names from the same member. The player's setting `mods.scripted_maps`
-  (`sh_modui_scripted_maps_allowed`) and the download approval's sentence
-  (`sh_modui_scripts_approval`) serve the download gate: the store's index
-  records each build's script count (checked against the archive's `.lua`
-  entries and the block's `scripts.files`) and `HEAD` answers it, so before
-  the one question the gate knows. The question then ends "These mods include
-  scripts (N files). Scripts run only inside this map and cannot read or
-  change your files. Download and install now?"; with the setting off the map
-  is not downloaded or played and the player reads `SH_MODUI_SCRIPTS_OFF`.
-  The same check runs at every launch the gate decides (`pub_refuse_scripts`):
-  a map with a place whose serving builds carry scripts (the `served_scripts`
-  op reads each serving folder's `mod.json`, only while the setting is off)
-  is refused with the same sentence though it was downloaded while scripts
-  were on; the player's own maps have no place and are never refused. A
+  (`sh_modui_scripted_maps_allowed`) serves the gates: the download asks no
+  question, so nothing says before it that a map's content has scripts. At
+  every launch the gate decides (`pub_refuse_scripts`) a map with a place whose
+  serving builds carry scripts (the `served_scripts` op reads each serving
+  folder's `mod.json`, only while the setting is off) is refused with
+  `SH_MODUI_SCRIPTS_OFF`, though it was downloaded while scripts were on; for
+  content a hold fetches, the same check runs once the fetch is done
+  (`pub_finish`), so the units stay in the content cache and the map is not
+  loaded. The player's own maps have no place and are never refused.
+  `sh_modui_scripts_approval` (the sentence of the retired download question)
+  has no caller. A
   rawmap or prefab ZIP import whose carried mods have scripts is refused with
   the same sentence while the setting is off and installs nothing
   (`modexport.c` me_install), and a rawmap that came with its mods (it records
@@ -2778,7 +2784,9 @@ is touched, and a removed demon answers nil.
   0.1 picks clips that turn in place, `travel` admits a demon's own stepping
   turns; with `travel` an entity target turns toward where it stands),
   `aim_at(entity | nil)`, `set_enemy([entity])` (`setEnemy` locked, or
-  `setPlayerEnemy` closest), `trigger(on, [hand])`
+  `setPlayerEnemy` closest; every enemy setter of the game locks, and the
+  lock byte, ai+0x25068, is read nowhere in build 13954591, so the lock
+  changes nothing), `trigger(on, [hand])`
   (`pull/releaseTriggerLeft` or `Right`), `equip(item)` (the item's decl
   name, as the entityDef's startingInventory names it, or its index;
   `equipInventoryItemByIndex`; answers `"left"` or `"right"`), `laser(tag, on)`
@@ -2905,6 +2913,25 @@ is touched, and a removed demon answers nil.
   its spawn id), removes the entry with the game's own `tempMemory_Remove`
   event, and answers nil or `{kind, target | pos}`; the Enemy SDK's
   `enemy_snapmap.lua` follows it.
+  `relations()` reads the demon's social relations as DOOM 2016's senses keep
+  them: the senses (ai+0x29A88) rebuild a table every AI think, whatever drives
+  the demon (UpdateRelations VK 0x1404AA490 / GL 0x1404A8C10, from the senses'
+  update called by the AI think VK 0x1403E0D40), one row per entity the demon
+  perceives, players and bots (the idPlayer classes) and demons, with the
+  respect and emotion its faction graph gives the two factions or what it
+  perceived of that entity (being hurt raises the emotion), whichever is
+  farther from neutral, most hostile first (rows at +0x28, count +0x30, 0x28
+  bytes a row: respect +4, emotion +8, the entity's idEntityPtr +0x10). A
+  demon's faction is its entityDef's `factionName`; a SnapMap team replaces it
+  with `team_<n>_demon`, and players get `team_<n>_player` (the co-op mode's
+  VK 0x14088FAF0). The call answers `{ entity, respect, emotion, awareness
+  [, unlimited] }` rows by name (`"minion"`, `"hate"`, `"confirmed"`); the
+  sigs test checks the layout on the two functions that write and read it
+  (UpdateRelations, and the engine's pick VK 0x1404AAD10 / GL 0x1404A9490).
+  The game never picks an enemy from the table by itself: its state machines
+  do, with `Shared_SocialRelationAvailable` (VK 0x1405F4930), which a
+  script-driven demon does not run. The Enemy SDK's `enemy_target.lua` is that
+  condition on these rows, so a script picks the enemy the game would.
   `wound_damage_counts(on)` gives a demon DOOM Eternal's wound counter. The
   game opens a living demon's wound from `idGoreComponent::DamageActivatesWound`
   (VK 0x1408FC8E0, GL 0x1408FB910), asked per queued hit record, per damage
@@ -3000,8 +3027,19 @@ is touched, and a removed demon answers nil.
   nothing. Only a manager without a model is given one.
   `enemy_sdk.bind` calls the brain's `bind(def)` first, where the brain names its
   breakables.
+- **The Enemy SDK's target rule.** `enemy_target` is DOOM 2016's
+  `Shared_SocialRelationAvailable` on `relations()`: the condition's respect,
+  emotion and awareness bands (by name; its constructor's defaults, VK
+  0x141302930: every respect, every emotion, every awareness), playersOnly and
+  noPlayers (a bot is a player), filterOutOffLimits, the 10,000-unit range of
+  GetRelations (VK 0x1404AAA30), and the pick: the nearest of the most hostile
+  emotion present. `enemy_snapmap` gives a demon that holds no enemy in 2016's
+  combat band (behavior_shared's: EMOTION_DESTROY_AT_ALL_COSTS to
+  EMOTION_DISLIKE at AIAWARE_CONFIRMED) that pick, and a source game's brain
+  evaluates its own conditions with it; nothing in the SDK reads a team or lists
+  players.
 - **The Enemy SDK's weapon library.** `enemy_weapon` (with `enemy_sdk`,
-  `enemy_snapmap`, `enemy_locomotion` and `enemy_probe`, required by name
+  `enemy_snapmap`, `enemy_target`, `enemy_locomotion` and `enemy_probe`, required by name
   from the DLL) is the interface a demon's behaviour layer uses for weapons:
   `equip`, `fire_mode`, `pull`, `release`, `trigger`, `pulled`, `ready`,
   `on_target`, `focus`, `hold`, `state` and `tick`, each one of the calls
@@ -3223,8 +3261,16 @@ names is the mod's own, or DOOM's through `native("...")`
 refused with one plain sentence. An attacker is any entity; without one the
 damage comes from the world entity, as a trigger's does.
 
-- **Calls.** `damage(entity, damage, [attacker], [from])` and `entity:damage(...)` (the
-  entity's own `damage` event: decl, direction angles, activator);
+- **Calls.** `damage(entity, damage, [attacker], [from])` and `entity:damage(...)`: with
+  an attacker, an actor (a player, a bot or a demon) takes it through its own
+  Damage (vtable slot 130, the same virtual in every actor class: idPlayer's VK
+  0x140DC3880, idAI2's VK 0x140424D30 / GL 0x140423B90, which passes it on to the
+  idAI2 body VK 0x1403F8C40) with the attacker as inflictor and attacker, so the
+  game's team rule (idAI2 Damage_Calculate VK 0x1403FB1D0: in a SnapMap mode an
+  attacker of the victim's own team, other than TEAM_NONE, does no damage), its
+  percepts and its kill credit see who hit it; without an attacker, or on any
+  other entity, the entity's own `damage` event (decl, direction angles,
+  activator, which credits no attacker);
   `hitscan(from, dir, damage, [range], [attacker])` (the game trace, then the
   damage event on what it hits; answers `{pos, normal, entity}` or nil);
   `radius_damage(pos, damage, [attacker])` (the engine's RadiusDamage with the
@@ -4648,13 +4694,13 @@ pass runs without the game's resource reader, so unresolved needs only warn, as
 for a converted carrier.
 
 Every writer of the store serialises on one recursive lock, `modstore_lock`
-(`modstore.c`; `modsync_store_lock` takes the same lock): the mods folder's
+(`modstore.c`): the mods folder's
 named mutex (`src/common/store_lock.h`), which the record lock
 (`sh_mb_record_lock`) shares and which the store tool holds for its whole run,
 so a second game or the store tool waits instead of overwriting. The scan
 records each root salt's folder in the record's `salts` section.
-Each install and verification takes it; each migration folder, a download
-install, `sh_mods install` and an export hold it around their
+Each install and verification takes it; each migration folder, a rawmap or
+prefab import's install, `sh_mods install` and an export hold it around their
 whole step. A second writer waits for the first instead of failing, and logs
 one `MODS: store: waiting` line; because the migration takes the lock per
 folder, an install on the main thread (the Mods tab or `sh_mods install`) waits
@@ -4688,7 +4734,12 @@ built:
   and last save from the slot's `game.details` under
   `Saved Games\id Software\DOOM\base\savegame.user\<profile>\SNAPMAPS<id>\`,
   and the published and uploaded state from the record's `links` and
-  `claims`. What none of these say is left out of the document, never guessed.
+  `map-claims` sections; the claim's `mods` list names the namespaces its
+  units serve (`modclaim_set_mods`), which is what the tab's count of published
+  maps per mod reads (`mu_published_maps`). The map document's `asked` list
+  ("Missing for players", `mu_put_asked`) reads the record's `asked` section,
+  which nothing writes now, so it is empty. What none of these say is left out
+  of the document, never guessed.
 
 Remove from map deletes the mod's entities through `sh_editor_delete_batch`,
 DOOM's own Delete Selection, in one batch: one native undo step that Ctrl+Z
@@ -4778,8 +4829,8 @@ serve in the editor and in a My Maps play.
 
 A lobby joiner whose map names units downloads them in the lobby (see "Co-op
 lobbies for modded maps" below). A joiner whose map cannot be confirmed
-otherwise (an earlier shape's build it declined, a download that failed or was
-refused, content that is not all to be had) leaves the lobby through the
+otherwise (a download that failed or was refused, content that is not all to
+be had) leaves the lobby through the
 session's own leave call, the one `OnCacheMapForLobbyError` makes after its dialog
 (slot 0x2F0, checked byte for byte at bind on both renderers), so the host never
 starts it on a map it does not hold; the player is told to join again. A warm-cache join no gate of this process saw
@@ -4836,13 +4887,21 @@ The launch boundary. Every published play ends in `PublishedMapLobbyLaunch`
 browser play calls them at +0x9C and +0xAD and the feed at +0xE3. Each gate
 consumes the record it decides on, so a record of the current frame that is
 still there at a launch, with rows the asset rule does not serve, belongs to a
-completion no gate knows. `sh_modpub_launch_gate` holds such a lobby launch with
-the same question (its resume runs the manifest step on the retained text and
-calls the launch with its flag, when the screen it was held on is still
-current) and refuses such an offline launch, which has no map object left to
-resume with, with "This map needs mods that could not be prepared. The map was
-not loaded." A launch without a parse of its frame (the lobby's own relaunch
-from the map cache) is not checked. The level load at START MISSION builds from
+completion no gate knows. `sh_modpub_launch_gate` holds such a lobby launch
+as any hold (its resume runs the manifest step on the retained text and calls
+the launch with its flag, when the screen it was held on is still current).
+An offline launch has no map object left to resume with, so nothing is
+fetched for it. A row of it that names units and whose composition exists
+(stand-ins for what is not here, see [The map content
+cache](#the-map-content-cache)) plays, with one log line, and the load says
+once what it plays without (S2 when this computer is offline, B1). The launch
+is refused when a row names no unit and nothing serves it ("This map was not
+loaded: it needs mods that are not on this computer and cannot be downloaded.
+Ask its author to publish it again."), or when a row that names units has no
+composition ("This map was not loaded: its mod content is not on this
+computer. Connect to the internet and open it again."), or when memory ran
+out. A launch without a parse of its frame (the lobby's own relaunch from the
+map cache) is not checked. The level load at START MISSION builds from
 the cached map and does not parse again, so this boundary is the last point at
 which a missing mod can be caught.
 
@@ -4851,20 +4910,20 @@ metadata (the copy constructor `PublishedMapSelectionConstruct` uses, inside
 process heap 0) and the text, does what the completion itself would have done to
 the screen first (`OnSnapPlay` clears its wait dialog, GDM 0x63, and hides the
 progress widget; browser play clears its pending state; the joiner hides the
-progress widget), and returns without the original. On a later main-thread tick
-(`sh_modpublished_poll`, after every native frame, menus included) it raises the
-engine's Yes/No (GDM 0x29, button set 6) once the dialog surface is idle:
-"This map needs N mod(s): <names> (<size>). Download and install now?". Each
-row it asks for prints the asset rule's sentence on the console first.
+progress widget), and returns without the original. Each row it holds for
+prints the asset rule's sentence on the console first. On a later main-thread
+tick (`sh_modpublished_poll`, after every native frame, menus included) the
+hold begins its job with no question: the fetch below when every missing row
+names units, else the refusal below.
 
 The map's place at the gates. Before anything counts what is missing, each
 gate decides the place of the map it holds and counts its rows there without
 changing what the loaded map serves (`sh_modserve_row_served_in` through the
 `row_state` op): a stranger's published map's place is the one the record gives
 its item (`sh_ms_place_of`), else a free one its title names, noted for the
-item (`sh_ms_place_dir`, `sh_ms_place_note`, the `item_place` op); a map this
-machine published (a claim keyed by the item, or `sh_modpublish_item_linked`)
-has none; a My Maps play, a launch no gate saw and a rawmap use the place their
+item (`sh_ms_place_dir`, `sh_ms_place_note`, the `item_place` op), a map this
+machine published included (the `own_item` op is bound, but `sh_modpub_decide`
+does not call it); a My Maps play, a launch no gate saw and a rawmap use the place their
 text records (`sh_carrier_place`); a prefab placement has none (DECISIONS 12).
 A gate that lets a map through, and a hold that resumes it, make that place the
 loaded map's (`place_set` op) and the place its launch serves from
@@ -4873,34 +4932,27 @@ loaded map's (`place_set` op) and the place its launch serves from
 The Mods tab's tick returns the place to the root when the editor leaves its map
 or a launched Play is over.
 
-The denial gate (DESIGN-additive 2.8). Before the question, every hold (the
-completions, the launch boundary, My Maps, rawmaps, prefabs) runs one job on
-the modsync worker that asks the store about each missing bundle
-(`modsync_probe_build`: `HEAD /mods/build/<hash>`, which also says how many
-script files the build carries; whether a borrow names game
-bytes this machine lacks is learned when the archive is unpacked, as the
-fetch's `MODNET_E_GAME`). One function,
-`sh_modpub_gate_decide`, then decides each bundle from three facts: what the
-store answered (held, absent for 404 and 451, unreachable for a network
-failure, a timeout, an unusable address, 429, 5xx or an unexpected response),
-whether a borrow names game bytes this machine lacks, and whether the map is
-published (every map-service hook is; a My Maps map, rawmap or prefab when a
-claim this machine holds names the bundle, `modsync_claim_names`). Held and
-installable is obtainable; any other answer denies the launch in one of four
-causes, `sh_modpub_gate_wording`:
-
-| cause | when | sentence (after "This map needs <name>, which ", the row's name, else its salt) |
-|---|---|---|
-| 1 gone | absent, published | "is no longer available: its author unpublished it, or it was removed. This is permanent on this machine." |
-| 2 unreachable | the store did not answer | "could not be downloaded: " and the store's failure in words (`plain_reason.h`): "the mod store is busy; try again in a few minutes." for 429 and 5xx, "the mod store could not be reached; check the internet connection and try again." when nothing answers, "the address in mods.store answered, but not as the mod store; check the mods.store setting." for another server, "the mod store did not answer; try again in a few minutes." when the cause is unknown |
-| 3 never published | absent, not published | "is not installed and was never published. Restore its folder from the Recycle Bin or load the map's rawmap ZIP." |
-| 4 game revision | held, a borrow the game lacks | "needs a file this game does not hold (<source>): a different game revision. This is permanent on this machine." |
+The content fetch (SPEC-distribution 5.7). Every hold whose missing rows all
+name units (the completions, the launch boundary, My Maps, rawmaps, prefabs)
+asks nothing and probes nothing. `pub_hold_begin` marks each row the asset
+rule does not serve as missing; one job on the modnet worker
+(`pub_job_main`) then runs `sh_cache_prepare` for each, one row after another
+(`eng_fetch_for`; a row the content cache has not noted is skipped, so its
+load stands in for it, and the place is not used: the content goes into
+`.content\`, see [The map content cache](#the-map-content-cache)). Whatever the
+store cannot supply stands in, so a fetch fails the hold only when it was
+cancelled or memory ran out ("The mod content of <name> could not be prepared:
+<reason>. The map was not loaded."). Why an object is absent is the cache's
+cause (S2 not on this computer and the store not asked, which is also what a
+computer whose store address does not resolve gets, B2; S4 the store could not
+be reached; S6 a newer Snapmap+ is needed; S4b another game revision; S5 not in
+the store; S3 removed), and the load says it once as its one notice
+(`sh_cache_notice_text`).
 
 An editor open asks no store, so its note for a salt no root folder holds
 (`sh_modpub_editor_substitute`) says only what this computer knows: "not
 installed on this computer, so the editor opens the map without it. Playing
-the map asks the mod store for it." The causes above, which depend on the
-store's answer, are said where the store is asked. When the map's placed
+the map asks the mod store for it." When the map's placed
 entities name that mod's namespace (`mods/<salt>/`, read by
 `sh_modmanifest_placed_names`), the engine's validator refuses the map
 (`GetLocalSavedMapEdit`'s RepairAndMigrate, then its damaged-save dialog,
@@ -4910,46 +4962,49 @@ raised once no gate took the parse (`sh_modmanifest_load_refusal`): "This
 map needs <name>, which is not installed on this computer, so the editor
 cannot open the map. Restore the mod's folder from the Recycle Bin, or play
 the map from My Maps to get it from the mod store." (My Maps Play holds and
-asks the store, above.) An editor open has no hold point before the engine's
-load, so a build row is not fetched there; a pinned row's units are asked for
-after the open, with the map open (see [The map content cache](#the-map-content-cache)).
+fetches the content, above.) An editor open has no hold point before the
+engine's load, so nothing is fetched before it; a pinned row's units are
+asked for after the open, with the map open (see [The map content
+cache](#the-map-content-cache)).
 
-A denial drops the hold before anything is asked or fetched: the first denied
-bundle's sentence is the one-button notice (with "N more mods cannot be
-obtained; see the console." when there are more) and every denied bundle gets
-one console line. A prefab's sentences say "prefab" and "the prefab's ZIP
-export". The title is the row's name, else its salt. The question's size is
-the total of the archives' sizes the store reported (`HEAD`), else the rows'.
-A fetch that fails after Yes
-is decided by the same function (404 and 451, a network failure, and
-`MODNET_E_GAME`, the download's own borrow refusal, whose source the fetch
-keeps). A placeholder system (phase 6) would plug in at `sh_modpub_gate_decide`
-with a verdict of its own and touch nothing else.
+The progress line. While the job runs the player sees where it is in the
+game's own progress line, the one the game shows while it downloads a published
+map: "Getting this map's mod content: Eternal Demons (2 of 3), 84 of 212 MB."
+(`pub_progress_text`; "this prefab's" for a prefab, no total when the size is
+not known yet), its text replaced in place every two seconds, never taken down
+and raised again, and the console prints the same line from the second one on.
+The line is not shown for the open editor map's fetch
+(`SH_MODPUB_EDITOR_OPEN`), which has no completion behind it. Nothing is
+asked, so the player cannot cancel it; leaving a lobby, another map load or a
+newer held launch stops it.
 
-Yes starts one job on the modsync worker that fetches every missing build's
-archive (`modsync_fetch_build_for`) and logs a progress line every two seconds. When the job is done, on a main
-tick, the index is rescanned, every fetched bundle must be admitted, the screen
-the hold came from must still be current (and, for a joiner, the lobby must
-still host that item and revision), the manifest's bundles are activated, a
-fresh `idSnapMap` is constructed, the retained text is parsed through the normal
-detour (which strips the rows and activates), and the original completion runs
-with it. No, a failed fetch, a bundle that will not install or a lobby that
-changed drops the hold: nothing is launched, the progress widget is hidden, and
-a one-button notice names the mod. Another map load, or a newer held launch,
-abandons the hold silently and cancels its fetch. The engine thread never waits:
-the network runs on the worker and the dialog is polled. After No, a hold that
-asked for one row shows that row's sentence and "The map was not loaded."
-(for example "This map uses Hell Guards, which is not installed. The map was
-not loaded."). The download (`modexport_fetch_build`) is unpacked where the
-map finds it: into its place, `mods\maps\<segment>\<mod name>\`
-(`modsync_fetch_build_for` under the record key `place:<segment>`; a published
-item's title is an idStr at metadata +0x398 beside the id at +0 and the
-revision at +0x30), replacing that place's earlier build of the same salt and
-nothing else; or, for a map without a place and a prefab, at the root as the
-player's own mod (`sh_ms_install_to_root`, from a copy unpacked in `%TEMP%`;
-a place that already holds this very build is installed from there with no
-download). The resume checks every row against the asset rule again, in the
-same place.
+Resuming. When the job is done, on a main tick (`pub_finish`), the index is
+rescanned and every row must be served by the asset rule (else "<name> was
+downloaded but cannot be used." with the rule's cause, and the load is dropped);
+a map the scripts setting refuses is dropped there too (see Mod scripts). The
+screen the hold came from must still be current (and, for a joiner, the lobby
+must still host that item and revision), the manifest's bundles are activated,
+a fresh `idSnapMap` is constructed, the retained text is parsed through the
+normal detour (which strips the rows and activates), and the original
+completion runs with it. The content's one notice (what the map plays without,
+above) is said after the load, once. A failed fetch, a refused row or a lobby
+that changed drops the hold: nothing is launched, the progress widget is
+hidden, and a one-button notice names the mod. Another map load, or a newer
+held launch, abandons the hold silently and cancels its fetch. The engine
+thread never waits: the network runs on the worker and the job is polled.
+
+A row that names no unit. A local row (`"local": true`, D6a) follows its
+author's folder, so the store has nothing for it. When a hold's missing rows
+include one (a map saved before its content was sent to the store, or a
+rawmap), `pub_refuse_local` refuses the load at the next tick, before any
+fetch, with one sentence: the asset rule's own when the row's folder is here
+but does not serve every name the row lists ("<cause> The map was not
+loaded."), else "This map needs <names>, which is not on this computer and
+cannot be downloaded: the map was saved before its content was sent to the mod
+store. Ask its author to publish it again. The map was not loaded." (a prefab:
+"This prefab needs ... The prefab was not placed."). The long form is also on
+the console. No stand-ins are built for such a row: only pinned rows have a
+composition.
 
 ### Co-op lobbies for modded maps
 
@@ -5053,19 +5108,21 @@ map as untrue (`shield_note_refused_load`). A reload request records the open
 map and the load generation and is dropped on the frame if either changed;
 nothing is kept for a later map.
 
-The hold (`sh_modpub_rawmap_hold`, hook `SH_MODPUB_RAWMAP_LOAD`) runs the
-denial gate first, as every hold does (see Published maps and missing mods).
-When every missing bundle is obtainable, the player gets the question a My Maps
-launch asks, and Yes fetches and installs them; the resume does not activate
-anything (the rawmap's own parse does) but opens the rawmap again, through a
-reload when the editor can take one; otherwise a notice says to load it again
-from File > Load Rawmap once a map is open in the editor. That reopened load parses the text the hold checked
-(`held_take` in `rawmap.c`), so a `.zip` is imported once, at the hold; any other
-read of the source drops it and reads the file again. Otherwise the load is denied with the gate's
-sentences; the asset rule's sentence for each row comes first on the console.
-No and a failed download behave as for a published map. The gate is bound with the published-map gates; on a
-build where they did not install, nothing is counted missing and rawmaps load as
-before.
+The hold (`sh_modpub_rawmap_hold`, hook `SH_MODPUB_RAWMAP_LOAD`) is the hold
+every load gets (see Published maps and missing mods): the rawmap's pinned rows
+are noted for the content cache first (`sh_modmanifest_content_for`), and a
+hold whose missing rows all name units fetches their units with no question
+under the progress line. The resume does not activate anything (the rawmap's
+own parse does) but opens the rawmap again, through a reload when the editor
+can take one; otherwise a notice says to load it again from File > Load
+Rawmap once a map is open in the editor. That reopened load parses the text the
+hold checked (`held_take` in `rawmap.c`), so a `.zip` is imported once, at the
+hold; any other read of the source drops it and reads the file again. A row that
+names no unit and that nothing here serves refuses the load with the sentence
+described there ("... cannot be downloaded ..."); the asset rule's sentence for
+each row comes first on the console. A failed fetch behaves as for a published
+map. The hold is bound with the published-map gates; on a build where they did
+not install, nothing is counted missing and rawmaps load as before.
 
 Transport off the game's thread. A ZIP's import (File > Load Rawmap,
 `sh_rawmaps load`, `sh_mods import`), a save to a `.zip` and the companion
@@ -5259,18 +5316,17 @@ place); a placement never changes where the open map finds its mods
   shows the new row, and a row that could not be added gets one console
   line. Then the placement goes on unchanged;
 - otherwise the placement is held by `sh_modpub_prefab_hold`, the rawmap hold
-  with its own hook (`SH_MODPUB_PREFAB_PLACE`): the denial gate asks the store
-  on the worker; when every missing bundle is obtainable the engine's Yes/No asks
-  "This prefab needs N mod(s): <names> (<size>). Download and install now?", Yes
-  fetches each archive (`modpublished.c` decides where; decision 12 wants the
-  root), and the ready callback runs the step above;
-  only rows the asset rule reports missing or incomplete are asked for; the
-  Prefabs tab, polling `MODS_POLL`, then places the prefab through its ordinary
-  Load / Place. Otherwise the placement is denied with the gate's prefab
-  sentences ("This prefab needs <title>, which ... The prefab was not
-  placed."). No, a failed
-  download and a bundle that will not install end as for a map, with "The
-  prefab was not placed.";
+  with its own hook (`SH_MODPUB_PREFAB_PLACE`): a hold whose missing rows all
+  name units fetches them with no question, under "Getting this prefab's mod
+  content: ..." (the fetch goes into the content cache, whatever place the
+  placement would use), and the ready callback runs the step above; only rows
+  the asset rule reports missing or incomplete are fetched; the Prefabs tab,
+  polling `MODS_POLL`, then places the prefab through its ordinary Load /
+  Place. A missing row that names no unit refuses the placement with the
+  prefab form of the sentence described under Published maps and missing mods
+  ("This prefab needs <names>, which ... cannot be downloaded ... The prefab
+  was not placed."). A failed fetch and a row that is still not served end as
+  for a map, with "The prefab was not placed.";
 - with the gates unbound (a build where the published-map gates did not
   install) the same refusal is printed and toasted without asking the store.
 
@@ -5329,30 +5385,76 @@ sentence. It changes nothing.
 
 ### Publishing a map with mods
 
-What is sent: the builds the published map names in its manifest rows
-(`<salt>@<build hash>`), one archive per build the store lacks, and only
-those, at publish time; a row names a whole build (units are not yet named,
-see [Units](#units)). The `SerializeToJson` detour reports each save's
-final text (`sh_rawmap_set_save_observer`); `PublishAfterSave`, the Save
-state's callback that runs before the first request to the map service, is
-detoured (`modpublish.c`). A save without rows publishes natively. A text over
-the service's 10,485,760-byte bound is refused through the engine's own
-`PublishFail`, with a toast giving the size and the overage. Otherwise the
-publish is held: the Save state returns with the publish pacifier up, as the
-engine's own asynchronous chain leaves it. The first publish with mods on an
-installation asks once through `sh_engine_dialog_ask` (Yes sets
-`mods.upload_confirmed`); the ask site is one function, and an alternative
-route shows the explanation as `PublishFail`'s editor toast instead, cancels
-that publish, and treats the next one as the agreement. One worker job then
-uploads every build the rows name (`modsync_upload_builds`, see [The mod store
-transport](#the-mod-store-transport): a HEAD per build, an archive PUT for each
-the store lacks, one claim) under a provisional ref `publish-pending-<16 hex>`,
-and a main tick resumes the original `PublishAfterSave`. A claim the store
-refuses with 409 (a release of the same build, by another publish's
-unpublish, deleted its archive between the HEAD and the claim) uploads again
-once (`mp_upload`); `sh_mods push` does the same. The store checks each
-archive at its PUT and answers a refusal with its first cause, which stops the
-publish. The rules of the store's that the
+What is sent: the units the published map's rows name (see [Units](#units)),
+those the store lacks and only those, as a map with mod rows is published. The
+publish is held at its start, not at its save (`modpublish.h` is the
+summary).
+
+`PublishStart` is detoured (`sh_modpublish_publish_start`). A map whose
+placed names give no mod rows publishes as the engine does. Otherwise the
+call is held (the detour returns without the original; a second Publish while
+one is held waits for it) and a job on the modnet worker prepares the content
+(`mp_prepare`) while the editor's pacifier reads "Preparing this map's mod
+content." The job makes this computer's publishing key when there is none
+(`modclaim_signer`; see [The map content cache](#the-map-content-cache)),
+reads the paths players asked of the units this computer's claims name
+(`modclaim_asked`, which seeds the unit walk, see [Units](#units)), computes
+the unit of every local row from its folder's current build (`sh_modpin_row`),
+and asks the store which units it holds (`modclaim_plan_units`). A unit the
+store lacks and this computer has the files of is missing (its bytes are the
+files the store does not hold); one the store lacks and this computer does not
+have is absent (S8); one moderation removed is removed.
+
+- A row whose mod is not on this computer (its folder is not built here)
+  refuses the publish with one sentence ("The map was not published: Snapmap+
+  cannot find the mod <name> on this computer. Build or install it in the Mods
+  tab, or remove its objects, then publish again."); no request is made for it.
+- Bytes to send: the game's own Yes/No (GDM 0x29) asks "Publishing uploads 212
+  MB of mod content that the mod store does not have yet. Publish?" (S7,
+  `sh_modpublish_compose_question`). No ends the hold and the publish never
+  starts, with no notice. A question that cannot be shown refuses the publish
+  with "its question could not be shown", so nothing is uploaded without an
+  answer. Nothing to send: no question.
+- Yes: a second job uploads the missing units (`modclaim_upload`, which sends
+  each through `sh_cache_publish_unit`), the pacifier reading "Uploading mod
+  content: 84 of 212 MB." (`sh_modpublish_progress_text`).
+- Absent or removed units do not stop the publish: one notice follows it,
+  "Players will see this map without the Marauder from Eternal Demons: its
+  content is not on this computer or in the mod store." (S8), or "..., which
+  was removed from the mod store." when only moderation removed units.
+- A busy store (429, 5xx, no answer) is waited out within two minutes
+  (`MP_STORE_WAIT_MS`, `modclaim_set_budget`, the store's Retry-After honoured).
+  Past that the publish goes on and what could not be sent is queued (N27): "The
+  map is published, but its mod content could not reach the mod store yet;
+  Snapmap+ sends it the next time DOOM starts." A refusal that will recur ends
+  the publish with the store's own sentence ("The map was not published." and
+  the store's cause); a store that retired this version (410) says "This version
+  of Snapmap+ cannot use the mod store; run the Snapmap+ installer to update."
+  A worker busy for about three minutes refuses with "Snapmap+ is busy with the
+  mod store. Publish again in a moment."
+
+When the units are in the store, or the publish goes on queued, the held
+`PublishStart` runs (`mp_resume`, through its own detour, which passes) and
+arms the pin step for 30 seconds. The save the publish makes then writes its
+rows pinned: `sh_modpublish_pin_save` is bound as the manifest's pin step
+(`sh_modmanifest_set_pin`) and replaces each local row with a pinned row naming
+the units of the objects the save places, from the walk the preparation did (a
+lookup, not another walk). A row that cannot be pinned is logged, and
+`g_save.local` rows left local are logged at the save ("players get stand-ins
+for them"). The open map keeps its own rows; only the cloud-saved text the
+engine publishes names units. A publish whose pin step was not reached in 30
+seconds logs that its rows were not pinned. The editor leaving, or a save while
+a publish is held, abandons the hold.
+
+The `SerializeToJson` detour reports each save's final text
+(`sh_rawmap_set_save_observer`); `PublishAfterSave`, the Save state's callback
+that runs before the first request to the map service, is detoured too
+(`sh_modpublish_after_save`). A save without rows publishes natively. A text
+over the service's 10,485,760-byte bound is refused through the engine's own
+`PublishFail`, with a toast giving the size and the overage, and so is a mod
+list that cannot be read ("The map was not published: its list of mods cannot
+be read. Save the map again, then publish it." or the sentence naming the mod).
+The rules of the store's that the
 builder would otherwise admit (an author key outside `^[a-z][a-z0-9_-]{0,63}$`
 such as `displayName` or `$schema`, a control character such as a tab in the
 name or author) are mirrored as build warnings in one table,
@@ -5385,24 +5487,44 @@ and the save observer saw rows, the way `PublishStart` appends `map:dev` (the
 list grow and idStr assignment are bound from its own calls). The save then
 copies that model back to the editor. A tag that cannot be written is logged
 and the map publishes without it; a held publish whose save was not tagged
-logs that too. A No, a failed upload, a
-question that cannot be shown or a busy worker cancels through `PublishFail`
-and a toast naming the cause; nothing reached the map service. The editor
-leaving abandons the hold; another save cancels it.
+logs that too. A refusal while the publish is
+held (a mod not on this computer, a refused upload, a question that cannot be
+shown, a busy worker) clears the pacifier and shows the sentence as the
+editor's toast (`mp_refuse`); the engine's `PublishStart` never ran, so nothing
+reached the map service. A No clears the pacifier and says nothing.
 
-The claim and its secret: `PublishFeedPost`, the one function both success
-paths reach, carries the item id and revision. The worker claims the build
-set under the item id. On a republish the stored secret re-claims that ref,
-which replaces the set; a republish without rows releases the
-item's claim. The claim id and secret live in the record's `claims`
-section (modsync); the secret is never logged. The provisional claim is released once the item
-claim succeeds, or when its publish never reaches the feed post. Claims,
-links and the retry queue are the `claims`, `links` and `pending` sections of
-`mods\snapmap-plus.json`.
+The claim and its secret (`modclaim.c`). The claim is made at
+`PublishFeedPost`, the one function both success paths reach, which carries the
+item id and revision (`sh_modpublish_feed_post`): there is no claim under a
+provisional ref before it. The units are those the publish's save named
+(`sh_modpublish_after_save` keeps them as the context of that save). The claim
+is queued on the worker and never delays the engine; the item's link is
+recorded with it (below). `modclaim_claim` claims the units under the item id,
+replacing the set an earlier publish of the item claimed; units moderation
+removed are left out of the claim (the store answers 451 and names them). Each
+change of a claim carries the next `rev` (D33): the stored rev plus one, and
+when the store answers 409 with its own rev a stale one is raised to it and
+tried again (twice at most); a 409 that names a unit the store lacks (deleted
+after its delay, or a queued upload) uploads what this computer has of it first
+and claims again once. A busy store's Retry-After is waited out within the
+caller's budget (`modclaim_set_budget`; two minutes for the publish's jobs).
+A republish without rows releases the item's claim. The claim's secret is not
+stored: it derives from the publishing key's claim seed and the item id
+(`sh_key_claim_secret`, HMAC-SHA256 of "snapmap-plus/claim/1\n" and the item
+id), and every write is signed by the key (`modkey.c`, kept in
+`%LOCALAPPDATA%\snapmap-plus\publishing\`, made at the first publish, never in
+the game's folders). The record keeps, in the `map-claims` section, per item
+`{rev, units, key, mods, at}` (`mods` the salts the units serve, kept across
+later claims, which the Mods tab reads) and, in `map-pending`, per item the
+queued `{do: "claim"|"release", units}`; the `links` section is the
+publish's own. All of them live in `mods\snapmap-plus.json`. Nothing here
+touches a map other people published.
 
 Release: the MapInfo screen's unpublish completion (`(screen, ctx, const
 idStr &id)`, bound by the unpublish confirm) releases the item's claim on the
-worker. Deleting a map from My Maps removes the local slot and the cloud-saved
+worker (`sh_modpublish_unpublished`, only when this computer holds a claim of
+the item; the release goes to the store alone, `modclaim_release`, which counts
+a claim neither side has as released). Deleting a map from My Maps removes the local slot and the cloud-saved
 item; the published item stays playable for everyone, so its claim normally
 stays. The delete completion (`(screen, ctx, const idStr &localId, const idStr
 &cloudItemId)`) releases a claim only when its item is no longer published,
@@ -5417,25 +5539,33 @@ the engine's request context invokes and destroys; only an item missing from a
 successful answer is released. No link, no stored claim, no cloud-saved id, a
 link younger than an hour (a fresh item may not be searchable yet), an answer
 as long as a search page (30 items, it may be partial), a failed answer or
-none within 60 seconds keeps every claim. A release or an
-unpublish forgets the link. A copy to My Maps of a published map whose
+none within 60 seconds keeps every claim. A release the store took
+forgets the link. A copy to My Maps of a published map whose
 cached text (`%LOCALAPPDATA%\id Software\DOOM\base\doomsnapmaps\published-maps\<id>_<rev>_map.decl`)
 is over the bound is refused at the MapInfo and browser entries, before the
-engine creates the saved item, with a one-button notice.
+engine creates the saved item, with a one-button notice. A copy that is allowed
+starts a background fetch of the content of its pinned rows whose composition
+is not complete on this computer (D25, `mp_copy_fetch`: one job on the worker,
+`sh_cache_prepare` per row, nothing asked), so the kept map opens offline; a
+fetch that did not all arrive is logged and the rest comes when the map is
+opened.
 
-The retry queue: a failure modsync can retry stays in the record's `pending`
-section, an upload or a claim release alike. A release the store does not
-take (a busy store at unpublish, say) is queued under its ref rather than only
-logged, since a leaked claim keeps its builds on the store; it replaces a
-queued upload of the same ref. Queued releases are retried after the next
-store call that succeeds and at startup. At startup the backend first forgets
-the queued work of provisional refs left by a closed game (their publish never
-completed), then retries the queue once on the worker, then releases each
-provisional claim, except one an item's queued claim still waits on: the item
-claim records its provisional ref when it is queued, and the provisional claim
-keeps the builds on the store until that claim succeeds. Releasing it first
-would let the store delete a build the retry then has to upload again. The
-worker logs the counts.
+The retry queue (`modclaim_queue`, `modclaim_launch`). A claim or a release the
+store could not take for a reason a later try could cure (a busy store past the
+wait, no connection) stays in the record's `map-pending` section under its ref,
+with the units of a claim, replacing an earlier entry of that item, since a
+leaked claim keeps its units on the store. At every start
+(`sh_modpublish_launch`, one job on the worker) the queue is retried: a queued
+claim first uploads the units the store lacks, then claims; a queued release
+releases. What the store took leaves the queue; the rest stays and the worker
+logs the counts (retried, settled, left). The same pass then repairs
+(`modclaim_launch`, 5.21): for every claim this computer made, the units the
+store lost are uploaded again from this computer's files and the claim is made
+again. A unit whose files this computer no longer holds is not repaired. The
+sweep keeps the units of every claim and queued claim this computer holds
+(`modclaim_held`), so that repair has its files. A store answer that names a
+newer minimum version raises one notice, "A newer Snapmap+ is available; run
+the Snapmap+ installer to update." (`modnet_newer_needed`), after the job.
 
 ### Units
 
@@ -5455,8 +5585,10 @@ The pin step (`modpin.c`) turns a map's local rows into pinned rows when the map
 leaves the machine: for each object a row places, the unit from the folder's
 current build, its manifest into the cache, and a module record per placed mod
 module. A unit that does not prove gives the row the whole build, with one log
-line; a row whose folder is not here stays local. Publish and export do not yet
-call it (DS-T, DS-X). `sh_unit_store` writes a manifest
+line; a row whose folder is not here stays local. Publish calls it twice (the
+preparation computes the units to upload, `mp_prepare`, and the save's pin step
+writes them into the rows, `sh_modpublish_pin_save`; see [Publishing a map with
+mods](#publishing-a-map-with-mods)); export does not yet (DS-X). `sh_unit_store` writes a manifest
 at `<mods>\.content\units\<hash>.json`. A unit's share of `mod.json` holds only
 the keys the player's build reads (requirements, strings, hud, companions,
 scenes, animation_events, attachment_tags), so a `version` or a note never
@@ -5494,18 +5626,24 @@ object, and the load gets one notice (S2-S6, `sh_cache_notice_text`). The
 published-map gate treats a pinned row as missing until its composition is
 complete: it asks no question and probes nothing, fetches the absent units on
 the network worker (`sh_cache_prepare`: the store's status for the row's
-units, then each unit in one request, its archive: unit.json first, which
-brings the manifest when it is not here, and every file, or only the files
-this computer lacks, named by a mask in the manifest's order; a transfer the
-network broke resumed by Range, every byte checked, an entry that did not
-check fetched alone), composes again
+units, then the units the store holds, four at a time, each in one request,
+its archive: unit.json first, which brings the manifest when it is not here,
+and every file, or only the files this computer lacks, named by a mask in the
+manifest's order; a transfer the network broke resumed by Range, every byte
+checked, an entry that did not check fetched alone; before a unit is used, its
+pointers into the product's own container are checked against the bytes this
+Snapmap+ derives (N13), and one this Snapmap+ cannot match is absent with S6,
+not an error), composes again
 (the composition's sidecar records each absent unit's cause, the store's
 answer), and resumes; the resumed load says once what the map plays without,
 with the cause the fetch recorded, never the hold and the load both. A joiner
 downloads in the lobby, and the host's start waits for it (see "Co-op lobbies
-for modded maps"). A map's content downloads with the progress line only: the
-"Keep downloading?" question is for the builds of earlier shapes alone (D-A36).
-An editor open (My Maps, a
+for modded maps"). A map's content downloads with the progress line only (D-A36;
+see Published maps and missing mods): no question is asked and none can cancel
+it. A computer whose store address does not resolve is offline: the objects
+stand in with S2 ("Connect to the internet and open the map again"), not S4
+(B2), and an offline launch from My Maps plays with those stand-ins (B1). An
+editor open (My Maps, a
 rawmap) composes from what is here, then asks the store for the units it stood
 in for on the network worker, with no question (`SH_MODPUB_EDITOR_OPEN`: the
 map is open, so nothing waits); what arrives is served in the open map through
@@ -5518,9 +5656,15 @@ tab) keeps every unit a kept map names (the local saves of My Maps, read
 through `saved_maps.c`, the one reader of the game's save slots, since a map
 saved offline exists only there; the cloud copies in the game's `saved-maps`;
 and, unless the player chose Remove content of maps you only played,
-`published-maps`), the open map's and those of uploads in progress, and
-removes the rest, then the files no remaining manifest names, then the
-compositions no kept map uses. A kept map whose text is there and does not
+`published-maps`), the open map's, and the units of every claim and queued
+claim this computer holds (`sh_cache_sweep_kept`, `modclaim_held`, so the
+self-repair of a claim keeps its files after its map left), and removes the
+rest, then the files no remaining manifest names, then the compositions no kept
+map uses (one being made or replaced is left alone unless nothing has written
+it for an hour, and so is a partial download that long), then partial downloads
+whose unit or file nothing names. The sweep also runs, off the calling thread,
+after a map is deleted from My Maps and after a mod is uninstalled
+(`sh_cache_sweep_async`). A kept map whose text is there and does not
 read (a slot that does not decode, a row that does not parse, a folder that
 cannot be listed) may use anything, so that sweep removes nothing and says
 why. A row of an earlier Snapmap+ shape (`id`, `bundle`) is refused but names no
@@ -5533,8 +5677,9 @@ most one request, a larger file in parts, complete), whoever authored the mod;
 `modkey.c` holds the publishing key (ECDSA P-256 with CNG, the private half and
 the claim seed under DPAPI in `%LOCALAPPDATA%\snapmap-plus\publishing\`), signs
 every write and derives each map's claim secret. The publish hold, the claim
-and self-repair are DS-T; the key's backup, restore and the account name read
-are DS-K.
+and the self-repair are `modpublish.c` and `modclaim.c` (see [Publishing a map
+with mods](#publishing-a-map-with-mods)); the key's backup, restore and the
+account name read are DS-K.
 
 The closure follows these rules:
 
@@ -5584,88 +5729,67 @@ publish.
 
 ### The mod store transport
 
-The store now speaks units (`modnet.h`, its units section: status, archive (with a mask) and blob reads with Range
-resume, begin, archives, parts, complete, signed claims with a rev, release, asked). It answers the build routes below
-with 410; the publish and download paths that still call them move to units in DS-T.
+The store speaks units and nothing else (`modnet.h`, SPEC-distribution 10.2).
+It keeps units (named by the SHA-256 of their manifest) and their files (blobs,
+named by their own SHA-256); a published map claims the units its rows name.
+Reads are anonymous. Every write is signed by the publishing key through a
+signer (`X-Publisher-Key`, `-Name` and `-Signature` headers, `modkey.c`), and
+the bytes are untrusted: the content cache checks every manifest and blob
+against the hash a map names before anything serves (I10). The build routes of
+earlier releases (`/mods/build/*`, `/mods/claim`, `/mods/release`, the unsigned
+`/mods/asked` and `/mods/build/<hash>/asked`) are not spoken; the store answers
+them with 410, and `modsync.c` and `modexport_fetch_build` are gone.
 
-The store keeps one object per build (ONE-SHAPE rule 5): a stored ZIP
-(`modzip.c`, method 0, ZIP64 where a value needs it) named by the build hash at
-`/mods/build/<hash>`, holding the folder's `mod.json`, the whole file, and
-its path in the mod folder (`materials/x.decl`) for every carried file its block lists. Stock pointers are
-never in it: their bytes are the player's own game. `modnet.c` speaks the
-routes: `HEAD` (held, with the archive's size and `X-Mod-Scripts`, the
-number of script files the build carries, or 404, or 451), `PUT`
-(`application/zip`, Content-Length, streamed from a file; 201 new, 200
-already held, 422 with the store's first cause), `GET` (streamed to a file a
-chunk at a time with progress, of any size), `POST /mods/claim`
-(`{"builds": [...], "ref", "secret"?}`, one claim per published item, any
-number of builds, 409 when a build is not stored) and `POST /mods/release`,
-after which the store deletes every build no claim names. There is no blob
-store and no manifest of its own: two mods with the same files are two
-archives. `POST /mods/build/<hash>/asked {"request","by"}`
-(`modnet_report_asked`) tells the store a player's game lacked a file a
-composition's namespace asked for, and `POST /mods/asked {"claim","secret"}` (`modnet_list_asked`) lists
-those reports for the claim's holder.
+`modnet.c` speaks the routes over WinHTTP, one process-wide session (https
+only, plain http for a loopback host; no redirects). Every request carries the
+User-Agent `snapmap-plus/<version>` ("dev" for a local build).
 
-Nothing limits a build (DECISIONS 26). One request body is the platform's
-limit (100 MB on the Worker's plan) and one connection is slower than several,
-so an archive larger than `MODNET_PART_SIZE` (32 MiB) goes up in parts of the
-size the store names (the Worker's `PART_SIZE`, 16 MiB), four at a time
-(`MODNET_PART_WORKERS`), each on its own connection and in any order
-(`mn_send_parts`: a failed part stops the taking of new parts, the ones on
-their way finish, and the next start sends only what the store lacks):
-`POST /mods/build/<hash>/parts {"size"}` starts the upload or resumes the one
-of that build and size and answers `{"partSize", "parts", "have"}`; `PUT
-/mods/build/<hash>/parts/<n>` (`application/octet-stream`, `X-Build-Size`)
-sends part n, each but the last exactly `partSize` bytes, read from the
-archive file at its offset; `POST /mods/build/<hash>/complete {"size"}` joins
-them, and the store checks the whole archive by the same rules as a
-one-request upload before it serves it (the answer waits up to 15 minutes
-for that read). A part the store holds is never sent again: a failed part
-starts the upload again (up to four starts in one call) and the store's
-answer names what it holds, and a later publish resumes the same way. The
-store's per-address hourly limits (abuse protection, not a mod limit) count a
-publish in parts as one upload when it starts.
+- `POST /mods/units`: each hash's state (held, missing, removed), in batches of
+  4,096 (`modnet_unit_status`).
+- `GET /mods/blob/<sha>`, resumed by Range from the bytes a partial file holds
+  (`modnet_get_blob`), and `GET /mods/unit/<hash>/archive`, a ZIP of unit.json
+  and every file or, with `?want=<base64url mask>`, only the files whose bit is
+  set (bit i of the mask is the manifest's file i), also resumed
+  (`modnet_get_unit_archive`): a unit arrives in one request.
+- Publishing, all signed: `POST /mods/unit/<hash>/begin` with the manifest
+  (the store answers that it holds the unit, or the blobs it lacks),
+  `PUT /mods/unit/<hash>/archive` (a ZIP of unit.json and the missing files, at
+  most 95 MB, `MODNET_ONE_REQUEST_MAX`, signed over its SHA-256) and
+  `POST /mods/unit/<hash>/complete`. A blob larger than one request goes in
+  parts (`modnet_put_blob`): `POST /mods/blob/<sha>/parts` starts or resumes the
+  upload and answers the part size and the parts the store has, `PUT` sends each
+  part it lacks, `POST .../complete` joins them (the answer waits up to 15
+  minutes while the store reads the archive back to check it), and a failed part
+  starts the upload again, up to four starts in one call, each sending only what
+  the store lacks. `sh_cache_publish_unit` drives these.
+- Claims, signed: `POST /mods/map/claim {ref, units, secret, rev}` answers the
+  claim's rev (409 with the stored rev when `rev` was stale, or without one when
+  a unit is missing; 451 with the units moderation removed, the claim holding the
+  rest), and `POST /mods/map/release {ref, secret, rev}`.
+- Asked paths: `POST /mods/unit/<hash>/asked {path}` (anonymous) tells the store
+  a player's game asked a unit for a file it lacks (`eng_report_asked`, on a
+  pool thread, never waited for), and `POST /mods/asked` with the claims' refs
+  and secrets (signed) lists them for the publisher (`modnet_asked_units`,
+  `modclaim_asked`), whose next publish seeds its unit walk with them.
 
-Upload (`modsync_upload_builds`) takes the map's rows as `<salt>@<hash>`. Each
-build is found in the mods folder (a root folder at that hash first, else a
-map's place); a salt the root holds only at another hash is refused with
-"<name> was built again since the map was saved; save the map again, then
-publish it", and a salt the machine lacks with "the map uses a mod this machine
-does not have". HEAD asks whether the store holds it; only when it does not is
-the archive written to a temporary file (`modsync_write_archive`: every file
-read and checked against the block, "<name>: <file> changed since the mod was
-built; open the Mods tab and Refresh" otherwise) and sent, in one request or
-in parts. Then one claim names every build, however many the map names.
+Answers the client acts on. A busy store (429, 5xx, a timeout, no answer)
+carries its Retry-After in the result (`retry_after_ms`), and the callers that
+wait (`modclaim.c`, within the budget the caller sets) honour it; the cache
+retries a unit file's broken transfer four times with a doubling pause
+(`sh_cache_net_retry_ms`: 250 to 2,000 ms). A name that does not resolve sets
+`offline` in the result (`MODNET_E_NET`): this computer is not connected, which
+the cache says as S2, never S4, and no wait is made for it. A 410
+(`MODNET_E_RETIRED`) says "This version of Snapmap+ cannot use the mod store;
+run the Snapmap+ installer to update." The `X-Snapmap-Plus-Minimum` header names
+the oldest version the store serves; once per process, when it is newer than
+this one, `modnet_newer_needed` is true and the background publish jobs (claim,
+release, launch retry) say "A newer Snapmap+ is available; run the Snapmap+
+installer to update." `MODNET_E_GAME` is not a store answer: it names content
+that was obtained but points at game bytes this machine does not hold, and no
+request returns it.
 
-Download (`modsync_fetch_build_for(row, place)`): when the root holds the
-row's salt at the row's hash, or the map's place holds it, nothing is
-fetched. Otherwise the archive is streamed to a temporary file and
-`modsync_install_archive` installs it. While the hold downloads, the game's own
-progress line (the manager's progress widget, which CacheMapForLobby fills
-with its wait text while the game downloads a published map) shows
-"Downloading <mod> (i of n): x of y MB, p%.", its text replaced in place every
-two seconds (`show_wait` again; `hide_progress` when the download ends), and
-the console prints the same line. The game's dialog cannot change the text it
-was raised with (ShowDialog copies the descriptor's text once), so a download
-still running after two seconds raises it once, with fixed words: "Downloading
-the map's mods; the progress shows on screen and on the console. Keep
-downloading? No cancels it and installs nothing more." Yes closes it for good;
-No sets the job's cancel flag, the download stops at its next chunk, its temporary file is
-deleted, no further mod is installed, and the map is not loaded ("The
-download was cancelled. The map was not loaded."). An install itself is
-atomic (staging folder, then one rename), so nothing is ever half installed.
-The archive's checks are: its `mod.json` must load and name the
-row's salt and build hash, every carried file must be an entry with the size
-and SHA-256 the block records, no other entry may be present, and every stock
-pointer must resolve against the installed game (`MODNET_E_GAME` otherwise).
-Any mismatch installs nothing: "the mod store sent a build that does not match
-the map". The files are unpacked into `<place folder>.staging-<pid>` beside
-the target (`sh_ms_place_folder`) without the store lock, then swapped in,
-replacing the place's earlier build of the salt; the place is noted in the
-record (`sh_ms_place_note`) and the serving index rescanned. Two maps that
-name one build each unpack their own copy. Every build a map names is
-installed, editor-tweaks builds included.
+Nothing limits a unit (DECISIONS 26): the request limit is the platform's, which
+is why a file larger than one request goes in parts.
 
 ## Module prefabs
 

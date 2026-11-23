@@ -23,14 +23,13 @@
  *   sh_mods map remove "<mod folder>" [--yes]   what removing it from the open map does; --yes does it
  *   sh_mods uninstall "<mod folder>" [--yes]    what uninstalling does; --yes does it
  *   sh_mods copystock "<engine path>" "<file>"  write an installed game file's bytes to a file
- *   sh_mods push "<mod folder>" "<ref>"         upload a mod's build to the mod store and claim it
- *   sh_mods release "<ref>"        release the claim stored for ref
- *   sh_mods retry                  retry uploads queued after a failure
+ *   sh_mods release "<published item id>"   drop this computer's claim of a published map's content
+ *   sh_mods retry                  send queued claims and releases, and repair what the store lost
  *   sh_mods export "<path.zip>"    write the open map and its mods to one ZIP
  *   sh_mods import "<path.zip>"    open a map's ZIP as File > Load Rawmap does
- *   sh_mods cancel                 stop the running push, release or retry
+ *   sh_mods cancel                 stop the running release or retry
  *
- * push, release and retry run on a worker thread (modnet.c), one at a time;
+ * release and retry run on a worker thread (modnet.c), one at a time;
  * their result lines print when they finish. build, rebuild and install take
  * the store lock.
  *
@@ -72,11 +71,11 @@
                               "(mod.json \"attachment_tags\") the same way, 'sh_mods sync-clock' whether a mod " \
                               "demon's kills in this Play run on the player's animation clock."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP_AUTHOR (each under the console's 1 KiB line). */
-#define SH_MODCMD_HELP_STORE "Mod store: 'sh_mods push \"<mod folder>\" \"<ref>\"' uploads a mod and claims it under ref, " \
-                             "'sh_mods release \"<ref>\"' drops a claim, 'sh_mods retry' retries uploads queued after a " \
-                             "failure, 'sh_mods export \"<path.zip>\"' writes the open map with its mods, 'sh_mods import " \
-                             "\"<path.zip>\"' opens such a ZIP as File > Load Rawmap does, 'sh_mods cancel' stops the " \
-                             "running upload."
+#define SH_MODCMD_HELP_STORE "Mod store: 'sh_mods release \"<published item id>\"' drops this computer's claim of a " \
+                             "published map's content, 'sh_mods retry' sends the claims and releases queued after a " \
+                             "failure and repairs what the store lost (as every start does), 'sh_mods export " \
+                             "\"<path.zip>\"' writes the open map with its mods, 'sh_mods import \"<path.zip>\"' opens " \
+                             "such a ZIP as File > Load Rawmap does, 'sh_mods cancel' stops the running transfer."
 
 /* The console handler (idCmdArgs layout from commands.h). */
 void h_sh_mods(idCmdArgs *args);

@@ -398,6 +398,22 @@ static void check_image(const char *path)
         }
         CHECK(found == 1 && SH_AI_OFF_WEB_ANIMATOR == 0x222B8u);
     }
+    if (rva[SH_AI_SIG_UPDATE_RELATIONS] && rva[SH_AI_SIG_BEST_RELATION]) {
+        /* the senses' relation table (script_api_ai.h, SH_AI_REL_*): UpdateRelations empties it (rows at +0x28,
+         * count at rows + 8) and reads each perceived entity's faction at +0x4EC0; the engine's pick reads a row's
+         * emotion at +8 and its entity at +0x10, 0x28 bytes a row, from EMOTION_MAX 14 down */
+        const uint8_t *u = base + rva[SH_AI_SIG_UPDATE_RELATIONS], *b = base + rva[SH_AI_SIG_BEST_RELATION];
+        uint32_t faction;
+        CHECK(u[SH_AI_UPDREL_ROWS_DISP] == SH_AI_REL_ROWS && !memcmp(u + SH_AI_UPDREL_ROWS_DISP - 3, "\x48\x8D\x59", 3));
+        CHECK(u[SH_AI_UPDREL_COUNT_DISP] == SH_AI_REL_COUNT - SH_AI_REL_ROWS &&
+              !memcmp(u + SH_AI_UPDREL_COUNT_DISP - 2, "\xC7\x43", 2));
+        memcpy(&faction, u + SH_AI_UPDREL_FACTION_IMM, 4);
+        CHECK(faction == 0x4EC0u);
+        CHECK(b[SH_AI_BEST_EMOTION_DISP] == SH_AI_REL_EMOTION && !memcmp(b + SH_AI_BEST_EMOTION_DISP - 3, "\x8B\x44\x0B", 3));
+        CHECK(b[SH_AI_BEST_ENTITY_IMM] == SH_AI_REL_ENTITY && !memcmp(b + SH_AI_BEST_ENTITY_IMM - 3, "\x48\x83\xC1", 3));
+        CHECK(b[SH_AI_BEST_STRIDE_IMM] == SH_AI_REL_SIZE && !memcmp(b + SH_AI_BEST_STRIDE_IMM - 3, "\x48\x83\xC3", 3));
+        CHECK(b[SH_AI_BEST_START_DISP] == 14 && !memcmp(b + SH_AI_BEST_START_DISP - 3, "\x44\x8D\x7D", 3));
+    }
     if (rva[SH_AI_SIG_FXPHYS_PLACE]) {
         /* mov rdx,[rsp+0x90]: the fifth argument the placement passes as 0 */
         CHECK(!memcmp(base + rva[SH_AI_SIG_FXPHYS_PLACE] + 0x1F, "\x48\x8B\x94\x24\x90\x00\x00\x00", 8));

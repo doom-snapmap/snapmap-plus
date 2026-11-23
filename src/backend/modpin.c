@@ -9,6 +9,7 @@
 #include "modunit.h"
 #include "modbundle.h"
 #include "modcache.h"
+#include "mp_json.h"
 #include "modprog.h"
 #include "modstock.h"
 #include "backend_log.h"
@@ -25,6 +26,98 @@ static sh_modpin_read_fn g_read;
 static void *g_read_ctx;
 static sh_unit_game_fn g_game = sh_modpin_game_installed;
 static void *g_game_ctx;
+
+/* The units already computed, by build and placed name: a publish computes them before its save (modpublish.c) and
+ * the save pins from here at once. Process-wide, under its lock; an entry stays valid while its build does (a build is
+ * named by its hash). The asked requests change a unit, so a new set of them empties it. */
+typedef struct mpn_memo { char build[SH_MB_HASH_HEX + 1]; char *name; char unit[SH_MB_HASH_HEX + 1]; char *root; } mpn_memo;
+static mpn_memo *g_memo;
+static size_t g_nmemo, g_cmemo;
+static SRWLOCK g_memo_lock = SRWLOCK_INIT;
+static sh_unit_asked *g_asked;
+static size_t g_nasked;
+
+static int mpn_memo_find(const char *build, const char *name, char unit[SH_MB_HASH_HEX + 1], char **root)
+{
+    size_t i;
+    int hit = 0;
+    AcquireSRWLockShared(&g_memo_lock);
+    for (i = 0; i < g_nmemo && !hit; i++)
+        if (!strcmp(g_memo[i].build, build) && !_stricmp(g_memo[i].name, name)) {
+            strcpy_s(unit, SH_MB_HASH_HEX + 1, g_memo[i].unit);
+            *root = sh_text(g_memo[i].root);
+            hit = *root != NULL;
+        }
+    ReleaseSRWLockShared(&g_memo_lock);
+    return hit;
+}
+
+static void mpn_memo_put(const char *build, const char *name, const char *unit, const char *root)
+{
+    AcquireSRWLockExclusive(&g_memo_lock);
+    if (g_nmemo == g_cmemo) {
+        size_t c = g_cmemo ? g_cmemo * 2 : 64;
+        mpn_memo *g = (mpn_memo *)realloc(g_memo, c * sizeof *g);
+        if (g) { g_memo = g; g_cmemo = c; }
+    }
+    if (g_nmemo < g_cmemo && (g_memo[g_nmemo].name = sh_text(name)) != NULL) {
+        if ((g_memo[g_nmemo].root = sh_text(root)) != NULL) {
+            strcpy_s(g_memo[g_nmemo].build, sizeof g_memo[g_nmemo].build, build);
+            strcpy_s(g_memo[g_nmemo].unit, sizeof g_memo[g_nmemo].unit, unit);
+            g_nmemo++;
+        } else free(g_memo[g_nmemo].name);
+    }
+    ReleaseSRWLockExclusive(&g_memo_lock);
+}
+
+void sh_modpin_set_asked(const sh_unit_asked *asked, size_t n)
+{
+    size_t i;
+    AcquireSRWLockExclusive(&g_memo_lock);
+    for (i = 0; i < g_nasked; i++) { free((void *)g_asked[i].request); free((void *)g_asked[i].by); }
+    free(g_asked);
+    g_asked = NULL;
+    g_nasked = 0;
+    if (n && (g_asked = (sh_unit_asked *)calloc(n, sizeof *g_asked)) != NULL) {
+        for (i = 0; i < n; i++) {
+            g_asked[i].request = asked[i].request ? sh_text(asked[i].request) : NULL;
+            g_asked[i].by = asked[i].by ? sh_text(asked[i].by) : NULL;
+        }
+        g_nasked = n;
+    }
+    for (i = 0; i < g_nmemo; i++) { free(g_memo[i].name); free(g_memo[i].root); }
+    g_nmemo = 0;
+    ReleaseSRWLockExclusive(&g_memo_lock);
+}
+
+/* The unit of `name`: from the memo, else walked (sh_unit_of) and remembered. A hit carries the manifest from the
+ * content cache and no `keep`. */
+static int mpn_unit_of(const sh_mb_bundle *b, const char *folder, const char *name, const sh_unit_env *env, sh_unit *u,
+                       const char *content_root, char **why)
+{
+    char unit[SH_MB_HASH_HEX + 1], *root = NULL;
+    memset(u, 0, sizeof *u);
+    if (mpn_memo_find(b->hash, name, unit, &root)) {
+        size_t len = 0;
+        char *manifest = NULL;
+        if (content_root) {
+            char *path = sh_textf("%s\\units\\%s.json", content_root, unit);
+            manifest = path ? (char *)sh_mb_read_file(path, 1u << 30, &len) : NULL;
+            free(path);
+        } else manifest = sh_cache_manifest(unit, &len);
+        if (manifest) {
+            strcpy_s(u->hash, sizeof u->hash, unit);
+            u->root = root;
+            u->manifest = manifest;
+            u->manifest_len = len;
+            return 1;
+        }
+        free(root);
+    }
+    if (!sh_unit_of(b, folder, name, env, u, why)) return 0;
+    mpn_memo_put(b->hash, name, u->hash, u->root);
+    return 1;
+}
 
 void sh_modpin_set_folder(sh_modpin_folder_fn fn, void *context) { g_folder = fn; g_folder_ctx = context; }
 void sh_modpin_set_read(sh_modpin_read_fn fn, void *context) { g_read = fn; g_read_ctx = context; }
@@ -137,17 +230,36 @@ static int mpn_store(const sh_unit *u, const char *content_root)
     return ok;
 }
 
-/* The bytes the units carry, each file of the build once. */
-static unsigned long long mpn_bytes(const sh_mb_bundle *b, const unsigned char *const *keeps, size_t n)
+/* The bytes the units carry, each file once (by its SHA-256): what the row costs a player. */
+static unsigned long long mpn_bytes(const sh_unit *units, size_t n)
 {
     unsigned long long total = 0;
-    size_t i, k;
-    for (i = 0; i < b->file_count; i++) {
-        int kept = 0;
-        if (b->files[i].stock || b->files[i].absent) continue;
-        for (k = 0; k < n && !kept; k++) kept = keeps[k] && keeps[k][i];
-        if (kept) total += b->files[i].size;
+    char (*seen)[SH_MB_HASH_HEX + 1] = NULL;
+    size_t nseen = 0, cseen = 0, i;
+    int k;
+    for (i = 0; i < n; i++) {
+        mpj *m = mpj_parse(units[i].manifest, units[i].manifest_len);
+        const mpj *files = m ? mpj_get(m, "files") : NULL;
+        for (k = 0; files && files->type == MPJ_ARR && k < files->n; k++) {
+            const mpj *sha = mpj_get(files->items[k], "sha256"), *size = mpj_get(files->items[k], "size");
+            size_t j;
+            int dup = 0;
+            if (!sha || sha->type != MPJ_STR || strlen(sha->text) != SH_MB_HASH_HEX) continue;
+            for (j = 0; j < nseen && !dup; j++) dup = !strcmp(seen[j], sha->text);
+            if (dup) continue;
+            if (nseen == cseen) {
+                size_t c = cseen ? cseen * 2 : 256;
+                char (*g)[SH_MB_HASH_HEX + 1] = realloc(seen, c * sizeof *g);
+                if (!g) break;
+                seen = g;
+                cseen = c;
+            }
+            strcpy_s(seen[nseen++], SH_MB_HASH_HEX + 1, sha->text);
+            total += (unsigned long long)mpj_int(size);
+        }
+        mpj_free(m);
     }
+    free(seen);
     return total;
 }
 
@@ -170,7 +282,6 @@ int sh_modpin_row(sh_modmanifest_row *row, const char *map_json, size_t len, con
     sh_unit_env env;
     sh_unit *units = NULL;
     const char **roots = NULL, **hashes = NULL;
-    const unsigned char **keeps = NULL;
     char *folder = NULL, *why = NULL, *fail = NULL, *display = NULL;
     size_t n = 0, cap, i;
     int state = -1, whole_only = 0;
@@ -194,18 +305,19 @@ int sh_modpin_row(sh_modmanifest_row *row, const char *map_json, size_t len, con
     memset(&env, 0, sizeof env);
     env.game = g_game;
     env.game_context = g_game_ctx;
+    env.asked = g_asked;
+    env.asked_count = g_nasked;
     cap = row->name_count + 1;
     units = (sh_unit *)calloc(cap, sizeof *units);
     roots = (const char **)calloc(cap, sizeof *roots);
     hashes = (const char **)calloc(cap, sizeof *hashes);
-    keeps = (const unsigned char **)calloc(cap, sizeof *keeps);
-    if (!units || !roots || !hashes || !keeps) goto done;
+    if (!units || !roots || !hashes) goto done;
     /* Each placed object's unit; a map-level row adds the whole build. */
     for (i = 0; i < row->name_count && !whole_only; i++) {
         size_t k;
         int dup = 0;
         if (!row->names[i] || !row->names[i][0]) continue;
-        if (!sh_unit_of(&b, folder, row->names[i], &env, &units[n], &why)) {
+        if (!mpn_unit_of(&b, folder, row->names[i], &env, &units[n], content_root, &why)) {
             fail = sh_textf("%s: %s", row->names[i], why ? why : "the unit did not prove");
             free(why);
             why = NULL;
@@ -222,7 +334,7 @@ int sh_modpin_row(sh_modmanifest_row *row, const char *map_json, size_t len, con
         n = 0;
     }
     if (whole_only || row->attached || !n) {
-        if (!sh_unit_of(&b, folder, SH_UNIT_WHOLE, &env, &units[n], &why)) {
+        if (!mpn_unit_of(&b, folder, SH_UNIT_WHOLE, &env, &units[n], content_root, &why)) {
             /* The whole build closes by definition (3.7): a failure here is the folder changing under the pin. */
             mpn_logf("MODS: pin: %s could not be pinned (%s); its row stays local", b.name ? b.name : row->salt,
                      why ? why : "?");
@@ -236,12 +348,11 @@ int sh_modpin_row(sh_modmanifest_row *row, const char *map_json, size_t len, con
         if (!mpn_store(&units[i], content_root)) goto done;
         roots[i] = units[i].root;
         hashes[i] = units[i].hash;
-        keeps[i] = units[i].keep;
     }
     display = sh_text(sh_modmanifest_row_name(row)[0] ? sh_modmanifest_row_name(row) : (b.name ? b.name : ""));
     if (!sh_modmanifest_row_pin(row, roots, hashes, n)) goto done;
     if (display && display[0]) (void)sh_modmanifest_row_set_name(row, display);
-    row->size = mpn_bytes(&b, keeps, n);
+    row->size = mpn_bytes(units, n);
     if (map_json && len) (void)sh_cache_row_record_modules(row, map_json, len, mpn_read, NULL);
     state = whole_only ? SH_MODPIN_WHOLE : SH_MODPIN_PINNED;
     if (whole_only) mpn_logf("MODS: pin: %s's object %s did not make a unit of its own; the row carries the whole mod",
@@ -253,7 +364,6 @@ done:
     free(units);
     free((void *)roots);
     free((void *)hashes);
-    free((void *)keeps);
     free(fail);
     free(display);
     free(folder);

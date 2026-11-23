@@ -232,6 +232,27 @@ static int f_anim_variable(void *ai, const char *name, float value)
     ((fent *)ai)->anim_val = value;
     return 1;
 }
+/* The relation rows the fake senses hold for every demon: entity 2 hated (and out of range-limit), entity 3
+ * neutral, entity 4 removed (left out), entity 5 a row with an emotion no name has (left out by the call). */
+static int g_rel_unreadable;
+static int f_relations(void *ai, sh_ai_relation *out, int cap)
+{
+    static const struct { int id, respect, emotion, unlimited; } rows[] = {
+        { 2, 2, 6, 1 }, { 3, 3, 10, 0 }, { 4, 2, 5, 0 }, { 5, 2, 99, 0 },
+    };
+    int i, n = 0;
+    (void)ai;
+    if (g_rel_unreadable) return -1;
+    for (i = 0; i < (int)(sizeof rows / sizeof rows[0]) && n < cap; i++) {
+        if (!g_ent[rows[i].id].live) continue;
+        out[n].entity = &g_ent[rows[i].id];
+        out[n].respect = rows[i].respect;
+        out[n].emotion = rows[i].emotion;
+        out[n].unlimited = rows[i].unlimited;
+        n++;
+    }
+    return n;
+}
 static void *f_enemy(void *e) { int id = ((fent *)e)->enemy; return id ? &g_ent[id] : NULL; }
 static int f_awareness(void *ai, void *t) { (void)t; return ((fent *)ai)->awareness; }
 static int f_move_status(void *e) { return ((fent *)e)->move_status; }
@@ -503,7 +524,7 @@ static const sh_script_ai_engine g_fake = {
     f_laser_add, f_laser_remove, f_rear_footsteps,
     f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose,
     f_interrupt_blend, f_destructible, f_weapon_use, f_wound_damage_counts, f_snapmap_order,
-    f_release, f_anim_variable, f_world_clear, f_world_ground
+    f_release, f_anim_variable, f_relations, f_world_clear, f_world_ground
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -2530,11 +2551,53 @@ static void test_release_and_anim_variable(void)
     }
 }
 
+static void test_relations(void)
+{
+    const char *log;
+    printf("-- relations: the engine's social relations, by name, with the awareness of each\n");
+    CHECK(!strcmp(sh_ai_respect_name(0), "min") && !strcmp(sh_ai_respect_name(3), "peer") && sh_ai_respect_name(7) == NULL);
+    CHECK(!strcmp(sh_ai_emotion_name(4), "destroy_at_all_costs") && !strcmp(sh_ai_emotion_name(14), "max"));
+    CHECK(sh_ai_emotion_name(15) == NULL && sh_ai_emotion_name(-1) == NULL);
+    CHECK(start(
+        "api = 1\n"
+        "on.think('ai/brute', function(self)\n"
+        "  local r = self:relations()\n"
+        "  local out = {}\n"
+        "  for i, x in ipairs(r) do\n"
+        "    out[#out + 1] = string.format('%d:%s/%s/%s/%s', i, x.respect, x.emotion, x.awareness, tostring(x.unlimited))\n"
+        "  end\n"
+        "  print('rel ' .. #r .. ' ' .. table.concat(out, ' ') .. ' ' .. tostring(r[1].entity == ent(2)))\n"
+        "end)\n"));
+    g_ent[4].live = 0;                                          /* its row's entity is gone */
+    g_ent[1].awareness = 3;
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "rel 2 1:minion/hate/confirmed/true 2:peer/neutral/confirmed/nil true\n") != NULL);
+    g_rel_unreadable = 1;
+    sh_script_map_end();
+    CHECK(start(
+        "api = 1\n"
+        "on.think('ai/brute', function(self) print('none ' .. tostring(self:relations())) end)\n"));
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "none nil\n") != NULL);
+    if (g_fail) printf("relations log:\n%s", log);
+    sh_script_map_end();
+    g_rel_unreadable = 0;
+    {
+        sh_script_ai_engine bare = g_fake;
+        bare.relations = NULL;
+        sh_script_ai_set_engine(&bare);
+        expect_stop("self:relations()", "\"relations\" is not available in this session");
+        sh_script_ai_set_engine(&g_fake);
+    }
+}
+
 int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 56);
+    CHECK(sh_script_ai_register() == 57);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();
@@ -2560,6 +2623,7 @@ int main(int argc, char **argv)
     test_brain_calls();
     test_snapmap_order();
     test_release_and_anim_variable();
+    test_relations();
     test_brain_refusals();
     test_fire_calls();
     test_fire_refusals();
