@@ -270,7 +270,14 @@ float sh_ai_position_score(float dist_to_target, float ideal, float path_len, fl
 #define SH_AI_TF_MUZZLE_VISIBILITY 0x020u   /* the same sight from weapon height */
 #define SH_AI_TF_TO_ENEMY_FORCE    0x040u   /* the motion does not carry the demon toward its enemy */
 #define SH_AI_TF_AVOID_ENEMY_FOV   0x080u   /* the end point is out of the centre of the enemy's view */
-#define SH_AI_TF_ANIM_DELTA        (SH_AI_TF_NAV_ENDPOINT | SH_AI_TF_BOUNDS)   /* VALIDATE_ANIM_DELTA */
+/* The attack graph's VALIDATE_ANIM_DELTA: DOOM Eternal's anim delta check
+ * (FUN_1409007D0, read) is a navigation trace from the AI to where the clip
+ * ends (FUN_1408E2420), which no player or demon blocks and which a clip with
+ * no root motion passes. The port's composition: the end stands on the world's
+ * floor and the straight line to it at knee and chest height is clear of the
+ * world, players and demons passed through (world_ground, world_clear). */
+#define SH_AI_TF_NAV_LINE          0x100u
+#define SH_AI_TF_ANIM_DELTA        SH_AI_TF_NAV_LINE                          /* VALIDATE_ANIM_DELTA */
 #define SH_AI_FOV_CENTRE_DEG       20.0f    /* TF_AVOID_ENEMY_FOV: the cone left out around the enemy's aim */
 /* The bits of a space-separated word list; 0 with the first word it does
  * not know copied into bad[cap]. Pure. */
@@ -583,6 +590,15 @@ typedef struct sh_script_ai_engine {
      * bound to, or the web's own scalar memory. 1 set, 0 the web has no
      * variable of that name, -1 unavailable. */
     int      (*anim_variable)(void *ai, const char *name, float value);
+    /* The world alone between two points, as a navigation trace sees it: a
+     * trace from `from` to `to` passing the demon and every player and demon
+     * it meets (none of them is part of the ground a demon walks). 1 clear,
+     * 0 blocked by the world, -1 unreadable. */
+    int      (*world_clear)(void *ai, const float from[3], const float to[3]);
+    /* The floor under pos, the same way: players and demons (the asking
+     * demon's own body included) are passed through. 1 found, with the
+     * point in out. */
+    int      (*world_ground)(void *ai, const float pos[3], float out[3]);
 } sh_script_ai_engine;
 
 /* The SnapMap order of a temp memory block (pure): `keys[i]` the slot's key

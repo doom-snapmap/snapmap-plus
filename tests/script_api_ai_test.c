@@ -144,6 +144,9 @@ typedef struct fent {
 /* The world: a wall across x = g_wall_x (0: none) up to g_wall_top, and no
  * ground past x = g_hole_x (0: ground everywhere at z 0). */
 static float g_wall_x, g_wall_top = 1000.0f, g_hole_x;
+/* A player or a demon standing across x = g_actor_x (0: none): the plain
+ * sight stops at it, a navigation trace (world_clear, world_ground) does not. */
+static float g_actor_x;
 
 #define NENT 16
 static fent g_ent[NENT];
@@ -248,6 +251,7 @@ static int f_eye(void *ai, float out[3]) { memcpy(out, ((fent *)ai)->origin, 12)
 static int f_sight(void *ai, const float a[3], const float b[3], void *target)
 {
     (void)ai; (void)target;
+    if (g_actor_x != 0 && (a[0] - g_actor_x) * (b[0] - g_actor_x) < 0) return 0;
     if (g_wall_x != 0 && (a[0] - g_wall_x) * (b[0] - g_wall_x) < 0) {
         float t = (g_wall_x - a[0]) / (b[0] - a[0]);
         if (a[2] + (b[2] - a[2]) * t < g_wall_top) return 0;
@@ -260,7 +264,19 @@ static int f_ground(const float pos[3], float out[3])
     out[0] = pos[0]; out[1] = pos[1]; out[2] = 0;
     return 1;
 }
-/* node "evade/side": two clips, 200 inches left and right; "evade/still": no clip */
+/* the world alone: the wall, never an actor */
+static int f_world_clear(void *ai, const float a[3], const float b[3])
+{
+    float actor = g_actor_x;
+    int r;
+    g_actor_x = 0;
+    r = f_sight(ai, a, b, NULL);
+    g_actor_x = actor;
+    return r;
+}
+static int f_world_ground(void *ai, const float pos[3], float out[3]) { (void)ai; return f_ground(pos, out); }
+/* node "evade/side": two clips, 200 inches left and right; "evade/still": no clip; "melee/swipe": one clip with
+ * no root motion (an attack that swipes in place); "melee/lunge": one clip 300 inches forward */
 static int f_anim_delta(void *ai, const char *node, int index, float out[3], int *count)
 {
     (void)ai;
@@ -271,6 +287,12 @@ static int f_anim_delta(void *ai, const char *node, int index, float out[3], int
         return 1;
     }
     if (!_stricmp(node, "evade/still")) { *count = 0; return 0; }
+    if (!_stricmp(node, "melee/swipe") || !_stricmp(node, "melee/lunge")) {
+        *count = 1;
+        if (index != 0) return 0;
+        out[0] = _stricmp(node, "melee/lunge") ? 0.0f : 300.0f; out[1] = 0; out[2] = 0;
+        return 1;
+    }
     *count = 0;
     return -1;
 }
@@ -481,7 +503,7 @@ static const sh_script_ai_engine g_fake = {
     f_laser_add, f_laser_remove, f_rear_footsteps,
     f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose,
     f_interrupt_blend, f_destructible, f_weapon_use, f_wound_damage_counts, f_snapmap_order,
-    f_release, f_anim_variable
+    f_release, f_anim_variable, f_world_clear, f_world_ground
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -556,7 +578,7 @@ static void spawn(uint32_t id, const char *name)
  * AI of mod B. */
 static void world(void)
 {
-    g_wall_x = 0; g_wall_top = 1000.0f; g_hole_x = 0;
+    g_wall_x = 0; g_wall_top = 1000.0f; g_hole_x = 0; g_actor_x = 0;
     sh_script_api_anim_reset();
     memset(g_ent, 0, sizeof g_ent);
     g_events[0] = 0;
@@ -1071,6 +1093,22 @@ static void test_compositions(void)
     /* no ground where the step ends */
     g_hole_x = -1;
     CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_NAV_ENDPOINT, -1, 0, 0, &idx) == 0);
+    /* VALIDATE_ANIM_DELTA is DOOM Eternal's navigation trace: a swipe with no root motion fits wherever the demon
+     * stands (no floor test, no line), even where the floor probe of its end would find nothing */
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "melee/swipe", SH_AI_TF_ANIM_DELTA, -1, 0, 0, &idx) == 1 && idx == 0);
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "melee/swipe", SH_AI_TF_NAV_ENDPOINT, -1, 0, 0, &idx) == 0);
+    g_hole_x = 0;
+    /* a player or a demon in the way stops the plain bounds test, never the navigation trace; the world does */
+    g_actor_x = 150;
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "melee/lunge", SH_AI_TF_BOUNDS, -1, 0, 0, &idx) == 0);
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "melee/lunge", SH_AI_TF_ANIM_DELTA, -1, 0, 0, &idx) == 1);
+    g_actor_x = 0;
+    g_wall_x = 150;
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "melee/lunge", SH_AI_TF_ANIM_DELTA, -1, 0, 0, &idx) == 0);
+    g_wall_x = 0;
+    /* a lunge whose end has no floor */
+    g_hole_x = 200;
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "melee/lunge", SH_AI_TF_ANIM_DELTA, -1, 0, 0, &idx) == 0);
     g_hole_x = 0;
 
     /* firing_position: the current place (600 from the target, ideal 600, seeing it) is kept for "any";
