@@ -12,7 +12,9 @@
  *
  * The closure, from the root:
  *   seeds    the root's file; for an entityDef, the mod's Toybox rows that place it; every DOOM file the mod changes
- *            that is not an editor tweak (edits and replacements apply wherever the mod is used), whose edges never
+ *            that is not an editor tweak (edits and replacements apply wherever the mod is used), and every DOOM file
+ *            its folder holds unchanged (a surface, kept as a pointer: wherever the mod is used the engine finds it,
+ *            whatever names it, a DOOM file included), whose edges never
  *            reach the mod's own entityDefs (such a file, the conductor's list, names every object; each comes from
  *            its own root); the md6Defs mod.json's animation_events and attachment_tags name (the product adds them
  *            to the player of every map that uses the mod); every decl of a type the game finds by enumeration

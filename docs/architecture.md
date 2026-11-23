@@ -5662,7 +5662,10 @@ The closure follows these rules:
 
 - Seeds: the root's file; for an entityDef, the Toybox rows that place it;
   every DOOM file the mod changes that is not an editor tweak, in every unit
-  (edits and replacements apply wherever the mod is used), though they never
+  (edits and replacements apply wherever the mod is used), and every DOOM file
+  its `native/` folder holds unchanged (a surface: DOOM's bytes at DOOM's name,
+  kept as a pointer, so a published map finds it wherever the editor did, even
+  when only a DOOM file names it, such as a campaign mesh's material), though they never
   reach the mod's own entityDefs (a registry names every object); decls of a
   type the game finds by enumeration (`sh_unit_enumerated_type`: the AI scores
   and encounters, which the conductor numbers) travel with the def the
