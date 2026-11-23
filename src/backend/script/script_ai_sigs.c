@@ -187,7 +187,14 @@
  *   AiBestRelation     VK 0x1404AAD10  GL 0x1404A9490  the engine's pick from a relation list (senses, list): the
  *                      nearest entity of the most hostile emotion; a row's emotion at +8 (+0x63), its entity at
  *                      +0x10 (+0x6C), 0x28 bytes a row (+0xD9), starting from EMOTION_MAX 14 (+0x41). Present for
- *                      those offsets; the Enemy SDK's enemy_target.lua makes the same pick. */
+ *                      those offsets; the Enemy SDK's enemy_target.lua makes the same pick.
+ *   AiFsmStateAsk      VK 0x14064C900  GL 0x14064BB80  an AI FSM's request through its STATE links (fsm, code, event,
+ *                      time): the links an FSM takes at its own update (FUN_14064F1E0, then the transition at
+ *                      vtable +0xB0 with group 1). The plain request (VK 0x14064A560) reads FSMEVENT links only, so it
+ *                      cannot take ExecuteDoomscript's way out (Shared_NotExecutingScript, VK 0x1405F16D0, a STATE
+ *                      link): the death of a parked demon asks this one first (R-TG1, report section 14.4).
+ *   AiGameTime         VK 0x14038DE60  GL 0x14038D700  the game time record a request is given (game, out[4]),
+ *                      read from the game's +0x49D210 clock. */
 #include <stddef.h>
 #include <string.h>
 #include "script_api_ai.h"
@@ -405,6 +412,14 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "48 8B 88 08 08 00 00 48 8B 01 FF 90 80 00 00 00 F3 0F 10 35 ?? ?? ?? ?? 33 ED 4C 8B E0 8B FD 44 8D 7D 0E "
       "41 39 6E 08",
       0x4AAD10u, 0x4A9490u },
+    { "AiFsmStateAsk",
+      "48 8B C4 89 50 10 57 48 81 EC 90 00 00 00 48 C7 40 98 FE FF FF FF 48 89 58 08 48 89 68 18 48 89 70 20 "
+      "49 8B F1 49 8B E8",
+      0x64C900u, 0x64BB80u },
+    { "AiGameTime",
+      "48 89 5C 24 10 57 48 83 EC 20 48 8D 99 10 D2 49 00 48 8B FA 48 8B 03 48 8D 54 24 30 41 B8 01 00 00 00 "
+      "48 8B CB FF 90 D0",
+      0x38DE60u, 0x38D700u },
     { NULL, NULL, 0, 0 }
 };
 

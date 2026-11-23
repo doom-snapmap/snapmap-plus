@@ -408,6 +408,17 @@ static void check_image(const char *path)
         }
         CHECK(found == 1 && SH_AI_OFF_WEB_ANIMATOR == 0x222B8u);
     }
+    if (rva[SH_AI_SIG_FSM_STATE_ASK]) {
+        /* the state-link request (script_ai_sigs.c AiFsmStateAsk): it calls the state-link search (+0xB1), which
+         * walks the state's list at +0x20 with group 1 (not the plain request's FSMEVENT list at +0x38), and takes the
+         * transition through the FSM's vtable +0xB0 (+0xDA) */
+        const uint8_t *a = base + rva[SH_AI_SIG_FSM_STATE_ASK];
+        uint32_t f = rel_target(base, rva[SH_AI_SIG_FSM_STATE_ASK] + 0xB1, 5, 1);
+        CHECK(a[0xB1] == 0xE8 && f != 0);
+        if (f) CHECK(!memcmp(base + f + 7, "\xC7\x44\x24\x38\x01\x00\x00\x00", 8) &&
+                     !memcmp(base + f + 0x18, "\x49\x83\xC1\x20", 4));
+        CHECK(!memcmp(a + 0xDA, "\xFF\x90\xB0\x00\x00\x00", 6));
+    }
     if (rva[SH_AI_SIG_UPDATE_RELATIONS] && rva[SH_AI_SIG_BEST_RELATION]) {
         /* the senses' relation table (script_api_ai.h, SH_AI_REL_*): UpdateRelations empties it (rows at +0x28,
          * count at rows + 8) and reads each perceived entity's faction at +0x4EC0; the engine's pick reads a row's
