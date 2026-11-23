@@ -3073,7 +3073,10 @@ is touched, and a removed demon answers nil.
   eye and weapon height, the enemy's view centre (20 degrees) and the path
   query, as the test words ask (every animation in turn without `side`, in an order
   shuffled by `seed` when given, as DOOM Eternal's query shuffles them; each node's
-  path queries under keys of their own); `force_animation_via(dest, via, [blend])` forces
+  path queries under keys of their own). `VALIDATE_ANIM_DELTA` is DOOM Eternal's
+  navigation line (FUN_1409007D0 through FUN_1408E2420): a clip that does not move
+  passes, else the end point needs ground and a world line at knee and chest height
+  that players and demons do not stop (the asking demon first among them); `force_animation_via(dest, via, [blend])` forces
   `via` (`ssaction_ForceAnimState`) and, when the observer sees the web leave
   it, asks for `dest` (`ssaction_ChangeAnimState`) from the per-frame step;
   `path_points(pos)` is the path query's computed path, read by a detour of
@@ -4476,11 +4479,15 @@ map's choices).
   followed the row: its placed names come from the entity's own text.
 - **The kill score.** `kill_score.c` detours the map's Player Score switch
   (Vulkan `0x140890390`, OpenGL `0x14088F2C0`, one signature; its window holds
-  one short conditional jump the hook relocates): a spawn type the listing gave
-  a ported demon is read as the stock type its conductor row stands in for
-  (`sh_modserve_spawn_type_standin`, published lock-free at every registry
-  compute), so the author's Gameplay Settings field of that class applies;
-  every stock type reaches the switch unchanged.
+  one short conditional jump the hook relocates) and the kill's snapAIScore
+  lookup (Vulkan `0x1408904D0`, OpenGL `0x14088F400`, byte-identical; it walks
+  the rules' score list for the decl whose aiType meets the victim's type, 15
+  stolen bytes): a spawn type the listing gave a ported demon is read as the
+  stock type its conductor row stands in for (`sh_modserve_spawn_type_standin`,
+  published lock-free at every registry compute), so the author's Gameplay
+  Settings field of that class and the stand-in's snapAIScore decl apply (a
+  mod writes no snapAIScore of its own); every stock type reaches both
+  unchanged.
 - **Clashes.** A slot is `<type>/<decl name>/<path>`
   (`entitydef/player/coop/edit/handsModelMPUseDoomHands`; a keyed entry adds its
   name, a named block segment is `word:name`). Two sources setting one slot to

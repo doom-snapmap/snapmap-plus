@@ -14,7 +14,15 @@
  * demon is answered as the stock type its conductor row says it stands in for
  * (sh_modserve_spawn_type_standin), so the author's field for that class
  * applies to it, scaled as the game scales every field. Every stock type, and
- * a type no declared mod was given, reaches the switch unchanged. */
+ * a type no declared mod was given, reaches the switch unchanged.
+ *
+ * The kill's challenge score (the game challenge record's `score`) takes the
+ * victim's snapAIScore decl, which the rules find in their list by the same
+ * spawn type (Vulkan 0x1408904D0, OpenGL 0x14088F400). A ported type is
+ * answered there as its stand-in too, so a port's kill scores the stand-in's
+ * baseScore and falloff, as its Player Score field does (R-LV8 measured 0 for
+ * a port kill, 825 for its stand-in's); the contract therefore writes no
+ * snapAIScore decl for a port. */
 #ifndef BACKEND_KILL_SCORE_H
 #define BACKEND_KILL_SCORE_H
 
@@ -27,6 +35,10 @@
 extern const sig_entry SH_KILL_SCORE_SIGNATURES[];
 #define SH_KS_STOLEN     16
 #define SH_KS_JCC_OFFSET 8
+/* [1]: the snapAIScore lookup. Its window (SH_KS_LOOKUP_STOLEN bytes: two
+ * register saves, push rdi, sub rsp,0x20) has no relative operand. */
+#define SH_KS_LOOKUP          1
+#define SH_KS_LOOKUP_STOLEN  15
 
 /* The type the switch should read for an AI of spawn type `type`: the
  * stand-in's stock bits when `standin` answers for it, else `type`. Pure. */

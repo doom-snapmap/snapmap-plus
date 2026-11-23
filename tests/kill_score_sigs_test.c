@@ -3,7 +3,9 @@
  *   - the switch's signature resolves at its recorded RVA and is the only match in the executable;
  *   - its detour window is whole instructions whose one relative operand is the short branch the hook relocates;
  *   - the branch lands past the window;
- *   - the switch still tests the 18 stock spawn-type bits and ends in "Unsupported AI Type" (the 18 field reads).
+ *   - the switch still tests the 18 stock spawn-type bits and ends in "Unsupported AI Type" (the 18 field reads);
+ *   - the snapAIScore lookup resolves at its RVA alone, its window is whole instructions with no relative operand,
+ *     and it still reads the rules' list (+0x7930, count +0x7938) and each decl's aiType (+0x70).
  * Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
 #include <windows.h>
 #include <stdint.h>
@@ -77,7 +79,7 @@ static void check_image(const char *path)
     identity = sh_host_test_bind_image(base, wide);
     if (!identity) { printf("FAIL %s is not a supported executable\n", path); g_fail = 1; free(base); return; }
     printf("image %s: %s\n", path, identity->label);
-    CHECK(SH_KILL_SCORE_SIGNATURES[1].name == NULL);
+    CHECK(SH_KILL_SCORE_SIGNATURES[SH_KS_LOOKUP].name != NULL && SH_KILL_SCORE_SIGNATURES[SH_KS_LOOKUP + 1].name == NULL);
     CHECK(sig_resolve_one(base, s, &r) == SIG_OK && r.rva == (identity->vulkan ? s->rva_vk : s->rva_gl));
     CHECK(sig_scan_one(base, s, &scan) == SIG_OK && scan.rva == r.rva);
     if (r.status == SIG_OK) {
@@ -99,6 +101,29 @@ static void check_image(const char *path)
         CHECK(field_reads(fn, 0x140) == 18);
         printf("  %-24s rva=0x%X window=%u (short branch at +%u)\n", s->name, r.rva, (unsigned)SH_KS_STOLEN,
                (unsigned)SH_KS_JCC_OFFSET);
+    }
+    {
+        const sig_entry *l = &SH_KILL_SCORE_SIGNATURES[SH_KS_LOOKUP];
+        sig_result lr, ls;
+        uint32_t lw = 0;
+        CHECK(sig_resolve_one(base, l, &lr) == SIG_OK && lr.rva == (identity->vulkan ? l->rva_vk : l->rva_gl));
+        CHECK(sig_scan_one(base, l, &ls) == SIG_OK && ls.rva == lr.rva);
+        if (lr.status == SIG_OK) {
+            const uint8_t *fn = base + lr.rva;
+            uint32_t list, count;
+            while (lw < SH_KS_LOOKUP_STOLEN) {
+                unsigned flags = 0;
+                size_t len = sh_x64_insn_len(fn + lw, 32, &flags);
+                if (!len) break;
+                CHECK(!(flags & (SH_X64_RIP_RELATIVE | SH_X64_LEAVES | SH_X64_BRANCH_REL)));
+                lw += (uint32_t)len;
+            }
+            CHECK(lw == SH_KS_LOOKUP_STOLEN);
+            memcpy(&count, fn + 0x12, 4);    /* movsxd rax, dword [rcx+0x7938] */
+            memcpy(&list, fn + 0x26, 4);     /* mov rbx, [rcx+0x7930] */
+            CHECK(count == 0x7938 && list == 0x7930 && fn[0x3B] == 0x70);   /* test [rcx+0x70], edx */
+            printf("  %-24s rva=0x%X window=%u\n", l->name, lr.rva, (unsigned)SH_KS_LOOKUP_STOLEN);
+        }
     }
     free(base);
 }

@@ -145,6 +145,7 @@ static const site SITES[] = {
     { "level_templates.c",    "SnapshotTemplateWalk",       SITE_LEVEL, SH_LT_WALK_CALL, SH_LT_STOLEN, REPLAYS, 0 },
     { "sync_clock.c",         "AnimReanchor",               SITE_SYNC, 0, 15, RELOCATES_AT, 3 },
     { "kill_score.c",         "SnapPlayerScoreByType",      SITE_KILL, 0, SH_KS_STOLEN, RELOCATES_AT, SH_KS_JCC_OFFSET },
+    { "kill_score.c",         "SnapAIScoreLookup",          SITE_KILL, 0, SH_KS_LOOKUP_STOLEN, REPLAYS, 0 },
     { "particlemotion.c",     "ParticleWriteVerts",         SITE_PARTICLE, 0, 19, REPLAYS, 0 },
     { "particlemotion.c",     "ParticleContext",            SITE_PARTICLE, 0, 15, REPLAYS, 0 },
     { "cachewrites.c",        "AtomicWrite",                SITE_CACHE, 0, 21, REPLAYS, 0 },
@@ -392,8 +393,9 @@ static void check_image(const char *path)
         }
         if (s->kind == SITE_KILL) {
             sig_result own;
-            if (strcmp(SH_KILL_SCORE_SIGNATURES[0].name, s->name) ||
-                sig_resolve_one(base, &SH_KILL_SCORE_SIGNATURES[0], &own) != SIG_OK || !own.addr) {
+            const sig_entry *ks = !strcmp(SH_KILL_SCORE_SIGNATURES[SH_KS_LOOKUP].name, s->name)
+                                      ? &SH_KILL_SCORE_SIGNATURES[SH_KS_LOOKUP] : &SH_KILL_SCORE_SIGNATURES[0];
+            if (strcmp(ks->name, s->name) || sig_resolve_one(base, ks, &own) != SIG_OK || !own.addr) {
                 report(label, s->owner, s->name, 0, s->stolen, 0, "", "SIGNATURE unresolved", 0);
                 continue;
             }
@@ -472,7 +474,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "fault_shield\\recovery.c", 1 }, { "backend\\settings_tab.c", 3 },
     { "fault_shield\\load_screen_stop.c", 1 }, { "fault_shield\\saved_map_guard.c", 1 },
     { "backend\\parmslots.c", 1 }, { "backend\\clip_events.c", 1 },
-    { "backend\\attach_tags.c", 1 }, { "backend\\sync_clock.c", 1 }, { "backend\\level_templates.c", 1 }, { "backend\\kill_score.c", 1 },
+    { "backend\\attach_tags.c", 1 }, { "backend\\sync_clock.c", 1 }, { "backend\\level_templates.c", 1 }, { "backend\\kill_score.c", 2 },
     { "backend\\particlemotion.c", 2 }, { "backend\\cachewrites.c", 1 },
 };
 
