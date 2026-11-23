@@ -326,6 +326,7 @@ typedef struct ai_rec {
     float      face_pos[3];
     unsigned   hand_noted;       /* equip told the author of a weapon outside the weapon hand (a bit per hand) */
     unsigned   turn_noted;       /* hold told the author of an idle turn with no turnParms entry (a bit per turn type) */
+    sh_script_handle focus_noted; /* the last entity the focus guard refused and said so (one line per entity) */
     char      *wait_dest;        /* an animation order held back while a step of the engine's is in flight */
     char      *wait_via;         /* (malloc'd node names; wait_dest NULL: none) */
     int        wait_kind;        /* its SH_AI_ORDER_ kind */
@@ -596,6 +597,30 @@ static int focus_entity_ok(void *ai, void *ent)
     if (ent == ai || !g_engine->origin(ent, o)) return 0;
     for (k = 0; k < 3; k++) if (o[k] != o[k] || o[k] > 1e7f || o[k] < -1e7f) return 0;
     return 1;
+}
+
+/* The guard's refusal, said once per refused entity in the mod's script log: the call, the entity's decl name and
+ * the origin it read, so a bench can tell a refused focus from one never asked for. */
+static void focus_refused(lua_State *L, ai_rec *r, void *ai, void *ent, const char *call)
+{
+    const sh_script_engine *ce = sh_script_api_engine();
+    sh_script_handle h = g_engine->handle_of(ent);
+    char name[160] = "?", line[400];
+    float o[3] = { 0, 0, 0 };
+    int got;
+    if (!r || r->focus_noted == h) return;
+    r->focus_noted = h;
+    if (ce && ce->def_name) ce->def_name(ent, name, sizeof name);
+    got = g_engine->origin(ent, o);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "\"%s\": %s is no focus for this demon (%s), so the aim focus is cleared instead", call,
+                ent == ai ? "the demon itself" : name,
+                ent == ai ? "a zero direction" : !got ? "its origin cannot be read" : "its origin is not a point of the world");
+    if (ent != ai && got) {
+        size_t n = strlen(line);
+        _snprintf_s(line + n, sizeof line - n, _TRUNCATE, "; origin %g %g %g", o[0], o[1], o[2]);
+    }
+    shs_log(shs_mod_of(L), line);
 }
 
 /* A target at `idx`: an entity (its origin) or a position. Returns 1 with
@@ -890,7 +915,7 @@ static int l_face(lua_State *L)
     ai = self_ai(L, "face", &h);
     if (!ai) return 0;
     if (is_ent && !(ent = other_entity(L, 2, "face"))) return 0;
-    if (ent && !focus_entity_ok(ai, ent)) return 0;   /* the focus guard: l_focus */
+    if (ent && !focus_entity_ok(ai, ent)) { focus_refused(L, rec_of(h), ai, ent, "face"); return 0; }
     if (ent && travel > 0) {
         if (!g_engine->origin(ent, p)) return 0;
         ent = NULL;
@@ -953,13 +978,15 @@ static int l_turn_done(lua_State *L)
 static int l_aim_at(lua_State *L)
 {
     sh_script_handle h = 0;
+    ai_rec *r;
     void *ai, *ent = NULL;
     if (!lua_isnoneornil(L, 2)) sh_script_check_entity(L, 2, "aim_at");
     ai = self_ai(L, "aim_at", &h);
     if (!ai) return 0;
     if (!lua_isnoneornil(L, 2) && !(ent = other_entity(L, 2, "aim_at"))) return 0;
-    if (!park(ai, h)) return 0;
-    if (ent && focus_entity_ok(ai, ent)) {   /* the focus guard: l_focus */
+    if (!(r = park(ai, h))) return 0;
+    if (ent && !focus_entity_ok(ai, ent)) { focus_refused(L, r, ai, ent, "aim_at"); ent = NULL; }
+    if (ent) {   /* the focus guard: focus_entity_ok */
         sh_ai_arg a[4];
         a[0] = arg_e(ent); a[1] = arg_b(1); a[2] = arg_b(1); a[3] = arg_i(SH_AI_AIMPOINT_CENTER);
         run(ai, SH_AI_EV_SET_FOCUS, a, 4, NULL);
@@ -2288,6 +2315,7 @@ static int l_focus(lua_State *L)
     sh_script_handle h = 0;
     float p[3];
     void *ai, *ent = NULL;
+    ai_rec *r;
     int kind = 0, aim = SH_AI_AIMPOINT_CENTER;
     if (!lua_isnoneornil(L, 3)) {
         const char *n;
@@ -2308,8 +2336,9 @@ static int l_focus(lua_State *L)
     ai = self_ai(L, "focus", &h);
     if (!ai) return 0;
     if (kind == 1 && !(ent = other_entity(L, 2, "focus"))) return 0;
-    if (!park(ai, h)) return 0;
+    if (!(r = park(ai, h))) return 0;
     if (kind == 1 && !focus_entity_ok(ai, ent)) {
+        focus_refused(L, r, ai, ent, "focus");
         run(ai, SH_AI_EV_CLEAR_AIM_FOCUS, NULL, 0, NULL);
         lua_pushboolean(L, 0);
         return 1;

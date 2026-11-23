@@ -2571,6 +2571,7 @@ static void test_focus_guard(void)
     tick();
     log = log_of("aaaaaaaa");
     CHECK(strstr(log, "focus true true true false\n") != NULL);
+    CHECK(strstr(log, "\"focus\": the demon itself is no focus for this demon (a zero direction)") != NULL);
     CHECK(strstr(g_events, "1:setFocus(e2,1,1,10)\n") != NULL && strstr(g_events, "setFocus(e1") == NULL);
     sh_script_map_end();
     for (i = 0; i < 3; i++) {
@@ -2584,7 +2585,11 @@ static void test_focus_guard(void)
         memcpy(g_ent[2].origin, bad[i], sizeof bad[i]);   /* after start, which sets the world up */
         g_events[0] = 0;
         tick();
-        CHECK(strstr(log_of("aaaaaaaa"), "bad false\n") != NULL);
+        log = log_of("aaaaaaaa");
+        CHECK(strstr(log, "bad false\n") != NULL);
+        /* said once for the entity, though three calls refused it */
+        CHECK(strstr(log, "\"focus\": ") != NULL && strstr(log, "is no focus for this demon") != NULL);
+        CHECK(strstr(strstr(log, "is no focus for this demon") + 1, "is no focus for this demon") == NULL);
         CHECK(strstr(g_events, "setFocus") == NULL && strstr(g_events, "1:clearAimFocus()\n") != NULL);
         if (g_fail) printf("focus guard events:\n%s", g_events);
         sh_script_map_end();
