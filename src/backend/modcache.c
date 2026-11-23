@@ -2567,19 +2567,14 @@ int sh_cache_stage_copy(const char *chash, sh_cache_copy *out, char **why)
     lens = n ? (size_t *)calloc(n, sizeof *lens) : NULL;
     if (!n || !units || !manifests || !lens) { reason = sh_textf("%s could not be copied: Snapmap+ ran out of memory.", title); goto done; }
     for (i = 0; i < n; i++) {
-        mpj *m;
-        const mpj *sp;
         mc_unit_load(&units[i], row->units[i]);
         if (units[i].state != 1) {
             reason = sh_textf("%s cannot be copied: some of its content is not on this computer. Play the map once online, "
                               "then try again.", title);
             goto done;
         }
-        /* D29: a unit whose binaries spell its namespace waits for the namespace mapping (D12). */
-        m = mpj_parse(units[i].bytes, units[i].len);
-        sp = m ? mpj_get(m, "spelled") : NULL;
-        if (sp && sp->type == MPJ_STR && sp->text && sp->text[0]) { mpj_free(m); reason = sh_text(SH_CACHE_COPY_SPELLED); goto done; }
-        mpj_free(m);
+        /* D29 as built: a unit whose binaries spell its namespace copies too; the copy's binaries keep spelling it, its
+         * build records "spelled", and serving maps that namespace to the copy's salt (D12, modserve.c). */
         manifests[i] = units[i].bytes;
         lens[i] = units[i].len;
         if (strcmp(row->roots[i], SH_UNIT_WHOLE)) out->objects++;

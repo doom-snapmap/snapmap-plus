@@ -213,10 +213,10 @@ int   sh_cache_report(sh_cache_line_fn fn, void *context);
  * composition hash is `row`, found in the kept and played maps' texts, made a mod folder from its units' files (author
  * layout already) and their mod shares merged, with the display name "<the row's name> (my copy)", at a staging folder
  * of the content cache (copies, never links: the folder becomes the player's to edit). The caller salts it into the
- * store (modstore.h sh_ms_add_copy) and frees the stage (sh_cache_copy_free). 1 staged; 0 with the player's sentence
- * in *why (malloc'd): no map here has the row, its content is not all here, or a unit's binaries spell its namespace
- * (D29, SH_CACHE_COPY_SPELLED). Any thread. */
-#define SH_CACHE_COPY_SPELLED "This mod cannot be copied yet: its files name its original's ID. A Snapmap+ update will allow it."
+ * store (modstore.h sh_ms_add_copy) and frees the stage (sh_cache_copy_free). A unit whose binaries spell its namespace
+ * copies as any other: the copy's binaries keep that namespace, its build records it as "spelled", and serving maps it
+ * to the copy's salt (D12; D29 as built). 1 staged; 0 with the player's sentence in *why (malloc'd): no map here has
+ * the row, or its content is not all here. Any thread. */
 typedef struct sh_cache_copy {
     char *dir;                  /* the staged mod folder (UTF-8, absolute) */
     char *modjson;              /* its author text: the name and the merged mod shares, no builder block */

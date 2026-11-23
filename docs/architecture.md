@@ -143,8 +143,8 @@ wrote (`smpkg.`, `smpbind.`, `smpref.`, `smpmod1.`, `smpprod1.`,
 or a `bundle`. Such a map is refused before anything reads it: the engine never
 parses it (the detour answers a failed parse), the open map keeps its settings
 and manifest, the text is not changed, one `CARRIER: map refused:` line is
-logged and the load's refusal note is "This map was saved in a format this
-version does not read." (`sh_modmanifest_load_refuse`), which the player hears
+logged and the load's refusal note is "This map was saved by an earlier
+Snapmap+; run the Snapmap+ installer to update it." (`sh_modmanifest_load_refuse`), which the player hears
 as the other refusals are. Otherwise each family reads its part from the
 member. The member is stripped last, so the engine never sees it; a member that
 does not read (not an object, a format other than 1, a part of the wrong type,
@@ -5176,7 +5176,7 @@ scripts", an export whose units carry scripts is refused with that setting's
 sentence before anything is written.
 
 An export in an earlier shape installs nothing and is refused with one
-sentence, "This export was saved in a format this version does not read.": an
+sentence, "This export was saved by an earlier Snapmap+; run the Snapmap+ installer to update it.": an
 entry under `mods/` (whole mod folders), a `bundle.canonical.json` anywhere or
 an `export.json` index (the bundle form of earlier releases), a map in an
 earlier shape (`sh_map_old_shape`), a prefab whose rows name `id` and
@@ -5337,8 +5337,8 @@ by the carried `.json` ("this is a map's export, not a prefab's"), and the
 prefab importer also refuses a map's JSON and two prefabs in one ZIP. An export
 in an earlier shape (any `bundle.canonical.json`, in a ZIP or an extracted
 folder, an `export.json` index, an entry under `mods/`, or rows in an earlier
-shape) is refused with "The prefab was not imported. This export was saved in a
-format this version does not read." `sh_prefab mods "<name>"` lists the block's
+shape) is refused with "The prefab was not imported. This export was saved by an
+earlier Snapmap+; run the Snapmap+ installer to update it." `sh_prefab mods "<name>"` lists the block's
 rows by their names and, for each, whether it is served in the open map's
 context (a local row: "installed", else the asset rule's sentence) or whether
 its content is on this computer (a pinned row). It changes nothing.

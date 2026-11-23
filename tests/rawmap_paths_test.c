@@ -686,7 +686,7 @@ static void refused_plainly(int parses_before, int refusals_before)
     CHECK(g_parses == parses_before);
     CHECK(log_refused == refusals_before + 1);
     CHECK(HO(refusal, sh_modmanifest_load_refusal(HO_P(0))) &&
-          !strcmp(refusal, "This map was saved in a format this version does not read."));
+          !strcmp(refusal, "This map was saved by an earlier Snapmap+; run the Snapmap+ installer to update it."));
     (void)sh_modmanifest_load_notes_flush(0);
 }
 

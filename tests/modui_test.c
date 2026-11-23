@@ -1342,11 +1342,11 @@ int main(int argc, char **argv)
         free(doc);
 
         /* The stage's refusal is the answer, as it is: nothing is added. */
-        g_stage_why = SH_CACHE_COPY_SPELLED;
+        g_stage_why = "Two Demons cannot be copied: some of its content is not on this computer. Play the map once online, then try again.";
         g_stage_calls = g_stage_frees = 0;
         doc = run_doc(SH_MODS_ACT_ADD_MINE, ROW);
-        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":false,\"message\":\"This mod cannot be copied yet: its files name its "
-                       "original's ID. A Snapmap+ update will allow it.\""));
+        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":false,\"message\":\"Two Demons cannot be copied: some of its content is "
+                       "not on this computer. Play the map once online, then try again.\""));
         CHECK(g_stage_calls == 1 && !has(doc, "\"apply\":true"));
         free(doc);
         g_stage_why = "No map on this computer has that mod's content.";

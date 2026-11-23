@@ -916,6 +916,97 @@ static void add_to_my_mods_end_to_end(const char *tmp, const char *store)
     sh_cache_set_map_folders(NULL, NULL);
 }
 
+/* D29 as built (manager): Add to my mods of one Tyrant from a two-demon pack whose model binary spells the pack's
+ * namespace. The copy gets a new salt, its texts follow, its binary is kept as written and its build records the old
+ * namespace as "spelled", and the serving index serves the binary with the copy's namespace (D12). */
+static void copy_a_demon_whose_binary_spells(const char *tmp, const char *store)
+{
+    static const char tyrant[] =
+        "{\r\n\tinherit = \"snapmaps/props/crate\";\r\n\tedit = {\r\n\t\trenderModelInfo = {\r\n"
+        "\t\t\tmodel = \"mods/spdemon1/models/tyrant.lwo\";\r\n\t\t}\r\n\t}\r\n}\r\n";
+    static const char mesh[] = "BMODEL\0\0\0material mods/spdemon1/tyrant_skin\0\0\0\0";
+    char src[MAX_PATH], path[MAX_PATH], played[MAX_PATH], saved[MAX_PATH], err[128], *mtext, *made = NULL, *cause = NULL;
+    char *why = NULL, req[400] = "";
+    sh_modmanifest_row pack, row;
+    sh_modmanifest_list one;
+    sh_modpin_row_result res;
+    sh_cache_copy copy;
+    sh_ms_list l;
+    size_t mlen = 0, i, k, blen = 0;
+    unsigned char *bytes = NULL;
+    int found = 0, newsp = 0, oldsp = 0;
+    FILE *f = NULL;
+    char newsalt[16] = "";
+    printf("-- Add to my mods of a Tyrant whose model spells its pack's namespace: copied, served with the copy's (D29, D12)\n");
+    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\spdemon-src", tmp);
+    CreateDirectoryA(src, NULL);
+    mt_write(src, "entities\\marauder.decl", "{\r\n\tinherit = \"snapmaps/doors/industrial_door_vertical\";\r\n}");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\meshes\\models\\tyrant.bmodel", src);
+    mt_mkdirs_for(path);
+    CHECK(spit(path, mesh, sizeof mesh - 1));
+    CHECK(install_mod(src, "spdemon1", "Spelling Demons", "entities\\tyrant.decl", tyrant, &pack));
+    CHECK(sh_modserve_index_build(store) >= 2);
+    /* The map's row: the Tyrant pinned to its unit, which carries the model and spells the namespace. */
+    row = pack;
+    row.name = NULL;
+    CHECK(sh_modmanifest_row_set_name(&row, "Spelling Demons") && sh_modmanifest_row_add_name(&row, "mods/spdemon1/tyrant"));
+    memset(&res, 0, sizeof res);
+    CHECK(sh_modpin_row(&row, NULL, 0, NULL, &res) == SH_MODPIN_PINNED && row.unit_count == 1);
+    free(res.why);
+    {
+        size_t ml = 0;
+        char *m = row.unit_count ? sh_cache_manifest(row.units[0], &ml) : NULL;
+        CHECK(m && strstr(m, "tyrant.bmodel") && strstr(m, "\"spelled\":\"spdemon1\"") && !strstr(m, "marauder"));
+        free(m);
+    }
+    memset(&one, 0, sizeof one);
+    CHECK(sh_modmanifest_list_add(&one, &row));
+    mtext = sh_modmanifest_write("{\"entities\":[]}", 15, &one, &mlen, err, sizeof err);
+    _snprintf_s(played, sizeof played, _TRUNCATE, "%s\\spell-played", tmp);
+    _snprintf_s(saved, sizeof saved, _TRUNCATE, "%s\\spell-saved", tmp);
+    CreateDirectoryA(played, NULL);
+    CreateDirectoryA(saved, NULL);
+    sh_cache_set_map_folders(saved, played);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\spl1_spl2_map.decl", played);
+    if (mtext && !fopen_s(&f, path, "wb") && f) { fwrite(mtext, 1, mlen, f); fclose(f); }
+    free(mtext);
+    /* Staged, copied with a new salt, built by the scan. */
+    CHECK(sh_cache_stage_copy(row.build, &copy, &why) == 1 && !why);
+    CHECK(sh_ms_add_copy(copy.dir, copy.modjson, copy.modjson_len, copy.salt, copy.name, &made, &cause) == 1);
+    if (cause) fprintf(stderr, "add copy: %s\n", cause);
+    sh_cache_copy_free(&copy);
+    CHECK(sh_ms_sync(NULL, NULL) >= 0);
+    CHECK(sh_ms_enumerate(&l));
+    for (i = 0; i < l.count; i++) {
+        const sh_ms_entry *e = &l.items[i];
+        if (!made || strcmp(e->name, made)) continue;
+        found = 1;
+        CHECK(sh_ms_entry_usable(e) && e->salt[0] && strcmp(e->salt, "spdemon1") && !strcmp(e->bundle.spelled, "spdemon1"));
+        strcpy_s(newsalt, sizeof newsalt, e->salt);
+        for (k = 0; k < e->bundle.file_count; k++)
+            if (e->bundle.files[k].request && strstr(e->bundle.files[k].request, "tyrant.bmodel"))
+                strcpy_s(req, sizeof req, e->bundle.files[k].request);
+    }
+    CHECK(found && req[0] && strstr(req, newsalt));
+    sh_ms_list_free(&l);
+    /* Served with the copy's namespace, length for length. */
+    CHECK(sh_modserve_index_build(store) >= 3);
+    sh_modserve_scope_enable(0);
+    CHECK(req[0] && sh_modserve_open(req, &bytes, &blen) == 1 && blen == sizeof mesh - 1);
+    for (i = 0; bytes && newsalt[0] && i + 14 <= blen; i++) {
+        if (!memcmp(bytes + i, "mods/", 5) && !memcmp(bytes + i + 5, newsalt, 8)) newsp = 1;
+        if (!memcmp(bytes + i, "mods/spdemon1/", 14)) oldsp = 1;
+    }
+    CHECK(newsp && !oldsp);
+    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+    free(made);
+    free(cause);
+    sh_modmanifest_list_free(&one);
+    sh_modmanifest_row_free(&row);
+    sh_modmanifest_row_free(&pack);
+    sh_cache_set_map_folders(NULL, NULL);
+}
+
 static void resolving(const sh_modmanifest_row *door)
 {
     sh_modmanifest_list rows;
@@ -1775,6 +1866,7 @@ int main(int argc, char **argv)
     one_demon_of_a_pack(tmp, storeA);
     absent_local_row_stands_in();
     add_to_my_mods_end_to_end(tmp, storeA);
+    copy_a_demon_whose_binary_spells(tmp, storeA);
 
     sh_cache_set_mods_root(NULL);
     sh_ms_set_root(NULL);
