@@ -328,6 +328,9 @@ void sh_modui_note_changed(void);
 /* The publishing key's Settings requests (SH_MODS_ACT_KEY) and its state in the list document ("publishingKey"),
  * modclaim.h modclaim_key_action and modclaim_key_status_json: each answer malloc'd. Unbound, neither is offered. */
 void sh_modui_set_key(char *(*action)(const char *arg), char *(*status)(void));
+/* The open map's listing again from its live placed names and rows, applied when it changed (a placement added rows
+ * to the current manifest: an imported prefab's units). Main thread: 1 changed, 0 not, -1 off the main thread. */
+int  sh_modui_scope_refresh(const char *why);
 
 /* The interface slot body (see snapmap_plus_iface.h, `mods`). */
 int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
@@ -341,6 +344,10 @@ int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
  * ("mods.scripted_maps", on by default). */
 #define SH_MODUI_SCRIPTS_OFF \
     "This map's mods include scripts, which you turned off. To play it, open any map in the editor and turn on " \
+    "\"Play maps whose mods include scripts\" in the Mods tab of the Snapmap+ window."
+/* The same refusal of a prefab's .zip import whose content carries scripts. */
+#define SH_MODUI_SCRIPTS_OFF_PREFAB \
+    "This prefab's mods include scripts, which you turned off. To use it, open any map in the editor and turn on " \
     "\"Play maps whose mods include scripts\" in the Mods tab of the Snapmap+ window."
 int  sh_modui_scripted_maps_allowed(void);
 

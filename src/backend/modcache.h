@@ -80,6 +80,9 @@ int   sh_cache_composition_hash(const char *salt, const char *const *units, size
 char *sh_cache_blob_path(const char *sha);
 /* Move the file at `from` into files\ when its SHA-256 and size are `sha` and `size` (deleted otherwise). 1 held. */
 int   sh_cache_put_blob(const char *from, const char *sha, unsigned long long size);
+/* Where a file with this SHA-256 and size is on this computer: its blob, else a local mod's file with those bytes (D21);
+ * malloc'd, NULL when neither. An export reads a unit's files from it (SPEC 5.16). */
+char *sh_cache_file_source(const char *sha, unsigned long long size);
 /* Write a manifest whose SHA-256 is `hash`. 1 written or already there; 0 when the bytes are not the unit's. */
 int   sh_cache_put_manifest(const char *hash, const void *bytes, size_t len);
 /* The manifest's bytes (malloc'd, checked against the hash), or NULL. */

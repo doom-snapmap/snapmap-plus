@@ -1306,6 +1306,21 @@ int sh_modmanifest_current_attach(const sh_modmanifest_row *row)
     return r;
 }
 
+int sh_modmanifest_current_add_row(const sh_modmanifest_row *row)
+{
+    sh_modmanifest_row *have;
+    size_t k;
+    int r = 1;
+    if (!row || !mm_salt_ok(row->salt)) return -1;
+    AcquireSRWLockExclusive(&g_current_lock);
+    have = mm_list_find(&g_current, row->salt, row->build);
+    if (have) {
+        for (k = 0; k < row->name_count && r > 0; k++) if (!sh_modmanifest_row_add_name(have, row->names[k])) r = -1;
+    } else if (!sh_modmanifest_list_add(&g_current, row)) r = -1;
+    ReleaseSRWLockExclusive(&g_current_lock);
+    return r;
+}
+
 int sh_modmanifest_current_make_local(const char *salt, const char *build, const char *const *names, size_t n)
 {
     size_t i, k;

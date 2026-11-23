@@ -12,8 +12,12 @@
  * first install lowercases every path below assets\ and rewrites mods/<folder>/
  * inside its .lua like any text (DECISIONS 13, 6); the serving index lists the
  * scripts with their recorded hashes and serves those bytes; the publish
- * archive, a rawmap export and its import carry the scripts under their
- * lower-case game names with no new member kind. A mod whose scripts register
+ * archive carries the scripts under their lower-case game names with no new
+ * member kind. A rawmap export carries them in the unit that binds them
+ * (units/<hash>.json names them by path, files/<sha256> holds the bytes); its
+ * import puts them into the content cache, installs nothing, and with
+ * "Play maps whose mods include scripts" off refuses with SH_MODUI_SCRIPTS_OFF
+ * and puts nothing in the cache (map and prefab). A mod whose scripts register
  * an input records "node" and the serving index serves its Script node row
  * (the entityDef and Toybox row, never in the author's folder, with the
  * row's strings), so a placed node names the mod's build; an author file at
@@ -33,6 +37,9 @@
 #include "../src/backend/modserve.h"
 #include "../src/backend/modmanifest.h"
 #include "../src/backend/modui.h"
+#include "../src/backend/modcache.h"
+#include "../src/backend/modpin.h"
+#include "../src/backend/modunit.h"
 #include "../src/backend/modzip.h"
 #include "../src/backend/script/script_compile.h"
 #include "../src/backend/script/script_source.h"
@@ -372,14 +379,43 @@ static void list_cb(void *context, const char *relpath, const char *request, uin
     }
 }
 
-static char *map_with(const sh_modmanifest_row *row)
+/* The folder that serves the local row on this computer (the installed mod), and the game as the unit proof sees it. */
+static char g_pin_folder[MAX_PATH * 2];
+static char *pin_folder(void *ctx, const sh_modmanifest_row *row)
 {
-    static const char base[] = "{\"~type\":\"idSnapMap\",\"entities\":[],\"name\":\"SCRIPT_MAP\"}";
+    (void)ctx;
+    (void)row;
+    return g_pin_folder[0] ? _strdup(g_pin_folder) : NULL;
+}
+static char *pin_read(void *ctx, const char *request, size_t *len) { (void)ctx; (void)request; (void)len; return NULL; }
+static int pin_game(void *ctx, const char *request, char sha[SH_MB_HASH_HEX + 1], char *source, size_t cap)
+{
+    (void)ctx;
+    if (strstr(request, "mods/")) return 0;
+    memset(sha, 'a', SH_MB_HASH_HEX);
+    sha[SH_MB_HASH_HEX] = 0;
+    strcpy_s(source, cap, "snap_gameresources");
+    return 1;
+}
+
+/* A map placing the mod's door, with one local row of the mod (an export pins it). */
+static char *map_with(const char *salt, const char *name)
+{
+    sh_modmanifest_row row;
     sh_modmanifest_list l;
-    char err[160] = "", *heap, *out = NULL;
+    char base[400], placed[160], err[160] = "", *heap, *out = NULL;
     size_t len = 0;
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, salt);
+    strcpy_s(row.build, sizeof row.build, SH_MODMANIFEST_LOCAL_BUILD);
+    sh_modmanifest_row_set_name(&row, name);
+    _snprintf_s(placed, sizeof placed, _TRUNCATE, "mods/%s/ai/door", salt);
+    sh_modmanifest_row_add_name(&row, placed);
+    _snprintf_s(base, sizeof base, _TRUNCATE,
+                "{\"~type\":\"idSnapMap\",\"entities\":[{\"inherit\":\"%s\"}],\"name\":\"SCRIPT_MAP\"}", placed);
     memset(&l, 0, sizeof l);
-    sh_modmanifest_list_add(&l, row);
+    sh_modmanifest_list_add(&l, &row);
+    sh_modmanifest_row_free(&row);
     heap = sh_modmanifest_write(base, strlen(base), &l, &len, err, sizeof err);
     sh_modmanifest_list_free(&l);
     if (!heap) return NULL;
@@ -387,6 +423,63 @@ static char *map_with(const sh_modmanifest_row *row)
     if (out) { memcpy(out, heap, len); out[len] = 0; }
     HeapFree(GetProcessHeap(), 0, heap);
     return out;
+}
+
+static size_t count_files(const char *dir)
+{
+    WIN32_FIND_DATAA fd;
+    char pattern[MAX_PATH * 2], child[MAX_PATH * 2];
+    HANDLE h;
+    size_t n = 0;
+    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", dir);
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+        _snprintf_s(child, sizeof child, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
+        n += (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? count_files(child) : 1;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+/* Units and files in the content cache under the mods folder `root`. */
+static void cache_counts(const char *root, size_t *units, size_t *files)
+{
+    char dir[MAX_PATH * 2];
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.content\\units", root);
+    *units = count_files(dir);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.content\\files", root);
+    *files = count_files(dir);
+}
+
+/* What the mods folder holds besides its dot folders. */
+static int mod_folders(const char *root)
+{
+    WIN32_FIND_DATAA fd;
+    char pattern[MAX_PATH * 2];
+    HANDLE h;
+    int n = 0;
+    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", root);
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do { if (fd.cFileName[0] != '.') n++; } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+/* The bytes of the ZIP's entry (malloc'd, NUL-terminated), or NULL. */
+static unsigned char *zip_entry_bytes(const char *zip, const char *entry, size_t *len)
+{
+    sh_zip_reader r;
+    char cause[256];
+    long at;
+    unsigned char *b = NULL;
+    if (!HO(cause, sh_zip_reader_open(&r, zip, HO_P(0)))) return NULL;
+    at = sh_zip_reader_find(&r, entry);
+    if (at >= 0) b = HOT(unsigned char *, cause, sh_zip_reader_read(&r, at, 64u << 20, len, HO_P(0)));
+    sh_zip_reader_close(&r);
+    return b;
 }
 
 static void test_store(void)
@@ -450,34 +543,122 @@ static void test_store(void)
     if (strcmp(l.list, "door.lua|lib/fsm.lua|")) fprintf(stderr, "  listed %s\n", l.list);
     CHECK(sh_modserve_script_files("zzzzzzzz", NULL, NULL) == 0);
 
-    printf("-- a rawmap export carries them; its import installs and serves them\n");
-    map = map_with(&row);
+    printf("-- a rawmap export carries the scripts in the unit that binds them, each file once by its SHA-256\n");
+    sh_cache_set_mods_root(a);
+    sh_cache_local_changed();
+    _snprintf_s(g_pin_folder, sizeof g_pin_folder, _TRUNCATE, "%s\\%s", a, name);
+    sh_modpin_set_folder(pin_folder, NULL);
+    sh_modpin_set_read(pin_read, NULL);
+    sh_modpin_set_game(pin_game, NULL);
+    map = map_with(salt, "Door Logic");
     _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\Door Map.zip", g_tmp);
     CHECK(map && HO(cause, modexport_write(map, strlen(map), zip, &es, HO_P(0))));
+    if (cause[0]) fprintf(stderr, "  export: %s\n", cause);
+    /* one row, one unit (the door), three files: the entity, the entry script and the module it requires */
+    CHECK(es.bundles == 1 && es.bundles_installed == 1 && es.files == 3 && es.entries == 5);
     zip_names(zip, names, sizeof names);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "mods/%s/scripts/lib/fsm.lua\n", name);
-    CHECK(strstr(names, want) != NULL);
+    CHECK(strstr(names, "Door Map.json\n") && strstr(names, "units/") && strstr(names, "files/") && !strstr(names, "mods/") &&
+          !strstr(names, "scripts/"));
+    {
+        sh_modmanifest_list pinned;
+        unsigned rej = 0;
+        unsigned char *mapb, *manifest = NULL, *disk = NULL, *carried = NULL;
+        size_t ml = 0, mlen = 0, dl = 0, el = 0;
+        char entry[100], hex[SH_MB_HASH_HEX + 1] = "?", fentry[100], on_disk[MAX_PATH * 2];
+        mapb = zip_entry_bytes(zip, "Door Map.json", &ml);
+        memset(&pinned, 0, sizeof pinned);
+        CHECK(mapb && sh_modmanifest_read((const char *)mapb, ml, &pinned, &rej) == 1 && pinned.rows[0].pinned &&
+              pinned.rows[0].unit_count == 1);
+        if (pinned.count && pinned.rows[0].unit_count == 1) {
+            _snprintf_s(entry, sizeof entry, _TRUNCATE, "units/%s.json", pinned.rows[0].units[0]);
+            manifest = zip_entry_bytes(zip, entry, &mlen);
+        }
+        /* the unit's manifest names the scripts by their mod-relative paths */
+        CHECK(manifest && strstr((const char *)manifest, "\"path\":\"scripts/door.lua\"") &&
+              strstr((const char *)manifest, "\"path\":\"scripts/lib/fsm.lua\"") &&
+              strstr((const char *)manifest, "\"path\":\"entities/ai/door.decl\""));
+        /* the carried script is the installed script, byte for byte, under its SHA-256 */
+        _snprintf_s(on_disk, sizeof on_disk, _TRUNCATE, "%s\\%s\\scripts\\door.lua", a, name);
+        disk = sh_mb_read_file(on_disk, 1u << 20, &dl);
+        if (disk) sh_mb_sha256_hex(disk, dl, hex);
+        _snprintf_s(fentry, sizeof fentry, _TRUNCATE, "files/%s", hex);
+        carried = disk ? zip_entry_bytes(zip, fentry, &el) : NULL;
+        CHECK(disk && carried && el == dl && !memcmp(disk, carried, dl));
+        CHECK(manifest && disk && strstr((const char *)manifest, hex) != NULL);
+        free(carried);
+        free(disk);
+        free(manifest);
+        sh_modmanifest_list_free(&pinned);
+        free(mapb);
+    }
+
+    printf("-- with scripts turned off, the import refuses with the sentence that says what to turn on, and nothing goes into the cache\n");
     _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\storeC", g_tmp);
     CreateDirectoryA(c, NULL);
-    CHECK(sh_ms_set_root(c));
-    (void)sh_modserve_index_build(c);
-    (void)sh_modserve_place_set(NULL);
-    printf("-- with scripts turned off, the import installs nothing and says what to turn on\n");
+    sh_cache_set_mods_root(c);
+    sh_cache_local_changed();
+    g_pin_folder[0] = 0;
     g_scripts_on = 0;
     back = HOT(char *, cause, modexport_read(zip, &len, &es, HO_P(0)));
-    CHECK(!back && !strcmp(cause, SH_MODUI_SCRIPTS_OFF) && es.bundles_installed == 0);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps", c);
-    CHECK(!mt_exists(path));
-    free(back);
+    CHECK(!back && !strcmp(cause, SH_MODUI_SCRIPTS_OFF) && es.bundles_installed == 0 && es.files == 0);
+    {
+        size_t cu, cf;
+        cache_counts(c, &cu, &cf);
+        CHECK(cu == 0 && cf == 0 && mod_folders(c) == 0);
+    }
+    /* a prefab's export of the same unit is refused the same way */
+    {
+        static const char PREFAB[] = "{\"entities\":[],\"~type\":\"idSnapEntityPrefab\"}";
+        sh_modmanifest_list rows;
+        char pzip[MAX_PATH], *text = NULL, *pname = NULL, *pcause = NULL;
+        size_t pl = 0, cu, cf;
+        unsigned rej = 0;
+        modexport_stats ps;
+        g_scripts_on = 1;
+        sh_cache_set_mods_root(a);
+        sh_cache_local_changed();
+        _snprintf_s(g_pin_folder, sizeof g_pin_folder, _TRUNCATE, "%s\\%s", a, name);
+        memset(&rows, 0, sizeof rows);
+        CHECK(sh_modmanifest_read(map, strlen(map), &rows, &rej) == 1);
+        _snprintf_s(pzip, sizeof pzip, _TRUNCATE, "%s\\Door Kit.zip", g_tmp);
+        CHECK(HO(cause, modexport_write_prefab("Door Kit", PREFAB, sizeof PREFAB - 1, &rows, NULL, NULL, pzip, &ps, HO_P(0))));
+        CHECK(ps.bundles == 1 && ps.bundles_installed == 1 && ps.files == 3);
+        sh_modmanifest_list_free(&rows);
+        sh_cache_set_mods_root(c);
+        sh_cache_local_changed();
+        g_pin_folder[0] = 0;
+        g_scripts_on = 0;
+        CHECK(!modexport_read_prefab(pzip, NULL, NULL, &text, &pl, &pname, &ps, &pcause) && pcause &&
+              !strcmp(pcause, SH_MODUI_SCRIPTS_OFF_PREFAB) && !text && !pname);
+        free(pcause);
+        cache_counts(c, &cu, &cf);
+        CHECK(cu == 0 && cf == 0 && mod_folders(c) == 0);
+    }
+    /* a map without scripts is still imported with scripts off */
+    {
+        static const char PLAIN[] = "{\"~type\":\"idSnapMap\",\"entities\":[],\"name\":\"PLAIN\"}";
+        char plain[MAX_PATH];
+        modexport_stats ps;
+        _snprintf_s(plain, sizeof plain, _TRUNCATE, "%s\\plain.zip", g_tmp);
+        CHECK(HO(cause, modexport_write(PLAIN, sizeof PLAIN - 1, plain, &ps, HO_P(0))));
+        back = HOT(char *, cause, modexport_read(plain, &len, &ps, HO_P(0)));
+        CHECK(back && len == sizeof PLAIN - 1 && !memcmp(back, PLAIN, len));
+        free(back);
+    }
+
+    printf("-- with scripts allowed, the import puts the unit and its files into the cache and installs nothing\n");
     g_scripts_on = 1;
     back = HOT(char *, cause, modexport_read(zip, &len, &es, HO_P(0)));
     if (!back) fprintf(stderr, "  import: %s\n", cause);
-    CHECK(back && es.bundles_installed == 1);
+    CHECK(back && es.bundles == 1 && es.bundles_installed == 1 && es.files == 3 && es.bundles_present == 0 &&
+          es.bundles_absent == 0);
+    {
+        size_t cu, cf;
+        cache_counts(c, &cu, &cf);
+        CHECK(cu == 1 && cf == 3);
+        CHECK(mod_folders(c) == 0);   /* no mod folder and no maps\ place: nothing is installed */
+    }
     free(back);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Door Map\\Door Logic\\scripts\\door.lua", c);
-    CHECK(mt_exists(path));
-    memset(&l, 0, sizeof l);
-    CHECK(sh_modserve_script_files(salt, list_cb, &l) == 2 && l.match == 2);
     free(map);
 
     printf("-- a built folder spelled in mixed case installs under the game names\n");

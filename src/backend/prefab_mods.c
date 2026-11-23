@@ -10,6 +10,7 @@
 #include "modmanifest.h"
 #include "modpublished.h"
 #include "modexport.h"
+#include "modcache.h"
 #include "modserve.h"
 #include "modsalt.h"
 #include "modstore.h"
@@ -308,19 +309,21 @@ static int pm_row_state(const sh_modmanifest_row *row, char **cause)
     return o->row_state ? o->row_state(row, cause) : SH_MODPUB_ROW_MISSING;
 }
 
-/* Served in the open map's context (the root folders, else the map's own place). */
-static int pm_installed(const sh_modmanifest_row *row)
+/* A pinned row (the units an imported prefab carries, SPEC 5.16) whose every unit is in the content cache with all
+ * its files: placing the prefab composes them. */
+static int pm_pinned_here(const sh_modmanifest_row *row)
 {
-    return pm_row_state(row, NULL) == SH_MODPUB_ROW_SERVED;
+    size_t k;
+    if (!row->pinned || !row->unit_count) return 0;
+    for (k = 0; k < row->unit_count; k++) if (sh_cache_unit_state(row->units[k], NULL, NULL, NULL) != 1) return 0;
+    return 1;
 }
 
-/* Not served in the open map's context, but its very build is installed in
- * a place of the store (the mods of a downloaded or imported map): placing
- * the prefab installs it at the root (pm_install_root). A prefab ZIP's own
- * import installs at the root already (modexport_read_prefab). */
-static int pm_held_elsewhere(const sh_modmanifest_row *row)
+/* A local row served in the open map's context (its folder at the root), or a pinned row whose content is here. */
+static int pm_installed(const sh_modmanifest_row *row)
 {
-    return !pm_installed(row) && sh_modserve_bundle_state(row->build, NULL) == 1;
+    if (row->pinned) return pm_pinned_here(row);
+    return pm_row_state(row, NULL) == SH_MODPUB_ROW_SERVED;
 }
 
 static const char *pm_state_word(int state)
@@ -335,7 +338,7 @@ char *sh_prefab_mods_status_json(const sh_modmanifest_list *rows, size_t *missin
     char num[48];
     if (missing_out) *missing_out = 0;
     for (i = 0; rows && i < rows->count; i++)
-        if (!pm_installed(&rows->rows[i]) && !pm_held_elsewhere(&rows->rows[i])) missing++;
+        if (!pm_installed(&rows->rows[i])) missing++;
     _snprintf_s(num, sizeof num, _TRUNCATE, "{\"count\":%u,\"missing\":%u,\"mods\":[",
                 (unsigned)(rows ? rows->count : 0), (unsigned)missing);
     pm_puts(&b, num);
@@ -350,9 +353,7 @@ char *sh_prefab_mods_status_json(const sh_modmanifest_list *rows, size_t *missin
         pm_puts(&b, num);
         {
             char *cause = NULL;
-            int st = pm_row_state(r, &cause);
-            /* A build a map's place holds goes to the root at the placement. */
-            if (st != SH_MODPUB_ROW_SERVED && pm_held_elsewhere(r)) { st = SH_MODPUB_ROW_SERVED; free(cause); cause = NULL; }
+            int st = r->pinned ? (pm_pinned_here(r) ? SH_MODPUB_ROW_SERVED : SH_MODPUB_ROW_MISSING) : pm_row_state(r, &cause);
             pm_puts(&b, st == SH_MODPUB_ROW_SERVED ? ",\"installed\":true" : ",\"installed\":false");
             pm_puts(&b, ",\"state\":"); pm_put_str(&b, pm_state_word(st));
             pm_puts(&b, ",\"cause\":"); pm_put_str(&b, cause ? cause : "");
@@ -702,10 +703,6 @@ int sh_prefab_mods_meta_write(const char *body, size_t len, const char *path, co
 /* resolve                                                               */
 /* ==================================================================== */
 
-static volatile LONG g_seq;          /* last held placement */
-static volatile LONG g_wait_seq;     /* the placement the hold is for */
-static volatile LONG g_ready_seq;    /* the placement whose mods came */
-
 typedef struct pm_known_ctx { const sh_modmanifest_list *rows; int (*known)(const char *); } pm_known_ctx;
 
 /* The module guard's question with the prefab's rows: a module a row
@@ -746,63 +743,28 @@ static void pm_prepare(const sh_modmanifest_list *rows, const char *name)
     }
 }
 
-typedef struct pm_ready_ctx { const char *name; const sh_modmanifest_list *rows; } pm_ready_ctx;
+int sh_prefab_mods_poll(int seq) { (void)seq; return 0; }   /* nothing is held: a placement never waits (D35) */
 
-static int pm_prepare_main(void *ctx)
-{
-    pm_ready_ctx *r = (pm_ready_ctx *)ctx;
-    pm_prepare(r->rows, r->name);
-    return 1;
-}
-
-/* modpublished.c's ready callback: the held placement's mods are installed. */
-static void pm_ready(const char *name, const sh_modmanifest_list *rows)
-{
-    const sh_prefab_mods_ops *o = pm_ops();
-    pm_ready_ctx r;
-    r.name = name;
-    r.rows = rows;
-    /* Inside the scope the game thread's calls use (the tick runs outside it). */
-    if (!o->call_main || !o->call_main(pm_prepare_main, &r)) pm_prepare(rows, name);
-    InterlockedExchange(&g_ready_seq, InterlockedCompareExchange(&g_wait_seq, 0, 0));
-    pm_logf("PREFABS: the mods of prefab '%s' are installed; the placement goes on", name ? name : "");
-}
-
-int sh_prefab_mods_poll(int seq)
-{
-    if (seq <= 0) return 0;
-    if (InterlockedCompareExchange(&g_ready_seq, 0, 0) == seq) return 1;
-    if (InterlockedCompareExchange(&g_wait_seq, 0, 0) == seq && sh_modpub_prefab_holding()) return 2;
-    return 0;
-}
-
-/* The refusal without the store: console line, toast, the tab's message. */
+/* The refusal of a prefab whose content is not here: console line, toast, the tab's message. Nothing is fetched
+ * (D35: a prefab carries its units in its .zip export). */
 static void pm_refuse_unasked(const char *name, const sh_modmanifest_list *rows, char **msg)
 {
     const sh_prefab_mods_ops *o = pm_ops();
-    char *line, notice[256];
-    const char **labels = (const char **)calloc(rows->count ? rows->count : 1, sizeof *labels);
+    pm_buf b = { 0 };
     size_t i, n = 0;
-    if (!labels) {
-        pm_msg(msg, "This prefab was not placed: it needs mods you do not have. Ask its author for the prefab's "
-               ".zip export.");
-        if (msg && *msg) pm_print(*msg);
-        return;
-    }
     for (i = 0; i < rows->count; i++) {
-        char *cause = NULL;
-        if (pm_row_state(&rows->rows[i], &cause) == SH_MODPUB_ROW_SERVED) { free(cause); continue; }
-        if (cause && cause[0]) pm_print(cause);
-        free(cause);
-        labels[n++] = sh_prefab_mods_label(&rows->rows[i]);
+        if (pm_installed(&rows->rows[i])) continue;
+        pm_puts(&b, n ? ", " : "");
+        pm_puts(&b, sh_prefab_mods_label(&rows->rows[i]));
+        n++;
     }
-    line = sh_modpublished_prefab_refusal_line(name, labels, n, 2);
-    sh_modpublished_compose_prefab_refusal(notice, sizeof notice, labels, n, 2);
-    free((void *)labels);
-    if (line) { pm_print(line); pm_logf("PREFABS: %s", line); }
-    free(line);
-    if (o->toast) o->toast(notice);
-    pm_msg(msg, "%s", notice);
+    if (b.bad || !n) pm_msg(msg, "This prefab was not placed: it needs mods you do not have. Ask its author for the "
+                               "prefab's .zip export.");
+    else pm_msg(msg, "This prefab was not placed: it needs %s, which %s not on this computer. Ask its author for the "
+                     "prefab's .zip export.", b.p, n == 1 ? "is" : "are");
+    free(b.p);
+    if (msg && *msg) { pm_print(*msg); pm_logf("PREFABS: prefab %s: %s", name && name[0] ? name : "prefab", *msg); }
+    if (o->toast && msg && *msg) o->toast(*msg);
 }
 
 int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanifest_list *rows, const char *name,
@@ -844,43 +806,38 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
         }
         free(engine);
     }
-    /* The asset rule: the store is asked only for rows no installed folder
-     * serves (missing or incomplete). */
+    /* Every row is a local folder here, or units the prefab's import put in the content cache; nothing is fetched
+     * or installed (D35). */
     for (i = 0; i < rows->count; i++) if (!pm_installed(&rows->rows[i])) missing++;
-    if (!missing) {
-        pm_prepare(rows, name);
-        return SH_PREFAB_MODS_PLACE;
-    }
-    if (sh_modpublished_holding()) {
-        pm_msg(msg, sh_modpub_prefab_holding()
-            ? "Another prefab is waiting for its mods. Answer that first, then place this one."
-            : "A map is waiting for its mods. Answer that first, then place this prefab.");
-        return SH_PREFAB_MODS_REFUSED;
-    }
-    sh_modpub_set_prefab_ready(pm_ready);
-    r = sh_modpub_prefab_hold(rows, name);
-    if (r == 0) {
-        pm_prepare(rows, name);
-        return SH_PREFAB_MODS_PLACE;
-    }
-    if (r == -2) {
+    if (missing) {
         pm_refuse_unasked(name, rows, msg);
         return SH_PREFAB_MODS_REFUSED;
     }
-    if (r < 0) {
-        pm_msg(msg, "This prefab was not placed: its mods could not be checked. Press Refresh in the Mods tab "
-               "and try again.");
-        if (msg && *msg) pm_print(*msg);
-        return SH_PREFAB_MODS_REFUSED;
-    }
     {
-        LONG s = InterlockedIncrement(&g_seq);
-        InterlockedExchange(&g_wait_seq, s);
-        if (seq) *seq = (int)s;
+        /* The pinned rows (an imported prefab's units) join the open map as its pinned rows, composed (SPEC 5.16
+         * step 3); the local rows are activated and attached as before. */
+        sh_modmanifest_list pinned, local;
+        char *why = NULL;
+        memset(&pinned, 0, sizeof pinned);
+        memset(&local, 0, sizeof local);
+        for (i = 0; i < rows->count; i++)
+            (void)sh_modmanifest_list_add(rows->rows[i].pinned ? &pinned : &local, &rows->rows[i]);
+        r = pinned.count ? (o->use_pinned ? o->use_pinned(&pinned, &why) : -1) : 1;
+        if (r < 0) {
+            pm_msg(msg, "Prefab %s was not placed: %s.", name && name[0] ? name : "prefab",
+                   why ? why : "its mod content cannot be used in this map");
+            if (msg && *msg) { pm_print(*msg); pm_logf("PREFABS: %s", *msg); }
+            free(why);
+            sh_modmanifest_list_free(&pinned);
+            sh_modmanifest_list_free(&local);
+            return SH_PREFAB_MODS_REFUSED;
+        }
+        free(why);
+        pm_prepare(&local, name);
+        sh_modmanifest_list_free(&pinned);
+        sh_modmanifest_list_free(&local);
     }
-    pm_msg(msg, "This prefab needs %u mod%s you do not have; getting %s content.", (unsigned)missing,
-           missing == 1 ? "" : "s", missing == 1 ? "its" : "their");
-    return SH_PREFAB_MODS_HELD;
+    return SH_PREFAB_MODS_PLACE;
 }
 
 /* ==================================================================== */
@@ -1105,7 +1062,7 @@ int sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char **
             pm_msg(msg, "The prefab was not imported: %s could not be written.", c.path ? c.path : "its file");
         else if (why[0] >= 'A' && why[0] <= 'Z') pm_msg(msg, "The prefab was not imported. %s", why);
         else pm_msg(msg, "The prefab was not imported: %s.", why);
-        /* Its mods did not install: the prefab written for them goes too. */
+        /* Its content did not arrive: the prefab written for it goes too. */
         if (!c.refused && c.result == 1 && c.path) pm_remove_file(c.path);
         pm_logf("PREFABS: import %s refused: %s", src_utf8, msg && *msg ? *msg : why);
         free(cause); free(given); free(dir); free(c.name); free(c.path);
@@ -1116,7 +1073,7 @@ int sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char **
     pm_puts(&extra, "");
     if (sh_prefab_mods_rows_of(text, len, NULL, &rows) > 0) {
         for (i = 0; i < rows.count; i++) {
-            if (pm_installed(&rows.rows[i]) || pm_held_elsewhere(&rows.rows[i])) continue;
+            if (pm_installed(&rows.rows[i])) continue;
             pm_puts(&extra, absent ? ", " : " It also needs ");
             pm_puts(&extra, sh_prefab_mods_label(&rows.rows[i]));
             absent++;
@@ -1127,93 +1084,19 @@ int sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char **
     {
         const char *nm = name_out && *name_out ? *name_out : c.name ? c.name : "", *more = extra.p && !extra.bad ? extra.p : "";
         if (c.result == 1)
-            pm_msg(msg, "Imported prefab %s: %u mod%s installed, %u already installed.%s", nm, st.bundles_installed,
-                   st.bundles_installed == 1 ? "" : "s", st.bundles_present, more);
-        else if (st.bundles_installed)
-            pm_msg(msg, "Prefab %s is already in your library; %u mod%s installed.%s", nm, st.bundles_installed,
-                   st.bundles_installed == 1 ? " was" : "s were", more);
-        else pm_msg(msg, "Prefab %s and its mods are already here; nothing was changed.%s", nm, more);
+            pm_msg(msg, st.bundles_installed || st.bundles_present ? "Imported prefab %s with its mod content.%s"
+                                                                   : "Imported prefab %s.%s", nm, more);
+        else if (st.bundles_installed || st.files)
+            pm_msg(msg, "Prefab %s is already in your library; its mod content was added.%s", nm, more);
+        else pm_msg(msg, "Prefab %s and its mod content are already here; nothing was changed.%s", nm, more);
     }
-    pm_logf("PREFABS: import %s -> %s: %u mod(s) (%u installed, %u present), %u file(s) copied out, %llu byte(s) in %.0f ms",
-            src_utf8, c.result == 1 && c.path ? c.path : "(unchanged)", st.bundles, st.bundles_installed, st.bundles_present,
-            st.files, st.zip_bytes, st.ms);
-    if (st.bundles_installed && o->refresh) (void)o->refresh();
+    pm_logf("PREFABS: import %s -> %s: %u row(s); %u unit(s) and %u file(s) into the content cache, %u unit(s) there "
+            "already, in %.0f ms", src_utf8, c.result == 1 && c.path ? c.path : "(unchanged)", st.bundles,
+            st.bundles_installed, st.files, st.bundles_present, st.ms);
+    (void)o;
     result = c.result;
     free(text); free(extra.p); free(cause); free(given); free(dir); free(c.name); free(c.path);
     return result;
-}
-
-/* ==================================================================== */
-/* placing a prefab's mods at the root                                   */
-/* ==================================================================== */
-
-/* Install at the root the build of `row` that a place of the store holds (a
- * downloaded or imported map's mods), when the root holds no folder of its
- * salt (decision 12: the player puts the mod to use in their own maps; the
- * map's download or import was the approval). The place's folder stays as
- * it is; the root gets a copy under the same salt (sh_ms_install_to_root).
- * 1 installed, 0 nothing to do, -1 with the cause. */
-static int pm_install_root(const sh_modmanifest_row *row, char **cause)
-{
-    sh_ms_list list;
-    const sh_ms_entry *held;
-    char *folder, *name = NULL;
-    int r = 0;
-    memset(&list, 0, sizeof list);
-    modstore_lock();
-    if (!sh_ms_enumerate(&list)) {
-        pm_msg(cause, "the mods folder could not be read");
-        r = -1;
-    } else if ((held = sh_ms_find_salt(&list, row->salt, "*", row->build)) != NULL &&
-               !sh_ms_find_salt(&list, row->salt, NULL, NULL)) {
-        if (!(folder = sh_text(held->folder))) { pm_msg(cause, "out of memory"); r = -1; }
-        else {
-            r = sh_ms_install_to_root(folder, NULL, &name, NULL, NULL, cause) ? 1 : -1;
-            free(folder);
-            free(name);
-        }
-        if (r > 0) (void)sh_modserve_index_rescan();
-    }
-    sh_ms_list_free(&list);
-    modstore_unlock();
-    return r;
-}
-
-
-/* Every row the open map does not serve whose build a place holds, installed
- * at the root. Not the game thread: it copies the mods' files. `note` gets the
- * console line for what was installed, or why one could not be. Returns the
- * number installed, -1 when one failed (the placement is then refused). */
-static int pm_promote(const sh_modmanifest_list *rows, const char *name, char **note)
-{
-    size_t i;
-    int installed = 0;
-    if (note) *note = NULL;
-    for (i = 0; rows && i < rows->count; i++) {
-        const sh_modmanifest_row *r = &rows->rows[i];
-        const char *label = sh_prefab_mods_label(r);
-        char *cause = NULL;
-        int k;
-        if (!pm_held_elsewhere(r)) continue;
-        k = pm_install_root(r, &cause);
-        if (k < 0) {
-            pm_msg(note, "Prefab %s was not placed: its mod %s could not be installed in your mods folder (%s). "
-                   "Free some disk space or press Refresh in the Mods tab, then try again.", name, label,
-                   cause ? cause : "out of memory");
-            pm_logf("PREFABS: %s", note && *note ? *note : "a prefab's mod could not be installed");
-            free(cause);
-            return -1;
-        }
-        free(cause);
-        if (k > 0) {
-            installed++;
-            pm_logf("PREFABS: prefab %s: %s installed in the mods folder from a map's place", name, label);
-        }
-    }
-    if (installed)
-        pm_msg(note, "Prefab %s: %d mod%s it uses %s installed in your mods folder, where your own maps find %s.",
-               name, installed, installed == 1 ? "" : "s", installed == 1 ? "was" : "were", installed == 1 ? "it" : "them");
-    return installed;
 }
 
 /* ==================================================================== */
@@ -1231,7 +1114,6 @@ typedef struct pm_resolve_job {
     size_t len;
     const sh_modmanifest_list *rows;
     const char *name;
-    const char *note;        /* what pm_promote installed, for the console */
     int result, seq;
     char *msg;               /* malloc'd, or NULL */
 } pm_resolve_job;
@@ -1239,7 +1121,6 @@ typedef struct pm_resolve_job {
 static int pm_resolve_job_main(void *ctx)
 {
     pm_resolve_job *j = (pm_resolve_job *)ctx;
-    if (j->note && j->note[0]) pm_print(j->note);
     j->result = sh_prefab_mods_resolve_main(j->text, j->len, j->rows, j->name, &j->seq, &j->msg);
     return 1;
 }
@@ -1286,7 +1167,6 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
     case SH_MODULE_PREFAB_MODS_RESOLVE: {
         sh_modmanifest_list rows;
         pm_resolve_job job;
-        char *note = NULL;
         const char *nm = call->name && call->name[0] ? call->name : "prefab";
         int n;
         pm_out(call, "");
@@ -1304,28 +1184,18 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
         }
         /* No rows: the placement goes on exactly as before. */
         if (n <= 0) { sh_modmanifest_list_free(&rows); return SH_PREFAB_MODS_PLACE; }
-        /* Mods a map's place holds go to the root first, off the game thread. */
-        if (pm_promote(&rows, nm, &note) < 0) {
-            sh_modmanifest_list_free(&rows);
-            pm_out(call, note);
-            free(note);
-            return SH_PREFAB_MODS_REFUSED;
-        }
         memset(&job, 0, sizeof job);
         job.text = call->text;
         job.len = call->text_len;
         job.rows = &rows;
         job.name = call->name ? call->name : "";
-        job.note = note;
         if (!o->call_main || !o->call_main(pm_resolve_job_main, &job)) {
             sh_modmanifest_list_free(&rows);
-            free(note);
             free(job.msg);
             pm_out(call, "The game did not answer, so this prefab's mods could not be checked. Try again.");
             return SH_PREFAB_MODS_NO_ANSWER;
         }
         sh_modmanifest_list_free(&rows);
-        free(note);
         call->seq = job.seq;
         pm_out(call, job.msg);
         free(job.msg);
@@ -1489,10 +1359,11 @@ void sh_prefab_mods_command(int argc, const char *const *argv)
         /* Each row in the open map's own context, as its placement sees it. */
         for (i = 0; i < rows.count; i++) {
             char *cause = NULL;
-            int st = pm_row_state(&rows.rows[i], &cause);
-            pm_linef("  %s: %s", sh_prefab_mods_label(&rows.rows[i]), st == SH_MODPUB_ROW_SERVED ? "installed"
-                     : pm_held_elsewhere(&rows.rows[i]) ? "in a downloaded map's folder; placing it puts it in your mods folder"
-                     : cause && cause[0] ? cause : "not installed");
+            int st = rows.rows[i].pinned ? -1 : pm_row_state(&rows.rows[i], &cause);
+            pm_linef("  %s: %s", sh_prefab_mods_label(&rows.rows[i]),
+                     st < 0 ? (pm_pinned_here(&rows.rows[i]) ? "its content is on this computer"
+                                                             : "its content is not on this computer")
+                     : st == SH_MODPUB_ROW_SERVED ? "installed" : cause && cause[0] ? cause : "not installed");
             free(cause);
         }
         sh_modmanifest_list_free(&rows);
@@ -1527,9 +1398,6 @@ done:
 #ifdef SH_PREFAB_MODS_TESTING
 void sh_prefab_mods_test_reset(void)
 {
-    InterlockedExchange(&g_seq, 0);
-    InterlockedExchange(&g_wait_seq, 0);
-    InterlockedExchange(&g_ready_seq, 0);
     free(g_root);
     g_root = NULL;
 }
@@ -1549,6 +1417,7 @@ static char *pm_default_root(void) { return NULL; }
 #include "apply_engine.h"
 #include "ui_bridge.h"
 #include "modstore.h"
+#include "modcache.h"
 
 static int eng_row_state(const sh_modmanifest_row *row, char **cause)
 {
@@ -1595,6 +1464,57 @@ static int eng_attach(const sh_modmanifest_row *row, char **note)
 }
 
 static int eng_activate(const sh_modmanifest_list *rows) { return sh_modmanifest_activate(rows); }
+
+static int eng_use_pinned(const sh_modmanifest_list *pinned, char **cause)
+{
+    sh_modmanifest_list cur, use;
+    char **names = NULL;
+    size_t i, k, c, n = 0, cap = 0;
+    int r = 1;
+    memset(&use, 0, sizeof use);
+    (void)sh_modmanifest_current(&cur);
+    for (i = 0; i < pinned->count && r > 0; i++) {
+        const sh_modmanifest_row *p = &pinned->rows[i];
+        int other = 0, same = 0;
+        for (c = 0; c < cur.count; c++) {
+            if (strcmp(cur.rows[c].salt, p->salt)) continue;
+            if (!strcmp(cur.rows[c].build, p->build)) same = 1; else other = 1;
+        }
+        if (other && !same) {
+            /* one version per map (D23): the installed version takes the prefab's objects when it has them all */
+            int carries = 1;
+            for (k = 0; k < p->name_count && carries; k++) carries = sh_modserve_root_carries(p->salt, p->names[k]) == 1;
+            if (carries) { pm_logf("PREFABS: %s: the map's own version serves the prefab's objects", sh_prefab_mods_label(p)); continue; }
+            pm_msg(cause, "this map uses another version of %s than the one the prefab carries", sh_prefab_mods_label(p));
+            r = -1;
+            break;
+        }
+        if (!sh_modmanifest_list_add(&use, p)) { pm_msg(cause, "Snapmap+ ran out of memory"); r = -1; break; }
+        for (k = 0; k < p->name_count; k++) {
+            if (n == cap) {
+                size_t next = cap ? cap * 2 : 16;
+                char **g = (char **)realloc(names, next * sizeof *g);
+                if (!g) { r = -1; break; }
+                names = g;
+                cap = next;
+            }
+            names[n++] = p->names[k];
+        }
+    }
+    if (r > 0 && use.count) {
+        sh_cache_on_load(&use, names, n);   /* composes each row from the cache, then the serving index again */
+        for (i = 0; i < use.count && r > 0; i++) if (sh_modmanifest_current_add_row(&use.rows[i]) < 0) r = -1;
+        if (r > 0) {
+            (void)sh_modmanifest_activate(&use);
+            (void)sh_modui_scope_refresh("prefab");
+            pm_logf("PREFABS: %u row(s) of the prefab's own content joined the map", (unsigned)use.count);
+        } else pm_msg(cause, "Snapmap+ ran out of memory");
+    }
+    free(names);
+    sh_modmanifest_list_free(&use);
+    sh_modmanifest_list_free(&cur);
+    return r;
+}
 static int eng_module_known(const char *name) { return sh_grid_native_module_known(name); }
 static void eng_print(const char *line) { sh_printf("%s\n", line); }
 static void eng_toast(const char *text)
@@ -1632,6 +1552,7 @@ static void pm_bind_defaults(void)
     o.toast = eng_toast;
     o.refresh = eng_refresh;
     o.call_main = eng_call_main;
+    o.use_pinned = eng_use_pinned;
     g_ops = o;
 
     g_ops_bound = 1;

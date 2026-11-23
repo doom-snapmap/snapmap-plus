@@ -289,6 +289,9 @@ size_t sh_modmanifest_current_remove(const char *build);
  * The next save writes it (sh_modmanifest_on_save) and every later load keeps
  * it. Returns 1 attached now, 0 already attached, -1 invalid or out of memory. */
 int    sh_modmanifest_current_attach(const sh_modmanifest_row *row);
+/* Add `row` (its names kept) to the current manifest, or merge its names into the row of the same salt and build.
+ * 1 added or merged, -1 invalid or out of memory. The next save writes it (a placed prefab's pinned row, SPEC 5.16). */
+int    sh_modmanifest_current_add_row(const sh_modmanifest_row *row);
 /* A copy of the current manifest's map-level rows. Returns the row count. */
 size_t sh_modmanifest_current_attached(sh_modmanifest_list *out);
 /* The open map's pinned row of `salt` becomes a local row of the installed build `build` naming `names` (the version

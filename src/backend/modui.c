@@ -3405,6 +3405,8 @@ static int mu_scope_now_declared(const char *phase)
     return changed;
 }
 
+int sh_modui_scope_refresh(const char *why) { return mu_on_main() ? mu_scope_now_declared(why) : -1; }
+
 static int mu_scope_armed(void) { return sh_modserve_scope_relevant(); }
 
 /* The listing a load's hook just set, for that load's activation

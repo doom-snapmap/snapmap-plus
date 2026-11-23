@@ -434,6 +434,8 @@ static char *mc_source_of(const char *sha, unsigned long long size)
     return p ? p : mc_local_find(sha, size);
 }
 
+char *sh_cache_file_source(const char *sha, unsigned long long size) { return mc_source_of(sha, size); }
+
 /* ------------------------------------------------------------ manifests read */
 
 typedef struct mc_file { char *path; char sha[SH_MB_HASH_HEX + 1]; unsigned long long size; } mc_file;
