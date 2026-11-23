@@ -3810,6 +3810,8 @@ int sh_script_ai_register(void)
 #include "../hook.h"
 #include "../typeinfo.h"
 #include "../cheatkeep.h"
+#include "script_api_reflect.h"
+#include "script_reflect.h"
 #include "script_hooks.h"
 #include "script_api_common.h"
 
@@ -4495,16 +4497,93 @@ static int alert_cycle_of(void *ai)
     return v;
 }
 
+/* An FSM's name and the state it is in now, "name/state", by the game's reflection: idFiniteStateMachine.name and
+ * .curState -> idState.stateData -> idStateData.nameFromDecl (idAtomicStrings: the text's pointer). "?" for a part
+ * that is unreadable. The offsets are looked up once. */
+static volatile LONG g_fsm_rf;   /* 0 not looked up, 1 found, -1 missing */
+static uint32_t g_fsm_o_name, g_fsm_o_cur, g_fsm_o_data, g_fsm_o_state;
+
+static int fsm_rf_ready(void)
+{
+    const sh_rf_host *h;
+    sh_rf_field f;
+    if (g_fsm_rf) return g_fsm_rf > 0;
+    h = sh_script_reflect_host();
+    if (!h) return 0;
+    if (!sh_rf_find_field(h, "idFiniteStateMachine", "name", &f) || f.size != 8) goto missing;
+    g_fsm_o_name = f.offset;
+    if (!sh_rf_find_field(h, "idFiniteStateMachine", "curState", &f)) goto missing;
+    g_fsm_o_cur = f.offset;
+    if (!sh_rf_find_field(h, "idState", "stateData", &f)) goto missing;
+    g_fsm_o_data = f.offset;
+    if (!sh_rf_find_field(h, "idStateData", "nameFromDecl", &f) || f.size != 8) goto missing;
+    g_fsm_o_state = f.offset;
+    InterlockedExchange(&g_fsm_rf, 1);
+    return 1;
+missing:
+    InterlockedExchange(&g_fsm_rf, -1);
+    return 0;
+}
+
+static size_t copy_text(const char *s, char *out, size_t at, size_t cap)
+{
+    if (!s) s = "?";
+    while (at + 1 < cap && *s) out[at++] = *s++;
+    out[at] = 0;
+    return at;
+}
+
+static void fsm_state_name(void *fsm, char *out, size_t cap)
+{
+    size_t at = 0;
+    if (!cap) return;
+    strcpy_s(out, cap, "?");
+    if (!fsm || !fsm_rf_ready()) return;
+    __try {
+        const uint8_t *f = (const uint8_t *)fsm;
+        const uint8_t *st = *(const uint8_t *const *)(f + g_fsm_o_cur);
+        const uint8_t *data = st ? *(const uint8_t *const *)(st + g_fsm_o_data) : NULL;
+        at = copy_text(*(const char *const *)(f + g_fsm_o_name), out, 0, cap);
+        at = copy_text("/", out, at, cap);
+        copy_text(data ? *(const char *const *)(data + g_fsm_o_state) : NULL, out, at, cap);
+    } __except (av_only(GetExceptionCode())) { strcpy_s(out, cap, "?"); }
+}
+
+/* The FSM that controls the demon now (aiVolatile.fsms.fsmManager.controllingFSM), NULL when unreadable. */
+static void *controlling_fsm_of(void *ai)
+{
+    const sh_rf_host *h = sh_script_reflect_host();
+    sh_rf_loc loc;
+    char err[160];
+    void *fsm = NULL;
+    if (!h || !ai) return NULL;
+    memset(&loc, 0, sizeof loc);
+    if (!sh_rf_resolve(h, ai, "idAI2", "aiVolatile.fsms.fsmManager.controllingFSM", &loc, err, sizeof err)) return NULL;
+    if (loc.kind == SH_RF_POINTER && loc.addr) {
+        __try { fsm = *(void *const *)loc.addr; } __except (av_only(GetExceptionCode())) { fsm = NULL; }
+    }
+    sh_rf_loc_free(&loc);
+    return fsm;
+}
+
 /* A dying request on a demon this product parked (released or not), said in the backend log with what became of
- * it: the bench reads it beside the engine's "dead but not ALERTCYCLE_DYING" line (R-TG1). */
+ * it, where the alert cycle FSM stood and what the park told the engine: the bench reads it beside the engine's "dead
+ * but not ALERTCYCLE_DYING" line (R-TG1). */
 static void dying_note(void *fsm, const char *how, uint8_t taken)
 {
     int i, used = (int)g_parked_used;
     for (i = 0; i < used; i++) {
         void *ai = g_parked[i].ai;
+        char state[96], ctl[96];
+        int drives;
         if (!ai || spawn_id_of(ai) != (uint32_t)g_parked[i].spawn_id || alert_fsm_of(ai) != fsm) continue;
-        ai_log("SCRIPTS: dying request on a parked demon (slot %d, released %d): %s, taken %d, alert cycle %d", i,
-               (int)g_parked[i].released, how, (int)taken, alert_cycle_of(ai));
+        fsm_state_name(fsm, state, sizeof state);
+        fsm_state_name(controlling_fsm_of(ai), ctl, sizeof ctl);
+        drives = sh_ai_park_drives(&g_parked[i], spawn_id_of(ai));
+        ai_log("SCRIPTS: dying request on a parked demon (slot %d, released %d): %s, taken %d, alert cycle %d, "
+               "state %s, controlling %s, running script %d", i, (int)g_parked[i].released, how, (int)taken,
+               alert_cycle_of(ai), state, ctl,
+               drives ? (int)parked_now(ai, g_parked[i].pain_until) : (g_irs_orig ? (int)g_irs_orig(ai) : -1));
         return;
     }
 }
@@ -4520,16 +4599,28 @@ typedef void    (*ai_game_time_fn)(void *game, int *out);
 static ai_fsm_state_ask_fn g_fsm_state_ask;
 static ai_game_time_fn     g_game_time;
 
-static void fsm_leave_script(void *fsm)
+/* What the leave ask did, for the dying note: the state-link request's answer (0 or 1; 2 + the plain request's answer
+ * when a call is missing) and the game time it was given. */
+static int fsm_leave_script(void *fsm, int *time_ms)
 {
     void *gm = sh_entity_gamemgr();
     int t[4] = { 0, 0, 0, 0 };
+    *time_ms = -1;
     if (g_fsm_state_ask && g_game_time && gm) {
         g_game_time(gm, t);
-        (void)g_fsm_state_ask(fsm, SH_AI_TRANSCODE_NONE, NULL, t);
-    } else {
-        (void)g_fsm_request_orig(fsm, SH_AI_TRANSCODE_NONE);
+        *time_ms = t[0];
+        return g_fsm_state_ask(fsm, SH_AI_TRANSCODE_NONE, NULL, t) ? 1 : 0;
     }
+    return 2 + (g_fsm_request_orig(fsm, SH_AI_TRANSCODE_NONE) ? 1 : 0);
+}
+
+static void dying_leave_note(void *fsm, int asked, int time_ms)
+{
+    char state[96];
+    fsm_state_name(fsm, state, sizeof state);
+    ai_log("SCRIPTS: dying request: the leave ask answered %d at game time %d (state-link request %s, game time %s); "
+           "state now %s", asked, time_ms, g_fsm_state_ask ? "found" : "missing", g_game_time ? "found" : "missing",
+           state);
 }
 
 static uint8_t fsm_request_detour(void *fsm, int code)
@@ -4544,13 +4635,17 @@ static uint8_t fsm_request_detour(void *fsm, int code)
         return taken;
     }
     if (gm_clock(&now)) {
+        int asked = -1, t = -1;
         InterlockedExchange(&g_parked[slot].pain_until, (LONG)(now + SH_AI_PAIN_TAKE_MS));
         __try {
-            fsm_leave_script(fsm);
+            asked = fsm_leave_script(fsm, &t);
+            if (code == SH_AI_CODE_DYING) dying_leave_note(fsm, asked, t);
             taken = g_fsm_request_orig(fsm, code);
         } __except (av_only(GetExceptionCode())) { taken = 0; }
+        if (code == SH_AI_CODE_DYING) dying_note(fsm, "after leaving ExecuteDoomscript", taken);
+    } else if (code == SH_AI_CODE_DYING) {
+        dying_note(fsm, "no game clock, so not asked again", taken);
     }
-    if (code == SH_AI_CODE_DYING) dying_note(fsm, "after leaving ExecuteDoomscript", taken);
     InterlockedExchange(&g_parked[slot].fsm_busy, 0);
     return taken;
 }
