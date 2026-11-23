@@ -215,9 +215,6 @@ int sh_ai_force_via_next(unsigned flags, int asked, uint32_t frames_since_issue,
  * the clip, and the script hears of it through on.pain). The demon is the
  * script's again when the reaction is over. Pure. */
 int sh_ai_park_holds(int alive, int pain_requested, int pain_reaction);
-/* 1 when a parked demon's death should ask its alert cycle for the dying code again this frame: dead, its alert
- * cycle readable and neither ALERTCYCLE_DYING nor _DEAD, inside the window the refused request opened. */
-int sh_ai_dying_ask_again(int alive, int alert_cycle, int now_ms, int until_ms);
 /* One parked demon (the engine side's table; the FSM threads read it without
  * a lock). drives: the slot is this entity's (its spawn id now, id_now,
  * matches) and not released, so IsRunningScript answers what the park holds;
@@ -1004,6 +1001,8 @@ enum sh_ai_sig {
     SH_AI_SIG_WEB_SCALAR_SET,      /* the anim web's set-variable-by-name (animator, atom*, float) */
     SH_AI_SIG_UPDATE_RELATIONS,    /* the senses' UpdateRelations (writes the relation table) */
     SH_AI_SIG_BEST_RELATION,       /* the engine's pick from relations (reads the rows) */
+    SH_AI_SIG_FSM_STATE_ASK,       /* an AI FSM's request through its state links (the pain and death park) */
+    SH_AI_SIG_GAME_TIME,           /* the game's time record an FSM request is given */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */

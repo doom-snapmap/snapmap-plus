@@ -187,12 +187,6 @@ int sh_ai_pain_take_next(int alive, int playing, int now_ms, int until_ms)
     return alive && playing == SH_COMBAT_PAIN_NONE && now_ms <= until_ms;
 }
 
-int sh_ai_dying_ask_again(int alive, int alert_cycle, int now_ms, int until_ms)
-{
-    return !alive && alert_cycle != SH_AI_ALERT_DYING && alert_cycle != SH_AI_ALERT_DEAD && alert_cycle >= 0 &&
-           now_ms <= until_ms;
-}
-
 int sh_ai_park_holds(int alive, int pain_requested, int pain_reaction)
 {
     return alive && !pain_requested && pain_reaction == SH_COMBAT_PAIN_NONE;
@@ -4515,6 +4509,29 @@ static void dying_note(void *fsm, const char *how, uint8_t taken)
     }
 }
 
+/* Leave ExecuteDoomscript by its own link, inside the caller's request: ExecuteDoomscript's way out to ac_default
+ * (Shared_NotExecutingScript, true once the park opens) is a STATE link, which the plain request (FSMEVENT links
+ * only) never takes; the engine's state-link request (SH_AI_SIG_FSM_STATE_ASK) takes it with the game's time, as
+ * the FSM's own update would. Without it a parked demon's death found the alert cycle still in ExecuteDoomscript,
+ * refused its dying code, and the think forced it dead ("dead but not ALERTCYCLE_DYING", R-TG1 tg1vk32, vk36 to
+ * vk38). Falls back to the plain request when either call is missing. */
+typedef uint8_t (*ai_fsm_state_ask_fn)(void *fsm, int code, void *event, int *time);
+typedef void    (*ai_game_time_fn)(void *game, int *out);
+static ai_fsm_state_ask_fn g_fsm_state_ask;
+static ai_game_time_fn     g_game_time;
+
+static void fsm_leave_script(void *fsm)
+{
+    void *gm = sh_entity_gamemgr();
+    int t[4] = { 0, 0, 0, 0 };
+    if (g_fsm_state_ask && g_game_time && gm) {
+        g_game_time(gm, t);
+        (void)g_fsm_state_ask(fsm, SH_AI_TRANSCODE_NONE, NULL, t);
+    } else {
+        (void)g_fsm_request_orig(fsm, SH_AI_TRANSCODE_NONE);
+    }
+}
+
 static uint8_t fsm_request_detour(void *fsm, int code)
 {
     uint8_t taken = g_fsm_request_orig(fsm, code);
@@ -4529,7 +4546,7 @@ static uint8_t fsm_request_detour(void *fsm, int code)
     if (gm_clock(&now)) {
         InterlockedExchange(&g_parked[slot].pain_until, (LONG)(now + SH_AI_PAIN_TAKE_MS));
         __try {
-            (void)g_fsm_request_orig(fsm, SH_AI_TRANSCODE_NONE);
+            fsm_leave_script(fsm);
             taken = g_fsm_request_orig(fsm, code);
         } __except (av_only(GetExceptionCode())) { taken = 0; }
     }
@@ -4559,14 +4576,6 @@ static void pain_take_step(void)
                     void *fsm = alert_fsm_of(ai);
                     int code = g_pain_code ? g_pain_code(ai) : 0;
                     done = fsm && code && g_fsm_request_target(fsm, code);
-                } else if (sh_ai_dying_ask_again(!(health <= 0.0f), alert_cycle_of(ai), now, (int)until)) {
-                    /* The death's request found the alert cycle in ExecuteDoomscript, whose way out to ac_default
-                     * is a state link the FSM takes at its next update, not inside a request: the dying code is
-                     * asked again each frame, as a stock state's dead check would, until the alert cycle takes it
-                     * (else the think finds the demon dead outside the dying cycle and forces it, R-TG1). */
-                    void *fsm = alert_fsm_of(ai);
-                    done = !fsm || g_fsm_request_target(fsm, SH_AI_CODE_DYING);
-                    if (done) dying_note(fsm, "asked again a frame later", 1);
                 }
             } __except (av_only(GetExceptionCode())) { done = 1; }
         }
@@ -6007,6 +6016,8 @@ int sh_script_ai_install(const uint8_t *module_base)
     else g_live.anim_variable = NULL;
     /* The relations: the senses' table, whose layout the two functions show (the sigs test checks them). */
     if (!r[SH_AI_SIG_UPDATE_RELATIONS].addr || !r[SH_AI_SIG_BEST_RELATION].addr) g_live.relations = NULL;
+    g_fsm_state_ask = (ai_fsm_state_ask_fn)r[SH_AI_SIG_FSM_STATE_ASK].addr;
+    g_game_time = (ai_game_time_fn)r[SH_AI_SIG_GAME_TIME].addr;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;
