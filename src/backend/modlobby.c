@@ -281,6 +281,12 @@ static int lb_host_may_start(const char *where)
     void *lobby = lb_game_lobby();
     size_t n;
     if (!lb_hosting_modded(lobby, item, sizeof item, rev, sizeof rev)) return 1;
+    /* D-A41 Q2: a host whose own copy stands in for objects cannot host: every joiner needs the whole content. */
+    if (!sh_modpub_lobby_map_whole(item, rev, sentence, sizeof sentence)) {
+        lb_logf("MODS: lobby: the %s of '%s' is refused: this computer plays the map with stand-ins", where, item);
+        sh_modpublished_notice(sentence);
+        return 0;
+    }
     n = lb_members(lobby, members, names, 8);
     if (sh_modlobby_gate(members, n, sentence, sizeof sentence)) return 1;
     lb_logf("MODS: lobby: the %s of '%s' waits: a player has not got the map's mod content yet", where, item);

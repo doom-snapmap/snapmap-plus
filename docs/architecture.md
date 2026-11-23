@@ -5043,7 +5043,12 @@ in the engine on both renderers (R-CO1):
   sentence in the game's own dialog ("The match starts when every player has
   this map's mod content. Still getting it: Sam (40%)."), and the countdown's
   end when a player joined during it, which puts the controller back in its
-  idle state the way its own pump drops a countdown when players leave.
+  idle state the way its own pump drops a countdown when players leave. A host
+  whose own copy of the map stands in for objects (a unit it could not get)
+  cannot host it: every joiner needs the whole content, so the Start is refused
+  with "This map cannot be hosted: some of its mod content (Eternal Demons) is
+  not on this computer, and every player needs all of it. Play the map once
+  online to get it, then host it." (`sh_modpub_lobby_map_whole`).
 - Who is getting what. A joiner tells its host its state in the lobby's ready
   command (game reliable 0xB6: its lobby user and one byte), sent through the
   lobby screen's own sender. The host's lobby applies 0 toggle, 1 set and 2
@@ -5270,8 +5275,8 @@ An earlier shape. A prefab with a `<name>.meta.json` sidecar and no block, or a
 block whose rows name `id` and `bundle`, was saved by an earlier version: its
 details are not read (`META_READ` answers `SH_PREFAB_META_EARLIER` with an
 empty view), Load / Place, export and `sh_prefab mods` refuse it ("Prefab
-<name> was not placed: it was saved by an earlier version of Snapmap+. Ask its
-author to export it again."), and a description edit writes nothing. A prefab
+<name> was not placed: it was saved by an earlier Snapmap+; run the Snapmap+
+installer to update it."), and a description edit writes nothing. A prefab
 with neither names no mods and loads as before.
 A sidecar is never listed as a prefab, and it follows its prefab when that is
 moved, renamed or deleted. Prefab paths and names are UTF-8 and every file is

@@ -96,8 +96,7 @@ extern "C" {
 
 /* A prefab saved by an earlier version: the rows functions return this. */
 #define SH_PREFAB_ROWS_EARLIER (-2)
-#define SH_PREFAB_EARLIER_TEXT "This prefab was saved by an earlier version of Snapmap+ and cannot be used. " \
-    "Ask its author to export it again."
+#define SH_PREFAB_EARLIER_TEXT "This prefab was saved by an earlier Snapmap+; run the Snapmap+ installer to update it."
 
 /* ------------------------------------------------------------ rows */
 

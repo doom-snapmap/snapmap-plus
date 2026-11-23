@@ -1562,6 +1562,18 @@ static void coop_lobby_map_is_modded(void)
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
     CHECK(sh_modpub_lobby_map_modded(METADATA, "rev1"));
     CHECK(!sh_modpub_lobby_map_modded(METADATA, "rev2"));
+
+    printf("-- co-op: a host whose own content stands in for objects cannot host the map (D-A41 Q2)\n");
+    {
+        char out[256];
+        CHECK(sh_modpub_lobby_map_whole(METADATA, "rev1", out, sizeof out) == 1 && !out[0]);   /* whole */
+        CHECK(sh_modpub_lobby_map_whole(METADATA, "rev2", out, sizeof out) == 1);              /* never seen */
+        g_content.complete = 0;
+        CHECK(sh_modpub_lobby_map_whole(METADATA, "rev1", out, sizeof out) == 0);
+        CHECK(strstr(out, "This map cannot be hosted: some of its mod content (") == out && strstr(out, ") is not on this "
+              "computer, and every player needs all of it. Play the map once online to get it, then host it.") && strlen(out) < 256);
+        g_content.complete = 1;
+    }
 }
 
 /* D-A36 (R-LV6): a rawmap's units downloaded with "Keep downloading?" raised after two seconds. A map's content
