@@ -2778,7 +2778,9 @@ is touched, and a removed demon answers nil.
   0.1 picks clips that turn in place, `travel` admits a demon's own stepping
   turns; with `travel` an entity target turns toward where it stands),
   `aim_at(entity | nil)`, `set_enemy([entity])` (`setEnemy` locked, or
-  `setPlayerEnemy` closest), `trigger(on, [hand])`
+  `setPlayerEnemy` closest; every enemy setter of the game locks, and the
+  lock byte, ai+0x25068, is read nowhere in build 13954591, so the lock
+  changes nothing), `trigger(on, [hand])`
   (`pull/releaseTriggerLeft` or `Right`), `equip(item)` (the item's decl
   name, as the entityDef's startingInventory names it, or its index;
   `equipInventoryItemByIndex`; answers `"left"` or `"right"`), `laser(tag, on)`
@@ -2905,6 +2907,25 @@ is touched, and a removed demon answers nil.
   its spawn id), removes the entry with the game's own `tempMemory_Remove`
   event, and answers nil or `{kind, target | pos}`; the Enemy SDK's
   `enemy_snapmap.lua` follows it.
+  `relations()` reads the demon's social relations as DOOM 2016's senses keep
+  them: the senses (ai+0x29A88) rebuild a table every AI think, whatever drives
+  the demon (UpdateRelations VK 0x1404AA490 / GL 0x1404A8C10, from the senses'
+  update called by the AI think VK 0x1403E0D40), one row per entity the demon
+  perceives, players and bots (the idPlayer classes) and demons, with the
+  respect and emotion its faction graph gives the two factions or what it
+  perceived of that entity (being hurt raises the emotion), whichever is
+  farther from neutral, most hostile first (rows at +0x28, count +0x30, 0x28
+  bytes a row: respect +4, emotion +8, the entity's idEntityPtr +0x10). A
+  demon's faction is its entityDef's `factionName`; a SnapMap team replaces it
+  with `team_<n>_demon`, and players get `team_<n>_player` (the co-op mode's
+  VK 0x14088FAF0). The call answers `{ entity, respect, emotion, awareness
+  [, unlimited] }` rows by name (`"minion"`, `"hate"`, `"confirmed"`); the
+  sigs test checks the layout on the two functions that write and read it
+  (UpdateRelations, and the engine's pick VK 0x1404AAD10 / GL 0x1404A9490).
+  The game never picks an enemy from the table by itself: its state machines
+  do, with `Shared_SocialRelationAvailable` (VK 0x1405F4930), which a
+  script-driven demon does not run. The Enemy SDK's `enemy_target.lua` is that
+  condition on these rows, so a script picks the enemy the game would.
   `wound_damage_counts(on)` gives a demon DOOM Eternal's wound counter. The
   game opens a living demon's wound from `idGoreComponent::DamageActivatesWound`
   (VK 0x1408FC8E0, GL 0x1408FB910), asked per queued hit record, per damage
@@ -3000,8 +3021,19 @@ is touched, and a removed demon answers nil.
   nothing. Only a manager without a model is given one.
   `enemy_sdk.bind` calls the brain's `bind(def)` first, where the brain names its
   breakables.
+- **The Enemy SDK's target rule.** `enemy_target` is DOOM 2016's
+  `Shared_SocialRelationAvailable` on `relations()`: the condition's respect,
+  emotion and awareness bands (by name; its constructor's defaults, VK
+  0x141302930: every respect, every emotion, every awareness), playersOnly and
+  noPlayers (a bot is a player), filterOutOffLimits, the 10,000-unit range of
+  GetRelations (VK 0x1404AAA30), and the pick: the nearest of the most hostile
+  emotion present. `enemy_snapmap` gives a demon that holds no enemy in 2016's
+  combat band (behavior_shared's: EMOTION_DESTROY_AT_ALL_COSTS to
+  EMOTION_DISLIKE at AIAWARE_CONFIRMED) that pick, and a source game's brain
+  evaluates its own conditions with it; nothing in the SDK reads a team or lists
+  players.
 - **The Enemy SDK's weapon library.** `enemy_weapon` (with `enemy_sdk`,
-  `enemy_snapmap`, `enemy_locomotion` and `enemy_probe`, required by name
+  `enemy_snapmap`, `enemy_target`, `enemy_locomotion` and `enemy_probe`, required by name
   from the DLL) is the interface a demon's behaviour layer uses for weapons:
   `equip`, `fire_mode`, `pull`, `release`, `trigger`, `pulled`, `ready`,
   `on_target`, `focus`, `hold`, `state` and `tick`, each one of the calls
@@ -3220,8 +3252,16 @@ names is the mod's own, or DOOM's through `native("...")`
 refused with one plain sentence. An attacker is any entity; without one the
 damage comes from the world entity, as a trigger's does.
 
-- **Calls.** `damage(entity, damage, [attacker], [from])` and `entity:damage(...)` (the
-  entity's own `damage` event: decl, direction angles, activator);
+- **Calls.** `damage(entity, damage, [attacker], [from])` and `entity:damage(...)`: with
+  an attacker, an actor (a player, a bot or a demon) takes it through its own
+  Damage (vtable slot 130, the same virtual in every actor class: idPlayer's VK
+  0x140DC3880, idAI2's VK 0x140424D30 / GL 0x140423B90, which passes it on to the
+  idAI2 body VK 0x1403F8C40) with the attacker as inflictor and attacker, so the
+  game's team rule (idAI2 Damage_Calculate VK 0x1403FB1D0: in a SnapMap mode an
+  attacker of the victim's own team, other than TEAM_NONE, does no damage), its
+  percepts and its kill credit see who hit it; without an attacker, or on any
+  other entity, the entity's own `damage` event (decl, direction angles,
+  activator, which credits no attacker);
   `hitscan(from, dir, damage, [range], [attacker])` (the game trace, then the
   damage event on what it hits; answers `{pos, normal, entity}` or nil);
   `radius_damage(pos, damage, [attacker])` (the engine's RadiusDamage with the

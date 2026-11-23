@@ -1,5 +1,7 @@
--- test_enemy_placement.lua: the Enemy SDK's reading of a placed demon's editor properties and the
--- spawn behaviours a script-driven brain honours (enemy_placement.lua), over a fake map.
+-- test_enemy_placement.lua: the Enemy SDK's reading of a placed demon's editor properties, the
+-- spawn behaviours a script-driven brain honours and the enemy it is given (enemy_placement.lua,
+-- the older name of enemy_snapmap.lua), over a fake map whose social relations stand in for the
+-- engine's (ai:relations).
 --   lua54 tests/sdk/test_enemy_placement.lua      (run from the repository root; tests/sdk/run.ps1 does)
 -- The library under test is src/sdk/lua, or the folder SNAPMAP_SDK_LUA names.
 local here = (arg and arg[0] or ""):match("^(.*)[/\\][^/\\]*$") or "."
@@ -32,9 +34,9 @@ local function ent(t)
   return e
 end
 function entities() return world end
-function players() local out = {} for _, e in ipairs(world) do if e:is_player() then out[#out + 1] = e end end return out end
+function players() error("the SDK chose a target by listing players; the engine's relations decide") end
 
-local seen = {}          -- [a][b] = true: a can see b
+local rel = {}           -- [demon] = the engine's relation rows of that demon (ai:relations)
 local enemy = {}
 local moves = {}
 local function adapter()
@@ -44,7 +46,7 @@ local function adapter()
   A.alive = function(t) return t ~= nil and t:alive() end
   A.position = function(t) return t:position() end
   A.distance = function(e, t) return e:distance(t) end
-  A.can_see = function(e, t) return (seen[e] or {})[t] == true end
+  A.relations = function(e) return rel[e] or {} end
   A.entities_near = function(pos, r)
     local out = {}
     for _, x in ipairs(world) do
@@ -61,7 +63,7 @@ end
 
 local function fresh()
   package.loaded["enemy_placement"] = nil
-  world, seen, enemy, moves = {}, {}, {}, {}
+  world, rel, enemy, moves = {}, {}, {}, {}
   return require("enemy_placement")
 end
 
@@ -109,25 +111,10 @@ do
   now = nil
 end
 
--- ---- who is an enemy ----
-do
-  local P = fresh()
-  local d = placed(P, "DEFAULT", "TEAM_ONE")
-  local player = ent({ player = true, pos = { x = 100, y = 0, z = 0 }, fields = { team = "TEAM_TWO" } })
-  local mate = ent({ player = true, pos = { x = 100, y = 0, z = 0 }, fields = { team = "TEAM_ONE" } })
-  local rival = ent({ class = "idAI2", demon = true, pos = { x = 50, y = 0, z = 0 }, fields = { team = "TEAM_TWO" } })
-  local friend = ent({ class = "idAI2", demon = true, pos = { x = 50, y = 0, z = 0 }, fields = { team = "TEAM_ONE" } })
-  local stray = ent({ class = "idAI2", demon = true, pos = { x = 50, y = 0, z = 0 }, fields = { team = "TEAM_NONE" } })
-  check("a player of another team is an enemy", P.hostile(d, player))
-  check("a player of the demon's own team is not", not P.hostile(d, mate))
-  check("a demon of another team is an enemy", P.hostile(d, rival))
-  check("a demon of the same team is not", not P.hostile(d, friend))
-  check("a demon without a team is not", not P.hostile(d, stray))
-  check("a demon without a team fights players only", P.hostile(stray, player) and not P.hostile(stray, rival))
-  check("nothing fights itself", not P.hostile(d, d))
-end
+-- A relation row as the engine keeps it: hostile rows carry an emotion of the combat band.
+local function row(x, emotion, awareness) return { entity = x, respect = "minion", emotion = emotion or "destroy", awareness = awareness or "confirmed" } end
 
--- ---- spawn behaviours ----
+-- ---- the enemy is 2016's pick from the engine's relations ----
 local function scene(behavior, team)
   local P = fresh()
   local A = adapter()
@@ -139,39 +126,49 @@ end
 
 do
   local P, A, d, near, far = scene("DEFAULT")
-  P.acquire(A, d, {})
-  check("default: no enemy while it sees none", enemy[d] == nil)
-  seen[d] = { [far] = true }
-  P.acquire(A, d, {})
-  check("default: the enemy it can see, however far", enemy[d] == far)
+  P.acquire(A, d)
+  check("no enemy while the engine relates it to no one", enemy[d] == nil)
+  rel[d] = { row(far, "destroy", "suspected") }
+  P.acquire(A, d)
+  check("no enemy from a relation below confirmed awareness", enemy[d] == nil)
+  rel[d] = { row(far), row(near) }
+  P.acquire(A, d)
+  check("the nearest of the most hostile confirmed relations", enemy[d] == near)
+  rel[d] = { row(far, "destroy"), row(near, "dislike") }
   enemy[d] = nil
-  seen[d] = { [far] = true, [near] = true }
-  P.acquire(A, d, {})
-  check("default: the nearest of the enemies it sees", enemy[d] == near)
+  P.acquire(A, d)
+  check("a more hostile relation goes before a nearer one", enemy[d] == far)
+  rel[d] = { row(far, "destroy", "lost"), row(near, "dislike") }
+  P.acquire(A, d)
+  check("an enemy it has lost sight of is kept while it is still hostile", enemy[d] == far)
+  far.t.dead = true
+  P.acquire(A, d)
+  check("a dead enemy is replaced by the next pick", enemy[d] == near)
+  rel[d] = { row(near, "neutral") }
+  local other = ent({ player = true, pos = { x = 700, y = 0, z = 0 } })
+  rel[d][2] = row(other)
+  P.acquire(A, d)
+  check("an enemy that is no longer hostile (a team change) is replaced", enemy[d] == other)
+  rel[d] = { row(near, "friendly") }
+  enemy[d] = nil
+  P.acquire(A, d)
+  check("a friendly relation is never an enemy", enemy[d] == nil)
 end
 
 do
-  local P, A, d, near, far = scene("AMBUSH")
-  seen[d] = { [far] = true }
-  P.acquire(A, d, {})
-  check("ambush: an enemy beyond 768 units is left alone, seen or not", enemy[d] == nil)
-  seen[d] = { [far] = true, [near] = true }
-  P.acquire(A, d, {})
-  check("ambush: an enemy within 768 units that it sees", enemy[d] == near)
-  enemy[d] = nil
-  seen[d] = {}
-  P.acquire(A, d, { attacker = far })
-  check("ambush: whoever hurt it, wherever they are", enemy[d] == far)
-end
-
-do
-  local P, A, d, near, far = scene("HUNT")
-  P.acquire(A, d, {})
-  check("hunt: the nearest enemy without seeing it", enemy[d] == near)
-  near.t.dead = true
-  enemy[d] = nil
-  P.acquire(A, d, {})
-  check("hunt: the next one when that one is dead", enemy[d] == far)
+  -- the teams and the bots are the engine's: the same rows give the same choice whatever the team fields say
+  local P = fresh()
+  local A = adapter()
+  local d = placed(P, "DEFAULT", "TEAM_ONE")
+  local rival = ent({ class = "idAI2", demon = true, pos = { x = 300, y = 0, z = 0 }, fields = { team = "TEAM_TWO" } })
+  local bot = ent({ player = true, pos = { x = 200, y = 0, z = 0 }, fields = { team = "TEAM_TWO" } })
+  local mate = ent({ class = "idAI2", demon = true, pos = { x = 100, y = 0, z = 0 }, fields = { team = "TEAM_ONE" } })
+  rel[d] = { row(rival), row(bot), row(mate, "squadmate") }
+  P.acquire(A, d)
+  check("a bot of another team is an enemy like any player, its own team never", enemy[d] == bot)
+  bot.t.dead = true
+  P.acquire(A, d)
+  check("the demon of another team next", enemy[d] == rival)
 end
 
 do
@@ -190,9 +187,9 @@ do
   check("defend: chasing an enemy inside the radius is the chase itself", moves[#moves].target == near)
   d.t.fields["aiEditable.spawnSettings.initialRole"] = "ROLE_DEFEND"
   check("the FSM reads the role the engine gave the demon", A.encounter_role(d) == "ROLE_DEFEND")
-  seen[d] = { [far] = true }
-  P.acquire(A, d, {})
-  check("defend: it still takes the enemy it sees", enemy[d] == far)
+  rel[d] = { row(far) }
+  P.acquire(A, d)
+  check("defend: it still takes the engine's enemy", enemy[d] == far)
 end
 
 do
@@ -201,22 +198,6 @@ do
   A.move_to(d, { x = 2000, y = 0, z = 0 })
   check("default: moves are not held to a radius", moves[#moves].pos.x == 2000)
   check("default: no role", A.encounter_role(d) == "ROLE_NONE")
-end
-
--- ---- teams: demons of two teams fight ----
-do
-  local P = fresh()
-  local A = adapter()
-  local d = placed(P, "DEFAULT", "TEAM_ONE")
-  local rival = ent({ class = "idAI2", demon = true, pos = { x = 300, y = 0, z = 0 }, fields = { team = "TEAM_TWO" } })
-  local friend = ent({ class = "idAI2", demon = true, pos = { x = 100, y = 0, z = 0 }, fields = { team = "TEAM_ONE" } })
-  local player = ent({ player = true, pos = { x = 900, y = 0, z = 0 }, fields = { team = "TEAM_TWO" } })
-  seen[d] = { [rival] = true, [friend] = true, [player] = true }
-  P.acquire(A, d, {})
-  check("a demon with a team takes the nearest enemy, demon or player, never its own team", enemy[d] == rival)
-  enemy[d] = nil
-  P.acquire(A, d, { attacker = friend })
-  check("a hit from its own team does not make an enemy of it", enemy[d] == rival)
 end
 
 -- ---- a Snapmap+ without the general calls ----
@@ -229,10 +210,15 @@ do
   d.get = nil; d.class = nil
   local player = ent({ player = true, pos = { x = 100, y = 0, z = 0 } })
   player.get = nil
-  seen[d] = { [player] = true }
+  rel[d] = { row(player) }
   local s = P.of(d)
-  P.acquire(A, d, {})
-  check("without e:get and entities() the demon is default against players", s.behavior == "default" and enemy[d] == player)
+  P.acquire(A, d)
+  check("without e:get and entities() the demon is default and still takes the engine's enemy",
+        s.behavior == "default" and enemy[d] == player)
+  A.relations = nil
+  enemy[d] = nil
+  P.acquire(A, d)
+  check("without ai:relations it finds no enemy", enemy[d] == nil)
   entities = save
 end
 

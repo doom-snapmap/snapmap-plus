@@ -1036,7 +1036,8 @@ the pieces' explosion effect tint and fade the pieces themselves as DOOM Eternal
 (`destructible`),
 `spline_clear`, `pain_string`, `block_pain` and the rest; `animation_state` and `force_animation` work on
 demons too; `monster_type` names any demon's type, `ground_below` finds the floor under a point, `note` leaves a line for a development tool when one listens (`noting`) and
-`difficulty` reads the game's difficulty, `anim_variable` sets a variable of a demon's anim web by
+`difficulty` reads the game's difficulty, `relations` reads a demon's social relations as the game keeps
+them (who it hates, players, bots and demons of other teams alike), `anim_variable` sets a variable of a demon's anim web by
 name, so a node that picks its clip by it plays the clip the script chose): a commanded demon waits in
 the engine's own script state and keeps its pain and death, and `release` hands it back to its own
 behaviour until the next command (a ported demon that has lost the player then searches with DOOM
