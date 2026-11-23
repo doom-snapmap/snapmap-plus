@@ -1017,6 +1017,8 @@ extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
 /* Inside the recoil play: mulss xmm6,[rsi+0x24EB0] at +0x29 reads the
  * recoil strength. */
 #define SH_AI_RECOIL_SITE_MUL       0x29u
+/* The recoil play's multiply by the field e:set_recoil writes (mulss xmm6, [rsi+SH_AI_OFF_RECOIL]). */
+static const unsigned char k_ai_recoil_mul[8] = { 0xF3, 0x0F, 0x59, 0xB6, 0xB0, 0x4E, 0x02, 0x00 };
 /* The weapon-use accessor is its whole signature: movsxd rax,[rcx+0x250C8]
  * (the index), mov rdx,[rcx+0xC120] (the behaviour decl), mov rax,[rdx+0x398]
  * (the list's elements; its count is the int after the pointer), 0x50 an
@@ -1163,6 +1165,9 @@ static const unsigned char k_ai_foot_prologue[SH_AI_FOOT_STOLEN] = {
 #define SH_AI_LASER_DECL_RIBBON    0x108u
 #define SH_AI_LASER_ADD_DECL_AT    0x193u
 #define SH_AI_LASER_ADD_RIBBON_AT  0x1B2u
+/* The laser add's two reads that prove where the ribbon decl sits: mov rdx,[rsi+0x10]; mov rdx,[rdx+0x108]. */
+static const unsigned char k_ai_laser_decl_read[4] = { 0x48, 0x8B, 0x56, 0x10 };
+static const unsigned char k_ai_laser_ribbon_read[7] = { 0x48, 0x8B, 0x92, 0x08, 0x01, 0x00, 0x00 };
 /* idAI2 offsets of the new calls (both renderers). */
 #define SH_AI_OFF_RECOIL          0x24EB0u  /* float recoil strength (FSM states write recoilStrength here) */
 #define SH_AI_OFF_ANIMWEB         0x225C8u  /* the animWeb decl */

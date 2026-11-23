@@ -205,7 +205,7 @@ static void check_image(const char *path)
 
     /* The brain's calls. */
     if (rva[SH_AI_SIG_RECOIL_PLAY])
-        CHECK(!memcmp(base + rva[SH_AI_SIG_RECOIL_PLAY] + SH_AI_RECOIL_SITE_MUL, "\xF3\x0F\x59\xB6\xB0\x4E\x02\x00", 8));
+        CHECK(!memcmp(base + rva[SH_AI_SIG_RECOIL_PLAY] + SH_AI_RECOIL_SITE_MUL, k_ai_recoil_mul, sizeof k_ai_recoil_mul));
     if (rva[SH_AI_SIG_NEXT_PULL]) {
         uint32_t s = rva[SH_AI_SIG_NEXT_PULL];
         uint32_t decl = rel_target(base, s + SH_AI_NEXT_PULL_DECL_CALL, 5, 1);
@@ -321,8 +321,8 @@ static void check_image(const char *path)
         uint32_t a = rva[SH_AI_SIG_LASER_ADD];
         /* the list's count at component +0x108, the entry's name at +0x60 of a 0x80 entry; the ribbon comes from
          * the component's decl (+0x10) field +0x108, read where the product checks it */
-        CHECK(!memcmp(base + a + SH_AI_LASER_ADD_DECL_AT, "\x48\x8B\x56\x10", 4));
-        CHECK(!memcmp(base + a + SH_AI_LASER_ADD_RIBBON_AT, "\x48\x8B\x92\x08\x01\x00\x00", 7));
+        CHECK(!memcmp(base + a + SH_AI_LASER_ADD_DECL_AT, k_ai_laser_decl_read, sizeof k_ai_laser_decl_read));
+        CHECK(!memcmp(base + a + SH_AI_LASER_ADD_RIBBON_AT, k_ai_laser_ribbon_read, sizeof k_ai_laser_ribbon_read));
         CHECK(base[a + SH_AI_LASER_ADD_RIBBON_AT + 7] == 0xE8);
         CHECK(window_has(base, a, 0x60, "\x44\x8B\x86\x08\x01\x00\x00", 7));
     }
