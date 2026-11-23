@@ -3766,11 +3766,19 @@ static int ms_scope_compute(ms_index *x, int mark)
         for (i = 0; i < x->nbundles; ++i) {
             ms_bundle *b = &x->bundles[i];
             LONG sv, roff, was_sv, was_r, was_rank;
-            int inert = 0;
+            int inert = 0, overlay = 0;
             if (!b->admitted) continue;
             for (k = 0; k < x->nbundles && !inert; ++k)
-                inert = k != i && rank[k] >= 0 && rank[i] < 0 && !strcmp(x->bundles[k].id, b->id);
+                if (k != i && rank[k] >= 0 && rank[i] < 0 && !strcmp(x->bundles[k].id, b->id)) {
+                    inert = 1;
+                    /* D26: in the editor, the root folder's build of a salt the map names by units (its composition)
+                     * serves the names the units do not carry, so the Toybox shows the local version's objects; the
+                     * units win on every path they carry (the declared composition is preferred per path below). */
+                    overlay = !play && b->root_build && x->bundles[k].place &&
+                              !strcmp(x->bundles[k].place, SH_MODSERVE_CONTENT);
+                }
             if (!on || rank[i] >= 0) sv = MS_SV_ALL;
+            else if (overlay) sv = (ms_scope_always(b) ? MS_SV_EDITOR : 0) | MS_SV_NEW;
             else if (inert) sv = 0;
             else if (play || !b->root_build) sv = ms_scope_always(b) ? MS_SV_EDITOR : 0;
             else sv = (ms_scope_always(b) ? MS_SV_EDITOR : 0) | MS_SV_NEW | MS_SV_RESTORE;
@@ -8480,6 +8488,25 @@ int modserve_bundles_for_names(const char *const *names, int n_names,
     }
     free(seen_file); free(seen_bundle); free(queue);
     return found;
+}
+
+int sh_modserve_root_carries(const char *salt, const char *name)
+{
+    const ms_index *x = g_index;
+    char *lower;
+    int f, k, hit = 0;
+    if (!x || !salt || !name) return -1;
+    if (!(lower = _strdup(name))) return -1;
+    ms_lower(lower);
+    f = ms_name_file(x, lower);
+    free(lower);
+    if (f < 0) return 0;
+    for (k = -1; k < x->files[f].alt_count && !hit; ++k) {
+        int g = k < 0 ? f : x->alts[x->files[f].alt_first + k];
+        const ms_bundle *b = &x->bundles[x->files[g].bundle];
+        hit = b->admitted && b->root_build && !strcmp(b->id, salt);
+    }
+    return hit;
 }
 
 size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,

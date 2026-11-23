@@ -253,6 +253,8 @@ static int f_relations(void *ai, sh_ai_relation *out, int cap)
     }
     return n;
 }
+/* entity 2 (the player) is off-limits; a non-AI is no actor */
+static int f_off_limits(void *e) { fent *x = (fent *)e; return x == &g_ent[2] ? 1 : x->is_ai ? 0 : -1; }
 static void *f_enemy(void *e) { int id = ((fent *)e)->enemy; return id ? &g_ent[id] : NULL; }
 static int f_awareness(void *ai, void *t) { (void)t; return ((fent *)ai)->awareness; }
 static int f_move_status(void *e) { return ((fent *)e)->move_status; }
@@ -524,7 +526,7 @@ static const sh_script_ai_engine g_fake = {
     f_laser_add, f_laser_remove, f_rear_footsteps,
     f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose,
     f_interrupt_blend, f_destructible, f_weapon_use, f_wound_damage_counts, f_snapmap_order,
-    f_release, f_anim_variable, f_relations, f_world_clear, f_world_ground
+    f_release, f_anim_variable, f_relations, f_off_limits, f_world_clear, f_world_ground
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -2584,11 +2586,26 @@ static void test_relations(void)
     if (g_fail) printf("relations log:\n%s", log);
     sh_script_map_end();
     g_rel_unreadable = 0;
+    /* the off-limits flag: the player marked, a demon not, a prop no actor */
+    CHECK(start(
+        "api = 1\n"
+        "on.think('ai/brute', function(self)\n"
+        "  print('off ' .. tostring(ent(2):off_limits()) .. ' ' .. tostring(self:off_limits()) .. ' ' .. tostring(ent(3):off_limits()))\n"
+        "end)\n"));
+    tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "off true false nil\n") != NULL);
+    sh_script_map_end();
+    {
+        uint8_t getter[8] = { 0x0F, 0xB6, 0x81, 0x08, 0x94, 0x00, 0x00, 0xC3 }, other[8] = { 0x0F, 0xB6, 0x81, 0x09, 0x94, 0x00, 0x00, 0xC3 };
+        CHECK(sh_ai_off_limits_getter(getter) && !sh_ai_off_limits_getter(other));
+    }
     {
         sh_script_ai_engine bare = g_fake;
         bare.relations = NULL;
+        bare.off_limits = NULL;
         sh_script_ai_set_engine(&bare);
         expect_stop("self:relations()", "\"relations\" is not available in this session");
+        expect_stop("self:off_limits()", "\"off_limits\" is not available in this session");
         sh_script_ai_set_engine(&g_fake);
     }
 }
@@ -2597,7 +2614,7 @@ int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 57);
+    CHECK(sh_script_ai_register() == 58);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();

@@ -26,7 +26,8 @@
 -- Who the demon fights is DOOM 2016's choice (enemy_target.lua): the engine's own social relations, so players, bots,
 -- the editor's Team (demons of two teams fight each other, one team never fights itself) and a demon that hurt it
 -- all come from the engine. A demon without an enemy, or whose enemy left 2016's combat band (killed, removed, its
--- team changed), takes 2016's pick; the brain's own conditions re-pick as the fight goes on.
+-- team changed), takes 2016's pick, a hostile it sees counting as confirmed (enemy_target.FIND); the brain's own
+-- conditions re-pick as the fight goes on.
 --
 -- Every read goes through the script API's general calls (e:get, e:class, entities, e:snapmap_order,
 -- e:relations); on a Snapmap+ without them the demon hears no Follow order and finds no enemy.
@@ -104,7 +105,7 @@ end
 function P.acquire(A, e)
   local t = A.enemy(e)
   if target.holds(A, e, t, target.COMBAT) then return end
-  local _, pick = target.available(A, e, target.COMBAT)
+  local _, pick = target.available(A, e, target.FIND)
   if pick ~= nil and pick ~= t then A.set_enemy(e, pick) end
 end
 

@@ -156,6 +156,30 @@ do
 end
 
 do
+  -- R-LV8, single player, no co-op tracking, a brain library emitted before its adapter had A.relations: a scripted
+  -- demon with the player in view at 800 units whose awareness word is not yet confirmed
+  local P = fresh()
+  local A = adapter()
+  local d = placed(P, "DEFAULT", "TEAM_NONE")
+  local player = ent({ player = true, pos = { x = 800, y = 0, z = 0 }, fields = { team = "TEAM_NONE" } })
+  A.relations = nil                                         -- the old adapter: no A.relations
+  function d:relations() return { row(player, "anger", "unaware") } end   -- Snapmap+'s own call answers
+  local seen = false
+  A.can_see = function(e, t) return seen and t == player end
+  P.acquire(A, d)
+  check("unseen and unaware: no enemy yet", enemy[d] == nil)
+  seen = true
+  P.acquire(A, d)
+  check("the player in view at 800 units is engaged at once, through e:relations() when the adapter has none",
+        enemy[d] == player)
+  function d:relations() return { row(player, "anger", "suspected") } end
+  enemy[d] = nil
+  seen = false
+  P.acquire(A, d)
+  check("not seen and only suspected: still none (2016's combat band waits for confirmed)", enemy[d] == nil)
+end
+
+do
   -- the teams and the bots are the engine's: the same rows give the same choice whatever the team fields say
   local P = fresh()
   local A = adapter()
@@ -218,7 +242,7 @@ do
   A.relations = nil
   enemy[d] = nil
   P.acquire(A, d)
-  check("without ai:relations it finds no enemy", enemy[d] == nil)
+  check("without ai:relations, in the adapter or on the entity, it finds no enemy", enemy[d] == nil)
   entities = save
 end
 

@@ -1019,6 +1019,10 @@ int modserve_bundles_for_names(const char *const *names, int n_names,
  * match, then once with name NULL for each further bundle the needs closure
  * reaches. `size` is the sum of the bundle's file sizes. Returns the number of
  * distinct bundles reported. Stock names match nothing. */
+/* 1 when the root folder's build of `salt` (the local mod) provides the placed name `name` (D23, D23a: whether a map's
+ * placed object of that mod is in the installed version), 0 when it does not, -1 without an index. */
+int sh_modserve_root_carries(const char *salt, const char *name);
+
 typedef void (*sh_modserve_closure_fn)(void *context, const char *bundle_id, const char *bundle_hash,
                                        unsigned long long size, const char *name);
 size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,

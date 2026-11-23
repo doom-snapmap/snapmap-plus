@@ -1559,12 +1559,14 @@ int sh_unit_of(const sh_mb_bundle *b, const char *folder, const char *name, cons
         if (out->kind == SH_UNIT_ENTITY && w.owned[root]) uw_rows_of(&w, w.owned[root]);
     }
     if (!out->root) { w.oom = 1; goto done; }
-    /* What travels wherever the mod is used: the DOOM files it changes, and the enumerated decls naming none of
-     * its defs. */
+    /* What travels wherever the mod is used: the DOOM files it changes, the DOOM files its folder holds unchanged
+     * (a surface: DOOM's bytes at DOOM's name, served where the mod is used, as a pointer), and the enumerated decls
+     * naming none of its defs. A surface the builder derived from a need (no file in the folder) comes with what
+     * needs it. */
     for (i = 0; i < b->file_count; i++) {
         const sh_mb_file *f = &b->files[i];
         if (f->absent || f->cls == SH_MB_CLASS_EDITOR) continue;
-        if (f->cls == SH_MB_CLASS_REPLACE) uw_reach(&w, i);
+        if (f->cls == SH_MB_CLASS_REPLACE || f->cls == SH_MB_CLASS_SURFACE) uw_reach(&w, i);
     }
     for (i = 0; i < w.nenums; i++) if (!w.enums[i].ndefs) uw_reach(&w, w.enums[i].file);
     /* The md6Defs mod.json gives DOOM's player body events and tags from (animation_events, attachment_tags):

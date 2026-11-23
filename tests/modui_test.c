@@ -1458,6 +1458,83 @@ int main(int argc, char **argv)
     sh_modmanifest_reset();
     g_placed_count = -1;
 
+    printf("-- Update: a map's pinned row of an installed mod moves to the installed version (D23), or is refused (D23a)\n");
+    {
+        static const char UNIT[] = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        sh_modmanifest_list prow;
+        sh_modmanifest_row pr;
+        const char *roots[1] = { "entities/imp_copy" }, *units[1] = { UNIT };
+        char err[256], *ptext, *ploaded;
+        size_t ptl = 0, pll = 0;
+        sh_modmanifest_list now;
+        int marks;
+        memset(&prow, 0, sizeof prow);
+        memset(&pr, 0, sizeof pr);
+        strcpy_s(pr.salt, sizeof pr.salt, "alexrimp");
+        sh_modmanifest_row_set_name(&pr, "R2 Imp copy");
+        pr.size = 42;
+        CHECK(sh_modmanifest_row_pin(&pr, roots, units, 1));
+        CHECK(sh_modmanifest_list_add(&prow, &pr));
+        ptext = sh_modmanifest_write(MAP, sizeof MAP - 1, &prow, &ptl, err, sizeof err);
+        CHECK(ptext != NULL);
+        sh_modmanifest_row_free(&pr);
+        sh_modmanifest_list_free(&prow);
+        if (ptext) {
+            g_placed[0] = "mods/alexrimp/imp_copy";
+            g_placed_count = 1;
+            g_map_on = 1;
+            open_test_map();
+            ploaded = sh_modmanifest_prepare_load(ptext, ptl, &pll);
+            if (ploaded) HeapFree(GetProcessHeap(), 0, ploaded);
+            memset(&now, 0, sizeof now);
+            CHECK(sh_modmanifest_current(&now) == 1 && now.rows[0].pinned);
+            sh_modmanifest_list_free(&now);
+            /* The row is pinned and a root build of its salt is installed: the map row offers the update. */
+            doc = list_doc();
+            CHECK(has(doc, "\"update\":\"This map uses another version of R2 Imp copy than the one you have.\""));
+            CHECK(doc_prose_ok(doc));
+            free(doc);
+            /* The installed version lacks an object the map places: refused, nothing moves. */
+            g_placed[0] = "mods/alexrimp/imp_copy";
+            g_placed[1] = "mods/alexrimp/no_such_object";
+            g_placed_count = 2;
+            doc = run_doc(SH_MODS_ACT_MAP_UPDATE, "alexrimp");
+            CHECK(has(doc, "\"ok\":false,\"message\":\"R2 Imp copy was not updated: no_such_object is not in the version "
+                           "you have installed.\""));
+            free(doc);
+            memset(&now, 0, sizeof now);
+            CHECK(sh_modmanifest_current(&now) == 1 && now.rows[0].pinned);
+            sh_modmanifest_list_free(&now);
+            /* Nothing to update for a salt the map does not hold pinned, or with no salt. */
+            doc = run_doc(SH_MODS_ACT_MAP_UPDATE, "zzothers");
+            CHECK(has(doc, "\"ok\":false,\"message\":\"This map has no other version of that mod to update.\""));
+            free(doc);
+            doc = run_doc(SH_MODS_ACT_MAP_UPDATE, "");
+            CHECK(has(doc, "\"ok\":false,\"message\":\"Select a mod first.\""));
+            free(doc);
+            /* The installed version carries everything the map places: the row becomes local, the map is marked
+             * modified, and the sentence says so. */
+            g_placed[0] = "mods/alexrimp/imp_copy";
+            g_placed_count = 1;
+            marks = g_marks;
+            doc = run_doc(SH_MODS_ACT_MAP_UPDATE, "alexrimp");
+            CHECK(has(doc, "\"ok\":true,\"message\":\"This map now uses the version of R2 Imp copy you have installed for "
+                           "its object.\""));
+            free(doc);
+            CHECK(g_marks == marks + 1);
+            memset(&now, 0, sizeof now);
+            CHECK(sh_modmanifest_current(&now) == 1 && !now.rows[0].pinned && !strcmp(now.rows[0].build, hash1));
+            sh_modmanifest_list_free(&now);
+            doc = list_doc();
+            CHECK(!has(doc, "\"update\":\"This map uses another version"));   /* nothing left to update */
+            free(doc);
+            HeapFree(GetProcessHeap(), 0, ptext);
+        }
+        g_placed_count = -1;
+        g_map_on = 0;
+        sh_modmanifest_reset();
+    }
+
     printf("-- the map scope: an own map follows the root's build, a stranger's map keeps its row's\n");
     {
         /* The root holds alexrimp at hash1; the map's row names a build nothing holds. */
