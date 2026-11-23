@@ -60,7 +60,12 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
 - `modmanifest_test.c` checks the `smpmod1.` manifest rows: grammar, the value
   round trip, rows appended last and stripped with `allocCount` restored, the
   per-row budget that keeps them out of the 4 KiB playtest message, placed names,
-  the save closure and the load step against serving-layer doubles.
+  the save closure and the load step against serving-layer doubles, and the
+  spawn-type pins a save keeps for a row whose content is not here (a local
+  row's stand-ins, a pinned row composed with stand-ins) or gives up when the
+  listing decides. `modregistry_test.c` runs the same rule through real registry
+  generation: a two-port mod saved with its folder absent while another port
+  is added, then reopened with the folder back, keeps every type.
 - `modpublished_test.c` checks the published-map and offline-play gates with
   the real manifest and engine doubles: return-address classification, vanilla
   and installed maps passing through, the hold and the question on a later

@@ -55,7 +55,10 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int count)
     return count;
 }
 
-typedef struct installed { const char *salt, *name, *version, *hash; unsigned long long size; const char *names[4]; } installed;
+/* `place`: where the build serves from (modserve.h sh_modserve_bundle_ref): NULL or "" a local root folder, else the
+ * content cache (a composition, a local row's stand-ins). */
+typedef struct installed { const char *salt, *name, *version, *hash; unsigned long long size; const char *names[4];
+                           const char *place; } installed;
 static const installed *g_installed;
 static size_t g_installed_count;
 static int g_lookup_calls;
@@ -87,6 +90,7 @@ int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref 
     if (out) {
         strcpy_s(out->hash, sizeof out->hash, g_installed[b].hash);
         out->size = g_installed[b].size;
+        out->place = _strdup(g_installed[b].place ? g_installed[b].place : "");
     }
     return 1;
 }
@@ -1295,6 +1299,112 @@ static void version_rule(void)
     g_installed_count = 0;
 }
 
+/* A local row whose folder is absent is served by its stand-ins (D6a, a composition of no units in the content
+ * cache): a save keeps the type pins and the size it was loaded with (R-LV9: the row came back with the stand-ins'
+ * size and no choices). With the folder here, the listing decides the pins: a demon it types keeps its pin, one it
+ * does not (the folder no longer ports it) gives it up. */
+#define PIN_IMP "\"spawnAIType_t/19/mods/alexpink/single_imp\":\"alexpink\""
+
+/* A pinned row composed with stand-ins (its unit not here, D60) keeps its pin the same way; composed whole, the listing
+ * decides; unbound (no cache), a pinned row counts as whole. */
+static int g_whole_answer;
+static int whole_stub(const char *build) { (void)build; return g_whole_answer; }
+static void standin_pins_pinned(void)
+{
+    static const char PMAP[] = "{\"entities\":[" VR_ENT("imp") "],\"instances\":[],"
+        "\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"alexpink\","
+        "\"name\":\"Eternal Demons\",\"size\":42,\"objects\":{\"entities/imp\":\"" HASH_B "\"},"
+        "\"choices\":{\"spawnAIType_t/19/mods/alexpink/single_imp\":\"alexpink\"}}]}}";
+    static installed comp[1];
+    sh_modmanifest_list cur;
+    char *engine, *saved;
+    size_t en = 0, slen = 0;
+    printf("-- a pinned row composed with stand-ins keeps its pins at a save\n");
+    sh_modmanifest_reset();
+    g_installed = NULL; g_installed_count = 0;
+    engine = engine_text(sh_modmanifest_prepare_load(PMAP, sizeof PMAP - 1, &en), PMAP, sizeof PMAP - 1, &en);
+    memset(&cur, 0, sizeof cur);
+    CHECK(sh_modmanifest_current(&cur) == 1 && cur.rows[0].pinned);
+    strcpy_s(g_vr_comp, sizeof g_vr_comp, cur.count ? cur.rows[0].build : HASH_B);
+    sh_modmanifest_list_free(&cur);
+    comp[0] = (installed){ "alexpink", "Eternal Demons", "1", g_vr_comp, 100, { "mods/alexpink/imp", NULL, NULL, NULL }, "content" };
+    g_installed = comp; g_installed_count = 1;
+    g_npins = 0;
+    sh_modmanifest_set_whole(whole_stub);
+    g_whole_answer = 0;
+    saved = engine ? sh_modmanifest_on_save(engine, en, &slen) : NULL;
+    CHECK(saved && strstr(saved, PIN_IMP) && strstr(saved, "\"objects\""));
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    g_whole_answer = 1;
+    saved = engine ? sh_modmanifest_on_save(engine, en, &slen) : NULL;
+    CHECK(saved && !strstr(saved, "spawnAIType_t/") && strstr(saved, "\"objects\""));
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    sh_modmanifest_set_whole(NULL);
+    saved = engine ? sh_modmanifest_on_save(engine, en, &slen) : NULL;
+    CHECK(saved && !strstr(saved, "spawnAIType_t/"));
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    if (engine) HeapFree(GetProcessHeap(), 0, engine);
+    g_installed = NULL; g_installed_count = 0;
+    sh_modmanifest_reset();
+}
+
+static void standin_pins(void)
+{
+    static const installed STANDIN[] = {
+        { "alexpink", "Pink Imp", "", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", 462,
+          { "mods/alexpink/imp", "mods/alexpink/skin", NULL, NULL }, "content" },
+    };
+    sh_modmanifest_row row;
+    sh_modmanifest_list rows;
+    char err[192], *written, *engine, *saved;
+    size_t wlen, elen = 0, slen = 0;
+    printf("-- a local row whose folder is absent keeps its pins and size at a save\n");
+    memset(&rows, 0, sizeof rows);
+    make_row(&row, "alexpink", "", HASH_A, 185964430);
+    sh_modmanifest_row_add_name(&row, "mods/alexpink/imp");
+    sh_modmanifest_row_add_name(&row, "mods/alexpink/skin");
+    row.choices = _strdup("spawnAIType_t/19/mods/alexpink/single_imp\talexpink\n");
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    sh_modmanifest_row_free(&row);
+    written = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &wlen, err, sizeof err);
+    sh_modmanifest_list_free(&rows);
+    CHECK(written && strstr(written, PIN_IMP) && strstr(written, "\"local\":true"));
+    if (!written) return;
+
+    /* The folder absent: the closure names the stand-ins' build (462 bytes), the listing types nothing. */
+    sh_modmanifest_reset();
+    g_installed = STANDIN; g_installed_count = 1;
+    g_npins = 0;
+    engine = engine_text(sh_modmanifest_prepare_load(written, wlen, &elen), written, wlen, &elen);
+    saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
+    CHECK(saved && strstr(saved, PIN_IMP) && strstr(saved, "\"size\":185964430") && strstr(saved, "\"local\":true"));
+    if (saved && !strstr(saved, PIN_IMP)) printf("%s\n", saved);
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    /* Saved again in that session: the same. */
+    saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
+    CHECK(saved && strstr(saved, PIN_IMP) && strstr(saved, "\"size\":185964430"));
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+
+    /* The folder here and the listing types the imp: its pin, the folder's size. */
+    g_installed = INSTALLED; g_installed_count = 1;
+    g_pin_salt[0] = "alexpink"; g_pin_slot[0] = "spawnAIType_t/19/mods/alexpink/single_imp";
+    g_npins = 1;
+    saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
+    CHECK(saved && strstr(saved, PIN_IMP) && strstr(saved, "\"size\":11782"));
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    /* The folder here and no longer porting the imp: the pin goes. */
+    g_npins = 0;
+    saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
+    CHECK(saved && !strstr(saved, "spawnAIType_t/") && strstr(saved, "\"size\":11782"));
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+
+    if (engine) HeapFree(GetProcessHeap(), 0, engine);
+    HeapFree(GetProcessHeap(), 0, written);
+    g_installed = NULL; g_installed_count = 0;
+    sh_modmanifest_reset();
+    standin_pins_pinned();
+}
+
 int main(void)
 {
     printf("modmanifest_test\n");
@@ -1313,6 +1423,7 @@ int main(void)
     mod_json();
     map_level();
     choices();
+    standin_pins();
     version_rule();
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;

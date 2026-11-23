@@ -4515,7 +4515,15 @@ map's choices).
   `mm_choices_save`, from `sh_modserve_spawn_pins`); a load gives that bit to
   that encounter's demon first while it is free, and the other demons take the
   lowest free ones. So a mask the map saved (the AI Filter's, below) keeps
-  meaning the same demon whatever other mods are installed or removed.
+  meaning the same demon whatever other mods are installed or removed. A row
+  whose content is not here (a local row whose folder is absent and stands in,
+  a pinned row composed with stand-ins: `sh_modmanifest_set_whole`) keeps the
+  pins it was loaded with at a save, since the listing served its stand-ins and
+  cannot say its demons' types; a demon the listing types wins, and a present
+  folder's demon the listing no longer types gives its pin up. While the
+  content is absent, the conductor keeps those pins' types from the listed
+  demons as long as a free type is left, so a port added meanwhile does not
+  take a type the map's filters name.
 - **Spawn types compose.** An encounter member's `memberType` is a set of
   flags: when several sources set one member (or one `memberList` whose
   statements differ only in `memberType` values), the values compose as the
