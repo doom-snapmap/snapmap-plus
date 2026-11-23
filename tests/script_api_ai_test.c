@@ -2553,6 +2553,44 @@ static void test_release_and_anim_variable(void)
     }
 }
 
+/* The focus guard (R-LV8 lv8vk18: "has an NaN focus point!" every frame): an entity at no point of the world, or the
+ * demon itself, is never handed to the engine as a focus; the aim focus is cleared and the call answers false. */
+static void test_focus_guard(void)
+{
+    static const float bad[3][3] = { { NAN, 0, 0 }, { 0, INFINITY, 0 }, { 0, 0, 2e19f } };
+    const char *log;
+    int i;
+    printf("-- focus guard: no entity focus at a NaN, infinite or absurd point, none on the demon itself\n");
+    CHECK(start(
+        "api = 1\n"
+        "on.think('ai/brute', function(self)\n"
+        "  print('focus ' .. tostring(self:focus(ent(2), 'BEST')) .. ' ' .. tostring(self:focus({x = 1, y = 2, z = 3}))\n"
+        "        .. ' ' .. tostring(self:focus(nil)) .. ' ' .. tostring(self:focus(self)))\n"
+        "end)\n"));
+    g_events[0] = 0;
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "focus true true true false\n") != NULL);
+    CHECK(strstr(g_events, "1:setFocus(e2,1,1,10)\n") != NULL && strstr(g_events, "setFocus(e1") == NULL);
+    sh_script_map_end();
+    for (i = 0; i < 3; i++) {
+        CHECK(start(
+            "api = 1\n"
+            "on.think('ai/brute', function(self)\n"
+            "  print('bad ' .. tostring(self:focus(ent(2), 'BEST')))\n"
+            "  self:aim_at(ent(2))\n"
+            "  self:face(ent(2))\n"
+            "end)\n"));
+        memcpy(g_ent[2].origin, bad[i], sizeof bad[i]);   /* after start, which sets the world up */
+        g_events[0] = 0;
+        tick();
+        CHECK(strstr(log_of("aaaaaaaa"), "bad false\n") != NULL);
+        CHECK(strstr(g_events, "setFocus") == NULL && strstr(g_events, "1:clearAimFocus()\n") != NULL);
+        if (g_fail) printf("focus guard events:\n%s", g_events);
+        sh_script_map_end();
+    }
+}
+
 static void test_relations(void)
 {
     const char *log;
@@ -2641,6 +2679,7 @@ int main(int argc, char **argv)
     test_snapmap_order();
     test_release_and_anim_variable();
     test_relations();
+    test_focus_guard();
     test_brain_refusals();
     test_fire_calls();
     test_fire_refusals();

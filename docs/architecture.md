@@ -2839,7 +2839,12 @@ is touched, and a removed demon answers nil.
   test, the fire control's +0x27 byte), `tracking` and `body_rotation`;
   `focus(entity | position | nil)` sets the aim focus (`setFocus` for an
   entity, the set-focus-to-position call for a point, `clearAimFocus` for nil;
-  `aim_at` and `aim_point` are the same two orders); `tracking([on])` and
+  `aim_at` and `aim_point` are the same two orders; an entity whose origin is
+  not a finite point within +-1e7, or the demon itself, is never handed to the
+  engine: the aim focus is cleared and `focus` answers false, since the
+  engine's focus update, VK 0x1404C78C0 / GL 0x1404C6290, checks its input for NaN only and an
+  infinite or absurd point prints "has an NaN focus point!" every frame);
+  `tracking([on])` and
   `body_rotation([on])` are the `enableHeadTracking` and `enableBodyRotation`
   switches the aim point and the turn in place need. `hold([turn])` stands
   the demon the engine's way: the engine's `ClearMove` (VK 0x1404EA6F0, on the
@@ -3042,7 +3047,9 @@ is touched, and a removed demon answers nil.
   0x141302930: every respect, every emotion, every awareness), playersOnly and
   noPlayers (a bot is a player), filterOutOffLimits, the 10,000-unit range of
   GetRelations (VK 0x1404AAA30), and the pick: the nearest of the most hostile
-  emotion present. `enemy_snapmap` gives a demon that holds no enemy in 2016's
+  emotion present, its distance squared in a float against FLT_MAX as the
+  engine measures it, so a row with no range whose entity stands at no
+  measurable point counts as a relation but is never picked. `enemy_snapmap` gives a demon that holds no enemy in 2016's
   combat band (behavior_shared's: EMOTION_DESTROY_AT_ALL_COSTS to
   EMOTION_DISLIKE at AIAWARE_CONFIRMED) that pick, and a source game's brain
   evaluates its own conditions with it; nothing in the SDK reads a team or lists

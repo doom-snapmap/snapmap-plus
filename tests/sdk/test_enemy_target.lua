@@ -89,6 +89,27 @@ do
   check("holds: nothing held without an enemy", not T.holds(A, me, nil, T.COMBAT))
 end
 
+-- an entity at no measurable point (R-LV8 lv8vk18: a ported demon's focus on its pick printed "has an NaN focus
+-- point!" every frame): 2016 measures the pick's square in a float against FLT_MAX, so such a row counts as a
+-- relation but is never picked, and a bucket holding only such rows gives no pick at all
+do
+  local player = ent(800, true)
+  for _, where in ipairs({ { "an infinite point", math.huge }, { "a NaN point", 0 / 0 }, { "a point whose square overflows a float", 2e19 } }) do
+    local odd = ent(where[2])
+    rows = { row(odd, "destroy_at_all_costs", nil, nil, true), row(player, "destroy") }
+    local list, pick = T.available(A, me, {})
+    check("an entity at " .. where[1] .. " counts as a relation but is never picked", #list == 2 and pick == nil)
+    rows = { row(odd, "destroy", nil, nil, true), row(player, "destroy") }
+    local _, p2 = T.available(A, me, {})
+    check("a measurable row of the same emotion is picked over one at " .. where[1], p2 == player)
+  end
+  rows = { row(ent(1e18), "destroy", nil, nil, true) }
+  local _, far = T.available(A, me, {})
+  check("a far row whose float square still fits is picked, as the engine picks it", far ~= nil)
+  check("measurable: finite and its square below FLT_MAX", T.measurable(800) and not T.measurable(math.huge)
+        and not T.measurable(0 / 0) and not T.measurable(nil) and not T.measurable(2e19))
+end
+
 do
   rows = {}
   local none = {}

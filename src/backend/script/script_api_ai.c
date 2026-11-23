@@ -581,6 +581,23 @@ static void *other_entity(lua_State *L, int idx, const char *call)
     return h ? g_engine->entity((sh_script_handle)h) : NULL;
 }
 
+/* The focus guard (ai:focus, ai:aim_at, ai:face on an entity): an entity is
+ * handed to the engine as a focus only when its origin is a point of the world
+ * (finite, within the +-1e7 a position must lie in) and it is not the demon
+ * itself. DOOM 2016's focus update (idFocusInfo::Update, VK 0x1404C78C0 and
+ * 0x1404C9380, GL 0x1404C6290 and 0x1404C7D50) checks the point it is given
+ * for NaN only; an infinite or absurd
+ * point (or the demon's own, a zero direction) reaches its joint chain, which
+ * then prints "has an NaN focus point!" every frame the focus is kept. */
+static int focus_entity_ok(void *ai, void *ent)
+{
+    float o[3];
+    int k;
+    if (ent == ai || !g_engine->origin(ent, o)) return 0;
+    for (k = 0; k < 3; k++) if (o[k] != o[k] || o[k] > 1e7f || o[k] < -1e7f) return 0;
+    return 1;
+}
+
 /* A target at `idx`: an entity (its origin) or a position. Returns 1 with
  * the point, 0 when the entity was removed. *ent_out gets the entity. */
 static int target_point(lua_State *L, int idx, const char *call, float out[3], void **ent_out)
@@ -873,6 +890,7 @@ static int l_face(lua_State *L)
     ai = self_ai(L, "face", &h);
     if (!ai) return 0;
     if (is_ent && !(ent = other_entity(L, 2, "face"))) return 0;
+    if (ent && !focus_entity_ok(ai, ent)) return 0;   /* the focus guard: l_focus */
     if (ent && travel > 0) {
         if (!g_engine->origin(ent, p)) return 0;
         ent = NULL;
@@ -941,7 +959,7 @@ static int l_aim_at(lua_State *L)
     if (!ai) return 0;
     if (!lua_isnoneornil(L, 2) && !(ent = other_entity(L, 2, "aim_at"))) return 0;
     if (!park(ai, h)) return 0;
-    if (ent) {
+    if (ent && focus_entity_ok(ai, ent)) {   /* the focus guard: l_focus */
         sh_ai_arg a[4];
         a[0] = arg_e(ent); a[1] = arg_b(1); a[2] = arg_b(1); a[3] = arg_i(SH_AI_AIMPOINT_CENTER);
         run(ai, SH_AI_EV_SET_FOCUS, a, 4, NULL);
@@ -2262,7 +2280,9 @@ static int l_muzzle_on_target(lua_State *L)
  * enemy and DOOM Eternal's take); a position is a fixed aim point (the
  * game's set-focus-to-position); nil clears the aim focus. ai:aim_at
  * (entity or nil) and ai:aim_point (position or nil) are the same two
- * orders under their older names. */
+ * orders under their older names. An entity that fails the focus guard
+ * (focus_entity_ok) clears the aim focus instead, and the call answers false;
+ * true when the focus was handed. */
 static int l_focus(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -2289,6 +2309,11 @@ static int l_focus(lua_State *L)
     if (!ai) return 0;
     if (kind == 1 && !(ent = other_entity(L, 2, "focus"))) return 0;
     if (!park(ai, h)) return 0;
+    if (kind == 1 && !focus_entity_ok(ai, ent)) {
+        run(ai, SH_AI_EV_CLEAR_AIM_FOCUS, NULL, 0, NULL);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
     if (kind == 1) {
         sh_ai_arg a[4];
         a[0] = arg_e(ent); a[1] = arg_b(1); a[2] = arg_b(1); a[3] = arg_i(aim);
@@ -2298,7 +2323,8 @@ static int l_focus(lua_State *L)
     } else {
         run(ai, SH_AI_EV_CLEAR_AIM_FOCUS, NULL, 0, NULL);
     }
-    return 0;
+    lua_pushboolean(L, 1);
+    return 1;
 }
 
 /* ai:hold([turn]): stand the demon still the engine's way. Its pending move
