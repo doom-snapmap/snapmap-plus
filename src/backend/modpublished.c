@@ -37,7 +37,6 @@
 #include "plain_reason.h"
 #include "modmanifest.h"
 #include "modserve.h"
-#include "map_carrier.h"
 #include "modlobby.h"   /* the state codes a lobby joiner sends its host */
 #include "../common/text.h"
 
@@ -121,7 +120,6 @@ typedef struct pub_record {
     unsigned long sequence;
     unsigned long frame;      /* g_frame when it was made: a gate uses only a record of its own frame */
     int repeat;               /* the held map parsed again: this launch is held with the running hold */
-    char *place;              /* the place the text records (malloc'd; NULL or "" for none) */
 } pub_record;
 
 static pub_record g_record;
@@ -148,82 +146,34 @@ static void pub_notes_gated(void)
 static volatile LONG g_parse_sequence;
 static volatile LONG g_resuming;       /* our own parse and original call are running */
 
-/* The asset rule (modserve.h sh_modserve_row_served_in): a row is served
- * when the build the one place resolver names for it in `place` provides
- * every name it lists. `subject` is the word the cause uses ("map",
- * "prefab"). */
-static int pub_row_state(const sh_modmanifest_row *row, const char *place, const char *subject, char **cause)
+/* The asset rule (modserve.h sh_modserve_row_served_for): a row is served
+ * when the build the row resolver names for it provides every name it lists.
+ * `subject` is the word the cause uses ("map", "prefab"). */
+static int pub_row_state(const sh_modmanifest_row *row, const char *subject, char **cause)
 {
     if (cause) *cause = NULL;
-    return g_ops.row_state ? g_ops.row_state(g_ops.context, row, place ? place : "", subject, cause)
-                           : SH_MODPUB_ROW_MISSING;
+    return g_ops.row_state ? g_ops.row_state(g_ops.context, row, subject, cause) : SH_MODPUB_ROW_MISSING;
 }
 
-static int pub_row_served(const sh_modmanifest_row *row, const char *place)
+static int pub_row_served(const sh_modmanifest_row *row)
 {
     /* A pinned row whose composition stands in for objects is fetched again at a play (modcache.h). */
     if (row && row->pinned && g_ops.content_complete && !g_ops.content_complete(g_ops.context, row)) return 0;
-    return pub_row_state(row, place, NULL, NULL) == SH_MODPUB_ROW_SERVED;
+    return pub_row_state(row, NULL, NULL) == SH_MODPUB_ROW_SERVED;
 }
 
-static size_t pub_count_missing(const sh_modmanifest_list *rows, const char *place)
+static size_t pub_count_missing(const sh_modmanifest_list *rows)
 {
     size_t missing = 0;
     for (size_t i = 0; i < rows->count; i++)
-        if (!pub_row_served(&rows->rows[i], place)) missing++;
+        if (!pub_row_served(&rows->rows[i])) missing++;
     return missing;
-}
-
-/* The place `text` records (map_carrier.h), as a place ("maps\<segment>"),
- * malloc'd: "" when it records none or one that is not a place; NULL only
- * when memory runs out. */
-static char *pub_text_place(const char *text, size_t length)
-{
-    char *segment = NULL, *out = NULL;
-    if (text && length && sh_carrier_place(text, length, &segment) == 1 && g_ops.place_norm &&
-        !g_ops.place_norm(g_ops.context, segment, &out)) {
-        free(out);
-        out = NULL;
-    }
-    free(segment);
-    return out ? out : sh_text("");
-}
-
-/* The place the next launch serves from (sh_modpub_launch_place), set by the
- * gate or hold that let its map through, and made the loaded map's now. */
-static char *g_launch_place;
-static int g_launch_set;
-
-static void pub_place_decided(const char *place)
-{
-    free(g_launch_place);
-    g_launch_place = sh_text(pub_s(place));
-    g_launch_set = 1;
-    if (g_ops.place_set) g_ops.place_set(g_ops.context, pub_s(g_launch_place));
-}
-
-/* A gate decided the place of the map whose parse it took: the parse could
- * not know it (a published read's place is pending, rawmap.c), so the loaded
- * map's rows are listed and activated again there (rows_resolve). */
-static void pub_place_decided_load(const char *place)
-{
-    pub_place_decided(place);
-    if (g_ops.rows_resolve) (void)g_ops.rows_resolve(g_ops.context);
-}
-
-int sh_modpub_launch_place(char **out)
-{
-    int set = g_launch_set;
-    if (out) *out = sh_text(set ? pub_s(g_launch_place) : "");
-    g_launch_set = 0;
-    return set;
 }
 
 static void pub_record_clear(pub_record *r)
 {
     sh_modmanifest_list_free(&r->rows);
     free(r->text);
-    free(r->place);
     memset(r, 0, sizeof(*r));
 }
 
@@ -234,7 +184,6 @@ static void pub_record_clear(pub_record *r)
 
 typedef struct pub_seen {
     char *id, *revision;                 /* malloc'd */
-    char *place;                         /* the place its gate decided (malloc'd) */
     sh_modmanifest_list rows;
     unsigned long stamp;
 } pub_seen;
@@ -244,7 +193,6 @@ static void pub_seen_clear(pub_seen *slot)
     sh_modmanifest_list_free(&slot->rows);
     free(slot->id);
     free(slot->revision);
-    free(slot->place);
     memset(slot, 0, sizeof(*slot));
 }
 
@@ -268,7 +216,7 @@ static pub_seen *pub_seen_find(const char *id, const char *revision)
     return NULL;
 }
 
-static void pub_seen_note(const char *id, const char *revision, const char *place, const sh_modmanifest_list *rows)
+static void pub_seen_note(const char *id, const char *revision, const sh_modmanifest_list *rows)
 {
     pub_seen *slot;
     if (!id || !id[0] || !revision) return;
@@ -283,8 +231,7 @@ static void pub_seen_note(const char *id, const char *revision, const char *plac
     pub_seen_clear(slot);
     slot->id = sh_text(id);
     slot->revision = sh_text(revision);
-    slot->place = sh_text(pub_s(place));
-    if (!slot->id || !slot->revision || !slot->place || (rows && !pub_list_copy(&slot->rows, rows))) {
+    if (!slot->id || !slot->revision || (rows && !pub_list_copy(&slot->rows, rows))) {
         pub_seen_clear(slot);
         return;
     }
@@ -296,7 +243,6 @@ static void pub_seen_note(const char *id, const char *revision, const char *plac
 typedef struct pub_job {
     struct pub_job *next;
     size_t count;
-    char *place;                       /* where the fetch installs: the map's place, "" the root (malloc'd) */
     char (*hashes)[SH_MODMANIFEST_HASH_CAP];
     char (*salts)[SH_MODMANIFEST_SALT_CAP];
     char **names;                        /* the row's name, else its salt (malloc'd, count of them) */
@@ -318,7 +264,6 @@ static void pub_job_free(pub_job *job)
     free(job->salts);
     if (job->names) for (size_t i = 0; i < job->count; i++) free(job->names[i]);
     free(job->names);
-    free(job->place);
     free(job);
 }
 
@@ -348,7 +293,7 @@ static void pub_job_main(void *context)
         strcpy_s(row.salt, sizeof row.salt, job->salts[i]);
         strcpy_s(row.build, sizeof row.build, job->hashes[i]);
         row.name = job->names[i];   /* borrowed: the row is not freed */
-        rc = g_ops.fetch_for ? g_ops.fetch_for(g_ops.context, &row, job->place, pub_progress, &job->cancel) : -1;
+        rc = g_ops.fetch_for ? g_ops.fetch_for(g_ops.context, &row, pub_progress, &job->cancel) : -1;
         if (rc != 0) { job->failed_index = (int)i; job->failed_code = rc; break; }
     }
     g_running_job = NULL;
@@ -376,7 +321,6 @@ typedef struct pub_hold {
     unsigned long long token;
     void *metadata;                      /* owned copy, completions only */
     char *id, *revision;                 /* malloc'd ("" for none) while a hold runs */
-    char *place;                         /* the map's place ("" the root): rows resolve and fetch there (malloc'd) */
     char *text;                          /* owned, completions and local play */
     size_t length;
     sh_modmanifest_list rows;
@@ -571,7 +515,6 @@ static void pub_hold_free(void)
     free(h->missing);
     free(h->id);
     free(h->revision);
-    free(h->place);
     sh_modmanifest_list_free(&h->rows);
     memset(h, 0, sizeof(*h));
 }
@@ -615,11 +558,6 @@ int sh_modpublished_holding(void)
     return g_hold.state != HOLD_IDLE;
 }
 
-int sh_modpublished_resuming(void)
-{
-    return InterlockedCompareExchange(&g_resuming, 0, 0) != 0;
-}
-
 void sh_modpublished_parse_seen(int kind, const char *text, void *out_map, int parsed)
 {
     sh_modmanifest_list rows;
@@ -656,11 +594,9 @@ void sh_modpublished_parse_seen(int kind, const char *text, void *out_map, int p
     g_record.valid = 1;
     if (!parsed || !sh_modmanifest_current(&rows)) { sh_modmanifest_list_free(&rows); return; }
     g_record.rows = rows;
-    g_record.place = text ? pub_text_place(text, strlen(text)) : NULL;
-    g_record.missing = pub_count_missing(&g_record.rows, pub_s(g_record.place));
+    g_record.missing = pub_count_missing(&g_record.rows);
     /* The text is kept for every map with rows: the gate that takes the
-     * parse decides the map's place, in which a row the parse found served
-     * may be missing. */
+     * parse counts again, and a hold resumes with it. */
     if (text) {
         size_t length = strlen(text);
         g_record.text = malloc(length + 1);
@@ -699,10 +635,9 @@ static int pub_is_launch(int hook)
 }
 
 /* Build the hold from rows (copied) and, when given, the record's text
- * (moved). `place` is the map's: its rows resolve there and its fetches
- * install there. */
+ * (moved). */
 static int pub_hold_begin(int hook, void *owner, const void *metadata, void *extra, const char *id,
-                          const char *revision, const char *place, const sh_modmanifest_list *rows, pub_record *record)
+                          const char *revision, const sh_modmanifest_list *rows, pub_record *record)
 {
     pub_hold *h = &g_hold;
     if (h->state != HOLD_IDLE) pub_abandon("a newer map launch replaced it");
@@ -710,9 +645,8 @@ static int pub_hold_begin(int hook, void *owner, const void *metadata, void *ext
     if (!pub_list_copy(&h->rows, rows)) goto nomem;
     h->missing = calloc(rows->count ? rows->count : 1, sizeof(*h->missing));
     if (!h->missing) goto nomem;
-    if (!(h->place = sh_text(pub_s(place)))) goto nomem;
     for (size_t i = 0; i < h->rows.count; i++) {
-        if (pub_row_served(&h->rows.rows[i], h->place)) continue;
+        if (pub_row_served(&h->rows.rows[i])) continue;
         h->missing[h->missing_count++] = i;
         h->missing_bytes += h->rows.rows[i].size;
     }
@@ -740,7 +674,7 @@ static int pub_hold_begin(int hook, void *owner, const void *metadata, void *ext
     /* Each row the hold asks for, as the asset rule names it. */
     for (size_t i = 0; i < h->missing_count; i++) {
         char *cause = NULL;
-        (void)pub_row_state(&h->rows.rows[h->missing[i]], h->place, pub_thing(hook), &cause);
+        (void)pub_row_state(&h->rows.rows[h->missing[i]], pub_thing(hook), &cause);
         if (cause && cause[0]) { pub_print(cause); pub_logf("MODS: %s", cause); }
         free(cause);
     }
@@ -750,20 +684,28 @@ nomem:
     return -1;
 }
 
-/* The player turned off "Play maps whose mods include scripts": a map that
- * arrived with its mods (it has a place; the player's own maps have none)
- * whose builds carry scripts is not loaded, however its mods got here. The
- * launch is refused with the setting's sentence. 1 when refused. */
-static int pub_scripts_off(int hook, const char *place, const sh_modmanifest_list *rows)
+/* 1 when a row names units (a pinned row): content that came from elsewhere, a publish, an export, a prefab. */
+static int pub_rows_pinned(const sh_modmanifest_list *rows)
 {
-    return !pub_is_joiner(hook) && place && place[0] && rows && rows->count && g_ops.scripted_maps_allowed &&
-           !g_ops.scripted_maps_allowed(g_ops.context) && g_ops.served_scripts &&
-           g_ops.served_scripts(g_ops.context, rows, place);
+    for (size_t i = 0; rows && i < rows->count; i++) if (rows->rows[i].pinned) return 1;
+    return 0;
 }
 
-static int pub_refuse_scripts(int hook, void *owner, const char *place, const sh_modmanifest_list *rows)
+/* The player turned off "Play maps whose mods include scripts": a map whose
+ * units (its pinned rows: content that came from elsewhere; the player's own
+ * local rows never count) carry scripts is not loaded, however its content
+ * got here. The launch is refused with the setting's sentence. 1 when
+ * refused. */
+static int pub_scripts_off(int hook, const sh_modmanifest_list *rows)
 {
-    if (!pub_scripts_off(hook, place, rows)) return 0;
+    return !pub_is_joiner(hook) && pub_rows_pinned(rows) && g_ops.scripted_maps_allowed &&
+           !g_ops.scripted_maps_allowed(g_ops.context) && g_ops.served_scripts &&
+           g_ops.served_scripts(g_ops.context, rows);
+}
+
+static int pub_refuse_scripts(int hook, void *owner, const sh_modmanifest_list *rows)
+{
+    if (!pub_scripts_off(hook, rows)) return 0;
     pub_logf("MODS: %s: the map's mods include scripts and the player turned scripts off; it is not loaded",
              pub_hook_name(hook));
     if (owner && g_ops.hold_ui) g_ops.hold_ui(g_ops.context, hook, owner);
@@ -805,7 +747,7 @@ static void pub_joiner_ready(int hook, const char *item, const char *revision, i
 int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, void *extra,
                      const char *id, const char *revision)
 {
-    char *item = NULL, *rev = NULL, *title = NULL, *place = NULL;
+    char *item = NULL, *rev = NULL;
     pub_record *record = &g_record;
     int begun, passed;
     if (!g_ops_set || hook < 0 || hook >= SH_MODPUB_HOOKS || pub_is_local(hook) || pub_is_launch(hook)) return 1;
@@ -817,8 +759,8 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         /* A warm answer no gate of this process saw (the map was cached in an
          * earlier session, or by a path no gate took), or a seen map whose
          * rows are not the ones last listed and activated: the cold read
-         * runs instead, and its CacheReady gate checks the mods, decides the
-         * place and activates them, as for a first join. */
+         * runs instead, and its CacheReady gate checks the mods and
+         * activates them, as for a first join. */
         if ((!seen || (seen->rows.count && !pub_current_is(&seen->rows))) && g_ops.cold_read &&
             g_ops.cold_read(g_ops.context, owner, pub_s(id), pub_s(revision))) {
             pub_logf("MODS: lobby map '%s' revision '%s' is cached; %s, so it is read again and gated", pub_s(id),
@@ -830,13 +772,12 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
                      "so it is not gated", id ? id : "", revision ? revision : "");
             return 1;
         }
-        if (pub_refuse_scripts(hook, owner, seen->place, &seen->rows)) return 0;
-        if (!seen->rows.count || !pub_count_missing(&seen->rows, seen->place)) {
-            pub_place_decided(seen->place);
+        if (pub_refuse_scripts(hook, owner, &seen->rows)) return 0;
+        if (!seen->rows.count || !pub_count_missing(&seen->rows)) {
             pub_joiner_ready(hook, id, revision, seen->rows.count > 0);
             return 1;
         }
-        begun = pub_hold_begin(hook, owner, NULL, NULL, id, revision, seen->place, &seen->rows, NULL);
+        begun = pub_hold_begin(hook, owner, NULL, NULL, id, revision, &seen->rows, NULL);
         if (begun <= 0) {
             if (begun < 0) {
                 pub_log("MODS: the cached lobby map needs mods and could not be held; it is refused");
@@ -882,36 +823,16 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         free(item); free(rev);
         item = rev = NULL;
     }
-    if (pub_is_completion(hook) && g_ops.metadata_title &&
-        !g_ops.metadata_title(g_ops.context, metadata, &title)) {
-        free(title);
-        title = NULL;
-    }
-    /* The map's place before anything counts what is missing (DECISIONS
-     * 11): a stranger's published map is served from its item's place; a
-     * map this machine published finds its mods at the root, as the
-     * player's own maps do; a My Maps play uses the place the map records. */
-    if (pub_is_completion(hook)) {
-        /* A published item serves the builds it was published with, for every
-         * player and the author too (the owner, 2026-11-17): the author's edits
-         * reach it only by publishing again. */
-        if (record->rows.count &&
-            (!g_ops.item_place || !g_ops.item_place(g_ops.context, pub_s(title), pub_s(item), &place))) {
-            free(place);
-            place = NULL;
-        }
-    } else {
-        place = sh_text(pub_s(record->place));
-    }
-    record->missing = pub_count_missing(&record->rows, pub_s(place));
-    if (pub_is_completion(hook)) pub_seen_note(pub_s(item), pub_s(rev), pub_s(place), &record->rows);
+    /* A published item serves the units it was published with (its pinned rows), for every player and the author
+     * too (the owner, 2026-11-17): the author's edits reach it only by publishing again. The parse resolved the rows
+     * already; this counts them again in the gate's frame. */
+    record->missing = pub_count_missing(&record->rows);
+    if (pub_is_completion(hook)) pub_seen_note(pub_s(item), pub_s(rev), &record->rows);
     passed = -1;
-    if (pub_refuse_scripts(hook, owner, pub_s(place), &record->rows)) { pub_record_clear(record); passed = 0; goto out; }
+    if (pub_refuse_scripts(hook, owner, &record->rows)) { pub_record_clear(record); passed = 0; goto out; }
     if (!record->rows.count || !record->missing) {
         int rows = record->rows.count > 0;
         pub_record_clear(record);   /* consumed */
-        if (rows) pub_place_decided_load(pub_s(place));
-        else pub_place_decided(pub_s(place));
         pub_joiner_ready(hook, item, rev, rows);
         passed = 1;
         goto out;
@@ -925,7 +846,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         passed = 1;
         goto out;
     }
-    begun = pub_hold_begin(hook, owner, metadata, extra, pub_s(item), pub_s(rev), pub_s(place), &record->rows, record);
+    begun = pub_hold_begin(hook, owner, metadata, extra, pub_s(item), pub_s(rev), &record->rows, record);
     pub_record_clear(record);
     if (begun < 0) {
         /* Never hand the engine a map whose mods are absent: it ends in the
@@ -938,7 +859,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         passed = 0;
         goto out;
     }
-    if (!begun) { pub_place_decided_load(pub_s(place)); pub_joiner_ready(hook, item, rev, 1); passed = 1; goto out; }
+    if (!begun) { pub_joiner_ready(hook, item, rev, 1); passed = 1; goto out; }
     pub_logf("MODS: %s of '%s' needs %u missing mod(s) (%llu bytes); held for the player's answer",
              pub_hook_name(hook), item && item[0] ? item : "local map", (unsigned)g_hold.missing_count,
              g_hold.missing_bytes);
@@ -947,18 +868,14 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
 out:
     free(item);
     free(rev);
-    free(title);
-    free(place);
     return passed;
 }
 
 int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
 {
     pub_record *record = &g_record;
-    const char *place;
-    char *owned;
     size_t missing;
-    int begun = -1, passed, published;
+    int begun = -1, passed;
     sh_modmanifest_list rows_copy;
     memset(&rows_copy, 0, sizeof rows_copy);
     if (!g_ops_set || !pub_is_launch(hook)) return 1;
@@ -970,21 +887,12 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
     if (!record->valid || record->repeat || record->frame != g_frame || !record->rows.count) return 1;
     if (map && record->map != map) return 1;
     pub_notes_gated();
-    /* The parse no gate saw is decided in the place its map records (taken
-     * from the record, which is cleared below). */
-    owned = record->place;
-    record->place = NULL;
-    place = pub_s(owned);
-    /* A published read serves its published builds (the co-op rule, owner
-     * 2026-11-17): with no item to name its place, its rows resolve only at
-     * their own builds, never the author's root at another build. A download
-     * still lands at the root, at the row's build. */
-    published = record->kind == SH_MODPUB_PARSE_PUBLISHED_ONLINE || record->kind == SH_MODPUB_PARSE_PUBLISHED_OFFLINE;
-    if (pub_refuse_scripts(hook, NULL, place, &record->rows)) { pub_record_clear(record); passed = 0; goto out; }
-    missing = pub_count_missing(&record->rows, published && !place[0] ? SH_MODSERVE_PLACE_PUBLISHED : place);
+    /* A published read serves its published units (the co-op rule, owner 2026-11-17): its rows are pinned, and a
+     * pinned row resolves to its composition only, never the author's root at another build. */
+    if (pub_refuse_scripts(hook, NULL, &record->rows)) { pub_record_clear(record); passed = 0; goto out; }
+    missing = pub_count_missing(&record->rows);
     if (!missing) {
         pub_record_clear(record);
-        pub_place_decided_load(published && !place[0] ? SH_MODSERVE_PLACE_PUBLISHED : place);
         passed = 1;
         goto out;
     }
@@ -992,8 +900,7 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
              record->sequence, record->map, (unsigned)missing);
     if (!pub_list_copy(&rows_copy, &record->rows)) begun = -2;
     else if (hook == SH_MODPUB_LOBBY_LAUNCH)
-        begun = pub_hold_begin(hook, manager, NULL, extra, "", "", published && !place[0] ? SH_MODSERVE_PLACE_PUBLISHED : place,
-                               &record->rows, record);
+        begun = pub_hold_begin(hook, manager, NULL, extra, "", "", &record->rows, record);
     pub_record_clear(record);
     if (begun > 0) {
         pub_logf("MODS: %s needs %u missing mod(s) (%llu bytes); held for the player's answer", pub_hook_name(hook),
@@ -1002,25 +909,23 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
         passed = 0;
         goto out;
     }
-    if (begun == 0) { pub_place_decided_load(place); passed = 1; goto out; }
+    if (begun == 0) { passed = 1; goto out; }
     {
         /* An offline launch has no map object left to resume with, so nothing is fetched now. A row whose content is
          * composed with stand-ins plays (5.8: the objects that are not here stand in, and the load's one notice says
          * S2); a row with no composition at all, or one that names no unit, cannot, and the launch is refused with
          * what is missing. The engine is never handed a map whose namespaces nothing serves. */
-        const char *at = published && !place[0] ? SH_MODSERVE_PLACE_PUBLISHED : place;
         int local = 0, absent = 0;
         for (size_t i = 0; i < rows_copy.count; i++) {
             const sh_modmanifest_row *row = &rows_copy.rows[i];
-            if (pub_row_served(row, at)) continue;
-            if (row->pinned && g_ops.row_state && g_ops.row_state(g_ops.context, row, at, "map", NULL) == SH_MODPUB_ROW_SERVED)
+            if (pub_row_served(row)) continue;
+            if (row->pinned && g_ops.row_state && g_ops.row_state(g_ops.context, row, "map", NULL) == SH_MODPUB_ROW_SERVED)
                 continue;   /* composed, standing in for what is not here */
             if (row->pinned) absent++;
             else local++;
         }
         if (!local && !absent && begun < 0 && hook == SH_MODPUB_OFFLINE_LAUNCH) {
             pub_logf("MODS: the %s plays with stand-ins for the content that is not on this computer", pub_hook_name(hook));
-            pub_place_decided_load(at);
             passed = 1;
             goto out;
         }
@@ -1038,7 +943,6 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
     }
 out:
     sh_modmanifest_list_free(&rows_copy);
-    free(owned);
     return passed;
 }
 
@@ -1134,9 +1038,7 @@ static void pub_start_fetch(void)
 {
     pub_hold *h = &g_hold;
     pub_job *job = calloc(1, sizeof(*job));
-    /* A published map with no item place fetches to the root, at the row's build. */
-    const char *into = !strcmp(pub_s(h->place), SH_MODSERVE_PLACE_PUBLISHED) ? "" : pub_s(h->place);
-    if (!job || !pub_job_rows(job, h) || !(job->place = sh_text(into))) {
+    if (!job || !pub_job_rows(job, h)) {
         char line[PUB_TEXT_CAP];
         _snprintf_s(line, sizeof line, _TRUNCATE, "This %s's mods could not be downloaded: Snapmap+ ran out of memory. %s Restart DOOM and try again.",
                     pub_thing(h->hook), pub_not_done(h->hook));
@@ -1218,7 +1120,7 @@ static int pub_editor_fetch(void)
     for (size_t i = 0; i < now.count; i++)
         if (now.rows[i].pinned && !g_ops.content_complete(g_ops.context, &now.rows[i]) &&
             !sh_modmanifest_list_add(&want, &now.rows[i])) break;
-    if (want.count) begun = pub_hold_begin(SH_MODPUB_EDITOR_OPEN, NULL, NULL, NULL, "", "", "", &want, NULL) == 1;
+    if (want.count) begun = pub_hold_begin(SH_MODPUB_EDITOR_OPEN, NULL, NULL, NULL, "", "", &want, NULL) == 1;
     if (begun) pub_logf("MODS: the open map stands in for objects of %u row(s); asking the mod store for them",
                         (unsigned)g_hold.missing_count);
     sh_modmanifest_list_free(&now);
@@ -1289,7 +1191,7 @@ static void pub_finish(void)
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
         free(cause);
         cause = NULL;
-        if (pub_row_state(row, h->place, pub_thing(h->hook), &cause) == SH_MODPUB_ROW_SERVED) continue;
+        if (pub_row_state(row, pub_thing(h->hook), &cause) == SH_MODPUB_ROW_SERVED) continue;
         line = sh_textf("%s was downloaded but cannot be used.%s%s %s",
                         sh_modmanifest_row_name(row)[0] ? row->name : "The mod", cause && cause[0] ? " " : "",
                         pub_s(cause), pub_not_done(h->hook));
@@ -1300,7 +1202,7 @@ static void pub_finish(void)
     }
     free(cause);
     /* The player turned off "Play maps whose mods include scripts": content that arrived with scripts is not played. */
-    if (pub_scripts_off(h->hook, h->place, &h->rows)) {
+    if (pub_scripts_off(h->hook, &h->rows)) {
         pub_print(SH_MODUI_SCRIPTS_OFF);
         pub_drop(SH_MODUI_SCRIPTS_OFF, "the map's mods include scripts and the player turned scripts off");
         return;
@@ -1318,7 +1220,7 @@ static char *pub_content_said(void)
     return said;
 }
 
-/* The hold's mods are in place (fetched into the map's place): the load goes
+/* The hold's content is here (fetched into the content cache): the load goes
  * on. `installed` is the number of mods the fetch installed, for the log
  * line. */
 static void pub_resume(size_t installed)
@@ -1347,7 +1249,7 @@ static void pub_resume(size_t installed)
         return;
     }
     /* A joiner left the lobby to download (pub_leave_lobby): it joins again,
-     * and that join finds the mods in the map's place; its one notice says
+     * and that join finds the content in the cache; its one notice says
      * so, and what the map will play without. */
     if (h->left_lobby) {
         pub_logf("MODS: the held %s of '%s' installed %u mod(s); the joiner left the lobby to download them",
@@ -1383,9 +1285,7 @@ static void pub_resume(size_t installed)
     /* A rawmap is activated by its own parse when it opens again; activating
      * now would change what the map that is open serves. */
     if (h->hook != SH_MODPUB_RAWMAP_LOAD) {
-        /* The map's place is the loaded map's from here, and its launch's.
-         * Each row through the build that serves it there (the asset rule). */
-        pub_place_decided(h->place);
+        /* Each row through the build that serves it now (the asset rule). */
         if (g_ops.activate) (void)g_ops.activate(g_ops.context, &h->rows);
     }
 
@@ -1489,16 +1389,13 @@ char *sh_modpublished_prefab_refusal_line(const char *name, const char *const *m
     return out;
 }
 
-size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows, char **place)
+size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows)
 {
     unsigned rejected = 0;
     size_t missing;
-    char *at;
-    if (place) *place = NULL;
     if (!rows) return 0;
     memset(rows, 0, sizeof(*rows));
     if (!g_ops_set || !text || !length) return 0;
-    at = pub_text_place(text, length);
     sh_modmanifest_read(text, length, rows, &rejected);
     /* A pinned row's units are fetched into the content cache only when the cache knows the row: a rawmap's rows
      * are noted here, before its hold, as a load notes them before they resolve (R-LV2: the hold took the retired
@@ -1506,15 +1403,13 @@ size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_
     sh_modmanifest_content_for(text, length, rows);
     missing = 0;
     for (size_t i = 0; i < rows->count; i++)
-        if (!pub_row_served(&rows->rows[i], pub_s(at))) missing++;
-    if (place) *place = at;
-    else free(at);
+        if (!pub_row_served(&rows->rows[i])) missing++;
     return missing;
 }
 
-int sh_modpub_rawmap_scripts_off(const sh_modmanifest_list *rows, const char *place)
+int sh_modpub_rawmap_scripts_off(const sh_modmanifest_list *rows)
 {
-    if (!g_ops_set || !pub_scripts_off(SH_MODPUB_RAWMAP_LOAD, place, rows)) return 0;
+    if (!g_ops_set || !pub_scripts_off(SH_MODPUB_RAWMAP_LOAD, rows)) return 0;
     pub_logf("MODS: rawmap load: the map's mods include scripts and the player turned scripts off; it is not opened");
     return 1;
 }
@@ -1532,7 +1427,7 @@ static void pub_single_notice(char *notice, size_t cap, const char *cause, int h
 }
 
 /* The refusal: the notice, and one console line naming every mod. */
-static void pub_rawmap_refuse(int hook, const char *source, const char *place, const sh_modmanifest_row *const *rows,
+static void pub_rawmap_refuse(int hook, const char *source, const sh_modmanifest_row *const *rows,
                               size_t count, int unreachable, const char *why)
 {
     char notice[PUB_TEXT_CAP], *line, *head;
@@ -1545,7 +1440,7 @@ static void pub_rawmap_refuse(int hook, const char *source, const char *place, c
      * also the notice. */
     for (size_t i = 0; i < count; i++) {
         char *cause = NULL;
-        (void)pub_row_state(rows[i], g_hold.state != HOLD_IDLE ? g_hold.place : place, pub_thing(hook), &cause);
+        (void)pub_row_state(rows[i], pub_thing(hook), &cause);
         if (cause && cause[0]) {
             pub_print(cause);
             if (count == 1 && !single) { single = cause; cause = NULL; }
@@ -1584,7 +1479,7 @@ static void pub_rawmap_refuse(int hook, const char *source, const char *place, c
     else pub_notice(notice);
 }
 
-int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source, const char *place)
+int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source)
 {
     const char *name = pub_s(source);
     int begun;
@@ -1594,15 +1489,13 @@ int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source, c
         size_t n = 0;
         if (missing) {
             for (size_t i = 0; i < rows->count; i++)
-                if (!pub_row_served(&rows->rows[i], place)) missing[n++] = &rows->rows[i];
-            if (n) pub_rawmap_refuse(SH_MODPUB_RAWMAP_LOAD, name, place, missing, n, 0, "the rawmap gate is unavailable here");
+                if (!pub_row_served(&rows->rows[i])) missing[n++] = &rows->rows[i];
+            if (n) pub_rawmap_refuse(SH_MODPUB_RAWMAP_LOAD, name, missing, n, 0, "the rawmap gate is unavailable here");
             free((void *)missing);
         }
         return -1;
     }
-    /* The rawmap's place is the one its text records (its import's, for a
-     * ZIP): its rows resolve there and its fetches install there. */
-    begun = pub_hold_begin(SH_MODPUB_RAWMAP_LOAD, NULL, NULL, NULL, name, "", place, rows, NULL);
+    begun = pub_hold_begin(SH_MODPUB_RAWMAP_LOAD, NULL, NULL, NULL, name, "", rows, NULL);
     if (begun == 0) return 0;
     if (begun < 0) {
         pub_notice("This map was not loaded: Snapmap+ ran out of memory preparing its mods. Restart DOOM and open it again.");
@@ -1630,9 +1523,8 @@ int sh_modpub_prefab_hold(const sh_modmanifest_list *rows, const char *name)
     if (!rows || !rows->count) return 0;
     if (!g_ops_set) return -2;
     if (!pub_on_main()) return -1;
-    /* A prefab's mods are the player's own once placed: they install at the
-     * root (DECISIONS 12). */
-    begun = pub_hold_begin(SH_MODPUB_PREFAB_PLACE, NULL, NULL, NULL, nm, "", "", rows, NULL);
+    /* A prefab's units come into the content cache, as a map's do (D35). */
+    begun = pub_hold_begin(SH_MODPUB_PREFAB_PLACE, NULL, NULL, NULL, nm, "", rows, NULL);
     if (begun <= 0) return begun;
     (void)line;
     pub_logf("MODS: prefab '%s' needs %u missing mod(s) (%llu bytes)", nm, (unsigned)g_hold.missing_count,
@@ -1653,7 +1545,7 @@ static void pub_refuse_local(void)
     for (size_t i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
         char *cause = NULL;
-        if (row->pinned || pub_row_state(row, h->place, pub_thing(h->hook), &cause) != SH_MODPUB_ROW_INCOMPLETE ||
+        if (row->pinned || pub_row_state(row, pub_thing(h->hook), &cause) != SH_MODPUB_ROW_INCOMPLETE ||
             !cause || !cause[0]) {
             free(cause);
             continue;
@@ -1821,7 +1713,6 @@ void sh_modpub_test_reset(void)
     g_prefab_ready = NULL;
     for (size_t i = 0; i < PUB_SEEN_MAX; i++) pub_seen_clear(&g_seen[i]);
     pub_notice_clear(); g_notice_ticket = 0; g_notice_waited = 0;
-    free(g_launch_place); g_launch_place = NULL; g_launch_set = 0;
     InterlockedExchange(&g_resuming, 0);
     g_reopen_asked = 0;
 }
@@ -1842,12 +1733,10 @@ const char *sh_modpub_test_notice(void) { return g_notice ? g_notice : ""; }
 #include "../fault_shield/recovery.h"   /* shield_note_refused_load: a map the editor cannot open is sound */
 #include "modserve.h"
 #include "modstore.h"
-#include "modpublish.h" /* sh_modpublish_item_linked: an item this machine published */
 #include "modui.h"      /* sh_modui_scope_launch: a hub launch's listing */
 #include "process_heap_scope.h"
 #include "rawmap.h"     /* sh_rawmap_reopen_after_mods: a rawmap hold's resume */
 #include "commands.h"   /* sh_printf: the rawmap refusal's console line */
-#include "modclaim.h"   /* modclaim_known: an item this machine claimed */
 
 #define ENG_METADATA_SIZE  0x588   /* idPublishedMapModel; the selection record allocates 0x590 with its prefix */
 #define ENG_MAP_SIZE       0x800   /* idSnapMap: 0x770 on every native caller's stack */
@@ -2019,8 +1908,8 @@ static int eng_on_main(void *c)
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-static int eng_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char **cause)
-{ (void)c; return sh_modserve_row_served_in(row, place, subject, cause); }
+static int eng_row_state(void *c, const sh_modmanifest_row *row, const char *subject, char **cause)
+{ (void)c; return sh_modserve_row_served_for(row, subject, cause); }
 static int eng_rescan(void *c) { (void)c; return sh_modserve_index_rescan(); }
 static int eng_activate(void *c, const sh_modmanifest_list *rows) { (void)c; return sh_modmanifest_activate(rows); }
 static int eng_can_ask(void *c) { (void)c; return sh_engine_dialog_can_ask(); }
@@ -2045,12 +1934,11 @@ static int eng_worker_run(void *c, void (*job)(void *), void *ctx)
 }
 
 /* A row's units into the content cache, composed (modcache.h): what cannot be had stands in. Worker thread. */
-static int eng_fetch_for(void *c, const sh_modmanifest_row *row, const char *place, sh_modpub_progress_fn progress,
-                         volatile int *cancel)
+static int eng_fetch_for(void *c, const sh_modmanifest_row *row, sh_modpub_progress_fn progress, volatile int *cancel)
 {
     modnet_io io;
     int rc;
-    (void)c; (void)place;
+    (void)c;
     memset(&io, 0, sizeof io);
     io.cancel = (volatile long *)cancel;
     io.progress = (modnet_progress_fn)progress;
@@ -2061,43 +1949,6 @@ static int eng_fetch_for(void *c, const sh_modmanifest_row *row, const char *pla
     rc = sh_cache_prepare(row->build, &io);
     if (rc) pub_logf("MODS: the content of %s could not be prepared (%d)", pub_title(row), rc);
     return rc == MODNET_E_CANCELLED || rc == MODNET_E_NOMEM ? rc : 0;
-}
-
-/* The published metadata's title (an idStr at +0x398; the item id is at +0
- * and the revision at +0x30, as eng_metadata_ids reads them). */
-#define ENG_METADATA_TITLE 0x398
-static int eng_metadata_title(void *c, const void *metadata, char **out)
-{
-    (void)c;
-    *out = metadata ? eng_string((const uint8_t *)metadata + ENG_METADATA_TITLE) : NULL;
-    return *out && (*out)[0];
-}
-
-static int eng_own_item(void *c, const char *item)
-{
-    (void)c;
-    return item && item[0] && (modclaim_known(item) || sh_modpublish_item_linked(item));
-}
-
-/* The published item's place: the record's, else a free one its title names. */
-static int eng_item_place(void *c, const char *title, const char *item, char **out)
-{
-    sh_ms_place place;
-    (void)c;
-    *out = NULL;
-    if (item && item[0] && sh_ms_place_of(item, out, NULL)) return 1;
-    place.title = title && title[0] ? title : "map";
-    place.map_id = item && item[0] ? item : NULL;
-    /* Noted now, so the item keeps this place whatever else takes the title. */
-    return (*out = sh_ms_place_dir(&place)) != NULL && sh_ms_place_note(&place, *out);
-}
-
-static void eng_place_set(void *c, const char *place) { (void)c; (void)sh_modserve_place_set(place); }
-
-static int eng_place_norm(void *c, const char *place, char **out)
-{
-    (void)c;
-    return (*out = sh_modserve_place_norm(place)) != NULL;
 }
 
 /* A deep copy through the copy constructor the selection record uses, inside
@@ -2312,12 +2163,6 @@ static int eng_cold_read(void *manager, const char *id, const char *revision)
 static void eng_scope_play(const char *why)
 {
     __try {
-        /* The launched map's place, as its gate or hold decided it, before
-         * its serving is computed; a launch no gate decided keeps the place
-         * its parse set. */
-        char *place = NULL;
-        if (sh_modpub_launch_place(&place) && place) (void)sh_modserve_place_set(place);
-        free(place);
         (void)sh_modui_scope_launch(why);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: the launch's serving mode change faulted; the launch continues");
@@ -2400,9 +2245,9 @@ static void eng_print(void *c, const char *line) { (void)c; if (line) sh_printf(
 
 static int eng_scripted_maps_allowed(void *c) { (void)c; return sh_modui_scripted_maps_allowed(); }
 
-/* The script files of the builds serving the rows in `place`, from each
- * serving folder's mod.json. Asked only while scripts are turned off. */
-static unsigned eng_served_scripts(void *c, const sh_modmanifest_list *rows, const char *place)
+/* The script files of the compositions serving the pinned rows (the content that came from elsewhere), from each
+ * composition's mod.json. Asked only while scripts are turned off. */
+static unsigned eng_served_scripts(void *c, const sh_modmanifest_list *rows)
 {
     const char *root = sh_ms_root();
     unsigned n = 0;
@@ -2413,7 +2258,8 @@ static unsigned eng_served_scripts(void *c, const sh_modmanifest_list *rows, con
         sh_mb_bundle b;
         char *folder;
         memset(&ref, 0, sizeof ref);
-        if (!sh_modserve_row_build_in(&rows->rows[i], place, &ref) || !ref.folder || !ref.folder[0] ||
+        if (!rows->rows[i].pinned) continue;   /* the player's own local mod */
+        if (!sh_modserve_row_build(&rows->rows[i], &ref) || !ref.folder || !ref.folder[0] ||
             !(folder = sh_textf("%s\\%s", root, ref.folder))) {
             sh_modserve_bundle_ref_free(&ref);
             continue;
@@ -2431,8 +2277,6 @@ static void eng_launch_refused(void *c, int hook)
 {
     (void)c;
     __try {
-        /* The map the editor still shows finds its mods where it did. */
-        (void)sh_modserve_place_restore();
         (void)sh_modui_scope_launch_refused(pub_hook_name(hook));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: the refused launch's scope clear faulted");
@@ -2471,16 +2315,6 @@ static int eng_cold_read_op(void *c, void *owner, const char *id, const char *re
 }
 
 static void eng_scope_play_op(void *c, const char *why) { (void)c; eng_scope_play(why); }
-
-static int eng_rows_resolve(void *c)
-{
-    (void)c;
-    __try { return sh_modmanifest_place_decided(); }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        backend_log("MODS: listing the map's rows in the place its gate decided faulted");
-        return -1;
-    }
-}
 
 static int eng_content_complete(void *c, const sh_modmanifest_row *row)
 {
@@ -2536,10 +2370,9 @@ static const sh_modpub_ops ENG_OPS = {
     .fetch_for = eng_fetch_for, .metadata_copy = eng_metadata_copy, .metadata_free = eng_metadata_free,
     .metadata_ids = eng_metadata_ids, .hold_token = eng_hold_token, .owner_current = eng_owner_current,
     .host_matches = eng_host_matches, .hold_ui = eng_hold_ui, .drop_ui = eng_drop_ui, .resume = eng_resume,
-    .log = eng_log, .print = eng_print, .launch_refused = eng_launch_refused, .metadata_title = eng_metadata_title,
-    .own_item = eng_own_item, .item_place = eng_item_place, .place_set = eng_place_set, .place_norm = eng_place_norm,
+    .log = eng_log, .print = eng_print, .launch_refused = eng_launch_refused,
     .scripted_maps_allowed = eng_scripted_maps_allowed, .served_scripts = eng_served_scripts, .progress = eng_progress,
-    .refused_load = eng_refused_load, .rows_resolve = eng_rows_resolve, .leave_lobby = eng_leave_lobby,
+    .refused_load = eng_refused_load, .leave_lobby = eng_leave_lobby,
     .cold_read = eng_cold_read_op, .scope_play = eng_scope_play_op, .content_complete = eng_content_complete,
     .content_notice = eng_content_notice, .content_pending = eng_content_pending, .content_drop = eng_content_drop,
     .content_refresh = eng_content_refresh, .lobby_report = eng_lobby_report, .lobby_state = eng_lobby_state

@@ -202,9 +202,29 @@ void  sh_cache_sweep_async(void);
 /* ------------------------------------------------------------ the Mods tab (2.10) */
 
 /* Map content on disk: one call per kept map with what its rows hold, then the storage line ("Map content: 1.3 GB
- * for 14 maps."). Lines are plain text; never a hash, salt or path (I11). Returns the lines. */
-typedef void (*sh_cache_line_fn)(void *context, const char *line);
+ * for 14 maps."). Lines are plain text; never a hash, salt or path (I11). `row` is the line's row, its composition
+ * hash, which Add to my mods takes (sh_cache_stage_copy); NULL for the storage line. Returns the lines. */
+typedef void (*sh_cache_line_fn)(void *context, const char *line, const char *row);
 int   sh_cache_report(sh_cache_line_fn fn, void *context);
+
+/* Add to my mods from a row of a map on this computer (SPEC-distribution 5.15, step 1): the pinned row whose
+ * composition hash is `row`, found in the kept and played maps' texts, made a mod folder from its units' files (author
+ * layout already) and their mod shares merged, with the display name "<the row's name> (my copy)", at a staging folder
+ * of the content cache (copies, never links: the folder becomes the player's to edit). The caller salts it into the
+ * store (modstore.h sh_ms_add_copy) and frees the stage (sh_cache_copy_free). 1 staged; 0 with the player's sentence
+ * in *why (malloc'd): no map here has the row, its content is not all here, or a unit's binaries spell its namespace
+ * (D29, SH_CACHE_COPY_SPELLED). Any thread. */
+#define SH_CACHE_COPY_SPELLED "This mod cannot be copied yet: its files name its original's ID. A Snapmap+ update will allow it."
+typedef struct sh_cache_copy {
+    char *dir;                  /* the staged mod folder (UTF-8, absolute) */
+    char *modjson;              /* its author text: the name and the merged mod shares, no builder block */
+    size_t modjson_len;
+    char salt[SH_MB_ID_MAX + 1];  /* the namespace its files are under */
+    char *name;                 /* "<the row's name> (my copy)" */
+    size_t objects;             /* the placed objects it carries (the row's units but the whole-mod one) */
+} sh_cache_copy;
+int   sh_cache_stage_copy(const char *row, sh_cache_copy *out, char **why);
+void  sh_cache_copy_free(sh_cache_copy *copy);
 /* The storage line alone (malloc'd). */
 char *sh_cache_storage_line(void);
 

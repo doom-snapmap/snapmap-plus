@@ -524,16 +524,13 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
         if (!mm_member_text(&object, "mod", mod, sizeof mod, 1)) { MM_ERR("row has no valid mod"); goto done; }
         ml = strlen(mod);
         if (ml == SH_MODMANIFEST_SALT_LEN + 1 + SH_MOD_HASH_CHARS && mod[SH_MODMANIFEST_SALT_LEN] == '@') {
-            /* Format 1 (before 1.0): a local row at that build (D7). */
-            memcpy(out->salt, mod, SH_MODMANIFEST_SALT_LEN);
-            out->salt[SH_MODMANIFEST_SALT_LEN] = 0;
-            memcpy(out->build, mod + SH_MODMANIFEST_SALT_LEN + 1, SH_MOD_HASH_CHARS + 1);
+            /* Format 1 (before 1.0, "<salt>@<build>"): an earlier shape, which the installer converts (Q4). */
+            MM_ERR("the map was saved by an earlier Snapmap+; which this version does not read yet");
+            goto done;
         } else if (ml == SH_MODMANIFEST_SALT_LEN) {
-            char build[SH_MODMANIFEST_HASH_CAP];
+            /* A local row follows its folder (D6a): the build it was saved from is not part of it. */
             memcpy(out->salt, mod, SH_MODMANIFEST_SALT_LEN + 1);
             strcpy_s(out->build, sizeof out->build, SH_MODMANIFEST_LOCAL_BUILD);
-            if (mm_member_text(&object, "build", build, sizeof build, 0) && sh_modmanifest_valid_hash(build, strlen(build)))
-                strcpy_s(out->build, sizeof out->build, build);
         } else {
             MM_ERR("row has no valid mod");
             goto done;
@@ -677,8 +674,6 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
         if (row->modules && row->modules[0] == '[') { mm_put(&t, ",\"modules\":", 11); mm_put(&t, row->modules, strlen(row->modules)); }
     } else {
         mm_put(&t, ",\"local\":true", 13);
-        /* The local build it was saved from: what a format 1 import installs (until DS-X moves imports to units). */
-        if (strcmp(row->build, SH_MODMANIFEST_LOCAL_BUILD)) { mm_put(&t, ",\"build\":\"", 10); mm_put(&t, row->build, strlen(row->build)); mm_put(&t, "\"", 1); }
         mm_put(&t, ",\"names\":[", 10);
         for (i = 0; i < row->name_count; i++) {
             if (i) mm_put(&t, ",", 1);
@@ -1559,10 +1554,10 @@ static void mm_subst_load(const sh_modmanifest_list *list, const char *json, siz
     sh_modmanifest_names_free(names, count);
 }
 
-/* At every load: one line for each row whose build the place resolver replaces
+/* At every load: one line for each row whose build the row resolver replaces
  * with another build of its salt (the player's own map follows the root, so
- * the root's build serves the row and the next save records it). A stranger's
- * map resolves a row only at its own build, so it logs nothing here. */
+ * the root's build serves the row and the next save records it). A pinned row
+ * resolves to its composition only, so it logs nothing here. */
 static void mm_note_followed(const sh_modmanifest_list *list)
 {
     size_t i;
@@ -1715,28 +1710,6 @@ static int mm_activate_load(const sh_modmanifest_list *rows)
 }
 
 static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length);
-
-int sh_modmanifest_place_decided(void)
-{
-    sh_modmanifest_list rows;
-    int active;
-    char *names, *line;
-    memset(&rows, 0, sizeof rows);
-    if (!sh_modmanifest_current(&rows) || !rows.count) { sh_modmanifest_list_free(&rows); return 0; }
-    /* The rows alone: the load's placed names were read with the text, and a
-     * map that arrived with its mods has a row for each. */
-    mm_note_followed(&rows);
-    mm_scope_load(NULL, 0, &rows);
-    active = mm_activate_load(&rows);
-    names = mm_describe(&rows);
-    line = sh_textf("MODS: map manifest names %zu build(s)%s%s; listed and activated again in the place its gate decided",
-                    rows.count, rows.count ? ": " : "", names ? names : "");
-    backend_log(line ? line : "MODS: the map's rows were listed and activated again in the place its gate decided");
-    free(line);
-    free(names);
-    sh_modmanifest_list_free(&rows);
-    return active;
-}
 
 /* 1 when the text carries rows: the member's "mods" part. */
 static int mm_carries_rows(const char *json, size_t length)

@@ -603,7 +603,6 @@ static void declare(const sh_modmanifest_list *rows, const char *const *placed, 
         p = end + 1;
     }
     (void)sh_modserve_scope_set_choices(slots, keys, nc, 0);
-    (void)sh_modserve_place_set("");
     (void)sh_modserve_scope_set(list, n > 256 ? 256 : (n < 0 ? 0 : n), 1);
     (void)sh_modserve_scope_mode(mode);
     free(hashes);

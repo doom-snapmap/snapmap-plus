@@ -537,7 +537,6 @@ static void test_store(void)
 
     printf("-- the serving index lists the scripts and serves their built bytes\n");
     CHECK(sh_modserve_index_build(a) > 0 || 1);
-    (void)sh_modserve_place_set(NULL);
     memset(&l, 0, sizeof l);
     CHECK(sh_modserve_script_files(salt, list_cb, &l) == 2 && !strcmp(l.list, "door.lua|lib/fsm.lua|") && l.match == 2);
     if (strcmp(l.list, "door.lua|lib/fsm.lua|")) fprintf(stderr, "  listed %s\n", l.list);
@@ -656,7 +655,7 @@ static void test_store(void)
         size_t cu, cf;
         cache_counts(c, &cu, &cf);
         CHECK(cu == 1 && cf == 3);
-        CHECK(mod_folders(c) == 0);   /* no mod folder and no maps\ place: nothing is installed */
+        CHECK(mod_folders(c) == 0);   /* no mod folder: nothing is installed */
     }
     free(back);
     free(map);
@@ -716,7 +715,6 @@ static void test_map_scripts(void)
     memset(&b, 0, sizeof b);
     CHECK(HO2(name, cause, sh_ms_install_from_folder(src, NULL, HO_P(0), &st, &b, HO_P(1))));
     CHECK(sh_modserve_index_build(root) > 0);
-    CHECK(sh_modserve_place_set(NULL) >= 0);
     sh_modserve_scope_enable(1);
 
     /* Own map: the scope lists the root's build (the row recorded OLD). */
@@ -809,7 +807,6 @@ static void test_fixtures(void)
         sh_mb_free(&b);
     }
     CHECK(sh_modserve_index_build(e) == 2);
-    (void)sh_modserve_place_set(NULL);
     memset(&hit, 0, sizeof hit);
     CHECK(sh_modserve_lookup("generated/decls/snapeditorentitydef/mods/doorlogc/script.decl", &hit) && hit.is_decl);
     CHECK(sh_modserve_open("generated/decls/snapeditorentitydef/mods/doorlogc/script.decl", &bytes, &len) == 1);

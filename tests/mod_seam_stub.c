@@ -66,29 +66,6 @@ void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref)
     ref->name = ref->folder = ref->place = NULL;
 }
 
-/* The loaded map's place (sh_modserve_place_*): a parse sets it, a failed
- * one puts it back. */
-static char *g_stub_place, *g_stub_place_prev;
-int sh_modserve_place_pending(void)
-{
-    return sh_modserve_place_load(SH_MODSERVE_PLACE_PUBLISHED);
-}
-int sh_modserve_place_load(const char *place)
-{
-    free(g_stub_place_prev);
-    g_stub_place_prev = g_stub_place;
-    g_stub_place = _strdup(place ? place : "");
-    return 0;
-}
-int sh_modserve_place_restore(void)
-{
-    free(g_stub_place);
-    g_stub_place = g_stub_place_prev;
-    g_stub_place_prev = NULL;
-    return 1;
-}
-char *sh_modserve_place_get(void) { return _strdup(g_stub_place ? g_stub_place : ""); }
-
 int sh_modserve_index_rescan(void)
 {
     g_mod_stub_rescans++;

@@ -2,9 +2,8 @@
  *
  * A map whose manifest (modmanifest.h) names a mod build nothing on this
  * machine serves (sh_modserve_row_build) is held at the completion that would
- * launch it, the player is asked once with the engine's own Yes/No dialog,
- * and the map either resumes after the builds are fetched into its place and
- * activated, or the load is dropped with a notice. A map whose builds are all
+ * launch it, its content is fetched into the content cache, and the map
+ * either resumes with it activated, or the load is dropped with a notice. A map whose builds are all
  * served, and every map without manifest rows, passes through: the engine
  * sees no difference.
  *
@@ -101,10 +100,6 @@ void sh_modpublished_poll(void);
 /* 1 while a map is held (asking, fetching or resuming). */
 int sh_modpublished_holding(void);
 
-/* 1 while a held map's own resume runs (its parse keeps the place the hold
- * decided; rawmap.c). */
-int sh_modpublished_resuming(void);
-
 /* A published item serves the builds it was published with, on every
  * player's machine, its author's included, until its author publishes again
  * (the owner, 2026-11-17: an edited map is another map). The author's edits
@@ -155,13 +150,13 @@ typedef struct sh_modpub_resume {
 
 /* ------------------------------------------------------------ the hold
  * Every hold (published plays, lobby joins, My Maps, rawmap loads, prefab placements) counts the rows nothing serves
- * (the asset rule, in the map's place: modserve.h). Rows that name units (SPEC-distribution 5.7) are fetched at once
+ * (the asset rule: modserve.h). Rows that name units (SPEC-distribution 5.7) are fetched at once
  * into the content cache with no question, under the game's own progress line; what cannot be had stands in, with one
  * notice after the load (modcache.h, S2-S6). A row that names no unit (a local row, D6a) whose folder this computer
  * does not have cannot be downloaded: the load is refused with one sentence. While the player has turned off "Play
- * maps whose mods include scripts" (sh_modpub_ops scripted_maps_allowed), a map whose served content carries scripts
- * is not loaded, with that setting's sentence (modui.h SH_MODUI_SCRIPTS_OFF). A hold that resumes makes its place the
- * loaded map's (the place_set op) and the place its launch serves from (sh_modpub_launch_place). */
+ * maps whose mods include scripts" (sh_modpub_ops scripted_maps_allowed), a map whose units (its pinned rows: content
+ * that came from elsewhere) carry scripts is not loaded, with that setting's sentence (modui.h SH_MODUI_SCRIPTS_OFF);
+ * the player's own local rows never count. */
 
 /* The manifest's substitute op (modmanifest.h sh_modmanifest_substitute_fn)
  * for an editor open of a map whose row nothing serves: nothing substitutes
@@ -178,12 +173,10 @@ int  sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, 
 typedef struct sh_modpub_ops {
     void *context;
     int  (*on_main)(void *c);
-    /* The asset rule for a map whose place is `place` ("" the root;
-     * modserve.h sh_modserve_row_served_in): SH_MODPUB_ROW_*, with the
-     * refusal sentence in *cause (malloc'd; cause may be NULL) when it is
-     * not served. `subject` is "map" or "prefab" (NULL: "map"). Changes
+    /* The asset rule (modserve.h sh_modserve_row_served_for): SH_MODPUB_ROW_*, with the refusal sentence in *cause
+     * (malloc'd; cause may be NULL) when it is not served. `subject` is "map" or "prefab" (NULL: "map"). Changes
      * nothing. */
-    int  (*row_state)(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char **cause);
+    int  (*row_state)(void *c, const sh_modmanifest_row *row, const char *subject, char **cause);
     int  (*rescan)(void *c);
     /* Activate the rows' mods through the builds that serve them
      * (sh_modmanifest_activate). */
@@ -195,8 +188,7 @@ typedef struct sh_modpub_ops {
     int  (*worker_run)(void *c, void (*job)(void *), void *job_context);   /* 1 started */
     /* Fetch the row's units into the content cache and compose it (modcache.h sh_cache_prepare). Worker thread;
      * stops early when *cancel is set; 0 ok (what could not be had stands in), else a MODNET_E_ code. */
-    int  (*fetch_for)(void *c, const sh_modmanifest_row *row, const char *place, sh_modpub_progress_fn progress,
-                      volatile int *cancel);
+    int  (*fetch_for)(void *c, const sh_modmanifest_row *row, sh_modpub_progress_fn progress, volatile int *cancel);
     void *(*metadata_copy)(void *c, const void *metadata);
     void (*metadata_free)(void *c, void *copy);
     /* The item id and revision, whole (each malloc'd, either may be NULL on 0). */
@@ -217,27 +209,11 @@ typedef struct sh_modpub_ops {
      * declared (modui.h sh_modui_scope_launch_refused). Called after
      * drop_ui for every hook but a rawmap load and a prefab placement. */
     void (*launch_refused)(void *c, int hook);
-    /* The published item's title from its metadata, whole (*out malloc'd), else 0. */
-    int  (*metadata_title)(void *c, const void *metadata, char **out);
-    /* 1 when this machine published the item: a claim it holds is keyed by
-     * the item, or the record links the item to a map saved here. */
-    int  (*own_item)(void *c, const char *item);
-    /* The place of the published item `item` titled `title`: the one the
-     * store's record gives it, else a free mods\maps\<title>\ (modstore.h
-     * sh_ms_place_dir). 1 with "maps\<segment>" in *out (malloc'd), 0 when
-     * none can be made. */
-    int  (*item_place)(void *c, const char *title, const char *item, char **out);
-    /* Make `place` the loaded map's (modserve.h sh_modserve_place_set). */
-    void (*place_set)(void *c, const char *place);
-    /* `place` as a place (modserve.h sh_modserve_place_norm): 1 with it in
-     * *out (malloc'd), 0 when it is not one. */
-    int  (*place_norm)(void *c, const char *place, char **out);
     /* The player's setting "Play maps whose mods include scripts" (modui.h
      * sh_modui_scripted_maps_allowed): 1 on. NULL counts as on. */
     int  (*scripted_maps_allowed)(void *c);
-    /* The script files of the builds that serve `rows` in `place` (a map
-     * that arrived with its mods), as their folders record them. */
-    unsigned (*served_scripts)(void *c, const sh_modmanifest_list *rows, const char *place);
+    /* The script files of the compositions that serve the pinned rows of `rows`, as their mod.json records them. */
+    unsigned (*served_scripts)(void *c, const sh_modmanifest_list *rows);
     /* The download's progress in the game's own progress line (the one it
      * shows while it downloads a published map), its text replaced in place:
      * `text` shows or updates it, NULL hides it. */
@@ -247,11 +223,6 @@ typedef struct sh_modpub_ops {
      * and its offer to replace the map with its published version are
      * dismissed (recovery.h shield_note_refused_load). NULL counts as none. */
     void (*refused_load)(void *c);
-    /* A gate decided the place of the map its parse filled (place_set ran):
-     * the loaded map's rows are listed and activated again in that place
-     * (modmanifest.h sh_modmanifest_place_decided), since its parse could not
-     * know it. Returns what the activation returns. NULL counts as none. */
-    int  (*rows_resolve)(void *c);
     /* A lobby joiner whose map cannot be confirmed now (declined, refused,
      * failed, or downloading) leaves the lobby the engine's own way, as its
      * read-error handler does for a map the service does not have. NULL
@@ -310,12 +281,6 @@ int sh_modpub_lobby_map_modded(const char *item, const char *revision);
  * join again when the content is here. 0 lets the load run. Main thread. */
 int sh_modpub_joiner_start_held(void);
 
-/* The place the next launch serves from, as the last gate or hold decided it
- * for the map it let through: 1 with it in *out (malloc'd; consumed), 0 when
- * no gate decided since the last call (the launch keeps the place its parse
- * set). */
-int sh_modpub_launch_place(char **out);
-
 /* The decision a hook detour asks for before calling its original. Returns 1
  * to pass through (call the original now, unchanged) and 0 when the call was
  * held (the detour returns without the original; CacheMapForLobby returns 0,
@@ -345,26 +310,26 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra);
  * the install); otherwise nothing is missing and the rawmap loads as before. */
 
 /* Read every row of `text` into *rows (cleared first; free with
- * sh_modmanifest_list_free) and the place the text records into *place
- * (malloc'd; "" for none), and return how many rows name a build nothing
- * serves in that place under the asset rule. Changes nothing. */
-size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows, char **place);
+ * sh_modmanifest_list_free) and return how many rows name a build nothing
+ * serves under the asset rule. Changes nothing. */
+size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows);
 
 /* 1 when the rawmap may not open because the player turned off "Play maps
- * whose mods include scripts" and the builds serving its rows in its place
- * carry scripts: a rawmap that came with its mods (a ZIP import while the
- * setting was on) follows the setting at every open, as a downloaded map
- * does at every launch. A rawmap without a place (the player's own) is never
- * refused. The caller tells the player SH_MODUI_SCRIPTS_OFF. */
-int sh_modpub_rawmap_scripts_off(const sh_modmanifest_list *rows, const char *place);
+ * whose mods include scripts" and the compositions serving its pinned rows
+ * carry scripts: a rawmap whose content came from elsewhere (a ZIP import
+ * while the setting was on) follows the setting at every open, as a
+ * downloaded map does at every launch. A rawmap of local rows only (the
+ * player's own) is never refused. The caller tells the player
+ * SH_MODUI_SCRIPTS_OFF. */
+int sh_modpub_rawmap_scripts_off(const sh_modmanifest_list *rows);
 
-/* Hold a rawmap load whose rows name missing builds in `place` (as
- * sh_modpub_rawmap_missing gave it; the fetch fills that place, or the root).
+/* Hold a rawmap load whose rows name missing content (as
+ * sh_modpub_rawmap_missing gave it; the fetch fills the content cache).
  * `source` is the file name the messages use. Returns 1 held (its content is
  * being fetched), 0 when nothing is missing after all, -1 when it could not be
  * held (off the main thread, no gates, no memory); the -1 case raises the
  * refusal notice itself. Main thread. */
-int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source, const char *place);
+int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source);
 
 /* The refusal as the one-button notice shows it (shorter than 256 bytes,
  * names that do not fit summarized as "and K more"): `mods` are the mods' names;

@@ -176,19 +176,11 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
 /* ------------------------------------------------------------ hooks ------ */
 
 /* Activate the rows' mods: each row through the build that serves it now
- * (sh_modserve_row_build: the root when it has the row's build or the map
- * is the player's own, else the map's own place), else the build the editor
- * substitutes, else its own hash. Returns
+ * (sh_modserve_row_build: a pinned row's composition, a local row's root
+ * folder), else the build the editor substitutes, else its own hash. Returns
 
  * modserve_activate_bundles' result. Main thread. */
 int sh_modmanifest_activate(const sh_modmanifest_list *rows);
-
-/* A gate decided the loaded map's place after its parse (a published read's
- * place is pending at parse; modserve.h sh_modserve_place_pending): the
- * current rows are listed again through the map scope's hook and activated
- * in the place now set, as the load would have with the place known.
- * Returns the activation's result, 0 when the map has no rows. Main thread. */
-int sh_modmanifest_place_decided(void);
 
 /* The DeserializeFromJson step: read and keep the rows as the current
  * manifest, strip them, then activate them with the builds the map scope
@@ -234,9 +226,9 @@ typedef int (*sh_modmanifest_resolve_fn)(const char *build, const char *salt, sh
 void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
 
 
-/* An editor open of the author's own map whose row pins a build that no
- * place serves: another build of the same salt
- * serves in its place for this editor session, with the hashes on
+/* An editor open of the author's own map whose row pins a build that
+ * nothing serves: another build of the same salt
+ * serves in its stead for this editor session, with the hashes on
  * the backend log; the row keeps X until a save re-pins it. The
  * substitute op answers per row: 1 with the build to serve (hash_out), 0 none
  * (*why: the gate's sentence, malloc'd, or NULL). `placed` says the map's placed
@@ -350,7 +342,7 @@ void sh_modmanifest_set_carries(int (*fn)(const char *salt, const char *name));
 
 /* The listing: the builds a map declares to the map scope (modserve.h sh_modserve_scope_set), in order. One rule for
  * every mode (the editor's load and Play entry, a hub, My Maps or published launch, a co-op lobby's launch, a rawmap
- * import): per row, the build that serves it (the one the editor substituted, else the one the place resolver names,
+ * import): per row, the build that serves it (the one the editor substituted, else the one the row resolver names,
  * which for the player's own map is the root folder's build of the salt whatever build the row records; a pinned
  * row, its composition), then, when `names` are given, every further build the placed names' closure reaches whose
  * salt no row declares (per salt the build the row resolver names in the open map's context, else the one the

@@ -315,17 +315,15 @@ static void test_rows_format2(void)
     strcpy_s(local.build, sizeof local.build, "3333333333333333333333333333333333333333333333333333333333333333");
     CHECK(sh_modmanifest_row_add_name(&local, "mods/" SALT "/crate"));
     v = sh_modmanifest_format_value(&local, &len);
-    CHECK(v && !strcmp(v, "{\"mod\":\"" SALT "\",\"name\":\"\",\"size\":0,\"local\":true,\"build\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"names\":[\"mods/" SALT "/crate\"]}"));
+    CHECK(v && !strcmp(v, "{\"mod\":\"" SALT "\",\"name\":\"\",\"size\":0,\"local\":true,\"names\":[\"mods/" SALT "/crate\"]}"));
     CHECK(v && sh_modmanifest_parse_value(v, len, &back, err, sizeof err) && !back.pinned &&
-          !strcmp(back.build, "3333333333333333333333333333333333333333333333333333333333333333"));
+          !strcmp(back.build, SH_MODMANIFEST_LOCAL_BUILD));
     free(v);
     sh_modmanifest_row_free(&back);
-    /* A format 1 row is a local row at its build (D7). */
+    /* A format 1 row ("<salt>@<build>") is an earlier shape: it is not read. */
     {
         const char *old = "{\"mod\":\"" SALT "@3333333333333333333333333333333333333333333333333333333333333333\",\"name\":\"x\",\"size\":1,\"names\":[]}";
-        CHECK(sh_modmanifest_parse_value(old, strlen(old), &back, err, sizeof err) && !back.pinned &&
-              !strcmp(back.build, "3333333333333333333333333333333333333333333333333333333333333333"));
-        sh_modmanifest_row_free(&back);
+        CHECK(!sh_modmanifest_parse_value(old, strlen(old), &back, err, sizeof err));
     }
     sh_modmanifest_row_free(&local);
     sh_modmanifest_row_free(&r);

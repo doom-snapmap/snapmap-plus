@@ -7,12 +7,13 @@
  *   <data>\mods\<folder>\mod.json       the author block and the builder block
  *                                       ("snapmap-plus": format 2, salt, build, files, shadows)
  *   <data>\mods\<folder>\assets\...     the files at engine paths
- *   <data>\mods\maps\<segment>\<mod>\   a map's place: the builds a downloaded map,
- *                                       a rawmap or a prefab ZIP brought, served for that map
+ *   <data>\mods\.content\served\<hash>\ a pinned map row's composition (modcache.h): the
+ *                                       units a map, a rawmap or a prefab carries, served for it
  * A mod's identity is its salt (its "id" everywhere below): eight characters
  * in the builder block, never the folder name, which is the author's. The
- * root of mods\ (everything but mods\maps\) holds one build per salt, and
- * each place one per salt. A folder in an earlier shape, one not built yet
+ * root of mods\ holds one build per salt. mods\maps\, where earlier
+ * versions put the builds a downloaded map brought, is never read (D4). A
+ * folder in an earlier shape, one not built yet
  * and one whose build failed serve nothing; the cause is logged and listed.
  * <data> is %LOCALAPPDATA%\snapmap-plus.
  *
@@ -694,7 +695,7 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context);
  * modmanifest.h) and of its placed names (the save-time closure); the first
  * hash of a salt in row order declares that salt, and every other build of
  * the salt is inert for the map. A hash names the root's folder at that
- * build, else the folder of the loaded map's place (sh_modserve_place_set).
+ * build, else the content cache's composition of that hash (a pinned row's).
  *
  * Per path, the file that serves it for the open map is chosen among the
  * providers the map declares: the fewest needs the declared bundles do not
@@ -708,8 +709,8 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context);
  * and with no map open, the names under its salt serve (the Toybox offers its
  * rows; placing one declares it at the next save) for the root folder's build
  * only, and its surfaces (the game's own bytes at the game's name) serve;
- * its shadows never. A build in a map's place serves only for a map that
- * declares it. In Play and in a map launched outside the editor
+ * its shadows never. A composition serves only for a map that declares it.
+ * In Play and in a map launched outside the editor
  * (SH_MODSERVE_MODE_PLAY) it serves nothing. A bundle whose shadows include
  * editor-time content (a generated/decls/snapeditor*, snappropertyinspector*
  * or snappalette* decl, or the editor's own movies) is the editor-tweak class:
@@ -753,73 +754,19 @@ int  sh_modserve_scope_enabled(void);
  * their requirements. Any thread; serialised with index builds. */
 int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open);
 
-/* Where the loaded map finds its mods (DECISIONS 1 and 11): its place.
- *
- * A place is "" (the root of mods\: the player's own maps) or
- * "maps\<segment>" (mods\maps\<segment>\, a map that arrived with its mods:
- * a download, a rawmap ZIP import). The place is a fact of the map: the
- * saved map records it in its member ("place", map_carrier.h; written by
- * every save, rawmap.c), and every load sets it from that record
- * (sh_modserve_place_load at each parse), after which the published gates
- * set a downloaded map's place from its item (modpublished.c). There is no
- * other global setting: the editor's exit and the end of a launched Play
- * return it to the root.
- *
- * The one resolver. A row "<salt>@<build hash>" of the loaded map resolves to
- *   1. the root folder of the salt at the row's build hash; else
- *   2. with a place: that place's folder of the salt at the row's hash;
- *      without one: the root folder of the salt at any build.
- * Never another map's place. A bare hash (the listing, plans, bundle state)
- * resolves the same way: the root's folder at the hash, else the place's.
- * sh_modserve_row_build and sh_modserve_row_served use the loaded map's
- * place; the _in forms take a place and change nothing (a gate counting a
- * map's rows before that map loads).
- *
- * sh_modserve_place_norm: the place as stored, malloc'd ("" or
- *   "maps\<segment>"; "maps/<segment>" and a bare segment are accepted),
- *   NULL when `place` is not one: the segment must be exactly what
- *   sh_ms_title_segment makes of it (no separator, no dot step, no
- *   character Windows refuses), so a hostile map cannot point outside
- *   mods\maps\.
- * sh_modserve_place_set: make `place` the loaded map's (a gate, a launch).
- *   Returns the bundles whose serving changed, or -1 when it is not a place
- *   (nothing changes).
- * sh_modserve_place_load: a map parse's place (an invalid one is the root),
- *   remembering the place it replaces; sh_modserve_place_restore puts that
- *   back (a parse that failed, a launch that was refused) and returns 1, or
- *   0 when nothing is remembered.
- * sh_modserve_place_get: the loaded map's place (malloc'd; NULL when memory
- *   runs out); "" while it is pending.
- * sh_modserve_place_pending: a published read's parse, whose place only the
- *   gate that takes it can decide (the item is known at the read's
- *   completion; the text carries no place of this machine's). Remembers the
- *   place it replaces, as sh_modserve_place_load does. While pending a row
- *   resolves only at its own build at the
- *   root: the root's other build of its salt never stands in for it, so
- *   nothing of that build is listed or activated before the gate decides
- *   (sh_modserve_place_set). sh_modserve_place_is_pending: 1 while it is.
- * Any thread. */
-#define SH_MODSERVE_PLACES    "maps"   /* the places area of format 1 maps (being retired, DS-T/DS-X) */
+/* The row resolver (DECISIONS 1 and 11, SPEC-distribution D6a and D21). A row of the loaded map resolves to
+ *   - a pinned row: the content cache's composition of its units (named by the composition hash, its build), only;
+ *     a local mod never stands in for a map's units, whatever is installed;
+ *   - a local row (the player's own map, D6a): the root folder of the salt (it follows the folder; a local row
+ *     names no build, so the root's one build of the salt is the one).
+ * A bare hash (the listing, plans, bundle state) resolves the same way: the root's folder at the hash, else the
+ * composition. Nothing about the map's origin changes this: there is no place to set. Any thread. */
+/* mods\maps\: where earlier versions put the builds a downloaded map brought (places, retired with D4). The index
+ * never reads it; the store never writes or lists it, and refuses to make a mod there. */
+#define SH_MODSERVE_RETIRED_PLACES "maps"
 /* The content cache's area (modcache.h): <store root>\.content\served\<composition hash>\, one bundle per pinned map
  * row, named by its composition hash; a pinned row resolves to its composition only. */
 #define SH_MODSERVE_CONTENT   ".content"
-/* A published map whose item's place is not known (its parse before the gate,
- * a launch no gate saw): a row resolves only at its own build at the root, never
- * the root's other build of its salt. No folder can be named so. */
-#define SH_MODSERVE_PLACE_PUBLISHED SH_MODSERVE_PLACES "\\?"
-/* The cause of a folder in a map's place that the product did not receive:
- * a place holds only the builds a map brought, and nothing there is built. */
-#define SH_MODSERVE_PLACE_FRESH \
-    "This folder sits among a downloaded map's mods but did not come with the map. Move it out of the maps folder " \
-    "into your own mods and press Refresh."
-
-char *sh_modserve_place_norm(const char *place);
-int  sh_modserve_place_set(const char *place);
-int  sh_modserve_place_load(const char *place);
-int  sh_modserve_place_restore(void);
-char *sh_modserve_place_get(void);
-int  sh_modserve_place_pending(void);
-int  sh_modserve_place_is_pending(void);
 
 /* Set the mode (SH_MODSERVE_MODE_*): the Play entry sets PLAY
  * (sh_modserve_scope_source with SH_MODSERVE_AT_PLAY), a map load sets PLAY
@@ -872,7 +819,7 @@ typedef struct sh_modserve_scope_info {
     int map_open;            /* a map is open */
     int play;                /* the open map is played (SH_MODSERVE_MODE_PLAY) */
     int newest;              /* the root folder's build of its salt: it serves with no map open */
-    int in_place;            /* it sits in a map's place (mods\maps\<segment>) */
+    int in_place;            /* it is a composition of the content cache (a pinned row's), not a root folder */
     int names;               /* files under its salt (new names) */
     int shadows;             /* shadow files it serves */
     int surfaces;            /* surfaces (the game's bytes at the game's name) */
@@ -901,7 +848,7 @@ int  sh_modserve_bundle_edits_live(const char *bundle_hash);
  * builds, then one line per admitted bundle with what it serves for the open
  * map. A mod is named by its name (else its folder), never by its salt or a
  * hash:
- *   scope: mod <mod name>: 2 builds installed (the root folder and maps' places); ...
+ *   scope: mod <mod name>: 2 builds installed (the root folder and maps' compositions); ...
  *   scope: <mod name> (N names, N shadows, N surfaces[, requirements]): <state>
  * where the state is "declared by the open map (row N): serves everything it
  * carries", "inert: the open map declares another build of its salt", "not
@@ -946,9 +893,9 @@ int sh_modserve_bundle_state(const char *bundle_hash, char **cause);
 /* The asset rule. A map, rawmap or prefab needs the builds its manifest rows
  * name. A row is SERVED when the build sh_modserve_row_build names for it is
  * admitted and every name the row lists resolves, in that build or through
- * the serving index; MISSING when it names none (a stranger's map whose
- * place and root do not hold the row's build: the hold fetches it into the
- * map's place); INCOMPLETE when the build is admitted but a listed name does
+ * the serving index; MISSING when it names none (a pinned row whose units are
+ * not in the content cache: the hold fetches them; a local row whose mod is
+ * not installed); INCOMPLETE when the build is admitted but a listed name does
  * not resolve. *cause (when cause is not NULL; malloc'd) gets the sentence a refusal shows,
  * for a MISSING row "This map uses Hell Guards, which is not installed." or
  * "... which is installed but cannot be used: <cause>." (a folder of that
@@ -964,18 +911,15 @@ struct sh_modmanifest_row;
 int sh_modserve_row_served(const struct sh_modmanifest_row *row, char **cause);
 
 int sh_modserve_row_served_for(const struct sh_modmanifest_row *row, const char *subject, char **cause);
-int sh_modserve_row_served_in(const struct sh_modmanifest_row *row, const char *place, const char *subject,
-                              char **cause);
 
-/* The build that serves a row now: the one place resolver above, for the
- * loaded map's place, or (sh_modserve_row_build_in) for `place`. 1 with *out
+/* The build that serves a row now (the row resolver above). 1 with *out
  * filled, 0 when none (the row is missing and a hold fetches it). `id` is the
  * salt. */
 typedef struct sh_modserve_bundle_ref {
     char id[96], hash[SH_MODSERVE_HASH_HEX + 1];
     char *name;                        /* the author's name, "" when none (malloc'd) */
     char *folder;                      /* its folder below the store root (malloc'd) */
-    char *place;                       /* "maps\<segment>" for a place's folder, "" at the root (malloc'd) */
+    char *place;                       /* SH_MODSERVE_CONTENT for a composition, "" at the root (malloc'd) */
     unsigned long long size;           /* carried bytes, as a manifest row's size */
 } sh_modserve_bundle_ref;
 /* Filled refs hold malloc'd text: release each with sh_modserve_bundle_ref_free. */
@@ -1001,7 +945,6 @@ int  sh_modserve_note_miss(const char *request);
 /* The misses noted since the process started: one "<mod name>: <request>"
  * line each (sh_mods status). Returns the count. */
 int  sh_modserve_misses_report(sh_modserve_line_fn fn, void *context);
-int sh_modserve_row_build_in(const struct sh_modmanifest_row *row, const char *place, sh_modserve_bundle_ref *out);
 void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref);
 
 /* Map placed logical names (entityDef inherit names, or any decl name a
@@ -1066,7 +1009,7 @@ typedef struct sh_modserve_stats {
 void sh_modserve_get_stats(sh_modserve_stats *out);
 
 /* Visit every scanned bundle (admitted or skipped): its salt (the folder
- * when it has none), and `place` 1 for a folder in a map's place. */
+ * when it has none), and `place` 1 for a composition of the content cache. */
 typedef void (*sh_modserve_bundle_fn)(void *context, const char *id,
                                       const char *hash, int admitted, const char *cause,
                                       int files, int place);
@@ -1082,8 +1025,8 @@ char *sh_modserve_bundle_name(const char *bundle_hash);
 
 /* Visit every admitted bundle whose mod.json author block carries keys the
  * product does not read itself (the manifest's "extra", such as "strings" and
- * "hud"), in a fixed order: root folders before maps' places, then by salt,
- * then by folder; `place` is 1 for a folder in a map's place. `extra` is the object's JSON
+ * "hud"), in a fixed order: root folders before compositions, then by salt,
+ * then by folder; `place` is 1 for a composition. `extra` is the object's JSON
  * text; the strings stay valid while their table lives. Returns the number visited,
  * or -1 when the order could not be allocated (nothing is visited). Used by
  * strids.c for the bundle string layer. */
@@ -1111,8 +1054,8 @@ void sh_modserve_each_served_here(sh_modserve_file_fn fn, void *context);
 
 /* Mod scripts (modbundle.h sh_mb_script_request): every script of `salt` that
  * the index serves now, from the build that serves it (the map scope's choice:
- * a stranger's map its own place's copy, the author's own map the root
- * folder), in request order. fn gets the script's path below scripts\ ("x.lua"
+ * a stranger's map its composition, the author's own map the root folder), in
+ * request order. fn gets the script's path below scripts\ ("x.lua"
  * or "lib/x.lua", lower case), its request, its size and the SHA-256 the
  * build recorded (the bytes sh_modserve_open must answer with), and the
  * serving build's hash. Returns the number visited. The strings stay valid

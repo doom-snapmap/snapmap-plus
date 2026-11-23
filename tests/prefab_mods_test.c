@@ -454,6 +454,9 @@ static void comments(const char *lib)
     }
 }
 
+/* A local row is written without a build: it follows its folder (D6a). */
+#define LOCAL_ROW "\"local\":true"
+
 static const char BLOCK_HEAD[] = "{\"format\":1,\"description\":\"\",\"tags\":[],\"mods\":[{\"mod\":\"testdoor\"";
 
 static void recording(const char *lib, const sh_modmanifest_row *door)
@@ -476,15 +479,15 @@ static void recording(const char *lib, const sh_modmanifest_row *door)
     _snprintf_s(meta, sizeof meta, _TRUNCATE, "%s\\Door.meta.json", lib);
     CHECK(put_file(prefab, OBJECT_PREFAB));
     CHECK(sh_prefab_mods_record(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, prefab, &view) == 1);
-    CHECK(view && strstr(view, "\"desc\":\"\"") && strstr(view, door->build));
+    CHECK(view && strstr(view, "\"desc\":\"\"") && strstr(view, LOCAL_ROW) && !strstr(view, door->build));
     free(view);
     CHECK(engine_bytes_are(prefab, OBJECT_PREFAB) && !mt_exists(meta));
     text = slurp(prefab, &len);
     CHECK(text && len > sizeof OBJECT_PREFAB && !memcmp(text, OBJECT_PREFAB, sizeof OBJECT_PREFAB - 2));   /* engine keys first */
     blk = block_of(text, len);
-    CHECK(!strncmp(blk, BLOCK_HEAD, sizeof BLOCK_HEAD - 1) && strstr(blk, door->build) &&
+    CHECK(!strncmp(blk, BLOCK_HEAD, sizeof BLOCK_HEAD - 1) && strstr(blk, LOCAL_ROW) && !strstr(blk, door->build) &&
           !strstr(blk, "summary"));
-    CHECK(sh_prefab_mods_rows_of(text, len, NULL, &rows) == 1 && !strcmp(rows.rows[0].build, door->build) &&
+    CHECK(sh_prefab_mods_rows_of(text, len, NULL, &rows) == 1 && !strcmp(rows.rows[0].build, SH_MODMANIFEST_LOCAL_BUILD) &&
           rows.rows[0].name_count == 1);
     sh_modmanifest_list_free(&rows);
     /* The block's own strings are not placed names. */
@@ -499,7 +502,7 @@ static void recording(const char *lib, const sh_modmanifest_row *door)
     }
     text = slurp(prefab, &len);
     blk = block_of(text, len);
-    CHECK(strstr(blk, "\"description\":\"Blast door\",\"tags\":[\"door\",\"x\"]") && strstr(blk, door->build) && !strstr(blk, "ignored"));
+    CHECK(strstr(blk, "\"description\":\"Blast door\",\"tags\":[\"door\",\"x\"]") && strstr(blk, LOCAL_ROW) && !strstr(blk, "ignored"));
     CHECK(engine_bytes_are(prefab, OBJECT_PREFAB) && !mt_exists(meta));
     view = sh_prefab_mods_view_of(text, len, 0, meta, &source, NULL);
     CHECK(view && source == SH_PREFAB_META_BLOCK && strstr(view, "\"desc\":\"Blast door\"") && strstr(view, "\"mods\":["));
@@ -509,7 +512,7 @@ static void recording(const char *lib, const sh_modmanifest_row *door)
     CHECK(sh_prefab_mods_meta_write("", 0, prefab, meta) == 1);
     text = slurp(prefab, &len);
     blk = block_of(text, len);
-    CHECK(strstr(blk, "\"description\":\"\",\"tags\":[]") && strstr(blk, door->build) && !mt_exists(meta));
+    CHECK(strstr(blk, "\"description\":\"\",\"tags\":[]") && strstr(blk, LOCAL_ROW) && !mt_exists(meta));
     free(text);
     CHECK(sh_prefab_mods_meta_write("{\"desc\":\"An airlock\",\"tags\":[\"door\"]}", 37, prefab, meta) == 1);
 
@@ -543,8 +546,8 @@ static void recording(const char *lib, const sh_modmanifest_row *door)
                                                 "{\"desc\":\"\",\"tags\":[],\"kind\":\"modules\",\"moduleCount\":1}", &fl, &view, &count);
         CHECK(file && count == 1 && sh_mp_is_module_file(file, fl));
         blk = block_of(file, fl);
-        CHECK(strstr(blk, "\"summary\":{\"kind\":\"modules\",\"moduleCount\":1}") && strstr(blk, door->build));
-        CHECK(view && strstr(view, "\"kind\":\"modules\"") && strstr(view, "\"moduleCount\":1") && strstr(view, door->build));
+        CHECK(strstr(blk, "\"summary\":{\"kind\":\"modules\",\"moduleCount\":1}") && strstr(blk, LOCAL_ROW));
+        CHECK(view && strstr(view, "\"kind\":\"modules\"") && strstr(view, "\"moduleCount\":1") && strstr(view, LOCAL_ROW) && !strstr(view, door->build));
         {
             size_t sl = 0;
             char *s = sh_prefab_mods_strip_copy(file, fl, &sl);
@@ -631,7 +634,6 @@ static void use_store(const char *root)
     CreateDirectoryA(root, NULL);
     CHECK(sh_ms_set_root(root));
     (void)sh_modserve_index_build(root);
-    (void)sh_modserve_place_set(NULL);
     sh_cache_set_mods_root(root);
     sh_cache_local_changed();
 }
@@ -915,7 +917,7 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
     call.meta_path = meta;
     call.name = "Door";
     CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_PLACE && F.main_calls == 1 && F.attaches == 1 &&
-          !strcmp(F.attached[0], door->build));
+          !strcmp(F.attached[0], SH_MODMANIFEST_LOCAL_BUILD));   /* the row names no build: the root folder serves it */
     {
         /* A prefab an earlier version saved: refused with its sentence. */
         char old[MAX_PATH * 2];
@@ -935,7 +937,7 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
     call.text = text;
     call.text_len = len;
     call.meta_path = meta;
-    CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_META_BLOCK && strstr(out, "\"desc\":\"An airlock\"") && strstr(out, door->build));
+    CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_META_BLOCK && strstr(out, "\"desc\":\"An airlock\"") && strstr(out, LOCAL_ROW));
     call.text = text + 40;
     call.text_len = len - 40;
     call.tail = 1;
@@ -960,7 +962,7 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
         call.text = OBJECT_PREFAB;
         call.text_len = sizeof OBJECT_PREFAB - 1;
         call.path = p2;
-        CHECK(pm_slot(&call, out, sizeof out) == 1 && strstr(out, door->build));
+        CHECK(pm_slot(&call, out, sizeof out) == 1 && strstr(out, LOCAL_ROW));
         memset(&call, 0, sizeof call);
         call.op = SH_MODULE_PREFAB_META_WRITE;
         call.text = "{\"desc\":\"s\",\"tags\":[]}";
@@ -969,7 +971,7 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
         call.meta_path = none;
         CHECK(pm_slot(&call, out, sizeof out) == 1 && !mt_exists(none));
         text = slurp(p2, &len);
-        CHECK(strstr(block_of(text, len), "\"description\":\"s\"") && strstr(block_of(text, len), door->build));
+        CHECK(strstr(block_of(text, len), "\"description\":\"s\"") && strstr(block_of(text, len), LOCAL_ROW));
         free(text);
         DeleteFileA(p2);
     }
@@ -1106,7 +1108,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         CHECK(strip && sl == sizeof OBJECT_PREFAB - 1 && !memcmp(strip, OBJECT_PREFAB, sl));
         free(strip);
         text = slurp(prefab, &len);
-        CHECK(text && disk && len == dl && !memcmp(text, disk, len) && strstr(block_of(text, len), door->build) &&
+        CHECK(text && disk && len == dl && !memcmp(text, disk, len) && strstr(block_of(text, len), LOCAL_ROW) &&
               !strstr(block_of(text, len), "\"objects\""));
         free(text);
     }
@@ -1301,8 +1303,8 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
             const char *side;
             size_t wl = 0;
             _snprintf_s(lone, sizeof lone, _TRUNCATE, "%s\\Ghost door.json", tmp);
-            side = "{\"desc\":\"\",\"tags\":[],\"mods\":[{\"mod\":\"ghostmod@" GHOST
-                   "\",\"name\":\"ghost.mod\",\"size\":1,\"names\":[]}]}";
+            side = "{\"desc\":\"\",\"tags\":[],\"mods\":[{\"mod\":\"ghostmod\",\"name\":\"ghost.mod\","
+                   "\"local\":true,\"size\":1,\"names\":[]}]}";
             with = sh_prefab_mods_embed(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, side, strlen(side), NULL, &wl);
             CHECK(with && sh_prefab_mods_write_file(lone, with, wl));
             free(with);
@@ -1521,8 +1523,8 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         size_t wl = 0;
         _snprintf_s(p3, sizeof p3, _TRUNCATE, "%s\\Ghost.json", libA);
         _snprintf_s(z3, sizeof z3, _TRUNCATE, "%s\\ghost.zip", tmp);
-        side = "{\"desc\":\"\",\"tags\":[],\"mods\":[{\"mod\":\"ghostmod@" GHOST
-               "\",\"name\":\"ghost.mod\",\"size\":1,\"names\":[]}]}";
+        side = "{\"desc\":\"\",\"tags\":[],\"mods\":[{\"mod\":\"ghostmod\",\"name\":\"ghost.mod\","
+               "\"local\":true,\"size\":1,\"names\":[]}]}";
         with = sh_prefab_mods_embed(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, side, strlen(side), NULL, &wl);
         CHECK(with && sh_prefab_mods_write_file(p3, with, wl));
         free(with);

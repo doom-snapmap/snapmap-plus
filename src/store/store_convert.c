@@ -1675,7 +1675,7 @@ static const sh_ms_entry *cv_root_salt(const sh_ms_list *l, const char *salt)
     size_t i;
     for (i = 0; i < l->count; i++) {
         const sh_ms_entry *e = &l->items[i];
-        if (!e->place[0] && !strcmp(e->salt, salt) && sh_ms_entry_usable(e)) return e;
+        if (!strcmp(e->salt, salt) && sh_ms_entry_usable(e)) return e;
     }
     return NULL;
 }

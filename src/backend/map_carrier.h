@@ -5,26 +5,21 @@
  *
  *   "snapmap-plus":{"format":2,
  *       "mods":[<row>,...],
- *       "place":"<segment>",
  *       "settings":{"render":"<text>","bounds":"<text>"},
  *       "nav":[{"module":"<category>/<module>","class":"<class>",
  *               "digest":"<16 hex>","geom":"<16 hex>",
  *               "data":["<base64 chunk>",...]},...]}
  *
- *   format    the number 2 (1, before units, is read: its rows are local rows). Any other value, or a member that is not an
+ *   format    the number 2 (1, before units, reads only for its settings and nav: its "<salt>@<build>" rows are an
+ *             earlier shape, below). Any other value, or a member that is not an
  *             object, or a known part of the wrong type (mods and nav arrays,
- *             settings an object, place a string), makes the whole member
+ *             settings an object), makes the whole member
  *             malformed: it is logged, read as absent and removed, and the
  *             map loads without it.
  *   mods      one object per declared mod build, the manifest's row JSON
  *             (modmanifest.h: mod "<salt>@<build hash>", name, size, names,
  *             attached, choices). A row that does not read is dropped and
  *             counted.
- *   place     where the map finds its mods (modserve.h, DECISIONS 11): the
- *             <segment> of mods\maps\<segment>\ for a map that arrived with
- *             its mods (a download, a rawmap ZIP import); absent for the
- *             player's own maps, which find them at the root. A string
- *             without escapes.
  *   settings  "render" (Unlock View Distance, map_render.h encoding) and
  *             "bounds" (Unlock Map Bounds, map_bounds.h encoding); an absent
  *             key is that setting off (map_settings.h).
@@ -35,7 +30,8 @@
  *
  * Every part is optional; parts are written in this order, the member is
  * written compact and appended last at the root, after "~type". Unknown parts
- * are ignored on read and not written back.
+ * are ignored on read and not written back (the "place" of earlier versions,
+ * a map's folder under mods\maps\, retired with D4, is one).
  *
  * Load: every parse the DeserializeFromJson detour sees (rawmap.c
  * prepare_map_buffer: My Maps, a published read, a lobby joiner's download, a
@@ -81,7 +77,7 @@ typedef struct sh_carrier_view {
     unsigned members;          /* root members with the carrier's key */
     size_t cut_from, cut_to;   /* the first such member with its separator */
     size_t value_from, value_to;
-    sh_carrier_span mods, place, settings, nav;
+    sh_carrier_span mods, settings, nav;
     char   why[96];            /* MALFORMED: what did not read */
 } sh_carrier_view;
 
@@ -99,7 +95,7 @@ int sh_carrier_part(const char *json, size_t len, const char *part, size_t *from
  * or NULL when it has none or the text does not read. */
 char *sh_carrier_strip(const char *json, size_t len, size_t *out_len);
 
-/* `json` with the member carrying `part` ("mods", "place", "settings" or "nav") set to
+/* `json` with the member carrying `part` ("mods", "settings" or "nav") set to
  * `value` (raw JSON of the right type; NULL removes the part) and its other
  * parts as they were, compact and last at the root; with no part left the
  * member is removed. A process-heap buffer (HeapFree), or NULL: with err ""
@@ -107,15 +103,6 @@ char *sh_carrier_strip(const char *json, size_t len, size_t *out_len);
  * does not read, an unknown part, no memory). A malformed member is replaced. */
 char *sh_carrier_put(const char *json, size_t len, const char *part, const char *value, size_t value_len,
                      size_t *out_len, char *err, size_t err_cap);
-
-/* The member's place (above): 1 with it in *out (malloc'd, any length), 0
- * when the map has none, -1 when the member is malformed or the place is not
- * a plain string. */
-int sh_carrier_place(const char *json, size_t len, char **out);
-
-/* sh_carrier_put of the place: `place` NULL or "" removes it; one holding a
- * quote or a backslash is refused (err). */
-char *sh_carrier_put_place(const char *json, size_t len, const char *place, size_t *out_len, char *err, size_t err_cap);
 
 /* Iterate the elements of a JSON array span. *cursor starts at the '['
  * (whitespace before it allowed). 1 with the next element's span, 0 at the
@@ -140,9 +127,10 @@ void sh_carrier_describe(const sh_carrier_view *view, char *out, size_t cap);
 /* Earlier shapes. Builds before this one carried the same data as string
  * variables in the author's table (info.name smpkg., smpbind., smpref.,
  * smpmod1., smpprod1., smp.render.v1, smp.bounds.v1, smnav1.) or as member
- * rows naming the mod by an "id" and its build as a "bundle". The game reads
- * none of them: one pass answers SH_MAP_OLD_VARIABLES for a variables.string
- * name starting with a family, SH_MAP_OLD_ROWS for such a member row, else
+ * rows naming the mod by an "id" and its build as a "bundle", or (format 1,
+ * before units) as "mod": "<salt>@<build>". The game reads none of them: one
+ * pass answers SH_MAP_OLD_VARIABLES for a variables.string name starting with
+ * a family, SH_MAP_OLD_ROWS for such a member row, else
  * SH_MAP_OLD_NONE. The installer's store tool converts them (map_old.h). */
 enum { SH_MAP_OLD_NONE = 0, SH_MAP_OLD_VARIABLES = 1, SH_MAP_OLD_ROWS = 2 };
 int sh_map_old_shape(const char *json, size_t len);

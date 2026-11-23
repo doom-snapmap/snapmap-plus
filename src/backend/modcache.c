@@ -2322,6 +2322,8 @@ static void mc_size_text(char *out, size_t cap, unsigned long long bytes)
 typedef struct mc_report {
     sh_cache_line_fn fn; void *ctx; mc_set files; unsigned long long total; size_t maps, lines;
     char **items; size_t nitems;      /* the local saves' cloud item ids */
+    const char *want;                 /* sh_cache_stage_copy: the composition hash looked for */
+    sh_modmanifest_list found;        /* its row, once found */
 } mc_report;
 
 static void mc_report_text(mc_report *rep, const char *text, size_t len, const char *kind)
@@ -2337,6 +2339,10 @@ static void mc_report_text(mc_report *rep, const char *text, size_t len, const c
         size_t objects = 0;
         char size[32], share[32], *line;
         if (!row->pinned) continue;
+        if (rep->want) {
+            if (!rep->found.count && !_stricmp(row->build, rep->want)) (void)sh_modmanifest_list_add(&rep->found, row);
+            continue;
+        }
         if (!counted) { counted = 1; rep->maps++; }
         for (k = 0; k < row->unit_count; k++) {
             mc_unit u;
@@ -2355,7 +2361,7 @@ static void mc_report_text(mc_report *rep, const char *text, size_t len, const c
                                  (unsigned)objects, objects == 1 ? "" : "s", size, share)
                       : sh_textf("A map you %s: %s, %u object%s, %s.", kind, sh_modmanifest_row_name(row)[0] ? row->name : "a mod",
                                  (unsigned)objects, objects == 1 ? "" : "s", size);
-        if (line && rep->fn) { rep->fn(rep->ctx, line); rep->lines++; }
+        if (line && rep->fn) { rep->fn(rep->ctx, line, row->build); rep->lines++; }
         free(line);
     }
     sh_modmanifest_list_free(&rows);
@@ -2443,10 +2449,123 @@ int sh_cache_report(sh_cache_line_fn fn, void *context)
     mc_report_run(&rep);
     mc_size_text(size, sizeof size, rep.total);
     line = sh_textf("Map content: %s for %u map%s.", size, (unsigned)rep.maps, rep.maps == 1 ? "" : "s");
-    if (line && fn) { fn(context, line); rep.lines++; }
+    if (line && fn) { fn(context, line, NULL); rep.lines++; }
     free(line);
     free(rep.files.v);
     return (int)rep.lines;
+}
+
+void sh_cache_copy_free(sh_cache_copy *c)
+{
+    if (!c) return;
+    if (c->dir && mc_dir_exists(c->dir)) (void)mc_rmtree(c->dir);
+    free(c->dir);
+    free(c->modjson);
+    free(c->name);
+    memset(c, 0, sizeof *c);
+}
+
+int sh_cache_stage_copy(const char *chash, sh_cache_copy *out, char **why)
+{
+    mc_report rep;
+    const sh_modmanifest_row *row;
+    mc_unit *units = NULL;
+    const char **manifests = NULL;
+    size_t *lens = NULL, i, n;
+    sh_mb_bundle built;
+    sh_mb_resolver resolver;
+    mc_src src;
+    char *reason = NULL, *text = NULL;
+    const char *title;
+    int ok = 0;
+    if (why) *why = NULL;
+    if (out) memset(out, 0, sizeof *out);
+    memset(&built, 0, sizeof built);
+    if (!out || !mc_hex64(chash)) { if (why) *why = sh_text("This map's mod could not be found on this computer."); return 0; }
+    memset(&rep, 0, sizeof rep);
+    rep.want = chash;
+    mc_report_run(&rep);
+    free(rep.files.v);
+    if (!rep.found.count) {
+        if (why) *why = sh_text("No map on this computer uses this mod any more; press Refresh.");
+        sh_modmanifest_list_free(&rep.found);
+        return 0;
+    }
+    row = &rep.found.rows[0];
+    title = sh_modmanifest_row_name(row)[0] ? row->name : "This mod";
+    n = row->unit_count;
+    units = n ? (mc_unit *)calloc(n, sizeof *units) : NULL;
+    manifests = n ? (const char **)calloc(n, sizeof *manifests) : NULL;
+    lens = n ? (size_t *)calloc(n, sizeof *lens) : NULL;
+    if (!n || !units || !manifests || !lens) { reason = sh_textf("%s could not be copied: Snapmap+ ran out of memory.", title); goto done; }
+    for (i = 0; i < n; i++) {
+        mpj *m;
+        const mpj *sp;
+        mc_unit_load(&units[i], row->units[i]);
+        if (units[i].state != 1) {
+            reason = sh_textf("%s cannot be copied: some of its content is not on this computer. Play the map once online, "
+                              "then try again.", title);
+            goto done;
+        }
+        /* D29: a unit whose binaries spell its namespace waits for the namespace mapping (D12). */
+        m = mpj_parse(units[i].bytes, units[i].len);
+        sp = m ? mpj_get(m, "spelled") : NULL;
+        if (sp && sp->type == MPJ_STR && sp->text && sp->text[0]) { mpj_free(m); reason = sh_text(SH_CACHE_COPY_SPELLED); goto done; }
+        mpj_free(m);
+        manifests[i] = units[i].bytes;
+        lens[i] = units[i].len;
+        if (strcmp(row->roots[i], SH_UNIT_WHOLE)) out->objects++;
+    }
+    strcpy_s(out->salt, sizeof out->salt, row->salt);
+    out->name = sh_textf("%s (my copy)", sh_modmanifest_row_name(row)[0] ? row->name : row->salt);
+    out->dir = mc_path("partial\\copy-%lu-%llu", GetCurrentThreadId(), (unsigned long long)GetTickCount64());
+    if (!out->name || !out->dir) { reason = sh_textf("%s could not be copied: Snapmap+ ran out of memory.", title); goto done; }
+    {
+        char *partial = mc_path("partial");
+        int made = partial && mc_mkdirs(partial);
+        free(partial);
+        if (!made) { reason = sh_textf("%s could not be copied: the content folder could not be written.", title); goto done; }
+    }
+    memset(&resolver, 0, sizeof resolver);
+    if (g_resolver_set) resolver = g_resolver;
+    src.units = units;
+    src.n = n;
+    /* Copies (link 0): the folder becomes the player's own, whose files they may edit; a hard link would edit the
+     * cache's bytes. */
+    if (!sh_unit_compose_ex(manifests, lens, n, mc_compose_source, &src, NULL, 0, 0, row->salt, out->name, &resolver,
+                            out->dir, &built, &reason)) {
+        char *said = sh_textf("%s could not be copied: %s.", title, reason ? reason : "its files did not check");
+        free(reason);
+        reason = said;
+        goto done;
+    }
+    {
+        char *mj = sh_textf("%s\\mod.json", out->dir);
+        size_t len = 0;
+        unsigned char *bytes = mj ? sh_mb_read_file(mj, (size_t)1 << 24, &len) : NULL;
+        int had = 0;
+        text = bytes ? sh_mb_author_bytes((const char *)bytes, len, &out->modjson_len, &had) : NULL;
+        free(bytes);
+        free(mj);
+        if (!text) { reason = sh_textf("%s could not be copied: its mod.json could not be read back.", title); goto done; }
+        out->modjson = text;
+        text = NULL;
+    }
+    ok = 1;
+done:
+    sh_mb_free(&built);
+    for (i = 0; units && i < n; i++) mc_unit_free(&units[i]);
+    free(units);
+    free((void *)manifests);
+    free(lens);
+    free(text);
+    sh_modmanifest_list_free(&rep.found);
+    if (!ok) {
+        sh_cache_copy_free(out);
+        if (why) *why = reason;
+        else free(reason);
+    } else free(reason);
+    return ok;
 }
 
 /* The units this computer's published maps claim (modclaim.h modclaim_held), kept by every sweep (5.17): a claim's
