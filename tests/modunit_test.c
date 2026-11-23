@@ -342,6 +342,58 @@ static int cs_read(void *c, const char *source, const char *sha, unsigned char *
 }
 static const sh_mb_stock_ops g_conductor_ops = { NULL, NULL, cs_identify, NULL, cs_read };
 
+/* 6b: a native/ copy of a DOOM material, unchanged (a surface: the mod serves DOOM's own bytes at DOOM's name). The
+ * sweep of the owner's mods found one named only by a DOOM mesh the mod borrows, which no edge of the mod's own files
+ * reaches: it travels in every unit, as a pointer, as the editor serves it wherever the mod is used. */
+#define SURFACE_MAT "generated/decls/material/models/mapobjects/rock_kit.decl"
+static const char g_surface_text[] = "{\ndiffusemap\t\"models/mapobjects/rock_kit\"\n}\n";
+static int sf_identify(void *c, const char *source, char sha[SH_MB_HASH_HEX + 1], unsigned long long *size)
+{
+    (void)c;
+    if (_stricmp(source, SURFACE_MAT)) return SH_MB_STOCK_ABSENT;
+    sh_mb_sha256_hex(g_surface_text, strlen(g_surface_text), sha);
+    *size = strlen(g_surface_text);
+    return SH_MB_STOCK_OK;
+}
+static int sf_read(void *c, const char *source, const char *sha, unsigned char **bytes, size_t *len)
+{
+    (void)c; (void)sha;
+    if (_stricmp(source, SURFACE_MAT)) return SH_MB_STOCK_ABSENT;
+    *len = strlen(g_surface_text);
+    *bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, *len + 1);
+    if (!*bytes) return SH_MB_STOCK_UNAVAILABLE;
+    memcpy(*bytes, g_surface_text, *len);
+    return SH_MB_STOCK_OK;
+}
+static const sh_mb_stock_ops g_surface_ops = { NULL, NULL, sf_identify, NULL, sf_read };
+
+static void test_surface(const char *top)
+{
+    char folder[MAX_PATH * 2];
+    sh_mb_bundle b;
+    sh_unit u;
+    size_t i;
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\surface", top);
+    write_pack(folder);
+    mt_write(folder, "native\\generated\\decls\\material\\models\\mapobjects\\rock_kit.decl", g_surface_text);
+    sh_mb_set_stock_ops(&g_surface_ops);
+    if (!build(folder, &b)) { sh_mb_set_stock_ops(NULL); return; }
+    for (i = 0; i < b.file_count; i++)
+        if (!_stricmp(b.files[i].path, "native/" SURFACE_MAT)) CHECK(b.files[i].cls == SH_MB_CLASS_SURFACE);
+    if (unit(&b, folder, "mods/" SALT "/crate", &u)) {
+        CHECK(kept(&b, &u, "native/" SURFACE_MAT) == 1);
+        CHECK(u.manifest && strstr(u.manifest, "\"at\":\"native/" SURFACE_MAT "\""));
+        CHECK(u.manifest && !strstr(u.manifest, "{\"path\":\"native/"));   /* a pointer, never carried */
+        sh_unit_free(&u);
+    }
+    if (unit(&b, folder, "mods/" SALT "/barrel", &u)) {
+        CHECK(kept(&b, &u, "native/" SURFACE_MAT) == 1);
+        sh_unit_free(&u);
+    }
+    sh_mb_free(&b);
+    sh_mb_set_stock_ops(NULL);
+}
+
 typedef struct src_ctx { const char *folder, *swap_path, *swap_file; } src_ctx;
 static char *source_of(void *context, const char *path);
 
@@ -691,6 +743,7 @@ int main(void)
     test_identity(top);
     test_proof(top);
     test_registry_edits(top);
+    test_surface(top);
     test_boards(top);
     test_scripts(top);
     test_asked(top);

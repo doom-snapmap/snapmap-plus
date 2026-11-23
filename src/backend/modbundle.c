@@ -2442,6 +2442,11 @@ static void mb_need_cb(void *ctx, const char *type, const char *name, size_t n)
         f->event_count++;
         return;
     }
+    /* A look's images (snapmapplus/look/<hash>: a parameter or colour image) are what the look compiler derives from
+     * this very material, again wherever the material serves: no need of it. Recorded, each became a pointer in the
+     * material's units that a player's product cannot answer before the unit's material has served (the composition
+     * was refused and stood in: the all-mods unit proof, DS-E). */
+    if (n > 17 && !_strnicmp(name, "snapmapplus/look/", 17)) return;
     if (!mb_add_need(c->file, type, name, n)) c->oom = 1;
 }
 

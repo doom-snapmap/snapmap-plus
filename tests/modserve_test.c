@@ -5290,6 +5290,55 @@ static void test_composition_serves_its_map(void)
     CHECK(sh_modserve_index_build(g_root) >= 6);
 }
 
+/* D26: in the editor, the root folder's build of a salt the map declares by a composition is inert but serves the
+ * names under its salt that the composition does not carry (the Toybox shows the installed version's objects); on a
+ * path both carry the composition wins; in Play the root build serves nothing. */
+static void test_composition_overlay(void)
+{
+    char top[MAX_PATH], root[MAX_PATH], served[MAX_PATH], text[64];
+    char *slash;
+    const char *list[1];
+    sh_modserve_scope_info si;
+    int was_on = sh_modserve_scope_enabled(), was_mode = sh_modserve_scope_mode_get();
+    static const char CHASH[] = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    static const char RHASH[] = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    static const fx_file comp[] = {
+        { "generated/decls/entitydef/mods/dcompos1/x.decl", "COMPOSED", -1, "entityDef", "mods/dcompos1/x", NULL, 'd' },
+    };
+    static const fx_file local[] = {
+        { "generated/decls/entitydef/mods/dcompos1/x.decl", "LOCAL-X", -1, "entityDef", "mods/dcompos1/x", NULL, 'e' },
+        { "generated/decls/entitydef/mods/dcompos1/y.decl", "LOCAL-Y", -1, "entityDef", "mods/dcompos1/y", NULL, 'e' },
+    };
+    printf("-- the installed version of a composition's salt serves the names the composition lacks, in the editor only\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\overlaymap\\mods", top);
+    _snprintf_s(served, sizeof served, _TRUNCATE, "%s\\.content\\served", root);
+    mkdirs(served);
+    g_bundle_extra = NULL;
+    make_bundle(served, CHASH, "dcompos1", 'd', NULL, comp, 1, NULL);
+    make_bundle(root, "dcompos1", "dcompos1", 'e', NULL, local, 2, NULL);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_index_build(root) == 2);
+    list[0] = CHASH;
+    (void)sh_modserve_scope_set(list, 1, 1);
+    (void)sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR);
+    /* The editor: the composition's own path is the composition's; the extra name is the installed version's. */
+    CHECK(open_text("generated/decls/entitydef/mods/dcompos1/x.decl", text, sizeof text) && !strcmp(text, "COMPOSED"));
+    CHECK(open_text("generated/decls/entitydef/mods/dcompos1/y.decl", text, sizeof text) && !strcmp(text, "LOCAL-Y"));
+    CHECK(sh_modserve_bundle_scope(RHASH, &si) && si.inert && si.names_live && !si.shadows_live && !si.requirements_live);
+    /* Play: the installed version serves nothing. */
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0);
+    CHECK(open_text("generated/decls/entitydef/mods/dcompos1/x.decl", text, sizeof text) && !strcmp(text, "COMPOSED"));
+    CHECK(!open_text("generated/decls/entitydef/mods/dcompos1/y.decl", text, sizeof text));
+    CHECK(sh_modserve_bundle_scope(RHASH, &si) && si.inert && !si.names_live);
+    (void)sh_modserve_scope_mode(was_mode);
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(was_on);
+    CHECK(sh_modserve_index_build(g_root) >= 6);
+}
+
 /* The provider-miss reporter of a unit composition (block "units_of") reports a request under its namespace that
  * nothing serves, but never a board member (squares or quarters) or a name of a kind no build carries (R-LV2: the
  * Tyrant's unit reported 4 quarters and 90 .tga source names that the whole pack does not serve either). */
@@ -6044,6 +6093,7 @@ int main(void)
     test_static_model_refresh();
     test_miss_reporter_skips_probes();
     test_composition_serves_its_map();
+    test_composition_overlay();
     test_bank_stems();
     test_namespace_maps();
     test_index_retire();

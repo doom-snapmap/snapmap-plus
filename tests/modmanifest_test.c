@@ -1142,6 +1142,148 @@ static void choices(void)
     g_installed_count = 2;
 }
 
+/* ---- the version rule (D23, D23a, S9) ------------------------------------------------------------------------- */
+
+static int g_carry_answer;
+static int vr_carries(const char *salt, const char *name) { (void)salt; (void)name; return g_carry_answer; }
+
+static int g_notes;
+static char g_note[1024];
+static void vr_notice(const char *text)
+{
+    g_notes++;
+    strncpy_s(g_note, sizeof g_note, text, _TRUNCATE);
+}
+
+#define VR_ENT(n) "{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/alexpink/" n "\"," \
+                  "\"name\":\"\",\"state\":{}}}"
+#define VR_TAIL ",\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}" \
+                ",\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"alexpink\",\"name\":\"Eternal Demons\"," \
+                "\"size\":42,\"objects\":{\"entities/imp\":\"" HASH_B "\"}}]}}"
+static const char VR_MAP2[] = "{\"entities\":[" VR_ENT("imp") "," VR_ENT("extra") "]" VR_TAIL;   /* two placed objects */
+static const char VR_MAP1[] = "{\"entities\":[" VR_ENT("imp") "]" VR_TAIL;                       /* one */
+
+static installed g_vr[2];
+static char g_vr_comp[SH_MOD_HASH_CHARS + 1];
+
+/* The open map holds a pinned row of alexpink (its composition serves "imp"); the installed version is a root build of
+ * the same salt that carries "extra" (and "imp" too when `root_has_imp`). */
+static void vr_open(const char *map, size_t map_len, int root_has_imp, int carries)
+{
+    size_t en = 0;
+    sh_modmanifest_list cur;
+    char *engine;
+    sh_modmanifest_reset();
+    g_installed = NULL;
+    g_installed_count = 0;
+    engine = sh_modmanifest_prepare_load(map, map_len, &en);
+    if (engine) HeapFree(GetProcessHeap(), 0, engine);
+    memset(&cur, 0, sizeof cur);
+    CHECK(sh_modmanifest_current(&cur) == 1 && cur.rows[0].pinned);
+    strcpy_s(g_vr_comp, sizeof g_vr_comp, cur.count ? cur.rows[0].build : HASH_B);
+    sh_modmanifest_list_free(&cur);
+    memset(g_vr, 0, sizeof g_vr);
+    g_vr[0] = (installed){ "alexpink", "Eternal Demons", "1", g_vr_comp, 100, { "mods/alexpink/imp", NULL, NULL, NULL } };
+    g_vr[1] = (installed){ "alexpink", "Eternal Demons", "1", HASH_A, 200,
+                           { "mods/alexpink/extra", root_has_imp ? "mods/alexpink/imp" : NULL, NULL, NULL } };
+    g_installed = g_vr;
+    g_installed_count = 2;
+    g_carry_answer = carries;
+    g_notes = 0;
+    g_note[0] = 0;
+}
+
+static void version_rule(void)
+{
+    static const char *NAMES2[] = { "mods/alexpink/imp", "mods/alexpink/extra" };
+    sh_modmanifest_list back = {0}, cur, out;
+    size_t sn = 0;
+    char *saved;
+    printf("-- the version rule: a pinned row and a local row of one salt merge when the installed version carries every placed name\n");
+    sh_modmanifest_set_notice(vr_notice);
+    sh_modmanifest_set_carries(vr_carries);
+
+    /* The merge at a save: one local row naming every object, and S9. */
+    vr_open(VR_MAP2, sizeof VR_MAP2 - 1, 0, 1);
+    saved = sh_modmanifest_on_save(VR_MAP2, sizeof VR_MAP2 - 1, &sn);
+    CHECK(saved != NULL);
+    CHECK(g_notes == 1 && !strcmp(g_note, "This map now uses the version of Eternal Demons you have installed for all 2 "
+                                          "of its objects."));
+    if (saved) {
+        CHECK(sh_modmanifest_read(saved, sn, &back, NULL) == 1 && !back.rows[0].pinned && back.rows[0].name_count == 2 &&
+              !strcmp(back.rows[0].build, HASH_A));
+        sh_modmanifest_list_free(&back);
+        HeapFree(GetProcessHeap(), 0, saved);
+    }
+    memset(&cur, 0, sizeof cur);
+    CHECK(sh_modmanifest_current(&cur) == 1 && !cur.rows[0].pinned);   /* the open map's rows follow the save */
+    sh_modmanifest_list_free(&cur);
+
+    /* One object: the singular wording. */
+    vr_open(VR_MAP1, sizeof VR_MAP1 - 1, 1, 1);
+    saved = sh_modmanifest_on_save(VR_MAP1, sizeof VR_MAP1 - 1, &sn);
+    CHECK(saved != NULL);
+    CHECK(g_notes == 1 && !strcmp(g_note, "This map now uses the version of Eternal Demons you have installed for its object."));
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+
+    /* D23a: the installed version lacks an object the pinned row places: nothing merges; the notice says which. */
+    vr_open(VR_MAP2, sizeof VR_MAP2 - 1, 0, 0);
+    saved = sh_modmanifest_on_save(VR_MAP2, sizeof VR_MAP2 - 1, &sn);
+    CHECK(saved != NULL);
+    CHECK(g_notes == 1 && !strcmp(g_note, "Eternal Demons was not moved to the version you have installed: the Imp is not "
+                                          "in it. Objects placed from your version show in the editor only, until your "
+                                          "version has the Imp again or you remove it from the map."));
+    if (saved) {
+        CHECK(sh_modmanifest_read(saved, sn, &back, NULL) == 2);
+        CHECK(back.count == 2 && (back.rows[0].pinned != back.rows[1].pinned));   /* a pinned row and a local row */
+        sh_modmanifest_list_free(&back);
+        HeapFree(GetProcessHeap(), 0, saved);
+    }
+
+    /* The rows a save would write merge silently: no notice. */
+    vr_open(VR_MAP2, sizeof VR_MAP2 - 1, 0, 1);
+    memset(&out, 0, sizeof out);
+    CHECK(sh_modmanifest_rows_for(NAMES2, 2, &out) == 1 && !out.rows[0].pinned && out.rows[0].name_count == 2);
+    CHECK(g_notes == 0);
+    sh_modmanifest_list_free(&out);
+    vr_open(VR_MAP2, sizeof VR_MAP2 - 1, 0, 0);
+    memset(&out, 0, sizeof out);
+    CHECK(sh_modmanifest_rows_for(NAMES2, 2, &out) == 2 && g_notes == 0);   /* D23a: nothing merges, nothing said */
+    sh_modmanifest_list_free(&out);
+
+    /* The rule on the open map (before the Mods tab lists it): the current pinned row becomes local; S9 once. */
+    vr_open(VR_MAP2, sizeof VR_MAP2 - 1, 0, 1);
+    CHECK(sh_modmanifest_version_rule(NAMES2, 2) == 1);
+    CHECK(g_notes == 1 && !strcmp(g_note, "This map now uses the version of Eternal Demons you have installed for all 2 "
+                                          "of its objects."));
+    memset(&cur, 0, sizeof cur);
+    CHECK(sh_modmanifest_current(&cur) == 1 && !cur.rows[0].pinned && !strcmp(cur.rows[0].build, HASH_A) &&
+          cur.rows[0].name_count == 2);
+    sh_modmanifest_list_free(&cur);
+    /* D23a on the open map: the row stays pinned, with the notice. */
+    vr_open(VR_MAP2, sizeof VR_MAP2 - 1, 0, 0);
+    CHECK(sh_modmanifest_version_rule(NAMES2, 2) == 0 && g_notes == 1 &&
+          !strncmp(g_note, "Eternal Demons was not moved to the version you have installed", 62));
+    memset(&cur, 0, sizeof cur);
+    CHECK(sh_modmanifest_current(&cur) == 1 && cur.rows[0].pinned);
+    sh_modmanifest_list_free(&cur);
+
+    /* Unbound (the store tool): the rule does nothing, not even a notice. */
+    sh_modmanifest_set_carries(NULL);
+    vr_open(VR_MAP2, sizeof VR_MAP2 - 1, 0, 1);
+    saved = sh_modmanifest_on_save(VR_MAP2, sizeof VR_MAP2 - 1, &sn);
+    CHECK(saved != NULL && g_notes == 0);
+    if (saved) {
+        CHECK(sh_modmanifest_read(saved, sn, &back, NULL) == 2);
+        sh_modmanifest_list_free(&back);
+        HeapFree(GetProcessHeap(), 0, saved);
+    }
+    sh_modmanifest_set_notice(NULL);
+    sh_modmanifest_reset();
+    g_installed = NULL;
+    g_installed_count = 0;
+}
+
 int main(void)
 {
     printf("modmanifest_test\n");
@@ -1160,6 +1302,7 @@ int main(void)
     mod_json();
     map_level();
     choices();
+    version_rule();
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

@@ -3042,6 +3042,7 @@ static const wchar_t *ui_mods_action_name(int action)
     case SH_MODS_ACT_NEW_MOD:            return L"newMod";
     case SH_MODS_ACT_ADD_MINE:           return L"addToMine";
     case SH_MODS_ACT_CONTENT:            return L"content";
+    case SH_MODS_ACT_MAP_UPDATE:         return L"mapUpdate";
     default:                      return L"";
     }
 }
@@ -3068,6 +3069,7 @@ static int ui_mods_action_code(const std::wstring &name)
     if (name == L"newMod")              return SH_MODS_ACT_NEW_MOD;
     if (name == L"addToMine")           return SH_MODS_ACT_ADD_MINE;
     if (name == L"content")             return SH_MODS_ACT_CONTENT;
+    if (name == L"mapUpdate")           return SH_MODS_ACT_MAP_UPDATE;
     return 0;
 }
 

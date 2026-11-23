@@ -1661,7 +1661,9 @@ k is the texel (k % 8, k / 8), fetched exactly with `texelFetch`, and a layer's
 vectors only where its mask is non-zero. `sh_modprog_param_image` writes the
 image (a DOOM 2016 `.bimage`), `sh_modprog_register_param_image` serves it at
 `generated/image/snapmapplus/look/<16 hex digits of its SHA-256>.bimage` in the
-product's container (the same vectors, the same path), and `SH_MODPROG_ML_PARMS`
+product's container (the same vectors, the same path; the builder records no need
+of it, since the material derives it again wherever it serves, so a unit never
+points at one a player's product has not derived yet), and `SH_MODPROG_ML_PARMS`
 names the vectors by the material keys they had. Layer 0's height has no sampler
 of its own: vector 9 says whether it is a constant or the red channel of an
 extra map. A material written with the old keys (the 28 vectors and
@@ -4232,7 +4234,13 @@ it is inert for the map. Each admitted bundle gets serve flags computed from
 the listing and read lock-free (`sv`: names under its salt, shadows, surfaces):
 
 - declared: everything it carries;
-- another build of a declared salt: nothing;
+- another build of a declared salt: nothing, with one exception (D26): in the
+  editor, when the declared build is the map's composition (a row that names
+  units), the root folder's build of that salt serves the names under its salt
+  that the composition does not carry, so the Toybox offers the installed
+  version's objects while every path the map's units carry stays theirs (the
+  declared provider wins per path). Its shadows, surfaces and requirements
+  stay off, and in Play it serves nothing;
 - an editor-time bundle (its shadows include a `generated/decls/snapeditor*`,
   `snappropertyinspector*` or `snappalette*` decl, or the editor's own movies
   under `generated/swf/snapmaps/`): its editor tweaks, in every map this
@@ -5605,6 +5613,24 @@ and names no unit until a publish or an export pins it. It carries the local
 computes no unit: a pinned row the open map serves through its composition
 keeps its units; a row a local folder serves is written as a local row.
 
+The version rule (D23, `mm_save_version`): a map holds one version of each mod.
+When a save finds a mod both in a pinned row and in a local row (an object
+placed from the installed version, which the editor's overlay offers, D26),
+every placed object of that mod moves to the installed version: the two rows
+become one local row, the open map's rows follow, and the save says "This map
+now uses the version of Eternal Demons you have installed for all 3 of its
+objects." (S9, through `sh_modmanifest_set_notice`). When the installed version
+lacks an object the pinned row places (D23a), nothing moves yet and the notice
+names the object; the objects placed from the installed version then show in
+the editor only. The Mods tab's This map view offers the same move without a
+placement: a row of a mod whose installed version is another build says "This
+map uses another version of Eternal Demons than the one you have." with
+**Update** (`mapUpdate`, `sh_modmanifest_current_make_local`), which refuses
+when the installed version lacks a placed object. The engine reports no
+placement, so the rule runs wherever the open map's placed names are read live
+(`sh_modmanifest_version_rule` from `mu_listing_live`: a Mods tab change, the
+editor's Play) and at every save.
+
 `modcache.c` keeps one cache per machine at `<mods>\.content\`: each file once
 in `files\<sha[0:2]>\<sha>` (read-only, checked when it arrives), manifests in
 `units\`, and per pinned row a composition at `served\<composition hash>\`, a
@@ -5685,7 +5711,10 @@ The closure follows these rules:
 
 - Seeds: the root's file; for an entityDef, the Toybox rows that place it;
   every DOOM file the mod changes that is not an editor tweak, in every unit
-  (edits and replacements apply wherever the mod is used), though they never
+  (edits and replacements apply wherever the mod is used), and every DOOM file
+  its `native/` folder holds unchanged (a surface: DOOM's bytes at DOOM's name,
+  kept as a pointer, so a published map finds it wherever the editor did, even
+  when only a DOOM file names it, such as a campaign mesh's material), though they never
   reach the mod's own entityDefs (a registry names every object); decls of a
   type the game finds by enumeration (`sh_unit_enumerated_type`: the AI scores
   and encounters, which the conductor numbers) travel with the def the

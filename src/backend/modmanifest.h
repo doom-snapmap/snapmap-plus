@@ -291,6 +291,14 @@ size_t sh_modmanifest_current_remove(const char *build);
 int    sh_modmanifest_current_attach(const sh_modmanifest_row *row);
 /* A copy of the current manifest's map-level rows. Returns the row count. */
 size_t sh_modmanifest_current_attached(sh_modmanifest_list *out);
+/* The open map's pinned row of `salt` becomes a local row of the installed build `build` naming `names` (the version
+ * rule, D23: Update in the Mods tab). 1 changed, 0 no pinned row of that salt, -1 bad arguments or no memory. The next
+ * save writes it. */
+int sh_modmanifest_current_make_local(const char *salt, const char *build, const char *const *names, size_t n);
+/* The version rule on the open map now (D23): with `names` the names it places, every mod placed both from its pinned
+ * units and from the installed version moves to the installed version (S9 through the notice sink; D23a as at a save).
+ * The number of mods moved, -1 on failure. Main thread. */
+int sh_modmanifest_version_rule(const char *const *names, size_t count);
 /* Forget the current manifest (tests). */
 void sh_modmanifest_reset(void);
 /* The open map closed (the editor left it, or a hub launch's Play is over):
@@ -330,6 +338,12 @@ int sh_modmanifest_rows_for(const char *const *names, size_t count, sh_modmanife
  * they are. NULL unbinds. */
 typedef int (*sh_modmanifest_pin_fn)(sh_modmanifest_list *rows, const char *json, size_t length);
 void sh_modmanifest_set_pin(sh_modmanifest_pin_fn pin);
+
+/* Where the version rule's one-line notices go (S9, D23a: modpublished.h sh_modpublished_notice). NULL: the log only. */
+void sh_modmanifest_set_notice(void (*fn)(const char *text));
+/* Whether the installed version of `salt` carries the placed name `name` (modserve.h sh_modserve_root_carries): 1 yes.
+ * NULL (unbound): the version rule never moves a mod. */
+void sh_modmanifest_set_carries(int (*fn)(const char *salt, const char *name));
 
 /* The listing: the builds a map declares to the map scope (modserve.h sh_modserve_scope_set), in order. One rule for
  * every mode (the editor's load and Play entry, a hub, My Maps or published launch, a co-op lobby's launch, a rawmap
