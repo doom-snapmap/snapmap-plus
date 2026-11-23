@@ -171,6 +171,11 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   the end of the vector range, a full range of another kind. The signature and
   the detour window of `AllocParmState` are in `sig_test` and
   `detour_windows_test`.
+- `modlobby_sites_test.c`, given `-Doom`/`-DoomAlt`, runs the co-op lobby's
+  bind checks (`sh_modlobby_check_sites`, the function the DLL's bind runs) on
+  each executable's code: the six lobby sites at their recorded RVAs, every
+  byte check holding, the same with the four detours' windows written over,
+  and a changed byte at the controller's lobby-parameters call refused by name.
 - `clip_events_test.c` covers clip events' pure half (`clip_events_rule.c`):
   the `md6/mods/` and own-namespace tests, the md6Def reader, the registries
   rows a build records and the warning for every entry or clip it leaves out,
