@@ -122,6 +122,31 @@ int main(void)
     modclaim_set_account_name("Doom Slayer");
     modclaim_set_account_name("");
 
+    /* a key that cannot be made or used is its own failure, MODNET_E_KEY, never the store address's (W1) */
+    {
+        char blocker[MAX_PATH * 2], bad[MAX_PATH * 3];
+        char hash[MODNET_HASH_HEX + 1];
+        const char *units[1];
+        modclaim_plan plan;
+        FILE *f;
+        _snprintf_s(blocker, sizeof blocker, _TRUNCATE, "%s\\blocker", top);
+        _snprintf_s(bad, sizeof bad, _TRUNCATE, "%s\\keys", blocker);
+        f = fopen(blocker, "wb");
+        CHECK(f != NULL);
+        if (f) { fputs("x", f); fclose(f); }
+        memset(hash, 'a', MODNET_HASH_HEX);
+        hash[MODNET_HASH_HEX] = 0;
+        units[0] = hash;
+        modclaim_set_key_folder(bad);
+        free(why); why = NULL;
+        CHECK(modclaim_signer(NULL, NULL, &why) == 0);
+        CHECK(modclaim_plan_units(units, 1, &plan, NULL, NULL) == MODNET_E_KEY);
+        CHECK(modclaim_upload(NULL, NULL, NULL) == MODNET_E_KEY);
+        CHECK(modclaim_claim("aaaaaaaaaaaaaaaaaaaaaaa1", units, 1, NULL, NULL, NULL, NULL) == MODNET_E_KEY);
+        CHECK(modclaim_release("aaaaaaaaaaaaaaaaaaaaaaa1", NULL, NULL) == MODNET_E_KEY);
+        CHECK(MODNET_E_KEY != MODNET_E_CONFIG && MODNET_E_KEY == -20);
+    }
+
     free(why);
     sh_key_free(b);
     modclaim_set_key_folder(NULL);

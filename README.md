@@ -118,14 +118,15 @@ names a mod you do not have asks first and downloads only what you approve,
 verified by hash, into that map's own folder under `mods\maps\`. A mod may carry
 Lua scripts that run during Play, sandboxed, on the host only.
 
-On install and update the installer runs `snapmap-plus-store.exe`, which converts
-what earlier releases left: every mod folder and saved map, the packages in
-`overrides\`, and its loose files and `strings\strids.json` into the mod
-`mods\my-overrides`, then sends `overrides\` and `strings\` to the Recycle Bin
-once everything in them is in `mods\`. Nothing is deleted for good: an item the
-Recycle Bin cannot take stays where it is, and the tool says so. A mod folder or
-map in an earlier shape that the installer has not converted is refused with a
-plain sentence; running the installer again converts it. See
+This release's installer does not convert what earlier releases left.
+`snapmap-plus-store.exe` is built and packaged with the release, but the
+installer does not place or run it, and `snapmap-plus migrate` reports that
+there is nothing to convert. A map, export or prefab saved by an earlier
+Snapmap+ is refused with "... was saved by an earlier Snapmap+; run the
+Snapmap+ installer to update it.", and a mod folder made for an earlier version
+is listed with "This mod was made for an earlier version of Snapmap+. This
+version does not read it yet." Converting those earlier shapes is the
+installer's job: its migration must do it, and it is on the release gate. See
 [Mods](docs/capabilities.md#mods).
 
 ## Credits

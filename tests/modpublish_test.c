@@ -211,6 +211,22 @@ static void rows_pinned(int with_marauder)
     sh_modmanifest_row_free(&row);
 }
 
+/* A pinned row of a whole mod (root "*"): the mod itself is what the map uses. */
+static void rows_whole(void)
+{
+    sh_modmanifest_row row;
+    const char *roots[1] = { "*" };
+    const char *units[1] = { UNIT_T };
+    sh_modmanifest_list_free(&g_rows);
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, "eterndem");
+    sh_modmanifest_row_set_name(&row, "Eternal Demons");
+    sh_modmanifest_row_add_name(&row, "mods/eterndem/entities/ai/demon/tyrant");
+    CHECK(sh_modmanifest_row_pin(&row, roots, units, 1));
+    CHECK(sh_modmanifest_list_add(&g_rows, &row));
+    sh_modmanifest_row_free(&row);
+}
+
 /* A local row of a mod whose folder this computer does not have. */
 static void rows_local(void)
 {
@@ -411,6 +427,16 @@ int main(int argc, char **argv)
         publish(1);
         CHECK(F.starts == starts && !F.busy_on);
         CHECK(!strcmp(F.toast, "The map was not published. This mod content is over the mod store's size limit for one map."));
+        /* the store's text with no capital or full stop is made one sentence */
+        g_fc.upload_code = MODNET_E_REFUSED;
+        strcpy_s(g_fc.why, sizeof g_fc.why, "over the size limit");
+        publish(1);
+        CHECK(!strcmp(F.toast, "The map was not published. Over the size limit."));
+        /* the store sent no text: the client's own stand-in reads as a clause of the plain reason, never "refused by the store" */
+        g_fc.upload_code = MODNET_E_REFUSED;
+        strcpy_s(g_fc.why, sizeof g_fc.why, modnet_code_text(MODNET_E_REFUSED));
+        publish(1);
+        CHECK(!strcmp(F.toast, "The map was not published: the mod store refused it; use Send feedback in the Snapmap+ window."));
         g_fc.why[0] = 0;
     }
 
@@ -425,8 +451,12 @@ int main(int argc, char **argv)
                                      "Snapmap+ sends it the next time DOOM starts."));
         CHECK(engine_save() == 1);
         g_fc.claim_code = MODNET_E_UNAVAILABLE;
+        g_menu_notice[0] = 0;
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "bbbbbbbbbbbbbbbbbbbbbbb2", "rev1");
         PUMP_UNTIL(idle_all());
+        /* the claim that fails after the publish tells the author the queued sentence (P2-12) */
+        CHECK(!strcmp(g_menu_notice, "The map is published, but its mod content could not reach the mod store yet; "
+                                     "Snapmap+ sends it the next time DOOM starts."));
         CHECK(g_fc.queued == 1 && !strcmp(g_fc.queued_ref, "bbbbbbbbbbbbbbbbbbbbbbb2") && g_fc.queued_n == 2);
         CHECK(strstr(g_log, "(queued; retried at the next start)") != NULL);
         /* the store did not answer the preparation either: the same */
@@ -449,7 +479,24 @@ int main(int argc, char **argv)
         g_fc.signer_fails = 1;
         publish(0);
         CHECK(F.starts == starts &&
-              !strcmp(F.toast, "The map was not published: Snapmap+ could not make this computer's publishing key."));
+              !strcmp(F.toast, "The map was not published: Snapmap+ could not use your publishing key; restore it from your "
+                               "backup in the Settings menu."));
+    }
+
+    printf("-- a claim the store will not take after the publish: said once, with its reason\n");
+    {
+        int starts = F.starts;
+        g_menu_notice[0] = 0;
+        publish(0);
+        CHECK(F.starts == starts + 1);
+        CHECK(engine_save() == 1);
+        g_fc.claim_code = MODNET_E_FORBIDDEN;
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "bbbbbbbbbbbbbbbbbbbbbbb3", "rev1");
+        PUMP_UNTIL(idle_all());
+        CHECK(!strcmp(g_menu_notice, "The map is published, but its mod content could not reach the mod store: the mod store "
+                                     "did not accept your publishing key for this map; restore the key that published it from "
+                                     "its backup (Settings menu)."));
+        CHECK(strlen(g_menu_notice) < 255);
     }
 
     printf("-- an object neither here nor in the store, and one moderation removed: said after the publish\n");
@@ -473,6 +520,23 @@ int main(int argc, char **argv)
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc3", "rev2");
         PUMP_UNTIL(idle_all());
         fc_set_unit(UNIT_T, MODCLAIM_HELD, 0);
+    }
+
+    printf("-- a whole mod neither here nor in the store is named by the mod itself\n");
+    {
+        int starts = F.starts;
+        rows_whole();
+        g_menu_notice[0] = 0;
+        fc_set_unit(UNIT_T, MODCLAIM_ABSENT, 0);
+        publish(0);
+        CHECK(F.starts == starts + 1);
+        CHECK(!strcmp(g_menu_notice, "Players will see this map without Eternal Demons: its content is not on this computer "
+                                     "or in the mod store."));
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc4", "rev1");
+        PUMP_UNTIL(idle_all());
+        fc_set_unit(UNIT_T, MODCLAIM_HELD, 0);
+        rows_pinned(1);
     }
 
     printf("-- a mod that is not on this computer refuses the publish\n");

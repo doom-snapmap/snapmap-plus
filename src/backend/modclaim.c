@@ -467,7 +467,7 @@ int modclaim_plan_units(const char *const *units, size_t n, modclaim_plan *plan,
     if (!plan->units || !plan->state || !plan->bytes || !states) { free(states); modclaim_plan_free(plan); return MODNET_E_NOMEM; }
     plan->n = n;
     for (i = 0; i < n; i++) strcpy_s(plan->units[i], MODNET_HASH_HEX + 1, units[i]);
-    if (!modclaim_signer(&signer, NULL, why)) { free(states); return MODNET_E_CONFIG; }
+    if (!modclaim_signer(&signer, NULL, why)) { free(states); return MODNET_E_KEY; }
     do code = modnet_unit_status(units, n, states, io, &r);
     while (code != MODNET_OK && mc_wait(&r, code, attempt++, io));
     if (code != MODNET_OK) { mc_why(why, "%s", r.message ? r.message : modnet_code_text(code)); free(states); return code; }
@@ -532,7 +532,7 @@ int modclaim_upload(const modclaim_plan *plan, const modnet_io *io, char **why)
     mc_progress prog;
     modnet_io mine;
     size_t i;
-    if (!modclaim_signer(&signer, NULL, why)) return MODNET_E_CONFIG;
+    if (!modclaim_signer(&signer, NULL, why)) return MODNET_E_KEY;
     memset(&prog, 0, sizeof prog);
     memset(&mine, 0, sizeof mine);
     prog.outer = io;
@@ -573,8 +573,8 @@ int modclaim_claim(const char *ref, const char *const *units, size_t n, char (**
     unsigned attempt = 0, stale = 0;
     if (removed) *removed = NULL;
     if (nremoved) *nremoved = 0;
-    if (!mc_ref_ok(ref)) { mc_why(why, "the published item's id is not one Snapmap+ can claim"); return MODNET_E_ARG; }
-    if (!modclaim_signer(&signer, NULL, why) || !mc_secret(ref, secret, kid)) return MODNET_E_CONFIG;
+    if (!mc_ref_ok(ref)) { mc_why(why, "the published item's id is not one Snapmap+ can use"); return MODNET_E_ARG; }
+    if (!modclaim_signer(&signer, NULL, why) || !mc_secret(ref, secret, kid)) return MODNET_E_KEY;
     rev = mc_rev_of(ref) + 1;
     for (;;) {
         char (*gone)[MODNET_HASH_HEX + 1] = NULL;
@@ -617,7 +617,7 @@ int modclaim_release(const char *ref, const modnet_io *io, char **why)
     int code;
     unsigned attempt = 0, stale = 0;
     if (!mc_ref_ok(ref)) return MODNET_OK;
-    if (!modclaim_signer(&signer, NULL, why) || !mc_secret(ref, secret, NULL)) return MODNET_E_CONFIG;
+    if (!modclaim_signer(&signer, NULL, why) || !mc_secret(ref, secret, NULL)) return MODNET_E_KEY;
     rev = mc_rev_of(ref) + 1;
     for (;;) {
         code = modnet_map_release(ref, secret, rev, &signer, &got, io, &r);
@@ -726,7 +726,7 @@ int modclaim_asked(modclaim_asked_fn fn, void *context, const modnet_io *io, cha
     c = mc_section(MODCLAIM_CLAIMS_SECTION);
     ReleaseSRWLockShared(&g_lock);
     if (!c || !c->n) { mpj_free(c); return MODNET_OK; }
-    if (!modclaim_signer(&signer, NULL, why)) { mpj_free(c); return MODNET_E_CONFIG; }
+    if (!modclaim_signer(&signer, NULL, why)) { mpj_free(c); return MODNET_E_KEY; }
     refs = (const char **)calloc((size_t)c->n, sizeof *refs);
     secrets = (const char **)calloc((size_t)c->n, sizeof *secrets);
     held = calloc((size_t)c->n, sizeof *held);

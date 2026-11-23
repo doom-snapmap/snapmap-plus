@@ -112,6 +112,7 @@ const char *modnet_code_text(int code)
     case MODNET_E_UNAVAILABLE: return "the mod store is unavailable";
     case MODNET_E_GAME:        return "it needs game content this game does not hold";
     case MODNET_E_RETIRED:     return "this version of Snapmap+ is retired by the mod store";
+    case MODNET_E_KEY:         return "the publishing key could not be used";
     default:                   return "error";
     }
 }

@@ -57,7 +57,8 @@ enum {
     /* Not a store answer: content was obtained, but a pointer in it names game bytes this machine does not hold (a
      * different game revision, S4b). No request returns it. */
     MODNET_E_GAME        = -18,
-    MODNET_E_RETIRED     = -19    /* 410: the store no longer serves this version of the product (5.22) */
+    MODNET_E_RETIRED     = -19,   /* 410: the store no longer serves this version of the product (5.22) */
+    MODNET_E_KEY         = -20    /* not a store answer: the publishing key could not be made or used */
 };
 
 /* The codes that mean the store could not be asked or did not answer:

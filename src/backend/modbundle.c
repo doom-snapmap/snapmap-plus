@@ -1330,7 +1330,7 @@ int sh_mb_bank_rule(const char *request, const char *id, char **cause)
     if (!sh_mb_bank_stem(request, stem, sizeof stem))
         return mb_cause(cause, "%s: a sound bank goes in sound/soundbanks/pc/ itself, with a file name of at most 238 "
                         "characters (Windows holds a file name of 255, and the game is handed the bank under its "
-                        "name with 17 characters of its hash added); move or rename it", request ? request : "");
+                        "name with a short code added); move or rename it", request ? request : "");
     _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%s_", id);
     pn = strlen(prefix);
     n = strlen(stem);
@@ -2851,8 +2851,8 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
         return 0;
     }
     if (mbj_get(root, "files") || mbj_get(root, "bundle") || mbj_get(root, "build")) {
-        mb_error(b, "mod.json has \"files\", \"build\" or \"bundle\" at its top level, which Snapmap+ writes itself; "
-                 "remove it and press Refresh");
+        mb_error(b, "mod.json has entries at its top level that Snapmap+ writes itself; remove them and press "
+                 "Refresh");
         return 0;
     }
     if (block && block->t != MBJ_OBJ) { mb_error(b, "mod.json \"" SH_MB_BLOCK_KEY "\" must be an object"); return 0; }
@@ -7098,8 +7098,8 @@ int sh_mb_salt_paths_check(const sh_mb_bundle *b, char **cause)
                 end = strchr(seg, '/');
                 if (!end || end == seg) continue;
                 if ((size_t)(end - seg) == SH_SALT_LEN && _strnicmp(seg, b->id, SH_SALT_LEN) == 0) continue;
-                return mb_cause(cause, "%s is under mods/%.*s/, which is neither this mod folder's name nor its "
-                                "salt; move it under a mods folder named like this folder and press Refresh",
+                return mb_cause(cause, "%s is under mods/%.*s/, which is not under this mod folder's name; "
+                                "move it under a mods folder named like this folder and press Refresh",
                                 f->path ? f->path : t, (int)(end - seg), seg);
 
             }
@@ -7521,8 +7521,10 @@ static __declspec(thread) char *g_rec_why;
 
 static void mb_rec_why(const char *name, const char *why)
 {
-    char *text = sh_textf("%s could not be used (%s); close the program holding it (a backup, sync or antivirus tool, "
-                          "or an editor) and try again", name, why && why[0] ? why : "it could not be read");
+    char *text = sh_text("Snapmap+'s record of your mods could not be saved; close any program that holds files in "
+                         "your mods folder, then try again.");
+    mb_rec_log("MODS: record: %s could not be used (%s)", name ? name : SH_MB_RECORD_FILE,
+               why && why[0] ? why : "it could not be read");
     if (!text) return;
     free(g_rec_why);
     g_rec_why = text;

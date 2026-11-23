@@ -878,7 +878,7 @@ void sh_rawmap_reload_done(int rc, int faulted)
         text = sh_textf("Opening %s failed with an engine error. Rawmaps cannot be opened again until you restart DOOM.",
                         name);
     else if (rc != 0)
-        text = sh_textf("DOOM did not open %s (error %d). Try again; restart DOOM if it keeps happening.", name, rc);
+        text = sh_textf("DOOM did not open %s. Try again; restart DOOM if it keeps happening.", name);
     if (text) rawmap_tell(text);
     free(text);
     prepared_drop();

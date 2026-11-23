@@ -84,7 +84,7 @@ This compiles both DLLs into **`build/`**: the backend `XINPUT1_4.dll` and the f
 `build/webview/snapmap-plus-ui.dll` (the WebView2 SDK is auto-fetched from NuGet on the first build). `build/`
 is gitignored. (`build.ps1` first builds the backend, then the frontend, so the two never drift out of ABI
 sync; their shared ABI is declared in `src/common/snapmap_plus_iface.h`.) It also builds
-`build/snapmap-plus-store.exe`, the store tool the installer runs, from the backend's store sources
+`build/snapmap-plus-store.exe`, the store tool (the installer does not run it in this release), from the backend's store sources
 (`src/store/build.ps1`).
 
 `build.ps1` is the one top-level build script (used above, by CI and by the release workflow); build
@@ -114,7 +114,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File package.ps1
 This assembles the bundle into **`dist/`**: the **2-file overlay** (the two clone DLLs, laid out exactly
 as they drop into a DOOM install; the frontend renders in the system-installed WebView2 runtime) with its
 `MANIFEST.sha256`, and beside it the store tool `snapmap-plus-store.exe` with its own `TOOLS.sha256` (the
-installer places it in the data folder, not in DOOM). `dist/` is gitignored. No game assets or per-user
+installer does not place it in this release; it never goes into DOOM). `dist/` is gitignored. No game assets or per-user
 data are bundled. `tools/bundle_guard.ps1` checks that layout; CI and the release run it.
 
 A release build stamps its tag into the DLLs: `build.ps1 -Version v1.2.3` passes it to every compile as
@@ -174,7 +174,7 @@ a synthetic report against a GitHub mock. See [tests/README.md](../tests/README.
 for its pinned dependency and command. CI runs both the normal suite and the
 Worker runtime suite.
 
-Three more tests scan a **real DOOM image** — the executables of the supported build (the April 2024
+More tests scan a **real DOOM image** (`sig_test` and `globals_test`, plus `build_identity_test` and `x64_len_test`, which also take the images) — the executables of the supported build (the April 2024
 update, Steam build 13954591; they are not DRM-wrapped, so use the shipped files). **Running these is
 REQUIRED if you add or change any entry in the engine signature table** in `src/backend/signatures.c` **or
 in the engine-globals table** — they are the only thing that checks a recorded RVA, and CI cannot run them
@@ -496,6 +496,9 @@ for both renderers; or `tests/fixtures/modprog/lit.frag` or `particle.frag`) and
 Vulkan SDK on `PATH` (or named by `GLSLANG_VALIDATOR`). The JavaScript tests fail when the generated files are
 out of date.
 
+`src/backend/script/script_sdk_lua.c` is generated from `src/sdk/lua/*.lua`: edit the Lua file and run
+`node tools/gen_script_sdk.js` (`--check` exits 1 when the generated file is stale).
+
 ## 11. Reporting security issues
 
 This tool injects into DOOM, so a vulnerability here is a supply-chain risk for everyone who installs a
@@ -510,7 +513,7 @@ release. **Do not open a public issue for a security problem.** Use GitHub's **p
 | `src/ui/` | the frontend DLL (`snapmap-plus-ui.dll`): the WebView2 host, HTML page, styles, declaration module and native message codecs |
 | `src/fault_shield/` | the recover-in-place vectored-exception fault shield (compiled into the backend) |
 | `src/common/` | the shared backend↔frontend interface ABI (`snapmap_plus_iface.h`) |
-| `src/store/` | `snapmap-plus-store.exe`, the console tool that converts the mods, maps and override folders of earlier releases (the installer runs it) |
+| `src/store/` | `snapmap-plus-store.exe`, the console tool that converts the mods, maps and override folders of earlier releases (the installer does not run it in this release) |
 | `installer/` | `snapmap-plus.exe` — the Go install / update / uninstall CLI |
 | `tests/` | the native unit tests + `run-tests.ps1` |
 | `tools/` | the changelog parser (`changelog.py`), the release-notes drafter (`draft_changelog.py`), the published-release sync (`sync_release_notes.py`) and their tests |

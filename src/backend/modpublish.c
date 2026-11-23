@@ -474,7 +474,7 @@ static int mp_prepare(mp_job *job, const modnet_io *io)
     size_t n = 0, cap = 0, i, k;
     int code;
     modclaim_set_budget(MP_STORE_WAIT_MS);
-    if (!modclaim_signer(NULL, &job->made_key, &job->why)) return MODNET_E_CONFIG;
+    if (!modclaim_signer(NULL, &job->made_key, &job->why)) return MODNET_E_KEY;
     {
         mp_asked asked;
         memset(&asked, 0, sizeof asked);
@@ -639,6 +639,11 @@ static void mp_editor_notice(void *editor, const char *text)
     if (g_ops.editor_notice) g_ops.editor_notice(g_ops.context, editor, text);
 }
 
+/* The store stayed busy or out of reach past the wait: the publish goes on; the claim at the feed post queues what
+ * it could not send, and the next start sends it (N27). */
+#define MP_QUEUED_SENTENCE "The map is published, but its mod content could not reach the mod store yet; Snapmap+ " \
+                           "sends it the next time DOOM starts."
+
 /* The finished background job: its result lines and, for a claim, what players will miss. */
 static void mp_job_report(mp_job *job)
 {
@@ -646,8 +651,21 @@ static void mp_job_report(mp_job *job)
     switch (job->kind) {
     case JOB_CLAIM:
         if (job->code == MODNET_OK) mp_logf("MODS: publish: item '%s' claims its %zu unit(s)", job->ref, job->nunits);
-        else mp_logf("MODS: publish: the claim of item '%s' failed: %s%s", job->ref, cause,
-                     modnet_transient(job->code) ? " (queued; retried at the next start)" : "");
+        else {
+            mp_logf("MODS: publish: the claim of item '%s' failed: %s%s", job->ref, cause,
+                    modnet_transient(job->code) ? " (queued; retried at the next start)" : "");
+            /* The map is published by now: the author reads what players will miss, once (a retired Snapmap+ reads the
+             * newer-version notice below). */
+            if (modnet_transient(job->code)) mp_menu_notice(MP_QUEUED_SENTENCE);
+            else if (job->code != MODNET_E_RETIRED) {
+                char *reason = sh_reason(SH_REASON_STORE, job->code, NULL, 0);
+                char *line = sh_textf("The map is published, but its mod content could not reach the mod store: %s.",
+                                      reason ? reason : "the mod store refused it");
+                free(reason);
+                mp_menu_notice(line);
+                free(line);
+            }
+        }
         break;
     case JOB_RELEASE:
         if (job->code == MODNET_OK) mp_link_forget(job->ref);
@@ -1386,7 +1404,15 @@ static void mp_orphans_retire(void)
 static char *mp_store_sentence(const mp_job *job)
 {
     if (job->code == MODNET_E_RETIRED) return sh_text(MODNET_RETIRED_SENTENCE);
-    if (job->code == MODNET_E_REFUSED && job->why && job->why[0]) return sh_textf("The map was not published. %s", job->why);
+    /* The store's own words, when it sent some (the client's stand-in for an empty answer is not the store's). */
+    if (job->code == MODNET_E_REFUSED && job->why && job->why[0] && strcmp(job->why, modnet_code_text(job->code))) {
+        size_t len = strlen(job->why);
+        char *line = sh_textf("The map was not published. %s%s", job->why,
+                              job->why[len - 1] == '.' || job->why[len - 1] == '!' || job->why[len - 1] == '?' ? "" : ".");
+        char *c = line ? line + strlen("The map was not published. ") : NULL;
+        if (c && *c >= 'a' && *c <= 'z') *c = (char)(*c - 'a' + 'A');
+        return line;
+    }
     {
         char *reason = sh_reason(SH_REASON_STORE, job->code, NULL, 0), *line;
         line = sh_textf("The map was not published: %s.", reason ? reason : "the mod store refused its mod content");
@@ -1394,11 +1420,6 @@ static char *mp_store_sentence(const mp_job *job)
         return line;
     }
 }
-
-/* The store stayed busy or out of reach past the wait: the publish goes on; the claim at the feed post queues what
- * it could not send, and the next start sends it (N27). */
-#define MP_QUEUED_SENTENCE "The map is published, but its mod content could not reach the mod store yet; Snapmap+ " \
-                           "sends it the next time DOOM starts."
 
 static void mp_after_add(mp_hold *h, const char *line)
 {
@@ -1435,8 +1456,7 @@ static void mp_prepared(void)
             return;
         }
         {
-            char *line = job->code == MODNET_E_CONFIG && job->why
-                ? sh_textf("The map was not published: %s.", job->why) : mp_store_sentence(job);
+            char *line = mp_store_sentence(job);
             mp_logf("MODS: publish: the preparation failed: %s", job->why ? job->why : modnet_code_text(job->code));
             mp_job_free(job);
             mp_refuse(line ? line : "The map was not published.", "the preparation failed");

@@ -580,7 +580,7 @@ static int me_take(sh_zip_reader *zr, int kind, modexport_stats *st, char **caus
         if ((unit && !(n == 6 + SH_MB_HASH_HEX + 5 && me_hex64(name + 6, SH_MB_HASH_HEX) && !_stricmp(name + n - 5, ".json"))) ||
             (file && !me_hex64(name + 6, n - 6))) {
             free(root);
-            return me_cause(cause, "the export is damaged: %s is not one of its files", name);
+            return me_cause(cause, "the export is damaged: one of its mod files is not what it says; export it again");
         }
         if (unit) {
             char hash[SH_MB_HASH_HEX + 1];
@@ -597,13 +597,13 @@ static int me_take(sh_zip_reader *zr, int kind, modexport_stats *st, char **caus
         if (unit ? _strnicmp(actual, name + 6, SH_MB_HASH_HEX) : _stricmp(actual, name + 6)) {
             free(bytes);
             free(root);
-            return me_cause(cause, "the export is damaged: %s does not hold what its name says", name);
+            return me_cause(cause, "the export is damaged: one of its mod files is not what it says; export it again");
         }
         if (unit) {
             char hash[SH_MB_HASH_HEX + 1];
             memcpy(hash, name + 6, SH_MB_HASH_HEX);
             hash[SH_MB_HASH_HEX] = 0;
-            if (!sh_cache_put_manifest(hash, bytes, blen)) { free(bytes); free(root); return me_cause(cause, "the content cache cannot be written"); }
+            if (!sh_cache_put_manifest(hash, bytes, blen)) { free(bytes); free(root); return me_cause(cause, "the map's mod content could not be saved on this computer"); }
             st->bundles_installed++;
         } else {
             char *tmp = sh_textf("%s\\import-%lu-%u.tmp", root, GetCurrentProcessId(), serial++);
@@ -618,7 +618,7 @@ static int me_take(sh_zip_reader *zr, int kind, modexport_stats *st, char **caus
                 free(tmp);
                 free(bytes);
                 free(root);
-                return me_cause(cause, "the content cache cannot be written");
+                return me_cause(cause, "the map's mod content could not be saved on this computer");
             }
             free(wt);
             free(tmp);

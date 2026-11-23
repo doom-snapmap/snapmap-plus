@@ -180,10 +180,8 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   like any key of your own and means nothing to Snapmap+. A folder in a shape this version does not
   read (a `package.json`, a `mod.json` built by an earlier version, or one using `id`, `key`,
   `shadows`, `stock`, `scope`, `player`, `extends`, `replaces`, `legacy`, `composes` or `schema`) is
-  listed with "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer
-  again and it converts it." and serves nothing (what the installer converts is in the engine's layout,
-  and the build refuses that layout until the installer also lays a converted folder out by kind: owner,
-  2026-11-17, converting releases' mods is the installer's, not yet done). Files beside `mod.json` (a README,
+  listed with "This mod was made for an earlier version of Snapmap+. This version does not read it yet." and serves nothing (converting
+  releases' mods is the installer's job and this release's installer does not do it yet; its migration must, and it is on the release gate). Files beside `mod.json` (a README,
   notes, `desktop.ini`) are ignored and never carried. A mistake in `scenes` or `hud` fails the
   build with a sentence naming the block. A mod that brings campaign content gets the requirement
   `g_useResourceBlackList` 0 and `g_useImageBlackList` 0 without writing it. Everything about mods is in `mods\`: the folders and one product file,
@@ -447,8 +445,8 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   what is not here is fetched as above, and what cannot be had stands in.
 
 - Maps saved by earlier releases (with packages, or with format 1 rows) are refused on load with
-  "This map was saved by an earlier Snapmap+; run the Snapmap+ installer to update it." The
-  installer converts them.
+  "This map was saved by an earlier Snapmap+; run the Snapmap+ installer to update it." Converting
+  them is the installer's job; this release's installer does not do it yet (it is on the release gate).
 - A mod can carry cooked Flash movies (`.bswf`, with their `.bimage` atlases) in
   `movies/`: a replacement for a stock movie is your copy at the game's own path under `native/generated/swf/`, a new movie lives in
   `movies/`. They load whenever the game asks for the movie, in the editor and in
@@ -627,25 +625,12 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   mod texture board on this map, so <mod> draws with plain textures; a map with fewer mods that
   carry their own textures avoids this." The format a tool must write is in
   [vt-baker.md](vt-baker.md).
-- DOOM no longer converts anything at startup: the installer does, on install and update, by
-  running `snapmap-plus-store.exe` (kept beside `snapmap-plus.exe` in `%LOCALAPPDATA%\snapmap-plus`).
-  It first runs `check`, which lists what it finds from earlier releases, and runs `migrate` only
-  when there is something to do; its lines are printed as it goes, and a failure is a warning that
-  says to close DOOM and run the Snapmap+ installer again. Running the installer again is also
-  how a package dropped into `overrides\` after the first conversion gets moved. The same run
-  converts every mod folder and saved map of an earlier release it finds, each time it runs (so a
-  folder of an earlier release copied in later is converted by running the installer again): each
-  folder of an earlier shape gets its salt, its own `mods/<old key>/` paths and strings follow it
-  and it is built (a folder that does not build, for example one whose binary file names its old
-  key, is still converted, with the cause shown in the Mods tab until it is fixed; files beside
-  `mod.json` stay as they are; a run stopped part way loses nothing), extra copies
-  Snapmap+ made of one mod and `mods\.builds\` go to the
-  Recycle Bin, and the maps in My Maps, `rawmap.json` and the prefabs have their mod rows and
-  placed names rewritten to the salts, each with a copy of the file as it was beside it
-  (`<name>.before-snapmap-plus-1.0`); a map naming a mod nothing provides is left untouched. Everything it
-  deletes goes to the Windows Recycle Bin. What the conversion writes is the engine's layout (`assets\`),
-  and the build refuses that layout until the installer also lays a converted folder out by kind
-  (owner, 2026-11-17: converting releases' mods is the installer's, not yet done). A mod folder you add by
+- DOOM converts nothing at startup, and this release's installer converts nothing: `storeConversion` in
+  `installer/storemigrate.go` is off (decision 30), so install and update do not run
+  `snapmap-plus-store.exe`, and `snapmap-plus migrate` says there is nothing to convert. Converting
+  earlier releases' mods, maps, exports and prefabs is the installer's job; its migration must do it,
+  and it is on the release gate. The four bullets after the installer-layout bullet below describe what
+  the store tool does when conversion is on, not what the installer does today. A mod folder you add by
   hand is built at the next Refresh (or start). Its first scan gives it its salt, eight random characters
   written in the part of `mod.json` Snapmap+ writes; no file of yours is moved or rewritten, the folder's
   name stays yours and can change at any time, and you never need to know the salt. A folder copied in
@@ -655,7 +640,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
 - The installer leaves the DOOM folder holding exactly the two Snapmap+ files for the installed
   build, removing the other build's files, files of earlier releases and the backups earlier
   installers kept of their own DLLs, and naming any file that is not Snapmap+'s as left in place.
-  It leaves `%LOCALAPPDATA%\snapmap-plus` holding `snapmap-plus.exe`, `snapmap-plus-store.exe`,
+  It leaves `%LOCALAPPDATA%\snapmap-plus` holding `snapmap-plus.exe`,
   `install.json` (its only record) and your data; the records of earlier installers are folded into
   `install.json`, and empty `override-backups\`, `package-cache\` and `package-staging\` folders are
   removed. See [installer/README.md](../installer/README.md#layout-contract).
@@ -919,7 +904,11 @@ names never arrived re-asks when it is selected, which is the only retry that wa
 settings service. The registered settings are `theme` (`"light"` by default, or `"dark"`),
 `entities.show_hidden` (off by default), and `entities.selection_mode` (off by default; `off`, `follow`,
 or `select_in_3d`), `navmesh.enabled`, `navmesh.preview` and `navmesh.embed_in_saved_maps` (all on by
-default). Show Hidden and the exclusive Entity selection direction survive restarts. The runtime creates
+default), `prefabs.open_folders` and `timelines.open_folders` (the folders open in the Prefabs and
+Timelines tabs), `mods.collapsed_groups` (the collapsed groups of the Mods tab), `mods.store` (the mod
+store address, `https://api.snapmapplus.com` by default), `mods.scripted_maps` (on by default; see Mods)
+and `dialogs.prefab_export`, `dialogs.prefab_import`, `dialogs.rawmap_save` and `dialogs.rawmap_load`
+(the folder each file dialog last opened in). Show Hidden and the exclusive Entity selection direction survive restarts. The runtime creates
 the file when needed, so deleting it resets preferences and the next startup recreates the defaults.
 Manual config edits are consumed at the next startup. A key from an earlier release, such as
 `overrides.user_enabled`, is kept in the file but no longer read.

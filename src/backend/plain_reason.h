@@ -55,17 +55,21 @@ static const sh_reason_row SH_REASON_TABLE[] = {
     { SH_REASON_STORE, -17, "the mod store is busy", "try again in a few minutes" },
     { SH_REASON_STORE,  -4, "the mod store could not be reached", "check the internet connection and try again" },
     { SH_REASON_STORE,  -5, "the mod store took too long to answer", "check the internet connection and try again" },
-    { SH_REASON_STORE,  -3, "the mods.store setting is not a usable address", "correct it in config.json or remove it to use the default" },
-    { SH_REASON_STORE,  -7, "the address in mods.store answered, but not as the mod store", "check the mods.store setting" },
-    { SH_REASON_STORE,  -8, "the address in mods.store answered, but not as the mod store", "check the mods.store setting" },
+    { SH_REASON_STORE,  -1, "a file of the map's mod content is not on this computer", "check the map's mods in the Mods tab, then try again" },
+    { SH_REASON_STORE,  -3, "Snapmap+'s mod store address setting is not usable", "reinstall Snapmap+ to restore it" },
+    { SH_REASON_STORE,  -7, "the mod store's address answered, but not as the mod store", "reinstall Snapmap+ to restore the address" },
+    { SH_REASON_STORE,  -8, "the mod store's address answered, but not as the mod store", "reinstall Snapmap+ to restore the address" },
     { SH_REASON_STORE,  -9, "a download arrived damaged", "try again" },
     { SH_REASON_STORE,  -6, "the request was cancelled", "try again" },
     { SH_REASON_STORE,  -2, "the game ran out of memory for the request", "restart the game and try again" },
     { SH_REASON_STORE, -11, "the mod store no longer holds it", "its author may publish it again" },
     { SH_REASON_STORE, -16, "it was removed from the mod store", "nothing can restore it here" },
     { SH_REASON_STORE, -13, "the mod store lacked part of the upload", "try again" },
-    { SH_REASON_STORE, -14, "the mod store refused it", "see its message in the log" },
-    { SH_REASON_STORE, -12, "the mod store did not accept this computer's claim", "nothing more can be done from this computer" },
+    { SH_REASON_STORE, -14, "the mod store refused it", "use Send feedback in the Snapmap+ window" },
+    { SH_REASON_STORE, -12, "the mod store did not accept your publishing key for this map", "restore the key that published it from its backup (Settings menu)" },
+    { SH_REASON_STORE, -18, "the content needs a different version of DOOM's own files", "use the version of DOOM it was made for" },
+    { SH_REASON_STORE, -19, "this version of Snapmap+ is too old for the mod store", "run the Snapmap+ installer to update" },
+    { SH_REASON_STORE, -20, "Snapmap+ could not use your publishing key", "restore it from your backup in the Settings menu" },
     { SH_REASON_STORE, -10, "it is over the mod store's size limit", "make it smaller" },
 };
 
@@ -113,8 +117,7 @@ static __inline char *sh_reason(int kind, long code, const char *subject, unsign
     }
     if (kind == SH_REASON_STORE)
         return sh_textf("the mod store did not answer; %s", what ? what : "try again in a few minutes");
-    return sh_textf("Windows could not use %s (system error %ld); close programs that may hold it and try again",
-                    what, code);
+    return sh_textf("Windows could not use %s; close programs that may hold it and try again", what);
 }
 
 /* sh_reason(SH_REASON_WIN32, ...) in a per-thread buffer that the next call

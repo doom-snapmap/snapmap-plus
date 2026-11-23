@@ -16,7 +16,7 @@ The runtime uses only Go's standard library.
 | `doomclean.go` | The DOOM folder contract: which files are ours, the other build's pair, backups. |
 | `state.go` | `install.json`, the installer's only record, and the retirement of earlier records. |
 | `legacy.go`, `legacyinstall.go`, `userdata.go` | The original SnapHak, the 2018 build's release, and player data. |
-| `storemigrate.go` | Placing and running the store migration tool, `snapmap-plus-store.exe`. |
+| `storemigrate.go` | Placing and running the store migration tool, `snapmap-plus-store.exe`; off in this release (`storeConversion`). |
 | `selfinstall*.go`, `selfupdate*.go`, `webview2.go` | Installer copies, self-updates and WebView2 runtime setup. |
 | `changelog*.go` | Release-note retrieval and terminal rendering. |
 | `*_test.go`, `testdata/` | Installer and rendering regressions. |
@@ -164,7 +164,7 @@ After any install, update or migration:
   earlier installer kept in DOOM is deleted when it is a copy of our own file, and
   moved into `cache\installer\backup\` and recorded when it is not.
 - **The data folder**, `%LOCALAPPDATA%\snapmap-plus`, holds `snapmap-plus.exe`,
-  `snapmap-plus-store.exe`, `install.json` and the player's own data (`config.json`,
+  `install.json` and the player's own data (`config.json`,
   `prefabs\`, `mods\`, `rawmap.json`, `test-maps\`, `cache\`, and the
   `token` and `pinned.json` files when present). The retired `overrides\` and
   `strings\` folders of a release that had them go to the Recycle Bin once the store
@@ -254,8 +254,8 @@ step that has something to report.
    Then the pair is installed.
 2. **From v0.2.1-beta.19** (its 2018 pair in an April 2024 folder, recorded or not,
    and packages under `overrides\`). "Cleaning the DOOM folder" removes the 2018
-   pair, the April 2024 pair is installed, and "Converting mods" shows every line
-   of the store tool, which moves the `overrides\` packages into `mods\`. On the
+   pair, the April 2024 pair is installed, and the `overrides\` packages stay where
+   they are (the store tool is not run; `storeConversion` is off). On the
    2018 build itself v0.2.1-beta.19's own installer runs, and the 2018 pair stays.
 3. **From v0.2.1-beta.20** (both pairs, backups of our own DLLs in DOOM,
    `installer-files.json`, `installer-versions.json`, `snapmap-plus.exe.updates.json`,
@@ -291,10 +291,20 @@ when needed. See [packaging](../docs/packaging.md) for the installed file contra
 
 ## Mods and retired package folders
 
-DOOM converts nothing at startup. On install and update, after the DLLs are
-placed and before it reports success, the installer runs the bundle's store
-migration tool, `snapmap-plus-store.exe` (`storemigrate.go`, source in
-`src/store/`):
+This release does not run the store tool. `storeConversion` in `storemigrate.go`
+is off (decision 30; the owner, 2026-11-17: migrating mods from releases before
+beta.26 is the future installer's job), so install and update do not place or
+run `snapmap-plus-store.exe`, and nothing in this section's conversion happens.
+A map, export or prefab saved by an earlier Snapmap+ is refused with
+"... was saved by an earlier Snapmap+; run the Snapmap+ installer to update it.", and a mod folder made for an
+earlier version is listed with "This mod was made for an earlier version of Snapmap+. This version does not read it yet." Converting those earlier shapes is the
+installer's job: its migration must do it, and it is on the release gate. The
+rest of this section describes what the installer and the tool do when
+`storeConversion` is on (`storemigrate.go`, source in `src/store/`).
+
+DOOM converts nothing at startup. With conversion on, after the DLLs are placed
+and before it reports success, the installer runs the bundle's store migration
+tool:
 
 1. It checks the tool against the bundle's `TOOLS.sha256` and keeps it beside
    `snapmap-plus.exe` in `%LOCALAPPDATA%\snapmap-plus`, recorded in
@@ -361,9 +371,12 @@ check or migrate that does not finish is a warning, never a failed install; the
 warning says to close DOOM and run the Snapmap+ installer again.
 The tool holds the mods folder's named lock for its whole run
 (`src/common/store_lock.h`).
-`snapmap-plus migrate [--doom <path>]` (`migratecmd.go`) runs the same check and
-migrate with the tool the last install or update kept in `%LOCALAPPDATA%\snapmap-plus`,
-without downloading or reinstalling anything; without the tool it points at `update`.
+`snapmap-plus migrate [--doom <path>]` (`migratecmd.go`) currently prints "Nothing
+to convert: this release of Snapmap+ does not convert mods or maps made with
+earlier releases." and does nothing; with `storeConversion` on it runs the same
+check and migrate with the tool the last install or update kept in
+`%LOCALAPPDATA%\snapmap-plus`, without downloading or reinstalling anything;
+without the tool it points at `update`.
 Apart from removing empty retired folders, the installer itself never creates,
 changes or removes `mods\` or the retired package folders (see
 [Mods](../docs/capabilities.md#mods)).
@@ -393,7 +406,7 @@ folders under `-Scratch` (default `%TEMP%\snapmap-plus-sim`), with
 | Scenario | Layout before | Steps |
 |---|---|---|
 | a | the original SnapHak in DOOM, prefabs, strings and a rawmap under `%USERPROFILE%\snaphak`, another tool's `dinput8.dll.doomforge.rollback` | install, uninstall |
-| b | v0.2.1-beta.19's 2018 pair in the April 2024 folder, its record and `installer-files.json`, `tests/fixtures/store-retired` as the data folder (`overrides\`, the retired `mods\` layout, `removed-mods\`) | update (the store tool's lines are shown), uninstall |
+| b | v0.2.1-beta.19's 2018 pair in the April 2024 folder, its record and `installer-files.json`, `tests/fixtures/store-retired` as the data folder (`overrides\`, the retired `mods\` layout, `removed-mods\`) | update (no store-tool lines while `storeConversion` is off), uninstall |
 | c | v0.2.1-beta.20: both pairs, three backups of our DLLs, another tool's file, `installer-files.json`, `installer-versions.json`, `snapmap-plus.exe.updates.json`, `snapmap-plus.exe.old`, an empty `override-backups\` | update, uninstall |
 | d | none: `v0.3.0-sim.1` installs, then `v0.3.0-sim.2` is published | install, update (the installer updates itself first and relaunches), uninstall |
 

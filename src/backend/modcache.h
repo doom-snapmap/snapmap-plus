@@ -136,15 +136,21 @@ int   sh_cache_prepare(const char *chash, const modnet_io *io);
  * of S2-S6 naming every absent object (SPEC section 8). */
 char *sh_cache_take_notice(void);
 
+/* The absence cause a failed download of a unit's file gives (SH_CACHE_ABSENT_*): a 410 (MODNET_E_RETIRED) is the newer
+ * Snapmap+ (S6), a 451 the removal (S3), a 404 the absence at the store (S5), anything else the store not reached (S4). */
+int sh_cache_net_cause(int modnet_code);
+
 /* An absent object, for the sentence. */
 typedef struct sh_cache_absent { const char *object, *mod; int cause; } sh_cache_absent;
 /* The one sentence for `n` absent objects (malloc'd): the most actionable cause's (S2, S4, S6, S4b, S5, S3)
- * naming all of them, "the Tyrant" or "3 objects from 2 mods (the Tyrant, the Marauder and the Hell Guard)". */
+ * naming all of them, "the Tyrant" or "3 objects from 2 mods (the Tyrant, the Marauder and the Hell Guard)". Never over
+ * 250 bytes: names too long for that give way to the count ("5 objects from 2 mods"), the cause's tail kept. */
 char *sh_cache_notice_text(const sh_cache_absent *absent, size_t n);
 /* The objects a sentence names (malloc'd): "the Tyrant from Eternal Demons", or "3 objects from 2 mods (the Tyrant, the
  * Marauder and the Hell Guard)", at most three names then "and N more". */
 char *sh_cache_objects_subject(const sh_cache_absent *absent, size_t n);
-/* An object's name for a sentence from its root (entities/ai/demon/tyrant -> "Tyrant"), malloc'd. */
+/* An object's name for a sentence from its root (entities/ai/demon/tyrant -> "Tyrant"), malloc'd. A whole-mod row's root
+ * ("*") gives "": the sentence names the mod itself ("without Eternal Demons"). */
 char *sh_cache_object_name(const char *root);
 
 /* Stand-ins (R-DS5), malloc'd decl texts. The entityDef: snapmaps/unknown with `cls`, the class the map saved for the

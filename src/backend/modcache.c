@@ -740,7 +740,7 @@ char *sh_cache_object_name(const char *root)
     size_t i;
     int up = 1;
     leaf = leaf ? leaf + 1 : (root ? root : "");
-    if (!strcmp(leaf, "*")) return sh_text("its objects");
+    if (!strcmp(leaf, "*")) return sh_text("");   /* a whole-mod row: the mod's own name stands for it */
     if (!(out = sh_text(leaf))) return NULL;
     for (i = 0; out[i]; i++) {
         if (out[i] == '_' || out[i] == '-' || out[i] == '.') { out[i] = ' '; up = 1; continue; }
@@ -748,6 +748,12 @@ char *sh_cache_object_name(const char *root)
         up = 0;
     }
     return out;
+}
+
+/* A mod's name in a player sentence: a row with no name is kept under its salt, which is never shown. */
+static const char *mc_mod_label(const char *name, const char *salt)
+{
+    return name && name[0] && (!salt || strcmp(name, salt)) ? name : "a mod";
 }
 
 /* The cause order of SPEC section 8: the most actionable first. */
@@ -767,7 +773,12 @@ static int mc_cause_rank(int cause)
     }
 }
 
-char *sh_cache_objects_subject(const sh_cache_absent *a, size_t n)
+/* How many bytes the game's dialog holds of a notice, with the end (modpublished.c). */
+#define MC_NOTICE_MAX 250
+
+/* The subject of an absence sentence. fit 0: every object named; 1: counted, the mods named; 2: counted alone. A whole-mod
+ * row's object is empty: the mod's own name stands for it. */
+static char *mc_subject(const sh_cache_absent *a, size_t n, int fit)
 {
     char *subject = NULL;
     size_t i, k, mods = 0;
@@ -779,31 +790,39 @@ char *sh_cache_objects_subject(const sh_cache_absent *a, size_t n)
         for (k = 0; k < i && !seen; k++) seen = !strcmp(a[k].mod ? a[k].mod : "", a[i].mod ? a[i].mod : "");
         if (!seen) { mods++; if (!mod0) mod0 = a[i].mod; }
     }
-    if (!plural) subject = sh_textf("the %s from %s", a[0].object, a[0].mod);
-    else {
+    if (fit == 2) return plural ? sh_textf("%u objects", (unsigned)n) : sh_text("an object");
+    if (!plural) {
+        const char *mod = a[0].mod && a[0].mod[0] ? a[0].mod : "a mod";
+        subject = a[0].object && a[0].object[0] ? sh_textf("the %s from %s", a[0].object, mod) : sh_text(mod);
+    } else if (fit == 1) {
+        subject = mods > 1 ? sh_textf("%u objects from %u mods", (unsigned)n, (unsigned)mods)
+                           : sh_textf("%u objects from %s", (unsigned)n, mod0 && mod0[0] ? mod0 : "a mod");
+    } else {
         char *list = NULL;
         size_t shown = n > 3 ? 3 : n;
         for (i = 0; i < shown; i++) {
             const char *sep = !i ? "" : (i + 1 == shown && n <= 3) ? " and " : ", ";
-            (void)sh_text_set(&list, "%s%sthe %s", list ? list : "", sep, a[i].object);
+            if (a[i].object && a[i].object[0]) (void)sh_text_set(&list, "%s%sthe %s", list ? list : "", sep, a[i].object);
+            else (void)sh_text_set(&list, "%s%s%s", list ? list : "", sep, a[i].mod && a[i].mod[0] ? a[i].mod : "a mod");
         }
         if (n > 3) (void)sh_text_set(&list, "%s and %u more", list ? list : "", (unsigned)(n - 3));
         subject = mods > 1 ? sh_textf("%u objects from %u mods (%s)", (unsigned)n, (unsigned)mods, list ? list : "")
-                           : sh_textf("%u objects from %s (%s)", (unsigned)n, mod0 ? mod0 : "a mod", list ? list : "");
+                           : sh_textf("%u objects from %s (%s)", (unsigned)n, mod0 && mod0[0] ? mod0 : "a mod", list ? list : "");
         free(list);
     }
     return subject;
 }
 
-char *sh_cache_notice_text(const sh_cache_absent *a, size_t n)
+char *sh_cache_objects_subject(const sh_cache_absent *a, size_t n)
 {
-    char *subject, *out = NULL;
-    size_t i, best = 0;
-    int plural = n > 1;
-    if (!a || !n) return NULL;
-    for (i = 1; i < n; i++) if (mc_cause_rank(a[i].cause) < mc_cause_rank(a[best].cause)) best = i;
-    if (!(subject = sh_cache_objects_subject(a, n))) return NULL;
-    switch (a[best].cause) {
+    return mc_subject(a, n, 0);
+}
+
+/* One cause's sentence around a subject. */
+static char *mc_notice_sentence(const char *subject, int cause, int plural)
+{
+    char *out = NULL;
+    switch (cause) {
     case SH_CACHE_ABSENT_OFFLINE:
         out = sh_textf("This map is playing without %s, which %s not on this computer. Connect to the internet and open the map "
                        "again to get %s.", subject, plural ? "are" : "is", plural ? "them" : "it");
@@ -838,7 +857,26 @@ char *sh_cache_notice_text(const sh_cache_absent *a, size_t n)
         out = sh_textf("This map is playing without %s.", subject);
         break;
     }
-    free(subject);
+    return out;
+}
+
+/* S2-S6 for the objects a map is playing without: never over what the game's dialog holds, so a long list of names gives
+ * way to the count, the cause's tail kept. */
+char *sh_cache_notice_text(const sh_cache_absent *a, size_t n)
+{
+    char *out = NULL;
+    size_t i, best = 0;
+    int fit;
+    if (!a || !n) return NULL;
+    for (i = 1; i < n; i++) if (mc_cause_rank(a[i].cause) < mc_cause_rank(a[best].cause)) best = i;
+    for (fit = 0; fit <= 2; fit++) {
+        char *subject = mc_subject(a, n, fit);
+        if (!subject) return NULL;
+        free(out);
+        out = mc_notice_sentence(subject, a[best].cause, n > 1);
+        free(subject);
+        if (!out || strlen(out) <= MC_NOTICE_MAX) break;
+    }
     return out;
 }
 
@@ -1622,7 +1660,7 @@ record:
                 for (i = 0; r->absent && i < snapshot.n; i++) {
                     if (units[i].state == 1) continue;
                     r->absent[r->nabsent].object = sh_cache_object_name(snapshot.roots[i]);
-                    r->absent[r->nabsent].mod = sh_text(snapshot.name ? snapshot.name : snapshot.salt);
+                    r->absent[r->nabsent].mod = sh_text(mc_mod_label(snapshot.name, snapshot.salt));
                     r->absent[r->nabsent].cause = units[i].cause;
                     r->nabsent++;
                 }
@@ -1636,7 +1674,7 @@ record:
                 for (i = 0; r->absent && i < snapshot.nplaced; i++) {
                     if (read && !snapshot.pinfo[i].known) continue;
                     r->absent[r->nabsent].object = sh_cache_object_name(snapshot.placed[i]);
-                    r->absent[r->nabsent].mod = sh_text(snapshot.name && snapshot.name[0] ? snapshot.name : snapshot.salt);
+                    r->absent[r->nabsent].mod = sh_text(mc_mod_label(snapshot.name, snapshot.salt));
                     r->absent[r->nabsent].cause = snapshot.broken ? SH_CACHE_ABSENT_BROKEN : SH_CACHE_ABSENT_LOCAL;
                     r->nabsent++;
                 }
@@ -1680,9 +1718,15 @@ static int mc_net_cause(int code, const modnet_result *r)
     /* No name resolved: this computer is not connected, which S2 says (B2), not a store that did not answer (S4). */
     if (code == MODNET_E_NET && r && r->offline) return SH_CACHE_ABSENT_OFFLINE;
     if (code == MODNET_E_BLOCKED) return SH_CACHE_ABSENT_REMOVED;
+    if (code == MODNET_E_RETIRED) return SH_CACHE_ABSENT_NEWER;   /* a 410: this Snapmap+ is too old, S6 */
     if (code == MODNET_E_NOT_FOUND) return SH_CACHE_ABSENT_NOT_IN_STORE;
     if (code == MODNET_E_ARG && r && r->message && strstr(r->message, "(error 112)")) return SH_CACHE_ABSENT_DISK;
     return SH_CACHE_ABSENT_UNREACHABLE;
+}
+
+int sh_cache_net_cause(int code)
+{
+    return mc_net_cause(code, NULL);
 }
 
 int sh_cache_net_retry_ms(int code, int attempt)
@@ -2580,7 +2624,7 @@ int sh_cache_stage_copy(const char *chash, sh_cache_copy *out, char **why)
         if (strcmp(row->roots[i], SH_UNIT_WHOLE)) out->objects++;
     }
     strcpy_s(out->salt, sizeof out->salt, row->salt);
-    out->name = sh_textf("%s (my copy)", sh_modmanifest_row_name(row)[0] ? row->name : row->salt);
+    out->name = sh_modmanifest_row_name(row)[0] ? sh_textf("%s (my copy)", row->name) : sh_text("My copy of a mod");
     out->dir = mc_path("partial\\copy-%lu-%llu", GetCurrentThreadId(), (unsigned long long)GetTickCount64());
     if (!out->name || !out->dir) { reason = sh_textf("%s could not be copied: Snapmap+ ran out of memory.", title); goto done; }
     {
