@@ -1640,8 +1640,8 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         CHECK(zb && patch_entry(zb, zl, uname, "entities/door", "entities/DOOR"));
         CHECK(zb && spit(bad, zb, zl));
         CHECK(HO2(name, msg, sh_prefab_mods_import(bad, libE, HO_P(0), HO_P(1))) == -1);
-        _snprintf_s(want, sizeof want, _TRUNCATE, "The prefab was not imported: the export is damaged: %s does not hold what "
-                    "its name says.", uname);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "The prefab was not imported: the export is damaged: one of its mod files is "
+                    "not what it says; export it again.");
         CHECK(!strcmp(msg, want));
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Door.json", libE);
         CHECK(!mt_exists(path));   /* the prefab it had added is gone */
@@ -1652,8 +1652,8 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         zb = (unsigned char *)slurp(zipA, &zl);
         CHECK(zb && patch_entry(zb, zl, fname, "industrial", "INDUSTRIAL") && spit(bad, zb, zl));
         CHECK(HO2(name, msg, sh_prefab_mods_import(bad, libE, HO_P(0), HO_P(1))) == -1);
-        _snprintf_s(want, sizeof want, _TRUNCATE, "The prefab was not imported: the export is damaged: %s does not hold what "
-                    "its name says.", fname);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "The prefab was not imported: the export is damaged: one of its mod files is "
+                    "not what it says; export it again.");
         CHECK(!strcmp(msg, want));
         CHECK(!mt_exists(path));
         CHECK(sh_cache_blob_path(file_hex) == NULL && sh_cache_unit_state(unit, NULL, NULL, NULL) != 1);   /* never kept */

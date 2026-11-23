@@ -105,8 +105,8 @@ var modsTab = (function () {
   function uninstallHead(pv) { return pv && pv.install && pv.install.undoCleared ? UNINSTALL_HEAD.undo : UNINSTALL_HEAD.plain; }
   /* The saved maps that use the mod (the dry run's savedMaps), and the undo history. */
   function savedMapsText(n) {
-    return n === 1 ? '1 of your saved maps uses it; it will not open until you restore it from the Recycle Bin.'
-                   : n + ' of your saved maps use it; they will not open until you restore it from the Recycle Bin.';
+    return n === 1 ? '1 of your saved maps uses it; it will open without its objects until you restore it from the Recycle Bin.'
+                   : n + ' of your saved maps use it; they will open without its objects until you restore it from the Recycle Bin.';
   }
   /* The scope sentence under each confirmation's title, so the two dialogs read differently. */
   var SCOPE = {
@@ -544,7 +544,7 @@ var modsTab = (function () {
       if (m.manifestRow) out.push({text: m.attached ? "Removes the mod from the map's list of mods; the whole map used it."
                                                     : "Removes the mod's row from the map's list of mods."});
       if (m.vanillaAfter) out.push({text: 'The map then needs no mods and plays without Snapmap+.'});
-      if (m.published) out.push({text: 'The published copy on the server is unaffected until you publish the map again.'});
+      if (m.published) out.push({text: "The map's content in the mod store is unaffected until you publish the map again."});
     }
     if (pv.action === 'uninstall' && pv.editorRows.length)
       out.push({text: 'Removes ' + plural(pv.editorRows.length, 'Toybox row') + ' from the editor (' + pv.editorRows.join(', ') + ').'});

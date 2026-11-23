@@ -75,6 +75,10 @@ int main(void)
     modnet_result r;
     int code;
 
+    /* A publishing key that cannot be used is its own code: not the store's address, not the store being away. */
+    CHECK(MODNET_E_KEY < MODNET_E_RETIRED && MODNET_E_KEY != MODNET_E_CONFIG);
+    CHECK(!modnet_transient(MODNET_E_KEY) && !modnet_unreachable(MODNET_E_KEY));
+    CHECK(strcmp(modnet_code_text(MODNET_E_KEY), "error") != 0 && strstr(modnet_code_text(MODNET_E_KEY), "key") != NULL);
     CHECK(stub_start() > 0);
     stub_url(url, sizeof url);
     CHECK(mt_temp_dir("modnet", tmp, sizeof tmp));

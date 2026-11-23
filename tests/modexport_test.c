@@ -766,7 +766,7 @@ int main(int argc, char **argv)
         CHECK(patch(&zs, fname, "props/crate", "props/CRATE") && zset_save(&zs, bad));
         use_root(d_root);
         back = HOT(char *, cause, modexport_read(bad, &len, &st, HO_P(0)));
-        _snprintf_s(want, sizeof want, _TRUNCATE, "the export is damaged: %s does not hold what its name says", fname);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "the export is damaged: one of its mod files is not what it says; export it again");
         CHECK(!back && !strcmp(cause, want));
         CHECK(sh_cache_blob_path(fname + 6) == NULL);   /* the damaged bytes are not in the cache */
         CHECK(mod_folders(d_root) == 0);
@@ -786,7 +786,7 @@ int main(int argc, char **argv)
         strcpy_s(uname, sizeof uname, unit ? unit->name : "units/?");
         CHECK(patch(&zs, uname, "entities/crate", "entities/CRATE") && zset_save(&zs, bad));
         back = HOT(char *, cause, modexport_read(bad, &len, &st, HO_P(0)));
-        _snprintf_s(want, sizeof want, _TRUNCATE, "the export is damaged: %s does not hold what its name says", uname);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "the export is damaged: one of its mod files is not what it says; export it again");
         CHECK(!back && !strcmp(cause, want));
         {
             char hash[SH_MB_HASH_HEX + 1];
@@ -803,11 +803,11 @@ int main(int argc, char **argv)
         use_root(d_root);
         CHECK(zset_load(&zs, zip) && zset_add(&zs, "files/notahash", "x", 1) && zset_save(&zs, bad));
         back = HOT(char *, cause, modexport_read(bad, &len, &st, HO_P(0)));
-        CHECK(!back && !strcmp(cause, "the export is damaged: files/notahash is not one of its files"));
+        CHECK(!back && !strcmp(cause, "the export is damaged: one of its mod files is not what it says; export it again"));
         zset_drop(&zs, "files/notahash");
         CHECK(zset_add(&zs, "units/short.json", "{}", 2) && zset_save(&zs, bad));
         back = HOT(char *, cause, modexport_read(bad, &len, &st, HO_P(0)));
-        CHECK(!back && !strcmp(cause, "the export is damaged: units/short.json is not one of its files"));
+        CHECK(!back && !strcmp(cause, "the export is damaged: one of its mod files is not what it says; export it again"));
         CHECK(mod_folders(d_root) == 0);
         zset_free(&zs);
         use_root(p_root);

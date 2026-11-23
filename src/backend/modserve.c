@@ -738,7 +738,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     if (pointer && !stock) stock = "";
     if (!path || !ms_valid_rel(path)) { ms_fail(b, MS_DAMAGED, path ? path : "its file list"); return; }
     if (stock) {
-        if (!stock[0] || !blob || !ms_valid_hash(blob)) { ms_fail(b, "'%s' is a stock pointer without a source and hash", path); return; }
+        if (!stock[0] || !blob || !ms_valid_hash(blob)) { ms_fail(b, "'%s' names one of DOOM's files without saying which; press Refresh to build the mod again", path); return; }
         size = 0;
     } else if (size < 0 || size >= 18446744073709551616.0 || size != (double)(uint64_t)size) {
         ms_fail(b, MS_DAMAGED, path);
@@ -1131,7 +1131,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         /* A fresh folder: the store's scan salts and builds a root folder; a composition is only ever written
          * built. */
         sh_modserve_build_cause_fn cause_fn = g_build_cause;
-        if (b->place) ms_fail(b, "it is not a composition of the content cache");
+        if (b->place) ms_fail(b, "this map content folder is damaged; Snapmap+ makes it again the next time its map loads");
         else {
             char *last = cause_fn && b->dir ? cause_fn(b->dir) : NULL;
             if (last) ms_fail(b, "not built: %s", last);
@@ -1535,7 +1535,7 @@ static void ms_scan_child(ms_index *x, ms_scan_item *at, ms_scan_list *stack)
          * names. */
         if (strlen(leaf) == SH_MODSERVE_HASH_HEX && strspn(leaf, "0123456789abcdef") == SH_MODSERVE_HASH_HEX)
             b->hash = ms_strdup(x, leaf);
-        else ms_fail(b, "it is not a composition of the content cache");
+        else ms_fail(b, "this map content folder is damaged; Snapmap+ makes it again the next time its map loads");
     }
     if (b->cause) {
         /* Failure isolation: drop this bundle's rows, keep everything else. */
@@ -1612,8 +1612,8 @@ static void ms_one_per_area(ms_index *x)
             if (b->place && !strcmp(b->place, SH_MODSERVE_CONTENT)) break;   /* compositions: one per map row */
             first = o->installed_at != b->installed_at ? o->installed_at < b->installed_at : _stricmp(o->folder, b->folder) < 0;
             if (!first) continue;
-            ms_fail(b, "it is a copy of mods\\%s (the same salt %s); Refresh in the Mods tab makes it a new mod",
-                    o->folder, b->id);
+            ms_fail(b, "it is a copy of mods\\%s; Refresh in the Mods tab makes it a new mod",
+                    o->folder);
             b->admitted = 0;
             b->file_count = 0;
             ms_log("bundle '%s' skipped: %s", b->folder, b->cause);

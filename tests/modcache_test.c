@@ -373,6 +373,77 @@ static void test_notices(void)
     t = sh_cache_object_name("entities/ai/demon/hell_guard");
     CHECK(t && !strcmp(t, "Hell Guard"));
     free(t);
+    /* Row 9: a whole-mod row (root "*") is named by the mod itself, alone and in a list. */
+    t = sh_cache_object_name("*");
+    CHECK(t && !t[0]);
+    free(t);
+    {
+        sh_cache_absent whole = { "", "Eternal Demons", SH_CACHE_ABSENT_OFFLINE };
+        sh_cache_absent mixed[] = { { "", "Eternal Demons", SH_CACHE_ABSENT_OFFLINE },
+                                    { "Barrel", "Crates", SH_CACHE_ABSENT_OFFLINE } };
+        t = sh_cache_notice_text(&whole, 1);
+        CHECK(t && !strcmp(t, "This map is playing without Eternal Demons, which is not on this computer. Connect to the "
+                              "internet and open the map again to get it."));
+        free(t);
+        whole.cause = SH_CACHE_ABSENT_NEWER;
+        t = sh_cache_notice_text(&whole, 1);
+        CHECK(t && !strstr(t, "its objects") && !strstr(t, "the Eternal") && strstr(t, "without Eternal Demons, which needs"));
+        free(t);
+        t = sh_cache_objects_subject(&whole, 1);
+        CHECK(t && !strcmp(t, "Eternal Demons"));
+        free(t);
+        t = sh_cache_objects_subject(mixed, 2);
+        CHECK(t && !strcmp(t, "2 objects from 2 mods (Eternal Demons and the Barrel)"));
+        free(t);
+    }
+    /* A row with no name is "a mod", never its salt. */
+    {
+        sh_cache_absent anon[] = { { "Crate", "", SH_CACHE_ABSENT_LOCAL } };
+        t = sh_cache_notice_text(anon, 1);
+        CHECK(t && !strcmp(t, "This map is playing without the Crate from a mod, which is not on this computer."));
+        free(t);
+    }
+    /* P2-11: names too long for the game's dialog give way to the count, never over 250 bytes. */
+    {
+        static char longname[2][80];
+        sh_cache_absent big[3];
+        int k;
+        for (k = 0; k < 2; k++) { memset(longname[k], 'a' + k, 70); longname[k][70] = 0; }
+        for (k = 0; k < 3; k++) { big[k].object = longname[k & 1]; big[k].mod = k < 2 ? "Eternal Demons" : "Hell Guards"; big[k].cause = SH_CACHE_ABSENT_OFFLINE; }
+        t = sh_cache_notice_text(big, 3);
+        CHECK(t && strlen(t) <= 250 && !strcmp(t, "This map is playing without 3 objects from 2 mods, which are not on this computer. Connect to the "
+                                                  "internet and open the map again to get them."));
+        free(t);
+        big[2].mod = "Eternal Demons";
+        t = sh_cache_notice_text(big, 3);
+        CHECK(t && strlen(t) <= 250 && strstr(t, "3 objects from Eternal Demons, which are not on this computer.") != NULL);
+        free(t);
+        /* a mod name that is itself too long: the count alone */
+        {
+            char huge[260];
+            sh_cache_absent two[2];
+            memset(huge, 'm', sizeof huge - 1);
+            huge[sizeof huge - 1] = 0;
+            two[0].object = "A"; two[0].mod = huge; two[0].cause = SH_CACHE_ABSENT_NEWER;
+            two[1] = two[0];
+            t = sh_cache_notice_text(two, 2);
+            CHECK(t && strlen(t) <= 250 && !strcmp(t, "This map is playing without 2 objects, which need a newer Snapmap+; run the Snapmap+ installer to update."));
+            free(t);
+        }
+    }
+    /* P2-2: a 410 on a download is the newer Snapmap+ (S6), not a store that could not be reached (S4). */
+    CHECK(sh_cache_net_cause(MODNET_E_RETIRED) == SH_CACHE_ABSENT_NEWER);
+    CHECK(sh_cache_net_cause(MODNET_E_UNAVAILABLE) == SH_CACHE_ABSENT_UNREACHABLE);
+    CHECK(sh_cache_net_cause(MODNET_E_NOT_FOUND) == SH_CACHE_ABSENT_NOT_IN_STORE);
+    CHECK(sh_cache_net_cause(MODNET_E_BLOCKED) == SH_CACHE_ABSENT_REMOVED);
+    {
+        sh_cache_absent retired = { "Tyrant", "Eternal Demons", 0 };
+        retired.cause = sh_cache_net_cause(MODNET_E_RETIRED);
+        t = sh_cache_notice_text(&retired, 1);
+        CHECK(t && !strcmp(t, "This map is playing without the Tyrant from Eternal Demons, which needs a newer Snapmap+; run the "
+                              "Snapmap+ installer to update."));
+        free(t);
+    }
 }
 
 /* The module decls a pinning step reads: the hall only. */
@@ -971,6 +1042,26 @@ static void test_cache(const char *top)
                 if (!fopen_s(&f, path, "wb") && f) { fwrite(old, 1, strlen(old), f); fclose(f); }
                 CHECK(sh_cache_sweep(1, NULL, 0, &st));
                 CHECK(st.unreadable == 0 && sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);
+                /* A format 1 row names no unit either: the map is read. */
+                {
+                    const char *f1 = "{\"entities\":[],\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"abcdefgh@"
+                                     "f34fd3eba67a6817553afe4bbde142f87c58716dfdf67de5a5ca230f9fb47fb7\",\"name\":\"Old\","
+                                     "\"size\":3,\"names\":[]}]}}";
+                    FILE *g = NULL;
+                    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\ffff_f1f1_map.decl", saved);
+                    if (!fopen_s(&g, path, "wb") && g) { fwrite(f1, 1, strlen(f1), g); fclose(g); }
+                    CHECK(sh_cache_sweep(1, NULL, 0, &st) && st.unreadable == 0);
+                    CHECK(DeleteFileA(path));
+                }
+                /* B9: a member that does not read leaves what the map uses unknown: the sweep removes nothing. */
+                {
+                    const char *bad = "{\"entities\":[],\"snapmap-plus\":{\"format\":2,\"mods\":7}}";
+                    FILE *g = NULL;
+                    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\ffff_bad0_map.decl", saved);
+                    if (!fopen_s(&g, path, "wb") && g) { fwrite(bad, 1, strlen(bad), g); fclose(g); }
+                    CHECK(sh_cache_sweep(1, NULL, 0, &st) && st.unreadable == 1 && st.units_removed == 0);
+                    CHECK(DeleteFileA(path));
+                }
             }
             write_slot(saves, "FEDCBA98765432100123", "", NULL, 64);
             _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\aaaa_bbbb_map.decl", saved);
@@ -1263,6 +1354,19 @@ static void test_local_standins(const char *top)
     CHECK(t && !strcmp(t, "This map is playing without 2 objects from Crates and barrels (the Crate and the Barrel): your folder "
                           "of it cannot be used. The Mods tab says why."));
     free(t);
+    /* W22: a row with no name is "a mod" in the sentence, never its salt. */
+    {
+        sh_modmanifest_row nameless;
+        memset(&nameless, 0, sizeof nameless);
+        strcpy_s(nameless.salt, sizeof nameless.salt, SALT);
+        strcpy_s(nameless.build, sizeof nameless.build, none);
+        nameless.pinned = 1;
+        load_rows(&nameless, 1, placed2, 2);
+        t = sh_cache_take_notice();
+        CHECK(t && !strstr(t, SALT) && strstr(t, "2 objects from a mod (the Crate and the Barrel)"));
+        free(t);
+        sh_modmanifest_row_free(&nameless);
+    }
     sh_modmanifest_row_free(&row);
 
     /* The sweep keeps the open map's stand-ins; once no map is open, they go. */

@@ -483,6 +483,17 @@ static void test_fresh_folder_refusals(const char *tmp)
     /* Called directly: refused with the cause; an already salted folder answers 0. */
     CHECK(HO(cause, sh_ms_assign_salt(bin, "binprobe", salt, HO_P(0))) == -1 && strstr(cause, "binary file"));
     CHECK(HO(cause, sh_ms_assign_salt(good, "goodprobe", salt, HO_P(0))) == 0 && sh_salt_valid(salt, strlen(salt)));
+    {
+        /* W15: a folder named like another mod's ID whose files sit under that mod: the sentence names no salt. */
+        char other[MAX_PATH * 2], rel[MAX_PATH], got[SH_SALT_LEN + 1];
+        _snprintf_s(other, sizeof other, _TRUNCATE, "%s\\%s", root, salt);
+        fb_make(other, salt);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\gen\\mods\\%s\\x.decl", salt);
+        mt_write(other, rel, "{\r\n}");
+        CHECK(HO(cause, sh_ms_assign_salt(other, salt, got, HO_P(0))) == -1 &&
+              strstr(cause, "is another mod's ID, so its files belong to that mod; rename this folder and press Refresh") &&
+              !strstr(cause, salt) && !strstr(cause, "salt"));
+    }
     /* A swap the system refuses: a file held open without delete sharing
      * makes the rename of the folder fail; nothing changes. */
     {

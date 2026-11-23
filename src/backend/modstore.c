@@ -423,7 +423,8 @@ static int ms_recycle(const wchar_t *path, char **why)
     op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_NORECURSEREPARSE;
     rc = SHFileOperationW(&op);
     free(from);
-    if (rc) { ms_cause(why, "the shell refused it (error 0x%x)", (unsigned)rc); return 0; }
+    if (rc) { ms_log("MODS: store: the shell refused the move to the Recycle Bin (error 0x%x)", (unsigned)rc);
+              ms_cause(why, "Windows would not move it to the Recycle Bin"); return 0; }
     if (op.fAnyOperationsAborted) { ms_cause(why, "the shell stopped before it finished"); return 0; }
     if (ms_exists(path)) { ms_cause(why, "the shell left part of it in place"); return 0; }
     return 1;
@@ -1616,7 +1617,7 @@ static int ms_rk_stage(ms_rk *r, const wchar_t *src, const wchar_t *staging, int
 {
     size_t i;
     wchar_t *mj;
-    if (!ms_mkdirs(staging)) { ms_rk_fail(r, "cannot create the staging folder: %s", ms_why(GetLastError(), NULL, 0, 0)); return 0; }
+    if (!ms_mkdirs(staging)) { ms_rk_fail(r, "cannot create a working folder: %s", ms_why(GetLastError(), NULL, 0, 0)); return 0; }
     for (i = 0; i < r->n && !r->failed; i++) {
         const ms_rk_file *f = &r->f[i];
         wchar_t *from = ms_wjoin_utf8(src, f->rel), *to = ms_wjoin_utf8(staging, f->new_rel);
@@ -1755,8 +1756,8 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
         qsort(r.f, r.n, sizeof *r.f, ms_rk_rel_cmp);
         for (i = 1; i < r.n && !r.failed; i++)
             if (!_stricmp(r.f[i - 1].new_rel, r.f[i].new_rel) && !(r.f[i - 1].dir && r.f[i].dir))
-                ms_rk_fail(&r, "%s and %s would both become %s once moved under the salt; rename one of them and press "
-                           "Refresh (the folder is unchanged)", r.f[i - 1].rel, r.f[i].rel, r.f[i].new_rel);
+                ms_rk_fail(&r, "%s and %s would end up at the same place in this mod; rename one of them and press "
+                           "Refresh (the folder is unchanged)", r.f[i - 1].rel, r.f[i].rel);
     }
     if (!r.failed) ms_rk_rebank(&r, src, &modjson, &mlen);
     if (keep && !r.failed && !drefs && !nskeys && !r.moved && !r.rewritten && !r.banks) {
@@ -1783,8 +1784,8 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
             }
         }
         if (foreign && named_salt && (size_t)other_n == strlen(named_salt) && !_strnicmp(other, named_salt, other_n))
-            ms_rk_fail(&r, "this folder's name, %s, is another mod's salt, so its files under mods/%s/ belong to that mod; "
-                       "rename this folder and press Refresh", named_salt, named_salt);
+            ms_rk_fail(&r, "this folder's name is another mod's ID, so its files belong to that mod; "
+                       "rename this folder and press Refresh");
         else if (foreign)
             ms_rk_fail(&r, "%u of this folder's %u file(s) are under mods/%.*s/ (the first: %s), which is not this folder's "
                        "name; move them under a mods folder named like this folder and press Refresh", foreign, files,
@@ -1926,7 +1927,7 @@ int sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SAL
     } else {
         r = ms_assign_to(folder, NULL, 0, from, 1, NULL, NULL, salt_out, cause);
     }
-    if (r < 0) ms_note_cause(folder, cause && *cause ? *cause : "the folder could not be given its salt");
+    if (r < 0) ms_note_cause(folder, cause && *cause ? *cause : "the folder could not be set up as a mod");
     else if (r > 0) ms_note_cause(folder, NULL);
     modstore_unlock();
     free(why);
@@ -1937,7 +1938,7 @@ int sh_ms_assign_salt_as(const char *folder, const char *from, const char *salt,
 {
     char got[SH_SALT_LEN + 1];
     int r;
-    if (!salt || !sh_salt_valid(salt, strlen(salt))) return ms_cause(cause, "no salt given") - 1;
+    if (!salt || !sh_salt_valid(salt, strlen(salt))) return ms_cause(cause, "no ID given") - 1;
     modstore_lock();
     strcpy_s(g_ms_fixed_salt, sizeof g_ms_fixed_salt, salt);
     r = sh_ms_assign_salt(folder, from, got, cause);
@@ -2497,7 +2498,7 @@ int sh_ms_verify(const char *spec, sh_ms_verify_stats *st, char **cause)
     int ok = 1;
     char *first = NULL;
     if (st) memset(st, 0, sizeof *st);
-    if (!spec || !spec[0]) return ms_cause(cause, "Name the mod: its folder name under mods, or its salt");
+    if (!spec || !spec[0]) return ms_cause(cause, "Name the mod: its folder name under mods, or its ID");
     modstore_lock();
     if (!sh_ms_enumerate(&l)) { modstore_unlock(); return ms_cause(cause, "the store cannot be listed"); }
     for (i = 0; i < l.count; i++) {

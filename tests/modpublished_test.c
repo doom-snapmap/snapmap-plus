@@ -872,10 +872,32 @@ static void one_notice_queue(void)
     tick(1);
     CHECK(F.asks == 1 && F.ask_buttons == 0 && strstr(F.last_ask, "cannot be copied to My Maps") != NULL);
     sh_modpublished_notice("first");
-    sh_modpublished_notice("second");   /* a later notice replaces one not raised yet */
+    sh_modpublished_notice("second");   /* a second notice joins one not raised yet (P2-10) */
     F.answer = 1;
     tick(3);
-    CHECK(F.asks == 2 && !strcmp(F.last_ask, "second"));
+    CHECK(F.asks == 2 && !strcmp(F.last_ask, "first second"));
+    {
+        /* Two that do not fit 250 bytes together: the later replaces the earlier. */
+        char big[200];
+        memset(big, 'a', sizeof big - 1);
+        big[sizeof big - 1] = 0;
+        char big2[200];
+        memset(big2, 'b', sizeof big2 - 1);
+        big2[sizeof big2 - 1] = 0;
+        sh_modpublished_notice(big);
+        sh_modpublished_notice(big2);
+        F.answer = 1;
+        tick(3);
+        CHECK(F.asks == 3 && !strcmp(F.last_ask, big2));
+    }
+    /* P2-9: a notice kept past the busy-tick limit is raised when the game can ask. */
+    reset();
+    F.can_ask_after = 1000;
+    sh_modpublished_notice("kept until the surface is free");
+    tick(900);
+    CHECK(F.asks == 0 && !strcmp(sh_modpub_test_notice(), "kept until the surface is free"));
+    tick(200);
+    CHECK(F.asks == 1 && !strcmp(F.last_ask, "kept until the surface is free"));
 }
 
 static void a_copied_map_fetches_then_passes(void)

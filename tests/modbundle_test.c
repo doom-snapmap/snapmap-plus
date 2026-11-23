@@ -839,8 +839,8 @@ static void test_record_read_failure(const char *tmp)
     {
         /* The sentence a caller shows the player: the file and the next step. */
         char why[MAX_PATH * 4 + 240];
-        CHECK(sh_mb_record_why() && strstr(sh_mb_record_why(), "recordheld\\snapmap-plus.json could not be used (another "
-              "program has it open); close the program holding it (a backup, sync or antivirus tool, or an editor) and try again"));
+        CHECK(sh_mb_record_why() && !strcmp(sh_mb_record_why(), "Snapmap+'s record of your mods could not be saved; close any program that holds files in "
+              "your mods folder, then try again.") && !strstr(sh_mb_record_why(), "snapmap-plus.json"));
         sh_mb_record_why_clear();
         CHECK(!sh_mb_record_why());
     }
@@ -1188,7 +1188,7 @@ static void test_refusals(const char *fixture, const char *tmp)
     accepted(fixture, tmp, m_bad_version, &b);
     CHECK(b.errors == 0 && b.extra && strstr(b.extra, "\"version\":\"1/2\"") && !strstr(b.canonical, ",\"version\":"));
     sh_mb_free(&b);
-    refused(fixture, tmp, m_reserved, &RESOLVER, "at its top level, which Snapmap+ writes itself");
+    refused(fixture, tmp, m_reserved, &RESOLVER, "at its top level that Snapmap+ writes itself; remove them");
     refused(fixture, tmp, m_float, &RESOLVER, "not a plain integer or fixed decimal");
     accepted(fixture, tmp, m_decimal, &b);
     CHECK(strstr(b.canonical, "\"pos\":[0.0,12.25,-0.70710678118654757]") != NULL);

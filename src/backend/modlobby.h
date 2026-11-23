@@ -94,6 +94,23 @@ int sh_modlobby_waiting_line(const sh_modlobby_member *members, size_t count, ch
 void sh_modlobby_send(unsigned code);
 
 /* ------------------------------------------------------------ the engine */
+/* The six engine functions the lobby binds, each at its signature's address in the running image (or in a mapped
+ * executable, for the image test). */
+typedef struct sh_modlobby_sites {
+    const uint8_t *try_start;    /* SnapmapLobbyTryToStartMatch (detoured) */
+    const uint8_t *controller;   /* LobbyControllerStartMatch (detoured) */
+    const uint8_t *ready;        /* LobbySetUserReady (detoured) */
+    const uint8_t *peer;         /* SessionStateGameLobbyPeer (detoured) */
+    const uint8_t *send;         /* SnapmapLobbySendReadyCommand (called) */
+    const uint8_t *confirm;      /* LobbyPeerConfirmsMap (read only) */
+} sh_modlobby_sites;
+
+/* Every byte the detours and the sender rely on, checked in the functions' own code: NULL when each holds (with the
+ * session's global slot and the acting-lobby call in *session_slot and *acting_lobby), else the name of the first
+ * check that failed, for the log. No check reads a detour's stolen window, so the result is the same before and after
+ * the lobby's own hooks are written. The bind and tests/modlobby_sites_test.c both run this function. */
+const char *sh_modlobby_check_sites(const sh_modlobby_sites *sites, void ***session_slot, const void **acting_lobby);
+
 #ifndef SH_MODLOBBY_PURE
 #include "signatures.h"
 /* Bind and install the four lobby sites and the sender (both renderers, by

@@ -2681,8 +2681,7 @@ static char *mu_record_note(char *msg)
     size_t n;
     if (!why || !why[0] || !msg) return msg;
     n = strlen(msg);
-    out = sh_textf("%s%s Snapmap+ could not update its records: %s; close any program using that file and try again.",
-                   msg, n && msg[n - 1] != '.' ? "." : "", why);
+    out = sh_textf("%s%s %s", msg, n && msg[n - 1] != '.' ? "." : "", why);
     if (!out) return msg;
     free(msg);
     return out;
@@ -2861,7 +2860,10 @@ static int mu_unzip(const char *zip, char **dir, char **cause)
             DWORD piece = len - k > (1u << 30) ? (1u << 30) : (DWORD)(len - k);
             if (!WriteFile(h, bytes + k, piece, &put, NULL) || !put) ok = 0;
         }
-        if (!ok) sh_text_set(cause, "%s could not be unpacked (error %lu)", name, GetLastError());
+        if (!ok) {
+            mu_log("unpack %s: the write failed (error %lu)", name, GetLastError());
+            sh_text_set(cause, "%s could not be unpacked; the ZIP may be damaged. Download it again and install it.", name);
+        }
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
         free(wp);
         free(bytes);
@@ -4995,6 +4997,7 @@ static int mu_add_mine(const char *row)
     const int action = SH_MODS_ACT_ADD_MINE;
     sh_cache_copy copy;
     char *why = NULL, *made = NULL, *cause = NULL, *msg = NULL;
+    const char *shown;
     int ok = 0, rc;
     mu_buf x;
     memset(&x, 0, sizeof x);
@@ -5005,18 +5008,20 @@ static int mu_add_mine(const char *row)
         free(why);
         return rc;
     }
+    /* A row with no name is copied under its salt: a sentence never says it. */
+    shown = copy.salt[0] && copy.name && !strncmp(copy.name, copy.salt, strlen(copy.salt)) ? "This mod" : copy.name;
     mu_log("add to my mods %.16s: copying %s (%zu object(s)) into your mods", row, copy.name, copy.objects);
     ok = sh_ms_add_copy(copy.dir, copy.modjson, copy.modjson_len, copy.salt, copy.name, &made, &cause);
     if (ok) {
         mu_log("add to my mods %.16s: now mods\\%s", row, made ? made : "");
         mu_sync();
         if (copy.objects)
-            mu_msg(&msg, "%s is now one of your mods: the %zu object%s from this map.", copy.name, copy.objects,
+            mu_msg(&msg, "%s is now one of your mods: the %zu object%s from this map.", shown, copy.objects,
                    copy.objects == 1 ? "" : "s");
-        else mu_msg(&msg, "%s is now one of your mods: what this map uses of it.", copy.name);
+        else mu_msg(&msg, "%s is now one of your mods: what this map uses of it.", shown);
     } else {
         mu_log("add to my mods %.16s: refused: %s", row, cause ? cause : "");
-        msg = mu_sentence_end(sh_textf("%s was not added to your mods: %s", copy.name, cause && cause[0] ? cause : "it could not be copied"));
+        msg = mu_sentence_end(sh_textf("%s was not added to your mods: %s", shown, cause && cause[0] ? cause : "it could not be copied"));
     }
     sh_cache_copy_free(&copy);
     mu_kstr(&x, "key", ok && made ? made : "", 0);

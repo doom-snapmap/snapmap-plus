@@ -47,6 +47,7 @@
 #define PUB_GDM_ID          0x29u   /* GDM_CONFIRM_VIDEO_CHANGES: a Yes/No body of our own text */
 #define PUB_BUTTONS_YES_NO  6u
 #define PUB_BUTTONS_ACCEPT  0u
+#define PUB_NOTICE_JOIN_CAP 250     /* bytes: what one notice may hold when two are joined */
 #define PUB_RAISE_TICKS     600     /* about ten seconds at 60 Hz */
 #define PUB_PROGRESS_MS     2000ull
 #define PUB_SEEN_MAX        16
@@ -402,15 +403,20 @@ static void pub_launch_refused(int hook)
 }
 
 /* One pending notice (malloc'd, whole), raised with a single Accept button
- * when the surface is idle and no question is up. A later notice replaces an
- * unraised one. */
+ * when the surface is idle and no question is up. A second notice before the
+ * first is raised joins it (first, a space, second) when the two fit the
+ * game's 250 bytes; otherwise the later one replaces it. A notice waits as
+ * long as the surface stays busy. */
 static char *g_notice;
 static int g_notice_ticket, g_notice_waited;
 
 static void pub_notice(const char *text)
 {
     char *copy;
-    if (!text || !text[0] || !(copy = sh_text(text))) return;
+    if (!text || !text[0]) return;
+    if (g_notice && strlen(g_notice) + 1 + strlen(text) <= PUB_NOTICE_JOIN_CAP) copy = sh_textf("%s %s", g_notice, text);
+    else copy = sh_text(text);
+    if (!copy) return;
     free(g_notice);
     g_notice = copy;
     g_notice_waited = 0;
@@ -975,10 +981,9 @@ static void pub_poll_notice(void)
     }
     if (!g_notice) return;
     if (!g_ops.can_ask || !g_ops.can_ask(g_ops.context)) {
-        if (++g_notice_waited > PUB_RAISE_TICKS) {
-            pub_log("MODS: the notice could not be shown; the dialog surface stayed busy");
-            pub_notice_clear();
-        }
+        if (++g_notice_waited == PUB_RAISE_TICKS)
+            pub_log("MODS: the notice is waiting: the dialog surface stayed busy; it is raised when the game can ask");
+        if (g_notice_waited > PUB_RAISE_TICKS) g_notice_waited = PUB_RAISE_TICKS + 1;
         return;
     }
     /* The game's dialog holds 255 bytes: a longer notice is said whole on the

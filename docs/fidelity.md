@@ -68,9 +68,11 @@ safe. See [`src/fault_shield/`](../src/fault_shield/).
 
 ## Unsupported SnapHak features
 
-- **Lua scripting:** no Lua runtime or empty Lua tab is shipped.
+- **Lua scripting as a tab:** no Lua tab is shipped. Mods carry sandboxed Lua scripts that run during
+  Play on the host (see [Mods](capabilities.md#mods)).
 - **Render-model count overlay:** `sh_show_rmcount` is not registered.
-  `sh_debugrender dumprenderinfo` prints the count and model names. The native
+  The diagnostic build's `sh_debugrender dumprenderinfo` prints the count and model names (a release
+  does not register `sh_debugrender`). The native
   navigation line renderer does not implement this text overlay.
 - **Dash and meathook tuning:** the six original `cs_dash_*` and `cs_mh_*`
   movement cvars are not registered because their movement implementation is
