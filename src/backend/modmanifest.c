@@ -488,7 +488,11 @@ static size_t mm_choice_count(const char *lines)
 /* A row object of an earlier Snapmap+ shape: an "id" or "bundle" member (before units existed; it names no unit). */
 static int mm_earlier_shape(const sh_json_object *object)
 {
-    return sh_json_object_get(object, "id") || sh_json_object_get(object, "bundle");
+    const char *mod;
+    if (sh_json_object_get(object, "id") || sh_json_object_get(object, "bundle")) return 1;
+    /* Format 1 (before units): "mod": "<salt>@<build>"; it names no unit either. */
+    mod = sh_json_object_get(object, "mod");
+    return mod && mod[0] == '"' && strchr(mod, '@') != NULL;
 }
 
 /* The same test on a row's text, for the reader's count of earlier rows. */
@@ -514,6 +518,7 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
         MM_ERR("row value is not a JSON object");
         return 0;
     }
+    /* An "id" or "bundle" row, or format 1's "<salt>@<build>" (Q4): the installer converts them. */
     if (mm_earlier_shape(&object)) {
         MM_ERR("the map was saved by an earlier Snapmap+; which this version does not read yet");
         goto done;
@@ -523,11 +528,7 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
         size_t ml;
         if (!mm_member_text(&object, "mod", mod, sizeof mod, 1)) { MM_ERR("row has no valid mod"); goto done; }
         ml = strlen(mod);
-        if (ml == SH_MODMANIFEST_SALT_LEN + 1 + SH_MOD_HASH_CHARS && mod[SH_MODMANIFEST_SALT_LEN] == '@') {
-            /* Format 1 (before 1.0, "<salt>@<build>"): an earlier shape, which the installer converts (Q4). */
-            MM_ERR("the map was saved by an earlier Snapmap+; which this version does not read yet");
-            goto done;
-        } else if (ml == SH_MODMANIFEST_SALT_LEN) {
+        if (ml == SH_MODMANIFEST_SALT_LEN) {
             /* A local row follows its folder (D6a): the build it was saved from is not part of it. */
             memcpy(out->salt, mod, SH_MODMANIFEST_SALT_LEN + 1);
             strcpy_s(out->build, sizeof out->build, SH_MODMANIFEST_LOCAL_BUILD);

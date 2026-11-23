@@ -2188,7 +2188,12 @@ static void mc_kept_text(mc_kept *k, const char *text, size_t len)
     unsigned rejected = 0;
     sh_modmanifest_list rows;
     memset(&rows, 0, sizeof rows);
-    if (sh_carrier_part(text, len, "mods", NULL, NULL) == 1) sh_modmanifest_read(text, len, &rows, &rejected);
+    {
+        int part = sh_carrier_part(text, len, "mods", NULL, NULL);
+        /* B9: a member that does not read leaves what the map uses unknown, as a row that does not parse does. */
+        if (part < 0) k->unreadable++;
+        if (part == 1) sh_modmanifest_read(text, len, &rows, &rejected);
+    }
     /* A row of an earlier Snapmap+ shape names no unit (R-LV6: three such maps on the owner's machine kept the sweep
      * from ever removing anything); only a row that does not parse leaves what the map uses unknown. */
     if (rejected > rows.earlier) k->unreadable++;

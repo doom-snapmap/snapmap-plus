@@ -1042,6 +1042,26 @@ static void test_cache(const char *top)
                 if (!fopen_s(&f, path, "wb") && f) { fwrite(old, 1, strlen(old), f); fclose(f); }
                 CHECK(sh_cache_sweep(1, NULL, 0, &st));
                 CHECK(st.unreadable == 0 && sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);
+                /* A format 1 row names no unit either: the map is read. */
+                {
+                    const char *f1 = "{\"entities\":[],\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"abcdefgh@"
+                                     "f34fd3eba67a6817553afe4bbde142f87c58716dfdf67de5a5ca230f9fb47fb7\",\"name\":\"Old\","
+                                     "\"size\":3,\"names\":[]}]}}";
+                    FILE *g = NULL;
+                    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\ffff_f1f1_map.decl", saved);
+                    if (!fopen_s(&g, path, "wb") && g) { fwrite(f1, 1, strlen(f1), g); fclose(g); }
+                    CHECK(sh_cache_sweep(1, NULL, 0, &st) && st.unreadable == 0);
+                    CHECK(DeleteFileA(path));
+                }
+                /* B9: a member that does not read leaves what the map uses unknown: the sweep removes nothing. */
+                {
+                    const char *bad = "{\"entities\":[],\"snapmap-plus\":{\"format\":2,\"mods\":7}}";
+                    FILE *g = NULL;
+                    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\ffff_bad0_map.decl", saved);
+                    if (!fopen_s(&g, path, "wb") && g) { fwrite(bad, 1, strlen(bad), g); fclose(g); }
+                    CHECK(sh_cache_sweep(1, NULL, 0, &st) && st.unreadable == 1 && st.units_removed == 0);
+                    CHECK(DeleteFileA(path));
+                }
             }
             write_slot(saves, "FEDCBA98765432100123", "", NULL, 64);
             _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\aaaa_bbbb_map.decl", saved);
