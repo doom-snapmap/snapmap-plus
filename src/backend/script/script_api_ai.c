@@ -1777,6 +1777,7 @@ static void wound_count_gone(sh_script_handle h, uint32_t spawn_id)
 #define AI_SPLINE_RAISE 32.0f    /* spline_clear traces this far above each point */
 #define AI_STEP        48.0f     /* the most a clip's end may sit above or below the ground under it */
 #define AI_TARGET_RAISE 40.0f    /* sights aim this far above the target's origin */
+#define AI_LINE_MIN    1.0f      /* TF_NAV_LINE: a clip whose end lies closer than this needs no line */
 
 static float dist3(const float a[3], const float b[3])
 {
@@ -1906,6 +1907,29 @@ int sh_ai_spline_run(const sh_script_ai_engine *e, void *ai, const sh_ai_spline_
     return 1;
 }
 
+/* SH_AI_TF_NAV_LINE: the clip's end on the world's floor (within a step of
+ * where the clip puts it) and the straight line to it clear of the world at
+ * knee and chest height, players and demons passed through, as DOOM
+ * Eternal's navigation trace sees the ground (no actor is part of it). A
+ * clip that ends where it starts needs no line and no floor test: the demon
+ * stands there (a zero-length navigation trace passes). 1 fits, 0 not. */
+static int nav_line(const sh_script_ai_engine *e, void *ai, const float at[3], const float end[3])
+{
+    float above[3], g[3], from[3], to[3], h[2] = { AI_KNEE, AI_CHEST };
+    float dx = end[0] - at[0], dy = end[1] - at[1];
+    int k;
+    if (!e->world_ground || !e->world_clear) return 0;
+    if (dx * dx + dy * dy < AI_LINE_MIN * AI_LINE_MIN && fabsf(end[2] - at[2]) <= AI_STEP) return 1;
+    above[0] = end[0]; above[1] = end[1]; above[2] = end[2] + AI_STEP;
+    if (!e->world_ground(ai, above, g) || fabsf(g[2] - end[2]) > AI_STEP) return 0;
+    for (k = 0; k < 2; k++) {
+        from[0] = at[0]; from[1] = at[1]; from[2] = at[2] + h[k];
+        to[0] = end[0]; to[1] = end[1]; to[2] = g[2] + h[k];
+        if (e->world_clear(ai, from, to) != 1) return 0;
+    }
+    return 1;
+}
+
 int sh_ai_anim_key(int key_base, const char *node, int index)
 {
     unsigned h = 2166136261u;                                   /* FNV-1a of the node's name */
@@ -1973,6 +1997,8 @@ int sh_ai_anim_valid_run(const sh_script_ai_engine *e, void *ai, const char *nod
                 if (sees(e, ai, from, to, NULL) != 1) ok = 0;
             }
         }
+        if (ok && (tests & SH_AI_TF_NAV_LINE))
+            ok = nav_line(e, ai, at, end);
         if (ok && (tests & (SH_AI_TF_EYE_VISIBILITY | SH_AI_TF_MUZZLE_VISIBILITY))) {
             if (!enemy) ok = 0;
             else {
@@ -4595,6 +4621,59 @@ static int e_ground(const float pos[3], float out[3])
     return c && c->ground && c->ground(pos, out);
 }
 
+/* The engine's world trace from `from` to `to`, passing through every player
+ * and demon it meets (at most AI_WORLD_HOPS of them; the first trace passes
+ * `ai`): 1 with the world's hit in *t, 0 nothing of the world hit, -1
+ * unreadable. A navigation trace's view of the line (world_clear,
+ * world_ground). */
+#define AI_WORLD_HOPS 6
+static int world_trace(void *ai, const float from[3], const float to[3], sh_script_trace *t)
+{
+    const sh_script_engine *c = sh_script_api_engine();
+    float at[3], dir[3], len;
+    uint32_t ignore = spawn_id_of(ai);
+    int hop, i;
+    if (!c || !c->trace) return -1;
+    memcpy(at, from, sizeof at);
+    for (i = 0; i < 3; i++) dir[i] = to[i] - from[i];
+    len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    if (!(len > 1e-3f)) return 0;
+    for (i = 0; i < 3; i++) dir[i] /= len;
+    for (hop = 0; hop < AI_WORLD_HOPS; hop++) {
+        void *hit;
+        int kind;
+        if (!c->trace(at, to, ignore, t)) return -1;
+        if (!(t->fraction < 1.0f)) return 0;
+        if (t->hit_spawn_id == SH_SCRIPT_SPAWN_ID_NONE) return 1;
+        hit = c->resolve ? c->resolve(t->hit_spawn_id) : NULL;
+        kind = hit && c->kind ? c->kind(hit) : SH_SCRIPT_KIND_OTHER;
+        if (kind != SH_SCRIPT_KIND_AI && kind != SH_SCRIPT_KIND_PLAYER) return 1;
+        ignore = t->hit_spawn_id;                                 /* go on past it */
+        for (i = 0; i < 3; i++) at[i] = t->end[i] + dir[i] * 2.0f;
+    }
+    return 1;
+}
+
+static int e_world_clear(void *ai, const float from[3], const float to[3])
+{
+    sh_script_trace t;
+    int st = world_trace(ai, from, to, &t);
+    return st < 0 ? -1 : st == 0;
+}
+
+static int e_world_ground(void *ai, const float pos[3], float out[3])
+{
+    sh_script_trace t;
+    float from[3], to[3];
+    from[0] = to[0] = pos[0];
+    from[1] = to[1] = pos[1];
+    from[2] = pos[2] + SH_SCRIPT_GROUND_ABOVE;
+    to[2] = pos[2] - SH_SCRIPT_GROUND_DEPTH;
+    if (world_trace(ai, from, to, &t) != 1 || t.normal[2] < SH_SCRIPT_GROUND_FLAT) return 0;
+    memcpy(out, t.end, 3 * sizeof(float));
+    return 1;
+}
+
 static int read_name(const char *src, char *out, size_t cap)
 {
     size_t i = 0;
@@ -5646,7 +5725,7 @@ static const sh_script_ai_engine k_engine = {
     e_laser_add, e_laser_remove, e_rear_footsteps,
     e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose,
     e_interrupt_blend, e_destructible, e_weapon_use, e_wound_damage_counts, e_snapmap_order,
-    e_release, e_anim_variable, e_relations, e_off_limits
+    e_release, e_anim_variable, e_relations, e_off_limits, e_world_clear, e_world_ground
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
