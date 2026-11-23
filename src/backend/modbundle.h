@@ -676,6 +676,16 @@ int  sh_mb_stock_restore(const char *request, const char *source);
  * pass as it registers a mod's own decls (modserve.c ms_plannable). */
 int  sh_mb_product_decl(const char *request);
 
+/* 1 when `request` is a file the product derives from a mod's own file and names by the SHA-256 of its bytes: a look's
+ * parameter or colour image, generated/image/snapmapplus/look/[c]<16 hex>.bimage, or a Graphics SDK decl,
+ * generated/decls/<type>/snapmapplus/sdk/<16 hex>.decl or generated/decls/<type>/snapmapplus_sdk_<16 hex>.decl
+ * (modprog.h). Its bytes cannot be derived from the path alone: it exists in a process once a material, effect or
+ * environment that names it has compiled there. So the provider serves one no build lists once it is registered
+ * (modserve.h sh_modserve_set_product_reader), a pointer to one derives it by compiling the served files that need it
+ * (modserve.c ms_derive), and a unit's pointer to one is satisfied by this product's own compiler, not refused before
+ * that file has served (modcache.c mc_product_ok, N13). */
+int  sh_mb_product_hashed(const char *request);
+
 /* For a snapModule decl request maps/modules/<path>.decl, the snapModuleInfo
  * request it needs (generated/decls/snapmoduleinfo/<path>.decl), malloc'd;
  * NULL when the request is not a module decl. */

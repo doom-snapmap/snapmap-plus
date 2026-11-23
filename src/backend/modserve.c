@@ -808,7 +808,9 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     if (!ptype || !pname) { ms_fail(b, "out of memory"); return; }
     f->ptype = ptype;
     f->pname = pname;
-    f->product = f->is_restore && f->is_decl && ms_product_request(request);
+    /* a file the product names by its bytes' hash (a look's image, an SDK decl) is one by its shape alone: it is not
+     * derived yet while the index is built, and ms_open derives it when first asked */
+    f->product = f->is_restore && (sh_mb_product_hashed(request) || (f->is_decl && ms_product_request(request)));
     /* Namespace: new names live under mods/<salt>/ (ONE-SHAPE rule 1, the
      * builder's sh_mb_salt_paths_check). Raw files (and skins decls, which
      * are named by their mesh path) may sit deeper, below a folder of their
@@ -5105,6 +5107,32 @@ static int ms_product_request(const char *request)
     return sh_mb_product_decl(request) || (owns && owns(request) == 1);
 }
 
+static int (*volatile g_product_reader)(const char *request, unsigned char **bytes, size_t *len);
+
+void sh_modserve_set_product_reader(int (*read)(const char *request, unsigned char **bytes, size_t *len))
+{
+    InterlockedExchangePointer((PVOID volatile *)&g_product_reader, (PVOID)read);
+}
+
+/* A file the product names by its bytes' hash (sh_mb_product_hashed: a look's parameter or colour image, an SDK decl)
+ * that no build of the index lists: the bytes the product registered when a served material, effect or environment
+ * that names it compiled in this process (sdk.h). Only such a compile can spell the name, so it is served wherever
+ * that file serves, in every mode, without a pointer (a build records no need of a look's images, modbundle.c
+ * mb_need_cb), and a product that derives other bytes names and serves its own. Without this the engine met no file
+ * and the layered program read no numbers: the surface drew black (R-HD1). 1 served, 0 not such a file. */
+static int ms_open_derived(const char *request, unsigned char **bytes, size_t *length)
+{
+    int (*owns)(const char *) = (int (*)(const char *))InterlockedCompareExchangePointer((PVOID volatile *)&g_product_owner,
+                                                                                       NULL, NULL);
+    int (*read)(const char *, unsigned char **, size_t *) =
+        (int (*)(const char *, unsigned char **, size_t *))InterlockedCompareExchangePointer(
+            (PVOID volatile *)&g_product_reader, NULL, NULL);
+    if (!sh_mb_product_hashed(request) || !owns || !read || owns(request) != 1) return 0;
+    if (read(request, bytes, length) != SH_MB_STOCK_OK || !*bytes) { *bytes = NULL; *length = 0; return 0; }
+    InterlockedIncrement(&g_opens_served);
+    return 1;
+}
+
 void sh_modserve_set_material_filter(sh_modserve_material_fn fn)
 {
     InterlockedExchangePointer((PVOID volatile *)&g_material_filter, (PVOID)fn);
@@ -5277,7 +5305,8 @@ int sh_modserve_serve_identity(const char *request, const char **bundle_hash, co
  * product only once that file has been compiled in this process (sdk.h: compiling registers what it derives), and a
  * plan loads it before the file that needs it. So a read of such a pointer that finds nothing first compiles the
  * served files that need it (through the material filter, ms_look_of), and the pointers that need it in turn, then
- * reads again. Returns how many files it compiled. */
+ * reads again. A need names the file by its provided name or by the request it resolved to (an image is needed as
+ * <name>.tga and provided as <name>). Returns how many files it compiled. */
 static int ms_derive(const ms_index *x, const ms_file *f, int depth)
 {
     int i, k, n = 0;
@@ -5288,7 +5317,9 @@ static int ms_derive(const ms_index *x, const ms_file *f, int depth)
         for (k = 0; k < d->need_count; ++k) {
             const ms_need *nd = &x->needs[d->need_first + k];
             size_t len = 0;
-            if (_stricmp(nd->type, f->ptype) || _stricmp(nd->name, f->pname)) continue;
+            int same = !_stricmp(nd->type, f->ptype) && !_stricmp(nd->name, f->pname);
+            if (!same && nd->file >= 0 && nd->file < x->nfiles) same = !_stricmp(x->files[nd->file].request, f->request);
+            if (!same) continue;
             if (d->stock) n += ms_derive(x, d, depth + 1);
             else if (ms_look_of(d, &len)) n++;
             break;
@@ -5310,7 +5341,7 @@ static int ms_open(const char *request, unsigned char **bytes, size_t *length)
     if (length) *length = 0;
     if (!bytes || !length) return 0;
     f = ms_lookup_file(&x, request);
-    if (!f) return 0;
+    if (!f) return ms_open_derived(request, bytes, length);
     body = ms_body_of(f, &body_len);
     if (!body && (body = ms_look_of(f, &body_len)) != NULL) looked = 1;
     if (body) {

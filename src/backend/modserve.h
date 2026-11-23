@@ -1264,6 +1264,15 @@ void sh_modserve_set_material_filter(sh_modserve_material_fn fn);
  * Unset (the native tests), the name alone decides. */
 void sh_modserve_set_product_owner(int (*owns)(const char *request));
 
+/* How the product's own bytes are read (modprog.h sh_modprog_read: SH_MB_STOCK_OK with a process-heap copy), set by
+ * the backend with the owner. With both set, sh_modserve_open answers a request no build lists that names a file the
+ * product derives by its bytes' hash (modbundle.h sh_mb_product_hashed: a look's parameter and colour images) once the
+ * owner answers for it, that is once a served material that names it has compiled in this process: such a name is
+ * spelled only by that compile, so the file serves wherever its material serves, in every mode, and never needs a
+ * pointer of a build or a unit. It is the product's content, not a mod's: no lookup, identity or serve listener sees
+ * it. Unset (the native tests), nothing is served without an index entry. */
+void sh_modserve_set_product_reader(int (*read)(const char *request, unsigned char **bytes, size_t *len));
+
 /* What sh_modserve_open would serve for `request` now, without serving it:
  * 1 with the bundle hash and either the file's SHA-256 (*file_hash) or, for a
  * composed text, its bytes (*body, *body_len; index memory, valid for the
