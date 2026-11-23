@@ -11,7 +11,8 @@
 --             with no entity of its own is not range-limited), as the senses' GetRelations gives them (VK
 --             0x1404AAA30 / GL 0x1404A91B0);
 --   filters   playersOnly / noPlayers (a bot is a player), the awareness band, filterOutOffLimits;
---   the pick  the nearest of the most hostile emotion present (VK 0x1404AAD10 / GL 0x1404A9490).
+--   the pick  the nearest of the most hostile emotion present (VK 0x1404AAD10 / GL 0x1404A9490), its distance squared
+--             in single precision: an entity at no measurable point is never picked (T.measurable).
 --
 -- A source game whose condition narrows the range gives it: range (units, instead of the 10,000) and flat (distance on
 -- the ground plane); DOOM Eternal's class has maxRange, rangeString and use2DChecks for them.
@@ -98,7 +99,7 @@ function T.relations(A, e, p)
     if x ~= nil and x ~= e and respect and emotion and respect >= b[1] and respect <= b[2]
         and emotion >= b[3] and emotion <= b[4] and A.alive(x) then
       local d = p.flat and A.flat_distance and A.flat_distance(e, x) or A.distance(e, x)
-      local in_range = r.unlimited or d < (p.range or T.RANGE)
+      local in_range = r.unlimited or (type(d) == "number" and d < (p.range or T.RANGE))
       local player = is_player(x)
       if in_range and not (p.playersOnly and not player) and not (p.noPlayers and player)
           and ((aware >= b[5] and aware <= b[6]) or (p.sight_confirms and A.can_see and A.can_see(e, x)))
@@ -110,7 +111,17 @@ function T.relations(A, e, p)
   return out
 end
 
---- 2016's pick among admitted relations: the nearest of the most hostile emotion present, or nil.
+-- 2016 measures the pick's distance squared in single precision against FLT_MAX (VK 0x1404AAD10: the best starts at
+-- 3.4028235e38 and only a smaller square replaces it), so a row whose entity stands at no measurable point (NaN,
+-- infinite, or so far that the square overflows a float) is never the pick, though it counts as a relation. Such a
+-- row can only be one with no range (r.unlimited): a ranged row fails the range first.
+local FLT_MAX = 3.4028234663852886e38
+local function measurable(d) return type(d) == "number" and d == d and d * d < FLT_MAX end
+T.measurable = measurable
+
+--- 2016's pick among admitted relations: the nearest measurable row of the most hostile emotion present, or nil.
+-- The most hostile emotion is the first row's in the engine's order, measurable or not, so a bucket whose rows are
+-- all unmeasurable gives no pick (it does not give way to a less hostile one).
 function T.pick(list)
   local worst
   for _, r in ipairs(list) do
@@ -118,7 +129,7 @@ function T.pick(list)
   end
   local best
   for _, r in ipairs(list) do
-    if r.emotion == worst and (best == nil or r.distance < best.distance) then best = r end
+    if r.emotion == worst and measurable(r.distance) and (best == nil or r.distance < best.distance) then best = r end
   end
   return best and best.entity or nil
 end
