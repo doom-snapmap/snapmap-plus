@@ -38,6 +38,14 @@ T.AWARE = { unaware = 0, lost = 1, suspected = 2, confirmed = 3, max = 4 }
 -- EMOTION_DESTROY_AT_ALL_COSTS..EMOTION_DISLIKE, at AIAWARE_CONFIRMED).
 T.COMBAT = { minEmotion = "EMOTION_DESTROY_AT_ALL_COSTS", maxEmotion = "EMOTION_DISLIKE",
              awareness_min = "AIAWARE_CONFIRMED" }
+-- The band the generic tier gives a demon its first enemy in: the combat band, where the demon's perception seeing the
+-- entity now (A.can_see: its sight state, seen within the last second, and a clear line) counts as confirmed. 2016's
+-- perception raises awareness from its sight stimulus (the record's stimulus update VK 0x140651360), but a demon's
+-- relation rows and awareness words are refreshed in turns and by events (the senses update VK 0x1404AE3C0: at spawn,
+-- on an encounter's spawn, on the AI manager's turn), and nothing forces a scripted demon's awareness in single player
+-- without co-op tracking: a hostile the demon sees is engaged at once, as a stock demon's alert cycle does on sight.
+T.FIND = { minEmotion = "EMOTION_DESTROY_AT_ALL_COSTS", maxEmotion = "EMOTION_DISLIKE",
+           awareness_min = "AIAWARE_CONFIRMED", sight_confirms = true }
 
 local function word(name, prefix)
   if type(name) ~= "string" then return nil end
@@ -67,14 +75,23 @@ local function is_player(x)
 end
 
 --- The relations of demon e that condition p admits, in the engine's order: { { entity, respect, emotion,
--- awareness, distance }, ... } with numbers for the words. A.relations(e) is the engine's table (nil when this
--- Snapmap+ cannot read it: then there are none).
+-- awareness, distance }, ... } with numbers for the words. The rows are the engine's: the adapter's A.relations when
+-- it has one, else Snapmap+'s own e:relations() (a brain library emitted before the adapter had the call still gets
+-- the engine's rows); none when this Snapmap+ cannot read them.
+local function rows_of(A, e)
+  if A.relations then return A.relations(e) end
+  local ok, has = pcall(function() return e.relations end)
+  if ok and has ~= nil then return e:relations() end
+  return nil
+end
+T.rows_of = rows_of
+
 function T.relations(A, e, p)
   p = p or {}
   local b = T.band(p)
   local out = {}
   if p.ambientOnly then return out end     -- 2016: only a demon whose behaviour runs its ambient social behaviour
-  for _, r in ipairs((A.relations and A.relations(e)) or {}) do
+  for _, r in ipairs(rows_of(A, e) or {}) do
     local x = r.entity
     local respect, emotion = T.RESPECT[r.respect], T.EMOTION[r.emotion]
     local aware = T.AWARE[r.awareness or "unaware"] or 0
@@ -84,7 +101,7 @@ function T.relations(A, e, p)
       local in_range = r.unlimited or d < (p.range or T.RANGE)
       local player = is_player(x)
       if in_range and not (p.playersOnly and not player) and not (p.noPlayers and player)
-          and aware >= b[5] and aware <= b[6]
+          and ((aware >= b[5] and aware <= b[6]) or (p.sight_confirms and A.can_see and A.can_see(e, x)))
           and not (p.filterOutOffLimits and A.off_limits and A.off_limits(e, x)) then
         out[#out + 1] = { entity = x, respect = respect, emotion = emotion, awareness = aware, distance = d }
       end
