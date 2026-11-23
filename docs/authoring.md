@@ -208,6 +208,79 @@ Encounter's list) that adds an entry naming your encounter. A mod never replaces
 encounters' members as they are. A converter (Doomforge) writes all of this from the source game's data; its author
 writes nothing.
 
+## A mod with nothing to place
+
+Some mods change the game and give the author nothing to place: no Toybox row, no module. A player-side change is one
+(different hands, a console setting, a change to a DOOM file), and so is a set of scripts that run when the map starts.
+A map uses such a mod as a whole: in the Mods tab, select the mod with the map open in the editor and press **Use in
+this map** in its In this map block, which then reads "In this map: the whole mod". Save the map. In the editor's own
+Play the mod applies at once. When you publish the map, the whole mod goes with it, and a player who opens the map gets
+it with the map, in that map only. **Remove from map** in the same block takes it out again.
+
+A mod that has something to place never needs the button: place its objects from the Toybox, and the map carries the
+pieces of the objects you placed and nothing else.
+
+**Worked example: bare hands.** First-person hands that are the campaign's pre-suit arms, and a third-person body that
+wears them, in the maps that use the mod.
+
+```
+%LOCALAPPDATA%\snapmap-plus\mods\bare-hands\
+  mod.json
+  entities\player_tp_body_bare.decl
+  meshes\tp_body_bare.md6.decl
+  native\generated\decls\entitydef\player\coop.decl
+```
+
+`mod.json` names the mod and the console setting the hands slots need while a map uses it:
+
+```json
+{
+  "name": "Bare Hands",
+  "description": "Bare arms in the maps that use this mod.",
+  "requirements": { "cvars": { "g_weaponDoomMPUseDoomHands": "1" } }
+}
+```
+
+`meshes/tp_body_bare.md6.decl` is the multiplayer body's model with the campaign's bare arms mesh:
+
+```
+{
+	init {
+		inherit "player/mp/tp_body_mp.md6"
+		mesh "md6/player/human/base/assets/mesh/arms.md6mesh"
+	}
+}
+```
+
+`entities/player_tp_body_bare.decl` is the multiplayer third-person body drawing that model:
+
+```
+{
+	inherit = "player_tp_body_mp";
+	edit = {
+		renderModelInfo = {
+			model = "meshes/tp_body_bare.md6";
+		}
+	}
+}
+```
+
+`native/generated/decls/entitydef/player/coop.decl` is **DOOM's whole `player/coop` decl**, copied from the game, with
+only the three hands fields changed:
+
+```
+	handsModelMPUseDoomHands = "player/fp_hands.md6";
+	handsModelMPUseDoomHands_D1 = "player/fp_hands_d1.md6";
+	thirdPersonBodyMPUseDoomHands = "entities/player_tp_body_bare";
+```
+
+Copy the whole file and change only what you mean to change. The build compares your copy with DOOM's own text, field
+by field, and a field your copy leaves out is removed from the game's decl in the maps that use the mod (the player
+would then take it from `player/mp`, its starting inventory and weapon list included). The Mods tab's "What it changes
+in the game" lists what the build found ("entitydef/player/coop: 3 fields set"); a count of removed fields you did not
+mean is the sign of a partial copy. Your own names work inside a `native/` file too: `entities/player_tp_body_bare` is
+the mod's entity, whatever the mod's identity on this computer.
+
 ## What the build checks
 
 Every file is checked when the mod is built (a Refresh, or the first scan of a folder): its folder and kind, every
