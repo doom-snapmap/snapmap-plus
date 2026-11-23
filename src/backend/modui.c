@@ -1234,6 +1234,14 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const
         mu_str(b, u->row_names[i]);
     }
     mu_putn(b, "]", 1);
+    {
+        /* The SnapMap modules it adds (its own snapModule decls under map-modules/): with its Toybox rows, what an
+         * author can place of it. A mod with neither is used by a map as a whole. */
+        unsigned modules = 0;
+        for (k = 0; e->loaded && k < bd->file_count; k++)
+            if (bd->files[k].is_module && !bd->files[k].stock && !bd->files[k].shadowed) modules++;
+        mu_knum(b, "modules", modules, 0);
+    }
     if (rec->claims_read) mu_knum(b, "publishedMaps", mu_published_maps(m, rec, (int)(u - m->entries)), 0);
     if (e->loaded) {
         mu_put_facts(b, bd);
@@ -1568,6 +1576,8 @@ typedef struct mu_mapmod {
     /* Its row's declared build when the editor serves the row through this
      * (installed) build of its salt (an editor load that substituted it). */
     char declared[SH_MODMANIFEST_HASH_CAP];
+    int pinned;               /* the save writes its row with units (a published or downloaded map's content) */
+    const sh_modmanifest_row *row;   /* the row the save writes for it (in mu_map.save), or NULL */
 } mu_mapmod;
 
 /* A (placed name, mod) match of the closure. */
@@ -1578,6 +1588,10 @@ typedef struct mu_hit { char *name; int mod; } mu_hit;
  * with the map's JSON, its entities, wires and references, and its details. */
 typedef struct mu_map {
     sh_modmanifest_list rows;
+    /* The rows a save would write now (sh_modmanifest_rows_for over the live placed names): the mods the map uses
+     * are exactly these, so the tab never says a map uses a mod the save would drop, or misses one it would add. */
+    sh_modmanifest_list save;
+    int have_save;
     mu_closure closure;
     int entities;             /* entities read, -1 no editor map, -2 not available */
     size_t names;
@@ -1768,16 +1782,23 @@ static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
         mp->names = nm.count;
         if (mp->entities >= 0 && nm.count && sh_modserve_active())
             modserve_bundles_for_names_visit((const char *const *)nm.items, nm.count, mu_map_visit, &visit);
+        if (mp->entities >= 0 && !nm.oom)
+            mp->have_save = sh_modmanifest_rows_for((const char *const *)nm.items, nm.count, &mp->save) >= 0;
         mu_names_free(&nm);
     } else if (mp->have_mm) {
         mp->names = count;
         if (count && sh_modserve_active()) modserve_bundles_for_names_visit((const char *const *)names, count, mu_map_visit, &visit);
+        mp->have_save = sh_modmanifest_rows_for((const char *const *)names, count, &mp->save) >= 0;
         sh_modmanifest_names_free(names, count);
     }
     if (mp->entities >= 0) {
         size_t i, k;
-        for (i = 0; i < mp->rows.count; i++) {
-            const sh_modmanifest_row *row = &mp->rows.rows[i];
+        /* The mods the map uses are the rows its save would write; the load's rows stand in only when that could not
+         * be computed (out of memory), and then a row the save would drop still shows until the next save. */
+        const sh_modmanifest_list *src = mp->have_save ? &mp->save : &mp->rows;
+        if (!mp->have_save) mu_log("map: the rows a save would write could not be computed; the tab shows the map's last rows");
+        for (i = 0; i < src->count; i++) {
+            const sh_modmanifest_row *row = &src->rows[i];
             char sub_ok[SH_MODMANIFEST_HASH_CAP];
             int mod = -1;
             sh_modserve_bundle_ref ref;
@@ -1806,11 +1827,32 @@ static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
             if (mod >= 0) {
                 mp->mods[mod].in_rows = 1;
                 if (row->attached) mp->mods[mod].attached = 1;
+                if (row->pinned) mp->mods[mod].pinned = 1;
+                if (!mp->mods[mod].row) mp->mods[mod].row = row;
                 if (sub_ok[0] && strcmp(row->build, mp->mods[mod].hash))
                     strcpy_s(mp->mods[mod].declared, sizeof mp->mods[mod].declared, row->build);
             }
         }
         if (mp->have_mm) mu_map_attribute(mp);
+        /* A bundle the placed names reached that the save writes no row of is not used by the map: the version rule
+         * (D23) folded it into the installed version's row of the same mod, whose entities and modules it was
+         * serving, so they count there. One mod, one entry, as the saved map will have it. */
+        for (i = 0; mp->have_save && i < mp->mod_count;) {
+            mu_mapmod *x = &mp->mods[i];
+            size_t j, w;
+            if (x->in_rows) { i++; continue; }
+            for (j = 0; j < mp->mod_count; j++) {
+                mu_mapmod *y = &mp->mods[j];
+                if (j == i || !y->in_rows || _stricmp(y->id, x->id)) continue;
+                for (w = 0; w < x->uid_count; w++) mu_mapmod_uid(mp, (int)j, x->uids[w]);
+                y->modules += x->modules;
+                if (x->named) y->named = 1;
+                break;
+            }
+            free(x->uids);
+            memmove(x, x + 1, (mp->mod_count - i - 1) * sizeof *x);
+            mp->mod_count--;
+        }
         if (e->map_info && e->map_info(&mp->info) == 1) {
             mp->have_info = 1;
             /* A rawmap opened as a new map: the ids are the borrowed saved
@@ -1832,6 +1874,7 @@ static void mu_map_free(mu_map *mp)
 {
     size_t i;
     sh_modmanifest_list_free(&mp->rows);
+    sh_modmanifest_list_free(&mp->save);
     mu_closure_free(&mp->closure);
     for (i = 0; i < mp->mod_count; i++) free(mp->mods[i].uids);
     free(mp->mods);
@@ -1849,10 +1892,19 @@ static int mu_row_is_mod(const mu_model *m, const sh_modmanifest_row *row, const
     return mu_same_bundle(m, row->build, x->hash) || (x->id[0] && !_stricmp(row->salt, x->id));
 }
 
-/* The mod a map entry's bundle is installed as (entry index), or -1. */
+/* The installed folder (entry index) a mod of the map is, or -1 when it is not installed: the folder whose build
+ * serves it, else the folder of the build its save row names, else the installed folder of its namespace. A
+ * composition (a published or downloaded map's own content) is no folder, so without the last step the folder of the
+ * same mod installed here would not show as in this map. */
 static int mu_mapmod_entry(const mu_model *m, const mu_mapmod *x)
 {
-    return mu_find_hash(m, x->hash);
+    int at = mu_find_hash(m, x->hash);
+    /* the build the save writes for it (a row moved to the installed version while a composition still serves) */
+    if (at < 0 && x->row) at = mu_find_hash(m, x->row->build);
+    /* a row of the save names the mod by its namespace: a local row follows the installed folder of it (D9), and a
+     * pinned row is served by its composition with that folder alongside in the editor (D26) */
+    if (at < 0 && x->in_rows) at = mu_find_salt(m, x->id, -1);
+    return at;
 }
 
 /* A manifest row's state under the asset rule (modserve.h
@@ -2123,6 +2175,27 @@ static void mu_put_asked(mu_buf *b, const mu_model *m, const char *item)
  * placed name reaches (one only another mod needs is listed too). */
 static size_t mu_map_mod_count(const mu_map *mp) { return mp->mod_count; }
 
+/* A placed name of a mod (mods/<salt>/<rest>) as the Toybox names it: the row of that mod whose entityDef is it,
+ * written as the engine names it or as its author does (entities/<rest>); else its last part. */
+static const char *mu_placed_title(const mu_model *m, const char *salt, const char *name)
+{
+    const char *rest = NULL, *leaf;
+    size_t i, sl = salt ? strlen(salt) : 0;
+    int k;
+    if (!_strnicmp(name, "mods/", 5) && sl && !_strnicmp(name + 5, salt, sl) && name[5 + sl] == '/') rest = name + 6 + sl;
+    for (i = 0; i < m->list.count; i++) {
+        if (_stricmp(m->list.items[i].salt, salt ? salt : "")) continue;
+        for (k = 0; k < m->entries[i].row_count; k++) {
+            const char *def = m->entries[i].row_defs[k];
+            if (!def || !def[0]) continue;
+            if (!_stricmp(def, name) || (rest && !_strnicmp(def, "entities/", 9) && !_stricmp(def + 9, rest)))
+                return m->entries[i].row_names[k];
+        }
+    }
+    leaf = strrchr(name, '/');
+    return leaf ? leaf + 1 : name;
+}
+
 static const char *mu_update_name(const mu_model *m, const mu_map *mp, const char *salt);
 static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
 {
@@ -2230,6 +2303,27 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
             mu_kbool(b, "attached", x->attached, 0);
             /* A map-level row and nothing of it placed: "declared, nothing placed". */
             mu_kbool(b, "nothingPlaced", x->attached && !x->uid_count && !x->modules, 0);
+            mu_kbool(b, "pinned", x->pinned, 0);
+            {
+                /* The objects of the mod the map places, once each, as the Toybox names them (else the name's last
+                 * part): the row the save writes names them, and the map carries their pieces. */
+                size_t q, w;
+                int n = 0;
+                mu_key(b, "objects", 0);
+                mu_putn(b, "[", 1);
+                for (q = 0; x->row && q < x->row->name_count; q++) {
+                    const char *pn = x->row->names[q], *show;
+                    int dup = 0;
+                    if (!pn || !pn[0]) continue;
+                    show = mu_placed_title(m, x->id, pn);
+                    for (w = 0; w < q && !dup; w++)
+                        dup = x->row->names[w] && x->row->names[w][0] && !_stricmp(mu_placed_title(m, x->id, x->row->names[w]), show);
+                    if (dup) continue;
+                    if (n++) mu_putn(b, ",", 1);
+                    mu_str(b, show);
+                }
+                mu_putn(b, "]", 1);
+            }
             mu_kstr(b, "build", x->hash, 0);
             {
                 /* 5.10: a row of another version than the installed mod offers Update. */
@@ -3636,6 +3730,38 @@ int sh_modui_poll_main(void *context)
     mu_drop_tick();
     mu_undo_tick();
     mu_scope_tick(1);
+    {
+        /* What the map places of mods changed (an object placed, deleted, undone, or picked in an inspector): the
+         * document moves, so an open Mods tab shows at once which mods the map now uses. Read once a second, and only
+         * while some mod is installed: the names of the map's objects under a mod's namespace, as a set. */
+        static ULONGLONG next;
+        static unsigned long long last;
+        static int known;
+        ULONGLONG now = GetTickCount64();
+        if (e->placed_names && sh_modserve_active() && now >= next) {
+            mu_names nm;
+            int r;
+            next = now + 1000;
+            memset(&nm, 0, sizeof nm);
+            r = e->placed_names(mu_names_add, &nm);
+            if (r >= 0 && !nm.oom) {
+                unsigned long long sig = 0, n = 0;
+                size_t i;
+                for (i = 0; i < nm.count; i++) {
+                    const char *p;
+                    for (p = nm.items[i]; *p && _strnicmp(p, "mods/", 5); p++) {}
+                    if (!*p) continue;
+                    sig += (unsigned long long)mu_hash_ci(nm.items[i]) * 2654435761ull + 1;
+                    n++;
+                }
+                sig ^= n << 48;
+                if (known && sig != last) InterlockedIncrement(&g_gen);
+                last = sig;
+                known = 1;
+            }
+            mu_names_free(&nm);
+        }
+    }
     return 1;
 }
 
