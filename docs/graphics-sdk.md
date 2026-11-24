@@ -389,6 +389,11 @@ materials, so a hand-made mod and a converted one use one surface.
 
 ## How it is drawn (for maintainers)
 
+- A hair card is written with the game's own keys on its hair programs (`hairnew` and the pre-pass, shadow and blended
+  edge beside it). The product's variants `snapmapplus/hair/hairprez`, `hairshadow` and `hairblending` are those
+  programs with the death fade the skin programs have, so the card dissolves with the body its demon burns away; a
+  material that names them in place of the game's three needs nothing else. See
+  [The hair programs](architecture.md#the-hair-programs).
 - `type layered` compiles to `snapmapplus/layered/skinvmtr` or `skinvmtrwounds` (the game's lit skinned programs with
   the layer blend added); its numbers go into a small per-material parameter image the product derives, so the
   program takes no render-parm slot of the engine's 1,024. `type particle` compiles to `snapmapplus/particles/

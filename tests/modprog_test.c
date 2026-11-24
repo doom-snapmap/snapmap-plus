@@ -545,6 +545,181 @@ static void test_ep_splice(void)
     CHECK(sh_modprog_ep_splice(MODPROG_FIXTURE_SPIRV, MODPROG_FIXTURE_SPIRV_WORDS, 10, 1, &n, &why) == NULL && why != NULL);
 }
 
+/* ------------------------------------------------------------------ the hair programs' death fade */
+
+extern const unsigned MODPROG_FIXTURE_HR_SPIRV_WORDS;
+extern const unsigned MODPROG_FIXTURE_HR_SPIRV[];
+extern const char MODPROG_FIXTURE_HR_GLSL[];
+
+/* hairprez's shape: a vertex stage, a fragment stage whose last line is its alpha test's clip and a commented block. */
+static const char HR_DECL[] =
+    "{\r\n\tstate {\r\n\t\tdepthfunc GL_LEQUAL\r\n\t}\r\n\thlsl_vp {\r\n\t\tresult.position = vertex.position;\r\n\t}\r\n"
+    "\thlsl_fp {\r\n\t\tfloat alpha = tex2DDeGamma( $spareDiffuseMap, fragment.texcoord0.xy ).w;\r\n"
+    "\t\tclip( alpha - $hairParms.w );\r\n\t\tresult.color = _float4( 0.0 );\r\n//\t\tif ( x ) { y }\r\n\t}\r\n}";
+
+/* The checks one derived hair fragment module must pass against its stock one: the noise's sampler on the binding
+ * after the program's textures, a binding at or after tex_end moved up by one, the material uniforms grown by
+ * deathfadeopacity, and one call of hr_fade, in main, after every other statement (just before its return). */
+static void check_hr_module(const uint32_t *w, size_t n, const uint32_t *stock, size_t sn, unsigned tex_end)
+{
+    mod m = { w, n }, s = { stock, sn };
+    size_t at, call_at = 0, ret_at = 0, kills = 0;
+    uint32_t fade = 0, calls = 0, mainid = named(&m, "main"), in_main = 0;
+    CHECK(n > sn && w[0] == 0x07230203u && w[3] > stock[3]);
+    CHECK(binding(&m, named(&m, "hr_noise")) == (int)tex_end);
+    CHECK(binding(&m, named(&m, "samp_sparediffusemap")) == binding(&s, named(&s, "samp_sparediffusemap")));
+    FOR_INS(&s, at) {
+        if ((s.w[at] & 0xffff) == 71 && s.w[at + 2] == 33 && s.w[at + 3] >= tex_end)
+            CHECK(binding(&m, s.w[at + 1]) == (int)s.w[at + 3] + 1);
+    }
+    CHECK(struct_members(&m, named(&m, "freqHigh_fragmentUniforms")) ==
+          struct_members(&s, named(&s, "freqHigh_fragmentUniforms")) + 1);   /* deathfadeopacity */
+    FOR_INS(&m, at) if ((m.w[at] & 0xffff) == 5 && !strncmp((const char *)(m.w + at + 2), "hr_fade(", 8)) fade = m.w[at + 1];
+    CHECK(fade != 0);
+    FOR_INS(&m, at) {
+        uint32_t op = m.w[at] & 0xffff;
+        if (op == 54) in_main = m.w[at + 2] == mainid;
+        if (op == 57 && m.w[at + 3] == fade) { calls++; call_at = at; }
+        if (in_main && op == 253) ret_at = at;
+        if (op == 252) kills++;
+    }
+    CHECK(calls == 1 && call_at && ret_at > call_at);
+    CHECK(kills >= 1);   /* the fade's discard */
+}
+
+static void test_hr_texts(void)
+{
+    size_t n = 0;
+    char *t = sh_modprog_hr_patch_decl(HR_DECL, strlen(HR_DECL), &n), *u;
+    printf("-- the hair programs' decl and stage text\n");
+    CHECK(t && n == strlen(t));
+    if (t) {
+        const char *hdr = strstr(t, "\thlsl_fp_header {\r\n"), *fp = strstr(t, "\thlsl_fp {\r\n");
+        const char *fn = strstr(t, "\t\tvoid hr_fade( float4 V[1], float4 P[1] )");
+        const char *clipp = strstr(t, "\t\tclip( alpha - $hairParms.w );");
+        const char *call = strstr(t, "\t\tfloat4 hrV[1] = { fragment.texcoord0 };\r\n\t\tfloat4 hrP[1] = { $deathfadeopacity };\r\n"
+                                     "\t\thr_fade( hrV, hrP );\r\n\t}\r\n}");
+        CHECK(hdr && fn && fp && clipp && call && hdr < fn && fn < fp && fp < clipp && clipp < call);
+        CHECK(strstr(t, "result.position = vertex.position;") < hdr);   /* the vertex stage untouched */
+        CHECK(strstr(t, "//\t\tif ( x ) { y }\r\n\t\tfloat4 hrV[1]") != NULL);   /* a commented brace is not the close */
+        CHECK(!strstr(t, "\r\r"));
+    }
+    free(t);
+    /* no hlsl_fp section, or two: refused */
+    CHECK(sh_modprog_hr_patch_decl("{ hlsl_vp { x; } }", 18, &n) == NULL);
+    u = (char *)malloc(2 * strlen(HR_DECL) + 1);
+    strcpy(u, HR_DECL);
+    strcat(u, HR_DECL);
+    CHECK(sh_modprog_hr_patch_decl(u, strlen(u), &n) == NULL);
+    free(u);
+    t = sh_modprog_hr_patch_glsl(MODPROG_FIXTURE_HR_GLSL, strlen(MODPROG_FIXTURE_HR_GLSL), 5, 1, &n);
+    CHECK(t != NULL);
+    if (t) {
+        CHECK(strstr(t, "layout( binding = 4 ) uniform sampler2D samp_sparediffusemap;") != NULL);
+        CHECK(strstr(t, "layout( binding = 5 ) uniform sampler2D samp_magnificationclouds;") != NULL);
+        CHECK(strstr(t, "\tvec4 hairparms;\n\tvec4 deathfadeopacity;\n}\nfreqHigh_fragmentUniforms ;") != NULL);
+        CHECK(strstr(t, "void hr_fade(") != NULL && strstr(t, "void hr_fade(") < strstr(t, "void main() {"));
+        CHECK(strstr(t, "\t}\n\thr_fade( vec4[1]( vofi_TexCoord0 ), vec4[1]( freqHigh_fragmentUniforms.deathfadeopacity ) );\n}") != NULL);
+    }
+    free(t);
+    CHECK(sh_modprog_hr_patch_glsl("void main() {}", 14, 5, 1, &n) == NULL);
+    {
+        /* a program that already samples the noise: refused (its texture would be bound twice) */
+        static const char noisy[] = "layout( binding = 3 ) uniform freqHigh_fragmentUniforms_ubo {\n\tvec4 a;\n}\nf ;\n"
+                                    "layout( binding = 4 ) uniform sampler2D samp_magnificationclouds;\n"
+                                    "layout( location = 2 ) in vec4 vofi_TexCoord0;\nvoid main() {\n}\n";
+        CHECK(sh_modprog_hr_patch_glsl(noisy, strlen(noisy), 5, 1, &n) == NULL);
+    }
+}
+
+static void test_hr_splice(void)
+{
+    size_t n = 0;
+    const char *why = NULL;
+    uint32_t *m = sh_modprog_hr_splice(MODPROG_FIXTURE_HR_SPIRV, MODPROG_FIXTURE_HR_SPIRV_WORDS, 5, 1, &n, &why);
+    printf("-- the hair module\n");
+    CHECK(m != NULL && why == NULL);
+    if (m) check_hr_module(m, n, MODPROG_FIXTURE_HR_SPIRV, MODPROG_FIXTURE_HR_SPIRV_WORDS, 5);
+    free(m);
+    /* a module that is not SPIR-V is refused with a reason */
+    why = NULL;
+    CHECK(sh_modprog_hr_splice(MODPROG_FIXTURE_HR_SPIRV, 3, 5, 1, &n, &why) == NULL && why != NULL);
+}
+
+static void check_hr_unit(const char *base, const char *decl_req, const char *bin_req, const char *vreq, const char *freq,
+                          const unsigned char *stock_v, size_t stock_vn, const unsigned char *stock_f, size_t stock_fn)
+{
+    unsigned char *d = NULL, *b = NULL, *v = NULL, *f = NULL;
+    size_t dn = 0, bn = 0, vn = 0, fn = 0, off[3], len[3];
+    CHECK(sh_modprog_owns(decl_req) && sh_modprog_owns(bin_req) && sh_modprog_owns(vreq) && sh_modprog_owns(freq));
+    CHECK(sh_modprog_read(decl_req, &d, &dn) == SH_MB_STOCK_OK);
+    CHECK(sh_modprog_read(bin_req, &b, &bn) == SH_MB_STOCK_OK);
+    CHECK(sh_modprog_read(vreq, &v, &vn) == SH_MB_STOCK_OK);
+    CHECK(sh_modprog_read(freq, &f, &fn) == SH_MB_STOCK_OK);
+    if (!d || !b || !v || !f) { fprintf(stderr, "  %s: %s\n", base, sh_modprog_cause()); goto out; }
+    dump_decl(base, decl_req, d, dn);
+    CHECK(strstr((const char *)d, "hlsl_fp_header {") != NULL && strstr((const char *)d, "void hr_fade(") != NULL);
+    CHECK(strstr((const char *)d, "hr_fade( hrV, hrP );") != NULL);
+    CHECK(rd_be32(b) == 0xb68800adu && rd_be32(b + 4) == decl_sum((const char *)d, dn));
+    CHECK(sh_mb_rp_stages(b, bn, off, len) == 1);
+    CHECK(rd_be32(v) == 4 && rd_be32(v + 4) == sh_mb_md5fold(b + off[0], len[0]) && rd_be32(v + 12) == vn - 16);
+    CHECK(rd_be32(f) == 4 && rd_be32(f + 4) == sh_mb_md5fold(b + off[1], len[1]) && rd_be32(f + 12) == fn - 16);
+    CHECK(vn == stock_vn && !memcmp(v, stock_v, vn));
+    CHECK(strstr((const char *)b + off[1], "\thr_fade( vec4[1]( vofi_TexCoord0 ),") != NULL);
+    g_stage_textures = count_textures(b, bn);
+    printf("   %s: %d textures over its stages\n", base, g_stage_textures);
+    CHECK(g_stage_textures > 0 && g_stage_textures <= 32);
+    {
+        const char *t = (const char *)b + off[1], *noise = strstr(t, "uniform sampler2D samp_magnificationclouds");
+        unsigned tex_end = 0;
+        if (noise) {
+            const char *eq = noise;
+            while (eq > t && strncmp(eq, "binding = ", 10)) eq--;
+            tex_end = (unsigned)atoi(eq + 10);
+        }
+        CHECK(tex_end > 0);
+        check_hr_module((const uint32_t *)(f + 16), (fn - 16) / 4, (const uint32_t *)(stock_f + 16), (stock_fn - 16) / 4, tex_end);
+    }
+out:
+    if (d) HeapFree(GetProcessHeap(), 0, d);
+    if (b) HeapFree(GetProcessHeap(), 0, b);
+    if (v) HeapFree(GetProcessHeap(), 0, v);
+    if (f) HeapFree(GetProcessHeap(), 0, f);
+}
+
+/* The hair programs derived from the installed hairprez, hairshadow and hairblending and their permutations. */
+static void test_real_hr(void)
+{
+    static const char *const bases[] = { "hairprez", "hairshadow", "hairblending" };
+    static const char *const masks[] = { NULL, "0000000000000001" };
+    int i, j;
+    printf("-- the installed game's hair programs\n");
+    for (j = 0; j < 3; j++)
+        for (i = 0; i < 2; i++) {
+            char *sd = masks[i] ? sh_textf("generated/renderprogs/permutations/%s_%s.decl", bases[j], masks[i]) : NULL;
+            char *sv = masks[i] ? sh_mb_spirv_request(sd, ".vspv") : sh_mb_spirv_request(bases[j], ".vspv");
+            char *sf = masks[i] ? sh_mb_spirv_request(sd, ".fspv") : sh_mb_spirv_request(bases[j], ".fspv");
+            char *d = masks[i] ? sh_textf("generated/renderprogs/permutations/" SH_MODPROG_HR_PREFIX "%s_%s.decl", bases[j], masks[i])
+                               : sh_textf("generated/decls/renderprog/" SH_MODPROG_HR_PREFIX "%s.decl", bases[j]);
+            char *b = masks[i] ? sh_textf("generated/renderprogs/permutations/" SH_MODPROG_HR_PREFIX "%s_%s_pc_vulkan.bin", bases[j], masks[i])
+                               : sh_textf("generated/renderprogs/" SH_MODPROG_HR_PREFIX "%s_pc_vulkan.bin", bases[j]);
+            char *v = masks[i] ? sh_mb_spirv_request(d, ".vspv") : sh_textf("generated/spirv/" SH_MODPROG_HR_PREFIX "%s.vspv", bases[j]);
+            char *f = masks[i] ? sh_mb_spirv_request(d, ".fspv") : sh_textf("generated/spirv/" SH_MODPROG_HR_PREFIX "%s.fspv", bases[j]);
+            char sha[SH_MB_HASH_HEX + 1], where[32];
+            unsigned long long sz = 0;
+            unsigned char *svb = NULL, *sfb = NULL;
+            size_t svn = 0, sfn = 0;
+            if (sh_modstock_identify(sv, sha, &sz) == SH_MB_STOCK_OK) sh_modstock_read(sv, sha, &svb, &svn);
+            if (sh_modstock_identify(sf, sha, &sz) == SH_MB_STOCK_OK) sh_modstock_read(sf, sha, &sfb, &sfn);
+            CHECK(svb && sfb);
+            if (svb && sfb) check_hr_unit(bases[j], d, b, v, f, svb, svn, sfb, sfn);
+            CHECK(sh_modstock_identify(f, sha, &sz) == SH_MB_STOCK_OK && sz > 0);
+            CHECK(sh_modstock_container(f, sha, where, sizeof where) == SH_MB_STOCK_OK && !strcmp(where, SH_MODPROG_CONTAINER));
+            HeapFree(GetProcessHeap(), 0, svb); HeapFree(GetProcessHeap(), 0, sfb);
+            free(sd); free(sv); free(sf); free(d); free(b); free(v); free(f);
+        }
+}
+
 static void check_ep_unit(const char *decl_req, const char *bin_req, const char *vreq, const char *freq,
                           const unsigned char *stock_v, size_t stock_vn, const unsigned char *stock_f, size_t stock_fn)
 {
@@ -1152,6 +1327,10 @@ static void test_real(const char *doom)
     s.files = 0;
     sh_modstock_list("generated/renderprogs/permutations/" SH_MODPROG_EP_PREFIX, count, &s);
     CHECK(s.files == 2);
+    test_real_hr();
+    s.files = 0;
+    sh_modstock_list("generated/renderprogs/permutations/" SH_MODPROG_HR_PREFIX, count, &s);
+    CHECK(s.files == 6);      /* each hair base's permutation decl and cooked program */
     if (sh_modprog_cause()[0]) fprintf(stderr, "  %s\n", sh_modprog_cause());
     sh_modstock_reset();
 }
@@ -1170,6 +1349,8 @@ int main(int argc, char **argv)
     test_derivation();
     test_ep_texts();
     test_ep_splice();
+    test_hr_texts();
+    test_hr_splice();
     test_image();
     test_registry();
     if (g_fixtures) { test_legacy_particle(); test_legacy_layered(); }

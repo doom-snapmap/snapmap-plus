@@ -1738,6 +1738,22 @@ writes `particleuberparms` only for a material whose stage program it remaps to
 the one source of both renderers' text. A liquid stage keeps the game's own
 blood shading.
 
+#### The hair programs
+
+`snapmapplus/hair/hairprez`, `snapmapplus/hair/hairshadow` and `snapmapplus/hair/hairblending` (`modprog.c`, the
+same derivation) are the game's hair-card programs (the alpha-tested depth pre-pass, its shadow and its blended edge,
+which the game's own hair cards write with `hairnew`) with the death fade the skin programs have. The game's hair
+programs never read `deathfadeopacity`, the render parm a demon's burn-away ramps from 1 down, so a hair card on them
+stands whole over a dissolving body until the body is removed. Each variant adds, as the fragment stage's last
+statement, the clip `CALC_DEATH_FADE_CLIP_VAL` makes in the skin programs (`includes/effects.inc`): while
+`deathfadeopacity` is below 1 a fragment is discarded below `deathfadeopacity - 0.5 noise - 0.1`, the noise the game's
+own `magnificationclouds` at the card's uv. The cooked program gains `deathfadeopacity` after the fragment stage's
+material uniforms and `magnificationclouds` after its textures (both the game's own render parms; the product
+declares neither); the fragment module has `hr_fade` spliced in and called before main returns; the vertex stage is
+the base's. `hairnew`, the opaque pass, draws only where the pre-pass left depth (`depthfunc GL_EQUAL`) and needs no
+variant. The rule is documented in `src/backend/programs/shaders/hair.rp`, the one source of both renderers' text. A
+material names them as it names any program: `zprepassprogram "snapmapplus/hair/hairprez"`.
+
 The programs were named `snapmapplus/multilayer/<base>` and `snapmapplus/eternal/uberparticles` before they stopped naming a source game; both old names are served until 1.0 for mods emitted before the rename (`SH_MODPROG_OLD_PREFIX`, `SH_MODPROG_EP_OLD_PREFIX`), answering with the new name's bytes.
 
 #### The Graphics SDK: looks

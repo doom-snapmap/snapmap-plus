@@ -1,0 +1,40 @@
+// hair.rp -- the death fade of the product's hair programs (modprog.h): ONE source, in the render program language, for
+// both renderers. The two sections are those of particles.rp (see its header): hlsl_fp_header holds the function,
+// call the statements modprog.c places at the end of the base program's fragment stage.
+//
+// DOOM 2016's hair programs (hairprez, the depth pre-pass that alpha-tests a hair card; hairshadow, its shadow; and
+// hairblending, its blended edge) never read the death fade: when a demon dies the engine ramps the entity's
+// deathfadeopacity render parm from 1 down (the burn-away's FX_RENDERPARM item on FX_START_DEATH_2), and only the skin,
+// glass, gun and wound programs and the prezdraw*deathfade pre-passes dissolve by it (includes/effects.inc,
+// CALC_DEATH_FADE_CLIP_VAL). A hair card on the stock programs therefore stands whole over a dissolving body until the
+// body is removed. DOOM Eternal's hair pre-pass (prezdrawalphahair) kills the card while the instance's
+// deathfadeopacity is below 1, so its hair goes with the body.
+//
+// snapmapplus/hair/<base> is the base program with 2016's own dissolve added, the statement CALC_DEATH_FADE_CLIP_VAL
+// makes in the skin programs, so the card dissolves with the body by the same rule and the same noise:
+//   while deathfadeopacity < 1:   clip( deathfadeopacity - 0.5 * magnificationclouds( uv ).x - 0.1 )
+// The noise is sampled at the card's own uv (the skin programs scale it by the material's tiling; every hair card of
+// DOOM Eternal tiles by 1). hairnew, the opaque pass, draws only where the pre-pass left depth (depthfunc GL_EQUAL), so
+// it needs no variant.
+//
+// The Vulkan splice binds $magnificationClouds after the program's textures (the hair programs have no noise texture
+// of their own) and loads V from the stage inputs and P from the material uniform the splice appends
+// (deathfadeopacity), modprog.c's tables HR_VARYINGS and HR_BLOCK_PARMS, in this order.
+
+hlsl_fp_header {
+	// V: 0 texcoord0 (xy the card's uv)
+	// P: 0 deathfadeopacity (x 1 while the demon lives, ramped to 0 by its burn-away)
+	void hr_fade( float4 V[1], float4 P[1] )
+	{
+	    BRANCH if ( P[0].x < 1.0 ) {
+	        float dither = tex2Dlod( $magnificationClouds, float4( V[0].xy, 0.0, 0.0 ) ).x;
+	        clip( P[0].x - dither * 0.5 - 0.1 );
+	    }
+	}
+}
+
+call {
+	float4 hrV[1] = { fragment.texcoord0 };
+	float4 hrP[1] = { $deathfadeopacity };
+	hr_fade( hrV, hrP );
+}
