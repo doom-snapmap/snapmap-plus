@@ -35,6 +35,7 @@
 #include "../src/backend/modmanifest.h"
 #include "../src/backend/modserve.h"
 #include "../src/backend/modlobby.h"
+#include "../src/backend/modcache.h"   /* SH_CACHE_ABSENT_*: the absence causes */
 
 static int g_failed, g_checks;
 #define CHECK(expr) do {                                                         \
@@ -182,9 +183,16 @@ static struct {
     int served;                /* a pinned row serves (stand-ins included) */
     int pending, said, said_at_resumes, drops, refreshes, refresh_answer, absent_after_fetch;
     int unserve_after_fetch;   /* the composed row does not serve after the fetch */
+    unsigned causes;           /* content_causes' mask (1 << SH_CACHE_ABSENT_*); 0: the op answers no composition */
 } g_content;
 static int f_resumes_now(void);
 static int f_content_complete(void *c, const sh_modmanifest_row *row) { (void)c; (void)row; return g_content.complete; }
+static int f_content_causes(void *c, const sh_modmanifest_row *row, unsigned *mask)
+{
+    (void)c; (void)row;
+    *mask = g_content.complete ? 0 : g_content.causes;
+    return g_content.causes != 0 || g_content.complete;
+}
 static char *f_content_notice(void *c)
 {
     (void)c;
@@ -421,6 +429,7 @@ static void use_content(void)
 {
     g_ops_content = OPS;
     g_ops_content.content_complete = f_content_complete;
+    g_ops_content.content_causes = f_content_causes;
     g_ops_content.content_notice = f_content_notice;
     g_ops_content.content_pending = f_content_pending;
     g_ops_content.content_drop = f_content_drop;
@@ -1507,6 +1516,26 @@ static void coop_lobby_joiner_cannot_get_it(void)
                       "store could not be reached.", 104));
     CHECK(!strstr(F.last_ask, HASH_A) && !strstr(sh_modpub_test_notice(), HASH_A));   /* no hash in player text */
 
+    printf("-- co-op: a joiner whose missing content nobody can get (S3) plays the same stand-ins and answers\n");
+    reset();
+    use_lobby();
+    g_content.absent_after_fetch = 1;
+    g_content.causes = 1u << SH_CACHE_ABSENT_REMOVED;
+    join_pinned();
+    tick_until_idle();
+    tick(2);
+    CHECK(F.fetch_calls == 1 && F.resumes == 1 && F.resume_hook == SH_MODPUB_CACHE_READY && g_leaves == 0);
+    CHECK(last_code() == SH_MODLOBBY_CODE_STANDS_IN && !sent_code(SH_MODLOBBY_CODE_FAILED));
+    g_content.causes = 1u << SH_CACHE_ABSENT_UNREACHABLE;   /* S4: another player could get it: it leaves, as before */
+    reset();
+    use_lobby();
+    g_content.absent_after_fetch = 1;
+    g_content.causes = 1u << SH_CACHE_ABSENT_UNREACHABLE;
+    join_pinned();
+    tick_until_idle();
+    tick(2);
+    CHECK(F.resumes == 0 && g_leaves == 1 && last_code() == SH_MODLOBBY_CODE_FAILED);
+
     printf("-- co-op: a failed download (network, disk, hash) tells the host and leaves the lobby\n");
     reset();
     use_lobby();
@@ -1585,15 +1614,46 @@ static void coop_lobby_map_is_modded(void)
     CHECK(sh_modpub_lobby_map_modded(METADATA, "rev1"));
     CHECK(!sh_modpub_lobby_map_modded(METADATA, "rev2"));
 
-    printf("-- co-op: a host whose own content stands in for objects cannot host the map (D-A41 Q2)\n");
+    printf("-- co-op: a host whose copy stands in waits only while some player could get it (R-LB1 F5, SPEC 5.19)\n");
     {
+        /* Every absence cause: a start waits (with the cause's own sentence) while some player could get the content,
+         * and runs (solo too: every published play is a lobby the player hosts) when nobody can. */
+        static const struct { int cause; int expect; const char *says; } CASES[] = {
+            { SH_CACHE_ABSENT_REMOVED,      SH_MODPUB_HOST_SHARED,  NULL },   /* S3 */
+            { SH_CACHE_ABSENT_NOT_IN_STORE, SH_MODPUB_HOST_SHARED,  NULL },   /* S5 */
+            { SH_CACHE_ABSENT_GAME,         SH_MODPUB_HOST_SHARED,  NULL },   /* S4b */
+            { SH_CACHE_ABSENT_UNREACHABLE,  SH_MODPUB_HOST_REFUSED, "This map cannot be hosted yet: the mod store could not "
+                                                                    "be reached for " },   /* S4 */
+            { SH_CACHE_ABSENT_OFFLINE,      SH_MODPUB_HOST_REFUSED, "This map cannot be hosted yet: " },   /* S2 */
+            { SH_CACHE_ABSENT_DISK,         SH_MODPUB_HOST_REFUSED, "there is not enough free disk space for " },
+            { SH_CACHE_ABSENT_NEWER,        SH_MODPUB_HOST_REFUSED, "needs a newer Snapmap+" },   /* S6 */
+            { SH_CACHE_ABSENT_LOCAL,        SH_MODPUB_HOST_REFUSED, "Open the map once online to get it" },
+            { SH_CACHE_ABSENT_BROKEN,       SH_MODPUB_HOST_REFUSED, "Open the map once online to get it" },
+            { 0,                            SH_MODPUB_HOST_REFUSED, "Open the map once online to get it" },   /* not known */
+        };
         char out[256];
-        CHECK(sh_modpub_lobby_map_whole(METADATA, "rev1", out, sizeof out) == 1 && !out[0]);   /* whole */
-        CHECK(sh_modpub_lobby_map_whole(METADATA, "rev2", out, sizeof out) == 1);              /* never seen */
+        size_t i;
+        CHECK(sh_modpub_lobby_host_content(METADATA, "rev1", out, sizeof out) == SH_MODPUB_HOST_WHOLE && !out[0]);
+        CHECK(sh_modpub_lobby_host_content(METADATA, "rev2", out, sizeof out) == SH_MODPUB_HOST_WHOLE);   /* never seen */
         g_content.complete = 0;
-        CHECK(sh_modpub_lobby_map_whole(METADATA, "rev1", out, sizeof out) == 0);
-        CHECK(strstr(out, "This map cannot be hosted: some of its mod content (") == out && strstr(out, ") is not on this "
-              "computer, and every player needs all of it. Play the map once online to get it, then host it.") && strlen(out) < 256);
+        for (i = 0; i < sizeof CASES / sizeof CASES[0]; i++) {
+            int got;
+            g_content.causes = 1u << CASES[i].cause;
+            got = sh_modpub_lobby_host_content(METADATA, "rev1", out, sizeof out);
+            CHECK(got == CASES[i].expect);
+            CHECK(CASES[i].says ? strstr(out, CASES[i].says) != NULL && strlen(out) < 256 : !out[0]);
+            CHECK(!strstr(out, "Play the map once online"));   /* the old advice, wrong for a removed unit */
+            if (got != CASES[i].expect || (CASES[i].says && !strstr(out, CASES[i].says)))
+                printf("   cause %d: %d \"%s\"\n", CASES[i].cause, got, out);
+        }
+        /* a row standing in for a cause nobody can get beside one somebody could: the start waits */
+        g_content.causes = (1u << SH_CACHE_ABSENT_REMOVED) | (1u << SH_CACHE_ABSENT_UNREACHABLE);
+        CHECK(sh_modpub_lobby_host_content(METADATA, "rev1", out, sizeof out) == SH_MODPUB_HOST_REFUSED &&
+              strstr(out, "could not be reached"));
+        /* no composition on disk: the start waits */
+        g_content.causes = 0;
+        CHECK(sh_modpub_lobby_host_content(METADATA, "rev1", out, sizeof out) == SH_MODPUB_HOST_REFUSED);
+        CHECK(sh_modpub_standin_shared(SH_CACHE_ABSENT_REMOVED) && !sh_modpub_standin_shared(SH_CACHE_ABSENT_UNREACHABLE));
         g_content.complete = 1;
     }
 }

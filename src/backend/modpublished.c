@@ -1153,12 +1153,25 @@ static char *pub_content_said(void);
 /* A joiner downloading in the lobby enters the match only with every unit its map names: stand-ins would not be the
  * host's served bytes (its snapshot templates would differ, a fatal mismatch). 1 when the content is whole and the host
  * is told so; else the joiner tells the host it failed and leaves the lobby with one sentence (the fallback, D27). */
+/* 1 when a pinned row's composition stands in only for content no player can get (S3, S5, S4b): every player composes
+ * the same stand-ins, the host included (sh_modpub_lobby_host_content), so the joiner plays them (R-LB1 F5). */
+static int pub_row_standin_shared(const sh_modmanifest_row *row)
+{
+    unsigned mask = 0;
+    int c;
+    if (!g_ops.content_causes || !g_ops.content_causes(g_ops.context, row, &mask) || !mask) return 0;
+    for (c = 0; c < 32; c++) if ((mask & (1u << c)) && !sh_modpub_standin_shared(c)) return 0;
+    return 1;
+}
+
 static int pub_joiner_content_whole(pub_hold *h)
 {
     char *said;
+    int stands_in = 0;
     for (size_t i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
         if (!row->pinned || !g_ops.content_complete || g_ops.content_complete(g_ops.context, row)) continue;
+        if (pub_row_standin_shared(row)) { stands_in = 1; continue; }
         pub_report(h, SH_MODLOBBY_CODE_FAILED);
         /* The composition's own sentence says what is absent and why (S2-S6): "This map is playing without the Tyrant
          * from Eternal Demons, which was removed from the mod store." A joiner does not play it: it leaves. */
@@ -1179,6 +1192,16 @@ static int pub_joiner_content_whole(pub_hold *h)
         }
         free(said);
         return 0;
+    }
+    if (stands_in) {
+        /* What no player can get stands in for every player alike: the joiner plays the map, and says so once (S3). */
+        said = pub_content_said();
+        pub_logf("MODS: lobby join: the map plays with stand-ins every player has: %s",
+                 said ? said : "some of its mod content no player can get");
+        if (said) pub_notice(said);
+        free(said);
+        pub_report(h, SH_MODLOBBY_CODE_STANDS_IN);
+        return 1;
     }
     pub_report(h, SH_MODLOBBY_CODE_HOLDS);
     return 1;
@@ -1576,28 +1599,59 @@ int sh_modpub_lobby_map_modded(const char *item, const char *revision)
     return seen && seen->rows.count > 0;
 }
 
-int sh_modpub_lobby_map_whole(const char *item, const char *revision, char *out, size_t cap)
+int sh_modpub_standin_shared(int cause)
+{
+    return cause == SH_CACHE_ABSENT_REMOVED || cause == SH_CACHE_ABSENT_NOT_IN_STORE || cause == SH_CACHE_ABSENT_GAME;
+}
+
+/* The causes a start waits for, most actionable first, and what the host is told for each (%s: the mods). A cause
+ * not listed (none recorded, a local row's) has the last sentence. */
+static const struct { int cause; const char *text; } PUB_HOST_HOLDS[] = {
+    { SH_CACHE_ABSENT_UNREACHABLE, "This map cannot be hosted yet: the mod store could not be reached for %s. Try again "
+                                   "when it can be reached." },
+    { SH_CACHE_ABSENT_OFFLINE,     "This map cannot be hosted yet: %s is not on this computer. Connect to the internet "
+                                   "and open the map once to get it, then host it." },
+    { SH_CACHE_ABSENT_DISK,        "This map cannot be hosted yet: there is not enough free disk space for %s. Free some "
+                                   "space, then host it." },
+    { SH_CACHE_ABSENT_NEWER,       "This map cannot be hosted: %s needs a newer Snapmap+. Run the Snapmap+ installer to "
+                                   "update, then host it." },
+    { 0,                           "This map cannot be hosted yet: some of its mod content (%s) is not on this computer. "
+                                   "Open the map once online to get it, then host it." },
+};
+
+int sh_modpub_lobby_host_content(const char *item, const char *revision, char *out, size_t cap)
 {
     pub_seen *seen;
     char names[160] = "";
-    size_t i, n = 0;
+    size_t i, n = 0, worst = sizeof PUB_HOST_HOLDS / sizeof PUB_HOST_HOLDS[0];
+    int shared = 0;
     if (out && cap) out[0] = 0;
-    if (!item || !item[0] || !revision || !(seen = pub_seen_find(item, revision))) return 1;
+    if (!item || !item[0] || !revision || !(seen = pub_seen_find(item, revision))) return SH_MODPUB_HOST_WHOLE;
     for (i = 0; i < seen->rows.count; i++) {
         const sh_modmanifest_row *row = &seen->rows.rows[i];
+        unsigned mask = 0;
+        size_t k;
+        int c, held = 0;
         if (!row->pinned || !g_ops.content_complete || g_ops.content_complete(g_ops.context, row)) continue;
+        /* A row standing in: which causes. One that no player can get is shared; any other holds the start. */
+        if (!g_ops.content_causes || !g_ops.content_causes(g_ops.context, row, &mask) || !mask) mask = 1u;   /* not known */
+        for (c = 0; c < 32; c++) {
+            if (!(mask & (1u << c)) || sh_modpub_standin_shared(c)) continue;
+            held = 1;
+            for (k = 0; k + 1 < sizeof PUB_HOST_HOLDS / sizeof PUB_HOST_HOLDS[0] && PUB_HOST_HOLDS[k].cause != c; k++) {}
+            if (k < worst) worst = k;
+        }
+        if (!held) { shared = 1; continue; }
         if (n++ < 3) {
             const char *label = pub_row_label(row);
             strncat_s(names, sizeof names, n > 1 ? (n == 3 ? " and " : ", ") : "", _TRUNCATE);
             strncat_s(names, sizeof names, label && label[0] ? label : "a mod", _TRUNCATE);
         }
     }
-    if (!n) return 1;
-    if (out && cap)
-        _snprintf_s(out, cap, _TRUNCATE, "This map cannot be hosted: some of its mod content (%s%s) is not on this computer, "
-                    "and every player needs all of it. Play the map once online to get it, then host it.", names,
-                    n > 3 ? " and more" : "");
-    return 0;
+    if (!n) return shared ? SH_MODPUB_HOST_SHARED : SH_MODPUB_HOST_WHOLE;
+    if (n > 3) strncat_s(names, sizeof names, " and more", _TRUNCATE);
+    if (out && cap) _snprintf_s(out, cap, _TRUNCATE, PUB_HOST_HOLDS[worst].text, names);
+    return SH_MODPUB_HOST_REFUSED;
 }
 
 void sh_modpublished_poll(void)
@@ -2265,6 +2319,11 @@ static int eng_content_complete(void *c, const sh_modmanifest_row *row)
     (void)c;
     return row && sh_cache_composed(row->build, &complete) && complete;
 }
+static int eng_content_causes(void *c, const sh_modmanifest_row *row, unsigned *mask)
+{
+    (void)c;
+    return row && sh_cache_absent_causes(row->build, mask);
+}
 static char *eng_content_notice(void *c) { (void)c; return sh_cache_take_notice(); }
 static int eng_content_pending(void *c) { (void)c; return sh_cache_notice_pending(); }
 static void eng_content_drop(void *c) { (void)c; sh_cache_notice_drop(); }
@@ -2316,7 +2375,7 @@ static const sh_modpub_ops ENG_OPS = {
     .log = eng_log, .print = eng_print, .launch_refused = eng_launch_refused,
     .scripted_maps_allowed = eng_scripted_maps_allowed, .served_scripts = eng_served_scripts, .progress = eng_progress,
     .refused_load = eng_refused_load, .leave_lobby = eng_leave_lobby,
-    .cold_read = eng_cold_read_op, .scope_play = eng_scope_play_op, .content_complete = eng_content_complete,
+    .cold_read = eng_cold_read_op, .scope_play = eng_scope_play_op, .content_complete = eng_content_complete, .content_causes = eng_content_causes,
     .content_notice = eng_content_notice, .content_pending = eng_content_pending, .content_drop = eng_content_drop,
     .content_refresh = eng_content_refresh, .lobby_report = eng_lobby_report, .lobby_state = eng_lobby_state
 };

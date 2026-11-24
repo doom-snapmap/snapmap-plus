@@ -8,6 +8,7 @@
 #include "modmanifest.h"
 #include "modunit.h"
 #include "modbundle.h"
+#include "modserve.h"   /* SH_MODSERVE_STANDIN_DIR: the stand-in rows' folder */
 #include "modprog.h"
 #include "modzip.h"
 #include "map_carrier.h"
@@ -710,6 +711,33 @@ int sh_cache_row_known(const char *chash)
     return known;
 }
 
+int sh_cache_absent_causes(const char *chash, unsigned *mask)
+{
+    char *dir = mc_hex64(chash) ? mc_path("served\\%s", chash) : NULL, *side = dir ? sh_textf("%s.json", dir) : NULL;
+    int here = dir && mc_dir_exists(dir) && side && mc_exists(side, NULL);
+    if (mask) *mask = 0;
+    if (here && mask) {
+        size_t len = 0;
+        unsigned char *t = sh_mb_read_file(side, 1u << 24, &len);
+        mpj *j = t ? mpj_parse((const char *)t, len) : NULL;
+        const mpj *c = j ? mpj_get(j, "complete") : NULL, *a = j ? mpj_get(j, "absent") : NULL;
+        int k;
+        if (!(c && c->type == MPJ_BOOL && c->b)) {
+            for (k = 0; a && a->type == MPJ_ARR && k < a->n; k++) {
+                const mpj *why = mpj_get(a->items[k], "cause");
+                long long cause = why && mpj_is_num(why) ? mpj_int(why) : 0;
+                *mask |= 1u << (cause > 0 && cause < 32 ? (unsigned)cause : 0u);
+            }
+            if (!*mask) *mask = 1u;   /* stood in, no cause recorded */
+        }
+        mpj_free(j);
+        free(t);
+    }
+    free(dir);
+    free(side);
+    return here;
+}
+
 int sh_cache_composed(const char *chash, int *complete)
 {
     char *dir = mc_hex64(chash) ? mc_path("served\\%s", chash) : NULL, *side = dir ? sh_textf("%s.json", dir) : NULL;
@@ -946,8 +974,10 @@ static const char MC_ENTITY_STANDIN[] =
     "\tinherit = \"snapmaps/unknown\";\n"
     "}\n";
 
-/* The folder of the stand-in rows: decls/snapeditorentitydef/<this>/<the placed name's path>.decl. */
-#define MC_STANDIN_ROWS "snapmapplus_standin"
+/* The folder of the stand-in rows: decls/snapeditorentitydef/<this>/<the placed name's path>.decl. The serving index
+ * knows its names by it (modserve.h sh_modserve_standin_name): never a unit's miss, never read again once the row's
+ * real composition serves. */
+#define MC_STANDIN_ROWS SH_MODSERVE_STANDIN_DIR
 
 /* 1 when `cls` reads as a class name (letters, digits, '_'), so it can be written into a decl. */
 static int mc_class_name(const char *cls)

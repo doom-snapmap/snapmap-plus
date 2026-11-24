@@ -5084,18 +5084,26 @@ in the engine on both renderers (R-CO1):
   sentence in the game's own dialog ("The match starts when every player has
   this map's mod content. Still getting it: Sam (40%)."), and the countdown's
   end when a player joined during it, which puts the controller back in its
-  idle state the way its own pump drops a countdown when players leave. A host
-  whose own copy of the map stands in for objects (a unit it could not get)
-  cannot host it: every joiner needs the whole content, so the Start is refused
-  with "This map cannot be hosted: some of its mod content (Eternal Demons) is
-  not on this computer, and every player needs all of it. Play the map once
-  online to get it, then host it." (`sh_modpub_lobby_map_whole`).
+  idle state the way its own pump drops a countdown when players leave. Every
+  player plays the same bytes, and every published play is a lobby the player
+  hosts, solo included (`sh_modpub_lobby_host_content`). A host whose copy
+  stands in for content some player could get waits, with that cause's
+  sentence (the store not reached: "This map cannot be hosted yet: the mod
+  store could not be reached for Eternal Demons. Try again when it can be
+  reached."; not on this computer, no disk space, a newer Snapmap+). One that
+  stands in only for content nobody can get (removed S3, never uploaded S5,
+  another DOOM revision S4b) starts: every player composes the same stand-ins.
+  A joiner whose missing content is of those causes plays the stand-ins too and
+  says 0xF2; the Start is refused, naming the player, when a joiner holds the
+  content the host stands in for, or stands in for content the host holds
+  (`sh_modlobby_standins_agree`).
 - Who is getting what. A joiner tells its host its state in the lobby's ready
   command (game reliable 0xB6: its lobby user and one byte), sent through the
   lobby screen's own sender. The host's lobby applies 0 toggle, 1 set and 2
   unset to the player's ready flag and ignores every other byte; the product
   uses the bytes it ignores: 0x80 + percent while downloading (steps of 5 %),
-  0xF0 once the content is here, 0xF1 when it cannot be had. A host with the
+  0xF0 once the content is here, 0xF1 when it cannot be had, 0xF2 when it plays
+  the stand-ins every player has. A host with the
   product reads them where the engine applies the command
   (`SetLobbyUserReady`, idLobby vtable +0x210), and shows "Waiting for this
   map's mod content: Sam 40%, Robin." in the lobby's progress line while anyone
@@ -5117,7 +5125,8 @@ How a download in the lobby ends:
 | What happens | The joiner | The host |
 |---|---|---|
 | The content arrives whole | answers the map check (CacheReady runs), says 0xF0 | its Start runs |
-| A unit cannot be had (the store refused it, a file failed its hash twice, the disk is full) or the fetch failed | says 0xF1, leaves the lobby: "You left the lobby: this map cannot be played without the Tyrant from Eternal Demons, which was removed from the mod store." | the player leaves; its Start runs for the others |
+| A unit no player can get (removed, never uploaded, another DOOM revision) | answers the map check with the same stand-ins as every player, says 0xF2 and the S3 sentence | its Start runs (refused, naming the player, if the host has the real content) |
+| A unit cannot be had for this joiner only (the store not reached, a file failed its hash twice, the disk is full) or the fetch failed | says 0xF1, leaves the lobby: "You left the lobby: this map cannot be played without the Tyrant from Eternal Demons: the mod store could not be reached." | the player leaves; its Start runs for the others |
 | The joiner left, was kicked, or the host cancelled or left the lobby | the download stops: "You are no longer in the lobby, so this map's mod content stopped downloading. It continues from where it stopped the next time you join." | nothing waits |
 | The host chose another map, or a playlist moved on | the old download stops without a word; the new map's request brings its own | asks every peer again (verify 1) and waits for the new map |
 | The lobby started anyway | leaves, keeps downloading, "join the lobby again when it is done" | (a host without the product) |

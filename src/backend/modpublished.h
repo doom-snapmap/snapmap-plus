@@ -242,6 +242,9 @@ typedef struct sh_modpub_ops {
      * without (S2-S6), once (malloc'd), or NULL. content_pending: 1 while such a sentence waits. content_drop: forget
      * it (a gate took the load). NULL counts as none. */
     int  (*content_complete)(void *c, const sh_modmanifest_row *row);
+    /* Why a pinned row's composition stands in: 1 with *mask the set of its absent units' causes (bit 1 << cause,
+     * SH_CACHE_ABSENT_*; 0 when nothing is absent), 0 when no composition is on disk. NULL counts as 0. */
+    int  (*content_causes)(void *c, const sh_modmanifest_row *row, unsigned *mask);
     char *(*content_notice)(void *c);
     int  (*content_pending)(void *c);
     void (*content_drop)(void *c);
@@ -277,13 +280,21 @@ enum sh_modpub_lobby_place {
  * is a modded map's lobby, whose start the host holds for its members (modlobby.h). */
 int sh_modpub_lobby_map_modded(const char *item, const char *revision);
 
-/* The host's own content for that map (D-A41 Q2): 1 when every pinned row of it is whole on this computer (nothing
- * stands in), so the map may be hosted; 0 with the refusal in `out` (under 256 bytes, the native dialog body) when a row
- * stands in for objects that are not here. Every joiner needs the whole content, so a host playing with stand-ins
- * would hold every joiner at the map check: "This map cannot be hosted: some of its mod content (Eternal Demons) is not
- * on this computer, and every player needs all of it. Play the map once online to get it, then host it." A map no gate saw
- * answers 1. Main thread. */
-int sh_modpub_lobby_map_whole(const char *item, const char *revision, char *out, size_t cap);
+/* The host's own content for that map (D-A41 Q2, R-LB1 F5). Every published play is a co-op lobby the player hosts,
+ * so this decides a solo play too. Every player must play the same bytes:
+ *   SH_MODPUB_HOST_WHOLE   every pinned row is whole on this computer;
+ *   SH_MODPUB_HOST_SHARED  a row stands in only for content no player can get: removed by moderation (S3), never
+ *                          uploaded (S5), a DOOM file of another revision (S4b). Every player composes the same
+ *                          stand-ins, so the host may start (modlobby.h sh_modlobby_standins_agree checks the joiners);
+ *   SH_MODPUB_HOST_REFUSED a row lacks content some player could get (the store not reached S4, not asked S2, no
+ *                          disk space, a newer Snapmap+ S6, a cause not known): the start waits, with the cause's
+ *                          sentence in `out` (under 256 bytes, the native dialog body), e.g. "This map cannot be hosted
+ *                          yet: the mod store could not be reached for Eternal Demons. Try again when it can be."
+ * A map no gate saw answers SH_MODPUB_HOST_WHOLE. Main thread. */
+enum { SH_MODPUB_HOST_REFUSED = 0, SH_MODPUB_HOST_WHOLE = 1, SH_MODPUB_HOST_SHARED = 2 };
+int sh_modpub_lobby_host_content(const char *item, const char *revision, char *out, size_t cap);
+/* 1 when every player gets the same stand-ins for content absent for `cause` (SH_CACHE_ABSENT_*): S3, S5, S4b. */
+int sh_modpub_standin_shared(int cause);
 
 /* The joiner's lobby asked it to load (its start byte is set): 1 when a joiner's map content is still downloading in
  * the lobby, so it must not load. The joiner then leaves the lobby at the next tick, keeps downloading, and is told to

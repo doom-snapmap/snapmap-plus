@@ -121,6 +121,9 @@ int   sh_cache_pointer_checked(const char *source);
 int   sh_cache_net_retry_ms(int code, int attempt);
 /* 1 when the composition `chash` is on disk and complete (every unit present when it was made). */
 int   sh_cache_composed(const char *chash, int *complete);
+/* 1 when the composition `chash` is on disk, with *mask the causes its absent units recorded (bit 1 << cause,
+ * SH_CACHE_ABSENT_*; bit 0 when one stood in with no cause known; 0 when it is complete). 0 when it is not on disk. */
+int   sh_cache_absent_causes(const char *chash, unsigned *mask);
 
 /* Compose the noted row `chash` from what is here, with stand-ins for what is not (no download). `cause` is the
  * absence cause given to objects whose units are not here (SH_CACHE_ABSENT_OFFLINE for the editor's open). 1 when a
