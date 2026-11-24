@@ -14,11 +14,10 @@ typedef struct queue {
     uint32_t head, count;     /* oldest record, records held */
     uint32_t seq;
     volatile LONG dropped;
-    int reported;             /* a nonzero drop count was already taken this map */
+    int reported;             /* the drop count was taken this map */
 } queue;
 
-/* One queue per mod slot, each allocated once and kept, so a pointer read
- * under g_dir stays valid; the directory grows with the mods. */
+/* One queue per mod slot, each allocated once and kept, so a pointer read under g_dir stays valid. */
 static queue  **g_q;
 static int      g_nq, g_cq;
 static SRWLOCK  g_dir = SRWLOCK_INIT;
@@ -167,7 +166,7 @@ int sh_script_queue_push(int mod, const sh_script_event *ev)
         r = 1;
     }
     q_unlock(q);
-    free(block);   /* only when the record was not kept */
+    free(block);   /* when the record was not kept */
     return r;
 }
 

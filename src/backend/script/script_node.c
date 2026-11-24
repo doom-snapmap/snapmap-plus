@@ -20,8 +20,6 @@
 #define REG_MISSED   "snapmap-plus.node_missed"   /* node names fire() found nowhere, once each per map */
 #define REG_VARS_OFF "snapmap-plus.vars_off"      /* the "variables not readable" line, once per map */
 
-/* ================================================================ helpers */
-
 static void copyz(char *dst, size_t cap, const char *src)
 {
     size_t n;
@@ -33,8 +31,6 @@ static void copyz(char *dst, size_t cap, const char *src)
 }
 
 static char fold(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : (c == '\\' ? '/' : c); }
-
-/* ===================================================== the played map */
 
 typedef struct node_name { int uid; char *name; } node_name;
 typedef struct var_name { int type; int index; char *name; } var_name;
@@ -203,8 +199,6 @@ int sh_script_node_uid_from_name(const char *game_name)
     return (int)v;
 }
 
-/* ========================================================== the engine */
-
 static sh_script_node_ops g_ops;
 
 void sh_script_node_set_ops(const sh_script_node_ops *ops)
@@ -220,8 +214,6 @@ int sh_script_node_post_input(int mod, sh_script_handle node, sh_script_handle a
     free(name);
     return r;
 }
-
-/* =============================================================== the API */
 
 typedef struct node_ud { char name[1]; } node_ud;   /* the whole name follows, NUL-terminated */
 
@@ -515,14 +507,9 @@ int sh_script_node_api_register(void)
     return 1;
 }
 
-/* ======================================================== signatures */
-
-/* Build 13954591 (shared Ghidra, snaphak-re logs/shared-ghidra/SC7-*; each
- * pattern is the only match in each executable, tests/script_node_test.c):
- *   NodeFireOutput   VK 0x140A09AD0  GL 0x140A08CC0  FireOutput(entity, event, activator): stores event and
- *                    activator in its home slots and calls the target walk with their addresses.
- *   NodeVarChanged   VK 0x140891C60  GL 0x140890BA0  the logic manager's variable-changed(manager, type,
- *                    index); its sibling at +0x60 differs at +0x11 (+0x7EA0). */
+/* Build 13954591; each pattern is the only match in each executable (tests/script_node_test.c):
+ *   NodeFireOutput  VK 0x140A09AD0  GL 0x140A08CC0  FireOutput(entity, event, activator)
+ *   NodeVarChanged  VK 0x140891C60  GL 0x140890BA0  the logic manager's variable-changed(manager, type, index) */
 const sig_entry SH_SCRIPT_NODE_SIGNATURES[] = {
     { "NodeFireOutput",
       "4C 89 44 24 18 89 54 24 10 48 83 EC 28 4C 8D 44 24 40 48 8D 54 24 38 E8 ?? ?? ?? ?? 48 83 C4 28 C3",
@@ -535,14 +522,13 @@ const sig_entry SH_SCRIPT_NODE_SIGNATURES[] = {
     { NULL, NULL, 0, 0 }
 };
 
-/* Relay DoAction's first 16 bytes, whole and position-independent on both
- * renderers: mov [rsp+8],rbx; push rdi; sub rsp,0x20; mov rbx,rcx; mov rdi,rdx. */
+/* Relay DoAction's first 16 bytes, position-independent on both renderers: mov [rsp+8],rbx; push rdi; sub rsp,0x20;
+ * mov rbx,rcx; mov rdi,rdx. */
 const uint8_t SH_SCRIPT_NODE_RELAY_PROLOGUE[SH_SCRIPT_RELAY_STOLEN] = {
     0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x8B, 0xFA
 };
 
 #ifndef SH_SCRIPT_PURE
-/* ================================================== engine side (the DLL) */
 #include "../backend_log.h"
 #include "../entity.h"
 #include "../hook.h"
@@ -561,8 +547,8 @@ const uint8_t SH_SCRIPT_NODE_RELAY_PROLOGUE[SH_SCRIPT_RELAY_STOLEN] = {
 #define IDSTR_SIZE            0x30u
 #define IDSTR_LEN_OFF         0x08u
 #define IDSTR_DATA_OFF        0x10u
-#define VARS_MAX              100000      /* the engine's variable list read from its memory: a larger count
-                                               means the layout is not the expected one, so nothing is read */
+#define VARS_MAX              100000      /* a larger variable count read from engine memory means the layout is
+                                               not the expected one, so nothing is read */
 
 typedef void  (*relay_fn)(void *self, void *activator);
 typedef void  (*fire_fn)(void *entity, int event, void *activator);
@@ -621,9 +607,8 @@ static uint32_t spawn_id_of(void *entity)
     return id;
 }
 
-/* The uniqueId at the end of the entity's game name (a name of any length:
- * only the part after its last '_' is copied, which a uniqueId keeps to the
- * ten digits of an int). */
+/* The uniqueId at the end of the entity's game name: only the part after its last '_' is copied (at most the ten
+ * digits of an int). */
 static int entity_uid(void *entity)
 {
     char tail[16];
@@ -658,8 +643,6 @@ static int handle_is_node(sh_script_handle h)
     return is;
 }
 
-/* ---- the Relay DoAction detour (main thread, the game frame) ---- */
-
 static void relay_detour(void *self, void *activator)
 {
     int mod = -1;
@@ -678,9 +661,8 @@ static void relay_detour(void *self, void *activator)
         const char *names[9];
         int n = sh_companions_def_chain(self, names, 9);
         if (sh_script_node_in_chain(names, n)) {
-            /* A Script node whose scripts are not running here (a client, a
-             * stopped mod, or scripts unavailable): it does nothing, as its
-             * script would not run. */
+            /* A Script node whose scripts are not running here (a client, a stopped mod, or scripts unavailable)
+             * does nothing, as its script would not run. */
             if (!InterlockedExchange(&g_unrun_logged, 1))
                 node_log("SCRIPTS: a Script node received a signal while its mod's scripts were not running here; "
                          "it did nothing.");
@@ -689,8 +671,6 @@ static void relay_detour(void *self, void *activator)
     }
     g_orig_relay(self, activator);
 }
-
-/* ---- the operations ---- */
 
 static int op_nodes(void *context, int mod, sh_script_handle *out, int cap)
 {
@@ -712,10 +692,9 @@ static int op_nodes(void *context, int mod, sh_script_handle *out, int cap)
     return n;
 }
 
-/* The entity a handle names now, through idGameLocal vtable +0x7F8 (the
- * spawn-id lookup and the idEntity cast, script_handles.h): unlike
- * sh_script_handle_entity it also answers before the tick's first sweep has
- * reported the entity, which a map_start handler needs. NULL when gone. */
+/* The entity a handle names, through idGameLocal vtable +0x7F8 (script_handles.h); unlike
+ * sh_script_handle_entity it also answers before the first sweep reports the entity, as a map_start handler
+ * needs. NULL when gone. */
 typedef void *(*lookup_fn)(void *gm, const uint32_t *spawn_id);
 static void *entity_of(sh_script_handle h)
 {

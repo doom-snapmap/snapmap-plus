@@ -1,40 +1,9 @@
-/* script_handles.h -- the entity handles mod scripts hold.
- *
- * A script never holds an engine pointer. The spawn subscriber (script_hooks.c,
- * on idClass::CallSpawn) records each spawned entity of a mod with scripts by
- * its engine spawn id, the 32-bit value an idEntityPtr keeps: the entity's
- * number in the low bits and the spawn count of that entity slot in the high
- * bits, read from idGameLocal +0x653F8 + 4 * entity number, with the entity
- * number at idEntity +0x08 (both renderers, build 13954591). The engine
- * resolves a spawn id back to the object through idGameLocal vtable +0x7F0
- * (VK 0x140393220, GL 0x140392AF0), which returns NULL once the entity is
- * gone or its slot was reused, because the stored spawn count no longer
- * matches; slot +0x7F8 (VK 0x1403912A0, GL 0x140390B70) is that lookup
- * followed by the idEntity cast, and is what the engine side calls.
- *
- * A handle is a slot of this table plus the slot's generation, so a handle
- * kept past its entity's removal, past the map end, or one that never existed
- * resolves to nothing instead of to the slot's next entity. A record lives
- * exactly as long as its entity: every tick the table is swept
- * (sh_script_handles_sweep): a new entry whose spawn id resolves becomes live
- * and is reported as a spawn; an entry whose spawn id no longer resolves is
- * reported once (a removal for a mod's own live entity, "gone" for any other)
- * and its slot is released, its generation turned. Every API call resolves
- * the handle again (sh_script_handle_entity), so a removed entity is noticed
- * at once and nothing dangles. Records are kept in spawn order.
- *
- * The table grows with the entities it holds and has no count of its own.
- * Its records are the entities alive now (the engine holds at most 16382
- * managed entities) plus those spawned and removed within one frame; the
- * handle's 18-bit slot number (SH_SCRIPT_HANDLES_MAX) is the format's range,
- * far above what the engine can hold at once. A freed slot is reused only
- * after 4096 others have been freed, so a slot's 14-bit generation wraps only
- * after tens of millions of entities.
- *
- * Threads: add, sweep and entity run on the main thread (the spawn chain and
- * the tick); find and mod are safe on any thread (hooks on job threads use
- * them to route a record). Pure C; the resolver is injected, so the tests use
- * a fake one. */
+/* script_handles.h -- the entity handles mod scripts hold (a slot of this table plus its generation, so a stale
+ * handle resolves to nothing); a script never holds an engine pointer. A spawn id is the 32-bit idEntityPtr value;
+ * idGameLocal vtable +0x7F0 (VK 0x140393220, GL 0x140392AF0) resolves it, and +0x7F8 (VK 0x1403912A0, GL
+ * 0x140390B70) is that lookup plus the idEntity cast.
+ * add, sweep and entity run on the main thread; find and mod are safe on any thread. Pure C; the resolver is
+ * injected. */
 #ifndef SH_SCRIPT_HANDLES_H
 #define SH_SCRIPT_HANDLES_H
 #include <stddef.h>
@@ -50,7 +19,7 @@ typedef uint32_t sh_script_handle;   /* 0 = no entity */
 #define SH_SCRIPT_SPAWN_ID_NONE  0x1FFFFFEu  /* the engine's unset spawn id */
 #define SH_SCRIPT_SPAWN_ID_WORLD 0x1FFFFFDu  /* the world entity's spawn id */
 
-/* The engine's lookup: the entity a spawn id names now, or NULL. */
+/* The engine's lookup: the entity a spawn id names, or NULL. */
 typedef void *(*sh_script_resolve_fn)(uint32_t spawn_id);
 
 typedef enum sh_script_handle_change_kind {
@@ -66,21 +35,18 @@ typedef struct sh_script_handle_change {
     uint32_t spawn_id;
 } sh_script_handle_change;
 
-/* Called once for every record the sweep releases (removed or gone), after
- * the table's lock is released: the other tables of the script layer drop
- * what they keep for that entity. Up to four; idempotent. Main thread. */
+/* Called once for every record the sweep releases (removed or gone), after the table's lock is released, so the
+ * other tables of the script layer drop what they keep for that entity. Up to four; idempotent. Main thread. */
 typedef void (*sh_script_gone_fn)(sh_script_handle h, uint32_t spawn_id);
 void sh_script_handles_on_gone(sh_script_gone_fn fn);
 
 void sh_script_handles_set_resolver(sh_script_resolve_fn fn);
 
-/* Empty the table for a new map (every handle of the old map dies). */
+/* Empty the table for a new map; every handle of the previous map dies. */
 void sh_script_handles_reset(void);
 
-/* Record a spawned entity of `mod`. Returns its handle; the existing handle
- * when the spawn id is already recorded (for the same mod); 0 when the spawn
- * id is none or the world, when another mod holds it, or when memory or the
- * handle format has no room (*full is then set to 1 when full is not NULL). */
+/* Record a spawned entity of `mod`: its handle (the existing one when already recorded for that mod), or 0 for
+ * the none or world id, another mod's entity, or no room (then *full is set to 1 unless NULL). */
 sh_script_handle sh_script_handles_add(int mod, uint32_t spawn_id, int *full);
 
 /* The same, keeping the entity's entityDef chain with the record: `names`
@@ -88,12 +54,8 @@ sh_script_handle sh_script_handles_add(int mod, uint32_t spawn_id, int *full);
  * the runtime dispatches on it (copied; NULL keeps none). */
 sh_script_handle sh_script_handles_add_named(int mod, uint32_t spawn_id, const char *names, int *full);
 
-/* A handle for an entity no scripted mod owns (a player, an attacker), so a
- * script can be handed it: the existing record when the spawn id is already
- * recorded, else a new one that the sweep never reports and no mod owns
- * (sh_script_handle_mod answers SH_SCRIPT_HANDLE_FOREIGN) and the sweep
- * releases as "gone" once its entity is. 0 for none, the world, or no room.
- * Any thread. */
+/* A handle for an entity no scripted mod owns (a player, an attacker): the existing record, else a new one
+ * the sweep never reports as spawned and releases as "gone" with its entity. 0 for none, world or no room. */
 #define SH_SCRIPT_HANDLE_FOREIGN (-2)
 sh_script_handle sh_script_handles_ref(uint32_t spawn_id);
 
@@ -116,25 +78,22 @@ int sh_script_handle_mod(sh_script_handle h);
 /* The spawn id behind `h`, or SH_SCRIPT_SPAWN_ID_NONE. */
 uint32_t sh_script_handle_spawn_id(sh_script_handle h);
 
-/* The entity `h` names right now, resolved through the engine: NULL when h
- * is stale or released, not yet reported as spawned, or the entity is gone. Main
- * thread. */
+/* The entity `h` names, resolved through the engine: NULL when h is stale, released, not yet reported as
+ * spawned, or gone. Main thread. */
 void *sh_script_handle_entity(sh_script_handle h);
 
 /* 1 when h is live (reported as spawned and not yet removed), else 0. */
 int sh_script_handle_alive(sh_script_handle h);
 
-/* The tick's check: resolve every pending and live entry once, in spawn
- * order, and write each change to out[] (up to cap). Entries past cap are
- * left as they were for the next sweep. Returns the number written. Every
- * removed or gone record is released (and the gone callbacks told); a pending
- * entry already gone is reported as gone: no script saw it spawn. */
+/* The tick's check: resolve every pending and live entry once, in spawn order, and write each change to out[]
+ * (up to cap; the rest wait for the next sweep). Returns the number written; removed or gone records are
+ * released, and a pending entry already gone is reported as gone. */
 int sh_script_handles_sweep(sh_script_handle_change *out, int cap);
 
 /* Live entries of `mod` (-1: all mods). */
 int sh_script_handles_live(int mod);
 
-/* Records held now (pending and live, references included). */
+/* Records held (pending and live, references included). */
 int sh_script_handles_count(void);
 
 #ifdef __cplusplus

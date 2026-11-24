@@ -1,25 +1,15 @@
-/* script_sigs.c -- the private signatures of the mod-script hooks.
- * Kept apart so the two-image test (tests/script_sigs_test.c) links the table
- * without the engine side. Order matches enum sh_script_sig in script_hooks.h.
+/* script_sigs.c -- the private signatures of the mod-script hooks, in the order of enum sh_script_sig in
+ * script_hooks.h. Kept apart so tests/script_sigs_test.c links the table without the engine side.
  *
- * Build 13954591 (shared Ghidra, snaphak-re logs/shared-ghidra/sc3-* and
- * sc1-*; every pattern is the only match in each executable):
- *   ScriptTick           VK 0x140E9C9D0  GL 0x140E9BF10  the SuperScript per-frame wrapper idGameLocal::RunFrame
- *                        calls once per game frame after every entity has thought (VK RunFrame 0x1403AE730 at
- *                        +0x3197, GL 0x1403ADE50). `ff 52 20` (its slot +0x20 call) separates it from the
- *                        slot-+0x18 sibling that follows it (VK 0x140E9C890 / GL 0x140E9BDC0). 15-byte window.
- *   ScriptSpawnIdLookup  VK 0x140393220  GL 0x140392AF0  idGameLocal vtable +0x7F0: spawn id -> object, NULL
- *                        when the entity is gone (script_handles.h). Checked against the live vtable; not hooked.
- *   ScriptIsClient       VK 0x140398370  GL 0x140397C80  idGameLocal::IsClient (the companions' pattern).
- *   ScriptOnDamage       VK 0x1408283A0  GL 0x140827560  OnDamage callback dispatcher (entity, attacker, amount);
- *                        15-byte window.
- *   ScriptKilled         VK 0x140400130  GL 0x1403FF610  idAI2::Killed; 21-byte window, before its stack probe.
- *   ScriptRelayDoAction  VK 0x140A0C430  GL 0x140A0B630  idSnapMapLogic_Relay::DoAction(this, activator);
- *                        16-byte window, before its RIP-relative load.
- *   ScriptOnAnimNotify   VK 0x140827F70  GL 0x140827130  OnAnimNotify callback dispatcher (entity, message);
- *                        15-byte window. Its bytes equal the OnMoverNotify dispatcher's (VK 0x140828990,
- *                        GL 0x140827B50) except for the callback-name string each loads at +0x4C, so it is
- *                        resolved by pattern plus that string (sh_script_resolve_named). */
+ * Build 13954591; every pattern is the only match in each executable (VK / GL addresses):
+ *   ScriptTick           0x140E9C9D0 / 0x140E9BF10  the SuperScript per-frame wrapper; 15-byte window
+ *   ScriptSpawnIdLookup  0x140393220 / 0x140392AF0  idGameLocal vtable +0x7F0, spawn id -> object; not hooked
+ *   ScriptIsClient       0x140398370 / 0x140397C80  idGameLocal::IsClient
+ *   ScriptOnDamage       0x1408283A0 / 0x140827560  OnDamage callback dispatcher; 15-byte window
+ *   ScriptKilled         0x140400130 / 0x1403FF610  idAI2::Killed; 21-byte window, before its stack probe
+ *   ScriptRelayDoAction  0x140A0C430 / 0x140A0B630  idSnapMapLogic_Relay::DoAction; 16-byte window
+ *   ScriptOnAnimNotify   0x140827F70 / 0x140827130  OnAnimNotify dispatcher; 15-byte window, found by pattern
+ *                        plus its callback-name string (sh_script_resolve_named) */
 #include <stddef.h>
 #include "script_hooks.h"
 
@@ -62,8 +52,6 @@ const sh_script_named_sig SH_SCRIPT_ANIM_NOTIFY_SIGNATURE = {
     0x4C,
     "OnAnimNotify"
 };
-
-/* ---- named signatures ------------------------------------------------------ */
 
 #include <windows.h>
 #include <string.h>

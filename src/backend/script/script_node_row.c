@@ -1,7 +1,5 @@
-/* script_node_row.c -- the Script node's Toybox row and the names the
- * builder and the serving index ask about (see script_node.h, "the row").
- * No Lua and no engine: the builder and the serving index
- * link it without the script runtime. */
+/* script_node_row.c -- the Script node's Toybox row and the names the builder and the serving index ask about
+ * (script_node.h). No Lua and no engine, so both link it without the script runtime. */
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,8 +31,6 @@ static int valid_salt(const char *s)
     for (i = 0; i < n; i++) if (!ident_char(s[i]) && s[i] != '-') return 0;
     return 1;
 }
-
-/* ================================================================ the row */
 
 /* The level of a long bracket "[" "="* "[" at p, or -1. */
 static int long_open(const char *p, const char *end)
@@ -195,9 +191,8 @@ static const char k_def[] =
     "\t}\r\n"
     "}\r\n";
 
-/* The row: the stock Relay row with the mod's name, category and entityDef.
- * Its property sheet keeps only the name (Run Once is the Relay's and means
- * nothing to a script). %1 salt, %2 category tag. */
+/* The row: the stock Relay row with the mod's name, category and entityDef; its property sheet keeps only the name
+ * (Run Once means nothing to a script). Arguments: salt, salt, category tag, salt. */
 static const char k_row[] =
     "{\r\n"
     "\tinherit = \"" SH_SCRIPT_NODE_ROW_PARENT "\";\r\n"

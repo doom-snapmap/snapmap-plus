@@ -1,202 +1,56 @@
-/* script_ai_sigs.c -- the private signatures of the AI calls of mod scripts
- * (script_api_ai.h). Kept apart so the two-image test
- * (tests/script_ai_sigs_test.c) links the table without the engine side.
- * Order matches enum sh_ai_sig.
+/* script_ai_sigs.c -- the private signatures of the AI calls of mod scripts (script_api_ai.h), in the order of
+ * enum sh_ai_sig. Kept apart so tests/script_ai_sigs_test.c links the table without the engine side.
  *
- * Build 13954591 (shared Ghidra and offline scans, snaphak-re
- * logs/shared-ghidra/SC5; every pattern is the only match in each
- * executable):
- *   AiIsRunningScript  VK 0x14042FBC0  GL 0x14042EE60  idAI2::IsRunningScript(ai): true while one of the
- *                      SuperScript ids at ai+0x23BB8 (count +0x23BC0) is running. The condition
- *                      Shared_ExecutingScript enters the alert cycle's ExecuteDoomscript state through it.
- *                      Detoured; 15-byte window.
- *   AiGetAwareness     VK 0x1404A9E30  GL 0x1404A85B0  perception (ai+0x29A88) GetAwareness(perception,
- *                      entity) -> the AIAWARE_ word of the entity's perception record (+4 of a 0x2B40 record).
- *   AiEntityPtrGet     VK 0x1403935E0  GL 0x140392E10  idEntityPtr resolve: the entity an idEntityPtr names, or
- *                      NULL (the current enemy is the one at ai+0x25050).
- *   AiPathSite         VK 0x1405F6A00  GL 0x1405F5C20  inside Shared_TargetDistanceFilter's evaluate (VK
- *                      0x1405F6780, vtable 0x1423D6C90 slot +0x60): the path-key call (VK 0x1403D54C0 /
- *                      GL 0x1403D49C0), the load of the query's first word (VK 0x145B64F00 / GL
- *                      0x14446A580) and the move FSM's path query call (VK 0x140515300 / GL 0x140514030).
- *                      The query's own bytes repeat in a sibling (VK 0x140515660 / GL 0x140514390), so it
- *                      is reached through this unique call site.
- *   AiRecoilPlay       VK 0x1403D9520  GL 0x1403D8A40  inside the recoil play (VK 0x1403D9300): the weapon's
- *                      distance alpha (recoilAnimAlphas over recoilAlphaRanges) times the float at ai+0x24EB0
- *                      becomes the recoil animator's weight. The FSM states write their recoilStrength there
- *                      on enter and 1.0 on exit (VK 0x14062B630, 0x14062C3F0).
- *   AiNextPull         VK 0x1404447D0  GL 0x1404436F0  the weapon holder's next-pull writer: game clock
- *                      (vtable +0x810, group 1) + interval into holder +(slot+4)*0x10, slot = table[fire decl
- *                      +0x1B4]; the fire decl call (VK 0x140F137B0 / GL 0x140F12C10) and the slot table.
- *                      The can-fire check (VK 0x1404439D0) refuses with "cooldown" while the clock is below it.
- *   AiAimFocusSite     VK 0x140438D71  GL 0x140437CE1  ae_selectAimFocusPoint (VK 0x140438CD0): its call of
- *                      the set-focus-to-position (VK 0x14041BBA0 / GL 0x14041AD60; ai, focus 0/2/3, idVec3*,
- *                      true, -1, 14).
- *   AiPainStringSite   VK 0x1403F5EDD  GL 0x1403F53BD  inside the pain request (VK 0x1403F5440 / GL
- *                      0x1403F4920): the second accessor branch of the painString, the atomic-string set
- *                      (VK 0x14032B3D0 / GL 0x14032B040) into [rbp+0x88], then the 14 bytes where the string
- *                      is final; the request later compares each pain anim's +0x48 string with [rbp+0x88].
- *   AiGoreInitSite     VK 0x14042A7AA  GL 0x1404299FA  inside the demon's spawn: the test of its behaviour
- *                      decl's monster type against AI_MONSTER_GENERIC (1) and of g_EnableGore, then the gore
- *                      component's init (VK 0x1408FF0B0; component ai +0x2B3D8, the demon, its entity damage
- *                      component ai +0x4E08, 0, the gore graph at component +0x630, 0, 0). A demon of the
- *                      generic type is spawned without it: no hit is recorded, no wound opens, no full body
- *                      gib is tried, and the body is never faded out and removed.
- *   AiShowWound        VK 0x1409021C0  GL 0x140901270  idGoreComponent::ShowWound (component, wound row): the
- *                      first word of the row is its gore node, whose areaWoundDecl (+0x28) is the gorewounds
- *                      decl (VK 0x1406E8AB0); the component's owner is at +0x610 (the
- *                      handle pair +0x608 is resolved by the function itself). It shows the wound's mesh kits
- *                      (VK 0x1408FD680 -> 0x1415F0A70: bits of the model's 64-bit shown-mesh mask at model
- *                      +0xEE8, one per mesh index), clips, sprays and spawns the breakables. A wound has no
- *                      list of meshes to hide. Detoured; 14-byte window.
- *   AiMeshHideSite     VK 0x140830F00  GL 0x140830090  inside the armour pop-off of a damage group (VK
- *                      0x140830E10): for each name of the group's hideMeshes the model's mesh index by name
- *                      (call at +11: VK 0x1415EDF50, model, name -> index or -1) and, after the hide message
- *                      to clients, the model's hide (call at +107: VK 0x1415EFEC0, model, index: clears the
- *                      mesh's bit of the shown-mesh mask). The model is the entity's at +0x3DB0.
- *   AiPainStart        VK 0x140402FA0  GL 0x140402480  the start of a pain reaction (ai, reaction*, row,
- *                      damage) -> started: the pain selection chooses the clip and writes painParms, then the
- *                      alert cycle's FSM (the object at ai +0x123B8, vtable +0x78) is asked to take the pain
- *                      transition (call at +0x638 and, for a forced move, at +0x7E: VK 0x14064A560 / GL
- *                      0x140649870, fsm, code -> taken) with the code of the pending request (call at +0x62E:
- *                      VK 0x1405FBE70, ai -> 232 pain, 233 light, 237/238 stagger, 0 none). The death (VK
- *                      0x140400130) asks the same FSM request for 242. A site: the FSM request it calls is
- *                      detoured, 18-byte window.
- *   AiThreatRow        VK 0x1406E08D0  GL 0x1406DFD00  the threat table's check of one SDPSReaction_t row
- *                      (threat, actor, row, ...), called for every row by the evaluator (VK 0x1406DFE70);
- *                      the row's reaction is at +0x1C. Detoured; 15-byte window.
- *   AiPathLength       VK 0x14050EA60  GL 0x14050D790  the length of a computed path (move FSM, path): the
- *                      path query (VK 0x140515300) calls it with the path it just built (segments +0x90,
- *                      count +0x70, stride 0x1C, from +4, to +0x10). Detoured; 14-byte window.
- *   AiAnimOfProp       VK 0x141712C60  GL 0x141713650  an animWeb node's animation (prop, model, 0) -> idMD6Anim.
- *   AiAnimDelta        VK 0x1415C5290  GL 0x1415C63F0  an animation's total root motion (anim, idVec3*, NULL).
- *   AiWeaponInSlot     VK 0x14074AB30  GL 0x14074A440  the weapon in an equip slot: the demon's vtable +0x678 item
- *                      of that equipSlot_t, cast to a weapon (NULL for none or another item). The ae pull and
- *                      equip handlers and the fire control's per-hand loop read hands through it (evidence
- *                      snaphak-re logs/shared-ghidra/SCF2-*).
- *   AiInventoryItem    VK 0x140EEDC50  GL 0x140EED200  the inventory list's item `index` (the list the demon's
- *                      vtable +0x660 returns, ai +0x9900), as EquipInventoryItem (VK 0x14040CB00) reads it.
- *   AiMuzzleTest       VK 0x140436460  GL 0x1404353D0  the muzzle test (ai, mode, weapon): false while the aim
- *                      focus is not valid (ai +0xEE9B), else a ray from the muzzle tag (the weapon's muzzle when
- *                      the model has none) against a sphere at the focus point (ai +0xE020) of radius
- *                      ai +0x11AE4, times 3 unless ai +0x11AE8 is PRECISE, times 0.5 for mode 0 and 1.5 for
- *                      mode 1. CheckPullTrigger asks it with mode 0; called directly it is the engine's answer
- *                      (shared Ghidra m5-fire FUN_140436460; GL by the same bytes).
- *   AiClearMove        VK 0x1404EA6F0  GL 0x1404E9260  ClearMove(animFSM, result code): the call the scripted
- *                      actions start with (animFSM = *(ai+0x23198), code 0); it ends the move request, the path
- *                      state and the flight path. The GL address is the one place those bytes match.
- *   AiFireThink        VK 0x1404456E0  GL 0x140444600  the fire control's per-frame think: its two fire modes at
- *                      the fire control +0x1C (animation events) and +0x20 (script events), the control at
- *                      ai +0x22278. Present for the offsets the test reads from it.
- *   AiIdleAction       VK 0x1405DCDD0  GL 0x1405DC0A0  the ssaction_Idle handler: stores the idle turn type in
- *                      the animFSM when the aibehavior decl (ai +0xC120) has a turnParms entry (list +0x528,
- *                      count +0x530) for it. Present for those offsets.
- *   AiCheckPull        VK 0x1404439D0  GL 0x1404428F0  CheckPullTrigger, the fire gate: asks the muzzle test only
- *                      when the fire control's requireMuzzleOnTarget byte (+0x27) is set (cmp at +0x25A).
- *   AiLaserAdd         VK 0x140551940  GL 0x1405509D0  the laser targeter component's add-laser (component,
- *                      idAtomicString*): an entry of that name is reset, else one is appended, drawn with the
- *                      ribbon the component's decl (+0x10) names in laserPinpoint_ribbonDecl (+0x108; read at
- *                      +0x193 and +0x1B2 of the function), and left off. The engine calls it only from the
- *                      enter of two stock state classes (the Revenant's hover attack, the laser soldier's beam);
- *                      ae_setLaserState only switches entries that exist.
- *   AiLaserRemove      VK 0x1405517A0  GL 0x140550830  the component's remove (component, idAtomicString*).
- *   AiLaserState       VK 0x1403ED2B0  GL 0x1403EC780  the ae_setLaserState handler. Present for the offset of
- *                      the component in an idAI2 (+0x2CD90).
- *   AiFootTable        VK 0x14074B790  GL 0x14074B0A0  the footstep table of a foot (actor, foot index): the
- *                      actor's footstepEffectTable by gait (walk, slow walk, crouch, sprint, landing), never by
- *                      foot. Detoured; 15-byte window (snaphak-re reports/R-M7-engine-wave-laser-foot.md).
- *   AiCmdSetWait       VK 0x1405223F0  GL 0x140521120  the animWeb command context's set-active-wait-handle
- *                      (context, handle): a handle it still holds (context +0x18) gets its done event, the
- *                      status AWCMD_STATUS_INTERRUPTED (handle +0x18 = 9) and gives way to the new one. Every
- *                      command sent through the context ends the one before it this way.
- *   AiMoveStage        VK 0x14051A660  GL 0x140519390  the animFSM's move update: it switches on the stage
- *                      (animFSM +0x2A9C); stages 2, 7 and 8 (a step, an arrival) end when the context's active
- *                      command is no longer waiting. Present for that offset.
- *   AiRigEntry         VK 0x141A20CD0  GL 0x141A3CC00  the rig's entry (rig runtime, pose context, align): called
- *                      for every blended pose; with `align` and an aligner (runtime +0x18) the aligner moves the
- *                      hips and the leg target joints by the ground, then the rig engine (runtime +0x8) runs.
- *                      Detoured; 16-byte window.
- *   AiRigRun           VK 0x141A2C1F0  GL 0x141A480D0  the rig engine's run (engine, context): model transforms
- *                      of the context's pose (+0x50), then each block (engine +0, count +8, 0x70 bytes each).
- *                      Present for those offsets.
- *   AiRigBlock         VK 0x141A2BDA0  GL 0x141A47C80  a block's run: unless its bit +0x60.0 is set, each
- *                      component (block +0x18, count +0x20, 0x18 bytes each: object, legs, count) is evaluated
- *                      through the object's vtable +0x58. Present for those offsets.
- *   AiRigEval          VK 0x141A29310  GL 0x141A451F0  the two-bone leg component's evaluate (object, legs,
- *                      count, context): per leg (0xCC bytes) the joints at +0x80 parent, +0x84 target, +0x88
- *                      pole, +0x8C hip, +0x90 thigh, +0x94 shin, +0x98 foot; it reads the target's model
- *                      transform and the pole's local rotation (x and w), calls the solve (at +0x1ED) and
- *                      writes thigh, shin and foot.
- *   AiRigSolve         VK 0x141A26940  GL 0x141A428B0  the solve (hip place, parent model rotation, leg, {target
- *                      place, target rotation, swivel}, thigh rotation out, shin rotation out). Reads only.
- *   AiRigSite          VK 0x140426377  GL 0x140425437  inside the demon's setup: its model (entity +0x3DB0) and
- *                      the model's animation object (+0xE98), given to the aligner's maker; the object's second
- *                      word is the rig runtime.
- *   AiFkReference      VK 0x140418BF0  GL 0x140417D20  an fk effector's reference pose (ai, fkChainAddress_t*,
- *                      effector index, out): the animation is the anim web's current leaf (AiWebLeaf on ai
- *                      +0x222B8, called at +0xA7) when there is one, else the effector's poseReferenceAnim
- *                      (subgraph +0x40 effectors, 0x58 each, the idStr at +0x20); the effector's and its chain's
- *                      joints are then read from that animation. Called by the focus update's reference frames
- *                      (VK 0x1404C9380) and the fk solve (VK 0x1404140A0). Detoured; 15-byte window.
- *   AiWebLeaf          VK 0x141705850  GL 0x1417062C0  the anim web's current leaf (web): the leaf of the web's
- *                      current node, or none. Detoured; 18-byte window (its node accessor call is
- *                      register-indirect).
- *   AiWebForceState    VK 0x141704AA0  GL 0x141705510  the anim web's ForceState (web, subweb, state, blend, ...):
- *                      sets interruptPath (+0x56C) and interruptBlend (+0x570) to YES at +0x407 and +0x412.
- *                      Present for the offset ai:eternal_interrupts writes; not called.
- *   AiWebUpdate        VK 0x14170B890  GL 0x14170C300  the anim web's update: while the model's blend runs it
- *                      tests the current node's customFlags bit 25 (AW_CF_USE_MULTIPLE_INTERRUPT, +0x567) and
- *                      reads interruptBlend at +0x575 (NO: wait, YES: end the running blends, MULTI: nest);
- *                      a transition resets it to NO at +0xAB6. Present for those offsets; not called.
- *   AiBreakableGore    VK 0x1407A06E0  GL 0x14079FED0  a gore breakable's weapon-specific gore (manager, breakable,
- *                      tag position, owner axis, position, hit direction, falloff, gore behaviour): called by the
- *                      gore breakable spawn (VK 0x1407A2000) right after the spawn; when it answers true the spawn
- *                      queues the hit's explosion record and breaks the breakable (VK 0x14079E3B0). It reads the
- *                      breakable's rigid body count at +0xCC8 (physics +0xCA8, list +0x18, count +8). Detoured;
- *                      19-byte window.
- *   AiBreakableBreak   VK 0x14079E6D0  GL 0x14079DEC0  idBreakable's break (breakable, 0): unless brokenStartTime
- *                      (+0xE6C) is set, places every piece where the model puts it plus up to 20 units an axis
- *                      at random and turns it at random (VK 0x141758780, through the physics +0xCA8), starts the
- *                      explosion records, stamps brokenStartTime. Called.
- *   AiWeaponUse        VK 0x140435430  GL 0x1404343A0  the demon's weapon-use behaviour: entry [ai+0x250C8] of the
- *                      behaviour decl's weaponUseBehaviorList (decl at ai+0xC120, list at decl+0x398, 0x50 an
- *                      entry, its data at +8), or NULL below 0. The recoil play and the trigger-hold timers read
- *                      the entry through it; the game sets the index once, at spawn, by name (VK 0x1404395E0:
- *                      the entry named "default").
- *   AiFxPhysPlace      VK 0x141650390  GL 0x141650F30  an effect rigid body's broad phase entry moved to a position
- *                      and axis (broad phase, entry, position, axis, 0), as the piece placement calls it.
- *                      Called. (snaphak-re reports/R-G6)
- *   AiDamageWound      VK 0x1408FC8E0  GL 0x1408FB910  idGoreComponent::DamageActivatesWound (component, wound decl,
- *                      goreFrameDamage_t, damage group decl, group index, the group's lost health as an int, the
- *                      owner's max health as a float): called by the wound offer (VK 0x1408FE600) per record, per
- *                      damage group and per gore node of the group. It gates in order on the alive flags, the
- *                      group's frame damage (component +0xA0C + 4 x group) against the wound's +0x218, the lost
- *                      health against the threshold (VK 0x1406E8A80: +0x214 x max health, or +0x210 when +0x214
- *                      is negative), the group's damage-per-second bucket, gore type, distance, directions and
- *                      the clipping spheres. Detoured; 16-byte window (script_api_ai.h, SH_AI_DAW_*;
- *                      snaphak-re R-GAPS-B gap 6).
- *   AiWebScalarSet     VK 0x14170A950  GL 0x14170B3C0  the anim web's set-variable-by-name (animator, atom*, float
- *                      in xmm2): the row of the animator's variable list (+0x580, count +0x588, 0x18 a row)
- *                      whose atom is the name's gets the float through the store at +0x52 (VK 0x1417574D0 /
- *                      GL 0x141758620: the bound member at row +0x10 when the row's short +10 is below 0, else
- *                      the web's own memory +0x598 at that index); al 1 when found. The game's snippets call it
- *                      on the animator at ai +0x222B8 (VK 0x1404B02A0). Called. (snaphak-re reports/R-AR7)
- *   AiUpdateRelations  VK 0x1404AA490  GL 0x1404A8C10  the senses' UpdateRelations (senses): empties the relation
- *                      table (rows +0x28, count +0x30: lea rbx,[rcx+0x28] at +0x24; mov [rbx+8],0 at +0x28) and fills
- *                      it from the perceived entities, reading the faction at entity +0x4EC0 (+0x39). Present for those
- *                      offsets; ai:relations reads the table (snaphak-re reports/R-TG1).
- *   AiBestRelation     VK 0x1404AAD10  GL 0x1404A9490  the engine's pick from a relation list (senses, list): the
- *                      nearest entity of the most hostile emotion; a row's emotion at +8 (+0x63), its entity at
- *                      +0x10 (+0x6C), 0x28 bytes a row (+0xD9), starting from EMOTION_MAX 14 (+0x41). Present for
- *                      those offsets; the Enemy SDK's enemy_target.lua makes the same pick.
- *   AiFsmMove          VK 0x14064D330  GL 0x14064C5B0  the engine's entrance move of an AI FSM into a named state
- *                      (owner, path): for each FSM of the path it finds the state among the FSM's states (+0x38,
- *                      count +0x40), builds a move record (idTransitionCode, code 5, the target) and takes it through
- *                      the FSM's vtable +0xA8 with the game time. idAI2's entrance animation enters EntranceAnim this
- *                      way (VK 0x1403D4C80). ExecuteDoomscript's way out (Shared_NotExecutingScript) is a STATE link
- *                      neither request takes inside a call, so the death of a parked demon moves its alert cycle into
- *                      ac_default the same way and asks the dying code there (R-TG1, report section 14.4).
- *   AiGameTime         VK 0x14038DE60  GL 0x14038D700  the game time record a request is given (game, out[4]),
- *                      read from the game's +0x49D210 clock. */
+ * Build 13954591; every pattern is the only match in each executable (VK / GL addresses):
+ *   AiIsRunningScript  0x14042FBC0 / 0x14042EE60  idAI2::IsRunningScript(ai); detoured, 15-byte window
+ *   AiGetAwareness     0x1404A9E30 / 0x1404A85B0  GetAwareness(perception, entity) -> the AIAWARE_ word
+ *   AiEntityPtrGet     0x1403935E0 / 0x140392E10  idEntityPtr resolve: the entity it names, or NULL
+ *   AiPathSite         0x1405F6A00 / 0x1405F5C20  in Shared_TargetDistanceFilter's evaluate: path query call
+ *   AiRecoilPlay       0x1403D9520 / 0x1403D8A40  in the recoil play: the recoil animator's weight
+ *   AiNextPull         0x1404447D0 / 0x1404436F0  the weapon holder next-pull writer
+ *   AiAimFocusSite     0x140438D71 / 0x140437CE1  in ae_selectAimFocusPoint: the set-focus-to-position call
+ *   AiPainStringSite   0x1403F5EDD / 0x1403F53BD  in the pain request: where the pain string is final
+ *   AiGoreInitSite     0x14042A7AA / 0x1404299FA  in the demon's spawn: the gore component's init gate
+ *   AiShowWound        0x1409021C0 / 0x140901270  idGoreComponent::ShowWound (component, row); detoured
+ *   AiMeshHideSite     0x140830F00 / 0x140830090  in the armour pop-off: the per-name mesh hide
+ *   AiPainStart        0x140402FA0 / 0x140402480  the start of a pain reaction; detoured, 18-byte window
+ *   AiThreatRow        0x1406E08D0 / 0x1406DFD00  the threat table's check of one row; detoured
+ *   AiPathLength       0x14050EA60 / 0x14050D790  the length of a computed path; detoured, 14-byte window
+ *   AiAnimOfProp       0x141712C60 / 0x141713650  an animWeb node's animation (prop, model, 0)
+ *   AiAnimDelta        0x1415C5290 / 0x1415C63F0  an animation's total root motion (anim, idVec3*, NULL)
+ *   AiWeaponInSlot     0x14074AB30 / 0x14074A440  the weapon in an equip slot, NULL for none or another item
+ *   AiInventoryItem    0x140EEDC50 / 0x140EED200  the inventory list's item `index`
+ *   AiMuzzleTest       0x140436460 / 0x1404353D0  the muzzle test (ai, mode, weapon)
+ *   AiClearMove        0x1404EA6F0 / 0x1404E9260  ClearMove(animFSM, result code)
+ *   AiFireThink        0x1404456E0 / 0x140444600  the fire control's per-frame think; modes +0x1C, +0x20
+ *   AiIdleAction       0x1405DCDD0 / 0x1405DC0A0  the ssaction_Idle handler; turnParms +0x528
+ *   AiCheckPull        0x1404439D0 / 0x1404428F0  CheckPullTrigger, the fire gate; byte +0x27
+ *   AiLaserAdd         0x140551940 / 0x1405509D0  the laser targeter component's add-laser (component, atom*)
+ *   AiLaserRemove      0x1405517A0 / 0x140550830  the laser targeter component's remove (component, atom*)
+ *   AiLaserState       0x1403ED2B0 / 0x1403EC780  the ae_setLaserState handler; component at ai +0x2CD90
+ *   AiFootTable        0x14074B790 / 0x14074B0A0  the footstep table of a foot (actor, foot index); detoured
+ *   AiCmdSetWait       0x1405223F0 / 0x140521120  the animWeb command context's set-active-wait-handle
+ *   AiMoveStage        0x14051A660 / 0x140519390  the animFSM's move update; stage at animFSM +0x2A9C
+ *   AiRigEntry         0x141A20CD0 / 0x141A3CC00  the rig's entry (runtime, pose context, align); detoured
+ *   AiRigRun           0x141A2C1F0 / 0x141A480D0  the rig engine's run (engine, context); blocks at engine +0
+ *   AiRigBlock         0x141A2BDA0 / 0x141A47C80  a block's run: evaluates each component via vtable +0x58
+ *   AiRigEval          0x141A29310 / 0x141A451F0  the two-bone leg component's evaluate (object, legs, ...)
+ *   AiRigSolve         0x141A26940 / 0x141A428B0  the two-bone leg solve; reads only
+ *   AiRigSite          0x140426377 / 0x140425437  in the demon setup: model animation object
+ *   AiFkReference      0x140418BF0 / 0x140417D20  an fk effector's reference pose; detoured, 15-byte window
+ *   AiWebLeaf          0x141705850 / 0x1417062C0  the anim web's current leaf; detoured, 18-byte window
+ *   AiWebForceState    0x141704AA0 / 0x141705510  the anim web's ForceState; flags +0x56C, +0x570
+ *   AiWebUpdate        0x14170B890 / 0x14170C300  the anim web's update; interruptBlend +0x575
+ *   AiBreakableGore    0x1407A06E0 / 0x14079FED0  a gore breakable gore; detoured, 19 bytes
+ *   AiBreakableBreak   0x14079E6D0 / 0x14079DEC0  idBreakable's break (breakable, 0); brokenStartTime +0xE6C
+ *   AiWeaponUse        0x140435430 / 0x1404343A0  the demon's weapon-use behaviour; index at ai +0x250C8
+ *   AiFxPhysPlace      0x141650390 / 0x141650F30  an effect rigid body's broad phase entry moved to a place
+ *   AiDamageWound      0x1408FC8E0 / 0x1408FB910  DamageActivatesWound (component, ...); detoured, 16 bytes
+ *   AiWebScalarSet     0x14170A950 / 0x14170B3C0  the anim web set-variable-by-name
+ *   AiUpdateRelations  0x1404AA490 / 0x1404A8C10  the senses' UpdateRelations; relation table rows +0x28
+ *   AiBestRelation     0x1404AAD10 / 0x1404A9490  the engine's pick from a relation list (senses, list)
+ *   AiFsmMove          0x14064D330 / 0x14064C5B0  the entrance move of an AI FSM into a state
+ *   AiGameTime         0x14038DE60 / 0x14038D700  the game time record a request is given (game, out[4]) */
 #include <stddef.h>
 #include <string.h>
 #include "script_api_ai.h"
@@ -436,8 +290,8 @@ const char *const SH_AI_MONSTER_NAMES[SH_AI_MONSTER_TYPES] = {
     "AI_MONSTER_CYBERDEMON_HELL", "AI_MONSTER_SPIDER_MASTERMIND"
 };
 
-/* aiFireMode_t and aiIdleTurn_t, in the engine's order (13954591; the sigs test compares them
- * with the executables' own enum tables). */
+/* aiFireMode_t and aiIdleTurn_t names in the engine's order; the sigs test compares them with the executables'
+ * enum tables. */
 const char *const SH_AI_FIREMODE_NAMES[SH_AI_FIREMODE_MAX + 1] = {
     "AIFIREMODE_HOLDFIRE", "AIFIREMODE_WEAPON_EXPLICIT_RELEASE", "AIFIREMODE_WEAPON", "AIFIREMODE_FIREWHENREADY",
     "AIFIREMODE_SPRAYWHENREADY", "AIFIREMODE_MAX"
@@ -446,21 +300,9 @@ const char *const SH_AI_IDLETURN_NAMES[SH_AI_IDLETURN_MAX + 1] = {
     "AIIDLETURN_RELAXED", "AIIDLETURN_COMBAT", "AIIDLETURN_INCOVER", "AIIDLETURN_MAX"
 };
 
-/* The pain-string stub (script_api_ai.h). Entered by the 14-byte jump that
- * replaces the two loads at the site, with rbx the demon and rbp the pain
- * request's frame:
- *   push rax, rcx, rdx, r8, r9, r10, r11      the volatile registers
- *   mov r11,rsp; and rsp,-16; sub rsp,0x90    an aligned frame
- *   mov [rsp+0x88],r11                         (the stack before it)
- *   movdqu [rsp+0x20..0x70],xmm0..xmm5         the volatile vector registers
- *   mov rcx,rbx; mov rax,fetch; call rax       fetch(demon) -> string or NULL
- *   movdqu xmm0..xmm5,[rsp+0x20..0x70]
- *   mov rsp,[rsp+0x88]
- *   test rax,rax; jz +7; mov [rbp+0x88],rax     the request's string, when the script set one
- *   pop r11, r10, r9, r8, rdx, rcx, rax
- *   jmp [rip+0]; dq resume                     the trampoline: the two loads, then back
- * Flags are not live at the site (the next instruction that reads them is a
- * cmp after three moves). */
+/* The pain-string stub (script_api_ai.h), entered by the 14-byte jump over the two loads at the site (rbx the
+ * demon, rbp the request frame): saves the volatile state, stores fetch(demon)'s string at [rbp+0x88] when it is
+ * non-NULL, runs the two loads and jumps to resume. Flags are not live there. */
 size_t sh_ai_pain_stub_build(uint8_t *code, size_t cap, const void *fetch, const void *resume)
 {
     static const uint8_t head[] = {
