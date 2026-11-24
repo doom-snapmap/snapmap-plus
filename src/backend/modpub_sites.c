@@ -206,6 +206,27 @@ const char *sh_modpublish_check_cloud_read(const uint8_t *call, const uint8_t *r
     return NULL;
 }
 
+/* The slot's metadata the cloud-save request uploads with the text: ReadLocalSaveMeta(model->localId, &model, -1, -1)
+ * (`meta`: mov rbx,rdx; mov rcx,[rdx+0x10] before it; mov r12d,eax; test eax,eax; je after). Its declChecksum
+ * (+0xB8) is id's hash of the map text, which the local save computes (`local`: the hash, then mov [rsi],eax) and
+ * CreateLocalSavedMapInternal stores at +0xB8 (`create`). VK 0x1402D6A90 / GL 0x1402D68F0, the same function at all
+ * three. *hash gets it. */
+const char *sh_modpublish_check_cloud_meta(const uint8_t *meta, const uint8_t *meta_read, const uint8_t *create,
+                                           const uint8_t *local, const void **hash)
+{
+    const void *h;
+    if (hash) *hash = NULL;
+    if (!meta || !meta_read || !create || !local) return "a site is missing";
+    if (memcmp(meta - 7, "\x48\x8b\xda\x48\x8b\x4a\x10", 7)) return "cloud-save metadata read -0x07: the model and its id";
+    if (eng_call(meta) != (void *)meta_read) return "cloud-save metadata read +0x00: ReadLocalSaveMeta";
+    if (memcmp(meta + 5, "\x44\x8b\xe0\x85\xc0\x0f\x84", 7)) return "cloud-save metadata read +0x05: its result";
+    if (!(h = eng_call(create)) || memcmp(create + 5, "\x89\x87\xb8\x00\x00\x00", 6))
+        return "new saved map +0x05: declChecksum at +0xB8";
+    if (eng_call(local) != h || memcmp(local + 5, "\x89\x06", 2)) return "local save +0x00: the same checksum";
+    if (hash) *hash = h;
+    return NULL;
+}
+
 /* ------------------------------------------------------------ the FINISH step (modpublish.c eng_bind_finish) */
 
 /* MapProperties frame (VK 0x14118FDD0, GL 0x14118EF50), its PUBLISH case:

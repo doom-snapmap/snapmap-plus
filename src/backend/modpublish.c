@@ -235,12 +235,17 @@ static struct {
     char local[MP_ID_CAP];
 } g_upload;
 static SRWLOCK g_upload_lock = SRWLOCK_INIT;   /* the cloud save's read may come from a job thread */
+/* The published copy's declChecksum (the engine's hash of the pinned text), from its text read to its metadata read in
+ * the same cloud-save request: the uploaded metadata names the text it is uploaded with. A read that is not served
+ * forgets it. Under g_upload_lock. */
+static struct { int set; unsigned sum; char local[MP_ID_CAP]; } g_cloud_sum;
 
 static void mp_upload_clear(void)
 {
     AcquireSRWLockExclusive(&g_upload_lock);
     sh_modmanifest_list_free(&g_upload.rows);
     memset(&g_upload, 0, sizeof g_upload);
+    memset(&g_cloud_sum, 0, sizeof g_cloud_sum);
     ReleaseSRWLockExclusive(&g_upload_lock);
 }
 
@@ -280,9 +285,32 @@ char *sh_modpublish_cloud_text(const char *local_id, const char *text, size_t le
         n = g_upload.rows.count;
         if (out) g_upload.served = 1;
     }
+    if (!out) g_cloud_sum.set = 0;   /* this request uploads the slot as it is, with its own checksum */
     ReleaseSRWLockExclusive(&g_upload_lock);
     if (out) mp_logf("MODS: publish: the published copy carries %zu pinned row(s); the map's slot keeps its own rows", n);
     return out;
+}
+
+void sh_modpublish_cloud_sum_note(const char *local_id, unsigned sum)
+{
+    AcquireSRWLockExclusive(&g_upload_lock);
+    g_cloud_sum.set = local_id && strlen(local_id) < sizeof g_cloud_sum.local;
+    g_cloud_sum.sum = sum;
+    if (g_cloud_sum.set) strcpy_s(g_cloud_sum.local, sizeof g_cloud_sum.local, local_id);
+    ReleaseSRWLockExclusive(&g_upload_lock);
+}
+
+int sh_modpublish_cloud_sum_take(const char *local_id, unsigned *sum)
+{
+    int got = 0;
+    AcquireSRWLockExclusive(&g_upload_lock);
+    if (g_cloud_sum.set && local_id && !_stricmp(local_id, g_cloud_sum.local)) {
+        if (sum) *sum = g_cloud_sum.sum;
+        got = 1;
+        g_cloud_sum.set = 0;
+    }
+    ReleaseSRWLockExclusive(&g_upload_lock);
+    return got;
 }
 
 static void mp_save_seen_text(const char *text, size_t length, unsigned long sequence);
@@ -2069,6 +2097,9 @@ static struct {
     void (*event_log)(void *, const char *, const char *);   /* its CreateInfoLog */
     const char *event_name, *event_desc;         /* the frame's "snapeditor.publish.success" and its description */
     const void *cloud_read_ret;                  /* the return address of the cloud-save request's slot read */
+    unsigned (*decl_hash)(const char *, long long);   /* id's hash of a map text: a model's declChecksum */
+    int (*meta_read)(const char *, void *, int, int); /* ReadLocalSaveMeta, which the request's metadata read calls */
+    sh_patch_handle cloud_meta_patch;            /* that call, relayed to eng_cloud_meta_detour */
     uint8_t *finish_relay;                       /* near page: mov r9,rsi (the MapProperties state); jmp detour */
     sh_patch_handle finish_patch;
     DWORD *main_thread;
@@ -2571,6 +2602,11 @@ static void eng_cloud_read(const char *id, void *text, const void *caller)
     out = sh_modpublish_cloud_text(id, now, strlen(now), &length);
     free(now);
     if (!out) return;
+    /* the request's metadata read of this slot follows: its declChecksum becomes this text's, by the game's own hash */
+    if (g_eng.decl_hash) {
+        __try { sh_modpublish_cloud_sum_note(id, g_eng.decl_hash(out, (long long)length)); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the published copy's checksum faulted"); }
+    }
     __try {
         g_eng.idstr_ctor(tmp, out);
         g_eng.idstr_assign(text, tmp);
@@ -2579,7 +2615,55 @@ static void eng_cloud_read(const char *id, void *text, const void *caller)
     HeapFree(GetProcessHeap(), 0, out);
 }
 
-static int eng_cloud_ready(void *c) { (void)c; return g_eng.cloud_read_ret && sh_editor_frame_read_filter_live(); }
+static int eng_cloud_ready(void *c)
+{
+    (void)c;
+    return g_eng.cloud_read_ret && g_eng.cloud_meta_patch.live && sh_editor_frame_read_filter_live();
+}
+
+/* The cloud-save request's ReadLocalSaveMeta of the slot (relayed at CloudSaveMetaReadCall): read as the game reads
+ * it, then, for a published copy, its declChecksum (+0xB8) is the pinned text's, so the uploaded metadata matches the
+ * text uploaded with it. */
+#define ENG_MODEL_DECL_CHECKSUM 0xB8
+static int eng_cloud_meta_detour(const char *id, void *model, int a3, int a4)
+{
+    int r = g_eng.meta_read(id, model, a3, a4);
+    unsigned sum;
+    if (r != 0 || !model || !eng_live()) return r;
+    __try {
+        if (sh_modpublish_cloud_sum_take(id, &sum)) {
+            unsigned was = *(unsigned *)((uint8_t *)model + ENG_MODEL_DECL_CHECKSUM);
+            *(unsigned *)((uint8_t *)model + ENG_MODEL_DECL_CHECKSUM) = sum;
+            if (was != sum)
+                backend_log("MODS: publish: the published copy's metadata names its own text's checksum, not the slot's");
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the published copy's metadata faulted"); }
+    return r;
+}
+
+static int eng_cloud_meta_install(const sig_result *site)
+{
+    uint8_t expect[5], patch[5] = { 0xe8 }, *relay;
+    void *handler = (void *)eng_cloud_meta_detour;
+    intptr_t distance;
+    int32_t relative;
+    DWORD old;
+    if (!(relay = (uint8_t *)sh_near_page_alloc(site->addr + 5))) return 0;
+    memcpy(relay, "\xff\x25\x00\x00\x00\x00", 6);
+    memcpy(relay + 6, &handler, 8);
+    if (!VirtualProtect(relay, SH_NEAR_PAGE_BYTES, PAGE_EXECUTE_READ, &old)) { VirtualFree(relay, 0, MEM_RELEASE); return 0; }
+    FlushInstructionCache(GetCurrentProcess(), relay, 14);
+    distance = (intptr_t)relay - (intptr_t)(site->addr + 5);
+    if (distance < INT32_MIN || distance > INT32_MAX) { VirtualFree(relay, 0, MEM_RELEASE); return 0; }
+    relative = (int32_t)distance;
+    memcpy(patch + 1, &relative, 4);
+    memcpy(expect, (const void *)site->addr, 5);
+    if (code_patch_call_sig(site, expect, patch, &g_eng.cloud_meta_patch) != B2_PATCH_OK) {
+        VirtualFree(relay, 0, MEM_RELEASE);
+        return 0;
+    }
+    return 1;
+}
 
 static const sh_modpublish_ops ENG_OPS = {
     .on_main = eng_on_main, .can_ask = eng_can_ask, .ask = eng_ask, .poll = eng_poll, .release = eng_release,
@@ -2981,6 +3065,33 @@ int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t
                         "with mods are not published on this build", why);
             backend_log(line);
         } else g_eng.cloud_read_ret = call + 5;
+        if (!why) {
+            /* and its metadata read: the uploaded declChecksum is the published copy's own */
+            const uint8_t *meta = eng_site(results, count, module_base, "CloudSaveMetaReadCall");
+            const uint8_t *create = eng_site(results, count, module_base, "NewSavedMapDeclChecksumCall");
+            const uint8_t *local = eng_site(results, count, module_base, "LocalSaveDeclChecksumCall");
+            const void *hash = NULL;
+            const uint8_t *meta_read = NULL;
+            size_t i;
+            __try {
+                meta_read = meta && meta[0] == 0xe8 ? meta + 5 + *(const int32_t *)(meta + 1) : NULL;
+                why = sh_modpublish_check_cloud_meta(meta, meta_read, create, local, &hash);
+            } __except (EXCEPTION_EXECUTE_HANDLER) { why = "its bytes could not be read"; }
+            for (i = 0; !why && i < count; i++)
+                if (results[i].name && !strcmp(results[i].name, "CloudSaveMetaReadCall")) {
+                    g_eng.decl_hash = (unsigned (*)(const char *, long long))hash;
+                    g_eng.meta_read = (int (*)(const char *, void *, int, int))meta_read;
+                    if (!eng_cloud_meta_install(&results[i])) why = "the relay could not be installed";
+                    break;
+                }
+            if (why) {
+                char line[200];
+                g_eng.cloud_read_ret = NULL;   /* the published copy's metadata would not match: no copy is made */
+                _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: publish: the cloud-save metadata check '%s' did not "
+                            "hold; maps with mods are not published on this build", why);
+                backend_log(line);
+            }
+        }
         sh_editor_frame_set_read_filter(eng_cloud_read);
     }
     InterlockedExchange(&g_eng.ready, 1);

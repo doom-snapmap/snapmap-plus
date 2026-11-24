@@ -263,6 +263,18 @@ const char *sh_modpublish_check_sites(const sh_modpublish_sites *sites, sh_modpu
  * published copy is made at: NULL when its bytes hold, else the first check that failed. */
 const char *sh_modpublish_check_cloud_read(const uint8_t *call, const uint8_t *read_text);
 
+/* The cloud-save request's read of the slot's metadata (CloudSaveMetaReadCall, VK 0x11BE673, GL 0x11BDA43, calling
+ * `meta_read`, ReadLocalSaveMeta), and id's hash of the map text that fills a model's declChecksum (+0xB8): `create`
+ * (NewSavedMapDeclChecksumCall) and `local` (LocalSaveDeclChecksumCall) both call it. NULL when every byte holds,
+ * with *hash the hash function. */
+const char *sh_modpublish_check_cloud_meta(const uint8_t *meta, const uint8_t *meta_read, const uint8_t *create,
+                                           const uint8_t *local, const void **hash);
+
+/* The published copy's declChecksum: noted when the cloud save's read of the slot gets the pinned text (the engine's
+ * own hash of it), taken once by that request's metadata read of the same slot. 1 with *sum, 0 none. */
+void sh_modpublish_cloud_sum_note(const char *local_id, unsigned sum);
+int  sh_modpublish_cloud_sum_take(const char *local_id, unsigned *sum);
+
 /* The FINISH step (VK 0x1190362, GL 0x118F4E2: the MapProperties frame's PUBLISH case): `call` is its gate call
  * (PublishFinishGateCall), `start` PublishStart, `gdm_show` the editor dialog's show (EditorGdmShow), `answer` the
  * EditorFrame call of that dialog's input (EditorGdmAnswerCall). */

@@ -1568,6 +1568,18 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                                 * published copy is made at (modpublish.c eng_cloud_read, R-LB1 F6). Read, never hooked. */
       "E8 ?? ?? ?? ?? 44 8B F8 85 C0 0F 84 EF 00 00 00"
       , 0x11BE407u, 0x11BD7D7u },
+    { "CloudSaveMetaReadCall", /* the cloud-save request's ReadLocalSaveMeta(model->localId, &model, ...): the slot's
+                                * metadata into the model it uploads; relayed so the published copy's declChecksum is
+                                * its own text's (modpublish.c eng_cloud_meta_detour, R-LB1 F6). */
+      "E8 ?? ?? ?? ?? 44 8B E0 85 C0 0F 84 C9 00 00 00"
+      , 0x11BE673u, 0x11BDA43u },
+    { "NewSavedMapDeclChecksumCall", /* CreateLocalSavedMapInternal: model.declChecksum (+0xB8) = id's hash of the
+                                      * map text; read for that hash function and the field, never hooked. */
+      "E8 ?? ?? ?? ?? 89 87 B8 00 00 00 E8"
+      , 0x11BEF65u, 0x11BE335u },
+    { "LocalSaveDeclChecksumCall", /* the local save: the same hash over the saved JSON into the slot's declChecksum */
+      "E8 ?? ?? ?? ?? 89 06 B0 01 EB 02 32 C0"
+      , 0x11C539Cu, 0x11C476Cu },
     { "EditorGdmAnswerCall", /* EditorFrame: the dialog's input, then +0xA2C bit 0 cleared once it is answered */
       "E8 ?? ?? ?? ?? 44 38 BB D8 01 00 00 0F 84 ?? ?? ?? ?? 48 8B 86 88 10 02 00 83 A0 2C 0A 00 00 FE"
       , 0x118301Bu, 0x118217Bu },

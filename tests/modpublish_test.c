@@ -798,8 +798,17 @@ int main(int argc, char **argv)
         CHECK(strstr(g_uploaded, "\"objects\"") && !strstr(g_uploaded, "\"local\":true"));
         {
             size_t ul = 0;
-            char *other = sh_modpublish_cloud_text("ANOTHERSLOT", g_slot, strlen(g_slot), &ul);
-            CHECK(other == NULL);   /* another slot's read is left as it is */
+            char *other;
+            unsigned sum = 0;
+            /* the request's metadata read takes the published copy's checksum once, for its own slot */
+            sh_modpublish_cloud_sum_note(LOCAL_ID, 0x1234abcdu);
+            CHECK(!sh_modpublish_cloud_sum_take("ANOTHERSLOT", &sum));
+            CHECK(sh_modpublish_cloud_sum_take(LOCAL_ID, &sum) && sum == 0x1234abcdu);
+            CHECK(!sh_modpublish_cloud_sum_take(LOCAL_ID, &sum));
+            /* another slot's read is left as it is, and forgets a checksum noted for a served copy */
+            sh_modpublish_cloud_sum_note(LOCAL_ID, 7);
+            other = sh_modpublish_cloud_text("ANOTHERSLOT", g_slot, strlen(g_slot), &ul);
+            CHECK(other == NULL && !sh_modpublish_cloud_sum_take(LOCAL_ID, &sum));
             if (other) HeapFree(GetProcessHeap(), 0, other);
         }
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "eeeeeeeeeeeeeeeeeeeeeee1", "rev1");

@@ -119,6 +119,27 @@ static void check_image(const char *path)
         }
     }
 
+    /* The cloud-save request's metadata read and the declChecksum hash: the published copy's metadata names its own
+     * text (R-LB1 F6). */
+    {
+        const uint8_t *meta = image_site(base, results, n, "CloudSaveMetaReadCall", vk);
+        const uint8_t *create = image_site(base, results, n, "NewSavedMapDeclChecksumCall", vk);
+        const uint8_t *local = image_site(base, results, n, "LocalSaveDeclChecksumCall", vk);
+        const uint8_t *meta_read = base + (vk ? 0x11CB8C0u : 0x11CAC90u);
+        const void *hash = NULL;
+        failed = sh_modpublish_check_cloud_meta(meta, meta_read, create, local, &hash);
+        printf("  the cloud-save metadata's checks: %s\n", failed ? failed : "all hold");
+        IMG_CHECK(failed == NULL);
+        IMG_CHECK(hash == (const void *)(base + (vk ? 0x2D6A90u : 0x2D68F0u)));
+        if (!failed) {
+            uint8_t *at = (uint8_t *)create + 7, keep = *at;   /* +0xB8 */
+            *at ^= 0x10;
+            failed = sh_modpublish_check_cloud_meta(meta, meta_read, create, local, &hash);
+            IMG_CHECK(failed && strstr(failed, "declChecksum at +0xB8"));
+            *at = keep;
+        }
+    }
+
     /* The publish screens' FINISH step (modpublish.c eng_bind_finish, R-LB1 S7). */
     {
         sh_modpublish_finish_sites fs;
