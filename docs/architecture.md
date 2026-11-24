@@ -5455,9 +5455,10 @@ files the store does not hold); one the store lacks and this computer does not
 have is absent (S8); one moderation removed is removed.
 
 - A row whose mod is not on this computer (its folder is not built here)
-  refuses the publish with one sentence ("The map was not published: Snapmap+
-  cannot find the mod <name> on this computer. Build or install it in the Mods
-  tab, or remove its objects, then publish again."); no request is made for it.
+  does not stop the publish (the owner, 2026-11-18, the SPEC's S8 question:
+  the author proceeds). It publishes as it is, a local row, so players see
+  stand-ins for its objects; nothing of it is asked of the store or claimed,
+  and S8 below names its objects.
 - Bytes to send: the editor's own Yes/No over the screens asks "Publishing
   uploads 212 MB of mod content that the mod store does not have yet.
   Publish?" (S7, `sh_modpublish_compose_question`). No ends the hold and leaves
@@ -5467,7 +5468,8 @@ have is absent (S8); one moderation removed is removed.
 - Yes: a second job uploads the missing units (`modclaim_upload`, which sends
   each through `sh_cache_publish_unit`), the pacifier reading "Uploading mod
   content: 84 of 212 MB." (`sh_modpublish_progress_text`).
-- Absent or removed units do not stop the publish: one notice follows it,
+- Absent or removed units, and the objects of a row no folder here serves, do
+  not stop the publish: one notice follows it,
   "Players will see this map without the Marauder from Eternal Demons: its
   content is not on this computer or in the mod store." (S8), or "..., which
   was removed from the mod store." when only moderation removed units.
@@ -5608,8 +5610,7 @@ list grow and idStr assignment are bound from its own calls). The save then
 copies that model back to the editor. A tag that cannot be written is logged
 and the map publishes without it; a held publish whose save was not tagged
 logs that too. A refusal while the publish is
-held (a mod not on this computer, a refused upload, a question that cannot be
-shown, a busy worker) clears the pacifier and shows the sentence as the
+held (a refused upload, a question that cannot be shown, a busy worker) clears the pacifier and shows the sentence as the
 editor's toast (`mp_refuse`); the engine's `PublishStart` never ran, so nothing
 reached the map service. A No clears the pacifier and says nothing.
 

@@ -621,14 +621,23 @@ int main(int argc, char **argv)
         rows_pinned(1);
     }
 
-    printf("-- a mod that is not on this computer refuses the publish\n");
+    /* The owner (2026-11-18, the SPEC's S8 question): the author proceeds. A local row no folder here serves publishes
+     * as it is, players see stand-ins for its objects, and S8 is the one notice; nothing of it is claimed (R-LV9 check
+     * 4 was refused with "cannot find the mod"). */
+    printf("-- a mod that is not on this computer publishes with S8, its row local and nothing of it claimed\n");
     {
-        int starts = F.starts, plans = g_fc.plans;
+        int starts = F.starts, plans = g_fc.plans, claims = g_fc.claims, queued = g_fc.queued;
+        F.toast[0] = 0;
+        g_menu_notice[0] = 0;
         rows_local();
         publish(0);
-        CHECK(F.starts == starts && g_fc.plans == plans && !F.busy_on);
-        CHECK(!strcmp(F.toast, "The map was not published: Snapmap+ cannot find the mod Hell Guards on this computer. "
-                               "Build or install it in the Mods tab, or remove its objects, then publish again."));
+        CHECK(F.starts == starts + 1 && g_fc.plans == plans + 1 && !sh_modpublish_holding() && !F.toast[0]);
+        CHECK(!strcmp(g_menu_notice, "Players will see this map without the Hellguard from Hell Guards: its content is "
+                                     "not on this computer or in the mod store."));
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc4", "rev1");
+        PUMP_UNTIL(idle_all());
+        CHECK(g_fc.claims == claims && g_fc.queued == queued);   /* no unit: nothing is claimed or queued */
         rows_pinned(1);
     }
 

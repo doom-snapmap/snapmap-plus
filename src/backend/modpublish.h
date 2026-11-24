@@ -7,11 +7,12 @@
  *                 it lacks is sized. Bytes to send: "Publishing uploads 212 MB of mod content that the mod store does
  *                 not have yet. Publish?" (S7), in the editor's own dialog over the screens; No leaves the author on
  *                 FINISH. Yes: the units go up with progress on the editor's pacifier. Then the screens close and the
- *                 engine's PublishStart runs. A row whose mod is not on this computer refuses the publish with one
- *                 sentence; a busy store past two minutes lets it go on, queued (N27).
+ *                 engine's PublishStart runs. A row whose mod is not on this computer publishes local, players see
+ *                 stand-ins for its objects, and S8 names them; a busy store past two minutes lets it go on, queued
+ *                 (N27).
  *   save          the publish's save pins a copy of its rows to the prepared units (sh_modpublish_pin_save, bound
  *                 as modmanifest.h's pin step): the text the engine publishes (the cloud save's read of the slot,
- *                 sh_modpublish_cloud_text) names units only. The open map and its slot keep their own rows. The
+ *                 sh_modpublish_cloud_text) names units, but for a row no folder here serves, which stays local. The open map and its slot keep their own rows. The
  *                 SerializeToJson detour (rawmap.c) reports the final text.
  *   PublishAfterSave  a text over the service bound (10,485,760 bytes) or an unreadable mod list is refused through
  *                 the engine's own PublishFail.

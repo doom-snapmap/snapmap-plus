@@ -469,7 +469,8 @@ typedef struct mp_job {
     volatile LONG done;
     int code;                                  /* MODNET_OK or the failure */
     char *why;                                 /* the failure, for the log (malloc'd) */
-    char *unbuilt;                             /* prepare: the first row whose folder is not built (its name) */
+    unsigned char *unbuilt;                    /* prepare: per row, 1 when it is local and no folder here serves it */
+    size_t nunbuilt;                           /* prepare: those rows (S8: they publish as they are, local) */
     int made_key;                              /* the key was made by this job (the first publish) */
     char *after;                               /* prepare: S8 or the removed sentence, said after the publish */
     unsigned long long done_bytes, total_bytes;   /* upload progress, written by the worker */
@@ -546,17 +547,34 @@ static void mp_asked_one(void *context, const char *unit, const char *root, cons
 
 /* The objects of the plan players will not get, named as the load notices name them: "Players will see this map
  * without the Marauder from Eternal Demons: its content is not on this computer or in the mod store." (S8), or "...,
- * which was removed from the mod store." (moderation). Absent units first: they are the author's to fix. */
+ * which was removed from the mod store." (moderation). Absent units first: they are the author's to fix; with them
+ * the objects of a local row no folder here serves (the owner, 2026-11-18: the author proceeds, players see
+ * stand-ins). */
 static char *mp_missing_sentence(const mp_job *job)
 {
     sh_cache_absent *a;
     char **names;
     size_t n = 0, i, r, k;
-    int removed_only = !job->plan.absent;
+    int removed_only = !job->plan.absent && !job->nunbuilt;
     char *subject, *out = NULL;
-    if (!(a = (sh_cache_absent *)calloc(job->plan.n + 1, sizeof *a)) || !(names = (char **)calloc(job->plan.n + 1, sizeof *names))) {
+    size_t cap = job->plan.n + 1;
+    for (r = 0; job->unbuilt && r < job->rows.count; r++)
+        if (job->unbuilt[r]) cap += job->rows.rows[r].name_count + 1;
+    if (!(a = (sh_cache_absent *)calloc(cap, sizeof *a)) || !(names = (char **)calloc(cap, sizeof *names))) {
         free(a);
         return NULL;
+    }
+    for (r = 0; job->unbuilt && r < job->rows.count; r++) {
+        const sh_modmanifest_row *row = &job->rows.rows[r];
+        const char *mod = sh_modmanifest_row_name(row)[0] ? sh_modmanifest_row_name(row) : "a mod";
+        if (!job->unbuilt[r]) continue;
+        /* the row's placed objects; a map-level row with none is the mod itself ("without Tyrant") */
+        for (k = 0; k < (row->name_count ? row->name_count : 1); k++) {
+            names[n] = sh_cache_object_name(row->name_count ? row->names[k] : "*");
+            a[n].object = names[n] ? names[n] : "object";
+            a[n].mod = mod;
+            n++;
+        }
     }
     for (i = 0; i < job->plan.n; i++) {
         int want = removed_only ? job->plan.state[i] == MODCLAIM_REMOVED
@@ -607,14 +625,23 @@ static int mp_prepare(mp_job *job, const modnet_io *io)
         memset(&r, 0, sizeof r);
         if (!row->pinned && _stricmp(row->salt, SH_MODMANIFEST_PRODUCT)) {
             int state = sh_modpin_row(row, NULL, 0, NULL, &r);
-            if (state == SH_MODPIN_ABSENT && !job->unbuilt)
-                job->unbuilt = sh_text(sh_modmanifest_row_name(row)[0] ? sh_modmanifest_row_name(row) : "a mod");
+            /* No folder here serves it: it publishes local, and players see stand-ins for its objects (S8). */
+            if (state == SH_MODPIN_ABSENT) {
+                if (!job->unbuilt && !(job->unbuilt = (unsigned char *)calloc(job->rows.count, 1))) {
+                    free(r.why);
+                    free(units);
+                    return MODNET_E_NOMEM;
+                }
+                job->unbuilt[i] = 1;
+                job->nunbuilt++;
+                mp_logf("MODS: publish: %s: the row publishes local; players see stand-ins for its objects (S8)",
+                        r.why ? r.why : "a row's folder is not built here");
+            }
             free(r.why);
         }
         for (k = 0; row->pinned && k < row->unit_count; k++)
             if (!mp_units_add(&units, &n, &cap, row->units[k])) { free(units); return MODNET_E_NOMEM; }
     }
-    if (job->unbuilt) { free(units); return MODNET_OK; }
     {
         const char **list = (const char **)calloc(n ? n : 1, sizeof *list);
         if (!list) { free(units); return MODNET_E_NOMEM; }
@@ -623,7 +650,7 @@ static int mp_prepare(mp_job *job, const modnet_io *io)
         free((void *)list);
     }
     free(units);
-    if (code == MODNET_OK && (job->plan.absent || job->plan.removed)) job->after = mp_missing_sentence(job);
+    if (code == MODNET_OK && (job->plan.absent || job->plan.removed || job->nunbuilt)) job->after = mp_missing_sentence(job);
     return code;
 }
 
@@ -1701,15 +1728,6 @@ static void mp_prepared(void)
     h->job = NULL;
     h->started = 0;
     h->waited = 0;
-    if (job->unbuilt) {
-        char *line = sh_textf("The map was not published: Snapmap+ cannot find the mod %s on this computer. Build or "
-                              "install it in the Mods tab, or remove its objects, then publish again.", job->unbuilt);
-        mp_job_free(job);
-        mp_refuse(line ? line : "The map was not published: one of its mods is not on this computer.",
-                  "a row's folder is not built here");
-        free(line);
-        return;
-    }
     if (job->code != MODNET_OK) {
         if (modnet_transient(job->code)) {
             mp_logf("MODS: publish: the mod store did not answer (%s); the publish goes on and its claim is queued",
