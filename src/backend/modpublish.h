@@ -9,8 +9,8 @@
  *                 editor's pacifier. Then the engine's PublishStart runs. A row whose mod is not on this computer
  *                 refuses the publish with one sentence; a busy store past two minutes lets it go on, queued (N27).
  *   save          the publish's save writes its rows pinned to the prepared units (sh_modpublish_pin_save, bound as
- *                 modmanifest.h's pin step): the cloud-saved text the engine publishes names units only. The open map
- *                 keeps its own rows. The SerializeToJson detour (rawmap.c) reports the final text.
+ *                 modmanifest.h's pin step): the saved text the engine publishes names units only, and the open map
+ *                 takes those pinned rows (a published map is pinned). The SerializeToJson detour (rawmap.c) reports the final text.
  *   PublishAfterSave  a text over the service bound (10,485,760 bytes) or an unreadable mod list is refused through
  *                 the engine's own PublishFail.
  *   PublishFeedPost   (the item id known) the save's units are claimed for the item (modclaim.h); a republish replaces

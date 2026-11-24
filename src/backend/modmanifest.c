@@ -2288,8 +2288,11 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
         if (ctx.list.rows[i].name_count > 1)
             qsort(ctx.list.rows[i].names, ctx.list.rows[i].name_count, sizeof(char *), mm_cstr_cmp);
     {
-        /* A publish's save writes its rows pinned (modpin.h, bound by modpublish.c while a publish is armed); the open
-         * map keeps the rows it has, so its session goes on serving what it served. */
+        /* A publish's save writes its rows pinned (modpin.h, bound by modpublish.c while a publish is armed). The open
+         * map then takes the pinned rows it wrote, composed and declared as a load of the saved map composes and
+         * declares them: a published map is pinned to its units (owner ruling 2026-11-18, Q1), so its session plays
+         * what players play, a reopen changes nothing, and Update is offered as soon as the folder's build differs
+         * (R-LB1 F6). Any other save keeps the open map's own rows: an unpublished map follows the author's folders. */
         sh_modmanifest_pin_fn pin = g_pin;
         sh_modmanifest_list pinned;
         size_t k;
@@ -2301,6 +2304,15 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
             use_pinned = k == ctx.list.count && pin(&pinned, json, length) > 0;
         }
         out = sh_modmanifest_write(json, length, use_pinned ? &pinned : &ctx.list, &written, err, sizeof err);
+        if (out && use_pinned) {
+            sh_modmanifest_content_for(json, length, &pinned);
+            if (scope) scope(&pinned, NULL, 0, SH_MODSERVE_AT_SAVE);
+            sh_modmanifest_list_free(&ctx.list);
+            ctx.list = pinned;   /* the open map's record below */
+            memset(&pinned, 0, sizeof pinned);
+            backend_log("MODS: save manifest: the publish's save pinned the rows; the open map plays its pinned units "
+                        "from now on, as a reopen would");
+        }
         sh_modmanifest_list_free(&pinned);
     }
     described = mm_describe(&ctx.list);

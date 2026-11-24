@@ -5519,8 +5519,13 @@ rows pinned: `sh_modpublish_pin_save` is bound as the manifest's pin step
 the units of the objects the save places, from the walk the preparation did (a
 lookup, not another walk). A row that cannot be pinned is logged, and
 `g_save.local` rows left local are logged at the save ("players get stand-ins
-for them"). The open map keeps its own rows; only the cloud-saved text the
-engine publishes names units. A publish whose pin step was not reached in 30
+for them"). The open map then takes the pinned rows that save wrote, composed
+and declared as a load of the saved map composes and declares them
+(`sh_modmanifest_on_save`). A published map is pinned to its units (owner
+ruling 2026-11-18, Q1): its session plays what players play, a reopen changes
+nothing, and the Mods tab offers Update as soon as the folder's build differs.
+Every other save keeps the open map's own rows, so an unpublished map follows
+the author's folders. A publish whose pin step was not reached in 30
 seconds logs that its rows were not pinned. The editor leaving, or a save while
 a publish is held, abandons the hold.
 

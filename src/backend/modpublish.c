@@ -10,7 +10,7 @@
  *                 Publish?" (S7). No: the publish never starts.
  *   UPLOADING     the missing units go up, with "Uploading mod content: 84 of 212 MB." on the pacifier.
  *   (resume)      the engine's PublishStart runs; its save pins the map's rows (sh_modmanifest_set_pin), so the
- *                 cloud-saved text the engine publishes names units only. The open map keeps its own rows.
+ *                 saved text names units only, and the open map takes those pinned rows, as a reopen would.
  *   PublishAfterSave  the text bound (10 MB) and an unreadable mod list are refused here, as before.
  *   PublishFeedPost   (the item id known) the save's units are claimed for the item on the worker (a republish
  *                 replaces its set); a claim the store could not take is queued and retried at every start.

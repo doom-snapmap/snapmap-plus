@@ -106,6 +106,19 @@ void sh_cache_copy_free(sh_cache_copy *copy)
 #include "modpin.h"
 static int g_row_differs;
 int sh_modpin_row_differs(const struct sh_modmanifest_row *row) { (void)row; return g_row_differs; }
+/* A publish's pin step (modpublish.c sh_modpublish_pin_save): every local row of the save pinned to one unit. */
+static int g_pins;
+static int t_publish_pin(sh_modmanifest_list *rows, const char *json, size_t length)
+{
+    static const char UNIT[] = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const char *roots[1] = { "entities/imp_copy" }, *units[1] = { UNIT };
+    size_t i;
+    (void)json; (void)length;
+    g_pins++;
+    for (i = 0; i < rows->count; i++)
+        if (!rows->rows[i].pinned && !sh_modmanifest_row_pin(&rows->rows[i], roots, units, 1)) return 0;
+    return 1;
+}
 char *sh_cache_storage_line(void) { return _strdup("Map content: 0 KB for 0 maps."); }
 int sh_cache_sweep_kept(int drop_played, sh_cache_sweep_stats *out) { return sh_cache_sweep(drop_played, NULL, 0, out); }
 static int g_sweeps_async;
@@ -1496,6 +1509,34 @@ int main(int argc, char **argv)
             doc = list_doc();
             CHECK(!has(doc, "\"update\":\"This map uses another version"));   /* nothing left to update */
             free(doc);
+
+            /* R-LB1 F6: the author publishes the map in this session. The publish's save pins its rows, and the open
+             * map takes them, as a reopen would: when the folder's build then differs, Update is offered at once. */
+            {
+                char *saved;
+                size_t sl = 0;
+                g_row_differs = 1;
+                doc = list_doc();
+                CHECK(!has(doc, "\"update\":\"This map uses another version"));   /* local: it follows the folder */
+                free(doc);
+                sh_modmanifest_set_pin(t_publish_pin);
+                saved = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &sl);
+                sh_modmanifest_set_pin(NULL);
+                CHECK(saved != NULL && g_pins == 1);
+                memset(&now, 0, sizeof now);
+                CHECK(sh_modmanifest_current(&now) == 1 && now.rows[0].pinned);
+                sh_modmanifest_list_free(&now);
+                doc = list_doc();
+                CHECK(has(doc, "\"update\":\"This map uses another version of R2 Imp copy than the one you have.\""));
+                free(doc);
+                /* the folder serves the same bytes: nothing to offer */
+                g_row_differs = 0;
+                doc = list_doc();
+                CHECK(!has(doc, "\"update\":\"This map uses another version"));
+                free(doc);
+                /* (a later plain save, with the composition served: prefab_mods_test published_map_follows_rebuild) */
+                if (saved) HeapFree(GetProcessHeap(), 0, saved);
+            }
             HeapFree(GetProcessHeap(), 0, ptext);
         }
         g_placed_count = -1;

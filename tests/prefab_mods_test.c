@@ -851,6 +851,165 @@ static void absent_local_row_stands_in(void)
     sh_modmanifest_reset();
 }
 
+/* The publish's pin step as modpublish.c binds it (sh_modpublish_pin_save): every local row of the save pinned from
+ * its folder's current build through the real unit walk. */
+static int g_publish_pins;
+static int publish_pin(sh_modmanifest_list *rows, const char *json, size_t length)
+{
+    size_t i;
+    g_publish_pins++;
+    for (i = 0; i < rows->count; i++) {
+        sh_modpin_row_result res;
+        int st;
+        if (rows->rows[i].pinned) continue;
+        memset(&res, 0, sizeof res);
+        st = sh_modpin_row(&rows->rows[i], json, length, NULL, &res);
+        free(res.why);
+        if (st != SH_MODPIN_PINNED && st != SH_MODPIN_WHOLE) return 0;
+    }
+    return 1;
+}
+
+/* The map scope as modui.c binds it (mu_scope_hook, mu_listing_set): a load's or a save's rows set the listing the
+ * serving index serves the open map from. */
+static void t_scope(const sh_modmanifest_list *rows, const char *const *names, size_t name_count, int when)
+{
+    char (*hashes)[SH_MODMANIFEST_HASH_CAP] = NULL;
+    const char *list[16];
+    int n = sh_modmanifest_listing(rows, names, name_count, &hashes), i;
+    (void)when;
+    for (i = 0; i < n && i < 16; i++) list[i] = hashes[i];
+    (void)sh_modserve_scope_set(list, n < 0 ? 0 : n > 16 ? 16 : n, 1);
+    free(hashes);
+}
+static int t_scope_armed(void) { return 1; }
+
+/* The installed folder of `salt`'s mod, or "" (absolute). */
+static void folder_of(const char *salt, char *out, size_t cap)
+{
+    sh_ms_list l;
+    size_t i;
+    out[0] = 0;
+    if (!sh_ms_enumerate(&l)) return;
+    for (i = 0; i < l.count; i++)
+        if (!_stricmp(l.items[i].salt, salt) && l.items[i].folder) strcpy_s(out, cap, l.items[i].folder);
+    sh_ms_list_free(&l);
+}
+
+/* R-LB1 F6, owner ruling 2026-11-18 Q1 (a published map is pinned to its units): with the real unit walk, serving index
+ * and content cache, a row pinned from a folder compares equal until a file of its object changes and the folder is
+ * built again, and then differs, with no reload. A publish's save in the session makes the open map take the pinned
+ * rows it wrote, still served, so that comparison (Update) follows the rebuild in the same session; a later plain save
+ * keeps them pinned. */
+static void published_map_follows_rebuild(const char *tmp, const char *store)
+{
+    static const char MAP_PUB[] =
+        "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/pubtyr01/tyrant\","
+        "\"name\":\"\",\"state\":{}},\"uniqueId\":0}]}";
+    static const char TYRANT_V2[] = "{\r\n\tinherit = \"snapmaps/doors/industrial_door_horizontal\";\r\n}";
+    char src[MAX_PATH], folder[MAX_PATH * 2], *saved, *loaded, *cause = NULL, err[192];
+    sh_modmanifest_row mod, row;
+    sh_modmanifest_list rows, cur, back;
+    sh_modpin_row_result res;
+    sh_modserve_bundle_ref ref;
+    size_t n = 0, ln = 0;
+    char *text;
+    int scoped;
+    printf("-- a row pinned from a folder differs once the folder is built again; a publish in the session pins the open map (F6)\n");
+    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\pubtyr-src", tmp);
+    CreateDirectoryA(src, NULL);
+    CHECK(install_mod(src, "pubtyr01", "Pub Tyrant", "entities\\tyrant.decl", DOOR_DECL, &mod));
+    CHECK(sh_modserve_index_build(store) >= 1);
+    folder_of("pubtyr01", folder, sizeof folder);
+    CHECK(folder[0] != 0);
+    sh_modmanifest_set_content(sh_cache_on_load);
+    sh_cache_set_rescan(sh_modserve_index_rescan);
+    scoped = sh_modserve_scope_enabled();
+    sh_modserve_scope_enable(1);
+    sh_modmanifest_set_scope(t_scope, t_scope_armed);
+
+    /* The author's map, unpublished: a local row of the installed build, served by the folder. */
+    memset(&rows, 0, sizeof rows);
+    row = mod;
+    row.name = NULL;
+    CHECK(sh_modmanifest_row_set_name(&row, "Pub Tyrant") && sh_modmanifest_row_add_name(&row, "mods/pubtyr01/tyrant"));
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    sh_modmanifest_row_free(&row);
+    text = sh_modmanifest_write(MAP_PUB, sizeof MAP_PUB - 1, &rows, &ln, err, sizeof err);
+    sh_modmanifest_list_free(&rows);
+    CHECK(text != NULL);
+    if (!text) goto done;
+    loaded = sh_modmanifest_prepare_load(text, ln, NULL);
+    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+    memset(&cur, 0, sizeof cur);
+    CHECK(sh_modmanifest_current(&cur) == 1 && !cur.rows[0].pinned);
+    sh_modmanifest_list_free(&cur);
+
+    /* The real comparison: pinned from the folder, it is equal. */
+    memset(&row, 0, sizeof row);
+    row = mod;
+    row.name = NULL;
+    CHECK(sh_modmanifest_row_add_name(&row, "mods/pubtyr01/tyrant"));
+    memset(&res, 0, sizeof res);
+    CHECK(sh_modpin_row(&row, NULL, 0, NULL, &res) == SH_MODPIN_PINNED && row.pinned);
+    free(res.why);
+    CHECK(sh_modpin_row_differs(&row) == 0);
+
+    /* The publish's save: the pinned rows are written and the open map takes them, served by their composition. */
+    g_publish_pins = 0;
+    sh_modmanifest_set_pin(publish_pin);
+    saved = sh_modmanifest_on_save(text, ln, &n);
+    sh_modmanifest_set_pin(NULL);
+    CHECK(saved && g_publish_pins == 1);
+    memset(&back, 0, sizeof back);
+    CHECK(saved && sh_modmanifest_read(saved, n, &back, NULL) == 1 && back.rows[0].pinned);
+    memset(&cur, 0, sizeof cur);
+    CHECK(sh_modmanifest_current(&cur) == 1 && cur.rows[0].pinned);
+    CHECK(cur.count && back.count && !strcmp(cur.rows[0].build, back.rows[0].build));
+    memset(&ref, 0, sizeof ref);
+    CHECK(cur.count && sh_modserve_row_build(&cur.rows[0], &ref) && ref.place && !strcmp(ref.place, SH_MODSERVE_CONTENT));
+    sh_modserve_bundle_ref_free(&ref);
+    CHECK(cur.count && sh_modserve_row_served_for(&cur.rows[0], NULL, &cause) == SH_MODSERVE_ROW_SERVED);
+    free(cause);
+    cause = NULL;
+    CHECK(cur.count && sh_modpin_row_differs(&cur.rows[0]) == 0);
+    sh_modmanifest_list_free(&back);
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+
+    /* The author changes the Tyrant in the folder and presses Refresh: the folder is built again. */
+    mt_write(folder, "entities\\tyrant.decl", TYRANT_V2);
+    CHECK(sh_ms_sync(NULL, NULL));
+    CHECK(sh_modserve_index_rescan() >= 1);
+    CHECK(sh_modpin_row_differs(&row) == 1);                         /* the real comparison, no reload */
+    CHECK(cur.count && sh_modpin_row_differs(&cur.rows[0]) == 1);    /* the open map's row: Update is offered */
+    sh_modmanifest_list_free(&cur);
+    memset(&cur, 0, sizeof cur);
+    CHECK(sh_modmanifest_current(&cur) == 1 && cur.rows[0].pinned &&
+          sh_modserve_row_served_for(&cur.rows[0], NULL, &cause) == SH_MODSERVE_ROW_SERVED);   /* still served */
+    free(cause);
+    cause = NULL;
+
+    /* A later plain save keeps the pinned row as it is: no pin step runs, the build does not move. */
+    saved = sh_modmanifest_on_save(text, ln, &n);
+    memset(&back, 0, sizeof back);
+    CHECK(saved && sh_modmanifest_read(saved, n, &back, NULL) == 1 && back.rows[0].pinned && cur.count &&
+          !strcmp(back.rows[0].build, cur.rows[0].build) && g_publish_pins == 1);
+    sh_modmanifest_list_free(&back);
+    sh_modmanifest_list_free(&cur);
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    HeapFree(GetProcessHeap(), 0, text);
+done:
+    sh_modmanifest_row_free(&row);
+    sh_modmanifest_row_free(&mod);
+    sh_modmanifest_set_content(NULL);
+    sh_cache_set_rescan(NULL);
+    sh_modmanifest_set_scope(NULL, NULL);
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(scoped);
+    sh_modmanifest_reset();
+    sh_cache_local_changed();   /* the local folders' snapshot is read again, as the next map load reads it */
+}
+
 /* Add to my mods end to end: a played map's row staged from the content cache, made a mod of the player's own with a
  * new salt by the store, built by the scan, and served from the root. */
 static void add_to_my_mods_end_to_end(const char *tmp, const char *store)
@@ -972,6 +1131,7 @@ static void copy_a_demon_whose_binary_spells(const char *tmp, const char *store)
     free(mtext);
     /* Staged, copied with a new salt, built by the scan. */
     CHECK(sh_cache_stage_copy(row.build, &copy, &why) == 1 && !why);
+    if (why) fprintf(stderr, "stage copy: %s\n", why);
     CHECK(sh_ms_add_copy(copy.dir, copy.modjson, copy.modjson_len, copy.salt, copy.name, &made, &cause) == 1);
     if (cause) fprintf(stderr, "add copy: %s\n", cause);
     sh_cache_copy_free(&copy);
@@ -1865,6 +2025,7 @@ int main(int argc, char **argv)
     zip(tmp, libA, storeA, &door);
     one_demon_of_a_pack(tmp, storeA);
     absent_local_row_stands_in();
+    published_map_follows_rebuild(tmp, storeA);
     add_to_my_mods_end_to_end(tmp, storeA);
     copy_a_demon_whose_binary_spells(tmp, storeA);
 
