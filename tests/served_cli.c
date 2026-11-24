@@ -160,7 +160,27 @@ int main(int argc, char **argv)
     }
     sh_modprog_reset();
     sh_modserve_set_material_filter(sh_look_compile);
-    if (sh_modserve_index_build(root) < 0) { fprintf(stderr, "the serving index was refused\n"); return 1; }
+    {
+        /* The launch preload's own share (modserve_engine.c sh_modserve_launch_preload): the index over the root and
+         * the plan of every editor row and its closure, as at the hub with no map open. The engine's registration of
+         * the plan's steps is not offline; its time is in the live logs. */
+        LARGE_INTEGER fq, t0, t1, t2;
+        sh_modserve_plan plan;
+        int steps;
+        QueryPerformanceFrequency(&fq);
+        QueryPerformanceCounter(&t0);
+        if (sh_modserve_index_build(root) < 0) { fprintf(stderr, "the serving index was refused\n"); return 1; }
+        QueryPerformanceCounter(&t1);
+        sh_modserve_scope_enable(1);
+        (void)sh_modserve_scope_set(NULL, 0, 0);
+        steps = sh_modserve_plan_editor(&plan);
+        QueryPerformanceCounter(&t2);
+        printf("served_cli: index %.1f ms; editor rows plan (the launch preload's product share) %.1f ms, %d step(s)\n",
+               (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart,
+               (double)(t2.QuadPart - t1.QuadPart) * 1000.0 / (double)fq.QuadPart, steps);
+        if (steps >= 0) sh_modserve_plan_free(&plan);
+        sh_modserve_scope_enable(0);
+    }
     for (i = 0; i < nreq; i++) {
         bank_find q = { reqs[i] + 1, NULL };
         if (reqs[i][0] != 1) continue;
