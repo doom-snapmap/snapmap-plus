@@ -115,13 +115,17 @@ static sh_script_engine g_engine_fake;
 static int o_write(void *c, void *addr, const void *in, size_t n) { (void)c; memcpy(addr, in, n); return 1; }
 static const char *o_class(void *c, void *ent) { (void)c; (void)ent; return "idAI2"; }
 static const char *o_res_name(void *c, const void *object) { (void)c; return ((const decl *)object)->name; }
-static const sh_script_reflect_ops k_rops = { NULL, o_class, o_write, NULL, NULL, o_res_name, NULL, NULL, NULL, NULL };
+static void *o_res_find(void *c, const char *cls, const char *name);
+static const sh_script_reflect_ops k_rops = { NULL, o_class, o_write, NULL, NULL, o_res_name, o_res_find, NULL, NULL, NULL };
 
 /* ---- the game ---- */
 static char g_signals[1024];
-static struct { const char *name; char value[64]; int locked; } g_cvars_fake[] = {
-    { "g_gravity", "1066", 0 }, { "ai_name", "doom", 0 }, { "g_scale", "0.5", 0 }, { "fs_basepath", "D:", 1 },
+static struct { const char *name; char value[64]; int locked; const char *def; } g_cvars_fake[] = {
+    { "g_gravity", "1066", 0, "1066" }, { "ai_name", "doom", 0, "" }, { "g_scale", "0.5", 0, "0.5" },
+    { "fs_basepath", "D:", 1, "D:" },
 };
+static char g_journal[4096];
+static int g_journaled;
 static const char *g_decl_name_of(void *d) { return ((decl *)d)->name; }
 static int g_signal_number(const char *event)
 {
@@ -135,12 +139,30 @@ static int g_signal_fire(void *ent, int number, void *activator)
     strcat_s(g_signals, sizeof g_signals, line);
     return 1;
 }
-static int g_cvar_get(const char *name, char *out, size_t cap)
+static char *g_cvar_get(const char *name)
 {
     size_t i;
     for (i = 0; i < sizeof g_cvars_fake / sizeof g_cvars_fake[0]; i++)
-        if (!strcmp(g_cvars_fake[i].name, name)) { strcpy_s(out, cap, g_cvars_fake[i].value); return 1; }
-    return 0;
+        if (!strcmp(g_cvars_fake[i].name, name)) return _strdup(g_cvars_fake[i].value);
+    return NULL;
+}
+static char *g_cvar_default(const char *name)
+{
+    size_t i;
+    for (i = 0; i < sizeof g_cvars_fake / sizeof g_cvars_fake[0]; i++)
+        if (!strcmp(g_cvars_fake[i].name, name)) return _strdup(g_cvars_fake[i].def);
+    return NULL;
+}
+static void g_cvar_journal(const char *json)
+{
+    g_journaled++;
+    strcpy_s(g_journal, sizeof g_journal, json ? json : "");
+}
+static void cvar_put(const char *name, const char *value)
+{
+    size_t i;
+    for (i = 0; i < sizeof g_cvars_fake / sizeof g_cvars_fake[0]; i++)
+        if (!strcmp(g_cvars_fake[i].name, name)) strcpy_s(g_cvars_fake[i].value, sizeof g_cvars_fake[i].value, value);
 }
 static int g_cvar_set(const char *name, const char *value)
 {
@@ -159,7 +181,8 @@ static void *g_decl(const char *type, const char *name)
     return !strcmp(name, g_enc.name) ? &g_enc : !strcmp(name, g_enc2.name) ? &g_enc2 : NULL;
 }
 static const char *g_decl_class(const char *type) { return !strcmp(type, "snapAIEncounter") ? "idDeclSnapAIEncounter" : NULL; }
-static const sh_script_game_ops k_gops = { g_decl_name_of, g_signal_number, g_signal_fire, g_cvar_get, g_cvar_set, g_decl, g_decl_class };
+static const sh_script_game_ops k_gops = { g_decl_name_of, g_signal_number, g_signal_fire, g_cvar_get, g_cvar_set, g_decl,
+                                           g_decl_class, g_cvar_default, g_cvar_journal };
 
 static int t_ent(lua_State *L)
 {
@@ -320,6 +343,39 @@ static void test_cvars(void)
     sh_script_map_end();                                 /* put back as they were before the map */
     CHECK(!strcmp(g_cvars_fake[0].value, "1066") && !strcmp(g_cvars_fake[1].value, "doom") && !strcmp(g_cvars_fake[2].value, "0.5"));
 
+    /* SPEC 5.23, who owns a cvar's restore: one the player (or the console, or a mod's requirement) changed after the
+     * script's set is theirs and stays; one still at the script's value is put back */
+    run("api = 1\nconsole_variable('g_gravity', 400) console_variable('ai_name', 'tyrant')\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(strstr(g_journal, "\"name\":\"g_gravity\",\"was\":\"1066\",\"set\":\"400\"") != NULL);
+    CHECK(strstr(g_journal, "\"name\":\"ai_name\",\"was\":\"doom\",\"set\":\"tyrant\"") != NULL);
+    cvar_put("g_gravity", "800");                        /* the player's own change, after the script's */
+    sh_script_map_end();
+    CHECK(!strcmp(g_cvars_fake[0].value, "800") && !strcmp(g_cvars_fake[1].value, "doom"));
+    CHECK(g_journal[0] == 0);                            /* nothing owed once the map ended */
+    cvar_put("g_gravity", "1066");
+
+    /* a name of any length is the game's to look up (no cap of the product's own) */
+    {
+        char body[1200];
+        char longname[1000];
+        memset(longname, 'x', sizeof longname - 1);
+        longname[sizeof longname - 1] = 0;
+        _snprintf_s(body, sizeof body, _TRUNCATE, "api = 1\nconsole_variable('%s')\n", longname);
+        refused(body, "found no cvar named xxxxxxxx");
+    }
+
+    /* a quit or crash mid-map: the journal it left puts back what the game kept in its saved settings (a value that is
+     * not the cvar's default) and leaves alone what the game did not keep */
+    cvar_put("g_gravity", "400");                        /* saved settings: the script's value came back with the game */
+    cvar_put("g_scale", "0.5");                          /* not saved: back at its default, not the script's 2 */
+    CHECK(sh_script_game_cvar_recover("{\"format\":1,\"cvars\":[{\"name\":\"g_gravity\",\"was\":\"900\",\"set\":\"400\"},"
+                                      "{\"name\":\"g_scale\",\"was\":\"0.25\",\"set\":\"2\"},"
+                                      "{\"name\":\"g_nope\",\"was\":\"1\",\"set\":\"2\"}]}") == 1);
+    CHECK(!strcmp(g_cvars_fake[0].value, "900") && !strcmp(g_cvars_fake[2].value, "0.5"));
+    CHECK(sh_script_game_cvar_recover(NULL) == 0 && sh_script_game_cvar_recover("not json") == 0);
+    cvar_put("g_gravity", "1066");
+
     refused("api = 1\nconsole_variable('g_nope')\n", "\"console_variable\" found no cvar named g_nope in the game");
     refused("api = 1\nconsole_variable('fs_basepath', 'C:')\n", "\"console_variable\" cannot set fs_basepath: the game only takes it when it starts");
     refused("api = 1\nconsole_variable('g_gravity', {})\n", "\"console_variable\" needs the value as a number, true or false, or text, got a table");
@@ -351,6 +407,14 @@ static void test_decls(void)
     refused("api = 1\ndecl('snapAIEncounter', 'enc/tyrant'):set('valu', 1)\n",
             "\"set\" could not write \"valu\": idDeclSnapAIEncounter has no field named valu");
     CHECK(g_enc.value == 9);
+}
+
+/* The restore finds a decl again by its class and name (SPEC 5.23). */
+static void *o_res_find(void *c, const char *cls, const char *name)
+{
+    (void)c;
+    if (strcmp(cls, "idDeclSnapAIEncounter")) return NULL;
+    return !strcmp(name, g_enc.name) ? (void *)&g_enc : !strcmp(name, g_enc2.name) ? (void *)&g_enc2 : NULL;
 }
 
 static void *h_resolve(uint32_t id) { return f_resolve(id); }

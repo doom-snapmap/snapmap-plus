@@ -305,6 +305,7 @@ int sh_script_hooks_reload(void)
 #include "script_api_reflect.h"
 #include "script_api_body.h"
 #include "script_api_game.h"
+#include "../modui.h"
 
 #define LOAD_SCREEN_RUNNING_BYTE 0x4B2   /* idLoadScreen thread: 1 while it draws (load_screen_stop.c) */
 #define EDITOR_ACTIVE_BYTE       0x09    /* idSnapEditorLocal: set while editing, clear during every SnapMap Play */
@@ -1119,7 +1120,7 @@ int sh_script_hooks_install(const sig_result *results, size_t count, const uint8
     if (!sh_companions_spawn_ready())
         sh_feature_off(SH_FEATURE_SCRIPT_SPAWNS, "the game's spawn function is not the expected one in this executable, "
                        "so only entities placed in the map reach scripts");
-    sh_script_source_install();
+    sh_script_source_install(sh_modui_scripted_maps_allowed);
     sh_companions_set_spawn_subscriber(sh_script_hooks_after_spawn, sh_script_hooks_spawn_wanted);
     (void)sh_load_screen_stop_add_map_end(sh_script_hooks_map_cancel);
     g_resolved = 1;

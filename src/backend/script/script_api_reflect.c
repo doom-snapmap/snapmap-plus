@@ -61,13 +61,53 @@ static int rd(const void *addr, void *out, size_t n)
     return g_host.read && g_host.read(g_host.ctx, addr, out, n);
 }
 
-/* What a script changed in an object that outlives the map (a decl): the
- * bytes or the text as they were, put back at map end, newest first. */
-typedef struct undo { void *addr; uint32_t n; uint8_t old[8]; char *text; } undo;
+/* What a script changed in an object that outlives the map (a decl, reached directly or through a pointer from an
+ * entity): put back at the map's end, newest first (SPEC-distribution 5.23, the restore rule). Each record names the
+ * object by its class and name, never by an address a re-parse can free, and the field by its path from that object;
+ * the restore finds both again. A field whose value is no longer what the script wrote belongs to whoever wrote it
+ * since, and is left as it is. */
+typedef struct undo {
+    char *cls, *name;          /* the anchor: the object's class and name (name NULL: an unnamed object, by address) */
+    const void *object;        /* the anchor's address, used only when it has no name */
+    char *path;                /* the field, from the anchor */
+    int kind;                  /* SH_RF_STR (texts), SH_RF_POINTER to a named resource (names), or bytes */
+    uint32_t n;
+    uint8_t was[8], now[8];    /* bytes */
+    char *was_text, *now_text; /* texts, or the names of the resources a pointer named (NULL: none) */
+} undo;
 static undo *g_undo;
-static int g_nundo, g_cundo, g_keep_undo;
+static int g_nundo, g_cundo;
 
-static undo *undo_add(void *addr)
+/* The write being made, while a set keeps its undo: the anchor and the path from it to the field being stored
+ * (extended as a table of fields or a list is stored field by field). */
+typedef struct undo_at { int on; const void *object; const char *cls; const char *name; char *path; size_t len, cap; } undo_at;
+static undo_at g_at;
+
+static int at_put(const char *s, size_t n)
+{
+    if (g_at.len + n + 1 > g_at.cap) {
+        size_t cap = g_at.cap ? g_at.cap : 64;
+        char *grown;
+        while (cap < g_at.len + n + 1) cap *= 2;
+        if (!(grown = (char *)realloc(g_at.path, cap))) return 0;
+        g_at.path = grown;
+        g_at.cap = cap;
+    }
+    memcpy(g_at.path + g_at.len, s, n);
+    g_at.len += n;
+    g_at.path[g_at.len] = 0;
+    return 1;
+}
+
+static char *dup_text(const char *s) { size_t n; char *d; if (!s) return NULL; n = strlen(s) + 1; d = (char *)malloc(n); if (d) memcpy(d, s, n); return d; }
+
+static void undo_free(undo *u)
+{
+    free(u->cls); free(u->name); free(u->path); free(u->was_text); free(u->now_text);
+    memset(u, 0, sizeof *u);
+}
+
+static undo *undo_add(int kind)
 {
     undo *u;
     if (g_nundo == g_cundo) {
@@ -77,38 +117,74 @@ static undo *undo_add(void *addr)
         g_undo = grown;
         g_cundo = cap;
     }
-    u = &g_undo[g_nundo++];
+    u = &g_undo[g_nundo];
     memset(u, 0, sizeof *u);
-    u->addr = addr;
+    u->kind = kind;
+    u->object = g_at.object;
+    u->cls = dup_text(g_at.cls);
+    u->name = g_at.name ? dup_text(g_at.name) : NULL;
+    u->path = dup_text(g_at.path ? g_at.path : "");
+    if (!u->cls || (g_at.name && !u->name) || !u->path) { undo_free(u); return NULL; }
+    g_nundo++;
     return u;
 }
+
+static void undo_drop_last(void) { if (g_nundo > 0) undo_free(&g_undo[--g_nundo]); }
+
+static int rd(const void *addr, void *out, size_t n);
+static int is_resource_class(const char *type);
 
 void sh_script_reflect_restore(void)
 {
     while (g_nundo > 0) {
         undo *u = &g_undo[--g_nundo];
-        if (u->text) {
-            if (g_ops.str_assign) g_ops.str_assign(g_ops.ctx, u->addr, u->text);
-            free(u->text);
-        } else if (g_ops.write) {
-            g_ops.write(g_ops.ctx, u->addr, u->old, u->n);
+        const void *obj = u->name ? (g_ops.resource_find ? g_ops.resource_find(g_ops.ctx, u->cls, u->name) : NULL)
+                                  : u->object;
+        sh_rf_loc loc;
+        char err[64];
+        if (obj && sh_rf_resolve(&g_host, obj, u->cls, u->path, &loc, err, sizeof err)) {
+            if (u->kind == SH_RF_STR) {
+                size_t len = 0;
+                char *cur = g_ops.str_read ? g_ops.str_read(g_ops.ctx, loc.addr, &len) : NULL;
+                if (cur && u->now_text && !strcmp(cur, u->now_text) && g_ops.str_assign)
+                    g_ops.str_assign(g_ops.ctx, (void *)loc.addr, u->was_text ? u->was_text : "");
+                free(cur);
+            } else if (u->kind == SH_RF_POINTER) {
+                const void *cur = NULL, *was = NULL;
+                const char *cur_name;
+                if (rd(loc.addr, (void *)&cur, sizeof cur)) {
+                    cur_name = cur && g_ops.resource_name ? g_ops.resource_name(g_ops.ctx, cur) : NULL;
+                    if ((!cur && !u->now_text) || (cur_name && u->now_text && !strcmp(cur_name, u->now_text))) {
+                        was = u->was_text && g_ops.resource_find ? g_ops.resource_find(g_ops.ctx, loc.type, u->was_text) : NULL;
+                        if ((was || !u->was_text) && g_ops.write) g_ops.write(g_ops.ctx, (void *)loc.addr, &was, sizeof was);
+                    }
+                }
+            } else {
+                uint8_t cur[8];
+                if (u->n <= sizeof cur && rd(loc.addr, cur, u->n) && !memcmp(cur, u->now, u->n) && g_ops.write)
+                    g_ops.write(g_ops.ctx, (void *)loc.addr, u->was, u->n);
+            }
+            sh_rf_loc_free(&loc);
         }
+        undo_free(u);
     }
 }
 
 static int wr(const void *addr, const void *in, size_t n)
 {
     if (!g_ops.write) return 0;
-    if (g_keep_undo) {
+    if (g_at.on) {
         undo *u;
         uint8_t old[8];
         if (n > sizeof old || !rd(addr, old, n)) return 0;
-        u = undo_add((void *)addr);
-        if (!u) return 0;
+        if (!(u = undo_add(0))) return 0;
         u->n = (uint32_t)n;
-        memcpy(u->old, old, n);
+        memcpy(u->was, old, n);
+        memcpy(u->now, in, n);
     }
-    return g_ops.write(g_ops.ctx, (void *)addr, in, n);
+    if (g_ops.write(g_ops.ctx, (void *)addr, in, n)) return 1;
+    if (g_at.on) undo_drop_last();
+    return 0;
 }
 
 static int read_int(const sh_rf_loc *loc, int is_signed, long long *out)
@@ -322,14 +398,20 @@ int sh_script_reflect_store(lua_State *L, const sh_rf_loc *loc, int idx, char *e
     }
     case SH_RF_STR:
         if (lua_type(L, idx) != LUA_TSTRING) { say(err, cap, "it takes text, not %s", lua_kind(L, idx)); return 0; }
-        if (g_keep_undo) {
+        if (g_at.on) {
             size_t len = 0;
             char *was = g_ops.str_read ? g_ops.str_read(g_ops.ctx, loc->addr, &len) : NULL;
-            undo *u = was ? undo_add((void *)loc->addr) : NULL;
-            if (!u) { free(was); say(err, cap, "the game's text there could not be read"); return 0; }
-            u->text = was;
+            undo *u = was ? undo_add(SH_RF_STR) : NULL;
+            if (!u || !(u->now_text = dup_text(lua_tostring(L, idx)))) {
+                if (u) undo_drop_last();
+                free(was);
+                say(err, cap, "the game's text there could not be read");
+                return 0;
+            }
+            u->was_text = was;
         }
         if (!g_ops.str_assign || !g_ops.str_assign(g_ops.ctx, (void *)loc->addr, lua_tostring(L, idx))) {
+            if (g_at.on) undo_drop_last();
             say(err, cap, "the game's text could not be changed in this session");
             return 0;
         }
@@ -347,7 +429,14 @@ int sh_script_reflect_store(lua_State *L, const sh_rf_loc *loc, int idx, char *e
                 lua_pop(L, 2);
                 return 0;
             }
-            ok = sh_script_reflect_store(L, &field, -1, why, sizeof why);
+            {
+                size_t mark = g_at.len;
+                const char *fname = lua_tostring(L, -2);
+                ok = !g_at.on || (at_put(".", 1) && at_put(fname, strlen(fname)));
+                if (ok) ok = sh_script_reflect_store(L, &field, -1, why, sizeof why);
+                else say(why, sizeof why, "there was not enough memory");
+                if (g_at.on && g_at.path) { g_at.len = mark; g_at.path[mark] = 0; }
+            }
             sh_rf_loc_free(&field);
             if (!ok) { say(err, cap, "%s: %s", lua_tostring(L, -2), why); lua_pop(L, 2); return 0; }
             lua_pop(L, 1);
@@ -366,6 +455,22 @@ int sh_script_reflect_store(lua_State *L, const sh_rf_loc *loc, int idx, char *e
         } else {
             say(err, cap, "it points at a %s, which a script cannot make; set the fields inside it", loc->type);
             return 0;
+        }
+        if (g_at.on && is_resource_class(loc->type)) {
+            /* a pointer to a named resource is put back by the name it held */
+            const void *old = NULL;
+            const char *old_name;
+            undo *u;
+            if (!rd(loc->addr, (void *)&old, sizeof old) || !(u = undo_add(SH_RF_POINTER))) break;
+            old_name = old && g_ops.resource_name ? g_ops.resource_name(g_ops.ctx, old) : NULL;
+            u->was_text = old_name ? dup_text(old_name) : NULL;
+            u->now_text = p ? dup_text(lua_tostring(L, idx)) : NULL;
+            if ((old_name && !u->was_text) || (p && !u->now_text) || !g_ops.write ||
+                !g_ops.write(g_ops.ctx, (void *)loc->addr, &p, sizeof p)) {
+                undo_drop_last();
+                break;
+            }
+            return 1;
         }
         if (!wr(loc->addr, &p, sizeof p)) break;
         return 1;
@@ -386,7 +491,15 @@ int sh_script_reflect_store(lua_State *L, const sh_rf_loc *loc, int idx, char *e
             int ok;
             if (!sh_rf_element(&g_host, loc, (uint32_t)k, &el, err, cap)) return 0;
             lua_rawgeti(L, idx, (lua_Integer)(k + 1));
-            ok = sh_script_reflect_store(L, &el, -1, why, sizeof why);
+            {
+                size_t mark = g_at.len;
+                char index[24];
+                int ni = snprintf(index, sizeof index, "[%lld]", k + 1);
+                ok = !g_at.on || at_put(index, (size_t)ni);
+                if (ok) ok = sh_script_reflect_store(L, &el, -1, why, sizeof why);
+                else say(why, sizeof why, "there was not enough memory");
+                if (g_at.on && g_at.path) { g_at.len = mark; g_at.path[mark] = 0; }
+            }
             lua_pop(L, 1);
             sh_rf_loc_free(&el);
             if (!ok) { say(err, cap, "[%lld]: %s", k + 1, why); return 0; }
@@ -476,14 +589,35 @@ int sh_script_reflect_set(lua_State *L, void *object, const char *cls, const cha
                           int restore_at_map_end)
 {
     sh_rf_loc loc;
+    sh_rf_anchor anchor;
     char err[320];
     int ok;
     if (!path[0]) return sh_script_refuse(L, "\"%s\" needs the field to write, such as \"team\"", call);
-    if (!sh_rf_resolve(&g_host, object, cls, path, &loc, err, sizeof err))
+    if (!sh_rf_resolve_anchored(&g_host, object, cls, path, is_resource_class, &loc, &anchor, err, sizeof err))
         return sh_script_refuse(L, "\"%s\" could not write \"%s\": %s", call, path, err);
-    g_keep_undo = restore_at_map_end;
-    ok = sh_script_reflect_store(L, &loc, idx, err, sizeof err);
-    g_keep_undo = 0;
+    /* The undo is decided by where the write lands, not by the call: a field of an object that outlives the map
+     * (the decl itself, or one a pointer on the way leads to) is put back at the map's end; an entity's own fields
+     * end with the entity. */
+    memset(&g_at, 0, sizeof g_at);
+    if (anchor.object) {
+        g_at.on = 1;
+        g_at.object = anchor.object;
+        g_at.cls = anchor.cls;
+        ok = at_put(path + anchor.at, strlen(path + anchor.at));
+    } else if (restore_at_map_end) {
+        g_at.on = 1;
+        g_at.object = object;
+        g_at.cls = cls;
+        ok = at_put(path, strlen(path));
+    } else ok = 1;
+    if (g_at.on) {
+        g_at.name = g_ops.resource_name ? g_ops.resource_name(g_ops.ctx, g_at.object) : NULL;
+        if (!ok) say(err, sizeof err, "there was not enough memory");
+    }
+    if (ok) ok = sh_script_reflect_store(L, &loc, idx, err, sizeof err);
+    free(g_at.path);
+    memset(&g_at, 0, sizeof g_at);
+    free(anchor.cls);
     sh_rf_loc_free(&loc);
     if (!ok) return sh_script_refuse(L, "\"%s\" could not write \"%s\": %s", call, path, err);
     lua_pushboolean(L, 1);

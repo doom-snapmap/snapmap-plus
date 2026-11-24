@@ -282,7 +282,8 @@ int sh_rf_element(const sh_rf_host *h, const sh_rf_loc *list, uint32_t index, sh
 }
 
 /* Make `cur` the object a pointer or reference names, so a field can be asked of it. */
-static int enter_object(const sh_rf_host *h, sh_rf_loc *cur, const char *sofar, const char *next, char *err, size_t cap)
+static int enter_object(const sh_rf_host *h, sh_rf_loc *cur, const char *sofar, const char *next, char *err, size_t cap,
+                        int (*is_anchor)(const char *cls), sh_rf_anchor *anchor, size_t at)
 {
     int guard = 0;
     while ((cur->kind == SH_RF_POINTER || cur->kind == SH_RF_REF) && guard++ < 64) {
@@ -299,6 +300,14 @@ static int enter_object(const sh_rf_host *h, sh_rf_loc *cur, const char *sofar, 
         }
         owned = dup_n(cls, strlen(cls));
         if (!owned) { set_err(err, cap, "there was not enough memory"); return 0; }
+        if (anchor && is_anchor && cur->kind == SH_RF_POINTER && is_anchor(owned)) {
+            char *ac = dup_n(owned, strlen(owned));
+            if (!ac) { free(owned); set_err(err, cap, "there was not enough memory"); return 0; }
+            free(anchor->cls);
+            anchor->object = obj;
+            anchor->cls = ac;
+            anchor->at = at;
+        }
         sh_rf_loc_free(cur);
         cur->kind = SH_RF_STRUCT;
         cur->addr = (const uint8_t *)obj;
@@ -310,6 +319,13 @@ static int enter_object(const sh_rf_host *h, sh_rf_loc *cur, const char *sofar, 
 int sh_rf_resolve(const sh_rf_host *h, const void *object, const char *cls, const char *path, sh_rf_loc *out,
                   char *err, size_t err_cap)
 {
+    return sh_rf_resolve_anchored(h, object, cls, path, NULL, out, NULL, err, err_cap);
+}
+
+int sh_rf_resolve_anchored(const sh_rf_host *h, const void *object, const char *cls, const char *path,
+                           int (*is_anchor)(const char *cls), sh_rf_loc *out, sh_rf_anchor *anchor, char *err,
+                           size_t err_cap)
+{
     sh_rf_loc cur;
     const char *p = path ? path : "";
     char *sofar = NULL;
@@ -317,6 +333,7 @@ int sh_rf_resolve(const sh_rf_host *h, const void *object, const char *cls, cons
     int ok = 0;
     memset(out, 0, sizeof *out);
     memset(&cur, 0, sizeof cur);
+    if (anchor) memset(anchor, 0, sizeof *anchor);
     if (err && err_cap) err[0] = 0;
     if (!h || !object || !cls) { set_err(err, err_cap, "there is no object to read"); return 0; }
     cur.kind = SH_RF_STRUCT;
@@ -355,7 +372,9 @@ int sh_rf_resolve(const sh_rf_host *h, const void *object, const char *cls, cons
             sh_rf_loc next;
             while (*p && *p != CH_DOT && *p != CH_OPEN) { if (n + 1 < sizeof name) name[n++] = *p; p++; }
             name[n] = 0;
-            if (!enter_object(h, &cur, sofar[0] ? sofar : "the object", name, err, err_cap)) goto done;
+            if (!enter_object(h, &cur, sofar[0] ? sofar : "the object", name, err, err_cap, is_anchor, anchor,
+                              (size_t)(tok - (path ? path : ""))))
+                goto done;
             if (cur.kind != SH_RF_STRUCT) {
                 set_err(err, err_cap, "%s is %s, so it has no %s", sofar[0] ? sofar : "the object", kind_word(cur.kind), name);
                 goto done;
@@ -384,6 +403,7 @@ int sh_rf_resolve(const sh_rf_host *h, const void *object, const char *cls, cons
 done:
     sh_rf_loc_free(&cur);
     free(sofar);
+    if (!ok && anchor) { free(anchor->cls); memset(anchor, 0, sizeof *anchor); }
     return ok;
 }
 

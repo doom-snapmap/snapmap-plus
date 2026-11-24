@@ -45,6 +45,8 @@ static const sh_script_source g_src = { NULL, src_list, src_read, src_release };
 #define ID_OTHER 77u
 static demon g_own, g_other;
 static decl g_enc = { NULL, "single_tyrant", 9 }, g_enc2 = { NULL, "single_baron", 4 };
+static decl g_enc_parsed = { NULL, "single_tyrant", 9 };   /* the tyrant's decl after a re-parse moved it */
+static int g_reparsed;
 static weapon g_inv[2];
 static idstr g_strs[2];
 static const decl *g_dl[4];
@@ -87,7 +89,7 @@ static void *o_res_find(void *c, const char *cls, const char *name)
 {
     (void)c;
     if (strcmp(cls, "idDeclSnapAIEncounter")) return NULL;
-    if (!strcmp(name, g_enc.name)) return &g_enc;
+    if (!strcmp(name, g_enc.name)) return g_reparsed ? &g_enc_parsed : &g_enc;
     if (!strcmp(name, g_enc2.name)) return &g_enc2;
     return NULL;
 }
@@ -342,6 +344,36 @@ static void test_refusals(void)
     g_ready = 1;
 }
 
+/* SPEC 5.23, the restore rule: a decl written through an entity's pointer is put back at the map's end, found again
+ * by its name (never by an address a re-parse can free), and a field someone else changed since is theirs. */
+static void test_restore(void)
+{
+    g_enc.value = 9;
+    run("api = 1\nent(0):set('encounter.value', 42)\nent(0):set('team', 'TEAM_ONE')\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(g_enc.value == 42 && g_own.base.team == 1);
+    sh_script_map_end();
+    CHECK(g_enc.value == 9);                 /* the decl outlives the map: put back */
+    CHECK(g_own.base.team == 1);             /* the entity's own field ends with the entity: not touched */
+
+    /* by name: the decl was parsed again elsewhere; the restore finds it by name and leaves the old address alone */
+    run("api = 1\nent(0):set('encounter.value', 42)\n");
+    g_reparsed = 1;
+    g_enc_parsed.value = 42;
+    g_enc.value = 1234;                      /* the freed memory a raw address would have written into */
+    sh_script_map_end();
+    CHECK(g_enc_parsed.value == 9 && g_enc.value == 1234);
+    g_reparsed = 0;
+    g_enc.value = 9;
+
+    /* who owns it: another writer changed the field after the script, so it stays theirs */
+    run("api = 1\nent(0):set('encounter.value', 42)\n");
+    g_enc.value = 7;
+    sh_script_map_end();
+    CHECK(g_enc.value == 7);
+    g_enc.value = 9;
+}
+
 static void *h_resolve(uint32_t id) { return f_resolve(id); }
 
 int main(void)
@@ -361,6 +393,7 @@ int main(void)
     test_reads();
     test_writes();
     test_refusals();
+    test_restore();
     sh_script_map_end();
     CHECK(sh_script_bytes_in_use() == 0);
     printf(g_fail ? "script_api_reflect_test: FAILED\n" : "script_api_reflect_test: ok\n");
