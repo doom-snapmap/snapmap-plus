@@ -162,10 +162,12 @@ func TestRetireBookkeepingFoldsAndRemoves(t *testing.T) {
 	dir := filepath.Join(tmp, "snapmap-plus")
 	exe := filepath.Join(dir, selfExeAsset)
 	writeF(t, exe, "current installer")
-	writeF(t, filepath.Join(dir, storeToolName), "store tool")
+	tool := filepath.Join(dir, retiredExecutables[0])
+	writeF(t, tool, "store tool")
+	writeF(t, tool+".old", "replaced store tool")
 	sum, _ := fileSHA256(exe)
-	toolSum, _ := fileSHA256(filepath.Join(dir, storeToolName))
-	writeF(t, filepath.Join(dir, retiredExecutableRecord), `{"snapmap-plus.exe":"`+sum+`","snapmap-plus-store.exe":"`+toolSum+`","gone.exe":"00"}`)
+	toolSum, _ := fileSHA256(tool)
+	writeF(t, filepath.Join(dir, retiredExecutableRecord), `{"snapmap-plus.exe":"`+sum+`","`+retiredExecutables[0]+`":"`+toolSum+`","gone.exe":"00"}`)
 	writeF(t, filepath.Join(dir, retiredVersionsRecord), `{"snapmap-plus.exe":{"sha256":"`+sum+`","version":"v0.2.1-beta.20"}}`)
 	writeF(t, exe+".updates.json", `{"current_sha256":"`+sum+`","backups":{"snapmap-plus.exe.old":"aa"}}`)
 	writeF(t, exe+".old", "replaced installer")
@@ -173,7 +175,8 @@ func TestRetireBookkeepingFoldsAndRemoves(t *testing.T) {
 	writeF(t, exe+".old-notes", "keep")
 	writeF(t, exe+".old200", "keep")
 	removed := retireBookkeeping(dir, filepath.Join(tmp, "elsewhere", selfExeAsset))
-	for _, gone := range []string{retiredExecutableRecord, retiredVersionsRecord, selfExeAsset + ".updates.json", selfExeAsset + ".old", selfExeAsset + ".old2"} {
+	for _, gone := range []string{retiredExecutableRecord, retiredVersionsRecord, selfExeAsset + ".updates.json", selfExeAsset + ".old", selfExeAsset + ".old2",
+		retiredExecutables[0], retiredExecutables[0] + ".old"} {
 		if exists(filepath.Join(dir, gone)) {
 			t.Errorf("%s was not removed", gone)
 		}
@@ -183,12 +186,12 @@ func TestRetireBookkeepingFoldsAndRemoves(t *testing.T) {
 			t.Errorf("an unrelated %s was touched", kept)
 		}
 	}
-	if len(removed) != 5 {
+	if len(removed) != 7 {
 		t.Errorf("reported %d removals: %q", len(removed), removed)
 	}
 	rec, err := loadStateAt(dir)
 	if err != nil || rec.Executables[selfExeAsset].SHA256 != sum || rec.Executables[selfExeAsset].Version != "v0.2.1-beta.20" ||
-		rec.Executables[storeToolName].SHA256 != toolSum || len(rec.Executables) != 2 {
+		len(rec.Executables) != 1 {
 		t.Fatalf("folded executables = %+v, %v", rec.Executables, err)
 	}
 	if rec.DoomPath != "" {
@@ -201,6 +204,30 @@ func TestRetireBookkeepingFoldsAndRemoves(t *testing.T) {
 	retireBookkeeping(dir, "")
 	if readF(t, exe+".old") != "the only copy" {
 		t.Error("the only remaining installer image was removed")
+	}
+}
+
+// A retired executable whose bytes are not the ones an install recorded is the player's: it stays, is
+// listed as kept, and its record entry is forgotten. One no install recorded stays too.
+func TestRetireExecutablesKeepsAChangedCopy(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "snapmap-plus")
+	tool := filepath.Join(dir, retiredExecutables[0])
+	writeF(t, tool, "the player's own file")
+	if err := saveExecutableRecord(dir, executableRecord{retiredExecutables[0]: strings.Repeat("ab", 32)}); err != nil {
+		t.Fatal(err)
+	}
+	removed, kept := retireExecutables(dir)
+	if len(removed) != 0 || len(kept) != 1 || !strings.HasPrefix(kept[0], retiredExecutables[0]+" (not the copy") {
+		t.Fatalf("removed %q, kept %q", removed, kept)
+	}
+	if readF(t, tool) != "the player's own file" {
+		t.Error("a changed copy was touched")
+	}
+	if rec, err := loadExecutableRecord(dir); err != nil || len(rec) != 0 {
+		t.Errorf("the changed copy is still recorded: %v, %v", rec, err)
+	}
+	if removed, kept = retireExecutables(dir); len(removed) != 0 || len(kept) != 1 || readF(t, tool) != "the player's own file" {
+		t.Errorf("an unrecorded copy: removed %q, kept %q", removed, kept)
 	}
 }
 

@@ -17,7 +17,6 @@ Usage:
   snapmap-plus install   [--doom <path>] [--local <dist-dir>] [--release <tag>] [--beta] [--force] [--yes]
   snapmap-plus update    [--doom <path>] [--release <tag>] [--beta] [--no-self] [--force] [--yes]
   snapmap-plus uninstall [--doom <path>] [--yes]
-  snapmap-plus migrate   [--doom <path>]
   snapmap-plus changelog [<version>|latest|all]
   snapmap-plus status
   snapmap-plus version
@@ -49,9 +48,6 @@ With no argument it shows the newest release and lists the earlier ones.
 With no --local, install/update download from GitHub. Uninstall restores any files it
 replaced and leaves your Snapmap+ modding data untouched; with --doom it also works when
 the install record is gone.
-
-"migrate" converts a mods folder of earlier releases to the current layout, without
-reinstalling; install and update do this by themselves.
 
 Running snapmap-plus with no arguments (a double-click) opens an interactive prompt: it offers
 to install (or to update when a newer version is out), and takes any command above.
@@ -113,8 +109,6 @@ func runCommand(cmd string, args []string) error {
 		return cmdUpdate(f)
 	case "uninstall":
 		return cmdUninstall(f)
-	case "migrate":
-		return cmdMigrate(f)
 	case "status":
 		return cmdStatus(f)
 	case "changelog":

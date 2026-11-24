@@ -47,10 +47,10 @@ func wantDoom(t *testing.T, stage, doom string, extra ...string) {
 	}
 }
 
-// dataAllowed are the data folder's entries the contract allows: the installer's three, and the
+// dataAllowed are the data folder's entries the contract allows: the installer's two, and the
 // player's data.
 var dataAllowed = map[string]bool{
-	selfExeAsset: true, storeToolName: true, stateName: true,
+	selfExeAsset: true, stateName: true,
 	"config.json": true, "prefabs": true, "strings": true, "mods": true, "rawmap.json": true, "test-maps": true,
 	"cache": true, "token": true, "pinned.json": true, "overrides": true,
 }

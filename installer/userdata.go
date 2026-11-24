@@ -14,12 +14,13 @@ import (
 
 // userContentSubdirs is the content tree the installer scaffolds and the backend reads. Mirrors
 // sh_user_dirs_subfolders in src/backend/user_dirs.c. The strings folder of earlier releases is not
-// scaffolded: the store tool moves its document into the mod My overrides and retires the folder.
+// scaffolded; one an earlier release left stays as it is (converting earlier releases' data is not in
+// this release).
 var userContentSubdirs = []string{"prefabs"}
 
 // retiredContent reports whether a path relative to a content root belongs to the retired
-// first-generation package system. It is never copied, scaffolded or removed by the installer: the
-// store tool moves what it holds into mods\ and sends the folder to the Recycle Bin.
+// first-generation package system. It is never copied, scaffolded or removed by the installer, and
+// stays where an earlier release left it.
 func retiredContent(rel string) bool {
 	first := strings.ToLower(strings.SplitN(filepath.ToSlash(rel), "/", 2)[0])
 	switch first {

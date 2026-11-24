@@ -23,6 +23,12 @@ const (
 	retiredUpdatesSuffix    = ".updates.json"           // <exe>.updates.json: self-update backups
 )
 
+// retiredExecutables are executables earlier releases placed in the data folder that this release does
+// not ship: the copy an install placed is removed (retireExecutables).
+var retiredExecutables = []string{
+	"snapmap-plus-store.exe", // the store migration tool; converting earlier releases' data is not in this release
+}
+
 // installRecord is install.json.
 type installRecord struct {
 	Version     string   `json:"version"` // first: the backend reads the first "version" key
@@ -341,8 +347,9 @@ func reportStartupTidy() {
 // retireBookkeeping folds installer-files.json and installer-versions.json into install.json and
 // removes them, removes <exe>.updates.json files, and removes the <exe>.old images earlier releases
 // kept beside an executable in the data folder or beside the running image while that executable
-// exists (a locked one is moved into cache\installer and removed at the next start). It returns one
-// line per file removed.
+// exists (a locked one is moved into cache\installer and removed at the next start), then the retired
+// executables (retireExecutables). It returns one line per file removed, and adds what it kept to
+// startupKept.
 func retireBookkeeping(dir, running string) []string {
 	var removed []string
 	files := readRetiredExecutables(dir)
@@ -380,7 +387,10 @@ func retireBookkeeping(dir, running string) []string {
 			removed = append(removed, name+" (folded into install.json)")
 		}
 	}
-	names := map[string]bool{selfExeAsset: true, storeToolName: true, legacyExeName: true}
+	names := map[string]bool{selfExeAsset: true, legacyExeName: true}
+	for _, name := range retiredExecutables {
+		names[name] = true
+	}
 	if rec, err := loadStateAt(dir); err == nil {
 		for name := range rec.Executables {
 			if executableName(name) {
@@ -398,6 +408,9 @@ func retireBookkeeping(dir, running string) []string {
 	for _, exe := range exes {
 		removed = append(removed, retireUpdateLeftovers(dir, exe)...)
 	}
+	gone, kept := retireExecutables(dir)
+	removed = append(removed, gone...)
+	startupKept = append(startupKept, kept...)
 	// Temporary files of an interrupted save.
 	if entries, err := os.ReadDir(dir); err == nil {
 		for _, e := range entries {
@@ -450,6 +463,42 @@ func retireUpdateLeftovers(dir, exe string) []string {
 		}
 	}
 	return removed
+}
+
+// retireExecutables removes each retired executable an install placed while its bytes are the recorded
+// ones, and forgets its record entry. A copy whose bytes changed, or one no install recorded, is the
+// player's: it stays, its entry is forgotten, and it is listed as kept. A recorded copy that cannot be
+// removed yet (it is running) keeps its entry, so the next start removes it.
+func retireExecutables(dir string) (removed, kept []string) {
+	rec, err := loadExecutableRecord(dir)
+	if err != nil {
+		return nil, nil
+	}
+	forgot := false
+	for _, name := range retiredExecutables {
+		path := filepath.Join(dir, name)
+		digest, recorded := rec[name]
+		_, statErr := os.Lstat(path)
+		present := statErr == nil
+		switch {
+		case recorded && present && ownsExecutable(path, digest):
+			if os.Remove(path) != nil {
+				kept = append(kept, name+" (in use; it is removed at the next start)")
+				continue
+			}
+			removed = append(removed, name+" (an executable of an earlier release)")
+		case present:
+			kept = append(kept, name+" (not the copy an earlier install placed; Snapmap+ no longer uses it)")
+		}
+		if recorded {
+			delete(rec, name)
+			forgot = true
+		}
+	}
+	if forgot {
+		saveExecutableRecord(dir, rec)
+	}
+	return removed, kept
 }
 
 func readRetiredExecutables(dir string) map[string]string {

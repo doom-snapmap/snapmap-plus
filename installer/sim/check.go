@@ -17,9 +17,8 @@ import (
 // and any file of another tool the scenario seeded), nothing else. Runtime folders the DLLs write
 // while the game runs (snapmap-plus\logs, snapmap-plus\crash) are never present in a simulation.
 //
-// Data folder, installed: snapmap-plus.exe and install.json, plus the player's data, and
-// snapmap-plus-store.exe only while the store conversion is on (installer storeConversion);
-// install.json starts with its version key, names this DOOM folder and the pair, and
+// Data folder, installed: snapmap-plus.exe and install.json, plus the player's data (an executable
+// of an earlier release that no install placed fails the contract); install.json starts with its version key, names this DOOM folder and the pair, and
 // records each executable present with the hash on disk; cache\installer holds only what install.json
 // records (backups of files that were not ours, replaced images still to remove). Uninstalled: none
 // of the installer's files remain. Either way every --keep file (the player's data) is still there.
@@ -35,17 +34,14 @@ var playerData = map[string]string{
 	"config.json": "player data", "prefabs": "player data", "strings": "player data", "mods": "player data",
 	"rawmap.json": "player data", "test-maps": "player data", "cache": "regenerable cache", "token": "player data",
 	"pinned.json": "player data",
-	// The store tool moves the packages of the retired overrides\ folder into mods\ and then sends
-	// overrides\ to the Recycle Bin; a folder it could not empty stays.
-	"overrides": "player data (retired package folder; the store tool empties and retires it)",
-	// An earlier release's recycle bin of mods; the store tool retires it, and with the conversion off it stays.
-	"removed-mods": "player data (an earlier release's recycle bin; kept while the store conversion is off)",
+	// Folders of earlier releases stay as they are: converting earlier releases' data is not in this release.
+	"overrides":    "player data (an earlier release's retired package folder; kept as it is)",
+	"removed-mods": "player data (an earlier release's recycle bin of mods; kept as it is)",
 }
 
-var installerFiles = map[string]bool{"snapmap-plus.exe": true, "snapmap-plus-store.exe": true, "install.json": true}
+var installerFiles = map[string]bool{"snapmap-plus.exe": true, "install.json": true}
 
-// requiredInstallerFiles are present after every install; the store tool is placed only while the
-// store conversion is on.
+// requiredInstallerFiles are present after every install.
 var requiredInstallerFiles = []string{"snapmap-plus.exe", "install.json"}
 
 type simRecord struct {
@@ -228,15 +224,15 @@ func cmdCheck(args []string, w io.Writer) (bool, error) {
 					fail("install.json records %s, which is not part of the pair", rel)
 				}
 			}
-			for _, name := range []string{"snapmap-plus.exe", "snapmap-plus-store.exe"} {
-				e, ok := rec.Executables[name]
-				if name == "snapmap-plus-store.exe" && !ok && !exists(filepath.Join(data, name)) {
-					continue // not placed: the store conversion is off
+			for name := range rec.Executables {
+				if !installerFiles[strings.ToLower(name)] {
+					fail("install.json records %s, which this release does not place", name)
 				}
-				sum, _, err := fileSHA256(filepath.Join(data, name))
-				if !ok || err != nil || !strings.EqualFold(e.SHA256, sum) {
-					fail("install.json does not record %s with the hash on disk", name)
-				}
+			}
+			e, ok := rec.Executables["snapmap-plus.exe"]
+			sum, _, err := fileSHA256(filepath.Join(data, "snapmap-plus.exe"))
+			if !ok || err != nil || !strings.EqualFold(e.SHA256, sum) {
+				fail("install.json does not record snapmap-plus.exe with the hash on disk")
 			}
 			fmt.Fprintf(w, "  install.json: version %s, build %s, %d file(s), %d backup(s), executables %s", rec.Version, rec.DoomBuild,
 				len(rec.Files), len(rec.Backups), strings.Join(sortedKeys(rec.Executables), ", "))

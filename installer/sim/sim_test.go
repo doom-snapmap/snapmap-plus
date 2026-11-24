@@ -25,15 +25,14 @@ func installedLayout(t *testing.T) (doom, data string) {
 		mustWrite(t, doom, rel, rel)
 	}
 	mustWrite(t, data, "snapmap-plus.exe", "exe")
-	mustWrite(t, data, "snapmap-plus-store.exe", "tool")
 	mustWrite(t, data, `prefabs\a.snapmap.json`, "{}")
-	exe, tool := hexSHA([]byte("exe")), hexSHA([]byte("tool"))
+	exe := hexSHA([]byte("exe"))
 	mustWrite(t, data, "install.json", `{
   "version": "v0.3.0-sim.2",
   "doom_path": "`+strings.ReplaceAll(doom, `\`, `\\`)+`",
   "files": ["XINPUT1_4.dll", "snapmap-plus\\snapmap-plus-ui-13954591.dll"],
   "backups": [],
-  "executables": {"snapmap-plus.exe": {"sha256": "`+exe+`"}, "snapmap-plus-store.exe": {"sha256": "`+tool+`"}}
+  "executables": {"snapmap-plus.exe": {"sha256": "`+exe+`"}}
 }`)
 	return doom, data
 }
@@ -73,6 +72,7 @@ func TestCheckFailsOnEveryLeftover(t *testing.T) {
 		{"installer-files.json", "data", "installer-files.json", "the data folder holds installer-files.json"},
 		{"updates.json", "data", "snapmap-plus.exe.updates.json", "the data folder holds snapmap-plus.exe.updates.json"},
 		{".old", "data", "snapmap-plus.exe.old", "the data folder holds snapmap-plus.exe.old"},
+		{"retired executable", "data", "snapmap-plus-store.exe", "the data folder holds snapmap-plus-store.exe"},
 		{"override-backups", "data", `override-backups\x`, `the data folder holds override-backups\x`},
 		{"unrecorded cache", "data", `cache\installer\snapmap-plus.exe.old`, "which install.json does not record"},
 	} {
@@ -99,7 +99,7 @@ func TestCheckUninstalled(t *testing.T) {
 		os.Remove(filepath.Join(doom, rel))
 	}
 	os.Remove(filepath.Join(doom, "snapmap-plus"))
-	for _, rel := range []string{"snapmap-plus.exe", "snapmap-plus-store.exe", "install.json"} {
+	for _, rel := range []string{"snapmap-plus.exe", "install.json"} {
 		os.Remove(filepath.Join(data, rel))
 	}
 	if ok, out := check(t, "--stage", "s", "--doom", doom, "--data", data, "--phase", "uninstalled", "--keep", `prefabs\a.snapmap.json`); !ok {

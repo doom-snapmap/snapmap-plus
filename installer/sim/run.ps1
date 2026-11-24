@@ -10,8 +10,8 @@
 # folders and SNAPMAP_PLUS_API_BASE at the fake API. Your real DOOM and data folders are never
 # written. Exit code 0 means every step of every scenario met the contract.
 #
-# The store conversion is off (installer storeConversion): no scenario runs the store tool, so nothing
-# goes to the Windows Recycle Bin; scenario b checks the earlier release's folders are left as they are.
+# Converting earlier releases' data is not in this release: scenario b checks the earlier release's
+# folders are left as they are.
 #
 # Keep this script ASCII for PowerShell 5.1.
 param(
@@ -95,10 +95,8 @@ foreach ($pair in @(@($tagA, $binA), @($tagB, $binB))) {
 Say ("  installers: {0} ({1}), {2} ({3})" -f $tagA, (Get-FileHash $binA).Hash.Substring(0, 12), $tagB, (Get-FileHash $binB).Hash.Substring(0, 12))
 
 # --- Scratch copies of the game's files (the real folder is only read) --------------------------------
-# The executables let the installer detect the build; the two archive indexes are what the store tool
-# needs to accept the folder as DOOM's (the archives themselves are not copied, so the store tool
-# cannot read stock files when it moves overrides\ packages).
-$gameFiles = @("DOOMx64vk.exe", "DOOMx64.exe", "base\gameresources.pindex", "base\snap_gameresources.pindex")
+# The executables let the installer detect the build.
+$gameFiles = @("DOOMx64vk.exe", "DOOMx64.exe")
 $base = Join-Path $Scratch "base"
 foreach ($f in $gameFiles) {
     $dst = Join-Path $base $f
@@ -220,11 +218,9 @@ try {
     $s = New-Scenario "b-beta19" $binB
     Seed $s "beta19"
     $keepB = @("config.json", "overrides\tinypack\package.json")
-    # The store conversion is off (installer storeConversion): the update converts nothing,
-    # places no store tool, and leaves the earlier release's mods, overrides\ and removed-mods\ as they are.
+    # The update converts nothing and leaves the earlier release's mods, overrides\ and removed-mods\ as they are.
     $keepB += @("removed-mods")
-    Step $s "update" @("update", "--yes", "--plain") "installed" $pair $keepB @("the other DOOM build's files") @("Converting mods", "snapmap-plus-store")
-    Step $s "migrate" @("migrate", "--plain") "installed" $pair $keepB @("does not convert mods or maps made with earlier releases") @("snapmap-plus-store")
+    Step $s "update" @("update", "--yes", "--plain") "installed" $pair $keepB @("the other DOOM build's files") @("Converting mods")
     Step $s "uninstall" @("uninstall", "--yes", "--plain") "uninstalled" @() $keepB @()
 
     # c) v0.2.1-beta.20: both pairs, backups, installer-files.json, updates.json, .old -> update, then uninstall.

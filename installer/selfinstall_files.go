@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-// The executables this installer places in the data folder (snapmap-plus.exe, snapmap-plus-store.exe)
-// are recorded in install.json by name with their SHA-256, so uninstall never deletes, and an update
+// The executables this installer places in the data folder (snapmap-plus.exe; earlier releases also
+// placed the executables in retiredExecutables) are recorded in install.json by name with their SHA-256, so uninstall never deletes, and an update
 // never overwrites, a file the player put at the same name.
 
 // executableRecord maps an executable's file name to the SHA-256 of the bytes this installer placed.

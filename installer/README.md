@@ -16,7 +16,6 @@ The runtime uses only Go's standard library.
 | `doomclean.go` | The DOOM folder contract: which files are ours, the other build's pair, backups. |
 | `state.go` | `install.json`, the installer's only record, and the retirement of earlier records. |
 | `legacy.go`, `legacyinstall.go`, `userdata.go` | The original SnapHak, the 2018 build's release, and player data. |
-| `storemigrate.go` | Placing and running the store migration tool, `snapmap-plus-store.exe`; off in this release (`storeConversion`). |
 | `selfinstall*.go`, `selfupdate*.go`, `webview2.go` | Installer copies, self-updates and WebView2 runtime setup. |
 | `changelog*.go` | Release-note retrieval and terminal rendering. |
 | `*_test.go`, `testdata/` | Installer and rendering regressions. |
@@ -50,7 +49,6 @@ embed the Windows resources. Use `build.ps1` for distributable executables.
 snapmap-plus install   [--doom <path>] [--local <dist-dir>] [--release <tag>] [--beta] [--force] [--yes]
 snapmap-plus update    [--doom <path>] [--release <tag>] [--beta] [--no-self] [--force] [--yes]
 snapmap-plus uninstall [--doom <path>] [--yes]
-snapmap-plus migrate   [--doom <path>]
 snapmap-plus changelog [<version>|latest|all]
 snapmap-plus status
 snapmap-plus version
@@ -117,7 +115,7 @@ mock, including corrupt, mismatched and interrupted downloads, and
 
 Everything the installer prints goes through `out.go`. Each phase (detecting DOOM,
 the earlier install it found, tidying the data folder, migrating player data,
-cleaning the DOOM folder, installing files, converting mods, updating,
+cleaning the DOOM folder, installing files, updating,
 uninstalling, status) opens with a title and a rule, details are aligned
 `Label:  value` lines, and each step ends in one result line marked `ok` (done),
 `--` (skipped or unchanged), `!!` (warning, written to stderr) or `xx` (error,
@@ -166,14 +164,14 @@ After any install, update or migration:
 - **The data folder**, `%LOCALAPPDATA%\snapmap-plus`, holds `snapmap-plus.exe`,
   `install.json` and the player's own data (`config.json`,
   `prefabs\`, `mods\`, `rawmap.json`, `test-maps\`, `cache\`, and the
-  `token` and `pinned.json` files when present). The retired `overrides\` and
-  `strings\` folders of a release that had them go to the Recycle Bin once the store
-  tool has moved everything in them into `mods\` (below); an `overrides\` entry it
-  skips keeps that folder. Empty `override-backups\`, `package-cache\` and `package-staging\` folders are
+  `token` and `pinned.json` files when present). The retired `overrides\`,
+  `strings\` and `removed-mods\` folders of a release that had them stay as they
+  are (see [Mods and retired package folders](#mods-and-retired-package-folders)).
+  Empty `override-backups\`, `package-cache\` and `package-staging\` folders are
   removed; one that holds files is kept and listed.
 - **Uninstall** removes every file of ours from DOOM, restores any backup from
-  `cache\installer\backup\`, removes the runtime log and crash folders, the store
-  tool, the data folder's installer copy and `install.json`, and leaves the
+  `cache\installer\backup\`, removes the runtime log and crash folders, the
+  data folder's installer copy and `install.json`, and leaves the
   player's data. An installer copy that is the one running cannot be removed: it
   stays, and `install.json` then records that copy alone. Without an install
   record, `uninstall --doom <path>` cleans that folder by content: it removes the
@@ -204,8 +202,7 @@ carry the version in the DLLs themselves (`SNAPMAP_PLUS_VERSION`, see
   "backups": [{"rel": "XINPUT1_4.dll", "backup": "C:\\Users\\me\\AppData\\Local\\snapmap-plus\\cache\\installer\\backup\\XINPUT1_4.dll"}],
   "legacy_removed": ["dinput8.dll", "snaphak_algo.dll"],
   "executables": {
-    "snapmap-plus.exe": {"sha256": "<hex>", "version": "v0.3.0"},
-    "snapmap-plus-store.exe": {"sha256": "<hex>"}
+    "snapmap-plus.exe": {"sha256": "<hex>", "version": "v0.3.0"}
   },
   "self_update": {
     "release": "v0.3.0",
@@ -222,7 +219,12 @@ replaced; `legacy_removed` the original SnapHak's files a migration deleted.
 placed, with the release it is when known: an update replaces, and uninstall
 removes, only a recorded copy whose bytes are unchanged, an installer older than
 the stable copy refuses to replace it unless `--force` is given, and a copy the
-player replaced is left alone. `self_update` records the last release checked, the
+player replaced is left alone. An executable earlier releases placed and this
+release does not ship (`retiredExecutables` in `state.go`: the store migration tool
+`snapmap-plus-store.exe`) is removed at every start while its bytes are the
+recorded ones, and its entry is dropped; a copy whose bytes changed, or one no
+install recorded, is kept and listed under "Tidying the data folder".
+`self_update` records the last release checked, the
 hash of the `snapmap-plus.exe` a self-update placed, and the replaced images still
 to remove. A record with no `doom_path` holds only the installer's own state and
 means "not installed".
@@ -255,7 +257,7 @@ step that has something to report.
 2. **From v0.2.1-beta.19** (its 2018 pair in an April 2024 folder, recorded or not,
    and packages under `overrides\`). "Cleaning the DOOM folder" removes the 2018
    pair, the April 2024 pair is installed, and the `overrides\` packages stay where
-   they are (the store tool is not run; `storeConversion` is off). On the
+   they are. On the
    2018 build itself v0.2.1-beta.19's own installer runs, and the 2018 pair stays.
 3. **From v0.2.1-beta.20** (both pairs, backups of our own DLLs in DOOM,
    `installer-files.json`, `installer-versions.json`, `snapmap-plus.exe.updates.json`,
@@ -276,10 +278,9 @@ the first; uninstall the first folder before installing into another.
 Migration of player data compares file contents before retiring a source and removes
 only empty directories; read errors and links prevent retirement. Unknown files in
 the old metadata directory also remain there. The installer scaffolds `prefabs\`
-only (a `strings\` folder copied from `%USERPROFILE%\snaphak` is the store tool's to
-move into a mod); this migration never copies or creates the retired package folders
-(`overrides`, `package-cache`, `package-staging`, `override-backups`). The store tool
-below handles `overrides\` and `strings\`.
+only (a `strings\` folder copied from `%USERPROFILE%\snaphak` stays as it is); this
+migration never copies or creates the retired package folders (`overrides`,
+`package-cache`, `package-staging`, `override-backups`).
 
 `config.json` belongs to the backend. Install, update, uninstall and reinstall
 do not create, parse or rewrite it. Prefabs, strings and rawmaps also remain
@@ -291,92 +292,17 @@ when needed. See [packaging](../docs/packaging.md) for the installed file contra
 
 ## Mods and retired package folders
 
-This release does not run the store tool. `storeConversion` in `storemigrate.go`
-is off (decision 30; the owner, 2026-11-17: migrating mods from releases before
-beta.26 is the future installer's job), so install and update do not place or
-run `snapmap-plus-store.exe`, and nothing in this section's conversion happens.
-A map, export or prefab saved by an earlier Snapmap+ is refused with
-"... was saved by an earlier Snapmap+; run the Snapmap+ installer to update it.", and a mod folder made for an
-earlier version is listed with "This mod was made for an earlier version of Snapmap+. This version does not read it yet." Converting those earlier shapes is the
-installer's job: its migration must do it, and it is on the release gate. The
-rest of this section describes what the installer and the tool do when
-`storeConversion` is on (`storemigrate.go`, source in `src/store/`).
+Converting the mods, maps and prefabs of earlier releases is not in this release;
+it will be built into the installer, `snapmap-plus.exe`, with no separate tool.
+Until then the installer leaves what an earlier release left exactly as it is:
+mod folders in an earlier shape, the retired `overrides\`, `strings\` and
+`removed-mods\` folders, and maps saved in an earlier shape. The game converts
+nothing either. A map, export or prefab saved by an earlier Snapmap+ is refused
+with "... was saved by an earlier Snapmap+; run the Snapmap+ installer to update
+it.", and a mod folder made for an earlier version is listed with "This mod was
+made for an earlier version of Snapmap+. This version does not read it yet."
+The installer's conversion is on the release gate.
 
-DOOM converts nothing at startup. With conversion on, after the DLLs are placed
-and before it reports success, the installer runs the bundle's store migration
-tool:
-
-1. It checks the tool against the bundle's `TOOLS.sha256` and keeps it beside
-   `snapmap-plus.exe` in `%LOCALAPPDATA%\snapmap-plus`, recorded in
-   `install.json` like the installer's own copy, so uninstall's rules for that
-   copy apply to it. A copy you changed is kept, and the bundle's verified copy
-   runs instead.
-2. It runs `snapmap-plus-store check "%LOCALAPPDATA%\snapmap-plus"`, which lists
-   what it finds from earlier releases and changes nothing.
-3. When check finds work (exit 1), it runs `snapmap-plus-store migrate
-   "%LOCALAPPDATA%\snapmap-plus" --doom "<the DOOM folder it installed into>"`.
-
-Every line the tool prints is shown, indented, under "Converting mods". The tool
-converts `mods\` folders of the retired layout to one folder per mod with a
-`mod.json` (`bundle.json`, `.state.json`, `blobs\` and `legacy\` go, hard-linked
-files get their own copies, the old record files are folded into
-`mods\snapmap-plus.json`), sends the retired recycle bin `removed-mods\` to the
-Windows Recycle Bin, moves the packages in `overrides\` into `mods\` (removing an
-empty `override-backups\`), and moves the loose files of `overrides\` and the old
-custom strings file `strings\strids.json` into one mod, My overrides
-(`mods\my-overrides\`; when that folder exists only what it lacks is added, and a
-`kept my-overrides'` line names each file or string it already had). Once
-everything in `overrides\` is in `mods\` that folder goes to the Recycle Bin, and
-`strings\` once its strings are moved; a skipped entry (a ZIP) keeps `overrides\`.
-A package added to `overrides\` after that first move is moved by the next check
-and migrate, so running the installer again picks it up.
-
-The same run converts everything an earlier release left in an earlier shape,
-because the game reads only the current one. Every run looks again, so a mod
-folder or map of an earlier release copied in later is converted the next time
-the installer runs again:
-
-- every mod folder in `mods\` (outside `mods\maps\`) with a mod.json of an
-  earlier release (a format-1 block, an author `id`, `shadows`, `stock` or
-  another retired key, a `package.json`): it gets its salt, its own
-  `mods/<old key>/` paths and texts become `mods/<salt>/`, its strings keys
-  become `<salt>_<key>` with every `#str_` reference to them, the block is
-  written in the current format and the folder is built under the current
-  rules. The folder keeps its name; the folder as it was goes to the Recycle
-  Bin; files beside `mod.json` and `assets\` stay as they are. A folder that
-  does not build under the current rules (a binary file naming its old key, a
-  new name outside its namespace) is still converted, with its build marked
-  failed and the plain cause, which the Mods tab shows until the author fixes
-  it. A run stopped part way loses nothing: the next run puts back a folder it
-  had set aside and finishes a saved map whose signature it had not yet put in
-  place;
-- extra copies of one mod that Snapmap+ made (`<key>@<hash16>` folders and
-  those under `downloads\` or `imports\`) go to the Recycle Bin once the
-  player's own folder is converted, and so does `mods\.builds\`;
-- every saved map in My Maps (both renderers share
-  `Saved Games\id Software\DOOM\base\savegame.user`), `rawmap.json` and every
-  prefab under `prefabs\`: their mod rows and placed names follow the salts,
-  their retired carriers move into the map's member, and the file is written
-  back with a copy of it as it was beside it (`<name>.before-snapmap-plus-1.0`;
-  a saved map's `map.decl.verify` is signed again for the account its present
-  signature matches). A map that names a mod no converted folder provides, or
-  whose signature matches no account, is left untouched with its cause.
-
-What was converted is kept in the `converted` section of
-`mods\snapmap-plus.json` (each old key and old build hash with its salt), and
-the record's retired sections (`cache`, `aliases`, `snapshots`, `renamed`,
-`downloads`) are removed. Building needs the DOOM folder, as `overrides\` does.
-Everything it deletes goes to the Recycle Bin. A missing tool, an altered one, or a
-check or migrate that does not finish is a warning, never a failed install; the
-warning says to close DOOM and run the Snapmap+ installer again.
-The tool holds the mods folder's named lock for its whole run
-(`src/common/store_lock.h`).
-`snapmap-plus migrate [--doom <path>]` (`migratecmd.go`) currently prints "Nothing
-to convert: this release of Snapmap+ does not convert mods or maps made with
-earlier releases." and does nothing; with `storeConversion` on it runs the same
-check and migrate with the tool the last install or update kept in
-`%LOCALAPPDATA%\snapmap-plus`, without downloading or reinstalling anything;
-without the tool it points at `update`.
 Apart from removing empty retired folders, the installer itself never creates,
 changes or removes `mods\` or the retired package folders (see
 [Mods](../docs/capabilities.md#mods)).
@@ -392,11 +318,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installer\sim\run.ps1
 
 It builds the DLLs and `dist/` (`build.ps1`, `package.ps1`; `-SkipNativeBuild`
 reuses `build/`), two installers stamped `v0.3.0-sim.1` and `v0.3.0-sim.2`, and
-the helper `snapmap-plus-sim.exe` (`sim/*.go`). It copies `DOOMx64vk.exe`,
-`DOOMx64.exe` and the two archive indexes `base\gameresources.pindex` and
-`base\snap_gameresources.pindex` from your DOOM folder (`-Doom`, found through
-Steam when omitted; the folder is only read), so build detection and the store tool
-see the real game. The helper serves a fake Releases API on a loopback port from
+the helper `snapmap-plus-sim.exe` (`sim/*.go`). It copies `DOOMx64vk.exe` and
+`DOOMx64.exe` from your DOOM folder (`-Doom`, found through Steam when omitted;
+the folder is only read), so build detection sees the real game. The helper serves a fake Releases API on a loopback port from
 release folders packed from `dist/` as `release.yml` packs them, with the size and
 digest fields the installer verifies, and `SNAPMAP_PLUS_API_BASE` points the
 installer at it. Each scenario gets fresh scratch DOOM, data, profile and TEMP
@@ -406,7 +330,7 @@ folders under `-Scratch` (default `%TEMP%\snapmap-plus-sim`), with
 | Scenario | Layout before | Steps |
 |---|---|---|
 | a | the original SnapHak in DOOM, prefabs, strings and a rawmap under `%USERPROFILE%\snaphak`, another tool's `dinput8.dll.doomforge.rollback` | install, uninstall |
-| b | v0.2.1-beta.19's 2018 pair in the April 2024 folder, its record and `installer-files.json`, `tests/fixtures/store-retired` as the data folder (`overrides\`, the retired `mods\` layout, `removed-mods\`) | update (no store-tool lines while `storeConversion` is off), uninstall |
+| b | v0.2.1-beta.19's 2018 pair in the April 2024 folder, its record and `installer-files.json`, `tests/fixtures/store-retired` as the data folder (`overrides\`, the retired `mods\` layout, `removed-mods\`) | update (the earlier release's folders stay as they are), uninstall |
 | c | v0.2.1-beta.20: both pairs, three backups of our DLLs, another tool's file, `installer-files.json`, `installer-versions.json`, `snapmap-plus.exe.updates.json`, `snapmap-plus.exe.old`, an empty `override-backups\` | update, uninstall |
 | d | none: `v0.3.0-sim.1` installs, then `v0.3.0-sim.2` is published | install, update (the installer updates itself first and relaunches), uninstall |
 
@@ -415,13 +339,12 @@ real ones do. After every step it prints the installer's full output and both
 folders, every entry labelled, and checks the contract: the DOOM folder holds
 exactly the vanilla files, the pair and the other tool's file; the data folder
 holds nothing outside the contract, `install.json` starts with its version, names
-the folder and the pair and records both executables with their hashes on disk,
+the folder and the pair and records `snapmap-plus.exe` with its hash on disk and no
+executable this release does not place,
 `cache\installer` holds only what `install.json` records; after uninstall none of
 the installer's files remain; the player's files are still there; TEMP is empty.
 It ends with a summary table and exits 0 only when every step met the contract.
 The full output is also written to `<scratch>\sim-output.txt` (and to `-Log`).
-Scenario b's store tool sends the fixture's retired files to the Windows Recycle
-Bin.
 
 ## Private release repositories
 

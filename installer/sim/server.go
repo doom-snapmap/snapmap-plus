@@ -151,7 +151,7 @@ func cmdServe(args []string) error {
 }
 
 // bundleFiles are what release.yml zips from dist/.
-var bundleFiles = []string{"XINPUT1_4.dll", "snapmap-plus", "MANIFEST.sha256", "snapmap-plus-store.exe", "TOOLS.sha256"}
+var bundleFiles = []string{"XINPUT1_4.dll", "snapmap-plus", "MANIFEST.sha256"}
 
 // cmdRelease packs dist/ into <out>\snapmap-plus-bundle.zip as release.yml does and copies the
 // installer beside it as snapmap-plus.exe.

@@ -154,8 +154,6 @@ func cmdInstall(f flags) error {
 		return fmt.Errorf("installed the files, but couldn't write the install record (%v) -- run: snapmap-plus update", err)
 	}
 	migrateLegacyLogs(doom) // runtime logs live in snapmap-plus\logs\ -- fold older locations (snaphak_logs\, snaphak\logs\) in (best-effort)
-	// The bundle's snapmap-plus-store converts a mods folder of earlier releases (never fails the install).
-	migrateStore(b.root, doom)
 	ui.Blank()
 	ui.OK("Snapmap+ %s installed.", b.version)
 	ensureWebView2Runtime(f) // the HTML UI renders in the WebView2 runtime -- ensure it's present (never fails the install)
@@ -246,9 +244,6 @@ func describeEarlier(doom, build string, prior *installRecord, legacy []string, 
 		return earlierInstall{"Snapmap+ " + ver, "An update: Snapmap+'s two files are replaced."}
 	}
 	plan := upperFirst(joinAnd(gone)) + " are removed, then Snapmap+'s two files for this build are installed."
-	if other && !present && storeConversion {
-		plan += "\nThe store tool converts the overrides\\ packages of that release." // a retired package folder
-	}
 	return earlierInstall{"Snapmap+ " + ver + " with " + joinAnd(found), plan}
 }
 
@@ -412,7 +407,7 @@ func cmdUninstall(f flags) error {
 	os.RemoveAll(filepath.Join(doom, "snaphak_logs"))
 	removeIfEmpty(filepath.Join(doom, "snapmap-plus"))
 	removeIfEmpty(filepath.Join(doom, "snaphak"))
-	// Remove the installer's record, the store tool and unused executable copies; preserve runtime
+	// Remove the installer's record and the executable copies it placed; preserve runtime
 	// configuration and the player's content.
 	cleanupAppData()
 	ui.OK("DOOM restored to vanilla. (Your Snapmap+ modding data was left untouched.)")
