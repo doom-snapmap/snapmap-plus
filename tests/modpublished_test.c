@@ -500,6 +500,12 @@ static const char PINNED_MAP[] =
     "\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}"
     ",\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"" SALT_A "\",\"name\":\"Eternal Demons\",\"size\":42,"
     "\"objects\":{\"entities/tyrant\":\"" HASH_A "\"}}]}}";
+static const char PINNED_LONG[] =
+    "{\"entities\":[{\"entityDef\":{\"className\":\"idPlaceableSnapAIEncounter\",\"inherit\":\"mods/" SALT_A "/tyrant\","
+    "\"targetType\":\"idDeclEntityDef\",\"~type\":\"idDeclEntityDef\"},\"uniqueId\":1,\"~type\":\"idSnapEntity\"}],"
+    "\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}"
+    ",\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"" SALT_A "\",\"name\":\"The Very Long Named Collection of Demons\",\"size\":42,"
+    "\"objects\":{\"entities/tyrant\":\"" HASH_A "\"}}]}}";
 static const char PINNED_TWO[] =
     "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}"
     ",\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"" SALT_A "\",\"name\":\"Eternal Demons\",\"size\":42,"
@@ -1277,7 +1283,8 @@ static void download_progress(void)
     tick(1);
     /* The progress line comes up at once; no dialog, now or later. */
     CHECK(sh_modpub_test_state() == 2 && F.asks == 0 && F.progress_up && F.progress_hides == 0);
-    CHECK(!strcmp(F.last_progress, "Getting this map's mod content: Eternal Demons (1 of 1), 84 of 212 MB."));
+    /* the screen's one short line; the console's sentence (SPEC 5.7, R-LV9) */
+    CHECK(!strcmp(F.last_progress, "Eternal Demons: 84 of 212 MB."));
     /* A download still running after two seconds: the line is updated in place, never taken down, and the console
      * says it too. */
     shows = F.progress_shows;
@@ -1297,17 +1304,49 @@ static void download_progress(void)
     tick(1);
     wait_progress_sent();
     tick(1);
-    CHECK(!strcmp(F.last_progress, "Getting this map's mod content: Eternal Demons (1 of 1), 5 MB."));
+    CHECK(!strcmp(F.last_progress, "Eternal Demons: 5 MB."));
     finish_gated_fetch();
     CHECK(F.resumes == 1);
+
+    /* a long mod name is cut with "..." so the line never wraps */
+    progress_line_for(PINNED_LONG);
+    F.prog_set = 1;
+    F.prog_done = 84ull << 20;
+    F.prog_total = 212ull << 20;
+    tick(1);
+    wait_progress_sent();
+    tick(1);
+    CHECK(!strcmp(F.last_progress, "The Very Long Named...: 84 of 212 MB."));
+    CHECK(strlen(F.last_progress) <= 38);
+    finish_gated_fetch();
 
     progress_line_for(PINNED_TWO);
     tick(1);
     wait_progress_sent();
     tick(1);
-    CHECK(!strncmp(F.last_progress, "Getting this map's mod content: Eternal Demons (1 of 2), ", 57));
+    CHECK(!strncmp(F.last_progress, "Mod content: ", 13) && strlen(F.last_progress) <= 38);
     finish_gated_fetch();
     CHECK(F.fetch_calls == 2 && F.resumes == 1);
+
+    printf("-- a browser play whose player leaves the browser mid-download: cancelled, the line down, never resumed\n");
+    reset();
+    use_units();
+    F.token = 64;   /* the browser's screen */
+    F.fetch_gate = CreateEventW(NULL, TRUE, FALSE, NULL);
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, PINNED_MAP, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    wait_progress_sent();
+    tick(1);
+    CHECK(sh_modpub_test_state() == 2 && F.progress_up && F.drop_ui == 0);
+    F.owner_ok = 0;   /* Esc: the hub, another screen */
+    tick(1);
+    CHECK(!sh_modpublished_holding() && !F.progress_up && F.drop_ui == 1 && F.launch_refused == 1);
+    WaitForSingleObject(F.worker, 5000);
+    CHECK(F.fetch_cancelled == 1 && F.resumes == 0 && F.activations == 0);
+    tick(2);
+    CloseHandle(F.fetch_gate); F.fetch_gate = NULL;
+    F.token = 0;
 
     printf("-- a short download asks nothing and leaves no line up\n");
     reset();

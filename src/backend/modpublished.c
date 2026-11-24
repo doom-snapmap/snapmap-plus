@@ -563,6 +563,21 @@ static void pub_abandon(const char *why)
     pub_hold_free();
 }
 
+/* A browser or feed play whose player left its screen while its mods downloaded (Esc to the hub): the download is
+ * cancelled, its line taken down, and the browser out of its loading state, so a play the player backed out of never
+ * starts later on its own (R-LV9). */
+static int pub_left_screen(pub_hold *h)
+{
+    if ((h->hook != SH_MODPUB_BROWSER_PLAY && h->hook != SH_MODPUB_FEED_PLAY) || !h->token || !g_ops.owner_current ||
+        g_ops.owner_current(g_ops.context, h->hook, h->owner, h->extra, h->token))
+        return 0;
+    pub_progress_hide(h);
+    if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, h->hook, h->owner);
+    pub_launch_refused(h->hook);
+    pub_abandon("the player left the screen while its mods downloaded; the download is cancelled");
+    return 1;
+}
+
 /* Visible: the player's load is refused and told why. */
 static void pub_drop(const char *notice, const char *why)
 {
@@ -1041,13 +1056,35 @@ static char *pub_progress_text(const char *thing, const char *name, long current
                     done / 1048576.0);
 }
 
+/* The same progress on the screen (SPEC-distribution 5.7, manager ruling R-LV9): one short line, as the game's own
+ * progress widget is sized for ("Loading..."): "Eternal Demons: 84 of 212 MB." for one mod, "Mod content: 84 of 212
+ * MB." for several (the mod being fetched), a long mod name cut with "..." so the line never wraps. */
+#define PUB_PROGRESS_LINE_CAP 38   /* characters the widget shows on one line at its font (39 measured, one spare) */
+static char *pub_progress_short(const char *name, size_t count, long long done, long long total)
+{
+    char amount[48], label[PUB_PROGRESS_LINE_CAP + 1];
+    size_t room;
+    if (total > 0) _snprintf_s(amount, sizeof amount, _TRUNCATE, ": %.0f of %.0f MB.", done / 1048576.0, total / 1048576.0);
+    else _snprintf_s(amount, sizeof amount, _TRUNCATE, ": %.0f MB.", done / 1048576.0);
+    if (count != 1 || !name || !name[0]) name = "Mod content";
+    room = strlen(amount) < PUB_PROGRESS_LINE_CAP - 4 ? PUB_PROGRESS_LINE_CAP - strlen(amount) : 4;
+    if (strlen(name) <= room) strcpy_s(label, sizeof label, name);
+    else {
+        size_t keep = room - 3;
+        while (keep > 1 && name[keep - 1] == ' ') keep--;   /* "Named..." rather than "Named ..." */
+        memcpy(label, name, keep);
+        strcpy_s(label + keep, sizeof label - keep, "...");
+    }
+    return sh_textf("%s%s", label, amount);
+}
+
 /* While a download runs the player sees where it is in the game's own progress line, the one the game shows while it
- * downloads a published map: its text is replaced in place every PUB_PROGRESS_MS, never taken down and raised again,
- * and the same words go to the console. Nothing is asked: a map's content downloads with a progress line only
+ * downloads a published map: its text is replaced in place every PUB_PROGRESS_MS, never taken down and raised again;
+ * the console gets the whole sentence. Nothing is asked: a map's content downloads with a progress line only
  * (D-A36). */
 static void pub_progress_step(pub_hold *h, pub_job *job)
 {
-    char *line;
+    char *line, *shown;
     ULONGLONG now = GetTickCount64();
     if (!h->progress_shown || now - h->progress_at >= PUB_PROGRESS_MS) {
         LONG current = InterlockedCompareExchange(&job->current, 0, 0);
@@ -1055,12 +1092,14 @@ static void pub_progress_step(pub_hold *h, pub_job *job)
         long long total = InterlockedCompareExchange64(&job->progress_total, 0, 0);
         h->progress_at = now;
         line = pub_progress_text(pub_thing(h->hook), job->names[current], current, job->count, done, total);
-        if (line) {
+        shown = pub_progress_short(job->names[current], job->count, done, total);
+        if (line && shown) {
             if (h->progress_shown) pub_print(line);   /* the first line says only "0 MB" */
-            if (g_ops.progress && h->hook != SH_MODPUB_EDITOR_OPEN) g_ops.progress(g_ops.context, h->hook, h->owner, line);
+            if (g_ops.progress && h->hook != SH_MODPUB_EDITOR_OPEN) g_ops.progress(g_ops.context, h->hook, h->owner, shown);
             h->progress_shown = 1;
         }
         free(line);
+        free(shown);
         /* A joiner downloading in the lobby tells its host how far it is, over every row of the download. */
         if (h->in_lobby && job->count) {
             unsigned long long part = total > 0 ? (unsigned long long)(done * 1000 / total) : 0;
@@ -1767,6 +1806,7 @@ void sh_modpublished_poll(void)
     case HOLD_FETCHING: {
         pub_job *job = h->job;
         if (h->in_lobby && pub_lobby_check(h)) break;
+        if (pub_left_screen(h)) break;
         if (!InterlockedCompareExchange(&job->done, 0, 0)) {
             pub_progress_step(h, job);
             break;
@@ -2086,7 +2126,8 @@ static unsigned long long eng_hold_token(void *c, int hook, void *owner, const v
     /* A feed widget or a launch boundary resumes into the screen it was held
      * on: the widget lives in that screen, the lobby launch reads the
      * history record the completion pushed from it. */
-    if (hook == SH_MODPUB_FEED_PLAY || hook == SH_MODPUB_LOBBY_LAUNCH) return eng_screen_token();
+    if (hook == SH_MODPUB_FEED_PLAY || hook == SH_MODPUB_LOBBY_LAUNCH || hook == SH_MODPUB_BROWSER_PLAY)
+        return eng_screen_token();   /* a browser play resumes only into the browser it was held on (R-LV9) */
     if (hook != SH_MODPUB_LOCAL_OFFLINE || !extra) return 0;
     __try { return *(const unsigned long long *)((const uint8_t *)extra + ENG_MODEL_KEY); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
@@ -2101,7 +2142,7 @@ static int eng_owner_current(void *c, int hook, void *owner, const void *extra, 
         if (!shell || *(void **)((uint8_t *)shell + ENG_SHELL_MANAGER) != manager) return 0;
         if (hook == SH_MODPUB_LOCAL_OFFLINE &&
             (!extra || *(const unsigned long long *)((const uint8_t *)extra + ENG_MODEL_KEY) != token)) return 0;
-        if ((hook == SH_MODPUB_FEED_PLAY || hook == SH_MODPUB_LOBBY_LAUNCH) && token &&
+        if ((hook == SH_MODPUB_FEED_PLAY || hook == SH_MODPUB_LOBBY_LAUNCH || hook == SH_MODPUB_BROWSER_PLAY) && token &&
             eng_screen_token() != token) return 0;
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
@@ -2168,17 +2209,11 @@ static void eng_hold_ui(void *c, int hook, void *owner)
         case SH_MODPUB_CACHE_READY:
             g_eng.hide_progress(manager);
             break;
-        case SH_MODPUB_BROWSER_PLAY: {
-            /* The browser completion's own first steps: clear the manager's
-             * pending flag (+0x348), the browser's state (+0x20), set its
-             * widget to 0xF and hide the progress widget. */
-            void *widget = *(void **)((uint8_t *)owner + 0x30);
-            g_eng.browser_flag(manager);
-            *(int *)((uint8_t *)owner + 0x20) = 0;
-            if (widget) ((void (*)(void *, int))eng_vslot(widget, 8))(widget, 0xF);
-            g_eng.hide_progress(manager);
+        case SH_MODPUB_BROWSER_PLAY:
+            /* The browser stays in its loading state, dimmed with its progress widget up, as the game keeps it while
+             * it loads a map (R-LV9): the download's line takes the widget's text. The completion's own first steps
+             * run when it resumes, or eng_drop_ui runs them when the hold is dropped. */
             break;
-        }
         default:
             break;
         }
@@ -2190,6 +2225,17 @@ static void eng_drop_ui(void *c, int hook, void *owner)
     void *manager = eng_manager_of(hook, owner);
     (void)c;
     if (!manager || hook == SH_MODPUB_LOCAL_OFFLINE || hook == SH_MODPUB_CACHE_LOBBY) return;
+    if (hook == SH_MODPUB_BROWSER_PLAY) {
+        /* The browser completion's own first steps, which the hold left for its end: clear the manager's pending flag
+         * (+0x348), the browser's state (+0x20), set its widget to 0xF (out of its loading state). Done even when the
+         * player has left the browser: the browser is the shell's own screen, kept, and must not stay loading. */
+        __try {
+            void *widget = *(void **)((uint8_t *)owner + 0x30);
+            g_eng.browser_flag(manager);
+            *(int *)((uint8_t *)owner + 0x20) = 0;
+            if (widget) ((void (*)(void *, int))eng_vslot(widget, 8))(widget, 0xF);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: the browser's loading state could not be cleared"); }
+    }
     if (!eng_owner_current(c, hook, owner, NULL, 0)) return;
     __try { g_eng.hide_progress(manager); }
     __except (EXCEPTION_EXECUTE_HANDLER) { }
