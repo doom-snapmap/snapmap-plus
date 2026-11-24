@@ -1615,7 +1615,7 @@ static void ms_one_per_area(ms_index *x)
             if (b->place && !strcmp(b->place, SH_MODSERVE_CONTENT)) break;   /* compositions: one per map row */
             first = o->installed_at != b->installed_at ? o->installed_at < b->installed_at : _stricmp(o->folder, b->folder) < 0;
             if (!first) continue;
-            ms_fail(b, "it is a copy of mods\\%s; Refresh in the Mods tab makes it a new mod",
+            ms_fail(b, "it is a copy of your folder %s; Refresh in the Mods tab makes it a new mod",
                     o->folder);
             b->admitted = 0;
             b->file_count = 0;

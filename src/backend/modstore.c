@@ -994,7 +994,7 @@ static void ms_mark_duplicates(sh_ms_list *l)
              * any other waits for the scan's new salt. */
             char *why = sh_ms_build_cause(e->folder);
             if (!why)
-                why = sh_textf("mods\\%s is a copy of mods\\%s; Refresh in the Mods tab makes it a new mod", e->name,
+                why = sh_textf("%s is a copy of your folder %s; Refresh in the Mods tab makes it a new mod", e->name,
                                l->items[keeper[i]].name);
             if (why) { free(e->cause); e->cause = why; }
         }
@@ -1896,8 +1896,9 @@ static int ms_in_retired(const char *folder)
     free(w);
     return in;
 }
-#define MS_RETIRED_SENTENCE "This folder is in mods\\" SH_MS_RETIRED_PLACES ", where earlier versions kept the mods of " \
-    "downloaded maps; this version does not read it. Move it to the top of the mods folder and press Refresh"
+#define MS_RETIRED_SENTENCE "This folder is in the \"" SH_MS_RETIRED_PLACES "\" folder of your mods, where earlier " \
+    "versions kept the mods of downloaded maps; this version does not read it. Move it to the top of your mods folder " \
+    "and press Refresh"
 
 int sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SALT_LEN + 1], char **cause)
 {
@@ -2304,7 +2305,7 @@ static int ms_new_mod(const char *name, int example, char salt_out[SH_MB_ID_MAX 
     assets = _wcsdup(dir);
     desc = ms_wjoin(dir, L"mod.json");
     if (!assets || !desc || !ms_mkdirs(assets)) {
-        ms_cause(cause, "cannot create the folder mods\\%s: %s", leaf, ms_why(GetLastError(), leaf, 1, 0));
+        ms_cause(cause, "cannot create the folder %s in your mods folder: %s", leaf, ms_why(GetLastError(), leaf, 1, 0));
         goto done;
     }
     /* The author's part holds what the files cannot say; the block the salt,
@@ -2321,9 +2322,9 @@ static int ms_new_mod(const char *name, int example, char salt_out[SH_MB_ID_MAX 
                               "\r\n  \"" SH_MB_BLOCK_KEY "\": {\r\n    \"format\": %d,\r\n    \"salt\": \"%s\"\r\n  }\r\n}\r\n",
                               esc, strings, SH_MB_FORMAT, salt) : NULL;
     if (!text) { ms_cause(cause, "out of memory"); goto done; }
-    if (!ms_write_text(desc, text, strlen(text))) { ms_cause(cause, "cannot write mods\\%s\\mod.json", leaf); goto done; }
+    if (!ms_write_text(desc, text, strlen(text))) { ms_cause(cause, "cannot write the mod.json of %s", leaf); goto done; }
     if (example && !ms_write_example(dir, salt, example_out)) {
-        ms_cause(cause, "cannot write the example files of mods\\%s: %s", leaf, ms_why(GetLastError(), leaf, 1, 0));
+        ms_cause(cause, "cannot write the example files of %s: %s", leaf, ms_why(GetLastError(), leaf, 1, 0));
         goto done;
     }
     u = sh_mb_utf8(dir);
@@ -2721,7 +2722,7 @@ static int ms_swap_in(const wchar_t *staging, const wchar_t *final, const wchar_
         if (!ms_move_folder(final, old)) {
             DWORD err = GetLastError();
             ms_rmtree(staging, root);
-            return ms_cause(cause, "cannot replace mods\\%s: %s", name, ms_why(err, name, 1, 0));
+            return ms_cause(cause, "cannot replace your folder %s: %s", name, ms_why(err, name, 1, 0));
         }
         *replaced = 1;
     }
@@ -2729,7 +2730,7 @@ static int ms_swap_in(const wchar_t *staging, const wchar_t *final, const wchar_
         DWORD err = GetLastError();
         if (*replaced) ms_move_folder(old, final);
         ms_rmtree(staging, root);
-        return ms_cause(cause, "cannot place mods\\%s: %s", name, ms_why(err, name, 1, 0));
+        return ms_cause(cause, "cannot put %s in your mods folder: %s", name, ms_why(err, name, 1, 0));
     }
     if (*replaced) {
         char *why = NULL;
@@ -2776,7 +2777,7 @@ static int ms_install_locked(const char *folder, int to_root,
 
     if (ms_in_retired_area(src, root)) { ms_cause(cause, MS_RETIRED_SENTENCE); goto done; }
     if (to_root && ms_inside(src, root)) {
-        ms_cause(cause, "mods\\%s is already one of your mods", ms_rel(folder));
+        ms_cause(cause, "%s is already one of your mods", ms_rel(folder));
         goto done;
     }
     if (!to_root && ms_store_mod_folder(src, root)) {
@@ -2842,7 +2843,8 @@ static int ms_install_locked(const char *folder, int to_root,
         const sh_ms_entry *here = sh_ms_find_salt(&list, b.id, NULL);
         if (to_root && here && !(here->loaded && !_stricmp(here->bundle.hash, b.hash) && sh_ms_entry_usable(here))) {
             /* One build per salt at the root: the player's own folder of this mod stays theirs. */
-            ms_cause(cause, "your mods already hold %s in mods\\%s", b.name && b.name[0] ? b.name : b.id, here->name);
+            ms_cause(cause, "your mods already hold %s, in your folder %s", b.name && b.name[0] ? b.name : "this mod",
+                     here->name);
             goto done;
         } else if (here && here->loaded && !_stricmp(here->bundle.hash, b.hash) && sh_ms_entry_usable(here)) {
             name = _strdup(here->name);
@@ -2873,7 +2875,7 @@ static int ms_install_locked(const char *folder, int to_root,
     final = ms_wjoin_utf8(root, name);
     if (!final || !ms_work_names(final, &staging, &old)) { ms_cause(cause, "out of memory"); goto done; }
     if (ms_exists(staging)) ms_rmtree(staging, root);
-    if (!ms_mkdirs(staging)) { ms_cause(cause, "cannot create mods\\%s: %s", name, ms_why(GetLastError(), name, 1, 0)); goto done; }
+    if (!ms_mkdirs(staging)) { ms_cause(cause, "cannot create the folder %s in your mods folder: %s", name, ms_why(GetLastError(), name, 1, 0)); goto done; }
     for (i = 0; i < b.file_count; i++) {
         wchar_t *from, *to;
         int copied;
@@ -2901,7 +2903,7 @@ static int ms_install_locked(const char *folder, int to_root,
         wchar_t *mj = ms_wjoin(staging, L"mod.json");
         int wrote = mj && text && ms_write_text(mj, text, text_len);
         free(mj);
-        if (!wrote) { ms_rmtree(staging, root); ms_cause(cause, "cannot write mod.json for mods\\%s", name); goto done; }
+        if (!wrote) { ms_rmtree(staging, root); ms_cause(cause, "cannot write the mod.json of %s", name); goto done; }
     }
     /* The copy is what serves: hash it (the source may have changed since the build). */
     if (!ms_verify_folder(staging, &b, NULL, &one)) {

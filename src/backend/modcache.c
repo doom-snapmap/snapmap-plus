@@ -9,6 +9,7 @@
 #include "modunit.h"
 #include "modbundle.h"
 #include "modserve.h"   /* SH_MODSERVE_STANDIN_DIR: the stand-in rows' folder */
+#include "modauthor.h"  /* a unit's root as the engine names it, for its label */
 #include "modprog.h"
 #include "modzip.h"
 #include "map_carrier.h"
@@ -592,6 +593,7 @@ typedef struct mc_row {
     char **placed; size_t nplaced;     /* names the map places under mods/<salt>/ */
     mc_placed_info *pinfo;             /* per placed name, when the map text was read */
     char *modules;                     /* the row's module records (D-A30), JSON, or NULL */
+    char *labels;                      /* the row's labels: each placed object's name as the author sees it, or NULL */
     mc_absent *absent; size_t nabsent; /* what its last composition stood in for */
     int broken;                        /* a row of no units: the local folder is here and cannot be used */
     int notice;                        /* the absent objects wait for the notice */
@@ -614,6 +616,7 @@ static void mc_row_clear(mc_row *r)
     free(r->placed);
     free(r->pinfo);
     free(r->modules);
+    free(r->labels);
     for (i = 0; i < r->nabsent; i++) { free(r->absent[i].object); free(r->absent[i].mod); }
     free(r->absent);
     memset(r, 0, sizeof *r);
@@ -712,6 +715,7 @@ void sh_cache_note_rows(const sh_modmanifest_list *rows, char *const *placed, si
         strcpy_s(r->salt, sizeof r->salt, row->salt);
         r->name = sh_text(sh_modmanifest_row_name(row)[0] ? row->name : row->salt);
         r->modules = row->modules ? sh_text(row->modules) : NULL;
+        r->labels = row->labels ? sh_text(row->labels) : NULL;
         r->broken = row->local_broken;
         r->n = row->unit_count;
         r->units = row->unit_count ? calloc(row->unit_count, sizeof *r->units) : NULL;
@@ -824,6 +828,23 @@ char *sh_cache_object_name(const char *root)
         up = 0;
     }
     return out;
+}
+
+/* The name a notice gives an object of row `r` (DS-WORDS): the name the author sees, carried by the row's labels under
+ * the name the map places it by (a unit's root is first spelled as the engine names it), else one made from the root
+ * or placed name. malloc'd. */
+static char *mc_object_label(const mc_row *r, const char *name, int root)
+{
+    sh_modmanifest_row probe;
+    char *engine = NULL, *label;
+    if (!name) return sh_text("");
+    if (!strcmp(name, "*")) return sh_text("");   /* a whole-mod row: the mod's own name stands for it */
+    memset(&probe, 0, sizeof probe);
+    probe.labels = r->labels;
+    if (root) engine = sh_ma_engine_name(r->salt, name, strlen(name));
+    label = sh_modmanifest_row_label(&probe, engine ? engine : name);
+    free(engine);
+    return label ? label : sh_cache_object_name(name);
 }
 
 /* A mod's name in a player sentence: a row with no name is kept under its salt, which is never shown. */
@@ -1581,6 +1602,7 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
             strcpy_s(snapshot.salt, sizeof snapshot.salt, r->salt);
             snapshot.name = sh_text(r->name ? r->name : r->salt);
             snapshot.modules = r->modules ? sh_text(r->modules) : NULL;
+            snapshot.labels = r->labels ? sh_text(r->labels) : NULL;
             snapshot.broken = r->broken;
             snapshot.n = r->n;
             snapshot.units = r->n ? calloc(r->n, sizeof *snapshot.units) : NULL;
@@ -1741,7 +1763,7 @@ record:
                 r->absent = (mc_absent *)calloc(snapshot.n, sizeof *r->absent);
                 for (i = 0; r->absent && i < snapshot.n; i++) {
                     if (units[i].state == 1) continue;
-                    r->absent[r->nabsent].object = sh_cache_object_name(snapshot.roots[i]);
+                    r->absent[r->nabsent].object = mc_object_label(&snapshot, snapshot.roots[i], 1);
                     r->absent[r->nabsent].mod = sh_text(mc_mod_label(snapshot.name, snapshot.salt));
                     r->absent[r->nabsent].cause = units[i].cause;
                     r->nabsent++;
@@ -1755,7 +1777,7 @@ record:
                 r->absent = (mc_absent *)calloc(snapshot.nplaced, sizeof *r->absent);
                 for (i = 0; r->absent && i < snapshot.nplaced; i++) {
                     if (read && !snapshot.pinfo[i].known) continue;
-                    r->absent[r->nabsent].object = sh_cache_object_name(snapshot.placed[i]);
+                    r->absent[r->nabsent].object = mc_object_label(&snapshot, snapshot.placed[i], 0);
                     r->absent[r->nabsent].mod = sh_text(mc_mod_label(snapshot.name, snapshot.salt));
                     r->absent[r->nabsent].cause = snapshot.broken == SH_MODMANIFEST_LOCAL_LACKS ? SH_CACHE_ABSENT_LACKED
                                                   : snapshot.broken ? SH_CACHE_ABSENT_BROKEN : SH_CACHE_ABSENT_LOCAL;

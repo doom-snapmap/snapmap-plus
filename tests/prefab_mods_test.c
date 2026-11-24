@@ -851,6 +851,60 @@ static void absent_local_row_stands_in(void)
     sh_modmanifest_reset();
 }
 
+/* DS-WORDS, end to end: a notice names a placed object by the name the author sees, carried by the row's labels (the
+ * Toybox row's name, written at the save from the installed mods), never by its unit's root; a save keeps the labels a
+ * row was loaded with for a mod that is not here. */
+static void label_name(const char *const *placed, size_t n, char **labels)
+{
+    size_t k;
+    for (k = 0; k < n; k++)
+        if (!_stricmp(placed[k], "mods/testdoor/door")) labels[k] = _strdup("Heavy Door");
+}
+static void notices_name_objects_as_the_author_sees_them(void)
+{
+    static const char MAP_LABELED[] =
+        "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/absnt001/crate\",\"name\":\"\"},"
+        "\"uniqueId\":0}],"
+        "\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"absnt001\",\"name\":\"Absent Pack\",\"size\":10,"
+        "\"local\":true,\"names\":[\"mods/absnt001/crate\"],\"labels\":{\"mods/absnt001/crate\":\"Wooden Crate\"}}]}}";
+    static const char MAP_DOOR[] =
+        "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/testdoor/door\",\"name\":\"\"},"
+        "\"uniqueId\":0}],"
+        "\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"testdoor\",\"name\":\"test.door\",\"size\":10,"
+        "\"local\":true,\"names\":[\"mods/testdoor/door\"]}]}}";
+    sh_modmanifest_list back;
+    char *t, *saved, *label;
+    size_t n = 0;
+    printf("-- a notice names an object as the author sees it (the row's labels), and a save writes and keeps them\n");
+    (void)sh_cache_take_notice();
+    sh_modmanifest_set_content(sh_cache_on_load);
+    sh_cache_set_rescan(sh_modserve_index_rescan);
+    (void)sh_modmanifest_prepare_load(MAP_LABELED, sizeof MAP_LABELED - 1, NULL);
+    t = sh_cache_take_notice();
+    CHECK(t && !strcmp(t, "This map is playing without the Wooden Crate from Absent Pack, which is not on this computer."));
+    free(t);
+    /* the mod is not here: the save keeps the label the row was loaded with */
+    saved = sh_modmanifest_on_save(MAP_LABELED, sizeof MAP_LABELED - 1, &n);
+    memset(&back, 0, sizeof back);
+    CHECK(saved && sh_modmanifest_read(saved, n, &back, NULL) == 1 && back.count == 1);
+    label = back.count ? sh_modmanifest_row_label(&back.rows[0], "mods/absnt001/crate") : NULL;
+    CHECK(label && !strcmp(label, "Wooden Crate"));
+    free(label);
+    sh_modmanifest_list_free(&back);
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    sh_modmanifest_reset();
+    /* the mod is here: the installed mods name it (the labeler, modui.c from the Toybox rows) */
+    sh_modmanifest_set_labeler(label_name);
+    (void)sh_modmanifest_prepare_load(MAP_DOOR, sizeof MAP_DOOR - 1, NULL);
+    saved = sh_modmanifest_on_save(MAP_DOOR, sizeof MAP_DOOR - 1, &n);
+    CHECK(saved && strstr(saved, "\"labels\":{\"mods/testdoor/door\":\"Heavy Door\"}"));
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    sh_modmanifest_set_labeler(NULL);
+    sh_modmanifest_set_content(NULL);
+    sh_cache_set_rescan(NULL);
+    sh_modmanifest_reset();
+}
+
 /* Manager, 2026-11-24, end to end: the author's own map places an object their folder no longer has (removed from the
  * mod). The map is never refused: the folder serves what it has, the object it lacks stands in beside it (the stand-in
  * composition of the salt, declared after the folder's build), and the load's one sentence says so. */
@@ -2130,6 +2184,7 @@ int main(int argc, char **argv)
     one_demon_of_a_pack(tmp, storeA);
     absent_local_row_stands_in();
     lacking_local_row_stands_in();
+    notices_name_objects_as_the_author_sees_them();
     published_map_follows_rebuild(tmp, storeA);
     rebuilt_folder_unit_is_here(tmp, storeA);
     add_to_my_mods_end_to_end(tmp, storeA);

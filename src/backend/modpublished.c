@@ -8,8 +8,9 @@
  *                  first (OnSnapPlay clears its wait dialog and hides the progress widget)
  *   BEGUN          next tick: rows that name units (SPEC-distribution 5.7) are fetched at once, with no question, into
  *                  the content cache, four units at a time, under a progress line; whatever cannot be had stands in
- *                  (modcache.h). A row that names no unit (a local row whose folder this computer does not have) cannot
- *                  be downloaded: the load is refused with one sentence
+ *                  (modcache.h). A row that names no unit (a local row whose folder is not here) has nothing to
+ *                  fetch: its stand-ins serve it, or it places nothing and the load goes on without it, saying so
+ *                  (pub_hold_local); only placed objects whose stand-ins could not be written stop the load
  *   FETCHING       the job runs on the worker
  *   (resume)       the job is done, on a main tick: rescan the index, check every row is served (the asset rule),
  *                  re-check the owner and (joiner) the lobby host's item, activate, parse the retained text into a

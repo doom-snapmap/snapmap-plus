@@ -325,11 +325,11 @@ static void rawmap_print_usage(void)
     sh_printf("Maps that use mods:\n");
     sh_printf("  Every save of such a map also writes <name>.zip beside the .json: the map\n");
     sh_printf("  and its mods in one file. Share the .zip; the .json alone will not load\n");
-    sh_printf("  for anyone who does not have the mods. Opening a .zip installs its mods\n");
-    sh_printf("  into mods\\maps\\<the .zip's name>\\, and the map, saved anywhere, finds them there.\n");
-    sh_printf("  A rawmap whose mods you do not have is never opened as it is: when the mod\n");
-    sh_printf("  store has them the game offers to download them, and otherwise it names\n");
-    sh_printf("  them and says to ask the map's author for the .zip.\n");
+    sh_printf("  for anyone who does not have the mods. Opening a .zip puts its mod content\n");
+    sh_printf("  into Snapmap+'s content cache (nothing is installed), and the map, saved\n");
+    sh_printf("  anywhere, finds it there. A rawmap whose mod content is not here gets it\n");
+    sh_printf("  from the mod store with no question; what cannot be had stands in, and one\n");
+    sh_printf("  sentence says what the map plays without.\n");
 }
 
 static void h_sh_rawmaps(idCmdArgs *a)

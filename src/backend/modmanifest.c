@@ -39,6 +39,7 @@ void sh_modmanifest_row_free(sh_modmanifest_row *row)
     free(row->names);
     free(row->name);
     free(row->choices);
+    free(row->labels);
     free(row->modules);
     if (row->roots) for (i = 0; i < row->unit_count; i++) free(row->roots[i]);
     free(row->roots);
@@ -47,6 +48,7 @@ void sh_modmanifest_row_free(sh_modmanifest_row *row)
     row->name_count = 0;
     row->name = NULL;
     row->choices = NULL;
+    row->labels = NULL;
     row->modules = NULL;
     row->roots = NULL;
     row->units = NULL;
@@ -174,13 +176,14 @@ int sh_modmanifest_list_add(sh_modmanifest_list *list, const sh_modmanifest_row 
     slot->name_count = 0;
     slot->name = NULL;
     slot->choices = NULL;
+    slot->labels = NULL;
     slot->modules = NULL;
     slot->roots = NULL;
     slot->units = NULL;
     slot->unit_count = 0;
     slot->pinned = 0;
     if ((row->name && !(slot->name = sh_text(row->name))) || (row->choices && !(slot->choices = sh_text(row->choices))) ||
-        (row->modules && !(slot->modules = sh_text(row->modules)))) {
+        (row->labels && !(slot->labels = sh_text(row->labels))) || (row->modules && !(slot->modules = sh_text(row->modules)))) {
         sh_modmanifest_row_free(slot);
         return 0;
     }
@@ -451,6 +454,21 @@ static int mm_choice_find(const char *lines, const char *slot, char *key, size_t
 
 /* Append "slot\tkey\n" to *lines (malloc'd, NULL for none) unless the slot
  * is there. 0 when memory runs out. */
+char *sh_modmanifest_row_label(const sh_modmanifest_row *row, const char *placed)
+{
+    const char *p, *nl;
+    size_t n;
+    if (!row || !row->labels || !placed || !placed[0]) return NULL;
+    n = strlen(placed);
+    for (p = row->labels; *p; p = nl + 1) {
+        const char *tab = strchr(p, '\t');
+        nl = strchr(p, '\n');
+        if (!tab || !nl || tab > nl) return NULL;
+        if ((size_t)(tab - p) == n && !_strnicmp(p, placed, n)) return sh_textn(tab + 1, (size_t)(nl - tab - 1));
+    }
+    return NULL;
+}
+
 static int mm_choice_add(char **lines, const char *slot, const char *key)
 {
     if (mm_choice_find(*lines, slot, NULL, 0)) return 1;
@@ -621,6 +639,23 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
             sh_json_object_free(&co);
         }
     }
+    {
+        /* Display only: entries that do not read are skipped (the row stays). */
+        const char *labels = sh_json_object_get(&object, "labels");
+        sh_json_object lo = {0};
+        size_t c;
+        if (labels && *labels == '{' && sh_native_json_parse_object(labels, strlen(labels), 2, &lo)) {
+            for (c = 0; c < lo.count; c++) {
+                char *label = mm_decode(lo.members[c].value_json, strlen(lo.members[c].value_json));
+                char *placed = label ? sh_textn(lo.members[c].key, lo.members[c].key_length) : NULL;
+                if (placed && placed[0] && label[0] && !strpbrk(placed, "\t\n") && !strpbrk(label, "\t\n"))
+                    (void)mm_choice_add(&out->labels, placed, label);
+                free(placed);
+                free(label);
+            }
+            sh_json_object_free(&lo);
+        }
+    }
     names = sh_json_object_get(&object, "names");
     if (names) {
         const char *cursor = names, *end = names + strlen(names), *elem;
@@ -693,6 +728,19 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
             mm_put_quoted(&t, key);
             free(slot);
             free(key);
+        }
+        mm_put(&t, "}", 1);
+    }
+    if (mm_choice_count(row->labels)) {
+        char *placed, *label;
+        mm_put(&t, ",\"labels\":{", 11);
+        for (c = 0, p = row->labels; mm_choice_next(&p, &placed, &label); c++) {
+            if (c) mm_put(&t, ",", 1);
+            mm_put_quoted(&t, placed);
+            mm_put(&t, ":", 1);
+            mm_put_quoted(&t, label);
+            free(placed);
+            free(label);
         }
         mm_put(&t, "}", 1);
     }
@@ -1898,6 +1946,7 @@ void sh_modmanifest_content_for(const char *json, size_t length, const sh_modman
             strcpy_s(none.salt, sizeof none.salt, r->salt);
             if (!sh_modmanifest_composition_hash(r->salt, NULL, 0, none.build)) continue;
             none.name = r->name;   /* copied by the add */
+            none.labels = r->labels;
             none.size = r->size;
             none.pinned = 1;
             none.local_broken = lacking ? SH_MODMANIFEST_LOCAL_LACKS : sh_modserve_salt_installed(r->salt);
@@ -2213,6 +2262,44 @@ static int mm_save_pins(mm_save_ctx *ctx)
     return ok;
 }
 
+/* DS-WORDS: each row carries the name the author sees for every object the map places of its mod (its Toybox row's
+ * name), so a notice on any machine names the object as the author named it, never by its unit's root. The installed
+ * mods answer (the labeler); a name they do not know keeps the label the row was loaded with. */
+static sh_modmanifest_labeler_fn volatile g_labeler;
+void sh_modmanifest_set_labeler(sh_modmanifest_labeler_fn fn) { g_labeler = fn; }
+
+static void mm_save_labels(mm_save_ctx *ctx, char **names, size_t count)
+{
+    sh_modmanifest_labeler_fn labeler = g_labeler;
+    sh_modmanifest_list cur;
+    char **labels = count ? (char **)calloc(count, sizeof *labels) : NULL;
+    size_t i, k, j;
+    if (count && !labels) return;
+    if (labeler && count) labeler((const char *const *)names, count, labels);
+    memset(&cur, 0, sizeof cur);
+    (void)sh_modmanifest_current(&cur);
+    for (i = 0; i < ctx->list.count; i++) {
+        sh_modmanifest_row *r = &ctx->list.rows[i];
+        size_t sl = strlen(r->salt);
+        char *kept = NULL;
+        for (k = 0; k < count; k++) {
+            char *label = NULL;
+            if (!names[k] || _strnicmp(names[k], "mods/", 5) || _strnicmp(names[k] + 5, r->salt, sl) || names[k][5 + sl] != '/')
+                continue;
+            if (labels[k] && labels[k][0]) label = sh_text(labels[k]);
+            for (j = 0; !label && j < cur.count; j++)
+                if (!strcmp(cur.rows[j].salt, r->salt)) label = sh_modmanifest_row_label(&cur.rows[j], names[k]);
+            if (label && label[0] && !strpbrk(label, "\t\n")) (void)mm_choice_add(&kept, names[k], label);
+            free(label);
+        }
+        free(r->labels);
+        r->labels = kept;
+    }
+    sh_modmanifest_list_free(&cur);
+    for (k = 0; labels && k < count; k++) free(labels[k]);
+    free(labels);
+}
+
 /* A local row whose folder is not here is served by its stand-ins (D6a), whose bundle's size the closure gave it: it
  * keeps the size and name the open map's row was loaded with, which say what the mod is (D6), as it stays a local
  * row. */
@@ -2302,6 +2389,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     if (!ctx.failed && !mm_save_pins(&ctx)) ctx.failed = 1;
     if (!ctx.failed) mm_save_keep_absent(&ctx);
     if (!ctx.failed && !mm_save_version(&ctx, 1)) ctx.failed = 1;
+    if (!ctx.failed) mm_save_labels(&ctx, names, count);
     sh_modmanifest_names_free(names, count);
     sh_modmanifest_list_free(&attached);
     if (ctx.failed) {

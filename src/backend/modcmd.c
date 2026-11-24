@@ -679,8 +679,8 @@ void h_sh_mods(idCmdArgs *a)
         else if (!sh_ms_new_mod(arg, key, &folder, &cause))
             mc_line("MODS: new \"%s\": refused: %s", arg, cause ? cause : "out of memory");
         else
-            mc_line("MODS: new \"%s\": salt %s, folder %s; put its decls under assets\\generated\\decls\\<type>\\mods\\%s\\ "
-                    "(any other file under its engine path, with mods\\%s\\ in it) and rescan", arg, key, folder, key, key);
+            mc_line("MODS: new \"%s\": folder %s; put each file in the folder for its kind (entities\\, materials\\, "
+                    "meshes\\ and the rest, docs/authoring.md) and rescan", arg, folder);
         free(cause);
     } else if (!_stricmp(verb, "verify")) {
         if (!arg[0]) sh_printf("usage: sh_mods verify \"<mod folder>\"\n");

@@ -228,11 +228,12 @@ static void mc_remove(mpj *obj, const char *key)
     }
 }
 
-/* A ref as a record key: plain tokens only (the engine's item ids are), so nothing needs escaping. */
+/* A ref as a record key: plain tokens only (the engine's item ids are), so nothing needs escaping; any length (no
+ * length of the product's own, modnet.h MODNET_REF_RULE). */
 static int mc_ref_ok(const char *ref)
 {
     size_t n = ref ? strlen(ref) : 0;
-    if (!n || n > 160 || !modnet_valid_ref(ref)) return 0;
+    if (!n || !modnet_valid_ref(ref)) return 0;
     for (; *ref; ref++)
         if (!((*ref >= '0' && *ref <= '9') || (*ref >= 'a' && *ref <= 'z') || (*ref >= 'A' && *ref <= 'Z') || *ref == '-' ||
               *ref == '_' || *ref == '.' || *ref == ':')) return 0;

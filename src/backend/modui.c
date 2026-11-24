@@ -185,6 +185,7 @@ static int mu_row_served_by(const sh_modmanifest_row *row, char *out, size_t cap
 static int mu_scope_listed(char (*out)[SH_MODMANIFEST_HASH_CAP], int cap);
 static void mu_mark_modified(const char *label);
 
+static void mu_labeler(const char *const *placed, size_t n, char **labels);
 void sh_modui_bind(const sh_modui_engine *engine)
 {
     mu_defaults(&g_engine);
@@ -219,6 +220,7 @@ void sh_modui_bind(const sh_modui_engine *engine)
     sh_modmanifest_set_scope(mu_scope_hook, mu_scope_armed);
     sh_modmanifest_set_resolver(mu_resolve_row);
     sh_modmanifest_set_listed(mu_scope_listed);
+    sh_modmanifest_set_labeler(mu_labeler);
     sh_modserve_set_scope_source(mu_scope_source);
 }
 
@@ -815,6 +817,21 @@ static const char *mu_row_name_for(const mu_model *m, const char *inherit)
         for (k = 0; k < m->entries[i].row_count; k++)
             if (m->entries[i].row_defs[k] && !_stricmp(m->entries[i].row_defs[k], inherit)) return m->entries[i].row_names[k];
     return NULL;
+}
+
+/* The save's labels (modmanifest.h sh_modmanifest_set_labeler): each placed name's Toybox row name, as the Mods tab
+ * shows it, from the installed mods. */
+static int mu_model_build(mu_model *m);
+static void mu_labeler(const char *const *placed, size_t n, char **labels)
+{
+    mu_model m;
+    size_t k;
+    if (!n || !mu_model_build(&m)) { if (n) mu_model_free(&m); return; }
+    for (k = 0; k < n; k++) {
+        const char *name = mu_row_name_for(&m, placed[k]);
+        if (name && name[0]) labels[k] = mu_strdup(name);
+    }
+    mu_model_free(&m);
 }
 
 /* The carried files' hashes of a loaded entry, sorted (the same-files hint). */
@@ -4033,7 +4050,7 @@ static void mu_say_plan(const mu_out *o, const char *verb, const mu_model *m, co
                                  p->attached ? " (it is attached to the whole map)" : "");
     if (p->tag_removed) mu_line(o, "%s: removes the search tag mods (the last mod the map uses)", verb);
     if (p->vanilla_after) mu_line(o, "%s: the map then needs no mods and plays without Snapmap+", verb);
-    if (p->published) mu_line(o, "%s: the published copy on the server is unaffected until you publish the map again", verb);
+    if (p->published) mu_line(o, "%s: the published map is unaffected until you publish the map again", verb);
 }
 
 /* A mod's name where a sentence names it: its build's name, else (an unnamed
@@ -4204,16 +4221,16 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
                     for (i = 0; targets[t] && i < (size_t)m.entries[t].row_count; i++)
                         if (!stay || !mu_entry_has_row(&m, stay_at, m.entries[t].row_names[i]))
                             mu_line(o, "%s:   %s", verb, m.entries[t].row_names[i]);
-                mu_line(o, "%s: moves the folder mods\\%s to the Windows Recycle Bin; restore it from there by hand", verb,
+                mu_line(o, "%s: moves its folder, %s, to the Windows Recycle Bin; restore it from there by hand", verb,
                         s->name);
                 if (stay)
-                    mu_line(o, "%s: another folder of %s stays installed (mods\\%s); maps that use it open with it", verb,
+                    mu_line(o, "%s: another folder of %s, %s, stays installed; maps that use it open with it", verb,
                             title, stay->name);
                 else if (saved > 0)
-                    mu_line(o, saved == 1 ? "%s: %d of your saved maps uses it; it will not open until a mod folder provides "
-                                            "its assets again"
-                                          : "%s: %d of your saved maps use it; they will not open until a mod folder provides "
-                                            "its assets again", verb, saved);
+                    mu_line(o, saved == 1 ? "%s: %d of your saved maps uses it; it opens with stand-ins for its objects "
+                                            "until you install the mod again"
+                                          : "%s: %d of your saved maps use it; they open with stand-ins for its objects "
+                                            "until you install the mod again", verb, saved);
                 else if (saved == 0) mu_line(o, "%s: none of your saved maps use it", verb);
                 if (mp.entities >= 0) mu_line(o, "%s: Undo history is cleared.", verb);
             }
@@ -5078,11 +5095,12 @@ static int mu_new_mod(const char *name)
     if (!e && ok) e = sh_ms_find_salt(&l, salt, NULL);
     key = _strdup(e ? e->name : mu_leaf(folder));
     if (e && sh_ms_entry_usable(e))
-        msg = sh_textf("Created %s in mods\\%s. Its Example crate is in the Toybox. After you change its files, press "
-                       "Refresh to see the change.", name, key ? key : "");
+        msg = sh_textf("Created %s in your mods folder, as %s. Its Example crate is in the Toybox. After you change its "
+                       "files, press Refresh to see the change.", name, key ? key : "");
     else {
         plain = mu_plain_cause(e, e ? e->cause : "not built yet");
-        msg = sh_textf("Created %s in mods\\%s, but it cannot be used yet. %s", name, key ? key : "", plain ? plain : "");
+        msg = sh_textf("Created %s in your mods folder, as %s, but it cannot be used yet. %s", name, key ? key : "",
+                       plain ? plain : "");
     }
     mu_kstr(&x, "key", key ? key : "", 0);
     mu_kstr(&x, "file", example ? example : "", 0);

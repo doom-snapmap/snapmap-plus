@@ -5048,7 +5048,7 @@ static void test_salt_and_root(void)
     sh_modserve_scope_enable(0);
     log_clear();
     CHECK(sh_modserve_index_build(root) == 2);
-    CHECK(log_has("bundle 'My doors (copy)' skipped: it is a copy of mods\\My doors (work); Refresh "
+    CHECK(log_has("bundle 'My doors (copy)' skipped: it is a copy of your folder My doors (work); Refresh "
                   "in the Mods tab makes it a new mod") && !log_has("the same salt"));
     CHECK(log_has("bundle 'format-one' skipped: " "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
     CHECK(log_has("bundle 'retired-id' skipped: " SH_MB_EARLIER));
