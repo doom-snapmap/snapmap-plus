@@ -172,9 +172,18 @@ int main(int argc, char **argv)
     CHECK(g_rects == NULL && g_out == NULL && g_page == NULL);
 
     CHECK(GetTempPathA(MAX_PATH, tempPath) > 0);
-    CHECK(GetTempFileNameA(tempPath, "smp", 0, tempDir) != 0);
-    CHECK(DeleteFileA(tempDir) != 0);
-    CHECK(CreateDirectoryA(tempDir, NULL) != 0);
+    /* A folder of this process's own: a temp file name deleted and made a folder can be taken by a suite running
+     * beside this one between the delete and the create. */
+    {
+        int made = 0;
+        for (unsigned attempt = 0; attempt < 64u && !made; ++attempt) {
+            _snprintf_s(tempDir, sizeof tempDir, _TRUNCATE, "%ssmp_megapreview_%lu_%lu_%u", tempPath,
+                        (unsigned long)GetCurrentProcessId(), (unsigned long)GetTickCount(), attempt);
+            made = CreateDirectoryA(tempDir, NULL) != 0;
+        }
+        CHECK(made);
+        if (!made) return 1;   /* nothing below can run without its folder */
+    }
     _snwprintf_s(g_vtDir, sizeof g_vtDir / sizeof g_vtDir[0], _TRUNCATE, L"%hs", tempDir);
 
     _snprintf_s(vmtr, sizeof vmtr, _TRUNCATE, "%s\\catalog.vmtr", tempDir);
