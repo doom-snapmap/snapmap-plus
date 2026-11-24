@@ -224,10 +224,16 @@ static int mp_units_add(char (**units)[MODNET_HASH_HEX + 1], size_t *n, size_t *
 /* The published copy's rows (R-LB1 F6, the owner's ruling): a publish's save pins a copy of its rows and the slot
  * keeps the map's own, so the author's map follows their folders, published or not. The cloud save reads the slot back
  * to upload it (ReadLocalSavedMapText in the cloud-save request, both renderers) and gets the text with these rows
- * instead (sh_modpublish_cloud_text); the bound and the claim count them. Armed from the save to the feed post, or
- * two minutes. */
-#define MP_UPLOAD_MS 120000ull
-static struct { int armed; ULONGLONG at; sh_modmanifest_list rows; char local[MP_ID_CAP]; } g_upload;
+ * instead (sh_modpublish_cloud_text); the bound and the claim count them. Armed from the save to the feed post (or the
+ * next publish, or the context's end), with no timer: a republish fetches the existing cloud save over the network
+ * before it reads the slot. `sequence` is the save it was armed for; `served` says the cloud save's read got it. */
+static struct {
+    int armed, served;
+    unsigned long sequence;
+    ULONGLONG at;
+    sh_modmanifest_list rows;
+    char local[MP_ID_CAP];
+} g_upload;
 static SRWLOCK g_upload_lock = SRWLOCK_INIT;   /* the cloud save's read may come from a job thread */
 
 static void mp_upload_clear(void)
@@ -241,7 +247,7 @@ static void mp_upload_clear(void)
 /* Under the lock (either mode). */
 static int mp_upload_live_locked(void)
 {
-    return g_upload.armed && GetTickCount64() - g_upload.at <= MP_UPLOAD_MS;
+    return g_upload.armed;
 }
 
 static int mp_upload_live(void)
@@ -268,12 +274,13 @@ char *sh_modpublish_cloud_text(const char *local_id, const char *text, size_t le
     size_t n = 0;
     if (out_length) *out_length = 0;
     if (!g_ops_set || !text || !length) return NULL;
-    AcquireSRWLockShared(&g_upload_lock);
+    AcquireSRWLockExclusive(&g_upload_lock);
     if (mp_upload_live_locked() && (!g_upload.local[0] || (local_id && !_stricmp(local_id, g_upload.local)))) {
         out = mp_upload_text_locked(text, length, out_length);
         n = g_upload.rows.count;
+        if (out) g_upload.served = 1;
     }
-    ReleaseSRWLockShared(&g_upload_lock);
+    ReleaseSRWLockExclusive(&g_upload_lock);
     if (out) mp_logf("MODS: publish: the published copy carries %zu pinned row(s); the map's slot keeps its own rows", n);
     return out;
 }
@@ -289,8 +296,10 @@ void sh_modpublish_save_seen(const char *text, size_t length)
     if (!mp_on_main()) { g_save.valid = 0; return; }
     /* a publish's save: what is published is the slot's text with the pinned rows */
     if (text && length) {
+        /* only the save whose pin step armed it: a later plain save is the slot's own */
         AcquireSRWLockShared(&g_upload_lock);
-        if (mp_upload_live_locked()) upload = mp_upload_text_locked(text, length, &upload_length);
+        if (mp_upload_live_locked() && g_upload.sequence == sequence)
+            upload = mp_upload_text_locked(text, length, &upload_length);
         ReleaseSRWLockShared(&g_upload_lock);
     }
     if (upload) { text = upload; length = upload_length; }
@@ -801,6 +810,9 @@ typedef struct mp_context {
 
 static mp_hold g_hold;
 static mp_context g_ctx;
+/* The units the last prepared publish found neither here nor in the store, or removed from it: left out of its claim
+ * (R-LB1 F7). Set at the resume, cleared when a publish begins. */
+static struct { char (*v)[MODNET_HASH_HEX + 1]; size_t n; } g_left_out;
 static int g_finish_on;                 /* S7 is asked at FINISH (sh_modpublish_finish_set); off: at PublishStart */
 static int (*g_finish_patch)(int on);   /* the engine side's gate-call patch: 1 when it is as asked */
 static int g_editor_ticking;            /* inside sh_modpublish_editor_tick */
@@ -890,6 +902,16 @@ static void mp_resume(void)
     }
     after = h->after;
     h->after = NULL;
+    {
+        /* what no claim of this publish can name (F7): the plan's absent and removed units */
+        size_t i;
+        free(g_left_out.v);
+        memset(&g_left_out, 0, sizeof g_left_out);
+        if (h->plan.n && (g_left_out.v = calloc(h->plan.n, sizeof *g_left_out.v)) != NULL)
+            for (i = 0; i < h->plan.n; i++)
+                if (h->plan.state[i] == MODCLAIM_ABSENT || h->plan.state[i] == MODCLAIM_REMOVED)
+                    strcpy_s(g_left_out.v[g_left_out.n++], MODNET_HASH_HEX + 1, h->plan.units[i]);
+    }
     mp_hold_free();
     mp_busy(editor, NULL);
     g_pin.armed = 1;
@@ -962,6 +984,8 @@ static int mp_hold_begin(void *editor, unsigned char overwrite, int finish)
     }
     if (g_ctx.kind != CTX_NONE) mp_ctx_clear();
     mp_upload_clear();
+    free(g_left_out.v);
+    memset(&g_left_out, 0, sizeof g_left_out);
     memset(&rows, 0, sizeof rows);
     if (g_ops.placed_names && g_ops.placed_names(g_ops.context, &names, &count) < 0) count = 0;
     n = g_rows_for((const char *const *)names, count, &rows);
@@ -1026,7 +1050,12 @@ int sh_modpublish_pin_save(sh_modmanifest_list *rows, const char *json, size_t l
         for (k = 0; k < rows->count && sh_modmanifest_list_add(&g_upload.rows, &rows->rows[k]); k++) {}
         g_upload.rows.uses = rows->uses;
         ok = k == rows->count;
-        if (ok) { g_upload.armed = 1; g_upload.at = GetTickCount64(); }
+        if (ok) {
+            g_upload.armed = 1;
+            g_upload.at = GetTickCount64();
+            /* the save observer reports this save next, with the next sequence */
+            g_upload.sequence = (unsigned long)InterlockedCompareExchange(&g_save_sequence, 0, 0) + 1;
+        }
         ReleaseSRWLockExclusive(&g_upload_lock);
         if (!ok) { mp_upload_clear(); mp_log("MODS: publish: no memory for the published copy's rows; it carries the slot's"); }
     }
@@ -1086,8 +1115,26 @@ int sh_modpublish_after_save(void *editor)
     }
     g_ctx.kind = CTX_ROWS;
     if ((g_ctx.units = calloc(g_save.nunits, sizeof *g_ctx.units)) != NULL) {
-        memcpy(g_ctx.units, g_save.units, g_save.nunits * sizeof *g_ctx.units);
-        g_ctx.nunits = g_save.nunits;
+        /* R-LB1 F7: the claim names only what the store holds or this publish sent. A unit neither on this computer
+         * nor in the store, or one moderation removed, is left out (S8 said so after the publish): no claim of it can
+         * ever succeed, and no later start could send it. */
+        size_t i, k, out = 0, left = 0;
+        for (i = 0; i < g_save.nunits; i++) {
+            int skip = 0;
+            for (k = 0; k < g_left_out.n && !skip; k++) skip = !strcmp(g_left_out.v[k], g_save.units[i]);
+            if (skip) { left++; continue; }
+            memcpy(g_ctx.units[out++], g_save.units[i], sizeof *g_ctx.units);
+        }
+        g_ctx.nunits = out;
+        if (left)
+            mp_logf("MODS: publish: %zu unit(s) left out of the claim: neither on this computer nor in the mod store, or "
+                    "removed from it", left);
+        if (!out) {
+            free(g_ctx.units);
+            g_ctx.units = NULL;
+            g_ctx.kind = CTX_NO_ROWS;   /* the item claims nothing the store could hold */
+            return 1;
+        }
     }
     if (g_save.nsalts && (g_ctx.salts = calloc(g_save.nsalts, sizeof *g_ctx.salts)) != NULL) {
         memcpy(g_ctx.salts, g_save.salts, g_save.nsalts * sizeof *g_ctx.salts);
@@ -1104,6 +1151,9 @@ void sh_modpublish_feed_post(void *edit, const char *item_id, const char *revisi
 {
     mp_job *job;
     if (!g_ops_set || !mp_on_main()) return;
+    if (mp_upload_live() && !g_upload.served)
+        mp_log("MODS: publish: the cloud save's read of the slot never reached Snapmap+; the published map carries the "
+               "slot's local rows, so players get stand-ins for its mods' objects");
     mp_upload_clear();   /* the published copy is uploaded */
     if (!item_id || !modnet_valid_ref(item_id)) {
         mp_logf("MODS: publish: the published item id '%s' is not a usable claim ref; no claim change",
@@ -1855,8 +1905,10 @@ void sh_modpublish_poll(void)
         mp_log("MODS: publish: the publish's save was not seen; its rows were not pinned");
     }
     if (g_ctx.kind != CTX_NONE && g_hold.state == HOLD_IDLE &&
-        (mp_token(g_ctx.editor) != g_ctx.token || GetTickCount64() - g_ctx.at > MP_CONTEXT_MS))
+        (mp_token(g_ctx.editor) != g_ctx.token || GetTickCount64() - g_ctx.at > MP_CONTEXT_MS)) {
         mp_ctx_clear();
+        mp_upload_clear();   /* the publish this context was for is over */
+    }
     mp_poll_background();
 }
 

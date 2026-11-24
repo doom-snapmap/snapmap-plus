@@ -164,6 +164,8 @@ static struct {
     char title[64], text[256];
 } FF;
 static void f_finish_done(void *c, void *editor) { (void)c; if (editor == EDITOR) { FF.dones++; FF.starts_at_done = F.starts; } }
+static int g_cloud_unhooked;   /* the cloud save's read of the slot is not hooked on this build */
+static int f_cloud_ready(void *c) { (void)c; return !g_cloud_unhooked; }
 static int f_finish_can_ask(void *c, void *editor) { (void)c; return editor == EDITOR && !(FF.busy_blocks && F.busy_on); }
 static int f_finish_ask(void *c, void *editor, const char *title, const char *text, int yes_no)
 {
@@ -189,6 +191,7 @@ static void set_ops(void)
     ops.published_query = f_published_query; ops.notice = f_menu_notice;
     ops.finish_can_ask = f_finish_can_ask; ops.finish_ask = f_finish_ask; ops.finish_poll = f_finish_poll;
     ops.finish_close = f_finish_close; ops.finish_clear = f_finish_clear; ops.finish_done = f_finish_done;
+    ops.cloud_ready = f_cloud_ready;
     sh_modpublish_test_set_ops(&ops);
 }
 
@@ -559,8 +562,18 @@ int main(int argc, char **argv)
         CHECK(!strcmp(g_menu_notice, "Players will see this map without the Tyrant from Eternal Demons: its content is "
                                      "not on this computer or in the mod store."));
         CHECK(engine_save() == 1);
-        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc3", "rev1");
-        PUMP_UNTIL(idle_all());
+        {
+            /* R-LB1 F7: the claim names only what the store holds; the absent Tyrant is left out, so it succeeds, nothing
+             * is queued, and the only notice is S8's */
+            int claims = g_fc.claims, refused = g_fc.claims_refused, queued = g_fc.queued;
+            size_t mark = g_log_n;
+            g_menu_notice[0] = 0;
+            sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc3", "rev1");
+            PUMP_UNTIL(idle_all());
+            CHECK(g_fc.claims == claims + 1 && g_fc.claims_refused == refused && g_fc.queued == queued);
+            CHECK(g_fc.claim_n == 1 && !strcmp(g_fc.claim_units[0], UNIT_M));
+            CHECK(g_menu_notice[0] == 0 && !strstr(g_log + mark, "does not hold every unit"));
+        }
         g_menu_notice[0] = 0;
         fc_set_unit(UNIT_T, MODCLAIM_REMOVED, 0);
         publish(0);
@@ -583,8 +596,14 @@ int main(int argc, char **argv)
         CHECK(!strcmp(g_menu_notice, "Players will see this map without Eternal Demons: its content is not on this computer "
                                      "or in the mod store."));
         CHECK(engine_save() == 1);
-        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc4", "rev1");
-        PUMP_UNTIL(idle_all());
+        {
+            /* F7: every unit is on no computer: the item claims nothing, and nothing untrue is said or queued */
+            int claims = g_fc.claims, queued = g_fc.queued;
+            g_menu_notice[0] = 0;
+            sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc4", "rev1");
+            PUMP_UNTIL(idle_all());
+            CHECK(g_fc.claims == claims && g_fc.queued == queued && g_menu_notice[0] == 0);
+        }
         fc_set_unit(UNIT_T, MODCLAIM_HELD, 0);
         rows_pinned(1);
     }
@@ -817,6 +836,18 @@ int main(int argc, char **argv)
         strcpy_s(now, sizeof now, g_fc.claim_units[0]);
         CHECK(first[0] && now[0] && strcmp(first, now));
         CHECK(strstr(g_slot, "\"local\":true") && !strstr(g_slot, "\"objects\""));
+
+        /* a build whose cloud-save read is not hooked: a map with mods is not published (players would get
+         * stand-ins), with no hold and nothing asked of the store */
+        {
+            int plans = g_fc.plans;
+            g_cloud_unhooked = 1;
+            F.toast[0] = 0;
+            CHECK(sh_modpublish_publish_start(EDITOR, 1) == 0 && !sh_modpublish_holding() && g_fc.plans == plans);
+            CHECK(!strcmp(F.toast, "The map was not published: Snapmap+ cannot send its mod content with this game "
+                                   "version. Use Send feedback in the Snapmap+ window."));
+            g_cloud_unhooked = 0;
+        }
         sh_modpin_set_folder(no_folder, NULL);
         sh_cache_set_mods_root(NULL);
         rows_pinned(1);

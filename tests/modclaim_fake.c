@@ -131,6 +131,18 @@ int modclaim_claim(const char *ref, const char *const *units, size_t n, char (**
     g_fc.claim_n = n;
     for (i = 0; i < n && i < FC_MAX; i++) strcpy_s(g_fc.claim_units[i], MODNET_HASH_HEX + 1, units[i]);
     if ((code = fc_take(&g_fc.claim_code)) != 0) { fc_why(why); return code; }
+    /* as the Worker: a claim of a unit the store does not hold is refused (409); modelled for the units on no computer
+     * (absent, or removed by moderation), which no upload can ever bring */
+    for (i = 0; i < n; i++) {
+        int k;
+        for (k = 0; k < g_fc.nunits; k++)
+            if (!strcmp(g_fc.units[k].hash, units[i]) &&
+                (g_fc.units[k].state == MODCLAIM_ABSENT || g_fc.units[k].state == MODCLAIM_REMOVED)) {
+                g_fc.claims_refused++;
+                if (why) *why = sh_text("The mod store does not hold every unit the claim names; upload them first.");
+                return MODNET_E_CONFLICT;
+            }
+    }
     fc_know(ref, 1);
     return MODNET_OK;
 }

@@ -46,6 +46,11 @@ static void original_frame(void *ed, void *arg) { (void)ed; (void)arg; }
 static int disk_read(const char *id, void *text, void *a3, void *a4)
 { (void)id; (void)text; (void)a3; (void)a4; ++disk_reads; return 4; }
 static void assign_cstr(void *idstr, const char *text) { (void)idstr; strcpy_s(placeholder, sizeof placeholder, text); }
+/* A read that succeeds, and the read filter that sees it. */
+static int good_read(const char *id, void *text, void *a3, void *a4) { (void)id; (void)text; (void)a3; (void)a4; return 0; }
+static int filtered;
+static const void *filter_caller;
+static void t_filter(const char *id, void *text, const void *caller) { (void)id; (void)text; filtered++; filter_caller = caller; }
 /* LoadMap reads the slot it is named, as the engine does. */
 static int load_map(void *ed, void *id)
 {
@@ -143,6 +148,24 @@ int main(void)
     g_borrow_thread = GetCurrentThreadId();
     CHECK(ef_read_text_detour("FFFFFFFFFFFFFFFFFFFF", NULL, NULL, NULL) == 4 && disk_reads == 2);
     g_borrowed_id = NULL;
+
+    /* The read filter (the published copy, modpublish.c) sees only a read that succeeded, with its caller, and never
+     * the borrowed id's placeholder. */
+    reset();
+    sh_editor_frame_set_read_filter(t_filter);
+    CHECK(sh_editor_frame_read_filter_live());
+    CHECK(ef_read_text_detour("0123456789abcdef0123", NULL, NULL, NULL) == 4 && filtered == 0);   /* failed: none */
+    g_read_text_orig = good_read;
+    {
+        char text[8] = "x";
+        CHECK(ef_read_text_detour("0123456789abcdef0123", text, NULL, NULL) == 0 && filtered == 1 && filter_caller);
+        g_borrowed_id = "0123456789abcdef0123";
+        g_borrow_thread = GetCurrentThreadId();
+        CHECK(ef_read_text_detour("0123456789abcdef0123", text, NULL, NULL) == 0 && filtered == 1);   /* placeholder */
+        g_borrowed_id = NULL;
+    }
+    sh_editor_frame_set_read_filter(NULL);
+    CHECK(!sh_editor_frame_read_filter_live());
 
     /* A reload that fails anyway marks the engine's notices about the borrowed map untrue. */
     reset();
