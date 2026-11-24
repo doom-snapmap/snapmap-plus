@@ -789,9 +789,25 @@ int main(int argc, char **argv)
         sh_modmanifest_row_free(&row);
         sh_mb_free(&b);
 
-        /* the first publish: the slot keeps the local row, the cloud save's read of it is pinned, and that unit is
-         * claimed */
-        publish(1);
+        /* the first publish: the store lacks the Tyrant's unit, so it is asked about and uploaded; the slot keeps the
+         * local row, the cloud save's read of it is pinned, and that unit is claimed */
+        {
+            sh_modmanifest_list probe;
+            sh_modpin_row_result pr;
+            memset(&probe, 0, sizeof probe);
+            CHECK(sh_modmanifest_list_add(&probe, &g_rows.rows[0]));
+            memset(&pr, 0, sizeof pr);
+            CHECK(probe.count && sh_modpin_row(&probe.rows[0], NULL, 0, NULL, &pr) == SH_MODPIN_PINNED &&
+                  probe.rows[0].unit_count == 1);
+            free(pr.why);
+            if (probe.count && probe.rows[0].unit_count) fc_set_unit(probe.rows[0].units[0], MODCLAIM_MISSING, 1024 * 1024);
+            sh_modmanifest_list_free(&probe);
+        }
+        {
+            int uploads = g_fc.uploads, asks = F.asks;
+            publish(1);
+            CHECK(g_fc.uploads == uploads + 1 && F.asks == asks + 1);
+        }
         CHECK(F.starts == starts + 1);
         CHECK(engine_save() == 1);
         CHECK(strstr(g_slot, "\"local\":true") && !strstr(g_slot, "\"objects\""));
@@ -821,6 +837,22 @@ int main(int argc, char **argv)
             char *late = sh_modpublish_cloud_text(LOCAL_ID, g_slot, strlen(g_slot), &ul);
             CHECK(late == NULL);
             if (late) HeapFree(GetProcessHeap(), 0, late);
+        }
+
+        /* an unchanged republish: the map's text goes up again (its published copy's checksum differs from the slot's),
+         * but the mod content the store holds is not asked about or uploaded again, and nothing else is said */
+        {
+            int uploads = g_fc.uploads, asks = F.asks, claims0 = g_fc.claims;
+            g_menu_notice[0] = 0;
+            F.toast[0] = 0;
+            publish(1);
+            CHECK(F.starts == starts + 2 && g_fc.uploads == uploads && F.asks == asks);
+            CHECK(engine_save() == 1 && strstr(g_uploaded, first));
+            sh_modpublish_feed_post((void *)(uintptr_t)F.token, "eeeeeeeeeeeeeeeeeeeeeee1", "rev1b");
+            PUMP_UNTIL(idle_all());
+            CHECK(g_fc.claims == claims0 + 1 && g_fc.claim_n == 1 && !strcmp(g_fc.claim_units[0], first));
+            CHECK(g_menu_notice[0] == 0 && F.toast[0] == 0);
+            starts++;
         }
 
         /* the author changes the Tyrant in the folder and presses Refresh; the map's row is still local */
