@@ -36,6 +36,7 @@
  *    true/false text. The widget flips +0xd0 itself before the panel's
  *    property-change dispatcher runs (VK 0x1282450 reads it for ids 7, 0xc..). */
 #include "settings_tab.h"
+#include <string.h>
 #include <math.h>
 
 float sh_settings_tab_unwrap(float previous,float value,float min,float max,float small_step,float large_step)
@@ -57,6 +58,23 @@ int sh_settings_tab_wrap(int category,int delta,int count)
     c=((long long)category+delta)%count;
     if(c<0)c+=count;
     return (int)c;
+}
+
+/* The byte checks the install makes at the two Populate call sites; pure so a test runs them on the executables. */
+int sh_settings_tab_check_dirty(uintptr_t call,uintptr_t *target)
+{
+    static const unsigned char dirty_prefix[]={0x48,0x89,0x5c,0x24,8,0x57,0x48,0x83,0xec,0x20,0x8b,0x51,8,0x48,0x8b,0xf9};
+    int32_t rel;
+    if(*(const unsigned char*)call!=0xe8)return 0;
+    memcpy(&rel,(const void*)(call+1),4);*target=call+5+(intptr_t)rel;
+    return !memcmp((const void*)*target,dirty_prefix,sizeof dirty_prefix);
+}
+int sh_settings_tab_check_clear(uintptr_t call,uintptr_t clear)
+{
+    int32_t rel;
+    if(*(const unsigned char*)call!=0xe8)return 0;
+    memcpy(&rel,(const void*)(call+1),4);
+    return call+5+(intptr_t)rel==clear;
 }
 
 #ifndef SH_SETTINGS_TAB_PURE
@@ -445,9 +463,8 @@ static int install_injection(const sig_result *results,size_t count)
     const sig_result *site=binding(results,count,"SettingsPanelClearCall"),*clear=binding(results,count,"SettingsPanelClear");
     unsigned char before[5],after[5];int32_t rel;intptr_t distance;
     if(!site||!clear)return 0;
-    memcpy(before,(void*)site->addr,5);if(before[0]!=0xe8)return 0;
-    memcpy(&rel,before+1,4);
-    if(site->addr+5+(intptr_t)rel!=clear->addr)return 0;
+    if(!sh_settings_tab_check_clear(site->addr,clear->addr))return 0;
+    memcpy(before,(void*)site->addr,5);
     g_clear=(clear_fn)clear->addr;
     g_clear_relay=near_relay(site->addr,(void*)clear_relay);if(!g_clear_relay)return 0;
     distance=(intptr_t)g_clear_relay-(intptr_t)(site->addr+5);
@@ -489,8 +506,7 @@ int sh_settings_tab_install(const sig_result *results,size_t count)
     const sig_result *r[9];void **originals[]={(void**)&g_enter,(void**)&g_exit,(void**)&g_populate,
         (void**)&g_apply,(void**)&g_reset,(void**)&g_dirty};
     void *handlers[]={(void*)enter,(void*)leave,(void*)populate,(void*)apply,(void*)reset,(void*)dirty};
-    const size_t stolen[]={15,16,20,16,20,16};unsigned i;uintptr_t address;int32_t rel;
-    static const unsigned char dirty_prefix[]={0x48,0x89,0x5c,0x24,8,0x57,0x48,0x83,0xec,0x20,0x8b,0x51,8,0x48,0x8b,0xf9};
+    const size_t stolen[]={15,16,20,16,20,16};unsigned i;uintptr_t address;
     if(g_mode!=SH_SETTINGS_TAB_OFF)return 1;
     for(i=0;i<6;i++)if(*originals[i])return 0;
     for(i=0;i<9;i++){r[i]=binding(results,count,names[i]);if(!r[i])goto unavailable;}
@@ -500,9 +516,7 @@ int sh_settings_tab_install(const sig_result *results,size_t count)
     for(i=0;i<6;i++) {
         address=r[i]->addr;
         if(i==5) {
-            if(*(unsigned char*)address!=0xe8)goto fail;
-            memcpy(&rel,(void*)(address+1),4);address+=5+rel;
-            if(memcmp((void*)address,dirty_prefix,sizeof dirty_prefix))goto fail;
+            if(!sh_settings_tab_check_dirty(address,&address))goto fail;
         }
         *originals[i]=hook_prepare((void*)address,handlers[i],stolen[i]);if(!*originals[i])goto fail;
     }

@@ -42,14 +42,9 @@ int sh_map_payload_remove(void)
         if (g_limits[i - 1].live && code_unpatch(&g_limits[i - 1]) != B2_PATCH_OK) ok = 0;
     return ok;
 }
-int sh_map_payload_install(const sig_result *results, size_t count)
+const char *sh_map_payload_check_sites(const sig_result *results, size_t count, sig_result sites[2])
 {
-    sig_result sites[2];
     size_t i, j;
-    if (g_ready) return current_bytes(0) && current_bytes(1);
-    /* A failed write can retain a rollback handle. Recover it before retrying. */
-    if (!sh_map_payload_remove()) return 0;
-    /* Resolve and preflight both sites before making either size change. */
     for (i = 0; i < 2; i++) {
         const sig_result *site = NULL;
         for (j = 0; results && j < count; j++)
@@ -57,13 +52,24 @@ int sh_map_payload_install(const sig_result *results, size_t count)
                 site = &results[j]; break;
             }
         if (!site || site->status != SIG_OK || !site->addr ||
-            site->addr > UINTPTR_MAX - g_sites[i].offset) goto failed;
+            site->addr > UINTPTR_MAX - g_sites[i].offset) return g_sites[i].name;
         sites[i] = *site;
         sites[i].addr += g_sites[i].offset;
         __try {
-            if (memcmp((void *)sites[i].addr, g_sites[i].original, g_sites[i].length)) goto failed;
-        } __except (EXCEPTION_EXECUTE_HANDLER) { goto failed; }
+            if (memcmp((void *)sites[i].addr, g_sites[i].original, g_sites[i].length)) return g_sites[i].name;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { return g_sites[i].name; }
     }
+    return NULL;
+}
+int sh_map_payload_install(const sig_result *results, size_t count)
+{
+    sig_result sites[2];
+    size_t i;
+    if (g_ready) return current_bytes(0) && current_bytes(1);
+    /* A failed write can retain a rollback handle. Recover it before retrying. */
+    if (!sh_map_payload_remove()) return 0;
+    /* Resolve and preflight both sites before making either size change. */
+    if (sh_map_payload_check_sites(results, count, sites)) goto failed;
     for (i = 0; i < 2; i++) {
         if (code_patch_sig(&sites[i], g_sites[i].original, g_sites[i].replacement,
                            g_sites[i].length, &g_limits[i]) != B2_PATCH_OK) {

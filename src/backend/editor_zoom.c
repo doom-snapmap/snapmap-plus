@@ -46,6 +46,7 @@
  *     on each renderer. */
 #include "editor_zoom.h"
 #include <math.h>
+#include <string.h>
 
 float sh_editor_zoom_clamp_scale(float scale)
 {
@@ -132,6 +133,47 @@ float sh_editor_zoom_blend(int current,int previous,int transitioning,float frac
     prev=previous?1.0f:0.0f;
     factor=(1.0f-fraction)*prev+fraction*factor;
     return factor<0?0:factor>1?1:factor;
+}
+
+/* The byte checks the install makes before it repoints anything; pure so a test runs them on the executables' own
+ * code. Each reads only the site (a = the signature's address) and the operands it addresses. */
+int sh_editor_zoom_check_core(uintptr_t dolly,uintptr_t pan,uintptr_t sky,uintptr_t *half)
+{
+    static const unsigned char dolly_op[4]={0xf3,0x0f,0x10,0x1d},pan_op[4]={0xf3,0x0f,0x10,0x0d},
+        sky_op[4]={0xf3,0x0f,0x59,0x05};
+    int32_t disp;
+    if(memcmp((void*)dolly,dolly_op,4)||memcmp((void*)pan,pan_op,4)||memcmp((void*)(sky+0x23),sky_op,4))return 0;
+    /* The sky factor is the shared 0.5 constant; check its value, not an address. */
+    memcpy(&disp,(void*)(sky+0x27),4);*half=sky+0x2b+(intptr_t)disp;
+    return *(const float*)*half==SH_ZOOM_SKY_FACTOR;
+}
+int sh_editor_zoom_check_far(uintptr_t a,uintptr_t *zfar_at)
+{
+    static const unsigned char movss_xmm1[4]={0xf3,0x0f,0x10,0x0d},lea_rcx[3]={0x48,0x8d,0x0d};
+    int32_t disp;uintptr_t constant;
+    if(memcmp((void*)a,movss_xmm1,4)||memcmp((void*)(a+8),lea_rcx,3))return 0;
+    memcpy(&disp,(void*)(a+11),4);*zfar_at=a+15+(intptr_t)disp;
+    memcpy(&disp,(void*)(a+4),4);constant=a+8+(intptr_t)disp;
+    return *(const float*)constant==SH_ZOOM_EDITOR_FAR;
+}
+int sh_editor_zoom_check_pick(uintptr_t a,uintptr_t *value_at)
+{
+    static const unsigned char movss[3]={0xf3,0x0f,0x10};
+    int32_t disp;
+    if(memcmp((void*)a,movss,3)||(*(const unsigned char*)(a+3)&0xc7)!=0x05)return 0;
+    memcpy(&disp,(void*)(a+4),4);*value_at=a+8+(intptr_t)disp;
+    return 1;
+}
+int sh_editor_zoom_check_fog(uintptr_t a,uintptr_t *fog_at)
+{
+    static const unsigned char scale_ops[3][6]={{0xc7,0x80,0xf8,0,0,0},{0xc7,0x80,0xfc,0,0,0},{0xc7,0x80,0x00,0x01,0,0}};
+    static const unsigned char movss_xmm1[4]={0xf3,0x0f,0x10,0x0d};
+    float native=SH_ZOOM_NATIVE_FOG_CUBE;int32_t disp;int i;
+    for(i=0;i<3;i++)
+        if(memcmp((void*)(a+0x3d+i*10),scale_ops[i],6)||memcmp((void*)(a+0x43+i*10),&native,4))return 0;
+    if(memcmp((void*)(a+0x67),movss_xmm1,4))return 0;
+    memcpy(&disp,(void*)(a+0x6b),4);*fog_at=a+0x6f+(intptr_t)disp;
+    return 1;
 }
 
 #ifndef SH_EDITOR_ZOOM_PURE
@@ -328,16 +370,11 @@ static int redirect(uintptr_t disp_at,uintptr_t end,uintptr_t expected_at,volati
  * opcode, the 33000 operand and that the LEA names r_zfar. All or nothing. */
 static int install_far_plane(const sig_result *const sites[2],void *zfar_cvar)
 {
-    static const unsigned char movss_xmm1[4]={0xf3,0x0f,0x10,0x0d},lea_rcx[3]={0x48,0x8d,0x0d};
-    int32_t disp;uintptr_t constant;int i;
+    int32_t disp;int i;
     if(!sites[0]||!sites[1]||!zfar_cvar||!g_page)return 0;
     for(i=0;i<2;i++) {
-        uintptr_t a=sites[i]->addr;
-        if(memcmp((void*)a,movss_xmm1,4)||memcmp((void*)(a+8),lea_rcx,3))return 0;
-        memcpy(&disp,(void*)(a+11),4);
-        if(a+15+(intptr_t)disp!=(uintptr_t)zfar_cvar)return 0;
-        memcpy(&disp,(void*)(a+4),4);constant=a+8+(intptr_t)disp;
-        if(*(const float*)constant!=SH_ZOOM_EDITOR_FAR)return 0;
+        uintptr_t a=sites[i]->addr,zfar_at;
+        if(!sh_editor_zoom_check_far(a,&zfar_at)||zfar_at!=(uintptr_t)zfar_cvar)return 0;
     }
     for(i=0;i<2;i++) {
         uintptr_t a=sites[i]->addr;
@@ -356,15 +393,12 @@ static int install_far_plane(const sig_result *const sites[2],void *zfar_cvar)
  * All or nothing. */
 static int install_pick(const sig_result *const sites[2],void *pick_cvar)
 {
-    static const unsigned char movss[3]={0xf3,0x0f,0x10};
-    uintptr_t value;int32_t disp;int i;
+    uintptr_t value;int i;
     if(!sites[0]||!sites[1]||!pick_cvar||!g_page)return 0;
     value=(uintptr_t)pick_cvar+0x34;
     for(i=0;i<2;i++) {
-        uintptr_t a=sites[i]->addr;
-        if(memcmp((void*)a,movss,3)||(*(const unsigned char*)(a+3)&0xc7)!=0x05)return 0;
-        memcpy(&disp,(void*)(a+4),4);
-        if(a+8+(intptr_t)disp!=value)return 0;
+        uintptr_t at;
+        if(!sh_editor_zoom_check_pick(sites[i]->addr,&at)||at!=value)return 0;
     }
     for(i=0;i<2;i++) {
         uintptr_t a=sites[i]->addr;
@@ -380,16 +414,10 @@ static int install_pick(const sig_result *const sites[2],void *pick_cvar)
  * immediates. All or nothing; checked against the expected bytes first. */
 static int install_fog_volume(const sig_result *site,void *fog_cvar)
 {
-    static const unsigned char scale_ops[3][6]={{0xc7,0x80,0xf8,0,0,0},{0xc7,0x80,0xfc,0,0,0},{0xc7,0x80,0x00,0x01,0,0}};
-    static const unsigned char movss_xmm1[4]={0xf3,0x0f,0x10,0x0d};
-    float native=SH_ZOOM_NATIVE_FOG_CUBE,cube=sh_editor_zoom_fog_cube(g_fog);int32_t disp;uintptr_t a;int i;
+    float native=SH_ZOOM_NATIVE_FOG_CUBE,cube=sh_editor_zoom_fog_cube(g_fog);uintptr_t a,fog_at;int i;
     if(!site||!fog_cvar||!g_page)return 0;
     a=site->addr;
-    for(i=0;i<3;i++)
-        if(memcmp((void*)(a+0x3d+i*10),scale_ops[i],6)||memcmp((void*)(a+0x43+i*10),&native,4))return 0;
-    if(memcmp((void*)(a+0x67),movss_xmm1,4))return 0;
-    memcpy(&disp,(void*)(a+0x6b),4);
-    if(a+0x6f+(intptr_t)disp!=(uintptr_t)fog_cvar+0x34)return 0;
+    if(!sh_editor_zoom_check_fog(a,&fog_at)||fog_at!=(uintptr_t)fog_cvar+0x34)return 0;
     g_page->fog=g_fog;
     if(!redirect(a+0x6b,a+0x6f,(uintptr_t)fog_cvar+0x34,&g_page->fog,&g_fog_patches[0]))return 0;
     for(i=0;i<3;i++)
@@ -401,11 +429,9 @@ static int install_fog_volume(const sig_result *site,void *fog_cvar)
 }
 int sh_editor_zoom_install(const sig_result *results,size_t count,const uint8_t *base)
 {
-    static const unsigned char dolly_op[4]={0xf3,0x0f,0x10,0x1d},pan_op[4]={0xf3,0x0f,0x10,0x0d},
-        sky_op[4]={0xf3,0x0f,0x59,0x05};
     const sig_result *dolly,*pan,*sky,*clock,*far_sites[2],*fog_site,*update,*pick_sites[2];
     void *slot,*camera_cvar,*bounds_cvar,*threshold_cvar,*zfar_cvar,*fog_cvar,*pick_cvar;
-    uintptr_t low,high,half;int32_t disp;int i;
+    uintptr_t low,high,half;int i;
     if(g_installed)return 1;
     dolly=binding(results,count,"OrbitDollyClamp");pan=binding(results,count,"OrbitPanClamp");
     sky=binding(results,count,"BlueprintZoomClamp");clock=binding(results,count,"EditorClockMs");
@@ -413,8 +439,6 @@ int sh_editor_zoom_install(const sig_result *results,size_t count,const uint8_t 
     fog_site=binding(results,count,"EditorFogVolume");update=binding(results,count,"RenderEntityUpdate");
     pick_sites[0]=binding(results,count,"ModulePickHover");pick_sites[1]=binding(results,count,"ModulePickFocus");
     if(!dolly||!pan||!sky||!clock||!base)goto unavailable;
-    if(memcmp((void*)dolly->addr,dolly_op,4)||memcmp((void*)pan->addr,pan_op,4)||memcmp((void*)(sky->addr+0x23),sky_op,4))
-        goto unavailable;
     slot=(void*)glb_resolve(base,"cvar_system_slot",NULL);
     camera_cvar=sh_engine_cvar_find(slot,SH_IDCVAR_NAME_FOR_LOOKUP,"snapEdit_cameraDistanceLimit");
     bounds_cvar=sh_engine_cvar_find(slot,SH_IDCVAR_NAME_FOR_LOOKUP,"snapEdit_environmentModuleBounds");
@@ -429,9 +453,7 @@ int sh_editor_zoom_install(const sig_result *results,size_t count,const uint8_t 
         g_vtables[i]=(uintptr_t)base+rva;
     }
     if(!camera_cvar||!bounds_cvar||!threshold_cvar||!g_editor)goto unavailable;
-    /* The sky factor is the shared 0.5 constant; check its value, not an address. */
-    memcpy(&disp,(void*)(sky->addr+0x27),4);half=sky->addr+0x2b+(intptr_t)disp;
-    if(*(const float*)half!=SH_ZOOM_SKY_FACTOR)goto unavailable;
+    if(!sh_editor_zoom_check_core(dolly->addr,pan->addr,sky->addr,&half))goto unavailable;
     low=dolly->addr<pan->addr?dolly->addr:pan->addr;if(sky->addr<low)low=sky->addr;
     high=dolly->addr>pan->addr?dolly->addr:pan->addr;if(sky->addr>high)high=sky->addr;
     for(i=0;i<2;i++)if(far_sites[i]) {

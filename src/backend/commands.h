@@ -28,6 +28,18 @@ void sh_printf(const char *fmt, ...);
 int            sh_safe_read(const uint8_t *src, uint8_t *dst, size_t n);
 const uint8_t *sh_decode_rip_slot(const uint8_t *accessor_fn);
 
+/* The bind-time decoders, in commands_decode.c so the image-backed commands_sites_test runs the same code the
+ * install and the console handlers run, against the shipped executables. */
+
+/* The idList-grow callee out of AddCommand's body: the call after LEA RCX,[RSI+8] in its first 256 bytes, which
+ * must land inside the module. NULL (and a log line) when the call site is not found. */
+void *sh_decode_idlist_grow(void *add_command, const uint8_t *module_base);
+
+/* SessionDevModeGetter: its head bytes (movzx eax, byte [rcx+disp32]) and the session field its displacement
+ * names; sh_disable_devmode refuses to patch unless the field is SH_SESSION_DEVMODE_FIELD. 0 when unreadable. */
+extern const uint8_t SH_DEVMODE_GETTER_HEAD[3];
+uint32_t sh_devmode_getter_field(const uint8_t *getter);
+
 /* Resolve cmdSystem through the signed CmdSystemLea accessor, or return NULL. */
 void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *module_base);
 

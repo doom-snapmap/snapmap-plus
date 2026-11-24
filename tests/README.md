@@ -14,6 +14,29 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   fail; the default continues to run every suite.
 - `*_test.c` and `*_test.cpp` exercise runtime helpers and source contracts.
 - `*_test.js` checks page behavior, browser modules and the feedback relay.
+- Bind-time byte checks. Every check an install makes on the game's code
+  before it patches or detours (expected bytes at an offset, a call's target,
+  a decoded global) is one product function the install calls, and a test
+  given `-Doom`/`-DoomAlt` runs that same function on both executables, so a
+  check that cannot match the shipped code fails the suite instead of turning
+  a feature off in every session (R-LB1: the co-op lobby's check). A test
+  never holds its own copy of the expected bytes. `image_sites.h` maps an
+  executable, resolves a signature at its recorded RVA and runs one
+  subprocess per image (`IMAGE_TEST_MAIN`). The image-backed bind tests are
+  `modlobby_sites_test`, `modpub_sites_test` (the published-map gates and the
+  publish hooks), `fault_shield_sites_test` (Frame, FatalError, EventLink,
+  InteractableSpawn, StaticModelUpdate and IncRef, the serialized-entity
+  index write), `commands_sites_test`, `nav_preview_sites_test`, and the
+  image parts of `boot_pacing_test`, `object_entry_test`,
+  `world_area_cell_test`, `place_anywhere_test`, `map_payload_test`,
+  `editor_zoom_test`, `nav_menu_test`, `nav_play_test`, `settings_tab_test`,
+  `timeline_tile_test`, `grid_room_native_test`, `map_render_native_test`,
+  `editor_undo_test`, `editor_delete_test`, `module_prefab_test`,
+  `overrides_internal_test`, `strids_test`, `rawmap_paths_test`,
+  `swf_textedit_test`, `modhud_test`, `companion_test`, `script_node_test`
+  and `script_ai_sigs_test`, beside the decoder tests that already ran the
+  product's code (`modswf_test`, `modsound_test`, `modvt_test` and the
+  private signature tables' tests).
 - `nav_menu_test.c` checks native action ordering, progress and completion,
   repeated requests, cancellation, and rollback after a partial installation.
   `nav_bake_test.c` collects background builds without preview drawing.
@@ -60,7 +83,12 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
 - `modmanifest_test.c` checks the `smpmod1.` manifest rows: grammar, the value
   round trip, rows appended last and stripped with `allocCount` restored, the
   per-row budget that keeps them out of the 4 KiB playtest message, placed names,
-  the save closure and the load step against serving-layer doubles.
+  the save closure and the load step against serving-layer doubles, and the
+  spawn-type pins a save keeps for a row whose content is not here (a local
+  row's stand-ins, a pinned row composed with stand-ins) or gives up when the
+  listing decides. `modregistry_test.c` runs the same rule through real registry
+  generation: a two-port mod saved with its folder absent while another port
+  is added, then reopened with the folder back, keeps every type.
 - `modpublished_test.c` checks the published-map and offline-play gates with
   the real manifest and engine doubles: return-address classification, vanilla
   and installed maps passing through, the hold and the question on a later

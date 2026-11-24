@@ -9,6 +9,12 @@
 /* Bind the private module lookup on a quiescent boot thread. Runtime creation
  * occurs only on the engine thread, through the native module loader. */
 int sh_grid_native_install(const sig_result *results,size_t count,const uint8_t *base);
+/* The byte checks the install runs on GridReconnectPortals and GridReapplyEntityTree, callable on their own: the
+ * environment-bounds cvar address (NULL when the +0x8f load is not there), and the re-apply routine's destroy and
+ * free callees (1 when its call shape and its two leading callees match entity_tree and apply_tree). */
+const float *sh_grid_native_decode_environment_bounds(const void *reconnect);
+int sh_grid_native_decode_reapply(const void *reapply,const void *entity_tree,const void *apply_tree,
+                                  void **destroy,void **release);
 /* Bundle modules. `served(request, module)` answers 1 when an installed mod
  * bundle serves `request` (module 1: as a snapModule decl, the name a map's
  * moduleName holds). A module lookup the stock palette cannot answer and the

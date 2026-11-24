@@ -25,6 +25,8 @@ int sh_world_area_cell_disp(uintptr_t site,uintptr_t dest,int32_t *disp);
 
 #ifndef SH_WORLD_AREA_CELL_PURE
 /* Boot thread, after the Grid Room native install. Logs either way. */
+/* The install's byte checks (load decoded, constant 512); NULL when they hold, else the reason. */
+const char *sh_world_area_cell_check(const unsigned char *site,uintptr_t *constant);
 int sh_world_area_cell_install(const sig_result *results,size_t count,const uint8_t *base);
 /* Whether the redirect is live. */
 int sh_world_area_cell_live(void);

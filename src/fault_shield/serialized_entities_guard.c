@@ -11,6 +11,17 @@
 #include "../backend/backend_log.h"
 
 static const uint8_t index_write[] = {0x89,0xa8,0x64,0x0b,0x00,0x00};
+
+/* The bytes the install expects at the signature's site (the expect argument of its code_patch_sig), public so the
+ * build-image test runs the same comparison on each executable's own SerializedEntityIndexWrite. 1 when they match. */
+int sh_serialized_entities_site_ok(const uint8_t *site)
+{
+    int same = 0;
+    if (!site) return 0;
+    __try { same = !memcmp(site, index_write, sizeof index_write); } __except (EXCEPTION_EXECUTE_HANDLER) { same = 0; }
+    return same;
+}
+
 static sh_patch_handle g_index_patch;
 static uint8_t *g_index_relay;
 static int g_index_ready;

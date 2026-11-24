@@ -93,6 +93,27 @@ int sh_boot_sleep_thunk(const unsigned char *code)
     return code && code[0] == 0x48 && code[1] == 0xff && code[2] == 0x25;
 }
 
+const char *sh_boot_video_check(const unsigned char *lock_site, const unsigned char *sleep_site,
+                                uintptr_t *lock, uintptr_t *video_sleep)
+{
+    uintptr_t handle = 0, first = 0, second = 0;
+    if (!sh_boot_video_lock_site(lock_site, lock, &handle) ||
+        !sh_boot_video_sleep_site(sleep_site, &first, &second, video_sleep))
+        return "the load-screen video draw has unexpected bytes";
+    if ((uintptr_t)sleep_site <= (uintptr_t)lock_site || (uintptr_t)sleep_site - (uintptr_t)lock_site > 0x200 ||
+        handle != first)
+        return "the video lock and sleep sites are not one draw";
+    if (!sh_boot_sleep_thunk((const unsigned char *)*video_sleep)) return "the draw's sleep is not the engine's Sleep";
+    return NULL;
+}
+
+const char *sh_boot_poll_check(const unsigned char *site, uintptr_t *poll_sleep)
+{
+    if (!sh_boot_read_poll_site(site, poll_sleep)) return "the read completion poll has unexpected bytes";
+    if (!sh_boot_sleep_thunk((const unsigned char *)*poll_sleep)) return "the poll's sleep is not the engine's Sleep";
+    return NULL;
+}
+
 size_t sh_boot_poll_stub(unsigned char *out, size_t cap, uintptr_t wait_fn)
 {
     /* Entered by the engine's CALL, so the caller's [rsp+X] is [rsp+X+8]:
@@ -289,7 +310,7 @@ unsigned sh_boot_pacing_install(const sig_result *results, size_t count, unsigne
     const sig_result *lock_r = binding(results, count, "BootVideoLock"),
         *sleep_r = binding(results, count, "BootVideoSleep"),
         *poll_r = binding(results, count, "BootReadPoll");
-    uintptr_t lock = 0, handle = 0, first = 0, second = 0, video_sleep = 0, poll_sleep = 0;
+    uintptr_t lock = 0, video_sleep = 0, poll_sleep = 0;
     uintptr_t sites[2];
     size_t nsites = 0;
     const char *video_why = NULL, *poll_why = NULL;
@@ -302,21 +323,13 @@ unsigned sh_boot_pacing_install(const sig_result *results, size_t count, unsigne
 
     if (!(mask & SH_BOOT_PACING_VIDEO_LOCK)) video_why = "off";
     else if (!lock_r || !sleep_r) video_why = "the load-screen video draw was not found";
-    else if (!sh_boot_video_lock_site((const unsigned char *)lock_r->addr, &lock, &handle) ||
-             !sh_boot_video_sleep_site((const unsigned char *)sleep_r->addr, &first, &second, &video_sleep))
-        video_why = "the load-screen video draw has unexpected bytes";
-    else if (sleep_r->addr <= lock_r->addr || sleep_r->addr - lock_r->addr > 0x200 || handle != first)
-        video_why = "the video lock and sleep sites are not one draw";
-    else if (!sh_boot_sleep_thunk((const unsigned char *)video_sleep))
-        video_why = "the draw's sleep is not the engine's Sleep";
+    else if ((video_why = sh_boot_video_check((const unsigned char *)lock_r->addr,
+                                              (const unsigned char *)sleep_r->addr, &lock, &video_sleep))) {}
     else { want |= SH_BOOT_PACING_VIDEO_LOCK; sites[nsites++] = sleep_r->addr; }
 
     if (!(mask & SH_BOOT_PACING_READ_POLL)) poll_why = "off";
     else if (!poll_r) poll_why = "the read completion poll was not found";
-    else if (!sh_boot_read_poll_site((const unsigned char *)poll_r->addr, &poll_sleep))
-        poll_why = "the read completion poll has unexpected bytes";
-    else if (!sh_boot_sleep_thunk((const unsigned char *)poll_sleep))
-        poll_why = "the poll's sleep is not the engine's Sleep";
+    else if ((poll_why = sh_boot_poll_check((const unsigned char *)poll_r->addr, &poll_sleep))) {}
     else { want |= SH_BOOT_PACING_READ_POLL; sites[nsites++] = poll_r->addr; }
 
     if (want && !g_page && !(g_page = near_page(sites, nsites))) {

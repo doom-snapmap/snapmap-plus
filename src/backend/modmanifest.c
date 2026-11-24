@@ -1212,21 +1212,84 @@ static void mm_pin_one(void *context, const char *salt, const char *slot)
         if (!strcmp(rows->rows[i].salt, salt)) { (void)mm_choice_add(&rows->rows[i].choices, slot, salt); return; }
 }
 
+static int mm_local_absent(const sh_modmanifest_row *r);
+
+/* Whether a pinned row's composition is on disk whole (modcache.h sh_cache_composed), bound by the product; unbound
+ * (the store tool, tests that do not bind it) a pinned row counts as whole. */
+static int (*g_whole)(const char *build);
+void sh_modmanifest_set_whole(int (*fn)(const char *build)) { g_whole = fn; }
+
+/* 1 when the listing cannot say which types a row's ported demons have: a local row whose folder no local root serves
+ * (D6a: it stands in), or a pinned row whose units are not all here (D60). Its recorded pins are then kept. */
+static int mm_row_cannot_pin(const sh_modmanifest_row *r)
+{
+    if (r->pinned) return g_whole && !g_whole(r->build);
+    return mm_local_absent(r);
+}
+
+/* The encounter a pin names (SH_MR_PIN "<bit>/<encounter>"), NULL for another slot. */
+static const char *mm_pin_encounter(const char *slot)
+{
+    size_t pl = strlen(SH_MR_PIN);
+    const char *e;
+    if (!slot || _strnicmp(slot, SH_MR_PIN, pl)) return NULL;
+    e = strchr(slot + pl, '/');
+    return e ? e + 1 : NULL;
+}
+
+/* 1 when a row's choices already pin `encounter` (the listing gave it a type). */
+static int mm_row_pins(const sh_modmanifest_row *r, const char *encounter)
+{
+    const char *p = r->choices;
+    char *slot, *key;
+    int found = 0;
+    while (!found && mm_choice_next(&p, &slot, &key)) {
+        const char *e = mm_pin_encounter(slot);
+        found = e && !_stricmp(e, encounter);
+        free(slot);
+        free(key);
+    }
+    return found;
+}
+
 /* At a save: each choice on the row of the salt it names, and every ported demon's type of the listing pinned on
- * its mod's row (the choices' earlier pins give way to the types the map has now). */
+ * its mod's row (the choices' earlier pins give way to the types the map has now). A row whose content is not here
+ * keeps the pins it was loaded with, as it keeps its module records (D60a): the listing served its stand-ins, not its
+ * demons, so it cannot say their types, and a pin dropped here would give the type to another port on the next load
+ * (R-LB1, R-LV8 L-F2..F4). A demon the listing pins wins over the recorded pin. */
 static void mm_choices_save(sh_modmanifest_list *rows)
 {
     char *lines, *slot, *key;
     const char *p;
     size_t i;
+    unsigned char *keep = rows->count ? (unsigned char *)calloc(rows->count, 1) : NULL;
     AcquireSRWLockShared(&g_current_lock);
     lines = g_choices ? sh_text(g_choices) : NULL;
     ReleaseSRWLockShared(&g_current_lock);
-    for (i = 0; i < rows->count; i++) { free(rows->rows[i].choices); rows->rows[i].choices = NULL; }
+    for (i = 0; i < rows->count; i++) {
+        free(rows->rows[i].choices);
+        rows->rows[i].choices = NULL;
+        if (keep) keep[i] = (unsigned char)mm_row_cannot_pin(&rows->rows[i]);
+    }
     (void)sh_modserve_spawn_pins(mm_pin_one, rows);
     for (p = lines; mm_choice_next(&p, &slot, &key);) {
         int placed = 0;
-        if (!_strnicmp(slot, SH_MR_PIN, strlen(SH_MR_PIN))) { free(slot); free(key); continue; }
+        const char *encounter = mm_pin_encounter(slot);
+        if (encounter) {
+            for (i = 0; i < rows->count && !placed; i++) {
+                if (strcmp(rows->rows[i].salt, key) || !keep || !keep[i]) continue;
+                placed = 1;   /* this row's pins are decided here, kept or given way to */
+                if (!mm_row_pins(&rows->rows[i], encounter) && mm_choice_add(&rows->rows[i].choices, slot, key)) {
+                    char *line = sh_textf("MODS: save manifest: %s keeps the pin %s: its content is not here to say its type",
+                                          key, slot);
+                    backend_log(line ? line : "MODS: save manifest: a row whose content is not here keeps its pin");
+                    free(line);
+                }
+            }
+            free(slot);
+            free(key);
+            continue;
+        }
         for (i = 0; i < rows->count && !placed; i++)
             if (!strcmp(rows->rows[i].salt, key))
                 placed = mm_choice_add(&rows->rows[i].choices, slot, key);
@@ -1240,6 +1303,7 @@ static void mm_choices_save(sh_modmanifest_list *rows)
         free(key);
     }
     free(lines);
+    free(keep);
 }
 
 void sh_modmanifest_reset(void)
@@ -2118,6 +2182,29 @@ static int mm_save_pins(mm_save_ctx *ctx)
     return ok;
 }
 
+/* A local row whose folder is not here is served by its stand-ins (D6a), whose bundle's size the closure gave it: it
+ * keeps the size and name the open map's row was loaded with, which say what the mod is (D6), as it stays a local
+ * row. */
+static void mm_save_keep_absent(mm_save_ctx *ctx)
+{
+    sh_modmanifest_list cur;
+    size_t i, k;
+    memset(&cur, 0, sizeof cur);
+    if (!sh_modmanifest_current(&cur)) { sh_modmanifest_list_free(&cur); return; }
+    for (i = 0; i < ctx->list.count; i++) {
+        sh_modmanifest_row *r = &ctx->list.rows[i];
+        if (r->pinned || !mm_local_absent(r)) continue;
+        for (k = 0; k < cur.count; k++) {
+            const sh_modmanifest_row *c = &cur.rows[k];
+            if (c->pinned || strcmp(c->salt, r->salt)) continue;
+            if (c->size) r->size = c->size;
+            if (!sh_modmanifest_row_name(r)[0] && c->name) (void)sh_modmanifest_row_set_name(r, c->name);
+            break;
+        }
+    }
+    sh_modmanifest_list_free(&cur);
+}
+
 /* A save step failed (why): the save keeps the rows the open map has, and the product features it uses, so a map is
  * never written without its declaration. NULL when it has none or they could not be written either. */
 static char *mm_save_fallback(const char *json, size_t length, size_t *out_length, unsigned uses, const char *why)
@@ -2182,6 +2269,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     if (!ctx.failed && attached.count && !mm_save_attached(&ctx, &attached)) ctx.failed = 1;
     if (!ctx.failed && !mm_save_keep_unserved(&ctx, names, count)) ctx.failed = 1;
     if (!ctx.failed && !mm_save_pins(&ctx)) ctx.failed = 1;
+    if (!ctx.failed) mm_save_keep_absent(&ctx);
     if (!ctx.failed && !mm_save_version(&ctx, 1)) ctx.failed = 1;
     sh_modmanifest_names_free(names, count);
     sh_modmanifest_list_free(&attached);
@@ -2253,6 +2341,7 @@ int sh_modmanifest_rows_for(const char *const *names, size_t count, sh_modmanife
     if (!ctx.failed && attached.count && !mm_save_attached(&ctx, &attached)) ctx.failed = 1;
     if (!ctx.failed && !mm_save_keep_unserved(&ctx, (char **)names, count)) ctx.failed = 1;
     if (!ctx.failed && !mm_save_pins(&ctx)) ctx.failed = 1;
+    if (!ctx.failed) mm_save_keep_absent(&ctx);
     if (!ctx.failed && !mm_save_version(&ctx, 0)) ctx.failed = 1;
     sh_modmanifest_list_free(&attached);
     if (ctx.failed) { sh_modmanifest_list_free(&ctx.list); return -1; }

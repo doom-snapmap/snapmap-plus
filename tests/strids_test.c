@@ -13,6 +13,7 @@
 #include "../src/backend/process_heap_scope.h"
 #include "../src/backend/hook.h"
 #include "../src/backend/modserve.h"
+#include "image_sites.h"
 
 static int g_failed;
 #define CHECK(c) do { if (!(c)) { \
@@ -883,7 +884,7 @@ static void test_runtime_pass_heap(void)
     sh_strids_set_process_heap(&g_heap_api);
 }
 
-int main(void)
+static int synthetic_main(void)
 {
     char temp[MAX_PATH], root[MAX_PATH];
     DWORD pid = GetCurrentProcessId();
@@ -989,3 +990,39 @@ int main(void)
     printf("strids_test: ok\n");
     return 0;
 }
+
+/* The install's table-global decode on the shipped executable: StridsTableLea's first LEA RCX,[rip+disp32]
+ * must land on a writable data location inside the image (the idList descriptor), not on the error string. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    if (!base) return;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    {
+        const uint8_t *fn = image_site(base, results, n, "StridsTableLea", identity->vulkan);
+        if (fn) {
+            const uint8_t *desc = (const uint8_t *)sh_strids_test_decode_table_global(fn);
+            IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
+            IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
+            int in_data = 0, i;
+            for (i = 0; desc && i < nt->FileHeader.NumberOfSections; i++) {
+                uint32_t va = sec[i].VirtualAddress, span = sec[i].Misc.VirtualSize;
+                if ((uint32_t)(desc - base) >= va && (uint32_t)(desc - base) < va + span)
+                    in_data = (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE) && !(sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE);
+            }
+            printf("  the table descriptor decoded from StridsTableLea: rva 0x%X\n", desc ? (unsigned)(desc - base) : 0u);
+            IMG_CHECK(desc != NULL && desc > base && desc < base + nt->OptionalHeader.SizeOfImage);
+            IMG_CHECK(in_data);
+        }
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+
+IMAGE_TEST_MAIN("strids_test", check_image, synthetic_main)

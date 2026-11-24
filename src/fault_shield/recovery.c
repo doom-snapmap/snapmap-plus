@@ -56,6 +56,17 @@ static void write_suppressor_b(void)
 static const uint8_t k_frame_prologue[FRAME_STOLEN] = {
     0x40, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0xB8, 0xC0, 0x1D, 0x01, 0x00
 };
+
+/* Frame's first FRAME_STOLEN bytes as the install compares them; the build-image test (fault_shield_sites_test) runs
+ * this same function on each executable's own Frame. SEH-guarded: unreadable counts as different. */
+int recovery_frame_prologue_ok(const void *target)
+{
+    int intact = 0;
+    if (!target) return 0;
+    __try { intact = memcmp(target, k_frame_prologue, FRAME_STOLEN) == 0; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { intact = 0; }
+    return intact;
+}
 #define RECOVER_BUDGET_FRAMES 600   /* ~10s @ 60fps backstop */
 
 static volatile LONG g_armed = 0;
@@ -357,10 +368,22 @@ static int64_t frame_detour(void *self)
  * dispatcher calls and failures outside Frame may still exit. */
 #define FATALERROR_LEVEL_OFF 0x28
 static sh_patch_handle g_fatal_patch;
+static const uint8_t k_fatal_level_seven = 0x07, k_fatal_level_six = 0x06;
+
+/* The level byte the downgrade expects at FatalError +FATALERROR_LEVEL_OFF; the build-image test runs this on each
+ * executable's own FatalError wrapper. SEH-guarded. */
+int recovery_fatalerror_site_ok(const void *fatalerror)
+{
+    int ok = 0;
+    if (!fatalerror) return 0;
+    __try { ok = ((const uint8_t *)fatalerror)[FATALERROR_LEVEL_OFF] == k_fatal_level_seven; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    return ok;
+}
 
 static void patch_fatalerror_downgrade(void)
 {
-    static const uint8_t seven = 0x07, six = 0x06;
+    const uint8_t *seven = &k_fatal_level_seven, *six = &k_fatal_level_six;
     uint8_t *fe = (uint8_t *)g_eng.fatalerror7;
     sh_patch_status st;
     if (fe == NULL) {
@@ -369,7 +392,7 @@ static void patch_fatalerror_downgrade(void)
         return;
     }
     if (g_fatal_patch.live) return;
-    st = code_patch(fe + FATALERROR_LEVEL_OFF, &seven, &six, 1, &g_fatal_patch);
+    st = code_patch(fe + FATALERROR_LEVEL_OFF, seven, six, 1, &g_fatal_patch);
     {
         shield_fault f = { st == B2_PATCH_OK ? "action" : "sig", -1,
             st == B2_PATCH_OK ? "FatalError(7) downgraded to recoverable Error(6)"
@@ -400,11 +423,7 @@ int recovery_install(void)
     }
 
     void *target = (void *)g_eng.frame;
-    int intact = 0;
-    if (target) {
-        __try { intact = memcmp(target, k_frame_prologue, FRAME_STOLEN) == 0; }
-        __except (EXCEPTION_EXECUTE_HANDLER) { intact = 0; }
-    }
+    int intact = recovery_frame_prologue_ok(target);
     if (!intact) {
         shield_fault f = { "sig", -1, target
             ? "recovery not installed: idCommonLocal::Frame's first bytes are not the expected prologue"

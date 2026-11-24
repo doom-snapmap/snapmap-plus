@@ -2,6 +2,7 @@
 #include "../src/backend/object_entry.c"
 #include <assert.h>
 #include <math.h>
+#include "image_sites.h"
 
 static char last_log[512];
 void backend_log(const char *message){strncpy_s(last_log,sizeof last_log,message,_TRUNCATE);}
@@ -35,7 +36,7 @@ static int descend(float map_top,const float *surface,int n,float drop)
         kept=i;z=surface[i]-1.0f;++i;
     }
 }
-int main(void)
+static int synthetic(void)
 {
     sig_result r={"ObjectEntryDrop",SIG_OK,0,0};
     unsigned char *site=make_site(18364.0f),*bad;uintptr_t constant;int32_t disp;
@@ -101,3 +102,35 @@ int main(void)
     puts("object_entry_test: passed");
     return 0;
 }
+
+/* The product's own bind check (sh_object_entry_check, the install's) on each executable. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    const uint8_t *site;
+    uintptr_t constant = 0;
+    const char *why;
+    float value = 0;
+    if (!base) return;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    site = image_site(base, results, n, "ObjectEntryDrop", identity->vulkan);
+    if (site) {
+        why = sh_object_entry_check(site, &constant);
+        printf("  ObjectEntryDrop rva 0x%X: %s\n", (unsigned)(site - base), why ? why : "all checks hold");
+        IMG_CHECK(why == NULL);
+        if (!why) {
+            memcpy(&value, (const void *)constant, 4);
+            IMG_CHECK(value == SH_OBJECT_ENTRY_NATIVE_DROP);
+            printf("  constant at rva 0x%X = %.1f\n", (unsigned)(constant - (uintptr_t)base), value);
+        }
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+IMAGE_TEST_MAIN("object_entry_test", check_image, synthetic)

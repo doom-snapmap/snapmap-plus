@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "overrides.h"
+#include "image_sites.h"
 
 static int g_failed;
 
@@ -375,7 +376,7 @@ static void test_native_stream_slots(void)
     if (data) HeapFree(GetProcessHeap(), 0, data);
 }
 
-int main(void)
+static int synthetic_main(void)
 {
     test_stream_abi_and_memory_streams();
     test_file_stream_is_read_only();
@@ -388,6 +389,41 @@ int main(void)
     puts("overrides provider tests passed");
     return 0;
 }
+
+/* The install's own byte checks (sh_overrides_check_sites) on the shipped executable: the base idFile helper's
+ * prologue at its recorded RVA, and the vtable decoded from ResProviderCtor landing in a read-only section. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    if (!base) return;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    {
+        const uint8_t *ctor = image_site(base, results, n, "ResProviderCtor", identity->vulkan);
+        if (ctor) {
+            const uint8_t *helper = NULL;
+            void *vtable = NULL;
+            const char *refused = sh_overrides_check_sites(base, ctor, &helper, &vtable);
+            uint32_t size = ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage;
+            printf("  the file shadow's checks on the executable's code: %s\n", refused ? refused : "all hold");
+            IMG_CHECK(refused == NULL);
+            IMG_CHECK(helper != NULL && helper > base && helper < base + size);
+            IMG_CHECK(vtable != NULL && (uint8_t *)vtable > base && (uint8_t *)vtable < base + size);
+            IMG_CHECK(sh_overrides_test_address_in_readonly_section(base, vtable));
+            printf("  base helper rva 0x%X, provider vtable rva 0x%X\n", (unsigned)(helper - base),
+                   (unsigned)((uint8_t *)vtable - base));
+        }
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+
+IMAGE_TEST_MAIN("overrides_internal_test", check_image, synthetic_main)
 
 /* AAS validation is exercised by grid_room_nav_test, not these lookup tests. */
 int sh_navmesh_validate_aas(const unsigned char *p,size_t n,char *e,size_t cap)

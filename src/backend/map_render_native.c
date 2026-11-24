@@ -221,6 +221,14 @@ static void *near_relay(uintptr_t call)
     }
     return NULL;
 }
+/* The RenderClipRead site is a rel32 call (byte 0 E8) to the parm float reader: copy its five bytes to `bytes` and
+ * give the callee. 0 when the site is not that call. The install and the image test both run this. */
+int sh_map_render_decode_read(uintptr_t site,unsigned char bytes[5],uintptr_t *callee)
+{
+    int32_t relative;
+    memcpy(bytes,(void*)site,5);if(bytes[0]!=0xe8)return 0;
+    memcpy(&relative,bytes+1,4);*callee=site+5+relative;return 1;
+}
 int sh_map_render_install(const sig_result *results,size_t count,const uint8_t *base)
 {
     const sig_result *read,*decl,*set;unsigned char before[5],after[5];int32_t relative;
@@ -243,8 +251,9 @@ int sh_map_render_install(const sig_result *results,size_t count,const uint8_t *
          * their previous far clip; everything else still works. */
         if(set&&g_zfar)g_set=(cvar_set_fn)set->addr;
         else backend_log("RENDER: r_zfar setter unavailable; frames without an environment keep their previous far clip");
-        memcpy(before,(void*)read->addr,5);if(before[0]!=0xe8)return 0;
-        memcpy(&relative,before+1,4);g_float=(parm_float_fn)(read->addr+5+relative);
+        {uintptr_t callee;
+            if(!sh_map_render_decode_read(read->addr,before,&callee))return 0;
+            g_float=(parm_float_fn)callee;}
         g_decl=(parm_decl_fn)decl->addr;
         g_relay=near_relay(read->addr);if(!g_relay)return 0;
         distance=(intptr_t)g_relay-(intptr_t)(read->addr+5);

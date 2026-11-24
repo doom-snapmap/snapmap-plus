@@ -249,6 +249,13 @@ it), label it as such in the comment rather than putting it in a field that mean
 
 An entry with a zero RVA in one column does not exist on that renderer and never resolves there.
 
+**A bind-time byte check needs an image test too.** An install that checks the game's code before it patches or
+detours (expected bytes at an offset, the target of a call, a decoded global) puts that check in one product function
+the install itself calls, and an image-backed test runs that same function on both executables (see "Bind-time byte
+checks" in [tests/README.md](../tests/README.md)). A signature that resolves says nothing about the offsets an install
+reads past it: a check that cannot match the shipped code turns its feature off for every player, and only the image
+test sees it before a player does. Never copy the expected bytes into the test.
+
 A third test, `xinput_ordinal_test.c`, is a **runtime** cross-check of the XInput ordinal invariant — it loads
 a built DLL and calls its exports by ordinal. CI verifies that same invariant *statically* with `dumpbin` (the
 "XInput ordinal parity" step), so you normally don't need to run it by hand.

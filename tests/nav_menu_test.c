@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "image_sites.h"
 static ULONGLONG test_now;
 #define GetTickCount64() test_now
 #include "../src/backend/nav_menu.c"
@@ -441,10 +442,47 @@ static void test_install_refuses_before_patching(void)
     for(i=0;i<4;i++) CHECK(!g_limits[i].live);
     VirtualFree(code,0,MEM_RELEASE);
 }
-int main(void)
+static int synthetic_main(void)
 {
     test_actions();test_modal();test_panel_layout();test_open_close_order();test_exit_dialog();
     test_install_refuses_before_patching();
     printf("nav_menu_test: %d checks, %d failed\n",checks,failures);
     return failures?1:0;
 }
+
+/* The row-bound checks (nav_menu.c nav_menu_limits + nav_menu_limits_hold, the functions the install calls) on each
+ * build 13954591 executable named on the command line. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    uintptr_t lo, hi;
+    if (!base) return;
+    lo = (uintptr_t)base;
+    hi = lo + ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    const sig_result *init, *row, *select;
+    struct nav_limit limits[4];
+    image_site(base, results, n, "StartMenuInit", identity->vulkan);
+    image_site(base, results, n, "StartMenuRow", identity->vulkan);
+    image_site(base, results, n, "StartMenuSelect", identity->vulkan);
+    init = sig_lookup(results, n, "StartMenuInit");
+    row = sig_lookup(results, n, "StartMenuRow");
+    select = sig_lookup(results, n, "StartMenuSelect");
+    if (init && row && select && init->status == SIG_OK && row->status == SIG_OK && select->status == SIG_OK) {
+        int ok;
+        nav_menu_limits(limits, init, row, select);
+        ok = nav_menu_limits_hold(limits);
+        printf("  StartMenuInit +0x4ee, StartMenuRow +0x36, StartMenuSelect +0x1a/+0x6c bounds: %s\n", ok ? "hold" : "FAIL");
+        IMG_CHECK(ok);
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+
+IMAGE_TEST_MAIN("nav_menu_test", check_image, synthetic_main)

@@ -122,6 +122,13 @@ static int boot_stock_exists(void *context, const char *request)
     return sh_modstock_exists(request);
 }
 
+/* A pinned row's composition on disk with every unit present (modmanifest.h sh_modmanifest_set_whole). */
+static int boot_composition_whole(const char *build)
+{
+    int complete = 0;
+    return sh_cache_composed(build, &complete) && complete;
+}
+
 /* The function's address for an install that requires an intact prologue, or
  * NULL; *clean says whether it resolved. */
 static void *sig_fn(const sig_result *results, size_t n, const char *name, int *clean)
@@ -243,6 +250,7 @@ static void install_features(const sig_result *results, size_t db)
         sh_cache_set_resolver(&boot_r);
         sh_cache_set_rescan(sh_modserve_index_rescan);
         sh_modmanifest_set_content(sh_cache_on_load);
+        sh_modmanifest_set_whole(boot_composition_whole);
         sh_cache_sweep_async();
     }
     /* What a map uses of Snapmap+ itself flags it at every save (map_uses.h). */

@@ -342,6 +342,10 @@ void sh_modmanifest_set_notice(void (*fn)(const char *text));
 /* Whether the installed version of `salt` carries the placed name `name` (modserve.h sh_modserve_root_carries): 1 yes.
  * NULL (unbound): the version rule never moves a mod. */
 void sh_modmanifest_set_carries(int (*fn)(const char *salt, const char *name));
+/* Whether a pinned row's composition `build` is here whole (every unit present): 1 yes. A save keeps the recorded
+ * spawn-type pins of a row whose content is not here, a local row whose folder is absent or a pinned row composed
+ * with stand-ins, since the listing cannot say its demons' types. NULL (unbound): a pinned row counts as whole. */
+void sh_modmanifest_set_whole(int (*fn)(const char *build));
 
 /* The listing: the builds a map declares to the map scope (modserve.h sh_modserve_scope_set), in order. One rule for
  * every mode (the editor's load and Play entry, a hub, My Maps or published launch, a co-op lobby's launch, a rawmap

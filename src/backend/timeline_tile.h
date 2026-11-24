@@ -54,6 +54,11 @@ const void *sh_tl_stock_row_first(const char *current_row, const void *current, 
  * placement 4, wire drag 7). Entities are not rebound during them. */
 int sh_tl_substate_blocks_rebind(int substate);
 
+/* The palette sort reached through the E8 at call_site (SnapPaletteSortCall + 37) when its first 12 bytes are
+ * the wrapper's prologue, else NULL. The install's own check. */
+#define SH_TIMELINE_SORT_CALL_OFF 37  /* the E8 to the sort inside SnapPaletteSortCall */
+const unsigned char *sh_timeline_tile_sort_target(const unsigned char *call_site);
+
 #ifndef SH_TIMELINE_TILE_PURE
 #include "signatures.h"
 #include "snapmap_plus_iface.h"

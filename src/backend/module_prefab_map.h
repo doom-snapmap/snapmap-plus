@@ -129,6 +129,16 @@ char *sh_mp_check_json(const sh_mp_module_check *c);
  * empty. Returns malloc-owned text or NULL. */
 char *sh_mp_summary_view_json(const sh_mp_summary *s, const float (*bounds)[6], const char *const *labels);
 
+/* ModuleRedoAction (Module Mode redo handler) calls Redo(editor) with an E8 rel32 at this offset. */
+#define SH_MP_ACTION_REDO_CALL_OFF 0x13
+
+/* Follow a rel32 CALL at `at`: its target, NULL unless the byte there is E8 (or `at` is unreadable). */
+void *sh_mp_call_target(const unsigned char *at);
+
+/* The Redo the install binds: the call target at ModuleRedoAction + SH_MP_ACTION_REDO_CALL_OFF, NULL when
+ * that is not an E8 call. */
+void *sh_mp_redo_target(const unsigned char *redo_action);
+
 #ifdef __cplusplus
 }
 #endif

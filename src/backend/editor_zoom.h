@@ -109,6 +109,12 @@ float sh_editor_zoom_pick_distance(float bounds, float scale, float configured);
  * transition and its transition fraction. */
 float sh_editor_zoom_blend(int current_blueprint, int previous_blueprint, int transitioning, float fraction);
 
+/* The install's byte checks, over each site's address: 1 when the bytes are the expected ones; the operand
+ * address each decodes is returned for the install to compare against its cvar. */
+int  sh_editor_zoom_check_core(uintptr_t dolly, uintptr_t pan, uintptr_t sky, uintptr_t *half);
+int  sh_editor_zoom_check_far(uintptr_t a, uintptr_t *zfar_at);
+int  sh_editor_zoom_check_pick(uintptr_t a, uintptr_t *value_at);
+int  sh_editor_zoom_check_fog(uintptr_t a, uintptr_t *fog_at);
 int  sh_editor_zoom_install(const sig_result *results, size_t count, const uint8_t *base);
 void sh_editor_zoom_set_scale(float scale);
 /* The active module bound changed (map bounds). */

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nav_preview.h"
+#include "nav_preview_sites.h"
 #include "hook.h"
 #include "backend_log.h"
 
@@ -207,18 +208,13 @@ static uintptr_t preview_address(const sig_result *r, size_t n, const char *name
 
 int sh_nav_preview_install(const sig_result *r, size_t n)
 {
-    /* Whole, position-independent prologues on the two supported renderers.
+    /* Whole, position-independent prologues on the two supported renderers (nav_preview_sites.h).
      * The function itself is obtained from the uniquely resolved job slot. */
-    static const unsigned char vk_head[] = {
-        0x48,0x89,0x5c,0x24,0x20,0x55,0x56,0x57,0x48,0x83,0xec,0x60,
-        0x65,0x48,0x8b,0x04,0x25,0x58,0,0,0 };
-    static const unsigned char gl_head[] = {
-        0x40,0x53,0x57,0x48,0x83,0xec,0x68,0x65,0x48,0x8b,0x04,0x25,0x58,0,0,0 };
     uintptr_t stage = preview_address(r,n,"NavRenderStage");
     uintptr_t slot = preview_address(r,n,"NavPostProcessSlot");
     unsigned char *post, *draw;
-    int32_t rel;
-    size_t stolen = 0, i;
+    int gl = 0;
+    size_t stolen = 0;
     if (g_ready && hook_is_installed((void *)g_stage) && hook_is_installed((void *)g_post)) return 1;
     InterlockedExchange(&g_ready,0);
     if (g_post) {
@@ -235,15 +231,15 @@ int sh_nav_preview_install(const sig_result *r, size_t n)
     g_draw = (draw_lines_fn)preview_address(r,n,"NavRenderLines");
     if (!stage || !slot || !g_begin || !g_end || !g_matrix || !g_draw) goto failed;
     __try {
-        const unsigned char *load = (const unsigned char *)slot;
-        if (memcmp(load,"\x48\x8b\x15",3)) __leave;
-        memcpy(&rel,load+3,4);
-        post = *(unsigned char **)(slot+7+rel);
-        if (!memcmp(post,vk_head,sizeof vk_head)) {
-            stolen = sizeof vk_head; g_world_backend_offset = 0x852c0;
-        } else if (!memcmp(post,gl_head,sizeof gl_head)) {
+        const unsigned char *cell = sh_nav_post_cell((const unsigned char *)slot);
+        if (!cell) __leave;
+        post = *(unsigned char **)cell;
+        stolen = sh_nav_post_head(post, &gl);
+        if (stolen && !gl) {
+            g_world_backend_offset = 0x852c0;
+        } else if (stolen) {
             sig_result target;
-            stolen = sizeof gl_head; g_world_backend_offset = 0x85280;
+            g_world_backend_offset = 0x85280;
             if (sig_resolve_one((const uint8_t *)GetModuleHandleW(NULL),
                                 &NAV_RENDER_TARGET_GL_SIGNATURE, &target) != SIG_OK) __leave;
             g_target = (draw_target_fn)target.addr;
@@ -252,9 +248,7 @@ int sh_nav_preview_install(const sig_result *r, size_t n)
         draw = (unsigned char *)g_draw;
         /* The first RIP-relative LEA RCX in the line consumer selects the
          * native immediate renderer on both verified builds. */
-        for (i = 0; i + 7 <= 96; i++) if (!memcmp(draw+i,"\x48\x8d\x0d",3)) {
-            memcpy(&rel,draw+i+3,4); g_immediate = draw+i+7+rel; break;
-        }
+        { const unsigned char *found = sh_nav_immediate(draw); if (found) g_immediate = (void *)found; }
         if (!g_immediate) __leave;
         if (!g_draw_world) g_draw_world = (unsigned char *)calloc(1,WORLD_DEBUG_OFFSET+sizeof(void *));
         if (!g_lines.data) g_lines.data = (preview_line *)calloc(PREVIEW_LINES,sizeof(preview_line));

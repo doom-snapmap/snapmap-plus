@@ -18,6 +18,7 @@
 #include <math.h>
 #include "companion.h"
 #include "companion_engine.h"
+#include "companion_sites.h"
 #include "modscene_decl.h"
 #include "signatures.h"
 #include "host_image.h"
@@ -250,7 +251,7 @@ static uint8_t *map_pe_by_rva(const char *path)
 
 static void test_image(const char *path)
 {
-    static const uint8_t prologue[14] = { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x40, 0x48, 0x8B, 0x01, 0x48, 0x8B, 0xD9, 0xFF, 0x10 };
+    /* Test-only observation of the cast's own head; the product checks only the E8 at +0x21 (companion_sites.h). */
     static const uint8_t cast_head[22] = { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9,
                                            0x74, 0x21, 0x48, 0x8B, 0x01, 0xFF, 0x10, 0x8B, 0x48, 0x68 };
     wchar_t wide[MAX_PATH];
@@ -275,23 +276,27 @@ static void test_image(const char *path)
     }
     CHECK(n == 5);
     if (bad || n != 5) { free(base); return; }
-    CHECK(!memcmp(base + r[0].rva, prologue, sizeof prologue));
+    CHECK(sh_companion_callspawn_prologue_ok(base + r[0].rva));
     {
         /* The runtime arm's prologue check on this image: as shipped it
          * commits; a foreign 5-byte jump over the head is refused. */
         uint8_t head[14];
         memcpy(head, base + r[0].rva, sizeof head);
-        CHECK(arm(1, 1, 0, 1, 1, !memcmp(head, prologue, sizeof prologue)) == SH_COMPANION_ARM_COMMIT);
+        CHECK(arm(1, 1, 0, 1, 1, sh_companion_callspawn_prologue_ok(head)) == SH_COMPANION_ARM_COMMIT);
         head[0] = 0xE9;
-        CHECK(arm(1, 1, 0, 1, 1, !memcmp(head, prologue, sizeof prologue)) == SH_COMPANION_ARM_FOREIGN);
+        CHECK(arm(1, 1, 0, 1, 1, sh_companion_callspawn_prologue_ok(head)) == SH_COMPANION_ARM_FOREIGN);
     }
     {
-        const uint8_t *w = base + r[3].rva;
-        int32_t rel;
-        memcpy(&rel, w + 0x22, 4);
-        CHECK(w[0x21] == 0xE8);
-        CHECK(!memcmp(w + 0x26 + rel, cast_head, sizeof cast_head));
-        CHECK((uint32_t)(w + 0x26 + rel - base) == (id && id->vulkan ? 0x13B34E0u : 0x13B3370u));
+        uint8_t *w = (uint8_t *)base + r[3].rva;
+        const uint8_t *cast = sh_companion_spawndef_cast(w);
+        CHECK(cast != NULL);
+        if (cast) {
+            CHECK(!memcmp(cast, cast_head, sizeof cast_head));
+            CHECK((uint32_t)(cast - base) == (id && id->vulkan ? 0x13B34E0u : 0x13B3370u));
+        }
+        w[0x21] = 0xE9;   /* not a call: refused, as resolve() refuses it */
+        CHECK(sh_companion_spawndef_cast(w) == NULL);
+        w[0x21] = 0xE8;
     }
     {
         static const char text[] = "Tried to bind an object to itself.";

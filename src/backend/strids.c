@@ -1055,6 +1055,12 @@ int sh_strids_refresh_pending(void)
 }
 
 #ifdef SH_STRIDS_TESTING
+/* The table-global decode the install runs, for the image-backed test. */
+void *sh_strids_test_decode_table_global(const uint8_t *table_lea_fn)
+{
+    return decode_table_global(table_lea_fn);
+}
+
 /* Bind doubles for the four native helpers and inspect the rows requested by
  * one injection pass.
  */

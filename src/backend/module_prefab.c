@@ -61,7 +61,6 @@
 #define MODULE_LOCAL_BOUNDS  0xa0
 #define SNAPMAP_BYTES        0x778
 #define SNAPMAP_EDIT_BYTES   0xdd0
-#define ACTION_REDO_CALL_OFF 0x13
 #define MODULE_CAP           1024
 #define GRAB_WAIT_FRAMES     90
 #define IDSTR_BYTES          0x30
@@ -149,17 +148,6 @@ static uintptr_t mp_clean(const sig_result *r, size_t n, const char *name)
     return 0;
 }
 
-/* Follow a rel32 CALL; NULL unless the byte there is E8. */
-static void *mp_call_target(const unsigned char *at)
-{
-    int rel = 0;
-    __try {
-        if (!at || at[0] != 0xE8) return NULL;
-        memcpy(&rel, at + 1, sizeof rel);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
-    return (void *)(at + 5 + rel);
-}
-
 int sh_module_prefab_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     uintptr_t redo_action = mp_clean(results, count, "ModuleRedoAction");
@@ -177,7 +165,7 @@ int sh_module_prefab_install(const sig_result *results, size_t count, const uint
     g_idstr_ctor = (idstr_ctor_fn)mp_clean(results, count, "IdStrCtor");
     g_idstr_dtor = (idstr_dtor_fn)mp_clean(results, count, "IdStrDtor");
     g_deser     = (void *)mp_clean(results, count, "DeserializeFromJson");
-    g_redo      = redo_action ? (redo_fn)mp_call_target((const unsigned char *)redo_action + ACTION_REDO_CALL_OFF) : NULL;
+    g_redo      = redo_action ? (redo_fn)sh_mp_redo_target((const unsigned char *)redo_action) : NULL;
     sh_apply_engine_get_run_on_main(&g_run_on_main);
     /* Native undo, redo and commit run inside the editor frame's heap 0 scope;
      * the install and the fallback commit run in the same scope. */

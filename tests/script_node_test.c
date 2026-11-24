@@ -34,6 +34,7 @@
 #include "script/script_hooks.h"
 #include "script/script_source.h"
 #include "script/script_node.h"
+#include "script/script_walk.h"
 
 static int g_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
@@ -695,6 +696,15 @@ static void check_image(const char *path)
             CHECK(found);
         }
     } else CHECK(!"Relay DoAction resolves");
+
+    /* The on.signal hook's site: the call at FireOutput +0x17 goes to a walk that begins with the product's own
+     * k_walk_prologue (script_api_game.c's walk_find runs this very function). */
+    if (rva[SH_SCRIPT_NODE_SIG_FIRE_OUTPUT]) {
+        const uint8_t *fire = base + rva[SH_SCRIPT_NODE_SIG_FIRE_OUTPUT];
+        void *walk = sh_script_walk_find(fire);
+        CHECK(walk != NULL);
+        if (walk) printf("  signal walk            rva=0x%X\n", (unsigned)((const uint8_t *)walk - base));
+    }
 
     /* idGameLocal vtable +0x720: lea rax,[rcx+0x49C510]; ret. */
     {

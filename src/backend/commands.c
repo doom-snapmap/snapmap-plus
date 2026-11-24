@@ -106,32 +106,6 @@ const char *cmd_argv(idCmdArgs *a, int n)
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
 
-/* Guarded byte reads shared by global decoders and entity handlers. */
-int sh_safe_read(const uint8_t *src, uint8_t *dst, size_t n)
-{
-    __try { for (size_t i = 0; i < n; i++) dst[i] = src[i]; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
-
-/* Decode the first RIP-relative MOV/LEA to RAX/RCX within the accessor window.
- * Return the pointer slot, not the object it contains. */
-const uint8_t *sh_decode_rip_slot(const uint8_t *accessor_fn)
-{
-    uint8_t b[B2_RIP_SCAN_WINDOW];
-    if (!sh_safe_read(accessor_fn, b, sizeof b)) return NULL;
-    for (int i = 0; i + 7 <= B2_RIP_SCAN_WINDOW; i++) {
-        /* 48 = REX.W; 8B = MOV r64,r/m64; 8D = LEA; modrm 0x0D = [rip+disp32]->RCX, 0x05 = ->RAX */
-        if (b[i] == 0x48 && (b[i + 1] == 0x8B || b[i + 1] == 0x8D) &&
-            (b[i + 2] == 0x0D || b[i + 2] == 0x05)) {
-            int32_t disp;
-            memcpy(&disp, &b[i + 3], 4);
-            const uint8_t *rip_next = accessor_fn + i + 7;
-            return rip_next + disp;
-        }
-    }
-    return NULL;
-}
-
 void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *module_base)
 {
     void *accessor = (void *)sig_addr_by_name(results, n, "CmdSystemLea");
@@ -707,9 +681,7 @@ static void h_disable_devmode(idCmdArgs *a)
     /* The getter reads one session byte; its displacement must be this build's
      * dev-mode field, or the matched function is not this getter. */
     if (r.status == SIG_OK) {
-        uint32_t field = 0;
-        __try { memcpy(&field, (const uint8_t *)r.addr + 3, sizeof field); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { field = 0; }
+        uint32_t field = sh_devmode_getter_field((const uint8_t *)r.addr);
         if (field != SH_SESSION_DEVMODE_FIELD) {
             sh_printf("sh_disable_devmode: %s reads session+0x%x, not the dev-mode field -- patch refused\n",
                       DEVMODE_SIG_NAME, (unsigned)field);
@@ -718,9 +690,8 @@ static void h_disable_devmode(idCmdArgs *a)
     }
 
     /* Replace the verified head with xor eax,eax; ret. */
-    const uint8_t expect[3]    = { 0x0F, 0xB6, 0x81 };
     const uint8_t new_bytes[3] = { 0x31, 0xC0, 0xC3 };
-    sh_patch_status st = code_patch_sig(&r, expect, new_bytes, 3, &g_devmode_handle);
+    sh_patch_status st = code_patch_sig(&r, SH_DEVMODE_GETTER_HEAD, new_bytes, 3, &g_devmode_handle);
     g_devmode_patch_complete = st == B2_PATCH_OK;
     if (st == B2_PATCH_OK)
         sh_printf("sh_disable_devmode: %s -- devmode disabled (session getter -> 0)\n",
@@ -1808,33 +1779,6 @@ static void h_sh_help(idCmdArgs *a)
 typedef sh_idlist_grow_fn idlist_grow_fn;
 static idlist_grow_fn g_idlist_grow;
 
-/* Decode the idList-grow callee out of AddCommand's body. Returns NULL if the call site is not found
- * within the scanned window or the decoded target lands outside the DOOM module. */
-static idlist_grow_fn sh_decode_idlist_grow(void *add_command, const uint8_t *module_base)
-{
-    if (!add_command || !module_base) return NULL;
-
-    /* Find LEA RCX,[RSI+8]; E8 rel32 in the first 256 bytes. The developer-list
-     * variant uses +0x20 and calls the same growth helper. */
-    const uint8_t *p = (const uint8_t *)add_command;
-    for (unsigned i = 0; i + 9 <= 256; ++i) {
-        uint8_t win[9];
-        if (!sh_safe_read(p + i, win, sizeof win)) return NULL;
-        if (win[0] != 0x48 || win[1] != 0x8D || win[2] != 0x4E || win[3] != 0x08 || win[4] != 0xE8)
-            continue;
-        int32_t rel;
-        memcpy(&rel, win + 5, sizeof rel);
-        const uint8_t *tgt = p + i + 9 + rel;
-
-        /* Validate callable addresses against the mapped image. */
-        uint8_t probe;
-        if (tgt < module_base || !sh_safe_read(tgt, &probe, 1)) return NULL;
-        return (idlist_grow_fn)tgt;
-    }
-    backend_log("commands: the list-growth call was not found in AddCommand; no developer-list backfill");
-    return NULL;
-}
-
 /* Preserve all six AddCommand arguments while adding exposure flags. */
 typedef void (*add_command6_fn)(void *cmdsys, const char *name, void *handler, const char *help,
                                 void *argComp, unsigned int flags);
@@ -1890,7 +1834,7 @@ int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void
     g_printf      = (printf_dispatch_fn)printf_disp;
     g_get_decls   = get_decls;
     g_module_base = module_base;
-    g_idlist_grow = sh_decode_idlist_grow(add_command, module_base);
+    g_idlist_grow = (idlist_grow_fn)sh_decode_idlist_grow(add_command, module_base);
     if (!command_unlock_detour(add_command))
         backend_log("commands: the AddCommand detour did not install; later engine commands keep their flags");
     InterlockedExchange(&g_register_pending, 1);

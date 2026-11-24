@@ -784,10 +784,43 @@ static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, const sh_mr_ch
         unsigned pin = mr_pin(choices, nchoices, src[e->source].key, e->encounter);
         if (pin && !(taken & pin)) { e->bit = pin; e->pinned = 1; taken |= pin; }
     }
+    /* A pin no listed demon claims is a demon of this map whose content is not here (its mod's folder is absent,
+     * modmanifest.c keeps its pin at a save): its type stays out of the others' reach while a free one is left, so
+     * the map's AI Filters and the demon keep their type when the content is back (R-LB1). */
+    {
+        unsigned reserved = 0;
+        size_t pl = strlen(SH_MR_PIN);
+        int c, b;
+        for (c = 0; c < nchoices; ++c) {
+            const char *slot = choices[c].slot;
+            char *end;
+            long bit;
+            int claimed = 0;
+            if (!slot || !choices[c].key || _strnicmp(slot, SH_MR_PIN, pl)) continue;
+            bit = strtol(slot + pl, &end, 10);
+            if (*end != '/' || bit < SH_MR_BIT_FIRST || bit > SH_MR_BIT_LAST) continue;
+            for (i = 0; i < r->nentries && !claimed; ++i)
+                claimed = r->entries[i].encounter && src[r->entries[i].source].key &&
+                          !_stricmp(src[r->entries[i].source].key, choices[c].key) &&
+                          !_stricmp(r->entries[i].encounter, end + 1);
+            if (!claimed && !(taken & (1u << bit))) reserved |= 1u << bit;
+        }
+        for (i = 0; i < r->nentries && reserved; ++i) {
+            sh_mr_entry *e = &r->entries[i];
+            if (e->pinned) continue;
+            for (b = SH_MR_BIT_FIRST; b <= SH_MR_BIT_LAST && !e->bit; ++b)
+                if (!((taken | reserved) & (1u << b))) { e->bit = 1u << b; taken |= e->bit; }
+        }
+        if (reserved) {
+            int kept = 0;
+            for (b = SH_MR_BIT_FIRST; b <= SH_MR_BIT_LAST; ++b) kept += (reserved >> b) & 1;
+            mr_line(r, "conductor: %d type(s) kept for the map's demons whose content is not here", kept);
+        }
+    }
     for (i = 0; i < r->nentries; ++i) {
         sh_mr_entry *e = &r->entries[i];
         int q, b, with = -1;
-        if (e->pinned) continue;
+        if (e->pinned || e->bit) continue;
         for (b = SH_MR_BIT_FIRST; b <= SH_MR_BIT_LAST && !e->bit; ++b)
             if (!(taken & (1u << b))) { e->bit = 1u << b; taken |= e->bit; }
         if (e->bit) continue;

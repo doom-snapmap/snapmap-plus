@@ -539,6 +539,7 @@ void sh_script_api_game_register(void)
 #include "../engine_build.h"
 #include "../engine_cvar_read.h"
 #include "../typeinfo.h"
+#include "script_walk.h"
 
 #define DECL_NAME_OFF       0x08u
 #define IDCVAR_VALUE_TEXT   0x10u       /* idCVar: its value as text */
@@ -546,8 +547,6 @@ void sh_script_api_game_register(void)
 #define CVAR_INIT_ONLY      0x4000u
 #define SIGNAL_ENUM         "snapListenerEvent_t"
 #define SIGNALS_MAX         256
-#define FIRE_CALL_OFF       0x17u       /* FireOutput: the call to the walk over the entity's listeners */
-#define WALK_STOLEN         14
 
 int   sh_script_node_fire_output(void *ent, int event, void *activator);   /* script_node.c */
 void *sh_script_node_fire_address(void);
@@ -563,10 +562,6 @@ static int g_signals_read;
 static void *g_walk_target;
 static walk_fn g_walk_orig;
 static int g_walk_failed;
-
-static const uint8_t k_walk_prologue[20] = {
-    0x48, 0x89, 0x6C, 0x24, 0x18, 0x48, 0x89, 0x7C, 0x24, 0x20, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x20
-};
 
 static const char *g_decl_name(void *decl)
 {
@@ -620,22 +615,10 @@ static void walk_detour(void *ent, int *event, void **activator)
     g_walk_orig(ent, event, activator);
 }
 
-/* Where the game walks an entity's listeners: the call inside FireOutput. */
+/* Where the game walks an entity's listeners: the call inside FireOutput (script_walk.h). */
 static void *walk_find(void)
 {
-    const uint8_t *fire = (const uint8_t *)sh_script_node_fire_address();
-    void *found = NULL;
-    if (!fire) return NULL;
-    __try {
-        if (fire[FIRE_CALL_OFF] == 0xE8) {
-            int32_t rel;
-            const uint8_t *walk;
-            memcpy(&rel, fire + FIRE_CALL_OFF + 1, sizeof rel);
-            walk = fire + FIRE_CALL_OFF + 5 + rel;
-            if (!memcmp(walk, k_walk_prologue, sizeof k_walk_prologue)) found = (void *)walk;
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { found = NULL; }
-    return found;
+    return sh_script_walk_find((const uint8_t *)sh_script_node_fire_address());
 }
 
 /* A script handles a SnapMap event: watch the game fire them (once). */

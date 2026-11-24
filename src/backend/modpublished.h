@@ -350,6 +350,25 @@ void sh_modpublished_compose_refusal(char *out, size_t cap, const char *const *m
  * (prefab_mods.h, D35). */
 
 /* ------------------------------------------------------------ engine */
+/* The engine functions the published-map gates bind, each at its signature's address in the running image (or in a
+ * mapped executable, for the image test), and the menu shell's global slot. */
+typedef struct sh_modpub_sites {
+    const uint8_t *on_snap, *browser, *ready, *lobby, *feed, *lobby_launch, *offline_launch;   /* detoured */
+    const uint8_t *read, *limit, *selection, *parse, *str_ctor, *str_dtor;                    /* read or called */
+    const void *shell_slot;
+} sh_modpub_sites;
+/* What the checks decode out of those functions' code. */
+typedef struct sh_modpub_bound {
+    const void *metadata_copy, *snap_params, *snap_source, *browser_flag, *hide_progress, *session_slot;
+    const void *system, *wait_text, *show_wait, *op_new, *vft_ok, *vft_fail, *fail_fn;
+    size_t slot_lobby, slot_parameters;
+    size_t slot_leave;   /* 0 when the read-error handler's leave call did not verify (not a failure) */
+} sh_modpub_bound;
+/* Every byte the gates rely on, checked in the functions' own code: NULL when each holds (*out filled), else the name
+ * of the first check that failed, for the log. It reads OnSnapPlay's window (the cookie load the hook relocates), so
+ * it runs before the gates' own hooks are written. The bind and tests/modpub_sites_test.c both run this function. */
+const char *sh_modpub_check_sites(const sh_modpub_sites *sites, sh_modpub_bound *out);
+
 #ifndef SH_MODPUBLISHED_PURE
 #include "signatures.h"
 /* Bind the read sites, the metadata, map, dialog and lobby helpers and the

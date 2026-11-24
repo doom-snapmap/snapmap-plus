@@ -5018,7 +5018,7 @@ static int e_weapon_use(void *ai, const char *name)
 static int e_set_recoil(void *ai, float alpha)
 {
     int ok = 0;
-    if (!g_recoil_site || memcmp(g_recoil_site + SH_AI_RECOIL_SITE_MUL, "\xF3\x0F\x59\xB6\xB0\x4E\x02\x00", 8)) return 0;
+    if (!g_recoil_site || memcmp(g_recoil_site + SH_AI_RECOIL_SITE_MUL, k_ai_recoil_mul, sizeof k_ai_recoil_mul)) return 0;
     __try { *(float *)((uint8_t *)ai + SH_AI_OFF_RECOIL) = alpha; ok = 1; }
     __except (av_only(GetExceptionCode())) { ok = 0; }
     return ok;
@@ -5088,12 +5088,7 @@ static float plen_detour(void *move_fsm, const uint8_t *path)
     return g_plen_orig(move_fsm, path);
 }
 
-static const uint8_t k_threat_prologue[SH_AI_THREAT_STOLEN] = {
-    0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x56, 0x48, 0x83, 0xEC, 0x40
-};
-static const uint8_t k_plen_prologue[SH_AI_PATH_LENGTH_STOLEN] = {
-    0x48, 0x83, 0xEC, 0x28, 0x48, 0x63, 0x4A, 0x70, 0x0F, 0x57, 0xE4, 0x48, 0x85, 0xC9
-};
+/* k_threat_prologue and k_plen_prologue: script_api_ai.h, where tests/script_ai_sigs_test.c compares them with the images. */
 
 static int commit_hook(void *target, void *detour, const uint8_t *want, size_t stolen, void **orig, int *failed,
                        const char *what)
@@ -6071,8 +6066,8 @@ int sh_script_ai_install(const uint8_t *module_base)
      * where the ribbon decl sits, and the engine's atom call (the pain site). */
     site = (const uint8_t *)r[SH_AI_SIG_LASER_ADD].addr;
     if (site && r[SH_AI_SIG_LASER_REMOVE].addr && r[SH_AI_SIG_LASER_STATE].addr && r[SH_AI_SIG_PAIN_STRING_SITE].addr &&
-        !memcmp(site + SH_AI_LASER_ADD_DECL_AT, "\x48\x8B\x56\x10", 4) &&
-        !memcmp(site + SH_AI_LASER_ADD_RIBBON_AT, "\x48\x8B\x92\x08\x01\x00\x00", 7)) {
+        !memcmp(site + SH_AI_LASER_ADD_DECL_AT, k_ai_laser_decl_read, sizeof k_ai_laser_decl_read) &&
+        !memcmp(site + SH_AI_LASER_ADD_RIBBON_AT, k_ai_laser_ribbon_read, sizeof k_ai_laser_ribbon_read)) {
         g_laser_add = (ai_laser_fn)site;
         g_laser_remove = (ai_laser_fn)r[SH_AI_SIG_LASER_REMOVE].addr;
     } else {

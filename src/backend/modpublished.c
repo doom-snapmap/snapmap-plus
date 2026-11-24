@@ -1698,7 +1698,8 @@ const char *sh_modpub_test_notice(void) { return g_notice ? g_notice : ""; }
 /* ================================================================== engine
  * Everything below binds the seam to DOOM build 13954591 (both renderers; the
  * offsets are equal on both, the addresses are not). Every engine read and
- * call is SEH-guarded; a failed bind installs nothing. */
+ * call is SEH-guarded; a failed bind installs nothing. The byte checks are in
+ * modpub_sites.c (sh_modpub_check_sites). */
 #ifndef SH_MODPUBLISHED_PURE
 #include "signatures.h"
 #include "hook.h"
@@ -1786,39 +1787,6 @@ static const uint8_t *eng_site(const sig_result *results, size_t count, const ui
         site = (const uint8_t *)results[i].addr;
     }
     return site;
-}
-
-static void *eng_call(const uint8_t *p)
-{
-    int32_t displacement;
-    if (p[0] != 0xe8) return NULL;
-    memcpy(&displacement, p + 1, 4);
-    return (void *)(p + 5 + displacement);
-}
-
-/* The target of a RIP-relative operand whose disp32 follows `opcode`. */
-static void *eng_rip(const uint8_t *p, const char *opcode, size_t opcode_length)
-{
-    int32_t displacement;
-    if (memcmp(p, opcode, opcode_length)) return NULL;
-    memcpy(&displacement, p + opcode_length, 4);
-    return (void *)(p + opcode_length + 4 + displacement);
-}
-
-/* The slot index of `call qword ptr [reg+disp]` (optional REX.B, FF /2). */
-static size_t eng_vcall_slot(const uint8_t *p)
-{
-    int32_t displacement;
-    uint8_t modrm;
-    if (p[0] == 0x41) p++;
-    if (p[0] != 0xff) return 0;
-    modrm = p[1];
-    if (((modrm >> 3) & 7) != 2 || (modrm & 7) == 4) return 0;
-    if ((modrm >> 6) == 1) displacement = (int8_t)p[2];
-    else if ((modrm >> 6) == 2) memcpy(&displacement, p + 2, 4);
-    else return 0;
-    if (displacement <= 0 || displacement >= 0x800 || displacement % 8) return 0;
-    return (size_t)displacement / sizeof(void *);
 }
 
 static void *eng_vslot(void *object, size_t offset)
@@ -2474,7 +2442,10 @@ static void eng_offline_launch_detour(void *manager, const void *metadata, void 
 static int eng_bind(const sig_result *results, size_t count, const uint8_t *base)
 {
     const uint8_t *read, *limit, *selection, *destroy, *parse, *map_ctor, *map_dtor, *str_ctor, *str_dtor, *clear;
-    const uint8_t *snap, *browser, *ready, *lobby;
+    const uint8_t *ready;
+    sh_modpub_sites sites;
+    sh_modpub_bound bound;
+    const char *failed;
     uintptr_t shell, thread;
     for (size_t i = 0; i < ENG_HOOKS; i++)
         if (!(g_eng.site[i] = eng_site(results, count, base, ENG_HOOK_NAMES[i]))) {
@@ -2499,75 +2470,42 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
         backend_log("MODS: a published-map helper did not resolve cleanly");
         return 0;
     }
-    snap = g_eng.site[ENG_ON_SNAP]; browser = g_eng.site[ENG_BROWSER];
-    ready = g_eng.site[ENG_READY]; lobby = g_eng.site[ENG_LOBBY];
     shell = glb_resolve(base, "shell_ptr_slot", NULL);
     thread = glb_resolve(base, "main_thread_id", NULL);
     if (!shell || !thread) { backend_log("MODS: the shell or main-thread global did not resolve"); return 0; }
-    __try {
-        /* The two read sites call the parser; their return addresses classify. */
-        if (eng_call(read + 0x125) != (void *)parse || eng_call(limit + 0x58) != (void *)parse) return 0;
-        /* The selection record allocates 0x590 and copy-constructs the metadata. */
-        if (memcmp(selection + 0x45, "\xb9\x90\x05\x00\x00", 5) ||
-            !(g_eng.metadata_copy = (eng_copy_fn)eng_call(selection + 0x69))) return 0;
-        /* OnSnapPlay: the cookie load relocated at +0xB, the dialog block's
-         * constant head, the shell slot, the source label, ClearDialog at
-         * vtable +0x220 and the progress widget. */
-        if (memcmp(snap + 0x0B, "\x48\x8b\x05", 3) ||
-            !(g_eng.snap_params = eng_rip(snap + 0x1D, "\x66\x0f\x6f\x05", 4)) ||
-            eng_rip(snap + 0x4E, "\x48\x8b\x0d", 3) != (void *)shell ||
-            !(g_eng.snap_source = eng_rip(snap + 0x55, "\x48\x8d\x05", 3)) ||
-            memcmp(snap + 0x69, "\xc7\x84\x24\xc0\x00\x00\x00\x19\x19\x00\x00", 11) ||
-            memcmp(snap + 0x8A, "\xff\x90\x20\x02\x00\x00", 6) ||
-            memcmp(snap + 0x90, "\x48\x8b\x8b\x38\x0a\x00\x00", 7) ||
-            memcmp(snap + 0xA1, "\xff\x50\x30", 3)) return 0;
-        /* Browser play: the manager flag, the browser state and widget, and the
-         * manager's progress hide (also used for the other manager hooks). */
-        if (!(g_eng.browser_flag = (eng_object_fn)eng_call(browser + 0x21)) ||
-            memcmp(browser + 0x26, "\x48\x8b\x4b\x30\xc7\x43\x20\x00\x00\x00\x00\x48\x85\xc9\x74\x0b"
-                                   "\x48\x8b\x01\xba\x0f\x00\x00\x00\xff\x50\x08\x48\x8b\x4b\x10", 31) ||
-            !(g_eng.hide_progress = (eng_object_fn)eng_call(browser + 0x45))) return 0;
-        /* The launch boundary is what browser play and feed play call: the
-         * lobby launch at browser+0x9C and feed+0xE3, the offline launch at
-         * browser+0xAD. */
-        if (eng_call(browser + 0x9C) != (void *)g_eng.site[ENG_LOBBY_LAUNCH] ||
-            eng_call(browser + 0xAD) != (void *)g_eng.site[ENG_OFFLINE_LAUNCH] ||
-            eng_call(g_eng.site[ENG_FEED] + 0xE3) != (void *)g_eng.site[ENG_LOBBY_LAUNCH]) return 0;
-        /* CacheReady: progress, then session -> lobby -> parameters. */
-        if (memcmp(ready + 0x38, "\x48\x8b\x89\x38\x0a\x00\x00", 7) || memcmp(ready + 0x49, "\xff\x50\x30", 3) ||
-            !(g_eng.session_slot = eng_rip(ready + 0x4C, "\x48\x8b\x0d", 3)) ||
-            memcmp(ready + 0x53, "\x48\x8b\x01", 3) || !(g_eng.slot_lobby = eng_vcall_slot(ready + 0x56)) ||
-            memcmp(ready + 0x5C, "\x48\x8b\x10\x48\x8b\xc8", 6) ||
-            !(g_eng.slot_parameters = eng_vcall_slot(ready + 0x62))) return 0;
-        /* CacheMapForLobby: the warm query, then the cold branch it replays. */
-        if (!(g_eng.system = (eng_get_fn)eng_call(lobby + 0x34)) ||
-            memcmp(lobby + 0x39, "\x48\x8b\x10\x48\x8b\xc8\xff\x52\x38", 9) ||
-            memcmp(lobby + 0x42, "\x4c\x8b\x08\x4c\x8b\xc5\x48\x8b\xd6\x48\x8b\xc8\x41\xff\x91\xb0\x01\x00\x00", 19) ||
-            !(g_eng.wait_text = eng_rip(lobby + 0x60, "\x48\x8d\x15", 3)) ||
-            eng_call(lobby + 0x6C) != (void *)str_ctor ||
-            !(g_eng.show_wait = (eng_show_fn)eng_call(lobby + 0x7A)) ||
-            eng_call(lobby + 0x85) != (void *)str_dtor ||
-            memcmp(lobby + 0x8A, "\xb9\x18\x00\x00\x00", 5) ||
-            !(g_eng.op_new = (eng_new_fn)eng_call(lobby + 0x8F)) ||
-            eng_call(lobby + 0xC3) != (void *)g_eng.op_new ||
-            !(g_eng.vft_ok = eng_rip(lobby + 0xA1, "\x48\x8d\x05", 3)) ||
-            eng_rip(lobby + 0xAF, "\x48\x8d\x05", 3) != (void *)ready ||
-            !(g_eng.vft_fail = eng_rip(lobby + 0xD2, "\x48\x8d\x0d", 3)) ||
-            !(g_eng.fail_fn = eng_rip(lobby + 0xE0, "\x48\x8d\x0d", 3)) ||
-            eng_call(lobby + 0xFD) != (void *)read) return 0;
-        /* The read-error handler (VK 0x140FA1E80, GL 0x140FA13B0; same bytes on both):
-         * on a 404 it raises dialog 0xA2, then +0x90 loads the session global
-         * CacheReady reads, +0x97 its vtable and +0x9A calls slot 0x2F0, which
-         * leaves the lobby. The leave is used alone (no dialog), and only when
-         * every byte of that sequence holds; else a joiner cannot be taken out. */
-        g_eng.slot_leave = 0;
-        if (!memcmp(g_eng.fail_fn, "\x41\x81\xf8\x94\x01\x00\x00", 7) &&
-            eng_rip((const uint8_t *)g_eng.fail_fn + 0x90, "\x48\x8b\x0d", 3) == (void *)g_eng.session_slot &&
-            !memcmp((const uint8_t *)g_eng.fail_fn + 0x97, "\x48\x8b\x01", 3) &&
-            !memcmp((const uint8_t *)g_eng.fail_fn + 0x9A, "\xff\x90", 2))
-            g_eng.slot_leave = eng_vcall_slot((const uint8_t *)g_eng.fail_fn + 0x9A);
-        if (!g_eng.slot_leave) backend_log("MODS: the lobby's leave call did not verify; a joiner without its mods stays in the lobby");
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    ready = g_eng.site[ENG_READY];
+    sites.on_snap = g_eng.site[ENG_ON_SNAP]; sites.browser = g_eng.site[ENG_BROWSER];
+    sites.ready = ready; sites.lobby = g_eng.site[ENG_LOBBY]; sites.feed = g_eng.site[ENG_FEED];
+    sites.lobby_launch = g_eng.site[ENG_LOBBY_LAUNCH]; sites.offline_launch = g_eng.site[ENG_OFFLINE_LAUNCH];
+    sites.read = read; sites.limit = limit; sites.selection = selection; sites.parse = parse;
+    sites.str_ctor = str_ctor; sites.str_dtor = str_dtor; sites.shell_slot = (const void *)shell;
+    __try { failed = sh_modpub_check_sites(&sites, &bound); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { failed = "a site's bytes could not be read"; }
+    if (failed) {
+        char line[200];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: the published-map gate check '%s' did not hold", failed);
+        backend_log(line);
+        return 0;
+    }
+    g_eng.metadata_copy = (eng_copy_fn)bound.metadata_copy;
+    g_eng.snap_params = (const uint8_t *)bound.snap_params;
+    g_eng.snap_source = (const char *)bound.snap_source;
+    g_eng.browser_flag = (eng_object_fn)bound.browser_flag;
+    g_eng.hide_progress = (eng_object_fn)bound.hide_progress;
+    g_eng.session_slot = (void **)bound.session_slot;
+    g_eng.slot_lobby = bound.slot_lobby;
+    g_eng.slot_parameters = bound.slot_parameters;
+    g_eng.system = (eng_get_fn)bound.system;
+    g_eng.wait_text = (const char *)bound.wait_text;
+    g_eng.show_wait = (eng_show_fn)bound.show_wait;
+    g_eng.op_new = (eng_new_fn)bound.op_new;
+    g_eng.vft_ok = (void *)bound.vft_ok;
+    g_eng.vft_fail = (void *)bound.vft_fail;
+    g_eng.fail_fn = (void *)bound.fail_fn;
+    /* The read-error handler's leave is used alone, and only when every byte of its sequence holds; else a joiner
+     * cannot be taken out. */
+    g_eng.slot_leave = bound.slot_leave;
+    if (!g_eng.slot_leave) backend_log("MODS: the lobby's leave call did not verify; a joiner without its mods stays in the lobby");
     g_eng.ready_fn = (void *)ready;
     g_eng.read = (eng_read_fn)read;
     g_eng.metadata_destroy = (eng_destroy_fn)destroy;

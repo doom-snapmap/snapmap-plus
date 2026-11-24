@@ -69,16 +69,23 @@ static int read_float(uintptr_t at,float *out)
     __try {*out=*(const volatile float*)at;return 1;}
     __except(EXCEPTION_EXECUTE_HANDLER) {return 0;}
 }
+/* The bind's byte checks, the install's and the image test's one function: the load's bytes, then its constant. */
+const char *sh_world_area_cell_check(const unsigned char *site,uintptr_t *constant)
+{
+    float native=0;
+    if(!sh_world_area_cell_site(site,constant))return "the cell-size load has unexpected bytes";
+    if(!read_float(*constant,&native)||native!=SH_RENDER_AREA_CELL)return "the cell-size constant is not 512";
+    return NULL;
+}
 int sh_world_area_cell_install(const sig_result *results,size_t count,const uint8_t *base)
 {
-    const sig_result *site;uintptr_t constant=0;float native=0;int32_t old_disp,new_disp;
+    const sig_result *site;uintptr_t constant=0;int32_t old_disp,new_disp;
     const char *why;char line[320];
     (void)base;
     if(g_live)return 1;
     site=binding(results,count,"WorldAreaCellLoad");
     if(!site){why="the cell-size load was not found";goto unavailable;}
-    if(!sh_world_area_cell_site((const unsigned char*)site->addr,&constant)){why="the cell-size load has unexpected bytes";goto unavailable;}
-    if(!read_float(constant,&native)||native!=SH_RENDER_AREA_CELL){why="the cell-size constant is not 512";goto unavailable;}
+    if((why=sh_world_area_cell_check((const unsigned char*)site->addr,&constant)))goto unavailable;
     /* The load's disp32 is relative to the instruction's end, site + 8. */
     if(!g_page&&!(g_page=(cell_page*)sh_near_page_alloc(site->addr+8))){why="no page within reach of the cell-size load";goto unavailable;}
     /* Written before the patch: the redirected load reads 512 from the start. */

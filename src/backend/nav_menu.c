@@ -566,11 +566,31 @@ static const sig_result *find(const sig_result *results,size_t count,const char 
     return NULL;
 }
 
+/* The row-bound compares the install widens (the eighth row), with the instruction each sits in. */
+struct nav_limit { const sig_result *anchor;size_t offset;unsigned char bytes[3]; };
+static void nav_menu_limits(struct nav_limit limits[4],const sig_result *init,const sig_result *row,
+                            const sig_result *select)
+{
+    limits[0]=(struct nav_limit){init,0x4ee,{0x83,0xff,7}};
+    limits[1]=(struct nav_limit){row,0x36,{0x83,0xfb,6}};
+    limits[2]=(struct nav_limit){select,0x1a,{0x83,0xfb,6}};
+    limits[3]=(struct nav_limit){select,0x6c,{0x83,0xfe,6}};
+}
+/* 1 when every compare holds the expected instruction bytes. */
+static int nav_menu_limits_hold(const struct nav_limit limits[4])
+{
+    int i;
+    __try {
+        for(i=0;i<4;i++) if(memcmp((void*)(limits[i].anchor->addr+limits[i].offset),limits[i].bytes,3)) return 0;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return 1;
+}
+
 int sh_nav_menu_install(const sig_result *results,size_t count)
 {
     const sig_result *bind,*action,*think,*end,*init,*row,*select;
     const sig_result *r;
-    struct limit { const sig_result *anchor;size_t offset;unsigned char bytes[3]; } limits[4];
+    struct nav_limit limits[4];
     void *hooks[4]={0};
     int i;
     if (g_bind || g_action || g_think || g_end) return g_enabled;
@@ -599,13 +619,8 @@ int sh_nav_menu_install(const sig_result *results,size_t count)
     if (!bind||!action||!think||!end||!init||!row||!select) goto fail;
     /* Independently verified instruction offsets and bounds on both renderers.
      * Check every site before making any change; no raw image-RVA fallback. */
-    limits[0]=(struct limit){init,0x4ee,{0x83,0xff,7}};
-    limits[1]=(struct limit){row,0x36,{0x83,0xfb,6}};
-    limits[2]=(struct limit){select,0x1a,{0x83,0xfb,6}};
-    limits[3]=(struct limit){select,0x6c,{0x83,0xfe,6}};
-    __try {
-        for(i=0;i<4;i++) if(memcmp((void*)(limits[i].anchor->addr+limits[i].offset),limits[i].bytes,3)) goto fail;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { goto fail; }
+    nav_menu_limits(limits,init,row,select);
+    if(!nav_menu_limits_hold(limits)) goto fail;
     /* Whole, position-independent windows; publish originals before commit. */
     hooks[0]=sh_prepare_detour_sig(bind,(void*)menu_bind,18);g_bind=(bind_fn)hooks[0];
     hooks[1]=sh_prepare_detour_sig(action,(void*)menu_action,19);g_action=(action_fn)hooks[1];

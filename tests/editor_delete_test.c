@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "editor_delete.h"
+#include "image_sites.h"
 
 #define T_ED_MAP          0x204C8
 #define T_ED_SEL          0x204D0
@@ -1006,7 +1007,7 @@ static void binding_requires_the_heap_scope(void)
     CHECK(run(ids, 1, &r) == SH_EDITOR_DELETE_DISPATCHED);
 }
 
-int main(void)
+static int synthetic_main(void)
 {
     legacy_leaf_loop_reaches_stale_hover_consumer();
     dispatch_releases_targets_and_leaves_commit_to_native_frames();
@@ -1048,3 +1049,34 @@ int main(void)
     printf("editor_delete_test: all checks passed\n");
     return 0;
 }
+
+/* The decode the DLL's bind runs (sh_editor_delete_install calls the same sh_editor_delete_decode_clear_hover) on
+ * each real executable: SelectionDeleteAction holds exactly one hover-clear call whose callee has the expected shape. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    const uint8_t *action;
+    uintptr_t clear;
+    uint32_t size;
+    if (!base) return;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    size = ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage;
+    action = image_site(base, results, n, "SelectionDeleteAction", identity->vulkan);
+    if (action) {
+        clear = sh_editor_delete_decode_clear_hover(action, base, size);
+        printf("  SelectionDeleteAction rva 0x%x: hover-clear callee %s (rva 0x%x)\n", (unsigned)(action - base),
+               clear ? "decoded" : "NOT decoded", clear ? (unsigned)(clear - (uintptr_t)base) : 0u);
+        IMG_CHECK(clear != 0);
+        IMG_CHECK(clear == 0 || (clear > (uintptr_t)base && clear < (uintptr_t)base + size));
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+
+IMAGE_TEST_MAIN("editor_delete_test", check_image, synthetic_main)

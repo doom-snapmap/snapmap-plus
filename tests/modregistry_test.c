@@ -921,6 +921,20 @@ static void test_pins_and_flags(void)
     CHECK(sh_modregistry_generate(src, 2, tg, 2, &other_salt, 1, NULL, 0, &r));
     CHECK(r.nentries == 2 && !r.entries[0].pinned && !r.entries[1].pinned && r.entries[1].bit == (1u << 20));
     sh_modregistry_result_free(&r);
+    /* a pin of a demon whose content is not here (its mod's folder absent, its pin kept by the save) keeps its type
+     * from the listed ports while a free one is left (R-LB1): A and B go round it */
+    {
+        sh_mr_choice absent = { "spawnAIType_t/19/mods/dddddddd/single_d", "dddddddd" };
+        sh_mr_choice absent_and_b[2] = { { "spawnAIType_t/19/mods/dddddddd/single_d", "dddddddd" },
+                                         { "spawnAIType_t/20/mods/bbbbbbbb/single_b", "bbbbbbbb" } };
+        CHECK(sh_modregistry_generate(src, 2, tg, 2, &absent, 1, NULL, 0, &r));
+        CHECK(r.nentries == 2 && r.entries[0].bit == (1u << 20) && r.entries[1].bit == (1u << 21) &&
+              !r.entries[0].pinned && !r.entries[1].pinned);
+        sh_modregistry_result_free(&r);
+        CHECK(sh_modregistry_generate(src, 2, tg, 2, absent_and_b, 2, NULL, 0, &r));
+        CHECK(r.nentries == 2 && r.entries[1].bit == (1u << 20) && r.entries[1].pinned && r.entries[0].bit == (1u << 21));
+        sh_modregistry_result_free(&r);
+    }
     /* in the editor the flag picker offers each port's type by its member, labelled with its encounter's strings */
     CHECK(sh_modregistry_generate(src, 2, tg, 2, &pin_b, 1, grown, 1, &r));
     CHECK(r.text[1] && strstr(r.text[1], "num = 3;") && strstr(r.text[1], "enumValue = \"SPAWN_AI_TYPE_IMP\";") &&
@@ -937,6 +951,152 @@ static void test_pins_and_flags(void)
     free(eb);
 }
 
+/* ------------------------------------------------------------------ pins kept while a mod's folder is absent (R-LB1) */
+
+#define PIN_HAMMER "\"spawnAIType_t/19/mods/localhel/single_hell_guard_hammer\":\"localhel\""
+#define PIN_STAFF  "\"spawnAIType_t/20/mods/localhel/single_hell_guard_staff\":\"localhel\""
+#define PIN_SPIDER "\"spawnAIType_t/21/mods/localspi/single_spider_mastermind\":\"localspi\""
+#define ENC_HAMMER "generated/decls/snapaiencounter/mods/localhel/single_hell_guard_hammer.decl"
+#define ENC_STAFF  "generated/decls/snapaiencounter/mods/localhel/single_hell_guard_staff.decl"
+#define ENC_SPIDER "generated/decls/snapaiencounter/mods/localspi/single_spider_mastermind.decl"
+#define ENC_NEW    "generated/decls/snapaiencounter/mods/localnew/single_new_demon.decl"
+
+static void attach_local(const char *salt, char digit)
+{
+    sh_modmanifest_row row;
+    char h[65];
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, salt);
+    strcpy_s(row.build, sizeof row.build, hash_of(digit, h));
+    row.size = 185964430;
+    CHECK(sh_modmanifest_current_attach(&row) >= 0);
+}
+
+static int member_type(const char *request, const char *bit)
+{
+    static char text[65536];
+    char want[64];
+    _snprintf_s(want, sizeof want, _TRUNCATE, "memberType = \"%s\"", bit);
+    return open_text(request, text, sizeof text) == 1 && strstr(text, want) != NULL;
+}
+
+static char *save_map(size_t *len)
+{
+    static const char MAPJ[] = "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
+    *len = 0;
+    return sh_modmanifest_on_save(MAPJ, sizeof MAPJ - 1, len);
+}
+
+static void load_map(char *saved, size_t len)
+{
+    size_t llen = 0;
+    char *loaded;
+    sh_modmanifest_reset();
+    loaded = saved ? sh_modmanifest_prepare_load(saved, len, &llen) : NULL;
+    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+}
+
+/* A map with two ports of one mod (the Hell Guard's staff and hammer) and the spider: saved with every folder here,
+ * then opened and saved on a machine where the guard's folder is absent while another mod ports a demon, then
+ * reopened with the folder back. The pins, and so the types its AI Filters name, are what they were; a present
+ * folder's demon that is gone gives its pin up. */
+static void test_pins_kept_absent(void)
+{
+    static const fx spider[] = {
+        { REQ_CONDUCTOR, "entityDef", "ai/conductor/coop/snapmap_default",
+          BOSS_CONDUCTOR("3", CITEM(2, "2097152", "ai/demon/spider_mastermind_base")) },
+        ENC("localspi", "single_spider_mastermind", "2097152"),
+    };
+    static const fx newcomer[] = {
+        { REQ_CONDUCTOR, "entityDef", "ai/conductor/coop/snapmap_default",
+          BOSS_CONDUCTOR("3", CITEM(2, "2097152", "ai/demon/new_demon")) },
+        ENC("localnew", "single_new_demon", "2097152"),
+    };
+    static const fx guard[] = {
+        { REQ_CONDUCTOR, "entityDef", "ai/conductor/coop/snapmap_default",
+          BOSS_CONDUCTOR("4", CITEM(2, "2097152", "ai/demon/talismanguard/staff") CITEM(3, "4194304", "ai/demon/talismanguard/hammer")) },
+        ENC("localhel", "single_hell_guard_staff", "2097152"),
+        ENC("localhel", "single_hell_guard_hammer", "4194304"),
+    };
+    static const fx guard_staff_only[] = {
+        { REQ_CONDUCTOR, "entityDef", "ai/conductor/coop/snapmap_default",
+          BOSS_CONDUCTOR("3", CITEM(2, "2097152", "ai/demon/talismanguard/staff")) },
+        ENC("localhel", "single_hell_guard_staff", "2097152"),
+    };
+    char full[MAX_PATH], absent[MAX_PATH], back[MAX_PATH], gone[MAX_PATH], hg[65], hs[65], hn[65], hgo[65];
+    const char *list[3];
+    char *saved1, *saved2, *saved3;
+    size_t len1, len2, len3;
+    printf("-- a save keeps the spawn-type pins of a mod whose folder is absent\n");
+    set_ops();
+    _snprintf_s(full, sizeof full, _TRUNCATE, "%s\\pins-full\\mods", g_top);
+    _snprintf_s(absent, sizeof absent, _TRUNCATE, "%s\\pins-absent\\mods", g_top);
+    _snprintf_s(back, sizeof back, _TRUNCATE, "%s\\pins-back\\mods", g_top);
+    _snprintf_s(gone, sizeof gone, _TRUNCATE, "%s\\pins-gone\\mods", g_top);
+    make_mod(full, "a-guard", "localhel", '1', NULL, guard, 3, 0);
+    make_mod(full, "b-spider", "localspi", '2', NULL, spider, 2, 0);
+    make_mod(absent, "b-spider", "localspi", '2', NULL, spider, 2, 0);
+    make_mod(absent, "c-new", "localnew", '7', NULL, newcomer, 2, 0);
+    make_mod(back, "a-guard", "localhel", '1', NULL, guard, 3, 0);
+    make_mod(back, "b-spider", "localspi", '2', NULL, spider, 2, 0);
+    make_mod(back, "c-new", "localnew", '7', NULL, newcomer, 2, 0);
+    make_mod(gone, "a-guard", "localhel", '8', NULL, guard_staff_only, 2, 0);
+    make_mod(gone, "b-spider", "localspi", '2', NULL, spider, 2, 0);
+    hash_of('1', hg); hash_of('2', hs); hash_of('7', hn); hash_of('8', hgo);
+    sh_modserve_scope_enable(1);
+    sh_modmanifest_reset();
+
+    /* Every folder here: the listing types the hammer 19, the staff 20, the spider 21, and the save pins them. */
+    CHECK(sh_modserve_index_build(full) == 2);
+    attach_local("localhel", '1');
+    attach_local("localspi", '2');
+    list[0] = hg; list[1] = hs;
+    CHECK(sh_modserve_scope_set(list, 2, 1) >= 1);
+    CHECK(member_type(ENC_HAMMER, "524288") && member_type(ENC_STAFF, "1048576") && member_type(ENC_SPIDER, "2097152"));
+    saved1 = save_map(&len1);
+    CHECK(saved1 && strstr(saved1, PIN_HAMMER) && strstr(saved1, PIN_STAFF) && strstr(saved1, PIN_SPIDER));
+    if (saved1 && !strstr(saved1, PIN_STAFF)) printf("%s\n", saved1);
+
+    /* The guard's folder absent, a new port here: the save keeps the guard's two pins as they were, with the row's
+     * recorded size, and the newcomer takes a type the map's demons do not hold. */
+    CHECK(sh_modserve_index_build(absent) == 2);
+    load_map(saved1, len1);
+    attach_local("localnew", '7');
+    list[0] = hs; list[1] = hn;
+    CHECK(sh_modserve_scope_set(list, 2, 1) >= 1);
+    CHECK(member_type(ENC_SPIDER, "2097152") && member_type(ENC_NEW, "4194304"));
+    saved2 = save_map(&len2);
+    CHECK(saved2 && strstr(saved2, PIN_HAMMER) && strstr(saved2, PIN_STAFF) && strstr(saved2, PIN_SPIDER) &&
+          strstr(saved2, "\"spawnAIType_t/22/mods/localnew/single_new_demon\":\"localnew\""));
+    CHECK(saved2 && strstr(saved2, "\"size\":185964430"));
+    if (saved2 && !strstr(saved2, PIN_STAFF)) printf("%s\n", saved2);
+
+    /* The folder back: every demon has the type it had, the newcomer keeps its own. */
+    CHECK(sh_modserve_index_build(back) == 3);
+    load_map(saved2, len2);
+    list[0] = hg; list[1] = hs; list[2] = hn;
+    CHECK(sh_modserve_scope_set(list, 3, 1) >= 1);
+    CHECK(member_type(ENC_HAMMER, "524288") && member_type(ENC_STAFF, "1048576") && member_type(ENC_SPIDER, "2097152") &&
+          member_type(ENC_NEW, "4194304"));
+
+    /* The folder here without the hammer: the listing decides, so the hammer's pin goes and the staff's stays. */
+    CHECK(sh_modserve_index_build(gone) == 2);
+    load_map(saved1, len1);
+    list[0] = hgo; list[1] = hs;
+    CHECK(sh_modserve_scope_set(list, 2, 1) >= 1);
+    CHECK(member_type(ENC_STAFF, "1048576"));
+    saved3 = save_map(&len3);
+    CHECK(saved3 && !strstr(saved3, "single_hell_guard_hammer") && strstr(saved3, PIN_STAFF) && strstr(saved3, PIN_SPIDER));
+
+    if (saved1) HeapFree(GetProcessHeap(), 0, saved1);
+    if (saved2) HeapFree(GetProcessHeap(), 0, saved2);
+    if (saved3) HeapFree(GetProcessHeap(), 0, saved3);
+    CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
+    sh_modmanifest_reset();
+    sh_modserve_scope_enable(0);
+    sh_mb_set_stock_ops(NULL);
+}
+
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH];
@@ -951,6 +1111,7 @@ int main(int argc, char **argv)
     test_pins_and_flags();
     test_body_clip_count();
     test_generation();
+    test_pins_kept_absent();
     test_map_add_remove();
     test_leftovers();
     printf("%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);

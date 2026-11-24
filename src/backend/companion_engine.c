@@ -9,6 +9,7 @@
 #include <string.h>
 #include "companion.h"
 #include "companion_engine.h"
+#include "companion_sites.h"
 #include "backend_log.h"
 #include "entity.h"
 #include "hook.h"
@@ -18,14 +19,7 @@
 
 enum { CS_CALLSPAWN, CS_BIND, CS_ADDTARGET, CS_SPAWNDEF, CS_ISCLIENT, CS_COUNT };
 
-#define CALLSPAWN_STOLEN 14
-static const uint8_t k_callspawn_prologue[CALLSPAWN_STOLEN] = {
-    0x40, 0x53,                    /* push rbx           */
-    0x48, 0x83, 0xEC, 0x40,        /* sub  rsp,0x40      */
-    0x48, 0x8B, 0x01,              /* mov  rax,[rcx]     */
-    0x48, 0x8B, 0xD9,              /* mov  rbx,rcx       */
-    0xFF, 0x10                     /* call [rax] GetType */
-};
+#define CALLSPAWN_STOLEN SH_CALLSPAWN_STOLEN
 
 #define ENT_DECL          0x6d0
 #define ENT_PHYSICS       0x808
@@ -488,7 +482,6 @@ static int resolve(const sig_result *results, size_t count, const uint8_t *modul
 {
     sig_result own[CS_COUNT];
     int i;
-    int32_t rel;
     uint8_t *wrapper;
     for (i = 0; i < CS_COUNT; i++) {
         if (sig_resolve_one(module_base, &SH_COMPANION_SIGNATURES[i], &own[i]) != SIG_OK) {
@@ -503,8 +496,12 @@ static int resolve(const sig_result *results, size_t count, const uint8_t *modul
     g_spawn_def = (spawn_def_fn)own[CS_SPAWNDEF].addr;
     g_is_client = (is_client_fn)own[CS_ISCLIENT].addr;
     wrapper = (uint8_t *)own[CS_SPAWNDEF].addr;
-    memcpy(&rel, wrapper + 0x22, 4);              /* the E8 at +0x21: the idEntity cast */
-    g_is_entity = (cast_fn)(wrapper + 0x26 + rel);
+    g_is_entity = (cast_fn)sh_companion_spawndef_cast(wrapper);   /* the E8 at +0x21: the idEntity cast */
+    if (!g_is_entity) {
+        cl_log("COMPANIONS: the SpawnEntityDef wrapper has no call at +0x21 (the idEntity cast); companions are "
+               "unavailable");
+        return 0;
+    }
     g_anchor = (const uint8_t *)clean(results, count, "DeclRegistryAnchor");
     g_register = clean(results, count, "DeclRegisterFile");
     g_type = (type_fn)clean(results, count, "DeclTypeByName");
@@ -538,7 +535,7 @@ static int resolve(const sig_result *results, size_t count, const uint8_t *modul
 static int prologue_ok(void)
 {
     int same = 0;
-    __try { same = !memcmp(g_target, k_callspawn_prologue, CALLSPAWN_STOLEN); }
+    __try { same = sh_companion_callspawn_prologue_ok((const uint8_t *)g_target); }
     __except (EXCEPTION_EXECUTE_HANDLER) { same = 0; }
     return same;
 }

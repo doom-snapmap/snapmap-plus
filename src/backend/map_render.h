@@ -58,6 +58,9 @@ int sh_map_render_encode(const sh_map_render *settings, char *out, size_t cap);
 int sh_map_render_own_variable(const char *name, int length);
 
 int sh_map_render_install(const sig_result *results, size_t count, const uint8_t *base);
+/* The RenderClipRead site is an E8 rel32 call: its five bytes in `bytes`, its callee in *callee; 0 when it is not
+ * that call. sh_map_render_install runs this same decode. */
+int sh_map_render_decode_read(uintptr_t site, unsigned char bytes[5], uintptr_t *callee);
 /* The open map's setting, held by map_settings.c (read from the map's row at
  * every parse, written back at every save; the engine's variable lists never
  * carry it). map names the map the caller means and must not be NULL. */

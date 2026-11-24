@@ -2,6 +2,7 @@
 #include "module_prefab_map.h"
 #include "mp_json.h"
 
+#include <windows.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -999,4 +1000,19 @@ char *sh_mp_check_json(const sh_mp_module_check *c)
     }
     if (b.bad) { free(b.p); return NULL; }
     return b.p;
+}
+
+void *sh_mp_call_target(const unsigned char *at)
+{
+    int rel = 0;
+    __try {
+        if (!at || at[0] != 0xE8) return NULL;
+        memcpy(&rel, at + 1, sizeof rel);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+    return (void *)(at + 5 + rel);
+}
+
+void *sh_mp_redo_target(const unsigned char *redo_action)
+{
+    return redo_action ? sh_mp_call_target(redo_action + SH_MP_ACTION_REDO_CALL_OFF) : NULL;
 }

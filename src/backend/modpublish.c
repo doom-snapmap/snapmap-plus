@@ -1710,7 +1710,8 @@ void sh_modpublish_test_set_cache_root(const char *root)
  * Everything below binds the seam to DOOM build 13954591 (both renderers; the
  * offsets are equal on both, the addresses are not). Every engine read and
  * call is SEH-guarded; a failed bind installs nothing. Evidence:
- * logs/shared-ghidra/mod-system-n4/ and lane N1a section 5. */
+ * logs/shared-ghidra/mod-system-n4/ and lane N1a section 5. The byte checks
+ * are in modpub_sites.c (sh_modpublish_check_sites). */
 #ifndef SH_MODPUBLISH_PURE
 #include "signatures.h"
 #include "hook.h"
@@ -1794,22 +1795,6 @@ static const uint8_t *eng_site(const sig_result *results, size_t count, const ui
         site = (const uint8_t *)results[i].addr;
     }
     return site;
-}
-
-static void *eng_call(const uint8_t *p)
-{
-    int32_t displacement;
-    if (p[0] != 0xe8 && p[0] != 0xe9) return NULL;
-    memcpy(&displacement, p + 1, 4);
-    return (void *)(p + 5 + displacement);
-}
-
-static void *eng_rip(const uint8_t *p, const char *opcode, size_t opcode_length)
-{
-    int32_t displacement;
-    if (memcmp(p, opcode, opcode_length)) return NULL;
-    memcpy(&displacement, p + opcode_length, 4);
-    return (void *)(p + opcode_length + 4 + displacement);
 }
 
 /* A native idStr's text: length at +8, data at +0x10. */
@@ -2372,7 +2357,10 @@ static void eng_save_observer(const char *text, size_t length)
 
 static int eng_bind(const sig_result *results, size_t count, const uint8_t *base)
 {
-    const uint8_t *fail, *copy, *browser, *on_error, *ctor, *dtor, *start, *query;
+    const uint8_t *fail, *ctor, *dtor, *start, *query;
+    sh_modpublish_sites sites;
+    sh_modpublish_bound bound;
+    const char *failed;
     uintptr_t thread;
     for (size_t i = 0; i < ENG_HOOKS; i++)
         if (!(g_eng.site[i] = eng_site(results, count, base, ENG_HOOK_NAMES[i]))) {
@@ -2393,55 +2381,25 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
                     "main thread) did not resolve");
         return 0;
     }
-    copy = g_eng.site[ENG_MAPINFO_COPY];
-    browser = g_eng.site[ENG_BROWSER_COPY];
-    __try {
-        /* PublishFail(editorLocal): the toast on editor+0x21088 with two idStr
-         * locals, then EditorBusyClear(editor). */
-        if (memcmp(fail + 0x27, "\x48\x83\xb9\x88\x10\x02\x00\x00\x74\x50", 10) ||
-            eng_call(fail + 0x3D) != (void *)ctor || eng_call(fail + 0x4F) != (void *)ctor ||
-            memcmp(fail + 0x54, "\x90\x4c\x8d\x44\x24\x58\x48\x8d\x54\x24\x28\x48\x8b\x8b\x88\x10\x02\x00", 18) ||
-            !(g_eng.toast = (eng_toast_fn)eng_call(fail + 0x66)) ||
-            eng_call(fail + 0x71) != (void *)dtor || memcmp(fail + 0x81, "\x48\x8b\xcb\xe8", 4)) return 0;
-        /* MapInfo copy: shell (+0x18, else from +0x20), manager, the record
-         * by index +0x300 of kind 1, and the model at record+0x18 -> +8. */
-        if (memcmp(copy + 0x2D, "\x48\x8b\xd9\x48\x8b\x41\x18\x48\x85\xc0\x75\x09\x48\x8b\x49\x20", 16) ||
-            !(g_eng.screen_shell = (eng_get1_fn)eng_call(copy + 0x3D)) ||
-            memcmp(copy + 0x42, "\x48\x8b\xc8", 3) ||
-            !(g_eng.shell_manager = (eng_get1_fn)eng_call(copy + 0x45)) ||
-            memcmp(copy + 0x56, "\x8b\x93\x00\x03\x00\x00\x48\x8b\xc8", 9) ||
-            !(g_eng.record = (eng_lookup_fn)eng_call(copy + 0x5F)) ||
-            memcmp(copy + 0x70, "\x83\x78\x0c\x01", 4) ||
-            memcmp(copy + 0x12C, "\x48\x8b\x56\x18\x48\x83\xc2\x08", 8)) return 0;
-        /* Browser copy: the same record lookup on (+0x10, +8) of kind 5, the
-         * entry lookup on (+0x38, +0), the model at entry+0x28 -> +8, and the
-         * cancelled-error path of its OnBranchError (flag 0). */
-        if (memcmp(browser + 0x10, "\x8b\x51\x08\x48\x8b\x49\x10", 7) ||
-            eng_call(browser + 0x17) != (void *)g_eng.record ||
-            memcmp(browser + 0x25, "\x83\x78\x0c\x05", 4) ||
-            memcmp(browser + 0x2F, "\x8b\x17\x48\x8d\x4f\x38", 6) ||
-            !(g_eng.entry = (eng_lookup_fn)eng_call(browser + 0x43)) ||
-            memcmp(browser + 0x9B, "\x48\x8b\x56\x28", 4) ||
-            !(on_error = eng_rip(browser + 0x7E, "\x48\x8d\x15", 3))) return 0;
-        if (memcmp(on_error + 0x2B, "\x48\x8b\x4b\x30\x33\xf6\x89\x73\x20\x48\x85\xc9\x74\x08\x48\x8b\x01\x33\xd2"
-                                    "\xff\x50\x08\xba\x0f\x00\x00\x00\x48\x8b\xcb", 30) ||
-            !(g_eng.browser_state = (eng_state_fn)eng_call(on_error + 0x49)) ||
-            memcmp(on_error + 0x4E, "\x48\x8b\x4b\x10\x48\x83\xc4\x40\x5f\x5e\x5b", 11) ||
-            !(g_eng.hide_progress = (eng_object_fn)eng_call(on_error + 0x59))) return 0;
-        /* PublishStart's map:dev append: IdStrCtor at +0x55, the tag list at
-         * editor->edit + 0x998, grow when num == size (+0xB3), assign into
-         * list[num * 0x30] (+0xD5), num++; its Save callback is PublishAfterSave. */
-        if (eng_call(start + 0x55) != (void *)ctor ||
-            memcmp(start + 0x5B, "\x49\x8b\xb6\xc8\x04\x02\x00\x48\x81\xc6\x98\x09\x00\x00", 14) ||
-            memcmp(start + 0xA8, "\x8b\x46\x0c\x39\x46\x08\x75\x0c\x48\x8b\xce\xe8", 12) ||
-            !(g_eng.tags_grow = (eng_grow_fn)eng_call(start + 0xB3)) ||
-            memcmp(start + 0xB8, "\x84\xc0\x74\x21\x48\x63\x46\x08\x3b\x46\x0c\x7d\x18\x48\x8d\x0c\x40\x48\xc1\xe1\x04"
-                                 "\x48\x03\x0e\x48\x8d\x54\x24\x28\xe8", 30) ||
-            !(g_eng.idstr_assign = (eng_assign_fn)eng_call(start + 0xD5)) ||
-            memcmp(start + 0xDA, "\xff\x46\x08", 3) ||
-            eng_rip(start + 0x1F5, "\x4c\x8d\x05", 3) != (void *)g_eng.site[ENG_AFTER_SAVE] ||
-            eng_call(start + 0x140) != (void *)dtor) return 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    sites.fail = fail; sites.copy = g_eng.site[ENG_MAPINFO_COPY]; sites.browser = g_eng.site[ENG_BROWSER_COPY];
+    sites.start = start; sites.after_save = g_eng.site[ENG_AFTER_SAVE]; sites.str_ctor = ctor; sites.str_dtor = dtor;
+    __try { failed = sh_modpublish_check_sites(&sites, &bound); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { failed = "a site's bytes could not be read"; }
+    if (failed) {
+        char line[200];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: the publish hook check '%s' did not hold", failed);
+        backend_log(line);
+        return 0;
+    }
+    g_eng.toast = (eng_toast_fn)bound.toast;
+    g_eng.screen_shell = (eng_get1_fn)bound.screen_shell;
+    g_eng.shell_manager = (eng_get1_fn)bound.shell_manager;
+    g_eng.record = (eng_lookup_fn)bound.record;
+    g_eng.entry = (eng_lookup_fn)bound.entry;
+    g_eng.browser_state = (eng_state_fn)bound.browser_state;
+    g_eng.hide_progress = (eng_object_fn)bound.hide_progress;
+    g_eng.tags_grow = (eng_grow_fn)bound.tags_grow;
+    g_eng.idstr_assign = (eng_assign_fn)bound.idstr_assign;
     g_eng.published_query = (eng_query_fn)query;
     /* The pacifier PublishStart raises; without it the hold shows nothing while it prepares. */
     g_eng.busy_show = (eng_busy_fn)eng_site(results, count, base, "EditorBusyShow");

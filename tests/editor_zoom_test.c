@@ -3,7 +3,8 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
-int main(void)
+#include "image_sites.h"
+static int synthetic_main(void)
 {
     /* Scale 1 is native: orbit height 16000, pan 16000, sky 0.5, far 33000. */
     assert(sh_editor_zoom_orbit_height(16000,1)==16000&&sh_editor_zoom_pan_limit(16000,1)==16000);
@@ -95,3 +96,59 @@ int main(void)
     printf("editor_zoom_test: all passed\n");
     return 0;
 }
+
+/* The install's byte checks (editor_zoom.c sh_editor_zoom_check_*, the functions the bind calls) on each build
+ * 13954591 executable named on the command line: every site must match, and each decoded operand must address the
+ * image (the cvar the install compares it to is a runtime value, so the operand is checked for agreement instead). */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    const uint8_t *dolly, *pan, *sky, *fa, *fb, *fog, *ph, *pf;
+    uintptr_t half = 0, za = 0, zb = 0, fog_at = 0, vh = 0, vf = 0, lo, hi;
+    if (!base) return;
+    lo = (uintptr_t)base;
+    hi = lo + ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    dolly = image_site(base, results, n, "OrbitDollyClamp", identity->vulkan);
+    pan = image_site(base, results, n, "OrbitPanClamp", identity->vulkan);
+    sky = image_site(base, results, n, "BlueprintZoomClamp", identity->vulkan);
+    fa = image_site(base, results, n, "BlueprintFarClipA", identity->vulkan);
+    fb = image_site(base, results, n, "BlueprintFarClipB", identity->vulkan);
+    fog = image_site(base, results, n, "EditorFogVolume", identity->vulkan);
+    ph = image_site(base, results, n, "ModulePickHover", identity->vulkan);
+    pf = image_site(base, results, n, "ModulePickFocus", identity->vulkan);
+    if (dolly && pan && sky) {
+        int ok = sh_editor_zoom_check_core((uintptr_t)dolly, (uintptr_t)pan, (uintptr_t)sky, &half);
+        printf("  orbit dolly/pan/sky-factor checks: %s\n", ok ? "hold" : "FAIL");
+        IMG_CHECK(ok);
+        IMG_CHECK(half > lo && half < hi);
+    }
+    if (fa && fb) {
+        int oka = sh_editor_zoom_check_far((uintptr_t)fa, &za), okb = sh_editor_zoom_check_far((uintptr_t)fb, &zb);
+        printf("  far-clip A/B checks: %s\n", oka && okb ? "hold" : "FAIL");
+        IMG_CHECK(oka && okb);
+        IMG_CHECK(za > lo && za < hi && za == zb);   /* both write the one r_zfar */
+    }
+    if (fog) {
+        int ok = sh_editor_zoom_check_fog((uintptr_t)fog, &fog_at);
+        printf("  fog volume checks: %s\n", ok ? "hold" : "FAIL");
+        IMG_CHECK(ok);
+        IMG_CHECK(fog_at > lo && fog_at < hi);
+    }
+    if (ph && pf) {
+        int oka = sh_editor_zoom_check_pick((uintptr_t)ph, &vh), okb = sh_editor_zoom_check_pick((uintptr_t)pf, &vf);
+        printf("  pick hover/focus checks: %s\n", oka && okb ? "hold" : "FAIL");
+        IMG_CHECK(oka && okb);
+        IMG_CHECK(vh > lo && vh < hi && vh == vf);   /* both read the one picking-distance cvar */
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+
+IMAGE_TEST_MAIN("editor_zoom_test", check_image, synthetic_main)

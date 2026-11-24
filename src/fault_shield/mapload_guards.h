@@ -15,4 +15,9 @@ int sh_evwire_guard_install(const uint8_t *module_base, const sig_result *result
 /* Clear tags before Spawn when their required subsystem is unreadable. */
 int sh_interactable_guard_install(const uint8_t *module_base, const sig_result *results, size_t count);
 
+/* The installs' own stolen-prologue checks (EventLink, InteractableSpawn), for the build-image test:
+ * 1 when the bytes at the function are the expected ones. */
+int sh_evlink_prologue_ok(const uint8_t *target);
+int sh_interactable_prologue_ok(const uint8_t *target);
+
 #endif /* SHIELD_MAPLOAD_GUARDS_H */

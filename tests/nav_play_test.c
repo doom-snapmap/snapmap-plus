@@ -1,5 +1,6 @@
 /* Execute the contents gate in a synthetic native frame, never game bytes. */
 #include "../src/backend/nav_play.c"
+#include "image_sites.h"
 
 static int enabled=1;
 void backend_log(const char *message) {(void)message;}
@@ -66,7 +67,7 @@ static int test_hook_publication(void)
     return publication_failures;
 }
 
-int main(void)
+static int synthetic_main(void)
 {
     unsigned char body[]={
         0x53,0x48,0x83,0xec,0x20,0x48,0x8b,0xd9,
@@ -105,3 +106,43 @@ int main(void)
     failed+=test_snapshot_reads_the_converted_map();
     printf("nav_play_test: %d failures\n",failed);return failed?1:0;
 }
+
+/* The bind checks of nav_play.c (nav_play_gate_hold and nav_play_call_target, which the installs use) on each build
+ * 13954591 executable named on the command line. */
+static void check_image(const char *path)
+{
+    const sh_build_identity *identity;
+    uint8_t *base = image_open(path, &identity);
+    sig_result *results;
+    size_t n, cap = sig_db_count();
+    uintptr_t lo, hi;
+    if (!base) return;
+    lo = (uintptr_t)base;
+    hi = lo + ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage;
+    results = (sig_result *)calloc(cap, sizeof *results);
+    if (!results) { g_image_fail = 1; free(base); return; }
+    n = sig_resolve_all(base, results, cap);
+    const uint8_t *gate = image_site(base, results, n, "BlockingVolumeObstacleGate", identity->vulkan);
+    static const char *calls[] = { "BuildAASFindCall", "BuildAASLoadCall", "PlacementModelNameCall" };
+    unsigned k;
+    if (gate) {
+        int ok = nav_play_gate_hold(gate);
+        printf("  BlockingVolumeObstacleGate bytes: %s\n", ok ? "hold" : "FAIL");
+        IMG_CHECK(ok);
+    }
+    for (k = 0; k < 3; k++) {
+        const uint8_t *site = image_site(base, results, n, calls[k], identity->vulkan);
+        uintptr_t target = 0;
+        if (site) {
+            int ok = nav_play_call_target((uintptr_t)site, &target);
+            printf("  %s E8 -> %p: %s\n", calls[k], (void *)(target - lo), ok ? "holds" : "FAIL");
+            IMG_CHECK(ok);
+            IMG_CHECK(target > lo && target < hi);
+        }
+    }
+    free(results);
+    (void)sh_host_test_bind_image(NULL, NULL);
+    free(base);
+}
+
+IMAGE_TEST_MAIN("nav_play_test", check_image, synthetic_main)
