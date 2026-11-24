@@ -845,7 +845,8 @@ static int mc_cause_rank(int cause)
     case SH_CACHE_ABSENT_REMOVED: return 6;
     case SH_CACHE_ABSENT_BROKEN: return 7;
     case SH_CACHE_ABSENT_LOCAL: return 8;
-    default: return 9;
+    case SH_CACHE_ABSENT_LACKED: return 9;
+    default: return 10;
     }
 }
 
@@ -928,6 +929,9 @@ static char *mc_notice_sentence(const char *subject, int cause, int plural)
         break;
     case SH_CACHE_ABSENT_BROKEN:
         out = sh_textf("This map is playing without %s: your folder of it cannot be used. The Mods tab says why.", subject);
+        break;
+    case SH_CACHE_ABSENT_LACKED:
+        out = sh_textf("This map is playing without %s, which your folder of the mod no longer has.", subject);
         break;
     default:
         out = sh_textf("This map is playing without %s.", subject);
@@ -1753,7 +1757,8 @@ record:
                     if (read && !snapshot.pinfo[i].known) continue;
                     r->absent[r->nabsent].object = sh_cache_object_name(snapshot.placed[i]);
                     r->absent[r->nabsent].mod = sh_text(mc_mod_label(snapshot.name, snapshot.salt));
-                    r->absent[r->nabsent].cause = snapshot.broken ? SH_CACHE_ABSENT_BROKEN : SH_CACHE_ABSENT_LOCAL;
+                    r->absent[r->nabsent].cause = snapshot.broken == SH_MODMANIFEST_LOCAL_LACKS ? SH_CACHE_ABSENT_LACKED
+                                                  : snapshot.broken ? SH_CACHE_ABSENT_BROKEN : SH_CACHE_ABSENT_LOCAL;
                     r->nabsent++;
                 }
                 r->notice = r->nabsent > 0;

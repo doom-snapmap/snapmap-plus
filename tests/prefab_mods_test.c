@@ -851,6 +851,63 @@ static void absent_local_row_stands_in(void)
     sh_modmanifest_reset();
 }
 
+/* Manager, 2026-11-24, end to end: the author's own map places an object their folder no longer has (removed from the
+ * mod). The map is never refused: the folder serves what it has, the object it lacks stands in beside it (the stand-in
+ * composition of the salt, declared after the folder's build), and the load's one sentence says so. */
+static void lacking_local_row_stands_in(void)
+{
+    static const char MAP_LACKS[] =
+        "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/testdoor/door\",\"name\":\"\"},"
+        "\"uniqueId\":0},{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/testdoor/gone\",\"name\":\"\"},"
+        "\"uniqueId\":1}],"
+        "\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"testdoor\",\"name\":\"test.door\",\"size\":10,"
+        "\"local\":true,\"names\":[\"mods/testdoor/door\",\"mods/testdoor/gone\"]}]}}";
+    static const char *const placed[] = { "mods/testdoor/door", "mods/testdoor/gone" };
+    sh_modmanifest_list cur;
+    char (*listing)[SH_MODMANIFEST_HASH_CAP] = NULL;
+    char none[SH_MODMANIFEST_HASH_CAP], *t, *cause = NULL;
+    const char *hashes[4];
+    sh_modserve_hit hit;
+    int n, i, folder = 0, standins = 0;
+    printf("-- a map whose own folder no longer has a placed object loads: the folder serves, the object stands in\n");
+    (void)sh_cache_take_notice();
+    sh_modmanifest_set_content(sh_cache_on_load);
+    sh_cache_set_rescan(sh_modserve_index_rescan);
+    CHECK(sh_modserve_root_lacks("testdoor", "mods/testdoor/gone") == 1 && !sh_modserve_root_lacks("testdoor", "mods/testdoor/door"));
+    (void)sh_modmanifest_prepare_load(MAP_LACKS, sizeof MAP_LACKS - 1, NULL);
+    memset(&cur, 0, sizeof cur);
+    CHECK(sh_modmanifest_current(&cur) == 1 && cur.count == 1 && !cur.rows[0].pinned);
+    CHECK(cur.count && sh_modserve_row_served_for(&cur.rows[0], NULL, &cause) == SH_MODSERVE_ROW_SERVED);
+    free(cause);
+    /* the listing declares the folder's build, then the stand-ins of what it lacks */
+    CHECK(sh_modmanifest_composition_hash("testdoor", NULL, 0, none));
+    n = sh_modmanifest_listing(&cur, placed, 2, &listing);
+    for (i = 0; listing && i < n; i++) {
+        if (!strcmp(listing[i], none)) standins = i + 1;
+        else if (i == 0) folder = 1;
+    }
+    CHECK(n >= 2 && folder && standins == 2);
+    /* served so: the door from the folder, the object it lacks from the stand-ins */
+    for (i = 0; listing && i < n && i < 4; i++) hashes[i] = listing[i];
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_scope_set(hashes, n < 4 ? n : 4, 1) >= 0);
+    CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/testdoor/gone.decl", &hit) && hit.bundle_hash &&
+          !strcmp(hit.bundle_hash, none));
+    CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/testdoor/door.decl", &hit) && hit.bundle_hash &&
+          strcmp(hit.bundle_hash, none));
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(0);
+    free(listing);
+    sh_modmanifest_list_free(&cur);
+    t = sh_cache_take_notice();
+    CHECK(t && !strcmp(t, "This map is playing without the Gone from test.door, which your folder of the mod no longer has."));
+    if (t) printf("  notice: %s\n", t);
+    free(t);
+    sh_modmanifest_set_content(NULL);
+    sh_cache_set_rescan(NULL);
+    sh_modmanifest_reset();
+}
+
 /* The publish's pin step as modpublish.c binds it (sh_modpublish_pin_save): every local row of the save pinned from
  * its folder's current build through the real unit walk. */
 static int g_publish_pins;
@@ -2072,6 +2129,7 @@ int main(int argc, char **argv)
     zip(tmp, libA, storeA, &door);
     one_demon_of_a_pack(tmp, storeA);
     absent_local_row_stands_in();
+    lacking_local_row_stands_in();
     published_map_follows_rebuild(tmp, storeA);
     rebuilt_folder_unit_is_here(tmp, storeA);
     add_to_my_mods_end_to_end(tmp, storeA);

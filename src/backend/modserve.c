@@ -239,6 +239,9 @@ static void ms_script_node_row(ms_index *x, ms_bundle *b);
 static void ms_req_index(ms_index *x, const ms_index *old);
 static int ms_req_conflicts(ms_index *x);
 static int ms_req_same(const char *a, const char *b);
+static int ms_standin_supplement(const ms_index *x, int b);
+static int ms_salt_in(const ms_index *x, const char *salt, const char *hash, const char *place);
+static int ms_bundle_carries(const ms_index *x, int b, const char *lower);
 static SRWLOCK g_build_lock = SRWLOCK_INIT;
 static char *g_last_root;   /* the mods folder of the last build (malloc'd) */
 static volatile LONG g_opens_served, g_open_failures, g_probe_claims, g_cache_hits;
@@ -3729,7 +3732,10 @@ static int ms_scope_compute(ms_index *x, int mark)
         for (k = 0; k < g_scope_n; ++k) {
             int b = ms_bundle_by_hash(x, g_scope_hashes[k], 1), dup = 0;
             if (b < 0 || rank[b] >= 0) continue;
-            for (i = 0; i < x->nbundles && !dup; ++i) dup = rank[i] >= 0 && !strcmp(x->bundles[i].id, x->bundles[b].id);
+            for (i = 0; i < x->nbundles && !dup; ++i)
+                dup = rank[i] >= 0 && !strcmp(x->bundles[i].id, x->bundles[b].id) &&
+                      /* the stand-ins of the names a local folder no longer has join that folder's build */
+                      !(ms_standin_supplement(x, b) && !x->bundles[i].place);
             if (!dup) rank[b] = next++;
         }
         for (i = 0; i < x->nbundles; ++i) {
@@ -8161,6 +8167,22 @@ unsigned sh_modserve_test_gates_owned(void)
 
 /* ------------------------------------------------------------------ queries */
 
+int sh_modserve_root_lacks(const char *salt, const char *name)
+{
+    const ms_index *x = g_index;
+    char lower_salt[SH_MODMANIFEST_SALT_CAP], *lower;
+    int at, lacks;
+    if (!x || !salt || !salt[0] || !name || !name[0]) return 0;
+    strncpy_s(lower_salt, sizeof lower_salt, salt, _TRUNCATE);
+    ms_lower(lower_salt);
+    if ((at = ms_salt_in(x, lower_salt, NULL, "")) < 0) return 0;   /* no folder here: the whole row stands in */
+    if (!(lower = _strdup(name))) return 0;
+    ms_lower(lower);
+    lacks = !ms_bundle_carries(x, at, lower);
+    free(lower);
+    return lacks;
+}
+
 int sh_modserve_salt_installed(const char *salt)
 {
     const ms_index *x = g_index;
@@ -8252,6 +8274,28 @@ static int ms_bundle_carries(const ms_index *x, int b, const char *lower)
     return hit;
 }
 
+/* The composition hash of no unit for `salt` (SPEC-distribution 2.13, modmanifest.c sh_modmanifest_composition_hash
+ * with a count of 0): SHA-256 of "snapmap-plus/composition/1\n1\n", the namespace and "\n". 0 when it cannot be made. */
+static int ms_none_hash(const char *salt, char out[SH_MODMANIFEST_HASH_CAP])
+{
+    char text[64];
+    int n = _snprintf_s(text, sizeof text, _TRUNCATE, "snapmap-plus/composition/1\n1\n%s\n", salt);
+    if (n <= 0) return 0;
+    sh_mb_sha256_hex(text, (size_t)n, out);
+    return 1;
+}
+
+/* 1 when bundle `b` is a stand-in composition (a row of no units, named by the composition hash of none) that
+ * supplements the root folder of its salt: the stand-ins of the names a local row lists and its folder no longer has
+ * (manager, 2026-11-24: no guard stops a map from loading). */
+static int ms_standin_supplement(const ms_index *x, int b)
+{
+    char none[SH_MODMANIFEST_HASH_CAP];
+    const ms_bundle *bd = &x->bundles[b];
+    return bd->place && !strcmp(bd->place, SH_MODSERVE_CONTENT) && bd->id && bd->hash && ms_none_hash(bd->id, none) &&
+           !_stricmp(bd->hash, none);
+}
+
 /* The admitted bundle of `salt` at `hash` (NULL: any hash) in the area `place` ("" the root, SH_MODSERVE_CONTENT the
  * compositions), or -1. */
 static int ms_salt_in(const ms_index *x, const char *salt, const char *hash, const char *place)
@@ -8288,14 +8332,8 @@ static int ms_row_build(const ms_index *x, const sh_modmanifest_row *row)
      * computer, the mod folder deleted) plays with its objects stood in: the content cache's stand-in composition of
      * its salt, which carries no unit and is named by the composition hash of none (modcache.h). */
     {
-        /* The composition hash of no unit (SPEC-distribution 2.13, modmanifest.c sh_modmanifest_composition_hash with
-         * a count of 0): SHA-256 of "snapmap-plus/composition/1\n1\n", the namespace and "\n". */
-        char none[SH_MODMANIFEST_HASH_CAP], text[64];
-        int n = _snprintf_s(text, sizeof text, _TRUNCATE, "snapmap-plus/composition/1\n1\n%s\n", salt);
-        if (n > 0) {
-            sh_mb_sha256_hex(text, (size_t)n, none);
-            return ms_salt_in(x, salt, none, SH_MODSERVE_CONTENT);
-        }
+        char none[SH_MODMANIFEST_HASH_CAP];
+        if (ms_none_hash(salt, none)) return ms_salt_in(x, salt, none, SH_MODSERVE_CONTENT);
     }
     return -1;
 }

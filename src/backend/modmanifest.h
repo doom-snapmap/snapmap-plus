@@ -69,9 +69,12 @@ typedef struct sh_modmanifest_row {
      * Kept as written (malloc'd), NULL for none. */
     char *modules;
     /* The content step only (sh_modmanifest_content_for): a row of no units standing in for a local row whose folder
-     * serves nothing, 1 when a folder of the salt is installed but cannot be used (else it is not on this computer). */
+     * serves nothing, 1 when a folder of the salt is installed but cannot be used (else it is not on this computer),
+     * or SH_MODMANIFEST_LOCAL_LACKS for the names a folder that is here no longer has (they stand in beside it). */
     int local_broken;
 } sh_modmanifest_row;
+
+#define SH_MODMANIFEST_LOCAL_LACKS 2
 
 typedef struct sh_modmanifest_list {
     sh_modmanifest_row *rows;

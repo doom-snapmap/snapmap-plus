@@ -52,7 +52,8 @@ enum {
     SH_CACHE_ABSENT_REMOVED,         /* S3: moderation removed it */
     SH_CACHE_ABSENT_DISK,            /* N15: not enough free disk space */
     SH_CACHE_ABSENT_LOCAL,           /* D6a: a local row whose mod folder is not on this computer (manager Q8) */
-    SH_CACHE_ABSENT_BROKEN           /* D6a: a local row whose mod folder is here but cannot be used (its build failed) */
+    SH_CACHE_ABSENT_BROKEN,          /* D6a: a local row whose mod folder is here but cannot be used (its build failed) */
+    SH_CACHE_ABSENT_LACKED           /* D6a: a name a local row lists that its mod folder, here, no longer has */
 };
 
 /* The cache's folder: <mods root>\.content (modstore.h sh_ms_root), or the folder tests set. malloc'd. */

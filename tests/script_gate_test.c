@@ -98,6 +98,7 @@ int sh_modserve_script_files(const char *salt, sh_modserve_script_fn fn, void *c
 }
 /* A local row's folder that is here but cannot be used (modserve.h): none here. */
 int sh_modserve_salt_installed(const char *salt) { (void)salt; return 0; }
+int sh_modserve_root_lacks(const char *salt, const char *name) { (void)salt; (void)name; return 0; }
 int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
     (void)row;
@@ -137,7 +138,7 @@ static void fake_install(void)
     g_main_tid = &g_main_id;
     g_load_screen = (const uint8_t *)&g_no_thread;
     g_editor = g_editor_bytes;
-    sh_script_source_install();
+    sh_script_source_install(NULL);
     g_resolved = 1;
 }
 

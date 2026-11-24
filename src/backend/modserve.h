@@ -898,6 +898,10 @@ int sh_modserve_bundle_state(const char *bundle_hash, char **cause);
  * of that salt whose folder serves nothing is then the player's folder that cannot be used, not one that is not on
  * this computer (manager Q8: both stand in, with different sentences). Lock-free; any thread. */
 int sh_modserve_salt_installed(const char *salt);
+/* 1 when the root folder of `salt` is here and does not carry `name` (a placed name a local row lists): its folder no
+ * longer has it, so it stands in beside the folder (the content cache's stand-in composition of the salt, which a map
+ * declares after the folder's build and which then serves only what the folder lacks). 0 otherwise. */
+int sh_modserve_root_lacks(const char *salt, const char *name);
 
 /* The asset rule. A map, rawmap or prefab needs the builds its manifest rows
  * name. A row is SERVED when the build sh_modserve_row_build names for it is

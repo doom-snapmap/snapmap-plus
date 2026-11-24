@@ -1863,21 +1863,35 @@ static int mm_local_absent(const sh_modmanifest_row *r)
     return !here;
 }
 
+/* 1 when `r` is a local row whose folder is here and no longer has a name the row lists (manager, 2026-11-24: the
+ * map loads with those objects stood in beside the folder, never refused). */
+static int mm_local_lacks(const sh_modmanifest_row *r)
+{
+    size_t k;
+    if (r->pinned || !strcmp(r->salt, SH_MODMANIFEST_PRODUCT)) return 0;
+    for (k = 0; k < r->name_count; k++)
+        if (r->names && r->names[k] && sh_modserve_root_lacks(r->salt, r->names[k])) return 1;
+    return 0;
+}
+
 void sh_modmanifest_content_for(const char *json, size_t length, const sh_modmanifest_list *rows)
 {
     sh_modmanifest_content_fn content = g_content;
     sh_modmanifest_list rows_here;
-    size_t i, placed_count = 0;
-    int failed = 0;
+    size_t i, k, placed_count = 0;
+    int failed = 0, lacks = 0;
     char **placed = NULL;
     if (!content || !rows) return;
-    /* The pinned rows, and each local row whose folder is not here as a row of no units under the composition hash
-     * of none (manager Q8, D6a): the cache composes its stand-ins (D60) and says the one sentence. */
+    /* The pinned rows, and each local row whose folder is not here, or is here and no longer has a name the row
+     * lists, as a row of no units under the composition hash of none (manager Q8, D6a): the cache composes its
+     * stand-ins (D60) and says the one sentence. */
     memset(&rows_here, 0, sizeof rows_here);
     for (i = 0; i < rows->count; i++) {
         const sh_modmanifest_row *r = &rows->rows[i];
+        int lacking = 0;
         if (r->pinned) { (void)sh_modmanifest_list_add(&rows_here, r); continue; }
-        if (!mm_local_absent(r)) continue;
+        if (!mm_local_absent(r) && !(lacking = mm_local_lacks(r))) continue;
+        lacks |= lacking;
         {
             sh_modmanifest_row none;
             memset(&none, 0, sizeof none);
@@ -1886,12 +1900,29 @@ void sh_modmanifest_content_for(const char *json, size_t length, const sh_modman
             none.name = r->name;   /* copied by the add */
             none.size = r->size;
             none.pinned = 1;
-            none.local_broken = sh_modserve_salt_installed(r->salt);
+            none.local_broken = lacking ? SH_MODMANIFEST_LOCAL_LACKS : sh_modserve_salt_installed(r->salt);
             (void)sh_modmanifest_list_add(&rows_here, &none);
         }
     }
     if (!rows_here.count) { sh_modmanifest_list_free(&rows_here); return; }
     placed_count = sh_modmanifest_placed_names(json, length, &placed, &failed);
+    if (lacks && !failed) {
+        /* Beside a folder that is here, only what it no longer has stands in: a name it carries is the folder's. */
+        size_t kept = 0;
+        for (k = 0; k < placed_count; k++) {
+            int theirs = 0;
+            for (i = 0; i < rows_here.count && !theirs; i++) {
+                const sh_modmanifest_row *r = &rows_here.rows[i];
+                size_t sl = strlen(r->salt);
+                theirs = r->local_broken == SH_MODMANIFEST_LOCAL_LACKS && !_strnicmp(placed[k], "mods/", 5) &&
+                         !_strnicmp(placed[k] + 5, r->salt, sl) && placed[k][5 + sl] == '/' &&
+                         !sh_modserve_root_lacks(r->salt, placed[k]);
+            }
+            if (theirs) { free(placed[k]); continue; }
+            placed[kept++] = placed[k];
+        }
+        placed_count = kept;
+    }
     t_content_text = json;
     t_content_length = length;
     content(&rows_here, placed, failed ? 0 : placed_count);
@@ -2476,6 +2507,8 @@ int sh_modmanifest_listing(const sh_modmanifest_list *rows, const char *const *n
         if (!_stricmp(r->salt, SH_MODMANIFEST_PRODUCT)) continue;
         if (sh_modmanifest_substituted(r->build, sub, sizeof sub) || mm_row_served_by(r, sub)) mm_listing_push(&l, sub);
         else mm_listing_push(&l, r->build);
+        /* A local row whose folder no longer has some of its names: their stand-ins serve beside the folder's build. */
+        if (mm_local_lacks(r) && sh_modmanifest_composition_hash(r->salt, NULL, 0, sub)) mm_listing_push(&l, sub);
         mm_listing_id(&l, r->salt);
     }
     if (names && name_count && sh_modserve_active())
