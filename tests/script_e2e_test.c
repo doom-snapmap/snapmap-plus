@@ -1,26 +1,5 @@
-/* script_e2e_test.c -- mod scripts end to end without the game: real mod
- * folders on disk (tests\fixtures\scripts), the folder file source, the
- * runtime, the hooks' mod table, handle table and queues, and the console.
- *
- * The engine's part is played as the hooks play it: the Play gate asks the
- * runtime to open the map (sh_script_map_open through the provider), the
- * spawn subscriber records each spawned entity with its entityDef chain
- * (sh_script_hooks_record), the frame hook calls sh_script_tick, the
- * resolver stops finding an entity when it is removed, and map end closes.
- *
- * Covers: a fixture mod whose script binds its own entityDef gets spawn and
- * think for a spawned entity, on every frame, with game time; a second
- * fixture mod whose think never returns is stopped in the frame it starts,
- * with the plain stop line naming its file and line, while the first keeps
- * running; a removed entity stops thinking; map end; the console's status,
- * log and reload outside Play; the three example mods' scripts compile; the
- * door example run through its Script nodes (the third switch fires the
- * door's node once, with the player who used it); and the spin-heal example
- * run through the entity calls against a faked engine table (it spins, heals
- * a hurt player who comes close and is gone); and the brute example run
- * through the AI and combat calls against the same kind of faked engine (it
- * takes the player as its enemy, parks, throws when it can see the player,
- * fires its rock on the animation notify, and goes for melee up close).
+/* script_e2e_test.c -- mod scripts end to end without the game: real mod folders on disk (tests\fixtures\scripts),
+ * the runtime, the hooks' tables and queues, and the console, with the engine's part played as the hooks play it.
  *
  *   script_e2e_test.exe <tests\fixtures\scripts> */
 #include "heap_out.h"
@@ -227,10 +206,8 @@ static void test_examples_compile(void)
     CHECK(sh_script_check_files("scrunaw1", "Script Runaway", sh_script_source_files(), cat_line, NULL) == 1);
 }
 
-/* A script file that is not the bytes its build recorded (edited since the
- * last Refresh; here a file another handle holds, which reads the same way:
- * kept as listed, without its text): the reload says which file and what to
- * do, in Play and outside it, and the status says it instead of "ready". */
+/* A script file that is not the bytes its build recorded (here a file another handle holds): the reload says which
+ * file and what to do, in Play and outside it, and the status says it instead of "ready". */
 static void test_stale_reload(void)
 {
     char tmp[MAX_PATH], dir[MAX_PATH], file[MAX_PATH], *p;

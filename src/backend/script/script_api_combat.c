@@ -1,7 +1,5 @@
-/* script_api_combat.c -- see script_api_combat.h. The pure part (the calls,
- * their argument checks and ownership, the hooks' records) builds alone with
- * SH_SCRIPT_PURE for tests/script_api_combat_test.c; the engine part fills the
- * combat engine on the backend. */
+/* script_api_combat.c -- see script_api_combat.h. The pure part (the calls, their argument checks and ownership,
+ * the hooks' records) builds alone with SH_SCRIPT_PURE for the tests; the engine part fills the combat engine. */
 #include <windows.h>
 #include <math.h>
 #include <stdio.h>
@@ -18,8 +16,6 @@
 #define SIGHT_RAISE      40.0f     /* can_see_from aims this far above the other entity's origin */
 #define REG_EFFECTS      "snapmap-plus.effects"
 
-/* ------------------------------------------------------------ the engine */
-
 static sh_script_combat_engine g_ce;
 static int g_have_ce;
 
@@ -30,8 +26,6 @@ void sh_script_combat_set_engine(const sh_script_combat_engine *engine)
 }
 
 #define CE(fn) (g_have_ce && g_ce.fn)
-
-/* -------------------------------------------------------------- hard stops */
 
 #define FX_HARD_MAX 64
 static SRWLOCK g_fx_hard_lock = SRWLOCK_INIT;
@@ -109,13 +103,9 @@ void sh_fx_hard_reset(void)
     ReleaseSRWLockExclusive(&g_fx_hard_lock);
 }
 
-/* -------------------------------------------------- records from the hooks */
-
-/* Three maps keyed by a 32-bit value: launches by projectile spawn id, last
- * hits and deaths by victim handle. Each grows (open addressing, at most half
- * full) and each record is dropped when the handle table releases the entity
- * it concerns (rec_gone), so a record lives exactly as long as its entity and
- * none has a count of its own. */
+/* Three maps keyed by a 32-bit value: launches by projectile spawn id, last hits and deaths by victim handle.
+ * Each grows (open addressing, at most half full) and drops a record when the handle table releases its entity
+ * (rec_gone), so none has a count of its own. */
 typedef struct rec_map {
     uint32_t *keys;          /* key + 1; 0 = empty */
     uint8_t  *vals;
@@ -398,8 +388,6 @@ int sh_script_combat_first_death(sh_script_handle victim)
     return first;
 }
 
-/* ------------------------------------------------------------ helpers */
-
 static int nil1(lua_State *L)
 {
     lua_pushnil(L);
@@ -505,16 +493,11 @@ static void dir_axis(const float f[3], float ax[9])
     ax[8] = f[0] * l[1] - f[1] * l[0];
 }
 
-/* Damage from a script. When the script names the attacker and the victim is
- * an actor (a player, a bot or a demon), the victim's own Damage takes it
- * with the attacker as inflictor and attacker: the game's damage route, so
- * its team rule (idAI2 Damage_Calculate, VK 0x1403FB1D0: in a SnapMap mode
- * an attacker of the victim's own team, other than TEAM_NONE, does no
- * damage), the percepts that make the victim hate whoever hurt it, and the
- * kill credit all see the attacker. Anything else gets its own `damage`
- * event: decl, from direction, no radius, full multiplier, the attacker as
- * activator (an event that carries no inflictor and does not credit the
- * activator). 1 when the engine ran it. */
+/* Damage from a script. When the script names the attacker and the victim is an actor (a player, a bot or a
+ * demon), the victim's own Damage takes it with the attacker as inflictor and attacker, so the game's team rule
+ * (idAI2 Damage_Calculate, VK 0x1403FB1D0), its percepts and its kill credit see the attacker. Anything else gets
+ * its own `damage` event (decl, from direction, no radius, full multiplier, the attacker as activator).
+ * 1 when the engine ran it. */
 static int damage_event(void *victim, void *decl, const float dir[3], void *attacker, int named_attacker)
 {
     sh_script_earg a[6];
@@ -531,11 +514,10 @@ static int damage_event(void *victim, void *decl, const float dir[3], void *atta
     return sh_script_api_event(victim, "damage", a, 6, NULL);
 }
 
-/* What damage() answers. A demon or a player whose health reads is measured before and after: true when its health
- * fell, so a hit the game's own rules stop (the team rule, an invulnerable demon, god mode, a corpse) answers false.
- * The game applies the hit inside the call: the script tick runs on the main thread after the AI think phase, while
- * idAI2's Damage defers a hit only inside that phase (VK 0x145B147A8, set and cleared around it in
- * idGameLocal::RunFrame). Anything without health answers whether the engine ran the damage. */
+/* What damage() answers: for a demon or a player whose health reads, true when its health fell (a hit the game's
+ * rules stop answers false). The game applies the hit inside the call, since idAI2's Damage defers only inside the
+ * AI think phase (VK 0x145B147A8) and the script tick runs after it. Anything without health answers whether the
+ * engine ran the damage. */
 static int damage_landed(void *victim, void *decl, const float dir[3], void *attacker, int named_attacker)
 {
     float before = 0, after = 0, max = 0;
@@ -544,8 +526,6 @@ static int damage_landed(void *victim, void *decl, const float dir[3], void *att
     if (!measured) return 1;
     return sh_script_api_health(victim, &after, &max) && after < before;
 }
-
-/* ------------------------------------------------------------ damage */
 
 /* damage(e, damage, [attacker], [from]) and e:damage(damage, [attacker], [from]) */
 static int do_damage(lua_State *L, int target, const char *call)
@@ -616,8 +596,6 @@ static int l_radius_damage(lua_State *L)
     if (!have || !decl || !attacker || !CE(radius_damage)) return bool1(L, 0);
     return bool1(L, g_ce.radius_damage(pos, decl, attacker, attacker));
 }
-
-/* ------------------------------------------------------------ effects */
 
 /* Call the API's own spawn (its ownership and the engine's room) with name, pos, yaw.
  * Leaves the entity (or nil) on the stack. */
@@ -692,11 +670,10 @@ static int fx_by_entity_call(void *ent)
     return kind != SH_SCRIPT_KIND_AI && kind != SH_SCRIPT_KIND_PLAYER;
 }
 
-/* One of the mod's Graphics SDK effects (an fx decl written `type effect`, modeffect.h): its emitter spawned at a
- * point, or at an entity and bound to it (to one of its joints when named); `options` { colour = {r, g, b} } tints
- * this play (the effect entity's setColor: the FX manager's systemColor times each light's and model's colour, VK
- * FUN_1416f0240). When the game is near its entity limit the effect is skipped, with one log line a map, never an
- * error. Leaves the effect entity (or nil) on the stack. */
+/* One of the mod's Graphics SDK effects (an fx decl written `type effect`): its emitter spawned at a point, or at
+ * an entity and bound to it (to one of its joints when named); `options` { colour = {r, g, b} } tints this play
+ * through the effect entity's setColor (VK FUN_1416f0240). Skipped with one log line a map near the entity limit.
+ * Leaves the effect entity (or nil) on the stack. */
 static int g_effect_skipped_logged;
 
 static int play_sdk_effect(lua_State *L, const char *emitter)
@@ -909,8 +886,6 @@ static int l_sound(lua_State *L)
     return bool1(L, sh_script_api_event(ent, "startSoundShader", a, 2, NULL));
 }
 
-/* ------------------------------------------------------------ joints, pain */
-
 /* The joint `name` of `ent` in world space. 1 when the entity has it. */
 static int joint_of(void *ent, const char *name, float pos[3], float fwd[3])
 {
@@ -983,13 +958,8 @@ static int l_can_see_from(lua_State *L)
     return bool1(L, !(t.fraction < 1.0f) || t.hit_spawn_id == e->spawn_id(other));
 }
 
-/* ------------------------------------------------------------ projectiles */
-
-/* The projectile at arg, one this mod's entities launched. NULL when it no
- * longer exists (the call answers nil, as every call on a removed entity
- * does); its launch record lives exactly as long as it does, so a projectile
- * that still exists always has one. A refusal only for an entity that exists
- * and is not such a projectile. */
+/* The projectile at arg that one of this mod's entities launched. NULL when it no longer exists (the call answers
+ * nil); a refusal only for an existing entity that is not such a projectile. */
 static void *own_projectile(lua_State *L, int arg, const char *call)
 {
     sh_script_handle h = 0;
@@ -1037,11 +1007,9 @@ static int l_steer(lua_State *L)
     return bool1(L, steer_to(p, point, speed));
 }
 
-/* p:gravity(units per second squared): the projectile falls at that rate from
- * now on, whatever the map's gravity, so a script that solved its arc under
- * its source game's gravity throws it there. The engine's setGravity event
- * (one vector argument; the entity's physics takes it, 13954591 event 245)
- * with the vector straight down; 0 lets it fly unpulled. */
+/* p:gravity(units per second squared): the projectile falls at that rate whatever the map's gravity, so a script
+ * that solved its arc under its source game's gravity throws it there. The setGravity event (13954591 event 245)
+ * takes a vector straight down; 0 lets it fly unpulled. */
 static int l_p_gravity(lua_State *L)
 {
     double g = sh_script_api_check_number(L, 2, "gravity", "the gravity in units per second squared");
@@ -1087,12 +1055,9 @@ typedef struct launch_aim {
     const float *velocity;  /* launch: the projectile's exact velocity, units per second */
 } launch_aim;
 
-/* The launch ai:fire and ai:launch share. The engine's launch event fires
- * from a joint and takes any other name for the demon's origin
- * (VK 0x14076E780), so for a tag the launch hook hands idProjectile::Launch
- * the tag's place and the axis the projectile flies along: the projectile,
- * its launch effects and its trail start on the tag. Pushes the projectile,
- * or nil. */
+/* The launch ai:fire and ai:launch share. The engine's launch event fires from a joint and takes any other name
+ * for the demon's origin (VK 0x14076E780), so for a tag the launch hook hands idProjectile::Launch the tag's place
+ * and axis and the projectile and its trail start on the tag. Pushes the projectile, or nil. */
 static int launch_from(lua_State *L, const char *call, void *self, sh_script_handle self_h, void *decl,
                        const char *joint, const launch_aim *how)
 {
@@ -1183,8 +1148,6 @@ static int l_launch(lua_State *L)
     return launch_from(L, "launch", self, self_h, decl, joint, &how);
 }
 
-/* ---------------------------------------------------- incoming projectiles */
-
 typedef struct incoming_hit { void *p; double seconds; } incoming_hit;
 
 static int incoming_cmp(const void *a, const void *b)
@@ -1220,13 +1183,9 @@ int sh_script_combat_ray_box(const float o[3], const float d[3], const float c[3
     return 1;
 }
 
-/* e:incoming_projectiles(size) -> { {projectile = p, seconds = t}, ... }, the
- * soonest first: every projectile in the world, not launched by `e` itself,
- * whose straight line (its velocity less e's own) enters a box of `size`
- * (x forward, y left, z up: whole sizes in units) standing on e's origin and
- * turned with it. `seconds` is the projectile's distance from the box's
- * center over that relative speed. A projectile already inside the box, or
- * past it, is not incoming. */
+/* e:incoming_projectiles(size) -> { {projectile = p, seconds = t}, ... }, soonest first: projectiles not launched by
+ * `e` whose line (velocity less e's) enters a box of `size` on e's origin, turned with it; `seconds` is the distance
+ * to the box's center over the relative speed. One already inside or past the box is not incoming. */
 static int l_incoming(lua_State *L)
 {
     const sh_script_engine *e = eng();
@@ -1291,8 +1250,6 @@ static int l_incoming(lua_State *L)
     return 1;
 }
 
-/* ------------------------------------------------------------ registration */
-
 void sh_script_combat_register(void)
 {
     static int done;
@@ -1323,7 +1280,7 @@ void sh_script_combat_register(void)
     for (i = 0; i < (int)(sizeof calls / sizeof calls[0]); i++) sh_script_api_add(calls[i].kind, calls[i].name, calls[i].fn);
 }
 
-#ifndef SH_SCRIPT_PURE /* the engine side ------------------------------------ */
+#ifndef SH_SCRIPT_PURE /* the engine side */
 
 #include "../backend_log.h"
 #include "../feature_health.h"
@@ -1444,13 +1401,11 @@ void *sh_script_combat_decl(const char *type, const char *name)
     return g_decl_find ? c_decl(type, name) : NULL;
 }
 
-/* The victim's own Damage (its vtable slot SH_COMBAT_DAMAGE_VSLOT, the same virtual in every actor class) when it
- * is the player's or idAI2's as this executable has them: call it. Both take (actor, inflictor, attacker, parms,
- * scale, direction, hit); idAI2's passes them on to its body with a hit count of 1. The body copies hits only from a
- * hit that is not NULL (VK 0x1403F8C40), and Damage_Calculate (VK 0x1403FB1D0) gives a record with no hit the
- * location the game gives any hit without one: the demon's default damage joint, or its bounds' centre, set back
- * along the direction. So a NULL hit is the engine's own no-location case (tests/script_combat_sigs_test.c). 1 when
- * the call returned; whether it landed is the health the caller measures (damage_landed). */
+/* The victim's own Damage (vtable slot SH_COMBAT_DAMAGE_VSLOT, the same in every actor class) when it is the
+ * player's or idAI2's as this executable has them. Both take (actor, inflictor, attacker, parms, scale, direction,
+ * hit); idAI2's body copies hits only from a non-NULL hit (VK 0x1403F8C40), and Damage_Calculate (VK 0x1403FB1D0)
+ * gives a NULL hit the engine's own no-location case. 1 when the call returned; whether it landed is the health
+ * the caller measures (damage_landed). */
 static int c_actor_damage(void *victim, void *decl, void *inflictor, void *attacker, const float dir[3])
 {
     const uint8_t *parms = (const uint8_t *)decl + SH_COMBAT_DECL_PARMS;
@@ -1557,10 +1512,8 @@ static int c_stop_fx(void *ent, int condition)
     return ok;
 }
 
-/* The FX manager's stop of one action. For an action of a decl named with
- * end_effects_at_once that the rule ends at once, the fading bit is set before the
- * game's own stop runs: its fade branch is then skipped and it ends and
- * clears the action in this frame, as it does for a second stop. */
+/* The FX manager's stop of one action. For an action of a decl named with end_effects_at_once that the rule ends
+ * at once, the fading bit is set first, so the game's own stop skips its fade branch and clears the action. */
 typedef void (*fx_action_stop_fn)(void *mgr, int index, int now, unsigned char immediate, unsigned char recycle);
 static fx_action_stop_fn g_fx_stop_target, g_fx_stop_orig;
 static int g_fx_stop_failed;
@@ -1587,11 +1540,9 @@ static void fx_action_stop_detour(void *mgr, int index, int now, unsigned char i
     g_fx_stop_orig(mgr, index, now, immediate, recycle);
 }
 
-/* The FX manager's request of one action, eight arguments (four in registers,
- * four on the stack), all forwarded unchanged. A request of a sound item of a
- * decl named with end_effects_at_once whose sound is playing is not passed on
- * (sh_fx_sound_held): the game would re-arm the action and start a second
- * sound over the first, which it never stops. */
+/* The FX manager's request of one action, eight arguments forwarded unchanged. A request of a sound item of a
+ * decl named with end_effects_at_once whose sound is playing is not passed on (sh_fx_sound_held): the game would
+ * start a second sound over the first and never stop it. */
 typedef void (*fx_action_request_fn)(void *mgr, intptr_t index, void *a3, void *a4, intptr_t a5, intptr_t a6,
                                      void *a7, intptr_t a8);
 static fx_action_request_fn g_fx_request_target, g_fx_request_orig;

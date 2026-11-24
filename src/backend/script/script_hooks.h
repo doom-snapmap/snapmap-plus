@@ -1,59 +1,20 @@
-/* script_hooks.h -- where mod scripts meet the engine: the tick, the map
- * lifecycle, spawned entities, and the queues every other hook writes to.
- *
- * Threads (build 13954591, both renderers, decompiled in shared Ghidra; the
- * evidence is snaphak-re logs/shared-ghidra/sc3-*):
- *   - The tick is the SuperScript per-frame wrapper (ScriptTick, script_sigs.c).
- *     Its only caller is idGameLocal::RunFrame (VK 0x1403AE730, GL 0x1403ADE50,
- *     idGameLocal vtable slot +0x08), after the entity think loop. RunFrame is
- *     reached from idCommonLocal::Frame (VK 0x14159D930, GL 0x14159E9A0)
- *     through the host's game-frame loop (VK 0x1415A1BF0, GL 0x1415A2C60, the
- *     "RunGameFrame" profile scope; one or more game frames per Frame) and
- *     through the two client frame loops (VK 0x1415A1490 and 0x1415A0FF0),
- *     which call the same slot. Frame is DOOM's main thread, so the tick runs
- *     on the main thread, on clients as well as on the host: the tick refuses
- *     to run scripts on a client (idGameLocal::IsClient).
- *   - idClass::CallSpawn runs on the main thread (companion_engine.h): map
- *     entities from SpawnEntitiesForLayers during the load, later spawns from
- *     game code inside RunFrame.
- *   - idCommonLocal::CancelMapChange (common vtable +0x28) runs on the main
- *     thread: from Frame when a session leaves its map, and from Frame's catch
- *     after a failed load (load_screen_stop.h).
- *   - The map gates are called directly by the serving layer on the main
- *     thread, just before it arms the companions detour: the map load
- *     (modserve_activate_bundles, every SnapMap map parse: the editor's load,
- *     a My Maps or published launch at the hub) and the Play build
- *     (sh_modserve_play_begin from the SnapBuild detour, inside the level
- *     load of every Play: the editor's Play, a My Maps play, a published map
- *     from the browser or the feed, a lobby's host), before that level's
- *     spawns.
- *   - Damage, death and animation notify hooks may run on AI prethink and
- *     animWeb job threads; they only enqueue (script_queue.h).
- *
- * Lifecycle. At the map-load gate the previous map's scripts end. At the
- * Play gate they end too and the runtime prepares the served mods that carry
- * scripts (sh_script_map_open; no script code runs there). Spawns of those
- * mods' entities are recorded in the handle table from then on. Each host
- * game frame of that Play the tick calls the runtime once (sh_script_tick),
- * never re-entrantly, never while a map load draws its loading screen, never
- * on a client. Before the runtime's first frame the tick walks the live
- * entities once and records every entity of a scripted mod the spawn chain
- * did not (sh_script_hooks_walk_live); the runtime then runs the mods' files
- * and map_start handlers, then the handle table's spawns and the queues. The
- * map ends at the next gate, when the editor is active again (a return from
- * the editor's Play: end handlers run), when a loading screen draws after the
- * scripts started (the session left the map: no end handlers), or at
- * CancelMapChange (end handlers run unless a load was in progress).
- *
- * In Play is read from the editor's active flag (idSnapEditorLocal +9, clear
- * during every SnapMap Play, set while editing): a published or My Maps play
- * leaves the editor's deactivate reason at 0, so the serving layer's
- * sh_modserve_engine_in_play (reason 3, the editor's own Play) is 0 there and
- * cannot gate scripts.
- *
- * The tick detour is committed only when a Play opens at least one mod, at
- * the gate on the main thread with the prologue verified, and is never
- * unhooked. */
+/* script_hooks.h -- where mod scripts meet the engine: the tick, the map lifecycle, spawned entities, and the
+ * queues every other hook writes to. */
+/* Threads (build 13954591): the tick is ScriptTick (script_sigs.c), called only from idGameLocal::RunFrame
+ * (VK 0x1403AE730, GL 0x1403ADE50) on the main thread, clients included, so it refuses to run on a client. RunFrame
+ * is reached from idCommonLocal::Frame (VK 0x14159D930, GL 0x14159E9A0) through the host game-frame loop (VK
+ * 0x1415A1BF0, GL 0x1415A2C60) and the client loops (VK 0x1415A1490, 0x1415A0FF0). Spawns, CancelMapChange and
+ * the map gates run on the main thread; damage, death and animation notify hooks may run on job threads and only
+ * enqueue (script_queue.h). */
+/* Lifecycle: the map-load and Play gates end the previous map's scripts, and the Play gate prepares the served
+ * mods that carry scripts (sh_script_map_open) and records their spawns. Each host game frame of that Play the
+ * tick calls sh_script_tick once, never re-entrantly, during a loading screen or on a client, after
+ * sh_script_hooks_walk_live records entities the spawn chain missed. The map ends at the next gate, an editor
+ * return (end handlers run), a loading screen after start (none run), or CancelMapChange (run unless a load
+ * was in progress). */
+/* In Play is read from the editor's active flag (idSnapEditorLocal +9, clear during every SnapMap Play), because
+ * a published or My Maps play leaves the deactivate reason at 0 and sh_modserve_engine_in_play cannot gate it.
+ * The tick detour is committed only when a Play opens a mod, with the prologue verified, and is never unhooked. */
 #ifndef SH_SCRIPT_HOOKS_H
 #define SH_SCRIPT_HOOKS_H
 #include <stddef.h>
@@ -67,18 +28,12 @@
 extern "C" {
 #endif
 
-/* The runtime's side (script_runtime.h): sh_script_map_open at the Play gate,
- * sh_script_tick(now, dt) once per host game frame of that Play,
- * sh_script_map_close(run_end_handlers) when it ends. */
-
 /* ---- the mods of this map (called by the runtime inside map_open) ---- */
 
 #define SH_SCRIPT_SALT_MAX 16
 
-/* Register a mod with scripts for this map. Returns its slot (from 0; the
- * table grows with the map's mods), the existing slot for a salt already
- * registered, or -1 (bad salt, or out of memory: its line is written). The
- * slot is the `mod` of the queue and handle APIs. */
+/* Register a mod with scripts for this map: its slot (the `mod` of the queue and handle APIs), the existing
+ * slot for a registered salt, or -1 on a bad salt or out of memory (a line is written). */
 int  sh_script_hooks_mod_add(const char *salt, const char *display_name);
 int  sh_script_hooks_mod_count(void);
 /* The slot of a registered salt (ASCII case-insensitive), or -1. */
@@ -93,12 +48,9 @@ const char *sh_script_hooks_mod_name(int mod);
  * entityDef's own name, then its inherits. -1 when none. Pure. */
 int  sh_script_hooks_owner_of(const char *const *names, int count);
 
-/* Record an entity of a scripted mod: the owner of names[0..count-1]
- * (sh_script_hooks_owner_of), its spawn id and its entityDef chain (the
- * names in order, lower case, a newline between them) go into the handle
- * table. Returns the handle (the existing one when already recorded), or 0
- * when no scripted mod owns the names or the table is full (*full set).
- * Pure; the spawn subscriber and the live walk call it. */
+/* Record an entity of a scripted mod in the handle table: its owner (sh_script_hooks_owner_of), spawn id and
+ * entityDef chain (lower case names, newline-separated). Returns the handle (existing if recorded), or 0 when no
+ * scripted mod owns the names or the table is full (*full set). Pure. */
 sh_script_handle sh_script_hooks_record(uint32_t spawn_id, const char *const *names, int count, int *full);
 
 /* ---- the tick's guards (pure) ------------------------------------------ */
@@ -114,12 +66,9 @@ typedef struct sh_script_tick_state {
 } sh_script_tick_state;
 
 #define SH_SCRIPT_TICK_RUN        1   /* call sh_script_tick */
-#define SH_SCRIPT_TICK_END        2   /* Play ended after scripts started (the editor is back): close
-                                         with end handlers */
+#define SH_SCRIPT_TICK_END        2   /* the editor is back after scripts started: close with end handlers */
 #define SH_SCRIPT_TICK_CLIENT     3   /* a client: close the states once, without handlers */
-#define SH_SCRIPT_TICK_LEFT       4   /* a loading screen draws after the scripts started: the session
-                                         left the map and its entities are going, so close without
-                                         end handlers (a handle could name another map's entity) */
+#define SH_SCRIPT_TICK_LEFT       4   /* a loading screen drew after start: close without end handlers */
 #define SH_SCRIPT_TICK_IDLE       0   /* no scripts this map */
 #define SH_SCRIPT_TICK_REENTERED (-1)
 #define SH_SCRIPT_TICK_OFF_MAIN  (-2)
@@ -129,10 +78,8 @@ typedef struct sh_script_tick_state {
 int  sh_script_tick_decide(const sh_script_tick_state *s);
 const char *sh_script_tick_name(int decision);
 
-/* The map gates. MAP_LOAD: a SnapMap map was parsed (the editor's load, a
- * launch at the hub): the previous map's scripts end, nothing opens. PLAY:
- * the level of a Play is being built: the previous scripts end and this
- * Play's mods are prepared. */
+/* The map gates. MAP_LOAD (a SnapMap map was parsed) ends the previous map's scripts; PLAY (a Play's level is
+ * being built) ends them and prepares this Play's mods. */
 #define SH_SCRIPT_GATE_MAP_LOAD 1
 #define SH_SCRIPT_GATE_PLAY     2
 /* 1 when the gate opens the map's mods, 0 when it only ends the last ones. Pure. */
@@ -146,13 +93,11 @@ enum sh_script_sig {
     SH_SCRIPT_SIG_COUNT
 };
 
-/* The private signature table (NULL-terminated, enum order), for the
- * two-image test. */
+/* The private signature table (NULL-terminated, enum order). */
 extern const sig_entry SH_SCRIPT_SIGNATURES[];
 
-/* A signature whose bytes repeat in a sibling function that differs only in
- * the callback-name string it loads with `lea rdx,[rip+disp32]` at
- * lea_offset: resolved when exactly one match loads `callback`. */
+/* A signature whose bytes repeat in a sibling function differing only in the callback name it loads at
+ * lea_offset (`lea rdx,[rip+disp32]`): resolved when exactly one match loads `callback`. */
 typedef struct sh_script_named_sig {
     sig_entry sig;
     size_t lea_offset;
@@ -160,13 +105,11 @@ typedef struct sh_script_named_sig {
 } sh_script_named_sig;
 extern const sh_script_named_sig SH_SCRIPT_ANIM_NOTIFY_SIGNATURE;
 
-/* Resolve a named signature over the image's executable sections (a mapped
- * module or an image laid out by RVA). Returns SIG_OK, SIG_NOT_FOUND,
- * SIG_AMBIGUOUS, SIG_BAD_PATTERN or SIG_BAD_MODULE. */
+/* Resolve a named signature over the image's executable sections (a mapped module or an RVA-laid image):
+ * SIG_OK, SIG_NOT_FOUND, SIG_AMBIGUOUS, SIG_BAD_PATTERN or SIG_BAD_MODULE. */
 sig_status sh_script_resolve_named(const uint8_t *module_base, const sh_script_named_sig *s, sig_result *out);
 
-/* Detour windows (whole, position-independent instructions; the test proves
- * them on both executables). */
+/* Detour windows (whole, position-independent instructions). */
 #define SH_SCRIPT_TICK_STOLEN          15
 #define SH_SCRIPT_ON_DAMAGE_STOLEN     15
 #define SH_SCRIPT_ON_ANIM_STOLEN       15
@@ -184,30 +127,21 @@ static const uint8_t k_script_tick_prologue[SH_SCRIPT_TICK_STOLEN] = {
 #define SH_SCRIPT_ENT_NUMBER_WORLD  0x3FFE
 #define SH_SCRIPT_GAME_LOOKUP_SLOT  0x7F0u    /* idGameLocal vtable: spawn id -> object; +8: then the idEntity cast */
 
-/* Boot: resolve the signatures, the globals and the dependencies, verify the
- * tick prologue, and subscribe to the spawn chain and CancelMapChange.
- * Commits nothing. Returns 1 when the scripts' engine side is usable on this
- * executable; 0 with its one log line when not (mod scripts then never run). */
+/* Boot: resolve the signatures and globals, verify the tick prologue, and subscribe to the spawn chain and
+ * CancelMapChange; commits nothing. Returns 1 when usable on this executable, else 0 with one log line. */
 int  sh_script_hooks_install(const sig_result *results, size_t count, const uint8_t *module_base);
 
-/* The map gates (main thread), called by the serving layer
- * (modserve_engine.c) before it arms the companions detour, so a Play that
- * opens a scripted mod arms the spawn chain in the same pass. */
+/* The map gates (main thread), called by modserve_engine.c before it arms the companions detour, so a Play
+ * that opens a scripted mod arms the spawn chain in the same pass. */
 void sh_script_hooks_gate(int gate);
 
-/* Before the first frame of a Play: record every live entity of a scripted
- * mod (an entity number's spawn id resolved through the engine, its entityDef
- * chain read as the spawn subscriber reads it). Placed entities spawn during
- * the level load; the spawn chain records them, and this catches any it did
- * not see. Returns the entities it recorded that were not recorded yet.
- * Main thread. */
+/* Before the first frame of a Play: record every live entity of a scripted mod that the spawn chain did not.
+ * Returns how many it newly recorded. Main thread. */
 int  sh_script_hooks_walk_live(void);
 
-/* Reload this map's scripts (the console's sh_scripts reload, main thread,
- * outside the frame): while a Play runs them, end them with their end
- * handlers, prepare them again from the files and record the live entities,
- * so they start again at the next frame. Returns the mods prepared, 0 when
- * no Play is running scripts. */
+/* Reload this map's scripts (console sh_scripts reload, main thread, outside the frame): end them with their
+ * end handlers, prepare them again from the files and record the live entities. Returns the mods prepared, 0
+ * when no Play is running scripts. */
 int  sh_script_hooks_reload(void);
 
 /* 1 while a Play has mods with scripts open (prepared or running). */
@@ -220,26 +154,22 @@ void sh_script_hooks_after_spawn(void *entity, const char *const *names, int cou
 /* 1 while this map has states, so the spawn chain must be watched. */
 int  sh_script_hooks_spawn_wanted(void);
 
-/* The CancelMapChange subscriber (main thread). during_load: the loading
- * screen was still drawing (a failed load). */
+/* The CancelMapChange subscriber (main thread); during_load: the loading screen was still drawing. */
 void sh_script_hooks_map_cancel(int during_load);
 
-/* For hooks on any thread: the mod and handle a spawned entity was recorded
- * under, or 0 when scripts do not run here (no states, a client, or not one of
- * a scripted mod's entities). Reads the entity's spawn id; never resolves. */
+/* For hooks on any thread: the mod and handle a spawned entity was recorded under, or 0 when scripts do not
+ * run here. Reads the entity's spawn id; never resolves. */
 sh_script_handle sh_script_hooks_handle_of(void *entity, int *mod);
 /* 1 on DOOM's main thread, the only thread scripts run on. */
 int sh_script_hooks_on_game_thread(void);
-/* 1 during SnapMap Play of any kind (the editor's active flag is clear), 0 while the editor is active, -1
- * unknown (the scripts' engine side did not resolve). Any thread; reads one byte. */
+/* 1 during any SnapMap Play (the editor's active flag is clear), 0 while the editor is active, -1 unknown.
+ * Any thread; reads one byte. */
 int sh_script_hooks_in_play(void);
 
 #ifdef SH_SCRIPT_PURE
 /* Tests only: empty the mod table. */
 void sh_script_hooks_test_reset(void);
-/* Tests only: pretend a Play runs the mods (1) or not (0): sh_script_hooks_open
- * answers it and sh_script_hooks_reload prepares the mods again from the
- * provider, as the engine side does. */
+/* Tests only: pretend a Play runs the mods (1) or not (0), for sh_script_hooks_open and _reload. */
 void sh_script_hooks_test_play(int on);
 #endif
 

@@ -1,7 +1,6 @@
-/* script_api_common.c -- see script_api_common.h. The pure part (argument
- * checks, entity objects, events through the engine table, the animation
- * observer) builds alone with SH_SCRIPT_PURE for the tests; the engine part
- * fills the engine table on the backend. */
+/* script_api_common.c -- see script_api_common.h. The pure part (argument checks, entity objects, events through the
+ * engine table, the animation observer) builds alone with SH_SCRIPT_PURE for the tests; the engine part fills the
+ * engine table. */
 #include <windows.h>
 #include <math.h>
 #include <stdarg.h>
@@ -11,8 +10,6 @@
 #include "../../common/text.h"
 #include "script_api_common.h"
 #include "script_hooks.h"
-
-/* ------------------------------------------------------------ the engine */
 
 static sh_script_engine g_engine;
 static int g_have_engine;
@@ -68,8 +65,6 @@ void sh_script_api_register(void)
     sh_script_api_entity_register();
     sh_script_api_world_register();
 }
-
-/* ------------------------------------------------------------ entities */
 
 static void *resolve_handle(sh_script_handle h)
 {
@@ -128,8 +123,6 @@ int sh_script_api_kind(void *ent)
     if (!ent) return SH_SCRIPT_KIND_GONE;
     return ENG(kind) ? g_engine.kind(ent) : SH_SCRIPT_KIND_OTHER;
 }
-
-/* ----------------------------------------------------------- arguments */
 
 static const char *type_words(lua_State *L, int arg)
 {
@@ -232,8 +225,6 @@ void sh_script_api_push_vec(lua_State *L, const float v[3])
     lua_pushnumber(L, v[2]); lua_setfield(L, -2, "z");
 }
 
-/* -------------------------------------------------------------- events */
-
 sh_script_earg sh_script_earg_int(int v)
 {
     sh_script_earg a;
@@ -331,8 +322,6 @@ int sh_script_api_health(void *ent, float *cur, float *max)
     }
     return 0;
 }
-
-/* ------------------------------------------------- animation observation */
 
 /* One row per entity with a standing request, made by the request and
  * dropped when its entity is gone (each frame) or when the handle table
@@ -507,7 +496,7 @@ void sh_script_api_frame(void)
     for (i = 0; i < g_nanim; i++) {
         anim_row *r = &g_anim[i];
         void *ent;
-        if (!sh_script_handle_known(r->handle)) {   /* removed, or a handle of an earlier map */
+        if (!sh_script_handle_known(r->handle)) {   /* removed, or a handle of a previous map */
             anim_drop(i--);
             continue;
         }
@@ -527,7 +516,7 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
     return 1;
 }
 
-#else /* the engine side ------------------------------------------------- */
+#else /* the engine side */
 
 #include "../backend_log.h"
 #include "../entity.h"
@@ -1095,10 +1084,8 @@ static void yaw_axis(float yaw, float axis[9])
     axis[6] = 0;  axis[7] = 0; axis[8] = 1;
 }
 
-/* Spawn an entityDef at a pose the way idTarget_Spawn::SpawnSingleEntity
- * does (the companions and scene spawns): create, write spawnPosition and
- * spawnOrientation, finish (register, then CallSpawn, whose spawn subscriber
- * records it for its mod), then "show". */
+/* Spawn an entityDef at a pose the way idTarget_Spawn::SpawnSingleEntity does: create, write spawnPosition and
+ * spawnOrientation, finish (register, then CallSpawn, whose spawn subscriber records it for its mod), then "show". */
 static void *e_spawn(const char *def, const float origin[3], float yaw, const char **why)
 {
     void *gm = sh_entity_gamemgr(), *manager, *decl = NULL, *obj = NULL;

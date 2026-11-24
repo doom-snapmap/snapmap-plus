@@ -1,20 +1,13 @@
-/* script_api_common.h -- what every module of the mod-script API shares:
- * the engine operations the calls go through, entity arguments with their
- * ownership check, vectors in and out, plain argument checks, engine events,
- * the game clock, and the per-frame animation observer.
+/* script_api_common.h -- what every module of the mod-script API shares: the engine operations the calls go
+ * through, entity arguments with their ownership check, vectors, argument checks, engine events, the game clock
+ * and the per-frame animation observer.
  *
- * Every function here runs on the game thread inside the script tick (the
- * only place Lua runs). Argument checks raise a plain error at the calling
- * script line BEFORE any engine call; nothing here raises after one, so a
- * longjmp never crosses an engine frame.
+ * Every function here runs on the game thread inside the script tick. Argument checks raise at the calling script
+ * line BEFORE any engine call and nothing raises after one, so a longjmp never crosses an engine frame. The engine
+ * is reached only through sh_script_engine: the backend fills it at boot (sh_script_api_install) and the pure
+ * tests (SH_SCRIPT_PURE) install a fake with sh_script_api_set_engine.
  *
- * The engine is reached only through sh_script_engine (below). The backend
- * fills it at boot (sh_script_api_install); the pure tests (SH_SCRIPT_PURE)
- * install a fake one with sh_script_api_set_engine. So an API module never
- * reads engine memory itself.
- *
- * Build 13954591 engine facts (shared Ghidra, both renderers; evidence in
- * snaphak-re logs/shared-ghidra/SC4-*):
+ * Build 13954591 engine facts (both renderers):
  *   game clock      idGameLocal vtable +0x220 (game, 1) -> int milliseconds (eax, stored as an int by
  *                   idAIHealth::Heal; the slot forwards to the time object at game +0x49D210, vtable +0xC8)
  *   events          ProcessEventArgs VK 0x140B47350 / GL 0x140B46940 (obj, ret[0x18], def, n, a0..a7);
@@ -42,8 +35,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* ------------------------------------------------------------ the engine */
 
 /* What an entity is, for the calls whose engine path depends on it. */
 #define SH_SCRIPT_KIND_GONE   0
@@ -85,7 +76,7 @@ typedef struct sh_script_trace {
  * answer, and never raises. Entities are engine pointers resolved this
  * frame; none is kept. */
 typedef struct sh_script_engine {
-    void    *(*resolve)(uint32_t spawn_id);         /* entity a spawn id names now, or NULL */
+    void    *(*resolve)(uint32_t spawn_id);         /* the entity a spawn id names, or NULL */
     uint32_t (*spawn_id)(void *ent);                /* SH_SCRIPT_SPAWN_ID_NONE when unreadable */
     int      (*slots)(void);                        /* entity numbers to scan (players first) */
     uint32_t (*slot_spawn_id)(int number);          /* spawn id of an entity number, NONE when free */
@@ -99,7 +90,7 @@ typedef struct sh_script_engine {
     int      (*ai_health)(void *ai, float *cur, float *max);
     int      (*ai_heal)(void *ai, float amount);
     int      (*ai_set_health)(void *ai, float value);   /* lowers only; value >= 1 */
-    char    *(*anim_node)(void *ai);   /* "subweb/state" now playing, whole (malloc'd; free); NULL when none */
+    char    *(*anim_node)(void *ai);   /* the "subweb/state" playing, whole (malloc'd; free); NULL when none */
     void    *(*spawn)(const char *def, const float origin[3], float yaw, const char **why);
     int      (*trace)(const float from[3], const float to[3], uint32_t ignore_spawn_id, sh_script_trace *out);
     int      (*game_time_ms)(int *ms);
@@ -107,32 +98,24 @@ typedef struct sh_script_engine {
     int      (*ground)(const float pos[3], float out[3]);
     /* The game difficulty, 0 easy .. 4 nightmare (1 when read). */
     int      (*difficulty)(int *level);
-    /* The md6Def tag `name` of a demon (a named point on a parent joint with
-     * its own offset and rotation) in world space: 1 with its position and
-     * axis (rows forward, left, up), 0 when the demon's model has no such
-     * tag (or the entity is not a demon), -1 unreadable. */
+    /* The md6Def tag `name` of a demon (a named point on a parent joint) in world space: 1 with its position and
+     * axis (rows forward, left, up), 0 when the model has no such tag (or the entity is no demon), -1 unreadable. */
     int      (*tag)(void *ent, const char *name, float pos[3], float axis[9]);
-    /* The argument format of the engine event `name` ("" when it takes
-     * none): 1, or 0 when the game has no such event. */
+    /* The argument format of the engine event `name` ("" when it takes none): 1, or 0 when the game has no such event. */
     int      (*event_format)(const char *name, char *format, size_t cap);
-    /* trace, and what stops a demon is solid too: a Blocking Box with Block
-     * Demons ticked, which the plain trace passes through. */
+    /* trace, and a Blocking Box with Block Demons ticked is solid too (the plain trace passes through it). */
     int      (*trace_as_demon)(const float from[3], const float to[3], uint32_t ignore_spawn_id, sh_script_trace *out);
-    /* The flags of the engine event `name` (idEventDef.flags: 1 can be
-     * skipped, 2 can be suppressed, 4 client safe, 8 no script, 16 passive
-     * marker) after setting the bits of `set` in them, or -1 when the game
-     * has no such event. A set bit stays for the life of the process. */
+    /* The flags of the engine event `name` (idEventDef.flags: 1 skippable, 2 suppressible, 4 client safe, 8 no
+     * script, 16 passive marker) after setting the bits of `set`, or -1 when there is no such event. A set bit stays
+     * for the life of the process. */
     int      (*event_flags)(const char *name, int set);
-    /* The loaded decl `name` of the decl type `type` ("renderParm", ...), by
-     * the game's own find, or NULL when there is none or it is not loaded. */
+    /* The loaded decl `name` of decl type `type` ("renderParm", ...) by the game's own find, or NULL. */
     void    *(*decl)(const char *type, const char *name);
 } sh_script_engine;
 
-/* The floor under pos made of the engine's world trace: straight down from
- * SH_SCRIPT_GROUND_ABOVE inches above pos for SH_SCRIPT_GROUND_DEPTH inches;
- * the first surface hit counts when it is flat enough to stand on (its normal
- * at least SH_SCRIPT_GROUND_FLAT up). 1 with the point; 0 none. Pure (the
- * engine side answers ground with it; the tests run it over a fake trace). */
+/* The floor under pos from the world trace: straight down from SH_SCRIPT_GROUND_ABOVE above pos for
+ * SH_SCRIPT_GROUND_DEPTH, the first surface hit counting when its normal is at least SH_SCRIPT_GROUND_FLAT up.
+ * 1 with the point; 0 none. Pure: the engine side answers ground with it and the tests run it over a fake trace. */
 #define SH_SCRIPT_GROUND_ABOVE 16.0f
 #define SH_SCRIPT_GROUND_DEPTH 4096.0f
 #define SH_SCRIPT_GROUND_FLAT  0.7f
@@ -143,10 +126,9 @@ int sh_script_api_ground_trace(int (*trace)(const float from[3], const float to[
 void sh_script_api_set_engine(const sh_script_engine *engine);
 const sh_script_engine *sh_script_api_engine(void);
 
-/* The Graphics SDK's files as the server holds them (sdk_runtime.c), for the calls that play them: the fx (fx(effect,
- * ...)) and env (set_environment) decls a mod wrote with `type effect` and `type environment`. Each answers the
- * entityDef to spawn (malloc'd), or NULL when the mod has no such SDK file. Opening the file through the server also
- * compiles it, which registers what it derives. Unset (the tests that do not install one), every answer is NULL. */
+/* The Graphics SDK's files as the server holds them (sdk_runtime.c), for the fx and set_environment calls. Each
+ * answers the entityDef to spawn (malloc'd), or NULL when the mod has no such file; opening it also compiles it.
+ * Unset (the tests), every answer is NULL. */
 typedef struct sh_script_sdk_runtime {
     char *(*effect_emitter)(const char *fx_name);       /* "mods/<salt>/<name>" */
     char *(*environment_emitter)(const char *env_name); /* "mods/<salt>/<name>" */
@@ -155,24 +137,18 @@ typedef struct sh_script_sdk_runtime {
 void sh_script_set_sdk_runtime(const sh_script_sdk_runtime *rt);
 const sh_script_sdk_runtime *sh_script_sdk_runtime_get(void);
 
-/* Boot (the backend): resolve the private signatures and the decl registry
- * from the shared results, fill the engine table and register every call of
- * the entity, animation, world and time groups. Commits nothing. Returns 1
- * when the engine side is usable; 0 with one log line when not (the calls
- * then answer nil). */
+/* Boot: resolves the private signatures and the decl registry, fills the engine table and registers every call of
+ * the entity, animation, world and time groups. Returns 1 when usable; 0 with one log line (the calls then answer
+ * nil). */
 int sh_script_api_install(const sig_result *results, size_t count, const uint8_t *module_base);
 
-/* The private signatures the engine side resolves (NULL-terminated), for the
- * two-image test. */
+/* The private signatures the engine side resolves (NULL-terminated), for the two-image test. */
 extern const sig_entry SH_SCRIPT_API_SIGNATURES[];
 
-/* Add the calls of script_api_entity.c and script_api_world.c to every state
- * opened from now on (sh_script_api_add). Idempotent. */
+/* Add the calls of script_api_entity.c and script_api_world.c to every state opened afterwards. Idempotent. */
 void sh_script_api_register(void);
 void sh_script_api_entity_register(void);
 void sh_script_api_world_register(void);
-
-/* ---------------------------------------------------------- the frame */
 
 /* Once per host game frame of a Play, before sh_script_tick: observe the
  * animation of every entity whose script asked for one (animation_event,
@@ -188,23 +164,17 @@ void sh_script_api_on_frame(void (*fn)(void));
  * 0 for no hit or outside a Play. */
 int sh_script_api_world_trace(const float from[3], const float to[3], float end[3], float normal[3]);
 
-/* The engine's own entity table: the game holds at most
- * SH_SCRIPT_ENGINE_ENTITIES entities at once (MAX_GENTITIES less the world
- * and none), and one more is a fatal engine error ("No free managed
- * instances"). A script's spawn or fire therefore needs a free entity slot
- * beyond SH_SCRIPT_ENGINE_RESERVE kept for the game's own spawns (players,
- * projectiles, effects, demons). The free count is read once a frame
- * (sh_script_api_frame) and each spawn or launch a script asks for takes one.
- * sh_script_api_check_room raises "<call> cannot add an entity now: the game
- * holds at most 16382 entities at once and nearly all are in use; remove some
- * first" when there is no room; it never refuses for any other reason. */
+/* The game holds at most SH_SCRIPT_ENGINE_ENTITIES entities at once (MAX_GENTITIES less the world and none); one
+ * more is a fatal engine error ("No free managed instances"). A script's spawn or fire therefore needs a free
+ * slot beyond SH_SCRIPT_ENGINE_RESERVE kept for the game's own spawns. The free count is read once a frame and
+ * each spawn or launch takes one; sh_script_api_check_room raises "<call> cannot add an entity now: ..." when
+ * there is no room, and for no other reason. */
 #define SH_SCRIPT_ENGINE_ENTITIES 16382
 #define SH_SCRIPT_ENGINE_RESERVE  256
 void sh_script_api_check_room(lua_State *L, const char *call);
 
-/* The same check without the refusal: 1 (and one slot taken) when there is room, 0 when the game is near its
- * entity limit. For a call whose entity is decoration (an effect), which is skipped instead of refused: a limit never
- * reaches the author or the player as an error. */
+/* The same check without the refusal: 1 (and one slot taken) when there is room, 0 near the entity limit. For a
+ * call whose entity is decoration (an effect), which is skipped instead of refused. */
 int sh_script_api_has_room(void);
 
 /* Spawns the entityDef `def` (a full name: this mod's or one the product serves) at `pos` facing `yaw` degrees,
@@ -214,16 +184,12 @@ int sh_script_api_spawn_def(lua_State *L, const char *def, const float pos[3], d
 /* The game clock in milliseconds (idGameLocal vtable +0x220). 1 when read. */
 int sh_script_api_now_ms(int *ms);
 
-/* ----------------------------------------------------------- arguments */
-
-/* The engine entity behind the entity object at `arg`: NULL when it was
- * removed or is gone (the caller returns nil). Raises a plain error naming
- * `call` when the value is not an entity. *h (may be NULL) gets the handle.
- * An entity this frame's spawn just made (not yet delivered) resolves too. */
+/* The engine entity behind the entity object at `arg`: NULL when it is gone (the caller returns nil). Raises
+ * naming `call` when the value is not an entity. *h (may be NULL) gets the handle. An entity this frame's spawn
+ * just made (not yet delivered) resolves too. */
 void *sh_script_api_entity(lua_State *L, int arg, const char *call, sh_script_handle *h);
 
-/* The entity a call changes. A script is the map's own logic, as wired
- * logic is, so it may change any entity of the map: this is
+/* The entity a call changes. A script is the map's own logic, so it may change any entity of the map: this is
  * sh_script_api_entity (`verb` names what the call does, for readers). */
 void *sh_script_api_owned(lua_State *L, int arg, const char *call, const char *verb, sh_script_handle *h);
 
@@ -235,7 +201,7 @@ int sh_script_api_owns(lua_State *L, sh_script_handle h);
 void sh_script_api_check_vec(lua_State *L, int arg, const char *call, const char *what, float out[3]);
 /* The same, or 0 when the argument is absent or nil. */
 int  sh_script_api_opt_vec(lua_State *L, int arg, const char *call, const char *what, float out[3]);
-/* A position or an entity (its position). 0 when the entity was removed. */
+/* A position or an entity (its position). 0 when the entity is gone. */
 int  sh_script_api_check_point(lua_State *L, int arg, const char *call, const char *what, float out[3]);
 
 /* A finite number. Raises "<call> needs <what> as a number, got <type>". */
@@ -249,26 +215,23 @@ const char *sh_script_api_check_text(lua_State *L, int arg, const char *call, co
 /* A new table {x=, y=, z=}. */
 void sh_script_api_push_vec(lua_State *L, const float v[3]);
 
-/* Push the script object for an engine entity: its handle (a mod's entity
- * keeps its own; any other gets a reference no mod owns), or nil when the
- * entity is NULL or the handle table is full. */
+/* Push the script object for an engine entity: its handle (a mod's entity keeps its own; any other gets a
+ * reference no mod owns), or nil when the entity is NULL or the handle table is full. */
 void sh_script_api_push_engine_entity(lua_State *L, void *ent);
 /* The handle for an engine entity (recording a reference when needed), or 0. */
 sh_script_handle sh_script_api_handle_of(void *ent);
 
-/* ---------------------------------------------------------- engine use */
-
 /* The entity's kind (SH_SCRIPT_KIND_*). */
 int sh_script_api_kind(void *ent);
 
-/* Run an event on an entity now, with the result in *ret (may be NULL).
- * 1 when the engine ran it (ret->type 0: the receiver did not answer). */
+/* Run an event on an entity at once, with the result in *ret (may be NULL). 1 when the engine ran it (ret->type 0:
+ * the receiver did not answer). */
 int sh_script_api_event(void *ent, const char *name, const sh_script_earg *args, int n, sh_script_earg *ret);
 /* Queue an event for this frame's event service. 1 when queued. */
 int sh_script_api_post(void *ent, const char *name, const sh_script_earg *args, int n);
 
-/* A demon's or a player's health and its maximum, read now. 1 when it has
- * health (any other entity, or an unreadable one, answers 0). */
+/* A demon's or a player's health and its maximum. 1 when it has health (any other entity, or an unreadable one,
+ * answers 0). */
 int sh_script_api_health(void *ent, float *cur, float *max);
 
 /* Argument builders. */
@@ -279,10 +242,8 @@ sh_script_earg sh_script_earg_text(char type, const char *s);   /* 's' or '1' */
 sh_script_earg sh_script_earg_entity(void *ent);
 sh_script_earg sh_script_earg_no_anim(void);
 
-/* --------------------------------------------- animation observation */
-
-/* The request a script made of an entity's animWeb (animation_state, force_animation),
- * observed every frame from the node now playing. */
+/* The request a script made of an entity's animWeb (animation_state, force_animation), observed every frame from
+ * the node playing. */
 #define SH_SCRIPT_ANIM_VIA_IN    0x01u   /* the via node became the node playing */
 #define SH_SCRIPT_ANIM_VIA_OUT   0x02u   /* after the via node, another node played */
 #define SH_SCRIPT_ANIM_DEST      0x04u   /* the destination node became the node playing */
@@ -293,7 +254,7 @@ void sh_script_api_anim_request(sh_script_handle h, const char *dest, const char
 unsigned sh_script_api_anim_flags(sh_script_handle h, void *ent, int *requested);
 /* The same destination, in place (valid until the next request or frame), or NULL. */
 char *sh_script_api_anim_dest_of(sh_script_handle h);
-/* Observe one entity now (also done every frame). */
+/* Observe one entity (also done every frame). */
 void sh_script_api_anim_observe(sh_script_handle h, void *ent);
 /* Forget every request (a new map). */
 void sh_script_api_anim_reset(void);

@@ -1,15 +1,7 @@
-/* script_runtime.c -- see script_runtime.h.
- *
- * Every Lua call the runtime makes runs inside lua_pcall: a delivery pushes
- * a C job (one event, one entity's think, one removal, the due timers, a
- * file, a handler list) and a light userdata, and pcalls it with the
- * message handler. The job calls the script's handlers with lua_call and
- * resets the per-call bounds before each one. So an allocation that fails
- * while the runtime builds a handler's arguments is a protected error like
- * any other, and Lua's panic (an abort) is never reached.
- *
- * A stopped or ended mod's state is closed at once, at the top of the tick,
- * map start or map end, never from inside a call into Lua. */
+/* script_runtime.c -- see script_runtime.h. Every Lua call runs inside lua_pcall as a C job (one event, think,
+ * removal, timer batch, file or handler list) that calls the handlers with lua_call, so an allocation failure
+ * while building arguments is a protected error and Lua's panic is never reached. A stopped or ended mod's state
+ * is closed at the top of the tick, map start or map end, never from inside a call into Lua. */
 #include "../../common/text.h"
 #include "script_internal.h"
 #include "script_fsm.h"
@@ -202,8 +194,7 @@ int shs_stop_unknown_call(lua_State *L, int stop, const char *name, int level)
     return shs_raise_stop(L, level);
 }
 
-/* _G's __index: a global that is not set is nothing, as in Lua, and is
- * remembered with where it was read, so a pcall handed it can name it. */
+/* _G's __index: an unset global is nil as in Lua, and is remembered with where it was read so a pcall can name it. */
 static int global_missing(lua_State *L)
 {
     shs_mod *m = shs_mod_of(L);
@@ -227,9 +218,8 @@ const char *shs_missing_global_here(lua_State *L, int level)
     return m->miss_name;
 }
 
-/* The one protection against a script that never returns: a single
- * delivery (one handler call, one timer, one coroutine resume) that has run
- * longer than the wall-clock stop is stopped. Nothing counts work. */
+/* The one protection against a script that never returns: a delivery (handler call, timer or coroutine resume)
+ * that has run longer than the wall-clock stop is stopped. */
 static int over_bound(shs_mod *m)
 {
     if (m->stop >= 0) return 1;
@@ -252,16 +242,15 @@ void shs_match_step(lua_State *L)
     if (m->stop >= 0) shs_raise_stop(L, 1);
 }
 
-/* The count hook: every SH_SCRIPT_HOOK_STRIDE instructions, in every
- * coroutine of the state, it only reads the clock. In a hook, level 0 is the
- * running Lua function. */
-/* A function's file as the product named its chunk ("=scripts\x.lua"),
- * whole: Lua's short_src is cut to LUA_IDSIZE. */
+/* A function's file as the product named its chunk ("=scripts\x.lua"), whole: Lua's short_src is cut to
+ * LUA_IDSIZE. */
 static const char *src_name(const lua_Debug *ar)
 {
     return ar->source && ar->source[0] == '=' ? ar->source + 1 : ar->short_src;
 }
 
+/* The count hook, run every SH_SCRIPT_HOOK_STRIDE instructions in every coroutine of the state: it notes the
+ * running script line and checks the wall clock. */
 static void shs_hook(lua_State *L, lua_Debug *ar)
 {
     shs_mod *m = shs_mod_of(L);
@@ -339,9 +328,8 @@ static void stop_line(shs_mod *m, const char *file, int line, const char *what, 
     free(text);
 }
 
-/* Lua names a chunk in its messages cut to LUA_IDSIZE - 1 bytes (the
- * vendored Lua's luaO_chunkid): a message's file is taken only when it is
- * shorter than that, so it is whole; else the stack says where. */
+/* Lua cuts a chunk name in messages to LUA_IDSIZE - 1 bytes (luaO_chunkid), so a message's file is taken only
+ * when shorter than that (hence whole); else the stack says where. */
 static char *msg_file(const char *msg, int *line, const char **rest)
 {
     char *file = NULL;
@@ -582,9 +570,8 @@ int sh_script_refuse(lua_State *L, const char *fmt, ...)
     return lua_error(L);
 }
 
-/* Keep the string on top of the stack alive in one of the state's eight
- * name slots and pop it: the stack is as the call found it, so a caller's
- * argument positions (and their nils) stay as they were. */
+/* Keep the string on top of the stack alive in one of the state's eight name slots and pop it, so the stack is
+ * as the call found it. */
 static const char *anchor_name(lua_State *L)
 {
     shs_mod *m = shs_mod_of(L);
@@ -833,11 +820,9 @@ static int on_signal(lua_State *L)
 #define SHS_REG_FSM "snapmap-plus.fsm"          /* "<kind>:<class>" -> function, or a state's table */
 static const char *const k_fsm_kinds[] = { "condition", "snippet", "transition", "state" };
 
-/* fsm.condition(name, fn), fsm.snippet(name, fn), fsm.transition(name, fn),
- * fsm.state(name, { enter = fn, update = fn, exit = fn }): a class the game's own AI state
- * machines ask for by name (smp.<kind>.<salt>.<name>.<n> in the mod's aifsmmanager decl).
- * fn(demon, n): a condition answers true or false, a transition the code of the link it fires
- * or false, a state's update or enter a code for its machine or nothing. */
+/* fsm.condition / snippet / transition (name, fn) and fsm.state(name, { enter, update, exit }): a class the game's
+ * AI state machines ask for as smp.<kind>.<salt>.<name>.<n>. fn(demon, n) answers true or false (condition), the
+ * link's code or false (transition), or a code for its machine or nothing (state). */
 static int fsm_register(lua_State *L)
 {
     int kind = (int)lua_tointeger(L, lua_upvalueindex(1));
@@ -1740,7 +1725,7 @@ static int job_event(lua_State *L)
     {
         int i = find_ent(m, ev->self);
         char *chain;
-        if (i < 0) return 0;                       /* not driven, or removed before the record was delivered */
+        if (i < 0) return 0;                       /* not driven, or removed before delivery */
         chain = _strdup(m->ents[i].chain);
         if (!chain) return luaL_error(L, "not enough memory");
         sh_script_push_entity(L, ev->self);
@@ -1866,11 +1851,8 @@ static void remove_one(shs_mod *m, sh_script_handle h)
     free(chain);
 }
 
-/* A record the handle table released (a removed entity, or a reference to a
- * player, an attacker or a projectile that is gone): every state drops its
- * object for that handle, so the objects a state keeps are the entities alive
- * in the map. A script still holding the object keeps it; its calls answer
- * nil. */
+/* A handle the handle table released (a removed entity, or a gone player, attacker or projectile): every state
+ * drops its object for it. A script still holding the object keeps it, and its calls answer nil. */
 static void forget_object(sh_script_handle h)
 {
     int i;
@@ -1928,7 +1910,7 @@ static void deliver_changes(void)
     } while (n == BATCH);
 }
 
-/* Deliver what is queued now; 0 when the mod stopped. */
+/* Deliver what is queued; 0 when the mod stopped. */
 static int drain(shs_mod *m)
 {
     int n = m->hook >= 0 ? sh_script_queue_pending(m->hook) : 0, k;

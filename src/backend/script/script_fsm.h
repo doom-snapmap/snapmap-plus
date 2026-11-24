@@ -1,33 +1,9 @@
 /* script_fsm.h -- classes a mod's script supplies to the game's own AI state machines.
  *
- * DOOM 2016 runs each demon on state machines read from aifsmmanager decls. Every state,
- * transition, condition and snippet of a graph names a class, and the engine finds the class
- * by name in its type registry (the lookup, VK 0x141583B20 / GL 0x141584BB0). A demon ported
- * from another game uses the engine's classes wherever the engine has them; the ones it lacks
- * are written in Lua and named in the decl as
- *
- *     smp.<kind>.<salt>.<class>.<n>      kind: condition, snippet, transition, state
- *                                        salt: the mod; class: the name the script registers;
- *                                        n: which parameter set of the class this node uses
- *
- * The lookup is detoured: such a name answers a record copied from a stock class of the same
- * kind (so the engine's own hierarchy tests hold), whose create and clone build the stock
- * object and give it a copy of the stock vtable in which the one virtual the kind implements
- * calls the mod's script. The engine skips the `object = { ... }` block of a class it has no
- * reflection record for, so a node's parameters are not read from the decl: they are the
- * script's own data, chosen by <n>.
- *
- * Engine facts (build 13954591, R-M6-engine-fsm): a type record is 0x90 bytes with its name at
- * +0x00, create at +0x28, clone at +0x30 and the placement constructor at +0x38; a condition
- * and a snippet implement vtable slot 2 (this, ai, fsm, extra), a transition slot 12 (this,
- * out, ai, fsm, ...) filling a transition code at out+8, a state slots 25 OnEnter, 26 OnExit
- * and 28 Update (this, ai, fsm, time); a state hands its machine a transition code by writing
- * it at fsm+0x6BD8 (idShared_FaceEnemy's Update, VK 0x1405E8A60). The decl's objects are
- * templates the engine clones per demon, so nothing about one demon is kept on an object.
- *
- * Scripts run on the game's thread only. A class asked from another thread answers "no" (a
- * condition), no code (a transition) or does nothing, and one line says so.
- */
+ * The engine looks up each aifsmmanager class by name (VK 0x141583B20 / GL 0x141584BB0); the detour answers
+ * smp.<kind>.<salt>.<class>.<n> (n: the node's parameter set) with a copy of a stock class of that kind whose one
+ * virtual calls the mod's script. Scripts run on the game's thread only; elsewhere a class answers "no", no code,
+ * or nothing, and logs a line. */
 #ifndef SH_SCRIPT_FSM_H
 #define SH_SCRIPT_FSM_H
 
@@ -36,6 +12,9 @@
 
 enum { SH_FSM_CONDITION, SH_FSM_SNIPPET, SH_FSM_TRANSITION, SH_FSM_STATE, SH_FSM_KINDS };
 
+/* Engine facts (build 13954591): a type record is 0x90 bytes with name at +0x00, create +0x28, clone +0x30,
+ * placement constructor +0x38. A condition and a snippet implement vtable slot 2, a transition slot 12 (fills a
+ * code at out+8), a state slots 25 OnEnter, 26 OnExit, 28 Update; a state hands its machine a code at fsm+0x6BD8. */
 #define SH_FSM_PREFIX        "smp."
 #define SH_FSM_RECORD_SIZE   0x90
 #define SH_FSM_REC_NAME      0x00

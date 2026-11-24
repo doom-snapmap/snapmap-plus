@@ -1,53 +1,25 @@
-/* script_runtime.h -- mod scripts: one sandboxed Lua 5.4 state per scripted
- * mod per map, the queue every engine hook writes into, and the one tick that
- * delivers it.
- *
- * A script is a carried text file of a mod, assets\mods\<salt>\scripts\*.lua
- * (entry files) and scripts\lib\*.lua (loaded only through require). The
- * runtime reads them through the serving layer (sh_script_source below). A
- * map's scripted mods are prepared at the Play gate (sh_script_map_open: no
- * script code runs there); the first tick runs every entry file once in
- * byte-wise name order, then the on.map_start handlers. After that Lua runs
- * only inside sh_script_tick, on the thread that calls it, never
- * re-entrantly: hooks on any thread post records to the mod's queue
- * (script_queue.h), the spawn subscriber records entities in the handle table
- * (script_handles.h), and the tick delivers both.
- *
- * The sandbox (script_lib_base.c): base (no dofile, loadfile, load, require,
- * collectgarbage except "count"; print and warn write the mod's log), string
- * (no dump; find, match, gmatch and gsub read the clock as they match), table,
- * math (no randomseed; random seeded from the map seed), utf8, coroutine. No
- * io, os, debug, package. Chunks load as text only (mode "t"). The product's
- * require(name) loads scripts\lib\<name>.lua of the same mod, once.
- *
- * No limits of its own: a state's memory, the work of a handler or a frame,
- * the number of timers, files and log lines, and the size of a script grow
- * as far as the process allows. One protection is not a limit: a single
- * delivery (one handler call, one timer, one coroutine resume) still running
- * after SH_SCRIPT_WALL_MS of wall time is stopped, so a script that never
- * returns cannot hang the game. The clock is read by a hook every
- * SH_SCRIPT_HOOK_STRIDE VM instructions, every 1024 pattern steps, and before
- * the C library calls the hook cannot see (sorting, moving table elements).
- * A script's pcall, xpcall, coroutine.resume and coroutine.close cannot catch
- * a stop.
- *
- * Errors: any error, the wall-clock stop, running out of memory, or a
- * refused call stops that mod's scripts for the rest of the map (its state is
- * closed, its bindings withdrawn, its queue refused) and writes one line:
+/* script_runtime.h -- mod scripts: one sandboxed Lua 5.4 state per scripted mod per map, the queue every engine
+ * hook writes into, and the one tick that delivers it. Scripts are a mod's assets\mods\<salt>\scripts\*.lua
+ * entry files and scripts\lib\*.lua (loaded only through require), read through the serving layer. */
+/* A map's scripted mods are prepared at the Play gate (sh_script_map_open, no script code runs); the first tick
+ * runs every entry file once in byte-wise name order, then the on.map_start handlers. After that Lua runs only
+ * inside sh_script_tick, never re-entrantly, while hooks on any thread post to the mod's queue (script_queue.h) and
+ * the spawn subscriber records entities in the handle table (script_handles.h). */
+/* The sandbox (script_lib_base.c) offers base (no dofile, loadfile, load, require, collectgarbage except "count"),
+ * string (no dump), table, math (no randomseed), utf8 and coroutine; no io, os, debug or package. Chunks load as
+ * text only, and require(name) loads scripts\lib\<name>.lua of the same mod once. */
+/* Memory, work, timers, files, log lines and script size have no limits of their own; the one protection is that
+ * a single delivery still running after SH_SCRIPT_WALL_MS of wall time is stopped, and pcall, xpcall and
+ * coroutine.resume and close cannot catch that stop. The clock is read every SH_SCRIPT_HOOK_STRIDE VM
+ * instructions, every 1024 pattern steps, and before library calls the hook cannot see (sorting, table moves). */
+/* Any error, the wall-clock stop, running out of memory or a refused call stops that mod's scripts for the rest of
+ * the map (state closed, bindings withdrawn, queue refused) and writes one line:
  *   Script stopped: <mod name>, scripts\<file>.lua line <n>: <what>. <what to do>.
- * The line, prints and warnings are the mod's script log (every line of the
- * map, whole), kept until the mod's next map start and read by the UI through
- * sh_script_log_read and sh_script_stop_line_dup. Other mods keep running.
- *
- * Threads: sh_script_map_start, sh_script_tick and sh_script_map_close run
- * Lua and are serialized by one lock (a call made while Lua runs on the same
- * thread is deferred: map end runs when the running call returns, a nested
- * tick is skipped). sh_script_binds, sh_script_entity_owner and the log
- * queries may be called from any thread.
- *
- * Co-op: the caller (the tick detour, the hooks) runs none of this on a client.
- *
- * SH_SCRIPT_PURE builds without the backend log (the tests). */
+ * That line, prints and warnings form the mod's script log, kept until its next map start. Other mods keep running. */
+/* Threads: sh_script_map_start, sh_script_tick and sh_script_map_close run Lua under one lock (a call made while
+ * Lua runs on the same thread is deferred: map end waits for the running call, a nested tick is skipped);
+ * sh_script_binds, sh_script_entity_owner and the log queries are any-thread. The caller runs none of this on a
+ * client. SH_SCRIPT_PURE builds without the backend log. */
 #ifndef SH_SCRIPT_RUNTIME_H
 #define SH_SCRIPT_RUNTIME_H
 
@@ -71,17 +43,10 @@ extern "C" {
 
 /* ------------------------------------------------------------ file access */
 
-/* How the runtime reads a mod's scripts. The serving layer supplies it: list
- * names every file the serving build of `salt` carries under
- * mods/<salt>/scripts/ (the map's own place first, else the root, as every
- * served file), and read returns one through the serving index
- * (sh_modserve_open of mods/<salt>/scripts/<relpath>). relpath is relative to
- * scripts/, '/'-separated, as "door.lua" or "lib/fsm.lua".
- *   list: calls fn once per file; returns the count, or -1 when the build
- *         could not be read.
- *   read: 1 with the bytes in *text (released with release), 0 when the build
- *         carries no such file, -1 when it could not be read.
- * The runtime calls these only from sh_script_map_start and from require. */
+/* How the runtime reads a mod's scripts, supplied by the serving layer; relpath is relative to
+ * mods/<salt>/scripts/, '/'-separated ("door.lua", "lib/fsm.lua"). Called only from sh_script_map_start and require.
+ *   list: calls fn once per file the build of `salt` carries; returns the count, or -1 when unreadable.
+ *   read: 1 with the bytes in *text (released with release), 0 when there is no such file, -1 when unreadable. */
 typedef void (*sh_script_file_fn)(void *fn_context, const char *relpath);
 typedef struct sh_script_source {
     void *context;
@@ -97,50 +62,34 @@ typedef struct sh_script_mod_desc {
     const char *name;        /* the author's display name, for the log and the stop line */
 } sh_script_mod_desc;
 
-/* Prepare scripts for a map: end anything left from the last map (with its
- * end handlers), empty the hooks' mod table and the handle table, then for
- * each mod list its scripts; a mod with at least one entry file is
- * registered with the hooks (sh_script_hooks_mod_add: its queue opens and its
- * entities are recorded from now on). No script code runs. `seed` seeds
- * math.random. Returns the mods prepared. Main thread. */
+/* Prepare scripts for a map: end the last map's scripts (with end handlers), empty the hooks' mod table and the
+ * handle table, then register each mod with an entry file via sh_script_hooks_mod_add. No script code runs;
+ * `seed` seeds math.random. Returns the mods prepared. Main thread. */
 int sh_script_map_prepare(const sh_script_mod_desc *mods, int n, const sh_script_source *source,
                           uint64_t seed);
 
-/* Where sh_script_map_open finds the map's mods: fill out[] (up to cap) with
- * the served mods that carry scripts, set *source and *seed, and return the
- * count (-1 when the map's mods could not be read: nothing runs). The strings
- * need to live only until it returns. */
+/* Where sh_script_map_open finds the map's mods: fill out[] (up to cap) with the served mods that carry scripts,
+ * set *source and *seed, and return the count (-1 when unreadable: nothing runs). The strings live until return. */
 typedef int (*sh_script_map_mods_fn)(void *context, sh_script_mod_desc *out, int cap,
                                      const sh_script_source **source, uint64_t *seed);
 void sh_script_set_map_provider(sh_script_map_mods_fn fn, void *context);
 
-/* The hooks' Play gate (script_hooks.h): prepare the mods the provider names.
- * Returns the mods prepared, 0 when none carries scripts, -1 when they could
- * not be read (the reason is logged). Main thread. */
+/* The hooks' Play gate (script_hooks.h): prepare the mods the provider names. Returns the mods prepared, 0 when
+ * none carries scripts, -1 when unreadable (logged). Main thread. */
 int sh_script_map_open(void);
 
-/* Prepare and start at once (the files and map_start run now, with `now` as
- * the game time): the tests. Returns the mods whose scripts are running. */
+/* Prepare and start at once, with `now` as the game time (tests). Returns the mods whose scripts are running. */
 int sh_script_map_start(const sh_script_mod_desc *mods, int n, const sh_script_source *source,
                         uint64_t seed, double now);
 
-/* One game frame (the hooks' tick: main thread, host, Play). On the first
- * frame of a map, each prepared mod's state opens and its files and
- * map_start run. Then the handle table's changes since the last frame are
- * delivered (a spawned entity whose entityDef chain the mod binds gets
- * spawn(self) and is driven from then on; a removed one gets remove(self)
- * once and its object answers nothing), then for every running mod its
- * queued records, think(self, dt) for every driven entity, due timers and
- * coroutines, then what those raised, up to SH_SCRIPT_PASSES queue passes;
- * what is left waits for the next frame. `now` is the game time in seconds,
- * `dt` the frame time. */
+/* One game frame (main thread, host, Play); `now` and `dt` are seconds. The first frame opens each prepared mod's
+ * state and runs its files and map_start; each frame delivers handle-table spawns and removals, then per mod its
+ * queued records, think(self, dt), timers and coroutines, in up to SH_SCRIPT_PASSES passes. */
 void sh_script_tick(double now, double dt);
 
-/* The map ended: run each running mod's on.map_end handlers (within their
- * budget) when run_end_handlers is 1 and the scripts had started, then close
- * every state and free every timer, binding and file list; each mod's queue
- * closes. The logs stay readable. Called while Lua runs, it waits until the
- * running call returns. */
+/* The map ended: run each running mod's on.map_end handlers when run_end_handlers is 1 and the scripts had
+ * started, then close every state and queue and free every timer, binding and file list. The logs stay readable;
+ * called while Lua runs, it waits for the running call to return. */
 void sh_script_map_close(int run_end_handlers);
 
 /* sh_script_map_close(1). */
@@ -154,11 +103,7 @@ int sh_script_started(void);
 
 /* ---------------------------------------------------------------- events */
 
-/* An entityDef chain (the entityDef's name, then its inherits, a newline
- * between them) fits in this many bytes. */
-
-/* Records come in through the mod's queue (script_queue.h), posted by the
- * engine hooks with handles from the handle table:
+/* Records arrive through the mod's queue (script_queue.h), posted by the engine hooks with handle-table handles:
  *   SH_SCRIPT_EV_DAMAGE  self, other = attacker, third = inflictor, amount, text = damage decl, text2 = location
  *   SH_SCRIPT_EV_DEATH   self, other = attacker, third = inflictor, text = damage decl
  *   SH_SCRIPT_EV_ANIM    self, text = the ae_notify string; on.animation handlers get it whole, and a text
@@ -172,14 +117,11 @@ int sh_script_started(void);
  *                        for any entity of the map
  *   SH_SCRIPT_EV_PROJECTILE self, other = the projectile, text = its decl, vec = origin and direction:
  *                        on.projectile(name, fn(self, p, decl, origin, dir))
- * A damage record's vec is the hit direction (hit.direction).
- * A record for an entity the mod's scripts do not drive is dropped at
- * delivery. Spawns and removals are the handle table's (sh_script_handles_sweep).
- * Notify strings, frame-event commands and node names have any length. */
+ * A damage record's vec is the hit direction. A record for an entity the mod does not drive is dropped at
+ * delivery; spawns and removals are the handle table's (sh_script_handles_sweep). */
 
-/* What the running mods bind: 1 when a running mod registered a handler for the
- * full entityDef name, with that mod's salt in salt_out and the kinds bound
- * (SH_SCRIPT_BIND_ bits) in *kinds. Any thread. */
+/* What the running mods bind: 1 when a running mod registered a handler for the full entityDef name, with its
+ * salt in salt_out and the kinds bound (SH_SCRIPT_BIND_ bits) in *kinds. Any thread. */
 #define SH_SCRIPT_BIND_SPAWN  0x01u
 #define SH_SCRIPT_BIND_THINK  0x02u
 #define SH_SCRIPT_BIND_REMOVE 0x04u
@@ -192,9 +134,8 @@ int sh_script_started(void);
 #define SH_SCRIPT_BIND_SIGNAL 0x200u   /* bound as "signal:<event>" */
 int sh_script_binds(const char *full_name, char *salt_out, size_t cap, unsigned *kinds);
 
-/* 1 when `handle` is an entity of a running mod (placed from its entityDefs
- * or spawned by it: recorded in the handle table under it, not yet
- * removed), with its salt in salt_out. Any thread. */
+/* 1 when `handle` is an entity of a running mod (recorded in the handle table under it, not yet removed), with
+ * its salt in salt_out. Any thread. */
 int sh_script_entity_owner(uint64_t handle, char *salt_out, size_t cap);
 
 /* --------------------------------------------------------------- engine */
@@ -206,25 +147,20 @@ void sh_script_set_console(sh_script_line_fn fn, void *context);
 
 /* ------------------------------------------------------------- API seam */
 
-/* Functions other modules add to every state opened after the call: a
- * global (spawn, players, ...) or an entity method (e:position(), self:move_to).
- * Call before sh_script_map_start, from one thread. Returns 1, or 0 when the
- * table is full or the name is not usable. */
+/* Functions other modules add to every state opened after the call: a global (spawn, players) or an entity
+ * method (e:position()). Call before sh_script_map_start, from one thread; 0 when the table is full or the name is
+ * unusable. */
 #define SH_SCRIPT_API_GLOBAL 1
 #define SH_SCRIPT_API_METHOD 2
 int sh_script_api_add(int kind, const char *name, lua_CFunction fn);
 
-/* A function that adds a module's own globals to every state opened after
- * the call (vars, a read-only table, is the Script node's). It runs inside
- * the state's protected open, after the added functions and before "on".
- * Same rules as sh_script_api_add; adding one twice adds it once. */
+/* A function that adds a module's own globals to every state opened after the call; it runs inside the state's
+ * protected open, after the added functions and before "on". Same rules as sh_script_api_add; once per function. */
 typedef void (*sh_script_opener_fn)(lua_State *L);
 int sh_script_api_add_opener(sh_script_opener_fn fn);
 
-/* SnapMap events (the outputs wired logic listens to). `known` answers 1 for
- * an event name the game has (lower case, without SNAP_EVENT_; NULL accepts
- * any); `wanted` runs when a script registers on.signal (the engine side
- * installs its hook then). */
+/* SnapMap events: `known` answers 1 for an event name the game has (lower case, without SNAP_EVENT_; NULL accepts
+ * any); `wanted` runs when a script registers on.signal, so the engine side installs its hook then. */
 void sh_script_set_signal_ops(int (*known)(const char *event), void (*wanted)(void));
 /* Queue a SnapMap event for every running mod that handles it: the number of
  * mods it reached. Any thread. */
@@ -235,49 +171,37 @@ int sh_script_signal_post(const char *event, sh_script_handle self, sh_script_ha
  * once. */
 typedef void (*sh_script_closer_fn)(void);
 int sh_script_api_add_closer(sh_script_closer_fn fn);
-/* Run fn for every entity of a mod the handle table reports spawned, before
- * the mod's spawn handler: what an API module gives an entity the game's own
- * spawn left out. Up to 4; idempotent. */
+/* Run fn for every spawned entity of a mod before its spawn handler, to give it what the game's spawn left out.
+ * Up to 4; idempotent. */
 void sh_script_api_on_spawn(void (*fn)(void *ent));
 
 /* The mod a state (or any of its coroutines) belongs to. */
 const char *sh_script_salt(lua_State *L);
 const char *sh_script_mod_name(lua_State *L);
 
-/* Push the Lua object for an entity handle: the same object for the same
- * handle within one state, carrying its own e.state table. 0 pushes nil. */
+/* Push the Lua object for an entity handle: the same object per handle within a state, with its own e.state table. */
 void sh_script_push_entity(lua_State *L, uint64_t handle);
 
-/* The handle of the entity object at `arg`, or 0 when it was removed (calls
- * on a removed entity return nil). Raises a plain error when the value is not
- * an entity; `call` names the API call for that sentence. */
+/* The handle of the entity object at `arg`, or 0 when it was removed. Raises a plain error naming `call` when the
+ * value is not an entity. */
 uint64_t sh_script_check_entity(lua_State *L, int arg, const char *call);
 
-/* 1 when the entity is this mod's: recorded in the handle table under it
- * (placed from its entityDefs, or spawned by its scripts, which the spawn
- * subscriber records the same way) and not yet removed. */
+/* 1 when the entity is this mod's: recorded in the handle table under it and not yet removed. */
 int sh_script_owns_entity(lua_State *L, uint64_t handle);
 
-/* The mod-relative naming rule. Resolve the name at `arg` (any length) and
- * return the full name, valid for the next seven resolutions of this state
- * (the stack is left as it was): "ai/tyrant" -> "mods/<salt>/ai/tyrant"; "mods/<salt>/..." with this
- * mod's own salt is accepted as written. Any other "mods/..." name is
- * refused. A native("...") reference resolves to DOOM's name when allow_game
- * (then *is_game = 1) and is refused otherwise. Raises a plain error naming
- * `call` on any refusal, before the caller touches the engine. */
+/* The mod-relative naming rule: resolve the name at `arg` to its full name, valid for the next seven resolutions of
+ * this state: "ai/tyrant" -> "mods/<salt>/ai/tyrant"; this mod's own "mods/<salt>/..." is accepted, any other
+ * "mods/..." refused. A native("...") reference gives DOOM's name when allow_game (*is_game = 1), else is refused;
+ * a refusal raises a plain error naming `call`. */
 const char *sh_script_check_name(lua_State *L, int arg, const char *call, int allow_game, int *is_game);
-/* The same for a sound decl: a short name's leaf takes the namespace ("play_x" -> "mods/<salt>/<salt>_play_x"), as
- * the builder names the mod's sounds/ files (modauthor.h). */
+/* The same for a sound decl: a short name's leaf takes the namespace ("play_x" -> "mods/<salt>/<salt>_play_x"). */
 const char *sh_script_check_sound_name(lua_State *L, int arg, const char *call, int allow_game, int *is_game);
 
-/* Raise a plain error at the calling script line: `fmt` is one sentence the
- * stop line shows as written ("\"spawn\" can only spawn this mod's
- * entities; \"ai/imp\" is not one"). Never returns. */
+/* Raise a plain error at the calling script line; `fmt` is the one sentence the stop line shows. Never returns. */
 int sh_script_refuse(lua_State *L, const char *fmt, ...);
 
-/* The script line at `level` (luaL_where's level): its file whole in *file
- * (malloc'd; NULL when it is not a script line), and its line. luaL_where
- * itself names the file cut to the vendored Lua's LUA_IDSIZE. */
+/* The script line at `level` (luaL_where's level): its whole file name in *file (malloc'd; NULL when it is not a
+ * script line) and its line; luaL_where cuts the name to LUA_IDSIZE. */
 void sh_script_where_line(lua_State *L, int level, char **file, int *line);
 
 /* ------------------------------------------------------------ UI queries */
@@ -319,18 +243,15 @@ typedef struct sh_script_mod_info {
 int sh_script_mod_info_get(const char *salt, sh_script_mod_info *out);
 void sh_script_mod_info_free(sh_script_mod_info *info);
 
-/* Compile every script file of `salt` without running anything (the
- * console's reload outside Play): calls fn with one plain line per file that
- * does not compile, worded as the stop line words it. Returns the files that
- * compiled, or -1 when the files could not be listed. Not while Lua runs. */
+/* Compile every script file of `salt` without running anything (the console's reload outside Play): fn gets one
+ * line per file that fails, worded as the stop line. Returns the files that compiled, or -1 when unlistable. */
 int sh_script_check_files(const char *salt, const char *name, const sh_script_source *source,
                           sh_script_line_fn fn, void *context);
 
 /* ------------------------------------------------------------ for tests */
 
-/* Bytes the runtime holds now: every state's allocator count plus queues,
- * timers, bindings and entity tables (not the kept logs). 0 after
- * sh_script_map_end. */
+/* Bytes the runtime holds: every state's allocator count plus queues, timers, bindings and entity tables (not the
+ * logs); 0 after sh_script_map_end. */
 size_t sh_script_bytes_in_use(void);
 
 /* The wall-clock stop, adjustable for a test; sh_script_limits_reset restores it. */

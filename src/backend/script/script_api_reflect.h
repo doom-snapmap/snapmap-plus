@@ -1,26 +1,19 @@
-/* Script calls that read and write the game's objects by field name
- * (script_reflect.h is the walk; this is its Lua side and its engine side).
+/* Script calls that read and write the game's objects by field name (script_reflect.h is the walk; this is its Lua
+ * side and its engine side).
  *
- *   e:get([path])        the value at `path` of the entity (no path: the whole
- *                        entity as a table). Numbers, true/false, text, an
- *                        enum member's name, an entity for a reference, a
- *                        decl's name for a decl pointer, a table for an
- *                        object, a list (1-based) for a list or array.
- *   e:set(path, value)   write it: a number, true/false, text, an enum member
- *                        by name or number, an entity or nil for an entity
- *                        pointer, a decl name for a decl pointer, a table of
- *                        fields for an object, a list of the same length for
- *                        a list or array. Returns true.
- *   e:fields([path])     the fields of the object at `path` (ancestors' too),
- *                        each { name = , type = , kind = }, in the game's
- *                        own order.
- *   e:class()            the entity's class name.
- *   enum(name)           an enum of the game as a table: member -> number.
+ *   e:get([path])        the value at `path` of the entity (no path: the whole entity as a table): numbers,
+ *                        true/false, text, an enum member's name, an entity for a reference, a decl's name for a
+ *                        decl pointer, a table for an object, a list (1-based) for a list or array
+ *   e:set(path, value)   write it: a number, true/false, text, an enum member by name or number, an entity or nil
+ *                        for an entity pointer, a decl name for a decl pointer, a table of fields for an object, a
+ *                        list of the same length for a list or array; returns true
+ *   e:fields([path])     the fields of the object at `path` (ancestors' too), each { name = , type = , kind = },
+ *                        in the game's own order
+ *   e:class()            the entity's class name
+ *   enum(name)           an enum of the game as a table: member -> number
  *
- * Any entity of the map can be read and written: a script is the map's own
- * logic, as wired logic is. A path that does not exist, a value of the wrong
- * kind, and a field the game does not describe are refused with a sentence
- * that names the part. */
+ * Any entity of the map can be read and written: a script is the map's own logic. A path that does not exist, a
+ * value of the wrong kind and a field the game does not describe are refused with a sentence naming the part. */
 #ifndef SH_SCRIPT_API_REFLECT_H
 #define SH_SCRIPT_API_REFLECT_H
 
@@ -61,15 +54,13 @@ int sh_script_reflect_push(lua_State *L, const sh_rf_loc *loc, char *err, size_t
 /* Store the value at stack index idx into `loc`; 1, or 0 with a sentence in err. */
 int sh_script_reflect_store(lua_State *L, const sh_rf_loc *loc, int idx, char *err, size_t err_cap);
 
-/* The same reads and writes for any object of a class the game describes (a
- * decl, the player's inventory): `call` names the script call in a refusal.
- * Each pushes its result or raises. A write with restore_at_map_end is put
- * back when the map ends (for objects that outlive the map). */
+/* The same reads and writes for any object of a class the game describes (a decl, the player's inventory):
+ * `call` names the script call in a refusal. Each pushes its result or raises. A write with restore_at_map_end is
+ * put back when the map ends (for objects that outlive the map). */
 int sh_script_reflect_ready(void);
-/* For other calls built on the walk (script_api_body.c): the host while the
- * game's types answer (NULL otherwise), an entity's class, the name of a
- * named object (a decl, a gore node), and whether a class descends from
- * another. Each answers NULL or 0 when it cannot. */
+/* For other calls built on the walk (script_api_body.c): the host while the game's types answer (NULL otherwise),
+ * an entity's class, the name of a named object (a decl, a gore node), and whether a class descends from another.
+ * Each answers NULL or 0 when it cannot. */
 const sh_rf_host *sh_script_reflect_host(void);
 const char *sh_script_reflect_class_of(void *ent);
 const char *sh_script_reflect_name_of(const void *object);

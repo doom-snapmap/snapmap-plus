@@ -1,7 +1,5 @@
-/* script_api_tint_test.c -- the pure half of e:tint and e:glow (src/backend/script/script_api_tint.h): the
- * render parms a look is written as, the channel and seconds checks, the fade length, the look a fade shows at a
- * time, a request made in the middle of a fade, the half of the look a request leaves alone, and the table's
- * round-robin replacement. Nothing here touches the engine. */
+/* script_api_tint_test.c -- the pure half of e:tint and e:glow (src/backend/script/script_api_tint.h): looks, fades,
+ * mid-fade requests and the table's round-robin replacement. Nothing here touches the engine. */
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -93,8 +91,7 @@ static void test_fade(void)
     CHECK(near3(now.glow, 1, 0, 0));
     sh_tint_at(r, 99999, &now);
     CHECK(near3(now.glow, 1, 0, 0) && near3(now.tint, 1, 1, 1));
-    /* a request in the middle of the fade starts where the fade is; the tint is the half it leaves alone, and a
-     * tint asked for now keeps the glow's target */
+    /* a request in the middle of the fade starts where the fade is; a tint asked for here keeps the glow's target */
     r = sh_tint_begin(&g_table, 7, 0, tint, 2000, 1000, &from, &to);
     CHECK(near3(from.glow, 0.5f, 0, 0) && near3(from.tint, 1, 1, 1));
     CHECK(near3(to.glow, 1, 0, 0) && near3(to.tint, 0.5f, 0.5f, 0.5f));

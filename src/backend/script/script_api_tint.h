@@ -18,12 +18,11 @@
  * No model program multiplies a surface's albedo by a per-entity parm, so a tint reads as the product on the
  * emissive surfaces and as this wash elsewhere.
  *
- * A change is sent to the engine as one lerpRenderParmFrom event per parm (the engine's own fade, run in game
- * time by idGameLocal's render parm lerper): from the look the entity has now to the look it is given, over the
- * duration. An instant change is a fade of one millisecond, which also replaces a fade still running. The look
- * "now" is kept here, per entity handle, as the last request and the time it began, so a request made in the
- * middle of a fade starts from where the fade has got to. The table is fixed (SH_TINT_RECORDS); an entity that
- * has been displaced from it, or never asked, starts from the neutral look. */
+ * A change is sent as one lerpRenderParmFrom event per parm (the engine's own fade, run in game time) from the
+ * entity's current look to the look it is given. An instant change is a fade of one millisecond, which also
+ * replaces a fade still running. The current look is kept per entity handle as the last request and its start
+ * time, so a request in the middle of a fade starts from where it has got to. The table is fixed
+ * (SH_TINT_RECORDS); an entity displaced from it, or never asked, starts from the neutral look. */
 #ifndef SH_SCRIPT_API_TINT_H
 #define SH_SCRIPT_API_TINT_H
 
@@ -38,12 +37,9 @@ extern "C" {
 #define SH_TINT_MAX_TINT     16.0     /* the largest tint channel */
 #define SH_TINT_MAX_GLOW     64.0     /* the largest glow channel */
 #define SH_TINT_MAX_SECONDS  3600.0   /* the longest fade */
-/* e:glow(r, g, b, [seconds], [strength]): the glow added is the colour times the strength. A glow of full
- * strength (1, what e:glow gave before the strength) washes the whole lit surface with the colour, which hides
- * the surface under it at full blue. The default is a soft glow that leaves the surface readable, chosen from
- * frames of the Tyrant and a stock Baron in a lit arena (snaphak-re R-CR1, glow (0, 0.6, 1)): 0.3 and 0.15
- * still paint them nearly flat cyan, 0.08 glows clearly with the muscles, plates and horns readable, 0.04 and
- * below read as a dim tint. */
+/* e:glow(r, g, b, [seconds], [strength]): the glow added is the colour times the strength. Full strength (1)
+ * washes the whole lit surface with the colour and hides it; the default is a soft glow that leaves the surface
+ * readable (0.3 and 0.15 still paint a demon nearly flat, 0.04 and below read as a dim tint). */
 #define SH_TINT_GLOW_STRENGTH_DEFAULT 0.08
 #define SH_TINT_MAX_STRENGTH 16.0
 #define SH_TINT_PARMS        3
@@ -74,8 +70,6 @@ typedef struct sh_tint_table {
     sh_tint_rec rec[SH_TINT_RECORDS];
     int         next;          /* the record the next new entity takes (round robin) */
 } sh_tint_table;
-
-/* ------------------------------------------------------------------ the look */
 
 static void sh_tint_neutral(sh_tint_state *s)
 {
@@ -109,10 +103,8 @@ static void sh_tint_parms(const sh_tint_state *s, sh_tint_parm out[SH_TINT_PARMS
     out[2].v[3] = 0.0f;
 }
 
-/* ----------------------------------------------------------------- arguments */
-
-/* The words a refused channel is told in: "<call> needs <what> from 0 to <max>, got <value>". 1 when `value` is
- * a finite number in [0, max]; otherwise 0 and the sentence in `err`. */
+/* 1 when `value` is a finite number in [0, max]; otherwise 0 and "<call> needs <what> from 0 to <max>, got <value>"
+ * in `err`. */
 static int sh_tint_check_channel(const char *call, const char *what, double value, double max, char *err, size_t cap)
 {
     if (value == value && value >= 0.0 && value <= max) return 1;
@@ -142,7 +134,7 @@ static int sh_tint_check_strength(const char *call, double strength, char *err, 
 }
 
 /* The glow a request adds: its colour times its strength. 1 when every channel stays within SH_TINT_MAX_GLOW;
- * otherwise 0 and the sentence in `err` (the colour and the strength were each in range, their product is not). */
+ * otherwise 0 and the sentence in `err` (each was in range, their product is not). */
 static int sh_tint_glow_scaled(const char *call, float rgb[3], double strength, char *err, size_t cap)
 {
     int i;
@@ -167,8 +159,6 @@ static int sh_tint_duration_ms(double seconds)
     if (ms > SH_TINT_MAX_SECONDS * 1000.0) ms = SH_TINT_MAX_SECONDS * 1000.0;
     return (int)ms;
 }
-
-/* ---------------------------------------------------------------------- fade */
 
 /* The look a record shows at `now_ms`: its start look moved the fraction of the fade that has run. */
 static void sh_tint_at(const sh_tint_rec *r, int now_ms, sh_tint_state *out)

@@ -1,10 +1,9 @@
-/* script_api_combat.h -- the combat calls of mod scripts (API version 1):
- * damage dealt by a script, projectiles, effects, sounds, joint positions
- * and the pain an entity is in, plus the records the damage, death, pain and
+/* script_api_combat.h -- the combat calls of mod scripts (API version 1): script-dealt damage, projectiles,
+ * effects, sounds, joint positions and the pain an entity is in, plus the records the damage, death, pain and
  * projectile hooks (script_hooks.c) keep for them.
  *
- * Lua (every name of a decl is mod-relative and must be the calling mod's
- * own, "mods/<salt>/..." with its own salt is accepted as written):
+ * Lua (every decl name is mod-relative and must be the calling mod's own; "mods/<salt>/..." with its own salt
+ * is accepted as written):
  *   hitscan(from, dir, damage, [range], [attacker]) -> {pos, normal, entity} or nil
  *   radius_damage(pos, damage, [attacker])
  *   damage(e, damage, [attacker], [from])     e:damage(damage, [attacker], [from])
@@ -20,67 +19,37 @@
  *   e:incoming_projectiles(size) -> { {projectile = p, seconds = t}, ... }, soonest first
  *   ai:can_see_from(other, tag or joint) -> boolean
  *   p:steer(target, [speed])                   p:explode()
- * p:steer and p:explode answer nil once the projectile no longer exists, as
- * every call on a removed entity does; a script may hold `p` for as long as
- * it likes.
- * `attacker` is one of the mod's own entities; without one the damage comes
- * from the world, as a trigger's does. `damage` is a damage decl, `projectile`
- * a projectile decl, `sound` a sound decl, `effect` an entityDef (an fx
- * emitter or any entity the mod made to show an effect), `condition` an fx
- * condition of the entity's own fx decl (FX_...).
+ * p:steer and p:explode answer nil once the projectile is gone, as every call on a removed entity does.
+ * `attacker` is one of the mod's own entities (none: the damage comes from the world, as a trigger's does).
+ * `damage`, `projectile` and `sound` are decls, `effect` an entityDef, `condition` an fx condition (FX_...) of the
+ * entity's own fx decl.
  *
- * Engine paths (build 13954591, both renderers; shared Ghidra evidence in
- * snaphak-re logs/shared-ghidra/SC6-*, offline scans in the campaign's
- * work/SC6/scan):
- *   damage           the entity's `damage` event (244, 'daffeb': decl, direction angles, radius 0,
- *                    multiplier 1, activator, false); a player damaged by a named attacker takes the game's own
- *                    idPlayer::Damage (VK 0x140DC3880, GL 0x140DC30A0) with that attacker as inflictor, because
- *                    the event carries none and a decl with radialDmgUseInflictorToTargetDir warns without one
+ * Engine paths (build 13954591, both renderers):
+ *   damage           the entity's `damage` event (244, 'daffeb'); a player hit by a named attacker takes idPlayer::Damage
+ *                    (VK 0x140DC3880, GL 0x140DC30A0) with the attacker as inflictor, as the event carries none
  *   radius_damage    RadiusDamage(game, origin, inflictor, attacker, decl + 0x70, 1.0, true, NULL)
- *                    (VK 0x1403A21E0, GL 0x1403A1AF0; the ae_radiusDamage handler's own call), which
- *                    queues the deferred radius damage the game applies that frame; the decl's radius
- *   hitscan          the game trace (script_api_common.h) and the damage event on the entity it hits
- *   fire             ae_launchProjectileAtTarget(NULL, decl, joint, target name, false) run at once on
- *                    the AI (300; its handler never reads the animation); the projectile it launches is
- *                    caught by the launch hook. A position target: launched at the AI's own center, then
- *                    steered to the position before its first frame.
- *   launch           the launch fire makes (its event, its hook and the tag), then setLinearVelocity with the
- *                    velocity given: the projectile leaves the tag along it at exactly that speed
- *   incoming_projectiles  every entity number's entity (as entities_near) whose class descends from idProjectile
- *                    (the game's type information), not launched by e itself: its getLinearVelocity less e's,
- *                    a ray from its origin along that, and the box (size x forward, y left, z up, standing on
- *                    e's origin, turned with e's axis). It is incoming when the ray enters the box ahead of it;
- *                    seconds = its distance from the box's center over the relative speed. The same test as DOOM
- *                    Eternal's incoming-projectile query (FUN_1409a9b10, build 25216728: ray against box, both
- *                    distances ahead, the nearest, time = distance over speed), over every projectile instead
- *                    of the demon's tracked list.
+ *                    (VK 0x1403A21E0, GL 0x1403A1AF0), which queues the damage the game applies that frame
+ *   hitscan          the game trace (script_api_common.h), then the damage event on the entity it hits
+ *   fire             ae_launchProjectileAtTarget (300) run at once on the AI; the launch hook catches the projectile,
+ *                    and a position target is steered to before the projectile's first frame
+ *   launch           the launch fire makes, then setLinearVelocity: the projectile leaves the tag at exactly that speed
+ *   incoming_projectiles  entities descending from idProjectile, not launched by e: a ray along the velocity
+ *                    relative to e against e's box (size x forward, y left, z up); seconds = distance over speed
  *   steer            setLinearVelocity on the projectile, at its current speed unless one is given
- *   p:gravity        the engine's setGravity event (one vector) on the projectile, straight down at the rate
- *                    given: it falls at its source game's gravity whatever the map's
- *   p:explode        the projectile's own Explode (idProjectile vtable +0xAA0: VK 0x140F38240,
- *                    GL 0x140F37700) with no collision, as the projectile's fuse does
- *   play_effect(e, cond)      on an AI or a player ae_startFX_Networked / ae_stopFX_Networked (1257 / 1258, '4i'):
- *                    the entity's fx decl, started on every machine. Any other entity (an effect entity)
- *                    answers neither event: idEntity StartFX / StopFX (VK 0x14082C270 / 0x14082D1D0, GL
- *                    0x14082B430 / 0x14082C390), which start and stop the condition on its FX manager
- *   play_effect(effect, pos)  the mod's entityDef spawned through spawn() (its caps), placed and turned to `dir`;
- *                    stop_effect removes it
- *   end_effects_at_once    a detour of the FX manager's stop of one action (VK 0x1416EEEF0, GL 0x1416EF870:
- *                    manager, action index, time, immediate, recycle), installed at the first call. For an
- *                    action of a named decl it skips the fade the game gives a stopped action where DOOM
- *                    Eternal's stop gives none (see "Hard stops" below); every other stop runs unchanged.
- *                    With it a detour of the FX manager's request of one action (VK 0x1416ECC80, GL
- *                    0x1416ED600: manager, action index and six more, forwarded unchanged): a named decl's
- *                    sound item already playing is not requested again, as in DOOM Eternal
+ *   p:gravity        the setGravity event, straight down: the projectile falls at its source game's gravity
+ *   p:explode        the projectile's Explode (idProjectile vtable +0xAA0: VK 0x140F38240, GL 0x140F37700)
+ *   play_effect(e, cond)  an AI or player: ae_startFX_Networked / ae_stopFX_Networked (1257 / 1258, '4i'); any other
+ *                    entity: idEntity StartFX / StopFX (VK 0x14082C270 / 0x14082D1D0, GL 0x14082B430 / 0x14082C390)
+ *   play_effect(effect, pos)  the mod's entityDef spawned through spawn() (its caps); stop_effect removes it
+ *   end_effects_at_once   detours of the FX manager's stop of one action (VK 0x1416EEEF0, GL 0x1416EF870) and
+ *                    request of one action (VK 0x1416ECC80, GL 0x1416ED600), installed at the first call
  *   sound            startSoundShader (200, 'di'): a sound decl on a channel of the entity
- *   tag              getJointHandle / getJointPos / getJointAngle (256 / 259 / 260, the base event
- *                    dispatcher's own cases): the joint in world space
- *   pain             idAI2 +0x5060, the current pain reaction (painType_t), written by SetPainReaction
- *                    (VK 0x140748710, GL 0x140748020) and cleared to PAIN_NONE when the pain state ends
- *                    (VK 0x140749F80, GL 0x140749890)
+ *   tag              getJointHandle / getJointPos / getJointAngle (256 / 259 / 260): the joint in world space
+ *   pain             idAI2 +0x5060, the current pain reaction, written by SetPainReaction (VK 0x140748710,
+ *                    GL 0x140748020) and cleared to PAIN_NONE when the pain state ends (VK 0x140749F80, GL 0x140749890)
  *
- * Every call runs on the game thread inside the script tick. The record
- * functions (sh_script_combat_note_*) are called by hooks on any thread. */
+ * Every call runs on the game thread inside the script tick; the record functions (sh_script_combat_note_*) are
+ * called by hooks on any thread. */
 #ifndef SH_SCRIPT_API_COMBAT_H
 #define SH_SCRIPT_API_COMBAT_H
 
@@ -92,8 +61,7 @@
 extern "C" {
 #endif
 
-/* painType_t of build 13954591 (the enum table is identical on both
- * renderers: VK 0x1434D4C40, GL 0x14351CAE0). */
+/* painType_t of build 13954591 (the enum table is the same on both renderers: VK 0x1434D4C40, GL 0x14351CAE0). */
 #define SH_COMBAT_PAIN_NONE   0
 #define SH_COMBAT_PAIN_COUNT  14
 /* The engine's name of a pain reaction ("PAIN_FALTER"), NULL out of range. */
@@ -101,8 +69,6 @@ const char *sh_script_combat_pain_name(int reaction);
 
 /* soundChannel_t values a script names. */
 int sh_script_combat_channel(const char *name);   /* -1 when unknown */
-
-/* ------------------------------------------------------------ the engine */
 
 typedef struct sh_script_combat_engine {
     /* the loaded decl `name` of decl type `type` ("damage", "projectile", "sound"), or NULL */
@@ -136,43 +102,17 @@ typedef struct sh_script_combat_engine {
 
 void sh_script_combat_set_engine(const sh_script_combat_engine *engine);
 
-/* Add the combat calls to every script state opened from now on. Idempotent. */
+/* Add the combat calls to every script state opened afterwards. Idempotent. */
 void sh_script_combat_register(void);
 
-/* Forget every record (a new map's states, or the tests) and register the
- * release of records with the handle table. */
+/* Forget every record (a new map's states, or the tests) and register the release of records with the handle table. */
 void sh_script_combat_reset(void);
 
-/* -------------------------------------------------------------- hard stops */
-
-/* The game ends a stopped action of an effect one way for every kind of
- * item: with a fade-out time the action fades for that long from the stop,
- * without one it ends in that frame. DOOM Eternal's effects are authored for
- * another rule (its FX manager's stop, read in its executable): a model, a
- * render parm item, a radial or gaussian blur, a screen overlay and a screen
- * particle end in the frame of the stop whatever their fade-out time, which
- * acts on them only at the end of their own duration; lights, particles,
- * sounds and ribbons fade as the game's do. And an action the stop reaches
- * while it still waits out its delay is started later with a fade factor
- * below zero, with which a particle draws nothing. end_effects_at_once gives the
- * named decls that rule: the first kinds end at once, and a particle or a
- * light stopped inside its delay ends there and is never started.
- *
- * The same rule covers a request of a sound item while its sound plays. The
- * game requests the action again in place and starts a second sound in the
- * next update, keeping only the second one's handle: the first goes on
- * unstopped, and one that loops in its sound event plays for good. DOOM
- * Eternal requests an item again only when nothing of it is running, or when
- * the item allows a restart before its end (the item's byte at +0x26, which
- * this game names forceLoopRestart). Under end_effects_at_once a request of a
- * named decl's sound item whose action is requested and has started, with
- * that byte clear, is not passed to the game; every other request is. A
- * sound still inside its delay has not started, so the game's own re-arm of
- * it stays.
- *
- * Names are whole decl names ("mods/<salt>/character/x") or a prefix ending
- * in '/' ("mods/<salt>/": every decl of the mod). The game's own decls are
- * never named, so they keep the game's rule. */
+/* Under end_effects_at_once a stopped action of a named decl follows DOOM Eternal's FX stop rule, not the game's
+ * fade: a model, render parm, blur, screen overlay or screen particle ends in the frame of the stop, and a particle
+ * or light stopped inside its delay is never started. A request of a named decl's sound item whose action is
+ * requested and started, with the item's byte at +0x26 (forceLoopRestart) clear, is not passed to the game, so a
+ * looping sound is not doubled. Names are whole decl names or a prefix ending in '/'; the game's own are never named. */
 #define SH_FX_TYPE_LIGHT           0     /* fxActionType_t of build 13954591 (both renderers) */
 #define SH_FX_TYPE_PARTICLE        1
 #define SH_FX_TYPE_MODEL           4
@@ -181,14 +121,11 @@ void sh_script_combat_reset(void);
 #define SH_FX_TYPE_BLUR_RADIAL     13
 #define SH_FX_TYPE_BLUR_GAUSSIAN   14
 #define SH_FX_TYPE_SCREEN_OVERLAY  20
-/* 1 when a stop that is not immediate ends an action of this type in that
- * frame under the rule: `screen_particle` is the item's isScreenPrt, `waiting`
- * says the action's delay has not passed yet. 0: the game's own stop. */
+/* 1 when a stop that is not immediate ends an action of this type in that frame under the rule: `screen_particle`
+ * is the item's isScreenPrt, `waiting` says the action's delay has not passed yet. 0: the game's own stop. */
 int  sh_fx_hard_ends(int type, int screen_particle, int waiting);
-/* 1 when a request of an item of this type is not passed to the game under
- * the rule: a sound item whose action's `flags` say requested and started,
- * and `restart_before_end` (the item's byte at +0x26) is 0. 0: the game's own
- * request. */
+/* 1 when a request of an item of this type is not passed to the game: a sound item whose action's `flags` say
+ * requested and started, and `restart_before_end` (the item's byte at +0x26) is 0. 0: the game's own request. */
 int  sh_fx_sound_held(int type, unsigned flags, int restart_before_end);
 /* Name a decl, or every decl under a prefix that ends in '/'. 1 named (or
  * already named), 0 refused (empty, too many, no memory). Any thread. */
@@ -199,17 +136,11 @@ int  sh_fx_hard_count(void);
 /* Forget every name (a new map's states, or the tests). */
 void sh_fx_hard_reset(void);
 
-/* ------------------------------------------------- records from the hooks */
+/* A record lives as long as its entity: the handle table's sweep (sh_script_handles_on_gone, registered by
+ * sh_script_combat_reset) drops the launch, last hit and death records. No record table has a count of its own. */
 
-/* Every record lives exactly as long as the entity it concerns: the handle
- * table's sweep releases an entity's handle and tells this module, which
- * drops its launch, last hit and death records (sh_script_handles_on_gone,
- * registered by sh_script_combat_reset). No record table has a count of its
- * own; each grows with the entities alive. */
-
-/* The launch hook: a projectile `owner` (an entity of mod `mod`) launched.
- * Records the projectile's handle and its launch together and returns the
- * handle (0 without memory: then nothing is recorded). Any thread. */
+/* The launch hook: a projectile `owner` (an entity of mod `mod`) launched. Records the projectile's handle and
+ * launch and returns the handle (0 without memory: nothing is recorded). Any thread. */
 sh_script_handle sh_script_combat_launch(uint32_t projectile_spawn_id, sh_script_handle owner, int mod);
 /* Before the engine launches a projectile of `owner`: 1 with the origin and
  * axis (rows forward, left, up) ai:fire asked this launch to start from. */
@@ -222,12 +153,11 @@ void sh_script_combat_note_launch(uint32_t projectile_spawn_id, sh_script_handle
  * scripted mod this map, exists, with that mod and launcher. Any thread. */
 int  sh_script_combat_launched(uint32_t projectile_spawn_id, int *mod, sh_script_handle *owner);
 
-/* Launch records held now (projectiles alive that scripted entities launched). */
+/* Launch records held now. */
 int  sh_script_combat_launches(void);
 
-/* The last hit `victim` took: its damage decl and attacker (0 for none).
- * The pain hook reports them with the reaction. *decl gets a malloc'd copy
- * of the whole name (the caller frees it). Any thread. */
+/* The last hit `victim` took: its damage decl and attacker (0 for none), as the pain hook reports them.
+ * *decl gets a malloc'd copy of the whole name (the caller frees it). Any thread. */
 void sh_script_combat_note_hit(sh_script_handle victim, const char *decl, sh_script_handle attacker);
 int  sh_script_combat_last_hit(sh_script_handle victim, char **decl, sh_script_handle *attacker);
 
@@ -237,19 +167,14 @@ int  sh_script_combat_first_death(sh_script_handle victim);
 
 #ifndef SH_SCRIPT_PURE
 #include "../signatures.h"
-/* Boot: resolve the signatures (script_combat_sigs.c), the decl registry from
- * the shared results and the fx condition table, fill the engine and register
- * the calls. Returns 1 when usable; 0 with one plain log line (the calls then
- * answer nil). */
+/* Boot: resolves the signatures, the decl registry and the fx condition table, fills the engine and registers the
+ * calls. Returns 1 when usable; 0 with one plain log line (the calls then answer nil). */
 int sh_script_combat_install(const sig_result *results, size_t count, const uint8_t *module_base);
 #endif
 
-/* ------------------------------------------------------------- signatures */
-
 #include "../signatures.h"
-/* script_combat_sigs.c: the private signatures of the combat engine side and
- * of the damage, pain and projectile hooks (two-image test:
- * tests/script_combat_sigs_test.c). Enum order, NULL-terminated. */
+/* script_combat_sigs.c: the signatures of the combat engine side and of the damage, pain and projectile hooks
+ * (two-image test: tests/script_combat_sigs_test.c). Enum order, NULL-terminated. */
 enum sh_combat_sig {
     SH_COMBAT_SIG_DAMAGE_APPLY,      /* idAI2::Damage_Apply(ai, record): detoured */
     SH_COMBAT_SIG_SET_PAIN,          /* idAI2 SetPainReaction(ai, reaction, ms): detoured */
@@ -272,15 +197,13 @@ extern const sig_entry SH_COMBAT_SIGNATURES[];
 #define SH_COMBAT_DAMAGE_APPLY_STOLEN 14
 #define SH_COMBAT_SET_PAIN_STOLEN     15
 #define SH_COMBAT_LAUNCH_STOLEN       15
-/* The FX manager's stop of one action: six pushes and sub rsp (whole,
- * position-independent). */
+/* The FX manager's stop of one action: six pushes and sub rsp (whole, position-independent). */
 #define SH_COMBAT_FX_STOP_STOLEN      16
 static const unsigned char k_combat_fx_stop_prologue[SH_COMBAT_FX_STOP_STOLEN] = {
     0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x55, 0x41, 0x57, 0x48, 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00
 };
-/* What that function reads (its own code, both renderers; the test compares
- * the bytes): the manager's decl and actions, the decl's items, and of an
- * item and an action the fields its fade branch tests. */
+/* What that function reads (both renderers; the test compares the bytes): the manager's decl and actions, the
+ * decl's items, and the item and action fields its fade branch tests. */
 #define SH_FX_MGR_DECL            0x18u    /* idFXManager: its idDeclFX* */
 #define SH_FX_MGR_ACTIONS         0x58u    /*              idFXActionData array, one per item */
 #define SH_FX_DECL_ITEMS          0x80u    /* idDeclFX: idFXSingleAction array */
@@ -295,17 +218,13 @@ static const unsigned char k_combat_fx_stop_prologue[SH_COMBAT_FX_STOP_STOLEN] =
 #define SH_FX_ACTION_REQUESTED    0x02u
 #define SH_FX_ACTION_FADING       0x10u
 #define SH_FX_STOP_FADE_BRANCH    0x90u    /* the function's fade branch (the test compares its bytes) */
-/* The FX manager's request of one action: seven pushes and lea rbp,[rsp-0x90]
- * (whole, position-independent; the next instruction loads the stack cookie
- * RIP-relative). */
+/* The FX manager's request of one action: seven pushes and lea rbp,[rsp-0x90] (whole, position-independent). */
 #define SH_COMBAT_FX_REQUEST_STOLEN   19
 static const unsigned char k_combat_fx_request_prologue[SH_COMBAT_FX_REQUEST_STOLEN] = {
     0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x70, 0xFF, 0xFF, 0xFF
 };
-/* What the request reads besides the fields above (its own code, both
- * renderers; the test compares the bytes): its head returns at once for a
- * requested, looping, not fading action whose item does not force a loop
- * restart, and otherwise re-arms the action in place. */
+/* What the request reads besides the fields above (both renderers; the test compares the bytes): its head
+ * returns at once for a requested, looping, not fading action whose item does not force a loop restart. */
 #define SH_FX_ITEM_LOOPING        0x25u    /* idFXSingleAction: looping */
 #define SH_FX_ITEM_RESTART        0x26u    /*                   forceLoopRestart (DOOM Eternal: allowRestartBeforeEnd) */
 #define SH_FX_ACTION_STARTED      0x04u    /* idFXActionData flags: actually started (a sound: posted or due) */
@@ -335,13 +254,9 @@ static const unsigned char k_combat_fx_request_prologue[SH_COMBAT_FX_REQUEST_STO
 int sh_script_combat_ray_box(const float o[3], const float d[3], const float c[3], const float ax[9],
                              const float h[3], double *enter, double *leave);
 
-/* The engine's enum tables are arrays of { char *name, char *value, ... }
- * 0x18 bytes apart. Find the table whose first two names are `first` and
- * `second`, in an image mapped by RVA (the loaded module or a test's copy):
- * returns the table's RVA and the count of consecutive entries whose names
- * start with `prefix`, or 0. pointer_base is the address the image's
- * pointers were relocated to (the loaded module's base), 0 for a copy that
- * keeps the file's preferred base. */
+/* Finds the engine enum table (entries { char *name, char *value, ... } 0x18 bytes apart) whose first two names
+ * are `first` and `second` in an image mapped by RVA; returns its RVA and the count of entries whose names start
+ * with `prefix`, or 0. pointer_base is the base the image's pointers were relocated to (0 for a copy at its own). */
 uint32_t sh_script_combat_enum_find(const uint8_t *module_base, uint64_t pointer_base, const char *first,
                                     const char *second, const char *prefix, int *count);
 

@@ -1,21 +1,10 @@
-/* script_api_body.c -- sync_partner, wounds_open and break_constraint
- * (script_api_body.h). The first half reads through the game's type
- * information and the engine table, so the pure test runs it over fake
- * types; the second half, without SH_SCRIPT_PURE, resolves the one engine
- * call.
- *
- * Build 13954591 facts (shared Ghidra, snaphak-re logs/shared-ghidra/gk2/):
- *   sync           idSyncEntity.activeParticipants, idList < idActiveSyncParticipant >: instance (an entity
- *                  reference), data (idSyncParticipant *, its type: INSTIGATOR 0, TARGET 1, HELPER 2). A
- *                  participant entity carries no link to its sync, so the map's sync entities are asked.
- *   wounds         goreComponent.activeWounds and .pendingWounds, idList < woundData_t >; woundNode is the
- *                  idDeclGoreNode whose name (+8, the name ae_goreEnableByName takes) the call answers.
- *   figure         an idAnimator_AF field (afProperties on idGoreEntity) .physicsObj (idPhysics_AF)
- *                  .constraints, idList < idAFConstraint * >, each with its idAtomicString name (+0x10, the
- *                  interned text pointer). DeleteConstraint VK 0x141643050 / GL 0x141643B60 (physics,
- *                  idAtomicString *) finds the constraint by that pointer, deletes it, closes the list and
- *                  sets changedAF (+0x2D0) so the figure rebuilds its trees; idAnimator_AF's own bind
- *                  constraint removal (VK 0x141659200) calls it the same way at run time. */
+/* script_api_body.c -- sync_partner, wounds_open and break_constraint (script_api_body.h). The first half reads through
+ * the game's type information, so the pure test runs it over fake types; the second half resolves the one engine call. */
+/* Build 13954591 layout read through reflection: idSyncEntity.activeParticipants (idActiveSyncParticipant: instance,
+ * data = participant type, INSTIGATOR 0, TARGET 1, HELPER 2); goreComponent.activeWounds and .pendingWounds (woundData_t,
+ * woundNode the gore node named at +8); an idAnimator_AF field's physicsObj.constraints (name idAtomicString at +0x10).
+ * DeleteConstraint (VK 0x141643050 / GL 0x141643B60) finds a constraint by that pointer, deletes it and sets changedAF
+ * (+0x2D0) so the figure rebuilds its trees. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
