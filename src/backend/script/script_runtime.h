@@ -154,9 +154,6 @@ int sh_script_started(void);
 
 /* ---------------------------------------------------------------- events */
 
-/* An entityDef chain (the entityDef's name, then its inherits, a newline
- * between them) fits in this many bytes. */
-
 /* Records come in through the mod's queue (script_queue.h), posted by the
  * engine hooks with handles from the handle table:
  *   SH_SCRIPT_EV_DAMAGE  self, other = attacker, third = inflictor, amount, text = damage decl, text2 = location

@@ -171,7 +171,7 @@ a synthetic report against a GitHub mock. See [tests/README.md](../tests/README.
 for its pinned dependency and command. CI runs both the normal suite and the
 Worker runtime suite.
 
-More tests scan a **real DOOM image** (`sig_test` and `globals_test`, plus `build_identity_test` and `x64_len_test`, which also take the images) — the executables of the supported build (the April 2024
+More tests scan a **real DOOM image** (`sig_test` and `globals_test`, plus `build_identity_test`, `x64_len_test` and the other image-backed suites [tests/README.md](../tests/README.md) lists) — the executables of the supported build (the April 2024
 update, Steam build 13954591; they are not DRM-wrapped, so use the shipped files). **Running these is
 REQUIRED if you add or change any entry in the engine signature table** in `src/backend/signatures.c` **or
 in the engine-globals table** — they are the only thing that checks a recorded RVA, and CI cannot run them
@@ -302,7 +302,7 @@ that are merged but not yet tagged do not appear.
    scripts as a local build and caches fetched dependencies (the WebView2 SDK, miniflare and the Go
    caches) and `build/obj/`, whose content keys decide what a run recompiles. It runs in a **secretless** sandbox — fork PRs get a read-only token and zero
    repo secrets.
-9. A **maintainer reviews** and merges (changes under `.github/`, `*.ps1`, and `installer/` are
+9. A **maintainer reviews** and merges (changes under `.github/`, `*.ps1`, `installer/` and `tools/` are
    CODEOWNERS-gated). Releases are cut from reviewed, tagged commits — see the README's
    ["Versioning & releases"](../README.md#versioning--releases).
 
@@ -520,7 +520,7 @@ release. **Do not open a public issue for a security problem.** Use GitHub's **p
 
 | `installer/` | `snapmap-plus.exe` — the Go install / update / uninstall CLI |
 | `tests/` | the native unit tests + `run-tests.ps1` |
-| `tools/` | the changelog parser (`changelog.py`), the release-notes drafter (`draft_changelog.py`), the published-release sync (`sync_release_notes.py`) and their tests |
+| `tools/` | the changelog parser (`changelog.py`), the release-notes drafter (`draft_changelog.py`), the published-release sync (`sync_release_notes.py`) and their tests, the package check (`bundle_guard.ps1`), the table generators (`gen_programs.js`, `gen_script_sdk.js`) and the signature tools; see [tools/README.md](../tools/README.md) |
 | `CHANGELOG.md` | the user-facing release notes -- the single source every consumer reads |
 | `docs/` | contributor guides and cross-component contracts, indexed in [README.md](README.md) |
 | `build.ps1` | compile the DLLs → `build/` (backend + frontend; `-BackendOnly` for backend alone) |

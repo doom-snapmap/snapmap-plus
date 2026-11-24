@@ -3,7 +3,7 @@
 #
 #   tests\run-tests.ps1
 #   tests\run-tests.ps1 -Doom <DOOMx64vk.exe 13954591> -DoomAlt <DOOMx64.exe 13954591>
-#   tests\run-tests.ps1 -Skip map_published_test
+#   tests\run-tests.ps1 -Skip modvt_test
 #
 # The default suite needs no game or built DLL. -Doom and -DoomAlt take the two
 # executables of the supported build (13954591, no unpacking needed) and add

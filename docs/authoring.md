@@ -74,11 +74,10 @@ that name.
 
 ## A small mod from an empty folder
 
-A crate that throws sparks and glows where it is hit. It draws the game's own SnapMap crate and the game's own sparks,
-so the mod carries no binary file. (This example is built and served offline by the product's tests; see "What the
-build checks".)
+A crate that throws sparks and glows when it is hit. It draws the game's own SnapMap crate and the game's own sparks,
+so the mod carries no binary file.
 
-1. In the Mods tab press **New mod**, or make the folder yourself:
+1. Make the folder yourself (**New mod** in the Mods tab starts a folder with an example crate of its own):
 
    ```
    %LOCALAPPDATA%\snapmap-plus\mods\spark-crate\
@@ -94,12 +93,12 @@ build checks".)
    ```json
    {
      "name": "Spark crate",
-     "description": "A crate that throws sparks where it is hit.",
+     "description": "A crate that throws sparks when it is hit.",
      "author": "you",
      "strings": {
        "en": {
          "crate_name": "Spark crate",
-         "crate_desc": "Throws sparks and glows where it is hit.",
+         "crate_desc": "Throws sparks and glows when it is hit.",
          "crate_category": "Spark crate"
        }
      }
@@ -123,30 +122,14 @@ build checks".)
    }
    ```
 
-4. `effects/crate_sparks.decl`, one of the game's own spark particles, played once:
+4. `effects/crate_sparks.decl`, a [Graphics SDK effect](graphics-sdk.md#effects) that plays one of the game's own
+   spark particles:
 
    ```
    {
-   	edit = {
-   		editEvents = {
-   			num = 1;
-   			item[0] = {
-   				name = "sparks";
-   				type = "FX_PARTICLE";
-   				duration = 1;
-   				startCondition = {
-   					num = 1;
-   					item[0] = "FX_NONE";
-   				}
-   				stopCondition = {
-   					num = 1;
-   					item[0] = "FX_NONE";
-   				}
-   				particleParms = {
-   					declPrt = "env/sparks/sparks_med_01";
-   				}
-   			}
-   		}
+   	type		effect
+   	particles {
+   		use		env/sparks/sparks_med_01
    	}
    }
    ```
@@ -172,7 +155,7 @@ build checks".)
    api = 1
 
    on.damage("crate", function(crate, hit)
-     play_effect("crate_sparks", hit.location)
+     play_effect("crate_sparks", crate)   -- the effect plays on the crate and follows it
      crate:glow(1, 0.45, 0.1, 0.3)   -- an orange glow, fading in over 0.3 seconds
    end)
    ```

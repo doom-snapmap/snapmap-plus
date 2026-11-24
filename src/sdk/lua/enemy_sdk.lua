@@ -1,4 +1,5 @@
--- enemy_sdk.lua: bind a brain (enemy_brain.lua) to a demon's entityDef. A demon's entry script is
+-- enemy_sdk.lua: bind a brain (a table of spawn, think, damage, death, remove, pain, projectile and frame
+-- functions, and an optional bind) to a demon's entityDef. A demon's entry script is
 -- three lines:
 --
 --   api = 1

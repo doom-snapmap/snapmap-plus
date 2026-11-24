@@ -8,7 +8,9 @@
  *                                  so it costs no bytes; the serving index admits it as a bundle served only when a
  *                                  map declares it
  *   served\<composition hash>.json what the composition holds: its units, the units it stands in for, its namespace
- *   partial\<sha256>.part          an interrupted download, resumed by Range
+ *   partial\<sha256>.part          an interrupted download, resumed by Range (a unit archive:
+ *                                  <hash>.zip.part, or <hash>.<mask>.zip.part; a file being written:
+ *                                  <sha256>.<thread>.part); the sweep removes every *.part
  *
  * A pinned map row (modmanifest.h) names units; its composition hash is
  *   SHA-256("snapmap-plus/composition/1\n" + unit format + "\n" + namespace + "\n" + each unit hash in byte order,

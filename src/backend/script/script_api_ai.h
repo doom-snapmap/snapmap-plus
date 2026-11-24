@@ -650,7 +650,7 @@ typedef struct sh_script_ai_engine {
      * parked), -1 unavailable. */
     int      (*release)(void *ai);
     /* Set the variable `name` of the demon's body anim web to `value`, by the
-     * engine's own set-by-name (sh_ai_web_scalar below): the member it is
+     * engine's own set-variable-by-name: the member it is
      * bound to, or the web's own scalar memory. 1 set, 0 the web has no
      * variable of that name, -1 unavailable. */
     int      (*anim_variable)(void *ai, const char *name, float value);

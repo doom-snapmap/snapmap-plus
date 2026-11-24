@@ -141,7 +141,7 @@ It lists the items that play together. Each item says when it starts, how long i
 ```
 {
 	type		effect
-	lasts		2			// every item that names no lasts of its own lasts 2 seconds
+	lasts		2			// every item but sound and particles that names no lasts of its own lasts 2 seconds
 	light {
 		colour		{ 1, 0.45, 0.1 }
 		brightness	flicker { rate 8, low 3, high 6 }
@@ -191,7 +191,7 @@ mod's folders is written `native:` before it (`native:effects/...`); `native("..
 | Field | Value | What it does |
 |---|---|---|
 | `starts` | seconds, or `{ least, most }` | waits before the item starts (the game draws between the two) |
-| `lasts` | seconds | how long it plays (the effect's own `lasts` for an item that names none) |
+| `lasts` | seconds | how long it plays (the effect's own `lasts` for an item that names none, except `sound` and `particles`) |
 | `fadein`, `fadeout` | seconds | how long it takes to fade in and out (for particles: fractions of each particle's life) |
 | `repeats` | `yes` / `no` | starts again when it ends, while the effect plays |
 | `restarts` | `yes` / `no` | starts again when it is asked to start while it plays |
@@ -212,7 +212,7 @@ mod's folders is written `native:` before it (`native:effects/...`); `native("..
 | `decal` | `material`, `size`, `depth`, `angle`, `glow` (`{ r, g, b, strength }`), `glowlasts` (seconds), `colour`, `stays` (`yes`/`no`) | a decal projected where the effect faces |
 | `shake` | `strength`, `angles` (`{ pitch, yaw, roll }`), `move` (`{ x, y, z }`), `use` (one of the game's advanced shakes) | shakes the view of every player in reach |
 | `flash` | `brightness` | flashes the view of every player in reach |
-| `screen` | `material`, `colour`, `tiles` (`{ x, y }`), `mirror`, `bottom` | an image over the view |
+| `screen` | `material`, `colour` (three numbers), `tiles` (`{ x, y }`), `mirror`, `bottom` | an image over the view |
 | `blur` | `strength`, `style` (`radial`, `soft`) | blurs the view |
 | `focus` | `near`, `focus`, `far` | depth of field |
 | `flare` | `use` (a flare), `size`, `colour` | a lens flare |
@@ -224,7 +224,7 @@ mod's folders is written `native:` before it (`native:effects/...`); `native("..
 | `wind` | `strength`, `angle` | wind |
 | `particles` | [Particles](#particles), or `use` (a particle decl), `size`, `colour`, `onscreen` | particles |
 
-A colour is `{ r, g, b }`, or `{ r, g, b, opacity }`.
+A colour is `{ r, g, b }`, or `{ r, g, b, opacity }` (a `screen` item's colour takes the three numbers only).
 
 An effect is played from a script ([Scripts](#scripts)), or named where the game names an fx (an entityDef's
 `fxDecl`, written `effects/<name>`): the product writes its fx decl under the same name, so nothing else changes.
@@ -250,6 +250,7 @@ particles {
 	size		curve { 0 4, 0.3 10, 1 0 }	// over each particle's life
 	colour		fade { from { 1, 0.8, 0.3 }, to { 0.6, 0.05, 0 } }
 	opacity		1
+	brightness	1			// at most 1: the game draws a stage no brighter (give the image's glow instead)
 	fadein		0.1			// fractions of the life
 	fadeout		0.4
 	angle		{ 0, 360 }		// each particle's starting angle
@@ -262,8 +263,9 @@ particles {
 }
 ```
 
-`size`, `colour` and `opacity` take a number (or a colour), two numbers (each particle between them), or a
-[changing value](#values-that-change-over-time) over the particle's life. A speed range, drag and bounce are
+`size` takes a number, two numbers (each particle between them), or a
+[changing value](#values-that-change-over-time) over the particle's life; `colour` takes a colour or a changing
+value; `opacity` takes one number. A speed range, drag and bounce are
 Snapmap+'s simulated particle motion (see [architecture.md](architecture.md#simulated-particle-motion)); everything else is
 the game's own particle stage. A stage with very many particles is drawn on the CPU today; the product will choose
 the game's GPU stages for it once that path is measured (the build log says which it took).
@@ -333,8 +335,11 @@ A wound is a file in the mod's `decls/gorewounds/` folder (`decls/gorewounds/<na
 	at		gorefx_chest		// the joint the blood (and what it throws) comes from
 	throws		entities/gibs/chest_chunk
 	whilealive	yes			// opens while the demon lives
+	ragdoll		no			// yes: the demon ragdolls at once when it opens
 }
 ```
+
+`parts` is required; `at` is required unless `blood none`; `blood` left out is `spray`.
 
 The demon's gore graph names its wounds, as for any wound.
 
