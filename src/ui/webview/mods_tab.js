@@ -86,7 +86,7 @@ var modsTab = (function () {
     var f = str(folder) || "<the mod's folder name>";
     return 'Put each new file in the folder for what it is (materials, images, meshes, animations, effects, entities, sounds, scripts), and in your files name it by that folder and its path, as in materials/crate.';
   }
-  var NEW_MOD_NOTE = 'Snapmap+ makes a folder for it in mods\\ with an example crate you can place right away.';
+  var NEW_MOD_NOTE = 'Snapmap+ makes a folder for it in your mods folder with an example crate you can place right away.';
   /* What removing a mod from a map severs: wires and timeline references to its placed entities.
      Other reference kinds are not consequences of the removal and are not shown. */
   var REF_KINDS = {wire: 'wire', timeline: 'timeline'};
@@ -549,9 +549,9 @@ var modsTab = (function () {
     if (pv.action === 'uninstall' && pv.editorRows.length)
       out.push({text: 'Removes ' + plural(pv.editorRows.length, 'Toybox row') + ' from the editor (' + pv.editorRows.join(', ') + ').'});
     if (pv.install) {
-      out.push({text: 'Moves the folder mods\\' + pv.install.folder + ' to the Windows Recycle Bin.'});
+      out.push({text: 'Moves its folder, ' + pv.install.folder + ', to the Windows Recycle Bin.'});
       if (pv.install.keptBuild)
-        out.push({text: 'Another folder of this mod stays installed (mods\\' + pv.install.keptBuild + '); maps that use the mod open with it.'});
+        out.push({text: 'Another folder of this mod, ' + pv.install.keptBuild + ', stays installed; maps that use the mod open with it.'});
       else if (pv.install.savedMaps > 0) out.push({text: savedMapsText(pv.install.savedMaps)});
     }
     return out;
@@ -1067,7 +1067,7 @@ var modsTab = (function () {
       var head = el('div', 'pf-folder-head' + (area ? ' mods-area-head' : ''));
       head.setAttribute('role', 'button');
       head.setAttribute('aria-expanded', closed ? 'false' : 'true');
-      head.title = area ? label : 'mods\\' + id;
+      head.title = area ? label : 'Folder ' + id;
       var caret = el('span', 'pf-caret');
       caret.appendChild(icon('chevron-down'));
       head.appendChild(caret);
@@ -1211,7 +1211,7 @@ var modsTab = (function () {
     function howTo(box, empty) {
       var card = el('div', 'mods-howto');
       card.appendChild(el('div', 'mods-howto-head', 'How mods work'));
-      card.appendChild(el('p', '', 'A mod is a folder in mods\\ holding mod.json and folders for what its files are: materials\\, meshes\\, scripts\\ and the rest.'));
+      card.appendChild(el('p', '', 'A mod is a folder in your mods folder holding mod.json and folders for what its files are: materials\\, meshes\\, scripts\\ and the rest.'));
       card.appendChild(el('p', '', folderRuleText('')));
       card.appendChild(el('p', '', 'A map carries the mods it uses: the pieces of the objects you place, or the whole of a mod used in the whole map. A player who opens the map gets them with it.'));
       card.appendChild(el('p', '', REFRESH_TEXT));

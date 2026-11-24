@@ -35,8 +35,8 @@ static const char *value_words(lua_State *L, int arg)
 
 typedef struct decl_ud {
     void *ptr;
-    char  type[64];
-    char  cls[128];     /* "" when the game does not describe the type */
+    const char *type;   /* the type as the script named it, kept in the userdata after the struct */
+    const char *cls;    /* "" when the game does not describe the type; after the type */
 } decl_ud;
 
 static decl_ud *check_decl_ud(lua_State *L, const char *call)
@@ -99,7 +99,7 @@ static int d_eq(lua_State *L)
 /* decl(type, name) */
 static int l_decl(lua_State *L)
 {
-    const char *type = sh_script_api_check_text(L, 1, "decl", "the decl's type (such as \"damage\")", sizeof ((decl_ud *)0)->type - 1);
+    const char *type = sh_script_api_check_text(L, 1, "decl", "the decl's type (such as \"damage\")", SH_SCRIPT_TEXT_ANY);
     const char *full, *cls;
     int is_game = 0;
     void *ptr;
@@ -113,12 +113,20 @@ static int l_decl(lua_State *L)
         return sh_script_refuse(L, is_game ? "\"decl\" found no %s decl named %s in the game"
                                            : "\"decl\" found no %s decl \"%s\" in this mod; a decl of the game is "
                                              "decl(type, native(name))", type, is_game ? full : lua_tostring(L, 2));
-    d = (decl_ud *)lua_newuserdatauv(L, sizeof *d, 0);
-    memset(d, 0, sizeof *d);
-    d->ptr = ptr;
-    strncpy_s(d->type, sizeof d->type, type, _TRUNCATE);
     cls = OP(decl_class) ? g_ops.decl_class(type) : NULL;
-    if (cls && strlen(cls) < sizeof d->cls) strcpy_s(d->cls, sizeof d->cls, cls);
+    if (!cls) cls = "";
+    {
+        /* the names live in the userdata itself, whatever their length */
+        size_t tl = strlen(type) + 1, cl = strlen(cls) + 1;
+        char *text;
+        d = (decl_ud *)lua_newuserdatauv(L, sizeof *d + tl + cl, 0);
+        text = (char *)(d + 1);
+        memcpy(text, type, tl);
+        memcpy(text + tl, cls, cl);
+        d->ptr = ptr;
+        d->type = text;
+        d->cls = text + tl;
+    }
     luaL_setmetatable(L, "decl");
     return 1;
 }
@@ -216,7 +224,7 @@ static int event_call(lua_State *L, int post)
 {
     const char *call = post ? "queue_event" : "run_event";
     void *ent = sh_script_api_entity(L, 1, call, NULL);
-    const char *name = sh_script_api_check_text(L, 2, call, "the event's name", 200);
+    const char *name = sh_script_api_check_text(L, 2, call, "the event's name", SH_SCRIPT_TEXT_ANY);
     const sh_script_engine *e = sh_script_api_engine();
     char format[40];
     sh_script_earg a[SH_SCRIPT_EVENT_ARGS], r;
@@ -351,7 +359,7 @@ static int l_post(lua_State *L) { return event_call(L, 1); }
 /* event_arguments(name) -> { "entity", "decl" } or nil */
 static int l_event_args(lua_State *L)
 {
-    const char *name = sh_script_api_check_text(L, 1, "event_arguments", "the event's name", 200);
+    const char *name = sh_script_api_check_text(L, 1, "event_arguments", "the event's name", SH_SCRIPT_TEXT_ANY);
     const sh_script_engine *e = sh_script_api_engine();
     char format[40];
     int i, n = 0;
@@ -370,12 +378,16 @@ static int l_event_args(lua_State *L)
 static int g_signals_wanted;   /* a script of this map handles a SnapMap event */
 
 /* Copy the event's key (lower case, without snap_event_). */
-static void signal_key(const char *s, char *out, size_t cap)
+/* The event's key: lower case, without snap_event_ (malloc'd, any length), or NULL without memory. */
+static char *signal_key(const char *s)
 {
-    size_t i = 0;
-    for (; *s && i + 1 < cap; s++) out[i++] = (*s >= 'A' && *s <= 'Z') ? (char)(*s + 32) : *s;
+    size_t i = 0, n = strlen(s);
+    char *out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    for (; *s; s++) out[i++] = (*s >= 'A' && *s <= 'Z') ? (char)(*s + 32) : *s;
     out[i] = 0;
     if (!strncmp(out, "snap_event_", 11)) memmove(out, out + 11, strlen(out + 11) + 1);
+    return out;
 }
 
 static int signal_known(const char *event)
@@ -396,8 +408,9 @@ void sh_script_game_signal_seen(void *ent, const char *event, void *activator)
 static int l_signal(lua_State *L)
 {
     void *ent = sh_script_api_entity(L, 1, "signal", NULL), *by = NULL;
-    const char *name = sh_script_api_check_text(L, 2, "signal", "the SnapMap event's name (such as \"ai_killed\")", 120);
-    char key[128];
+    const char *name = sh_script_api_check_text(L, 2, "signal", "the SnapMap event's name (such as \"ai_killed\")",
+                                                SH_SCRIPT_TEXT_ANY);
+    char *key;
     int number;
     if (!lua_isnoneornil(L, 3)) {
         if (!luaL_testudata(L, 3, "entity"))
@@ -406,8 +419,9 @@ static int l_signal(lua_State *L)
     }
     if (!OP(signal_number) || !OP(signal_fire))
         return sh_script_refuse(L, "\"signal\" is unavailable: SnapMap's events could not be reached in this session");
-    signal_key(name, key, sizeof key);
+    if (!(key = signal_key(name))) return sh_script_refuse(L, "\"signal\" could not run: there was not enough memory");
     number = g_ops.signal_number(key);
+    free(key);
     if (number < 0) return sh_script_refuse(L, "\"signal\" found no SnapMap event named %s in the game", name);
     if (!ent) { lua_pushnil(L); return 1; }
     lua_pushboolean(L, g_ops.signal_fire(ent, number, by));
@@ -416,42 +430,205 @@ static int l_signal(lua_State *L)
 
 /* ------------------------------------------------------------- cvars */
 
-/* The cvars a script set this map, with the value each had. */
-typedef struct cvar_undo { char *name, *was; } cvar_undo;
+/* The cvars a script set this map: the value each had before the script's first set, and the value the script
+ * last gave it (SPEC-distribution 5.23, who owns a cvar's restore). At the map's end a cvar still at the script's
+ * value is put back; one changed since (by the player, the console or a mod's requirement) belongs to whoever changed
+ * it and is left as it is. The outstanding restores are also kept in the journal (sh_script_game_ops cvar_journal)
+ * while the map runs, so a value the game saved in its settings at a quit or a crash mid-map is put back at the next
+ * start (sh_script_game_cvar_recover). */
+typedef struct cvar_undo { char *name, *was, *set; } cvar_undo;
 static cvar_undo *g_cvars;
 static int g_ncvars, g_ccvars;
 
-static int cvar_keep(const char *name, const char *was)
+static char *cvar_dup(const char *s) { size_t n = strlen(s) + 1; char *d = (char *)malloc(n); if (d) memcpy(d, s, n); return d; }
+
+static void json_raw(char **out, size_t *n, size_t *cap, const char *s);
+
+/* One string's characters as JSON text, appended (the quotes are the caller's). */
+static void json_str(char **out, size_t *n, size_t *cap, const char *s)
+{
+    static const char hex[] = "0123456789abcdef";
+    char one[7];
+    for (; *out && *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { one[0] = '\\'; one[1] = (char)c; one[2] = 0; }
+        else if (c < 0x20) { one[0] = '\\'; one[1] = 'u'; one[2] = '0'; one[3] = '0'; one[4] = hex[c >> 4]; one[5] = hex[c & 15]; one[6] = 0; }
+        else { one[0] = (char)c; one[1] = 0; }
+        json_raw(out, n, cap, one);
+    }
+}
+
+static void json_raw(char **out, size_t *n, size_t *cap, const char *s)
+{
+    size_t k = strlen(s);
+    if (!*out) return;
+    if (*n + k + 1 > *cap) {
+        size_t c = *cap ? *cap * 2 : 256;
+        char *g;
+        while (c < *n + k + 1) c *= 2;
+        if (!(g = (char *)realloc(*out, c))) { free(*out); *out = NULL; return; }
+        *out = g;
+        *cap = c;
+    }
+    memcpy(*out + *n, s, k);
+    *n += k;
+    (*out)[*n] = 0;
+}
+
+/* The journal's text: {"format":1,"cvars":[{"name":...,"was":...,"set":...},...]}, or NULL with none outstanding. */
+char *sh_script_game_cvar_journal_text(void)
+{
+    char *out;
+    size_t n = 0, cap = 64;
+    int i;
+    if (!g_ncvars || !(out = (char *)malloc(cap))) return NULL;
+    out[0] = 0;
+    json_raw(&out, &n, &cap, "{\"format\":1,\"cvars\":[");
+    for (i = 0; out && i < g_ncvars; i++) {
+        json_raw(&out, &n, &cap, i ? ",{\"name\":\"" : "{\"name\":\"");
+        if (out) json_str(&out, &n, &cap, g_cvars[i].name);
+        json_raw(&out, &n, &cap, "\",\"was\":\"");
+        if (out) json_str(&out, &n, &cap, g_cvars[i].was);
+        json_raw(&out, &n, &cap, "\",\"set\":\"");
+        if (out) json_str(&out, &n, &cap, g_cvars[i].set);
+        json_raw(&out, &n, &cap, "\"}");
+    }
+    json_raw(&out, &n, &cap, "]}");
+    return out;
+}
+
+static void cvar_journal(void)
+{
+    char *text;
+    if (!OP(cvar_journal)) return;
+    text = sh_script_game_cvar_journal_text();
+    g_ops.cvar_journal(text);
+    free(text);
+}
+
+/* Record the script's set: its first set of a cvar keeps the value it displaced. */
+static int cvar_keep(const char *name, const char *was, const char *set)
 {
     int i;
-    for (i = 0; i < g_ncvars; i++) if (!strcmp(g_cvars[i].name, name)) return 1;
+    char *now = cvar_dup(set);
+    if (!now) return 0;
+    for (i = 0; i < g_ncvars; i++)
+        if (!strcmp(g_cvars[i].name, name)) {
+            /* the journal is written only when what it holds changes, not at every set of the same value */
+            int changed = strcmp(g_cvars[i].set, now) != 0;
+            free(g_cvars[i].set);
+            g_cvars[i].set = now;
+            if (changed) cvar_journal();
+            return 1;
+        }
     if (g_ncvars == g_ccvars) {
         int cap = g_ccvars ? g_ccvars * 2 : 16;
         cvar_undo *grown = (cvar_undo *)realloc(g_cvars, (size_t)cap * sizeof *grown);
-        if (!grown) return 0;
+        if (!grown) { free(now); return 0; }
         g_cvars = grown;
         g_ccvars = cap;
     }
-    g_cvars[g_ncvars].name = _strdup(name);
-    g_cvars[g_ncvars].was = _strdup(was);
+    g_cvars[g_ncvars].name = cvar_dup(name);
+    g_cvars[g_ncvars].was = cvar_dup(was);
+    g_cvars[g_ncvars].set = now;
     if (!g_cvars[g_ncvars].name || !g_cvars[g_ncvars].was) {
         free(g_cvars[g_ncvars].name);
         free(g_cvars[g_ncvars].was);
+        free(now);
         return 0;
     }
     g_ncvars++;
+    cvar_journal();
     return 1;
+}
+
+static void cvar_drop_last_set(const char *name, const char *before)
+{
+    /* the game refused the value: the record says what the cvar holds again */
+    int i;
+    for (i = 0; i < g_ncvars; i++)
+        if (!strcmp(g_cvars[i].name, name)) {
+            char *b = cvar_dup(before);
+            if (b) { free(g_cvars[i].set); g_cvars[i].set = b; }
+            break;
+        }
+    cvar_journal();
 }
 
 static void map_ended(void)
 {
     while (g_ncvars > 0) {
         cvar_undo *u = &g_cvars[--g_ncvars];
-        if (OP(cvar_set)) g_ops.cvar_set(u->name, u->was);
+        char *now = OP(cvar_get) ? g_ops.cvar_get(u->name) : NULL;
+        /* still the script's value: put back what it displaced; otherwise whoever changed it since owns it */
+        if (now && !strcmp(now, u->set) && OP(cvar_set)) g_ops.cvar_set(u->name, u->was);
+        free(now);
         free(u->name);
         free(u->was);
+        free(u->set);
     }
+    cvar_journal();
     g_signals_wanted = 0;
+}
+
+/* One string value of `key` in a journal object (malloc'd), or NULL. */
+static char *journal_value(const char *obj, const char *end, const char *key)
+{
+    char want[16];
+    const char *p;
+    char *out;
+    size_t n = 0;
+    _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s\":\"", key);
+    p = strstr(obj, want);
+    if (!p || p >= end) return NULL;
+    p += strlen(want);
+    if (!(out = (char *)malloc((size_t)(end - p) + 1))) return NULL;
+    while (p < end && *p != '"') {
+        if (*p == '\\' && p + 1 < end) {
+            p++;
+            if (*p == 'u' && p + 4 < end) {
+                unsigned v = 0;
+                int k;
+                for (k = 1; k <= 4; k++) {
+                    char c = p[k];
+                    v = v * 16 + (unsigned)(c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 :
+                                            c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0);
+                }
+                out[n++] = (char)v;
+                p += 5;
+                continue;
+            }
+        }
+        out[n++] = *p++;
+    }
+    out[n] = 0;
+    if (p >= end) { free(out); return NULL; }
+    return out;
+}
+
+int sh_script_game_cvar_recover(const char *journal)
+{
+    const char *p = journal ? strstr(journal, "\"cvars\":[") : NULL;
+    int restored = 0;
+    if (!p || !OP(cvar_get) || !OP(cvar_set)) return 0;
+    for (p = strchr(p, '['); p && (p = strchr(p, '{')) != NULL;) {
+        const char *end = strchr(p, '}');
+        char *name, *was, *set, *now, *def;
+        if (!end) break;
+        name = journal_value(p, end, "name");
+        was = journal_value(p, end, "was");
+        set = journal_value(p, end, "set");
+        now = name ? g_ops.cvar_get(name) : NULL;
+        def = name && OP(cvar_default) ? g_ops.cvar_default(name) : NULL;
+        /* The game kept the script's value through the quit or crash only when it saves that cvar in its settings: it
+         * reads the script's value now, which is not the cvar's default (a cvar the game does not save starts at its
+         * default). The value the script displaced is put back. */
+        if (name && was && set && now && def && !strcmp(now, set) && strcmp(set, def) && g_ops.cvar_set(name, was) == 1)
+            restored++;
+        free(name); free(was); free(set); free(now); free(def);
+        p = end + 1;
+    }
+    return restored;
 }
 
 static void signals_wanted(void)
@@ -462,10 +639,10 @@ static void signals_wanted(void)
 /* console_variable(name[, value]) */
 static int l_cvar(lua_State *L)
 {
-    const char *name = sh_script_api_check_text(L, 1, "console_variable", "the cvar's name", 200);
-    char was[1024];
+    const char *name = sh_script_api_check_text(L, 1, "console_variable", "the cvar's name", SH_SCRIPT_TEXT_ANY);
+    char *was;
     if (!OP(cvar_get)) return sh_script_refuse(L, "\"console_variable\" is unavailable: the game's cvars could not be reached in this session");
-    if (!g_ops.cvar_get(name, was, sizeof was)) return sh_script_refuse(L, "\"console_variable\" found no cvar named %s in the game", name);
+    if (!(was = g_ops.cvar_get(name))) return sh_script_refuse(L, "\"console_variable\" found no cvar named %s in the game", name);
     if (lua_gettop(L) < 2) {
         char *end = NULL;
         double v = was[0] ? strtod(was, &end) : 0;
@@ -473,6 +650,7 @@ static int l_cvar(lua_State *L)
             if (v == (double)(lua_Integer)v && !strpbrk(was, ".eE")) lua_pushinteger(L, (lua_Integer)v);
             else lua_pushnumber(L, v);
         } else lua_pushstring(L, was);
+        free(was);
         return 1;
     }
     {
@@ -480,10 +658,17 @@ static int l_cvar(lua_State *L)
         int r;
         if (lua_isboolean(L, 2)) text = lua_toboolean(L, 2) ? "1" : "0";
         else if (lua_type(L, 2) == LUA_TNUMBER || lua_type(L, 2) == LUA_TSTRING) text = lua_tostring(L, 2);
-        else return sh_script_refuse(L, "\"console_variable\" needs the value as a number, true or false, or text, got %s", value_words(L, 2));
-        if (!OP(cvar_set) || !cvar_keep(name, was))
+        else {
+            free(was);
+            return sh_script_refuse(L, "\"console_variable\" needs the value as a number, true or false, or text, got %s", value_words(L, 2));
+        }
+        if (!OP(cvar_set) || !cvar_keep(name, was, text)) {
+            free(was);
             return sh_script_refuse(L, "\"console_variable\" could not set %s: the game's cvars cannot be changed in this session", name);
+        }
         r = g_ops.cvar_set(name, text);
+        if (r != 1) cvar_drop_last_set(name, was);
+        free(was);
         if (r == -1) return sh_script_refuse(L, "\"console_variable\" cannot set %s: the game only takes it when it starts", name);
         if (r != 1) return sh_script_refuse(L, "\"console_variable\" could not set %s: the game refused the value %s", name, text);
         lua_pushboolean(L, 1);
@@ -540,9 +725,12 @@ void sh_script_api_game_register(void)
 #include "../engine_cvar_read.h"
 #include "../typeinfo.h"
 #include "script_walk.h"
+#include <shlobj.h>
+#include "../../common/wide_path.h"
 
 #define DECL_NAME_OFF       0x08u
 #define IDCVAR_VALUE_TEXT   0x10u       /* idCVar: its value as text */
+#define IDCVAR_DEFAULT_TEXT 0x58u       /* idCVar: its default as text (idCVar::Set with NULL selects it, 13954591) */
 #define CVAR_READ_ONLY      0x8000u
 #define CVAR_INIT_ONLY      0x4000u
 #define SIGNAL_ENUM         "snapListenerEvent_t"
@@ -578,10 +766,8 @@ static void signals_read(void)
     long long value = 0;
     if (g_signals_read) return;
     for (i = 0; sh_typeinfo_enum_member(SIGNAL_ENUM, i, &member, &value); i++) {
-        char key[128];
         if (!member || value < 0 || value >= SIGNALS_MAX || g_signal_names[value]) continue;
-        signal_key(member, key, sizeof key);
-        g_signal_names[value] = _strdup(key);
+        g_signal_names[value] = signal_key(member);
     }
     if (i) g_signals_read = 1;        /* the types answer once a map is up: ask again until they do */
 }
@@ -658,19 +844,22 @@ static void *cvar_find(const char *name)
     return sh_engine_cvar_find(g_cvar_slot, SH_IDCVAR_NAME_FOR_LOOKUP, name);
 }
 
-static int g_cvar_get(const char *name, char *out, size_t cap)
+/* An idCVar's text at `off` (its value, or its default), malloc'd whatever its length; NULL when unreadable. */
+static char *cvar_text_at(const char *name, unsigned off)
 {
     const uint8_t *c = (const uint8_t *)cvar_find(name);
-    int ok = 0;
-    if (!c || !cap) return 0;
-    out[0] = 0;
+    char *out = NULL;
+    if (!c) return NULL;
     __try {
-        const char *text = *(const char *const *)(c + IDCVAR_VALUE_TEXT);
-        if (text) strncpy_s(out, cap, text, _TRUNCATE);
-        ok = 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
-    return ok;
+        const char *text = *(const char *const *)(c + off);
+        size_t n = text ? strlen(text) : 0;
+        if ((out = (char *)malloc(n + 1)) != NULL) { if (n) memcpy(out, text, n); out[n] = 0; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { free(out); out = NULL; }
+    return out;
 }
+
+static char *g_cvar_get(const char *name) { return cvar_text_at(name, IDCVAR_VALUE_TEXT); }
+static char *g_cvar_default(const char *name) { return cvar_text_at(name, IDCVAR_DEFAULT_TEXT); }
 
 static int g_cvar_set_text(const char *name, const char *value)
 {
@@ -707,10 +896,61 @@ static const char *g_decl_class(const char *type)
     return NULL;
 }
 
+/* %LOCALAPPDATA%\snapmap-plus\script-cvars.json: the cvar restores a running map still owes. */
+static int journal_path(wchar_t *out, size_t cap)
+{
+    return sh_wpath_local_appdata(out, cap) && sh_wpath_append(out, cap, L"snapmap-plus/script-cvars.json");
+}
+
+static void g_cvar_journal(const char *json)
+{
+    wchar_t path[MAX_PATH * 2];
+    HANDLE f;
+    DWORD wrote = 0;
+    if (!journal_path(path, sizeof path / sizeof path[0])) return;
+    if (!json) { DeleteFileW(path); return; }
+    f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    WriteFile(f, json, (DWORD)strlen(json), &wrote, NULL);
+    FlushFileBuffers(f);
+    CloseHandle(f);
+}
+
+void sh_script_game_cvar_recover_poll(void)
+{
+    static LONG done;
+    wchar_t path[MAX_PATH * 2];
+    HANDLE f;
+    char *text;
+    DWORD size, got = 0;
+    int n;
+    /* Not before the game's cvars are reachable: a frame before the script install would otherwise latch it off. */
+    if (!g_cvar_slot || !g_cvar_set || InterlockedExchange(&done, 1)) return;
+    if (!journal_path(path, sizeof path / sizeof path[0])) return;
+    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    size = GetFileSize(f, NULL);
+    text = size != INVALID_FILE_SIZE ? (char *)malloc((size_t)size + 1) : NULL;
+    if (text && ReadFile(f, text, size, &got, NULL) && got == size) {
+        text[got] = 0;
+        n = sh_script_game_cvar_recover(text);
+        if (n) {
+            char line[160];
+            _snprintf_s(line, sizeof line, _TRUNCATE, "SCRIPTS: %d cvar(s) a mod's script set were put back: the last "
+                        "session ended mid-map", n);
+            backend_log(line);
+        }
+    }
+    free(text);
+    CloseHandle(f);
+    DeleteFileW(path);
+}
+
 int sh_script_api_game_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     static const sh_script_game_ops ops = {
-        g_decl_name, g_signal_number, g_signal_fire, g_cvar_get, g_cvar_set_text, sh_script_combat_decl, g_decl_class
+        g_decl_name, g_signal_number, g_signal_fire, g_cvar_get, g_cvar_set_text, sh_script_combat_decl, g_decl_class,
+        g_cvar_default, g_cvar_journal
     };
     sh_script_api_game_register();
     sh_script_api_game_set(&ops);

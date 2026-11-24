@@ -38,8 +38,6 @@ extern "C" {
 #endif
 
 #define SH_COMPANION_NAME_CAP      192   /* including the terminator */
-#define SH_COMPANION_MAX_PER_OWNER 16
-#define SH_COMPANION_MAX_OWNERS    256   /* across all bundles */
 #define SH_COMPANION_ORIGIN_MAX    65536.0
 #define SH_COMPANION_AXIS_TOL      1e-3  /* row length and orthogonality tolerance */
 
@@ -55,7 +53,7 @@ typedef struct sh_companion_owner {
     char owner[SH_COMPANION_NAME_CAP];
     char bundle[SH_COMPANION_NAME_CAP];
     int  count;
-    sh_companion_entry entries[SH_COMPANION_MAX_PER_OWNER];
+    sh_companion_entry *entries;   /* count of them (malloc'd; any number, no count of the product's own) */
 } sh_companion_owner;
 
 typedef struct sh_companion_table {

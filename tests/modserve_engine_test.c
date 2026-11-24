@@ -317,8 +317,21 @@ static void test_static_model_kind(void)
     CHECK(g_smodel_begins == 1 && r.names[1].kind == ME_RAW_SMODEL);
 }
 
+/* No count of the product's own on the models, images and anims a pass reloads (the list held 4096 before; a pack
+ * with more changed in one refresh kept the rest stale). */
+static void test_raw_names_grow(void)
+{
+    me_raw r;
+    int i;
+    memset(&r, 0, sizeof r);
+    for (i = 0; i < 5000; i++) (void)me_raw_collect(&r, "image", "x", "generated/image/x.bimage", "b");
+    CHECK(r.n == 5000 && r.cap >= 5000 && r.dropped == 0 && r.names && r.names[4999].kind == ME_RAW_IMAGE);
+    free(r.names);
+}
+
 int main(void)
 {
+    test_raw_names_grow();
     test_op_load_levels();
     test_reparse_drops_type_info();
     test_keep_ref_map_heap();

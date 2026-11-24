@@ -25,7 +25,7 @@ typedef struct fsm_class {
     unsigned char record[SH_FSM_RECORD_SIZE];
     int        kind, index;
     char       salt[SH_FSM_SALT_CAP];
-    char       cls[SH_FSM_CLASS_CAP];
+    char      *cls;                  /* the class as the script registered it (any length) */
     char      *name;                 /* the whole name; the record's +0x00 points here */
     create_fn  sib_create;
     clone_fn   sib_clone;
@@ -265,7 +265,7 @@ static fsm_class *build(const char *name, int kind, const char *salt, const char
     c->kind = kind;
     c->index = index;
     strcpy_s(c->salt, sizeof c->salt, salt);
-    strcpy_s(c->cls, sizeof c->cls, cls);
+    if (!(c->cls = _strdup(cls))) { free(c->name); free(c); return NULL; }
     memcpy(&c->sib_create, sib + SH_FSM_REC_CREATE, 8);
     memcpy(&c->sib_clone, sib + SH_FSM_REC_CLONE, 8);
     memcpy(&c->sib_place, sib + SH_FSM_REC_PLACE, 8);
@@ -289,14 +289,17 @@ static fsm_class *build(const char *name, int kind, const char *salt, const char
 
 void *sh_fsm_class(const char *name)
 {
-    char salt[SH_FSM_SALT_CAP], cls[SH_FSM_CLASS_CAP];
+    char salt[SH_FSM_SALT_CAP], *cls;
     int kind, index;
     fsm_class *c;
-    if (!sh_fsm_parse(name, &kind, salt, sizeof salt, cls, sizeof cls, &index)) return NULL;
+    /* the class part is a piece of the name, so a buffer the name's size holds it, whatever its length */
+    if (!name || strncmp(name, SH_FSM_PREFIX, sizeof SH_FSM_PREFIX - 1)) return NULL;   /* a stock class: not ours */
+    if (!(cls = (char *)malloc(strlen(name) + 1))) return NULL;
+    if (!sh_fsm_parse(name, &kind, salt, sizeof salt, cls, strlen(name) + 1, &index)) { free(cls); return NULL; }
     AcquireSRWLockShared(&g_lock);
     for (c = g_classes; c; c = c->next) if (!strcmp(c->name, name)) break;
     ReleaseSRWLockShared(&g_lock);
-    if (c) return c;
+    if (c) { free(cls); return c; }
     AcquireSRWLockExclusive(&g_lock);
     for (c = g_classes; c; c = c->next) if (!strcmp(c->name, name)) break;
     if (!c) {
@@ -305,6 +308,7 @@ void *sh_fsm_class(const char *name)
         if (c) { c->next = g_classes; g_classes = c; g_nclasses++; }
     }
     ReleaseSRWLockExclusive(&g_lock);
+    free(cls);
     return c;
 }
 

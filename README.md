@@ -114,8 +114,10 @@ preserves this file.
 Mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`. Authors make, install and
 refresh them in the window's Mods tab or with the `sh_mods` console command; a
 saved map names the mods it uses, and the next load activates them. A map that
-names a mod you do not have asks first and downloads only what you approve,
-verified by hash, into that map's own folder under `mods\maps\`. A mod may carry
+names a mod you do not have gets that content from the mod store, with no
+question and verified by hash, into Snapmap+'s content cache (`mods\.content\`);
+nothing is installed in your mods folder, and what cannot be had stands in for
+the objects that need it. A mod may carry
 Lua scripts that run during Play, sandboxed, on the host only.
 
 Converting the mods, maps and prefabs of earlier releases is not in this

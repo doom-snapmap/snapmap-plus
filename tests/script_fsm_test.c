@@ -116,7 +116,7 @@ static void *slot(void *o, int n) { return (*(void ***)o)[n]; }
 
 static void test_names(void)
 {
-    char salt[SH_FSM_SALT_CAP], cls[SH_FSM_CLASS_CAP];
+    char salt[SH_FSM_SALT_CAP], cls[128];
     int kind = -1, idx = -1;
     CHECK(sh_fsm_parse("smp.condition.wuahwfly.ATRON_UseGrenades.3", &kind, salt, sizeof salt, cls, sizeof cls, &idx));
     CHECK(kind == SH_FSM_CONDITION && !strcmp(salt, "wuahwfly") && !strcmp(cls, "ATRON_UseGrenades") && idx == 3);

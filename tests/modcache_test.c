@@ -41,6 +41,7 @@ void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref) { (void)ref; }
 /* A local row's folder that is here but cannot be used (modserve.h): none here. */
 static int g_salt_installed;
 int sh_modserve_salt_installed(const char *salt) { (void)salt; return g_salt_installed; }
+int sh_modserve_root_lacks(const char *salt, const char *name) { (void)salt; (void)name; return 0; }
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out) { (void)row; if (out) memset(out, 0, sizeof *out); return 0; }
 size_t modserve_bundles_for_names_visit(const char *const *names, size_t count, sh_modserve_closure_fn visit, void *context)
 { (void)names; (void)count; (void)visit; (void)context; return 0; }

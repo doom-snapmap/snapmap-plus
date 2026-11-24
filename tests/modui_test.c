@@ -1721,8 +1721,8 @@ int main(int argc, char **argv)
         char want[600];
         doc = run_doc(SH_MODS_ACT_NEW_MOD, "Crate Pack");
         if (!has(doc, "\"ok\":true")) printf("    %s\n", doc ? doc : "(null)");
-        CHECK(has(doc, "\"ok\":true,\"message\":\"Created Crate Pack in mods\\\\Crate Pack. Its Example crate is in the Toybox. "
-                       "After you change its files, press Refresh to see the change.\""));
+        CHECK(has(doc, "\"ok\":true,\"message\":\"Created Crate Pack in your mods folder, as Crate Pack. Its Example crate is in the "
+                       "Toybox. After you change its files, press Refresh to see the change.\""));
         CHECK(has(doc, "\"key\":\"Crate Pack\""));
         CHECK(has(doc, "\"file\":\"decls/snapeditorentitydef/example_crate.decl\""));
         CHECK(doc_prose_ok(doc));
@@ -1744,11 +1744,11 @@ int main(int argc, char **argv)
         /* Off the main thread (the window's worker): made and built there, finished by APPLY. */
         g_main = 0;
         doc = run_doc(SH_MODS_ACT_NEW_MOD, "Later");
-        CHECK(has(doc, "\"ok\":true,\"message\":\"Created Later in mods\\\\Later.") && has(doc, "\"apply\":true"));
+        CHECK(has(doc, "\"ok\":true,\"message\":\"Created Later in your mods folder, as Later.") && has(doc, "\"apply\":true"));
         free(doc);
         g_main = 1;
         doc = run_doc(SH_MODS_ACT_APPLY, NULL);
-        CHECK(has(doc, "\"action\":\"newMod\",\"ok\":true,\"message\":\"Created Later in mods\\\\Later.") &&
+        CHECK(has(doc, "\"action\":\"newMod\",\"ok\":true,\"message\":\"Created Later in your mods folder, as Later.") &&
               has(doc, "\"key\":\"Later\"") && !has(doc, "\"apply\""));
         free(doc);
     }

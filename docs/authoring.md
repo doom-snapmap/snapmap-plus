@@ -11,6 +11,7 @@ its identity and keeps its names apart from the game's and from every other mod'
 | `materials/` | materials (`.decl`), including the [Graphics SDK's](graphics-sdk.md) `type layered` and `type particle` | material |
 | `images/` | images (`.bimage`) | image |
 | `meshes/` | models (`<name>.md6.decl`), their meshes (`.bmd6model`) and skeletons (`.bmd6skl`), static models (`.bmodel`), destructible models (`.dmodel`), particle models (`.pmodel`) | md6Def, model |
+| `collision/` | the collision models of an md6 mesh, at the mesh's path: `collision/<mesh path>/collision/<name>.bmodel` (the render model) and `<name>.bcm` (the collision mesh); a text names one as `collision/<mesh path>/collision/<name>` and it reads as `md6/mods/<salt>/...` | model |
 | `animations/` | animation clips (`.bmd6anim`) | anim |
 | `effects/` | effects (`.decl`): lights, decals, particles, shakes, ribbons, played together | fx |
 | `environments/` | environments (`.decl`): fog, bloom, colour and the rest of how the level looks, laid over the view ([Graphics SDK](graphics-sdk.md#environments)) | env |

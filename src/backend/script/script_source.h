@@ -28,7 +28,13 @@ extern "C" {
 
 /* Register the provider with the runtime. Called by sh_script_hooks_install.
  * Not in a SH_SCRIPT_PURE build (it reads the serving layer). */
-void sh_script_source_install(void);
+/* Install the provider. `foreign_allowed` is the player's setting for scripts in content that came from elsewhere
+ * (modui.h sh_modui_scripted_maps_allowed, the gates' own predicate; NULL: allowed): with it off, the map's
+ * compositions (its pinned rows: a published map's, a downloaded copy's, an import's) run no script, whatever path
+ * opened the map, while the player's own local rows always do. */
+void sh_script_source_install(int (*foreign_allowed)(void));
+/* The same policy alone (a test's, or NULL). */
+void sh_script_source_set_policy(int (*foreign_allowed)(void));
 
 /* The served mods of the open map that carry scripts, as the next Play would
  * prepare them (the console's check outside Play), their scripts read again.

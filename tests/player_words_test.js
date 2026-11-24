@@ -23,7 +23,10 @@ const BANNED = [
     [/\bmanifests?\b/i, 'manifest'], [/\bbundles?\b/i, 'bundle'], [/\bsidecar/i, 'sidecar'], [/\bstaging\b/i, 'staging'],
     [/\bclaims?\b/i, 'claim'], [/mods\.store/i, 'mods.store'], [/config\.json/i, 'config.json'],
     [/snapmap-plus\.json/i, 'snapmap-plus.json'], [/\.content\b/i, '.content'], [/\berror\s+(%|\d|0x)/i, 'error number'],
-    [/system error/i, 'system error'], [/\bthe log\b/i, 'the log']];
+    [/system error/i, 'system error'], [/\bthe log\b/i, 'the log'],
+    /* DS-WORDS: a refusal or notice names a mod by its name, never by a path under the mods folder (in the C source a
+       backslash is written twice) */
+    [/\bmods\\\\/i, 'a mods\\ path']];
 /* Words a builder cause may use for an author (the builder speaks to the mod's author). */
 const LOG_PREFIX = /^(MODS|PREFABS|CARRIER|RAWMAP|LEGACY|STORE|PUBLISH):/;
 
@@ -95,6 +98,19 @@ for (const f of fs.readdirSync(root).filter(n => /\.(c|h)$/.test(n))) {
     if (f === 'plain_reason.h') {
         const table = src.match(/SH_REASON_TABLE[\s\S]*?\n\n/);
         if (table) for (const lit of literalsIn(table[0])) check(f, lineOf(src, src.indexOf(table[0])), lit, 'reason table');
+    }
+}
+
+/* The Snapmap+ window's pages write sentences of their own: none names a path under the mods folder (DS-WORDS). The
+   Files view shows a mod's own files to its author, by their paths inside the mod, never by the mods folder. */
+const pages = path.join(__dirname, '..', 'src', 'ui', 'webview');
+for (const f of fs.readdirSync(pages).filter(n => /\.js$/.test(n))) {
+    const src = fs.readFileSync(path.join(pages, f), 'utf8');
+    const re = /'((?:[^'\\\n]|\\.)*)'/g;
+    let m;
+    while ((m = re.exec(src))) {
+        sentences++;
+        if (/\bmods\\\\/i.test(m[1])) found.push(`${f}:${lineOf(src, m.index)} (page) names a mods\\ path: ${m[1]}`);
     }
 }
 

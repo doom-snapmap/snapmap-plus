@@ -755,6 +755,66 @@ static void test_map_scripts(void)
     sh_mb_free(&b);
 }
 
+/* SPEC 5.23, the scripts setting at the runtime's map open: with scripts turned off for content from elsewhere, a
+ * map's composition (its pinned rows) runs no script whatever path opened the map, while the player's own folder
+ * always does. The policy is the gates' own predicate, injected (sh_script_source_set_policy). */
+static int g_foreign_on;
+static int foreign_allowed(void) { return g_foreign_on; }
+static void test_scripts_setting_at_open(void)
+{
+    static const char COMP[] = "00000000000000000000000000000000000000000000000000000000000000c0";
+    char src[MAX_PATH], root[MAX_PATH], comp[MAX_PATH * 2], name[HO_TEXT + 1], cause[HO_TEXT] = "", path[MAX_PATH * 2];
+    const char *hashes[1];
+    sh_script_mod_desc mods[4];
+    sh_ms_install_stats st;
+    sh_mb_bundle b;
+    char *json, *at;
+    size_t len = 0;
+    printf("-- the scripts setting at map open: a composition's scripts follow it, the player's own folder's always run\n");
+    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\src\\comp-door", g_tmp);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\storeForeign", g_tmp);
+    mt_write(src, "mod.json", MOD_JSON);
+    mt_write(src, DEF, "{\r\n}");
+    mt_write(src, ENTRY, GOOD_ENTRY);
+    mt_write(src, LIB, "return { name = \"door_input\" }\n");
+    CreateDirectoryA(root, NULL);
+    CHECK(sh_ms_set_root(root));
+    memset(&b, 0, sizeof b);
+    CHECK(HO2(name, cause, sh_ms_install_from_folder(src, NULL, HO_P(0), &st, &b, HO_P(1))));
+    /* the same content as a composition of the content cache (a pinned row's), under a build of its own */
+    _snprintf_s(comp, sizeof comp, _TRUNCATE, "%s\\.content\\served\\%s", root, COMP);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", root, name);
+    json = (char *)sh_mb_read_file(path, 1u << 20, &len);
+    CHECK(json != NULL && strstr(json, b.hash) != NULL);
+    if (json && (at = strstr(json, b.hash)) != NULL) memcpy(at, COMP, 64);
+    if (json) mt_write(comp, "mod.json", json);
+    free(json);
+    mt_write(comp, DEF, "{\r\n}");
+    mt_write(comp, ENTRY, GOOD_ENTRY);
+    mt_write(comp, LIB, "return { name = \"door_input\" }\n");
+    CHECK(sh_modserve_index_build(root) > 0);
+    sh_modserve_scope_enable(1);
+    sh_script_source_set_policy(foreign_allowed);
+
+    g_foreign_on = 0;
+    hashes[0] = COMP;                         /* a pinned row: content from elsewhere */
+    CHECK(sh_modserve_scope_set(hashes, 1, 1) >= 0);
+    CHECK(sh_script_source_map_mods(mods, 4) == 0);
+    hashes[0] = b.hash;                       /* the player's own folder */
+    CHECK(sh_modserve_scope_set(hashes, 1, 1) >= 0);
+    CHECK(sh_script_source_map_mods(mods, 4) == 1 && !strcmp(mods[0].salt, SALT));
+    g_foreign_on = 1;
+    hashes[0] = COMP;
+    CHECK(sh_modserve_scope_set(hashes, 1, 1) >= 0);
+    CHECK(sh_script_source_map_mods(mods, 4) == 1);
+
+    sh_script_source_set_policy(NULL);
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(0);
+    sh_script_source_clear();
+    sh_mb_free(&b);
+}
+
 /* ------------------------------------------- fixtures and the Script node */
 
 static char g_fixtures[MAX_PATH];
@@ -836,6 +896,7 @@ int main(int argc, char **argv)
     test_builds();
     test_store();
     test_map_scripts();
+    test_scripts_setting_at_open();
     test_fixtures();
     mt_remove_tree(g_tmp);
     printf("modscript_test: %d checks, %d failed\n", g_checks, g_failed);

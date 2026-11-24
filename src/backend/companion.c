@@ -184,8 +184,9 @@ int sh_companion_add_bundle(sh_companion_table *t, const char *bundle_id, const 
             say(log, context, "COMPANIONS: %s REFUSED: owner '%s' is not one of the bundle's own names", bundle_id, owner);
             goto rollback;
         }
-        if (!list || list->type != MPJ_ARR || list->n < 1 || list->n > SH_COMPANION_MAX_PER_OWNER) {
-            say(log, context, "COMPANIONS: %s REFUSED: owner '%s' needs a list of 1 to 16 companions", bundle_id, owner);
+        if (!list || list->type != MPJ_ARR || list->n < 1) {
+            say(log, context, "COMPANIONS: %s REFUSED: owner '%s' needs a list of its companions, at least one", bundle_id,
+                owner);
             goto rollback;
         }
         for (j = start; j < t->count; j++)
@@ -199,16 +200,19 @@ int sh_companion_add_bundle(sh_companion_table *t, const char *bundle_id, const 
             t->refused++;
             continue;
         }
-        if (t->count >= SH_COMPANION_MAX_OWNERS) {
-            say(log, context, "COMPANIONS: %s REFUSED: more than 256 owners in all%s", bundle_id, NULL);
-            goto rollback;
-        }
         if (!grow(t, t->count + 1)) {
             say(log, context, "COMPANIONS: %s REFUSED: out of memory%s", bundle_id, NULL);
             goto rollback;
         }
         o = &t->owners[t->count];
         memset(o, 0, sizeof *o);
+        /* The owner is counted in the table from here, so a rollback frees its entries. */
+        t->count++;
+        o->entries = (sh_companion_entry *)calloc((size_t)list->n, sizeof *o->entries);
+        if (!o->entries) {
+            say(log, context, "COMPANIONS: %s REFUSED: out of memory%s", bundle_id, NULL);
+            goto rollback;
+        }
         strncpy_s(o->owner, sizeof o->owner, owner, _TRUNCATE);
         strncpy_s(o->bundle, sizeof o->bundle, bundle_id, _TRUNCATE);
         for (j = 0; j < list->n; j++) {
@@ -222,13 +226,12 @@ int sh_companion_add_bundle(sh_companion_table *t, const char *bundle_id, const 
             }
         }
         o->count = list->n;
-        t->count++;
         added++;
     }
     mpj_free(root);
     return added;
 rollback:
-    t->count = start;
+    while (t->count > start) free(t->owners[--t->count].entries);
 refused:
     t->refused++;
     mpj_free(root);
@@ -291,7 +294,9 @@ const char *sh_companion_arm_name(int decision)
 
 void sh_companion_table_free(sh_companion_table *t)
 {
+    int i;
     if (!t) return;
+    for (i = 0; i < t->count; i++) free(t->owners[i].entries);
     free(t->owners);
     t->owners = NULL;
     t->count = t->cap = t->refused = 0;

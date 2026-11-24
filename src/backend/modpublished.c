@@ -8,8 +8,9 @@
  *                  first (OnSnapPlay clears its wait dialog and hides the progress widget)
  *   BEGUN          next tick: rows that name units (SPEC-distribution 5.7) are fetched at once, with no question, into
  *                  the content cache, four units at a time, under a progress line; whatever cannot be had stands in
- *                  (modcache.h). A row that names no unit (a local row whose folder this computer does not have) cannot
- *                  be downloaded: the load is refused with one sentence
+ *                  (modcache.h). A row that names no unit (a local row whose folder is not here) has nothing to
+ *                  fetch: its stand-ins serve it, or it places nothing and the load goes on without it, saying so
+ *                  (pub_hold_local); only placed objects whose stand-ins could not be written stop the load
  *   FETCHING       the job runs on the worker
  *   (resume)       the job is done, on a main tick: rescan the index, check every row is served (the asset rule),
  *                  re-check the owner and (joiner) the lobby host's item, activate, parse the retained text into a
@@ -183,6 +184,18 @@ static int pub_row_served(const sh_modmanifest_row *row)
     /* A pinned row whose composition stands in for objects is fetched again at a play (modcache.h). */
     if (row && row->pinned && g_ops.content_complete && !g_ops.content_complete(g_ops.context, row)) return 0;
     return pub_row_state(row, NULL, NULL) == SH_MODPUB_ROW_SERVED;
+}
+
+/* 1 when the map places something of the row: a local row's placed names, a pinned row's object units (a root other
+ * than "*", the whole mod) or a placed module's record. A row that places nothing is a mod used map-wide. */
+static int pub_row_places(const sh_modmanifest_row *row)
+{
+    size_t k;
+    if (!row) return 0;
+    if (!row->pinned) return row->name_count > 0;
+    if (row->modules && row->modules[0] && strcmp(row->modules, "[]")) return 1;
+    for (k = 0; k < row->unit_count; k++) if (row->roots && row->roots[k] && strcmp(row->roots[k], "*")) return 1;
+    return 0;
 }
 
 static size_t pub_count_missing(const sh_modmanifest_list *rows)
@@ -505,18 +518,14 @@ int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, s
          * damaged-save dialog, which the save guard dismisses), so the
          * sentence says the editor cannot open it and is also the notice;
          * it fits the dialog body, else the salt alone names the mod. */
-        if (placed) {
-            int k;
-            for (k = 0; k < 2; k++) {
-                free(*why);
-                *why = sh_textf("This map needs %s, which is not installed on this computer, so the editor cannot open "
-                                "the map. Restore the mod's folder from the Recycle Bin, or play the map from My Maps "
-                                "to get it from the mod store.", k ? "one of its mods" : title);
-                if (!*why || strlen(*why) < PUB_TEXT_CAP) break;
-            }
-        } else
-            *why = sh_textf("This map needs %s, which is not installed on this computer, so the editor opens the map "
-                            "without it. Playing the map asks the mod store for it.", title);
+        /* Its stand-ins (the content cache's composition of no units) serve it whenever they could be written, so
+         * this is reached only without them: a row that places nothing opens without the mod; one whose placed
+         * entities have no stand-in cannot be given to the engine's validator. */
+        if (placed)
+            *why = sh_textf("This map was not opened: Snapmap+ could not write the stand-ins for %s, which is not on "
+                            "this computer. Free some disk space, then open it again.", title);
+        else
+            *why = sh_textf("This map is playing without %s, which is not on this computer.", title);
     }
     return 0;
 }
@@ -963,34 +972,48 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
     }
     if (begun == 0) { pub_pass_said(); passed = 1; goto out; }
     {
-        /* An offline launch has no map object left to resume with, so nothing is fetched now. A row whose content is
-         * composed with stand-ins plays (5.8: the objects that are not here stand in, and the load's one notice says
-         * S2); a row with no composition at all, or one that names no unit, cannot, and the launch is refused with
-         * what is missing. The engine is never handed a map whose namespaces nothing serves. */
-        int local = 0, absent = 0;
+        /* An offline launch has no map object left to resume with, so nothing is fetched now. No guard stops a map
+         * from loading (manager, 2026-11-24): a row whose content is not here stands in (5.8: the cache composed its
+         * stand-ins, and the load's one notice says S2), and a row that places nothing (a mod used map-wide) whose
+         * content is not here plays without it, with one sentence. Only a row that places objects and has no
+         * stand-in (Snapmap+ could not write them) cannot be handed to the engine, whose palette miss is fatal at
+         * START. */
+        int unplaceable = 0;
+        char *without = NULL;
+        size_t nwithout = 0, pinned_without = 0;
         for (size_t i = 0; i < rows_copy.count; i++) {
             const sh_modmanifest_row *row = &rows_copy.rows[i];
             if (pub_row_served(row)) continue;
             if (row->pinned && g_ops.row_state && g_ops.row_state(g_ops.context, row, "map", NULL) == SH_MODPUB_ROW_SERVED)
                 continue;   /* composed, standing in for what is not here */
-            if (row->pinned) absent++;
-            else local++;
+            if (pub_row_places(row)) { unplaceable++; continue; }
+            (void)sh_text_set(&without, "%s%s%s", without ? without : "", without ? " and " : "", pub_title(row));
+            nwithout++;
+            if (row->pinned) pinned_without++;
         }
-        if (!local && !absent && begun < 0 && hook == SH_MODPUB_OFFLINE_LAUNCH) {
-            pub_logf("MODS: the %s plays with stand-ins for the content that is not on this computer", pub_hook_name(hook));
+        if (!unplaceable && begun >= -1) {
+            pub_logf("MODS: the %s plays with stand-ins for the content that is not on this computer%s", pub_hook_name(hook),
+                     nwithout ? ", and without the mods it uses map-wide that are not here" : "");
+            pub_pass_said();
+            if (nwithout) {
+                char *line = sh_textf("This map is playing without %s, which %s not on this computer.%s",
+                                      without ? without : "a mod", nwithout > 1 ? "are" : "is",
+                                      pinned_without ? " Connect to the internet and open the map again to get it." : "");
+                if (line) { pub_print(line); pub_notice(line); }
+                free(line);
+            }
+            free(without);
             passed = 1;
             goto out;
         }
-        pub_logf("MODS: the %s was refused: %d row(s) name no unit and %d have no content here", pub_hook_name(hook), local,
-                 absent);
+        free(without);
+        pub_logf("MODS: the %s was refused: %d row(s) place objects and have no stand-ins here", pub_hook_name(hook),
+                 unplaceable);
         if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, hook, manager);
         pub_launch_refused(hook);
-        pub_notice(local ? "This map was not loaded: it needs mods that are not on this computer and cannot be downloaded. "
-                           "Ask its author to publish it again."
-                         : begun < -1 || (begun < 0 && hook != SH_MODPUB_OFFLINE_LAUNCH)
-                           ? "This map was not loaded: Snapmap+ ran out of memory preparing its mods. Restart DOOM and open it again."
-                           : "This map was not loaded: its mod content is not on this computer. Connect to the internet and "
-                             "open it again.");
+        pub_notice(begun < -1 ? "This map was not loaded: Snapmap+ ran out of memory preparing its mods. Restart DOOM and open it again."
+                              : "This map was not loaded: Snapmap+ could not write the stand-ins for its mod content that "
+                                "is not on this computer. Free some disk space, then open it again.");
         passed = 0;
     }
 out:
@@ -1574,45 +1597,42 @@ int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source)
 /* ------------------------------------------------------------ local rows */
 
 /* Rows that name no unit and that nothing here serves: a local row (D6a) follows its author's folder, so no store has
- * its content. A local row whose folder is not here plays with stand-ins (the content cache's composition of no
- * units, manager Q8), so this is reached only when none could be made (memory, the cache's folder) or when a folder
- * is here and does not carry every name the row lists. The load is refused with one sentence naming the mods. */
-static void pub_refuse_local(void)
+ * its content. A local row whose folder is not here, or no longer has some of its names, stands in (the content cache's
+ * composition of no units, manager Q8 and 2026-11-24), so a row reaches this hold only when it places nothing (a mod
+ * used map-wide, whose stand-ins are none) or when its stand-ins could not be written. No guard stops a map from
+ * loading: the first goes on without the mod, with one sentence; only the second, whose placed objects the engine's
+ * palette would miss fatally, is refused, with what to do. */
+static void pub_hold_local(void)
 {
     pub_hold *h = &g_hold;
-    const char **names = calloc(h->missing_count ? h->missing_count : 1, sizeof(*names));
-    char list[160] = "mods that are not on this computer";
-    size_t n = 0;
-    char *line;
-    /* A folder that is here but does not serve every name the row lists says so in its own words (the asset rule). */
-    for (size_t i = 0; i < h->missing_count; i++) {
+    char *without = NULL, *line;
+    size_t i, n = 0, places = 0;
+    for (i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
-        char *cause = NULL;
-        if (row->pinned || pub_row_state(row, pub_thing(h->hook), &cause) != SH_MODPUB_ROW_INCOMPLETE ||
-            !cause || !cause[0]) {
-            free(cause);
-            continue;
-        }
-        line = sh_textf("%s %s", cause, pub_not_done(h->hook));
-        free(cause);
-        free((void *)names);
-        pub_drop(line && strlen(line) < PUB_TEXT_CAP ? line : "This map needs a mod whose folder here is incomplete.",
-                 "a row's folder is here but incomplete");
+        if (row->pinned) continue;
+        if (pub_row_places(row)) { places++; continue; }
+        (void)sh_text_set(&without, "%s%s%s", without ? without : "", without ? " and " : "", pub_title(row));
+        n++;
+    }
+    if (!places) {
+        line = n ? sh_textf(strcmp(pub_thing(h->hook), "prefab") ? "This map is playing without %s, which %s not on this "
+                                                                    "computer."
+                                                                  : "This prefab is placed without %s, which %s not on "
+                                                                    "this computer.",
+                            without ? without : "a mod", n > 1 ? "are" : "is")
+                   : NULL;
+        pub_logf("MODS: the held %s goes on without %u mod(s) it uses map-wide that are not on this computer",
+                 pub_hook_name(h->hook), (unsigned)n);
+        free(without);
+        pub_resume(0);
+        if (line) { pub_print(line); pub_notice(line); }
         free(line);
         return;
     }
-    for (size_t i = 0; names && i < h->missing_count; i++)
-        if (!h->rows.rows[h->missing[i]].pinned) names[n++] = pub_title(&h->rows.rows[h->missing[i]]);
-    if (names && n) pub_names_line(list, sizeof list, names, n);
-    free((void *)names);
-    line = sh_textf("This %s needs %s, which %s not on this computer and cannot be downloaded: the %s was saved before "
-                    "%s content was sent to the mod store. Ask its author to publish it again. %s", pub_thing(h->hook),
-                    list, n > 1 ? "are" : "is", pub_thing(h->hook), n > 1 ? "their" : "its", pub_not_done(h->hook));
-    if (line) pub_print(line);
-    pub_drop(line && strlen(line) < PUB_TEXT_CAP ? line : "This map needs mods that are not on this computer and cannot "
-                                                         "be downloaded. Ask its author to publish it again.",
-             "a row names no unit and nothing here serves it");
-    free(line);
+    free(without);
+    pub_drop("This map was not loaded: Snapmap+ could not write the stand-ins for its mod content that is not on this "
+             "computer. Free some disk space, then open it again.",
+             "a local row places objects and its stand-ins could not be made");
 }
 
 /* A joiner downloading in the lobby follows its lobby (SPEC 5.11). The lobby asked it to load before the content was
@@ -1800,7 +1820,7 @@ void sh_modpublished_poll(void)
 
     switch (h->state) {
     case HOLD_BEGUN:
-        if (!h->units) { pub_refuse_local(); break; }
+        if (!h->units) { pub_hold_local(); break; }
         if (!h->job) {
             /* SPEC 5.11 (owner, 2026-11-19): a joiner downloads in the lobby. It does not answer the host's map check
              * until the content is here, so the host's start waits for it (modlobby.h); the host sees its progress. */

@@ -63,21 +63,14 @@ int sh_script_api_declared(const char *t, size_t n, long *version, int *line)
     return 1;
 }
 
-typedef struct { size_t used; } compile_mem;
-
+/* Lua's allocator: memory as the system gives it, no count of the product's own. */
 static void *compile_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 {
-    compile_mem *m = (compile_mem *)ud;
-    size_t old = ptr ? osize : 0;
     void *p;
-    if (nsize == 0) {
-        if (ptr) { m->used -= old; free(ptr); }
-        return NULL;
-    }
-    if (nsize > old && m->used + (nsize - old) > SH_SCRIPT_COMPILE_MEM) return NULL;
+    (void)ud;
+    (void)osize;
+    if (nsize == 0) { free(ptr); return NULL; }
     p = realloc(ptr, nsize);
-    if (!p) return nsize <= old ? ptr : NULL;
-    m->used = m->used - old + nsize;
     return p;
 }
 
@@ -96,7 +89,6 @@ static void put(char **out, const char *fmt, ...)
 int sh_script_compile_check(const char *file, int entry, const char *text, size_t len, int *line,
                             char **what, char **todo)
 {
-    compile_mem mem = { 0 };
     lua_State *L;
     char *chunk = NULL;
     const char *t = text;
@@ -133,7 +125,7 @@ int sh_script_compile_check(const char *file, int entry, const char *text, size_
         }
     }
     if (n >= 3 && (unsigned char)t[0] == 0xEF && (unsigned char)t[1] == 0xBB && (unsigned char)t[2] == 0xBF) { t += 3; n -= 3; }
-    L = lua_newstate(compile_alloc, &mem);
+    L = lua_newstate(compile_alloc, NULL);
     if (!L) {
         put(what, "there was not enough memory to check the file");
         put(todo, "Close other programs and press Refresh again");

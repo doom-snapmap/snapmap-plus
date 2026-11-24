@@ -15,7 +15,6 @@
 
 #define PI               3.14159265358979323846
 #define HITSCAN_RANGE    8192.0
-#define NAME_ANY         ((size_t)-1 >> 1)   /* text of any length */
 #define SIGHT_RAISE      40.0f     /* can_see_from aims this far above the other entity's origin */
 #define REG_EFFECTS      "snapmap-plus.effects"
 
@@ -675,7 +674,7 @@ static int place_effect(lua_State *L, int ent_index, const float pos[3], const f
 
 static int fx_condition(lua_State *L, int arg, const char *call)
 {
-    const char *name = sh_script_api_check_text(L, arg, call, "the effect condition (FX_... of the entity's fx decl)", NAME_ANY);
+    const char *name = sh_script_api_check_text(L, arg, call, "the effect condition (FX_... of the entity's fx decl)", SH_SCRIPT_TEXT_ANY);
     int v;
     if (!CE(fx_condition)) return -2;
     v = g_ce.fx_condition(name);
@@ -898,7 +897,7 @@ static int l_sound(lua_State *L)
     void *ent = sh_script_api_owned(L, 1, "sound", "play sounds on", NULL);
     void *decl = check_decl(L, 2, "sound", "sound", "the sound");
     if (!lua_isnoneornil(L, 3)) {
-        const char *c = sh_script_api_check_text(L, 3, "sound", "the channel", NAME_ANY);
+        const char *c = sh_script_api_check_text(L, 3, "sound", "the channel", SH_SCRIPT_TEXT_ANY);
         channel = sh_script_combat_channel(c);
         if (channel < 0)
             sh_script_refuse(L, "\"sound\" knows no channel \"%s\"; use any, voice, body, weapon or item", c);
@@ -947,7 +946,7 @@ static int l_tag(lua_State *L)
 {
     float pos[3], fwd[3];
     void *ent = sh_script_api_entity(L, 1, "tag", NULL);
-    const char *name = sh_script_api_check_text(L, 2, "tag", "the tag or joint name", NAME_ANY);
+    const char *name = sh_script_api_check_text(L, 2, "tag", "the tag or joint name", SH_SCRIPT_TEXT_ANY);
     if (!ent || !point_of(ent, name, pos, fwd)) return nil1(L);
     sh_script_api_push_vec(L, pos);
     sh_script_api_push_vec(L, fwd);
@@ -975,7 +974,7 @@ static int l_can_see_from(lua_State *L)
     sh_script_trace t;
     void *self = sh_script_api_entity(L, 1, "can_see_from", NULL);
     void *other = sh_script_api_entity(L, 2, "can_see_from", &h);
-    const char *joint = sh_script_api_check_text(L, 3, "can_see_from", "the tag or joint to look from", NAME_ANY);
+    const char *joint = sh_script_api_check_text(L, 3, "can_see_from", "the tag or joint to look from", SH_SCRIPT_TEXT_ANY);
     if (!self || !other || !e || !e->trace || !e->spawn_id) return nil1(L);
     if (!point_of(self, joint, from, NULL)) return nil1(L);
     origin_of(other, to);
@@ -1147,7 +1146,7 @@ static int l_fire(lua_State *L)
     launch_aim how = { NULL, NULL, NULL };
     void *self = sh_script_api_owned(L, 1, "fire", "fire from", &self_h);
     void *decl = check_decl(L, 2, "fire", "projectile", "the projectile");
-    const char *joint = sh_script_api_check_text(L, 3, "fire", "the tag or joint to fire from", NAME_ANY);
+    const char *joint = sh_script_api_check_text(L, 3, "fire", "the tag or joint to fire from", SH_SCRIPT_TEXT_ANY);
     if (luaL_testudata(L, 4, "entity")) {
         how.target = sh_script_api_entity(L, 4, "fire", NULL);
     } else {
@@ -1172,7 +1171,7 @@ static int l_launch(lua_State *L)
     launch_aim how = { NULL, NULL, NULL };
     void *self = sh_script_api_owned(L, 1, "launch", "launch from", &self_h);
     void *decl = check_decl(L, 2, "launch", "projectile", "the projectile");
-    const char *joint = sh_script_api_check_text(L, 3, "launch", "the tag or joint to launch from", NAME_ANY);
+    const char *joint = sh_script_api_check_text(L, 3, "launch", "the tag or joint to launch from", SH_SCRIPT_TEXT_ANY);
     if (lua_type(L, 4) != LUA_TTABLE)
         sh_script_refuse(L, "\"launch\" needs the velocity (x, y and z in units per second), got %s",
                          lua_isnoneornil(L, 4) ? "nothing" : luaL_typename(L, 4));

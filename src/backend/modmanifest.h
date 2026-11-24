@@ -55,6 +55,10 @@ typedef struct sh_modmanifest_row {
     size_t name_count;
     int attached;          /* a map-level row ("attached": true) */
     char *choices;         /* its "choices": "<slot>\t<salt>\n" per entry, in text order; malloc'd, NULL for none */
+    /* Its "labels" (SPEC-distribution 2.7, DS-WORDS): each placed object's name as the author sees it (its Toybox
+     * row's name), keyed by the name the map places it by: "<placed name>\t<label>\n" per entry; malloc'd, NULL for
+     * none. Display only, like `name`: a notice names an object by it, never by its unit's root. */
+    char *labels;
     /* Format 2 (SPEC-distribution 2.7). A pinned row names the units of the objects it places ("objects", and
      * "whole" for a map-level row); its `build` is their composition hash (modcache.h), which the serving index
      * finds the composition by. A row that is not pinned is a local row ("local": true, D6a): it follows the local
@@ -69,9 +73,20 @@ typedef struct sh_modmanifest_row {
      * Kept as written (malloc'd), NULL for none. */
     char *modules;
     /* The content step only (sh_modmanifest_content_for): a row of no units standing in for a local row whose folder
-     * serves nothing, 1 when a folder of the salt is installed but cannot be used (else it is not on this computer). */
+     * serves nothing, 1 when a folder of the salt is installed but cannot be used (else it is not on this computer),
+     * or SH_MODMANIFEST_LOCAL_LACKS for the names a folder that is here no longer has (they stand in beside it). */
     int local_broken;
 } sh_modmanifest_row;
+
+#define SH_MODMANIFEST_LOCAL_LACKS 2
+
+/* The name the author sees for the object the map places as `placed` (the row's "labels"; malloc'd), or NULL. */
+char *sh_modmanifest_row_label(const sh_modmanifest_row *row, const char *placed);
+
+/* Where a save finds the labels (modui.c, from the installed mods' Toybox rows): for each of `placed[0..n)` the name
+ * its Toybox row shows, written to labels[k] (malloc'd) or left NULL when none is known. */
+typedef void (*sh_modmanifest_labeler_fn)(const char *const *placed, size_t n, char **labels);
+void sh_modmanifest_set_labeler(sh_modmanifest_labeler_fn fn);
 
 typedef struct sh_modmanifest_list {
     sh_modmanifest_row *rows;

@@ -41,7 +41,6 @@
 #include "script_api_tint.h"
 
 #define PLAYER_SLOTS       64      /* players take the first entity numbers */
-#define TEXT_ANY           ((size_t)-1 >> 1)
 #define PI                 3.14159265358979323846
 
 /* A call that cannot answer answers nil. */
@@ -352,9 +351,9 @@ static void split_path(char *path, const char **sub, const char **state)
 
 static int l_anim_state(lua_State *L)
 {
-    const char *node = sh_script_api_check_text(L, 2, "animation_state", "the animWeb node to play", TEXT_ANY);
+    const char *node = sh_script_api_check_text(L, 2, "animation_state", "the animWeb node to play", SH_SCRIPT_TEXT_ANY);
     const char *via = lua_isnoneornil(L, 3) ? NULL :
-                      sh_script_api_check_text(L, 3, "animation_state", "the node to pass through", TEXT_ANY);
+                      sh_script_api_check_text(L, 3, "animation_state", "the node to pass through", SH_SCRIPT_TEXT_ANY);
     sh_script_handle h = 0;
     void *ent = sh_script_api_owned(L, 1, "animation_state", "animate", &h);
     char *dest, *vpath = NULL;
@@ -390,7 +389,7 @@ static int l_anim_state(lua_State *L)
 
 static int l_anim_force(lua_State *L)
 {
-    const char *node = sh_script_api_check_text(L, 2, "force_animation", "the animWeb node to play", TEXT_ANY);
+    const char *node = sh_script_api_check_text(L, 2, "force_animation", "the animWeb node to play", SH_SCRIPT_TEXT_ANY);
     double blend = 0;
     sh_script_handle h = 0;
     void *ent;
@@ -441,7 +440,7 @@ static const struct { const char *name; unsigned bit; } k_anim_events[] = {
 
 static int l_anim_event(lua_State *L)
 {
-    const char *name = sh_script_api_check_text(L, 2, "animation_event", "the event name", TEXT_ANY);
+    const char *name = sh_script_api_check_text(L, 2, "animation_event", "the event name", SH_SCRIPT_TEXT_ANY);
     const char *bare = _strnicmp(name, "AWCMD_EVENT_", 12) ? name : name + 12;
     sh_script_handle h = 0;
     void *ent;

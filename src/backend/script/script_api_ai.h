@@ -898,8 +898,6 @@ int sh_script_ai_park(void *ai, sh_script_handle h);
  * from the pieces. Speeds are units a second, spins radians a second. The
  * registry is per map; names are whole and compared without case. The cone
  * and thru-square presets are refused (not carried). */
-#define SH_AI_DESTRUCT_DEFS        64
-#define SH_AI_DESTRUCT_PIECES      32
 enum { SH_AI_PRESET_CUSTOM = 0, SH_AI_PRESET_RANDOM = 1, SH_AI_PRESET_CONE = 2, SH_AI_PRESET_SPHERICAL = 3,
        SH_AI_PRESET_ANGEL_WINGS = 4, SH_AI_PRESET_THRU_SQUARE = 5 };
 typedef struct {
@@ -918,8 +916,9 @@ typedef struct {
     int   ignore_external;     /* DESTRUCT_FLAG_IGNORE_EXTERNAL_FORCE */
     float max_speed;           /* units/s; 0 none */
     float max_spin;            /* rad/s; 0 none */
-    int   n;                   /* pieces, in the breakable's piece order */
-    sh_ai_destruct_piece piece[SH_AI_DESTRUCT_PIECES];
+    int   n;                   /* pieces, in the breakable's piece order (any number) */
+    sh_ai_destruct_piece *piece;   /* n of them; the registry keeps its own copy, a spec it gives back points at it
+                                    * until the def is named again or the map ends (sh_ai_destructible_reset) */
 } sh_ai_destruct_spec;
 typedef float (*sh_ai_rand_fn)(void *state);   /* uniform in [0, 1) */
 /* One piece's velocity (units/s) and spin (rad/s) by DOOM Eternal's law

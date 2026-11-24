@@ -67,6 +67,11 @@ static const char VANILLA[] =
 static const char ONE_MOD[] =
     "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
     VAR("door_label", "Open") "]}" MEMBER(ROW(SALT_A, "alex.pink-imp")) "}";
+/* A local row that places the mod's imp: its stand-ins serve it whenever they can be written (the content cache). */
+static const char ONE_PLACED[] =
+    "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}"
+    MEMBER("{\"mod\":\"" SALT_A "\",\"name\":\"alex.pink-imp\",\"size\":42,\"local\":true,"
+           "\"names\":[\"mods/" SALT_A "/imp\"]}") "}";
 static const char TWO_MODS[] =
     "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}"
     MEMBER(ROW(SALT_A, "alex.pink-imp") "," ROW(SALT_B, "bob.room")) "}";
@@ -134,7 +139,7 @@ static int f_served(const sh_modmanifest_row *row)
 static int g_map_notes;
 void backend_log(const char *line)
 {
-    if (line && !strncmp(line, "MODS: map: ", 11) && strstr(line, "is not installed on this computer")) g_map_notes++;
+    if (line && !strncmp(line, "MODS: map: ", 11) && strstr(line, "is not on this computer")) g_map_notes++;
 }
 int sh_modserve_active(void) { return 1; }
 /* The registry choices' input (modmanifest.c gives them at every load). */
@@ -159,6 +164,7 @@ void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref)
 
 /* A local row's folder that is here but cannot be used (modserve.h): none here. */
 int sh_modserve_salt_installed(const char *salt) { (void)salt; return 0; }
+int sh_modserve_root_lacks(const char *salt, const char *name) { (void)salt; (void)name; return 0; }
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
     if (out) memset(out, 0, sizeof *out);
@@ -518,10 +524,13 @@ static const char PINNED_AND_LOCAL[] =
     "\"objects\":{\"entities/tyrant\":\"" HASH_A "\"}},{\"mod\":\"" SALT_B "\",\"name\":\"Bob Room\",\"size\":42,"
     "\"local\":true}]}}";
 
-/* The sentence a missing row that names no unit is refused with (pub_refuse_local). */
-#define LOCAL_ONE \
-    "This map needs alex.pink-imp, which is not on this computer and cannot be downloaded: the map was saved before " \
-    "its content was sent to the mod store. Ask its author to publish it again. The map was not loaded."
+/* No guard stops a map from loading (manager, 2026-11-24): a local row that places nothing and whose mod is not here
+ * (a mod used map-wide that was never published) goes on without it, with this sentence (pub_hold_local). */
+#define LOCAL_ONE "This map is playing without alex.pink-imp, which is not on this computer."
+/* A row that places objects whose stand-ins could not be written: the one refusal left. */
+#define NO_STANDINS \
+    "This map was not loaded: Snapmap+ could not write the stand-ins for its mod content that is not on this " \
+    "computer. Free some disk space, then open it again."
 #define SCRIPTS_OFF_TEXT \
     "This map's mods include scripts, which you turned off. To play it, turn on " \
     "\"Play Maps Whose Mods Include Scripts\" in the Settings menu of the Snapmap+ window."
@@ -667,29 +676,24 @@ static void vanilla_and_installed_pass_through(void)
     tick(5);
     CHECK(F.asks == 0 && F.activations == 0 && F.resumes == 0);
 
-    /* A map whose row no build serves is held; its row names no unit, so the next tick refuses it (nothing is
-     * asked of the store). */
+    /* A map whose row no build serves is held; its row names no unit and places nothing, so the next tick lets it
+     * go on without the mod, with one sentence (nothing is asked of the store). */
     reset();
     parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     CHECK(sh_modpublished_holding() && F.activations == 0);   /* a held map changes nothing yet */
     tick(1);
-    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.asks == 1 && F.ask_buttons == 0);
-    CHECK(!strcmp(F.last_ask, LOCAL_ONE));
+    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.resumes == 1 && F.drop_ui == 0);
+    CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, LOCAL_ONE));
 
-    /* The build that serves it lacks a listed name: the asset rule's sentence is said at the hold, and the refusal says
-     * the same, not "not on this computer". */
+    /* A row that places objects and is still not served (its stand-ins could not be written): the one refusal. */
     reset();
-    F.installed_a = 1;
-    F.incomplete_a = 1;
-    parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, ONE_MOD, MAP);
+    parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, ONE_PLACED, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     CHECK(sh_modpublished_holding());
-    CHECK(strstr(F.last_print, "is installed but does not provide mods/alexpink/imp, which this map uses.") != NULL);
     tick(1);
-    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.drop_ui == 1);
-    CHECK(!strcmp(F.last_ask, "alex.pink-imp is installed but does not provide mods/alexpink/imp, which this map uses. "
-                              "The map was not loaded."));
+    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.drop_ui == 1 && F.resumes == 0);
+    CHECK(!strcmp(F.last_ask, NO_STANDINS));
 
     /* A completion whose map is not the last parse's object is not gated. */
     reset();
@@ -773,24 +777,31 @@ static void launch_boundary(void)
     tick_until_idle();
     CHECK(F.resumes == 0 && F.activations == 0 && !sh_modpublished_holding());
 
-    /* A row that names no unit: nothing launches, nothing is fetched; the notice names the mod. */
+    /* A row that names no unit and places nothing: the launch goes on without it, nothing fetched; the notice names
+     * the mod. */
     reset();
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_launch_gate(SH_MODPUB_LOBBY_LAUNCH, MANAGER, NULL, NULL) == 0);
     tick(1);
-    CHECK(F.resumes == 0 && F.fetch_calls == 0 && F.drop_ui == 1 && !sh_modpublished_holding());
-    CHECK(F.launch_refused == 1 && F.refused_hook == SH_MODPUB_LOBBY_LAUNCH && !strcmp(F.last_ask, LOCAL_ONE));
+    CHECK(F.resumes == 1 && F.fetch_calls == 0 && F.drop_ui == 0 && !sh_modpublished_holding());
+    CHECK(F.launch_refused == 0 && !strcmp(F.last_ask, LOCAL_ONE));
 
-    /* An offline launch has no object to resume with, so nothing is fetched: a row that names no unit is refused. */
+    /* An offline launch has no object to resume with, so nothing is fetched: it plays without a mod it uses map-wide
+     * that is not here, with one sentence. */
     reset();
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
-    CHECK(sh_modpub_launch_gate(SH_MODPUB_OFFLINE_LAUNCH, MANAGER, MAP, NULL) == 0);
-    CHECK(!sh_modpublished_holding() && F.drop_ui == 1 && F.asks == 0 && F.fetch_calls == 0);
-    CHECK(F.launch_refused == 1 && F.refused_hook == SH_MODPUB_OFFLINE_LAUNCH);
-    CHECK(!strcmp(sh_modpub_test_notice(), "This map was not loaded: it needs mods that are not on this computer and "
-                                           "cannot be downloaded. Ask its author to publish it again."));
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_OFFLINE_LAUNCH, MANAGER, MAP, NULL) == 1);
+    CHECK(!sh_modpublished_holding() && F.drop_ui == 0 && F.launch_refused == 0 && F.fetch_calls == 0);
+    CHECK(!strcmp(sh_modpub_test_notice(), LOCAL_ONE));
     tick(1);
     CHECK(F.asks == 1 && F.ask_buttons == 0);
+
+    /* One that places objects with no stand-ins here: refused, the one refusal left. */
+    reset();
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_PLACED, MAP);
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_OFFLINE_LAUNCH, MANAGER, MAP, NULL) == 0);
+    CHECK(F.drop_ui == 1 && F.launch_refused == 1 && F.refused_hook == SH_MODPUB_OFFLINE_LAUNCH);
+    CHECK(!strcmp(sh_modpub_test_notice(), NO_STANDINS));
 
     /* A pinned row whose composition is here (stand-ins for what is not): the offline launch plays. */
     reset();
@@ -802,7 +813,7 @@ static void launch_boundary(void)
     tick(2);
     CHECK(F.asks == 0);
 
-    /* A pinned row with no composition at all: refused, told to connect and open it again. */
+    /* A pinned row that places objects with no composition at all (its stand-ins could not be written): refused. */
     reset();
     use_units();
     g_content.served = 0;
@@ -810,17 +821,15 @@ static void launch_boundary(void)
     CHECK(sh_modpub_launch_gate(SH_MODPUB_OFFLINE_LAUNCH, MANAGER, MAP, NULL) == 0);
     CHECK(!sh_modpublished_holding() && F.drop_ui == 1 && F.launch_refused == 1 && F.refused_hook == SH_MODPUB_OFFLINE_LAUNCH);
     CHECK(F.fetch_calls == 0);
-    CHECK(!strcmp(sh_modpub_test_notice(), "This map was not loaded: its mod content is not on this computer. Connect to "
-                                           "the internet and open it again."));
+    CHECK(!strcmp(sh_modpub_test_notice(), NO_STANDINS));
 
-    /* A row that names no unit beside a pinned one: the local sentence wins. */
+    /* A row that places nothing beside a served pinned one: the map plays, without that mod, saying so. */
     reset();
     use_units();
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, PINNED_AND_LOCAL, MAP);
-    CHECK(sh_modpub_launch_gate(SH_MODPUB_OFFLINE_LAUNCH, MANAGER, MAP, NULL) == 0);
-    CHECK(F.drop_ui == 1 && F.launch_refused == 1);
-    CHECK(!strcmp(sh_modpub_test_notice(), "This map was not loaded: it needs mods that are not on this computer and "
-                                           "cannot be downloaded. Ask its author to publish it again."));
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_OFFLINE_LAUNCH, MANAGER, MAP, NULL) == 1);
+    CHECK(F.drop_ui == 0 && F.launch_refused == 0);
+    CHECK(!strcmp(sh_modpub_test_notice(), "This map is playing without Bob Room, which is not on this computer."));
 
     /* A parse no gate saw, whose row no build serves, is held. */
     reset();
@@ -1119,14 +1128,13 @@ static void joiner_host_mismatch_drops(void)
     tick(2);
     CHECK(!sh_modpublished_holding() && g_leaves == 1 && F.resumes == 0);
 
-    /* A joiner whose row names no unit leaves the lobby at once, with the sentence that names the mod. */
+    /* A joiner whose row places objects and has no stand-ins here leaves the lobby at once, saying why. */
     reset();
-    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_PLACED, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_CACHE_READY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     tick(1);
     CHECK(!sh_modpublished_holding() && g_leaves == 1 && F.fetch_calls == 0 && F.resumes == 0);
-    CHECK(strstr(F.last_ask, "This map needs alex.pink-imp, which is not on this computer and cannot be downloaded") == F.last_ask);
-    CHECK(strstr(F.last_ask, "You left the lobby so the match is not held up; join it again later.") != NULL);
+    CHECK(strstr(F.last_ask, "Snapmap+ could not write the stand-ins") != NULL);
 
     /* A joiner runs no mod script, so its scripts setting never refuses the
      * host's map: with scripts off and scripted builds in place, it passes. */
@@ -1202,14 +1210,15 @@ static void my_maps_play(void)
     tick_until_idle();
     CHECK(F.resumes == 0 && F.activations == 0 && !sh_modpublished_holding());
 
-    /* A map saved before its content went to the store: refused, the launch's declared rows released. */
+    /* A map that uses a mod map-wide that was never published and is not here: it goes on without it (manager,
+     * 2026-11-24: no guard stops a map from loading). */
     reset();
     parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
-    CHECK(F.launch_refused == 0);   /* held: not refused yet */
+    CHECK(F.launch_refused == 0);   /* held */
     tick(1);
-    CHECK(F.resumes == 0 && !sh_modpublished_holding() && F.fetch_calls == 0);
-    CHECK(F.launch_refused == 1 && F.refused_hook == SH_MODPUB_LOCAL_OFFLINE && F.drop_ui == 1);
+    CHECK(F.resumes == 1 && !sh_modpublished_holding() && F.fetch_calls == 0);
+    CHECK(F.launch_refused == 0 && F.drop_ui == 0);
     CHECK(!strcmp(F.last_ask, LOCAL_ONE));
 }
 
@@ -1959,7 +1968,7 @@ static void rawmap_missing_counts_rows(void)
 static void rawmap_without_content_is_refused(void)
 {
     sh_modmanifest_list rows;
-    printf("-- a rawmap whose missing rows name no unit is refused at the next tick, nothing fetched\n");
+    printf("-- a rawmap whose missing rows name no unit and place nothing opens without them, nothing fetched\n");
     reset();
     CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 2);
     CHECK(sh_modpub_rawmap_hold(&rows, "shared.json") == 1);
@@ -1967,23 +1976,20 @@ static void rawmap_without_content_is_refused(void)
     CHECK(sh_modpublished_holding() && sh_modpub_test_state() == 1 && F.asks == 0 && F.fetch_calls == 0);
     CHECK(F.prints == 2);               /* one line per row the asset rule names; no store is asked */
     tick(1);
-    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.resumes == 0 && F.activations == 0);
-    CHECK(F.drop_ui == 1 && F.launch_refused == 0);   /* a rawmap load is not a launch */
+    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.resumes == 1 && F.drop_ui == 0);
     CHECK(F.prints == 3 && !strcmp(F.last_print,
-          "This map needs alex.pink-imp, bob.room, which are not on this computer and cannot be downloaded: the map was "
-          "saved before their content was sent to the mod store. Ask its author to publish it again. The map was not loaded."));
-    CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, F.last_print));
+          "This map is playing without alex.pink-imp and bob.room, which are not on this computer."));
 
-    printf("-- a rawmap with pinned rows and one local row is refused for the local row alone\n");
+    printf("-- a rawmap with pinned rows and one local row that places nothing opens without that mod alone\n");
     reset();
     use_units();
     CHECK(sh_modpub_rawmap_missing(PINNED_AND_LOCAL, strlen(PINNED_AND_LOCAL), &rows) == 2);
     CHECK(sh_modpub_rawmap_hold(&rows, "mixed.json") == 1);
     sh_modmanifest_list_free(&rows);
     tick(1);
-    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.resumes == 0);
-    CHECK(strstr(F.last_ask, "This map needs Bob Room, which is not on this computer and cannot be downloaded") == F.last_ask &&
-          !strstr(F.last_ask, "Eternal Demons"));
+    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.drop_ui == 0);
+    CHECK(strstr(F.last_print, "This map is playing without Bob Room, which is not on this computer.") == F.last_print &&
+          !strstr(F.last_print, "Eternal Demons"));
 }
 
 static void rawmap_pinned_rows_download_and_reopen(void)
@@ -2024,20 +2030,18 @@ static void gate_editor_substitutes(void)
     strcpy_s(row.build, sizeof row.build, HASH_A);
     /* The note says what this computer knows, never "permanent" or "never published". */
     CHECK(HO(why, sh_modpub_editor_substitute(&row, hash, sizeof hash, 0, HO_P(0))) == 0 && !hash[0] &&
-          !strcmp(why, "This map needs alex.pink-imp, which is not installed on this computer, so the editor "
-                       "opens the map without it. Playing the map asks the mod store for it."));
+          !strcmp(why, "This map is playing without alex.pink-imp, which is not on this computer."));
     CHECK(HO(why, sh_modpub_editor_substitute(&row, hash, sizeof hash, 0, HO_P(0))) == 0 &&
-          strstr(why, "is not installed on this computer") && !strstr(why, "permanent") && !strstr(why, "Recycle Bin"));
-    /* The map places something of the mod: the engine's validator refuses it, so the
-     * sentence says the editor cannot open the map and what to do, and fits the notice. */
+          !strstr(why, "permanent") && !strstr(why, "mod store"));
+    /* The map places something of the mod and its stand-ins could not be written: the engine's validator would
+     * refuse it, so the sentence says the map was not opened and what to do, and fits the notice. */
     CHECK(HO(why, sh_modpub_editor_substitute(&row, hash, sizeof hash, 1, HO_P(0))) == 0 && !hash[0] &&
-          !strcmp(why, "This map needs alex.pink-imp, which is not installed on this computer, so the editor cannot "
-                       "open the map. Restore the mod's folder from the Recycle Bin, or play the map from My Maps to "
-                       "get it from the mod store.") && strlen(why) < 256);
-    /* A row without a name says its salt. */
+          !strcmp(why, "This map was not opened: Snapmap+ could not write the stand-ins for alex.pink-imp, which is not "
+                       "on this computer. Free some disk space, then open it again.") && strlen(why) < 256);
+    /* A row without a name says "a mod", never its salt. */
     row.name[0] = 0;
     CHECK(HO(why, sh_modpub_editor_substitute(&row, hash, sizeof hash, 0, HO_P(0))) == 0 &&
-          !strncmp(why, "This map needs a mod, which", 27));
+          !strncmp(why, "This map is playing without a mod, which", 40));
     reset();
 }
 
@@ -2051,7 +2055,7 @@ static void editor_open_missing_placed_mod(void)
         "{\"entities\":[{\"entityDef\":{\"inherit\":\"mods/" SALT_A "/imp\"}}],\"instances\":[],"
         "\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":[" VAR("door_label", "Open") "]}"
         MEMBER(ROW(SALT_A, "alex.pink-imp")) "}";
-    printf("-- the editor cannot open a map that places a mod not installed: one plain notice, not \"damaged\"\n");
+    printf("-- the editor cannot open a map whose placed mod has no stand-ins here: one plain notice, not \"damaged\"\n");
     reset();
     g_map_notes = 0;
     g_refused_loads = 0;
@@ -2064,9 +2068,9 @@ static void editor_open_missing_placed_mod(void)
     /* The engine's "damaged" notice for the same failed load is dismissed (R-PG1, R-CR1 live). */
     CHECK(g_refused_loads == 1);
     tick(2);
-    CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, "This map needs alex.pink-imp, which is not installed on this computer, so "
-                                             "the editor cannot open the map. Restore the mod's folder from the Recycle "
-                                             "Bin, or play the map from My Maps to get it from the mod store."));
+    CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, "This map was not opened: Snapmap+ could not write the "
+                                             "stand-ins for alex.pink-imp, which is not on this computer. Free some disk "
+                                             "space, then open it again."));
     reset();
     /* Declared only (Use in this map): the editor opens it without the mod; no notice. */
     sh_modmanifest_set_editor_load(1);
@@ -2122,30 +2126,29 @@ static void gate_notes_after_the_decision(void)
 static void a_row_that_names_no_unit_is_refused(void)
 {
     sh_modmanifest_list rows;
-    printf("-- a published play whose missing row names no unit is refused at the next tick; nothing is fetched\n");
+    printf("-- a published play whose missing row names no unit and places nothing goes on without it; nothing is fetched\n");
     reset();
     use_units();    /* the content step is bound: the row is still not a unit's */
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     CHECK(sh_modpublished_holding() && sh_modpub_test_state() == 1 && F.hold_ui == 1);
-    CHECK(F.drop_ui == 0 && F.launch_refused == 0 && F.asks == 0);   /* held: not refused until the tick */
+    CHECK(F.drop_ui == 0 && F.launch_refused == 0 && F.asks == 0);   /* held until the tick */
     tick(1);
     CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.worker == NULL && F.rescans == 0);
-    CHECK(F.resumes == 0 && F.activations == 0 && F.metadata_frees == 1);
-    CHECK(F.drop_ui == 1 && F.launch_refused == 1 && F.refused_hook == SH_MODPUB_ON_SNAP_PLAY);
+    CHECK(F.resumes == 1 && F.drop_ui == 0 && F.launch_refused == 0);
     CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, LOCAL_ONE) && !strcmp(F.last_print, LOCAL_ONE));
     tick(5);
     CHECK(F.asks == 1 && F.fetch_calls == 0);   /* said once */
 
-    printf("-- the same for the other published hooks, and for a joiner (who leaves the lobby)\n");
+    printf("-- the same for the other published hooks; a joiner whose objects have no stand-ins leaves the lobby\n");
     reset();
     parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, TWO_MODS, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_FEED_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     tick(1);
-    CHECK(F.fetch_calls == 0 && F.launch_refused == 1 && F.refused_hook == SH_MODPUB_FEED_PLAY);
-    CHECK(strstr(F.last_ask, "This map needs alex.pink-imp, bob.room, which are not on this computer") == F.last_ask);
+    CHECK(F.fetch_calls == 0 && F.launch_refused == 0 && F.resumes == 1);
+    CHECK(!strcmp(F.last_ask, "This map is playing without alex.pink-imp and bob.room, which are not on this computer."));
     reset();
-    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_PLACED, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_CACHE_READY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     tick(1);
     CHECK(F.fetch_calls == 0 && g_leaves == 1 && F.drop_ui == 1 && F.resumes == 0);
@@ -2156,8 +2159,8 @@ static void a_row_that_names_no_unit_is_refused(void)
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, PINNED_AND_LOCAL, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     tick(1);
-    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.launch_refused == 1);
-    CHECK(strstr(F.last_ask, "This map needs Bob Room, which is not on this computer and cannot be downloaded") == F.last_ask);
+    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.launch_refused == 0);
+    CHECK(strstr(F.last_ask, "This map is playing without Bob Room, which is not on this computer.") == F.last_ask);
     CHECK(!strstr(F.last_ask, "Eternal Demons"));
 
 }
@@ -2177,14 +2180,14 @@ static void own_content_follows_the_installed_builds(void)
     CHECK(!sh_modpublished_holding() && F.asks == 0);
     sh_modmanifest_set_editor_load(0);
 
-    printf("-- a row nothing serves is refused for that mod alone; two mods, one served\n");
+    printf("-- a row nothing serves that places nothing: the map goes on without that mod alone; two mods, one served\n");
     reset();
     F.installed_a = 1;
     parse(SH_MODPUB_PARSE_OTHER, TWO_MODS, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
     tick(1);
-    CHECK(F.fetch_calls == 0 && F.resumes == 0 && F.launch_refused == 1);
-    CHECK(strstr(F.last_ask, "This map needs bob.room, which is not on this computer and cannot be downloaded") == F.last_ask);
+    CHECK(F.fetch_calls == 0 && F.resumes == 1 && F.launch_refused == 0);
+    CHECK(!strcmp(F.last_ask, "This map is playing without bob.room, which is not on this computer."));
     CHECK(!strstr(F.last_ask, "alex.pink-imp"));
 
     printf("-- a rawmap load follows the installed builds the same way\n");

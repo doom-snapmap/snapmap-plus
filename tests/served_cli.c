@@ -32,6 +32,22 @@ static void bank_found(void *ctx, const char *request, uint64_t size, const char
     if (!q->found && request && !_strnicmp(request, q->prefix, strlen(q->prefix))) q->found = _strdup(request);
 }
 
+typedef struct lack_count { int checked, lacking; } lack_count;
+static void lack_check(void *ctx, const char *request, uint64_t size, const char *bundle_id, const char *bundle_hash)
+{
+    lack_count *c = (lack_count *)ctx;
+    char type[SH_MB_TYPE_CAP], *name = NULL, own[64];
+    (void)size; (void)bundle_hash;
+    if (!request || !bundle_id || strncmp(request, "generated/decls/", 16)) return;
+    _snprintf_s(own, sizeof own, _TRUNCATE, "mods/%s/", bundle_id);
+    if (!sh_mb_logical_name(request, type, &name) || !name) return;
+    if (!_strnicmp(name, own, strlen(own))) {
+        c->checked++;
+        if (sh_modserve_root_lacks(bundle_id, name)) { c->lacking++; fprintf(stderr, "lacking: %s (%s)\n", name, request); }
+    }
+    free(name);
+}
+
 #include "../src/backend/nav_bake.h"
 void sh_nav_bake_source_update_begin(void) {}
 void sh_nav_bake_source_update_end(int committed) { (void)committed; }
@@ -155,7 +171,35 @@ int main(int argc, char **argv)
     }
     sh_modprog_reset();
     sh_modserve_set_material_filter(sh_look_compile);
-    if (sh_modserve_index_build(root) < 0) { fprintf(stderr, "the serving index was refused\n"); return 1; }
+    {
+        /* The launch preload's own share (modserve_engine.c sh_modserve_launch_preload): the index over the root and
+         * the plan of every editor row and its closure, as at the hub with no map open. The engine's registration of
+         * the plan's steps is not offline; its time is in the live logs. */
+        LARGE_INTEGER fq, t0, t1, t2;
+        sh_modserve_plan plan;
+        int steps;
+        QueryPerformanceFrequency(&fq);
+        QueryPerformanceCounter(&t0);
+        if (sh_modserve_index_build(root) < 0) { fprintf(stderr, "the serving index was refused\n"); return 1; }
+        QueryPerformanceCounter(&t1);
+        sh_modserve_scope_enable(1);
+        (void)sh_modserve_scope_set(NULL, 0, 0);
+        steps = sh_modserve_plan_editor(&plan);
+        QueryPerformanceCounter(&t2);
+        printf("served_cli: index %.1f ms; editor rows plan (the launch preload's product share) %.1f ms, %d step(s)\n",
+               (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart,
+               (double)(t2.QuadPart - t1.QuadPart) * 1000.0 / (double)fq.QuadPart, steps);
+        if (steps >= 0) sh_modserve_plan_free(&plan);
+        sh_modserve_scope_enable(0);
+    }
+    {
+        /* Every decl name a built folder provides is one its folder has (sh_modserve_root_lacks never answers "no
+         * longer has" for a healthy mod's own names). */
+        lack_count lc = { 0, 0 };
+        sh_modserve_each_served(lack_check, &lc);
+        printf("served_cli: %d own decl name(s) checked, %d said to be lacking\n", lc.checked, lc.lacking);
+        if (lc.lacking) bad = 1;
+    }
     for (i = 0; i < nreq; i++) {
         bank_find q = { reqs[i] + 1, NULL };
         if (reqs[i][0] != 1) continue;

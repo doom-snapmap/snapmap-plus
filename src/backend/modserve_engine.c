@@ -1518,7 +1518,6 @@ static void me_reparse_early(const char *phase, int in_heap)
  * resource lists hold is loaded again in place, which resolves its materials
  * and pixels with the blacklists off. Matched by name within the list of its
  * class (idMD6Model, idImage), since a material and an image can share one. */
-#define ME_RAW_MAX 4096
 #define ME_RAW_MODEL 0
 #define ME_RAW_IMAGE 1
 #define ME_RAW_ANIM  2
@@ -1530,6 +1529,7 @@ typedef struct me_raw {
     int smodels;          /* static models reloaded: the list's reload counter is moved once after the walk */
     int refused;          /* anims whose served bytes the engine's Load would refuse: the held one is kept */
     int anims_level1;     /* anims held below level 4: read from the current bytes at their next load */
+    int dropped;          /* names not kept for want of memory (logged) */
     char first[700];
 } me_raw;
 
@@ -1549,7 +1549,15 @@ static int me_raw_collect(void *context, const char *type, const char *name, con
      * is the one pass that loads the game's own bytes again, inside its
      * keeper, so a boot-held stock mesh gets its blacklisted materials
      *. */
-    if (r->n < r->cap) {
+    if (r->n == r->cap) {
+        /* Every name is kept: the list grows (no count of the product's own). */
+        int cap = r->cap ? r->cap * 2 : 256;
+        me_raw_name *grown = (me_raw_name *)realloc(r->names, sizeof *grown * (size_t)cap);
+        if (!grown) { r->dropped++; return 0; }
+        r->names = grown;
+        r->cap = cap;
+    }
+    {
         r->names[r->n].name = name;
         r->names[r->n].request = request;
         r->names[r->n].kind = me_raw_kind(type);
@@ -1649,13 +1657,12 @@ static void me_raw_one(void *context, const char *list_class, void *resource, co
  * serves that name one are parsed again, so whatever they built from the old
  * data is rebuilt from the new (which objects cache an anim's data pointer
  * is not established). Inside process heap 0, main thread. */
-#define ME_DEP_SEEN 256
 typedef struct me_dep {
     const me_raw *raw;
     me_reparse *decls;
     int found;
-    const char *seen[ME_DEP_SEEN];
-    int nseen;
+    const char **seen;   /* the decls re-parsed so far, each once (grows) */
+    int nseen, cseen;
 } me_dep;
 
 static void me_dep_visit(void *context, const char *request, uint64_t size, const char *bundle_id,
@@ -1677,7 +1684,12 @@ static void me_dep_visit(void *context, const char *request, uint64_t size, cons
             !me_body_names(body, len, c->raw->names[i].name))
             continue;
         if (sh_mb_logical_name(request, type, &name)) {
-            if (c->nseen < ME_DEP_SEEN) c->seen[c->nseen++] = request;
+            if (c->nseen == c->cseen) {
+                int cap = c->cseen ? c->cseen * 2 : 64;
+                const char **grown = (const char **)realloc((void *)c->seen, sizeof *grown * (size_t)cap);
+                if (grown) { c->seen = grown; c->cseen = cap; }
+            }
+            if (c->nseen < c->cseen) c->seen[c->nseen++] = request;
             (void)me_reparse_one(c->decls, type, name, request, bundle_id);
             c->found++;
         }
@@ -1695,6 +1707,7 @@ static int me_anim_dependents(const me_raw *raw, me_reparse *decls)
     c.raw = raw;
     c.decls = decls;
     sh_modserve_each_served(me_dep_visit, &c);
+    free((void *)c.seen);
     return c.found;
 }
 
@@ -1707,10 +1720,8 @@ static void me_reload_ungated(const char *phase, int in_heap)
     double t0 = me_now_ms();
     if (!g_bound || !g_res_head || !sh_modserve_active() || me_on_main() != 1) return;
     memset(&r, 0, sizeof r);
-    r.cap = ME_RAW_MAX;
-    r.names = (me_raw_name *)calloc((size_t)r.cap, sizeof *r.names);
-    if (!r.names) return;
     (void)sh_modserve_each_ungated_raw(me_raw_collect, &r);
+    if (r.dropped) me_log("%s: out of memory: %d gated model(s) and image(s) not reloaded", phase, r.dropped);
     if (!r.n) { free(r.names); return; }
     if (!in_heap && !sh_process_heap_enter(&g_heap, &heap)) {
         me_log("%s: gated models and images not reloaded (process heap scope unavailable)", phase);
@@ -1838,9 +1849,6 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
     if (!g_bound || me_on_main() != 1) return;
     (void)sh_modserve_refresh_expand();
     memset(&c, 0, sizeof c);
-    c.raw.cap = ME_RAW_MAX;
-    c.raw.names = (me_raw_name *)calloc((size_t)c.raw.cap, sizeof *c.raw.names);
-    if (!c.raw.names) return;
     if (!in_heap && !sh_process_heap_enter(&g_heap, &heap)) {
         me_rlog("refresh: changes not applied at the %s (process heap scope unavailable)", phase);
         free(c.raw.names);
@@ -1883,6 +1891,8 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
                c.raw.faulted, c.raw.refused, c.raw.anims_level1, c.raw.n - c.raw.reloaded - c.raw.faulted, c.raw.n,
                c.raw.first[0] ? ": " : "", c.raw.first,
                c.raw.reloaded > 0 && strlen(c.raw.first) + 40 >= sizeof c.raw.first ? ", ..." : "");
+    if (c.raw.dropped)
+        me_rlog("refresh: out of memory: %d model(s), image(s) and anim(s) not reloaded at the %s", c.raw.dropped, phase);
     if (c.dependents)
         me_rlog("refresh: %d md6Def and animWeb decl(s) naming a reloaded anim re-parsed at the %s", c.dependents, phase);
     if (c.kept || c.game)
@@ -2768,9 +2778,8 @@ static void me_sync_rows(const char *const *bundle_hashes, int n)
  * reloaded); a held skeleton or other raw type has no in-place route and is
  * reported. Stock paths (shadows) and paths the map does not serve are left
  * to the marks. Main thread, inside process heap 0. */
-#define ME_SWEEP_MAX 512
 typedef struct me_sweep_item { const char *request; } me_sweep_item;
-typedef struct me_sweep { me_sweep_item v[ME_SWEEP_MAX]; int n, over; } me_sweep;
+typedef struct me_sweep { me_sweep_item *v; int n, cap, dropped; } me_sweep;
 
 static void me_sweep_collect(void *context, const sh_modledger_rec *rec)
 {
@@ -2780,8 +2789,15 @@ static void me_sweep_collect(void *context, const sh_modledger_rec *rec)
     if (!rec->request || sh_modserve_is_surface(rec->request)) return;   /* the game's own bytes: never refreshed */
     if (!me_now_ident(rec->request, &now) || sh_modledger_same(&rec->id, &now)) return;
     if (!sh_modserve_lookup(rec->request, &hit) || hit.is_shadow) return;
-    if (s->n < ME_SWEEP_MAX) s->v[s->n++].request = rec->request;
-    else s->over++;
+    if (s->n == s->cap) {
+        /* Every name is checked: the list grows (no count of the product's own). */
+        int cap = s->cap ? s->cap * 2 : 256;
+        me_sweep_item *grown = (me_sweep_item *)realloc(s->v, sizeof *grown * (size_t)cap);
+        if (!grown) { s->dropped++; return; }
+        s->v = grown;
+        s->cap = cap;
+    }
+    s->v[s->n++].request = rec->request;
 }
 
 static void me_ledger_sweep(const char *phase)
@@ -2797,17 +2813,17 @@ static void me_ledger_sweep(const char *phase)
     s = (me_sweep *)calloc(1, sizeof *s);
     if (!s) return;
     (void)sh_modledger_each(me_sweep_collect, s);
-    if (!s->n) { free(s); return; }
-    if (!me_held_collect(&held, 0)) { me_log("%s: ledger: resource lists could not be walked", phase); me_held_free(&held); free(s); return; }
+    if (!s->n) { free(s->v); free(s); return; }
+    if (!me_held_collect(&held, 0)) { me_log("%s: ledger: resource lists could not be walked", phase); me_held_free(&held); free(s->v); free(s); return; }
     me_held_sort(&held);
     memset(&decls, 0, sizeof decls);
     memset(&raw, 0, sizeof raw);
-    raw.cap = ME_SWEEP_MAX;
+    raw.cap = s->n;
     raw.names = (me_raw_name *)calloc((size_t)raw.cap, sizeof *raw.names);
     if (!raw.names || !sh_process_heap_enter(&g_heap, &heap)) {
         me_log("%s: ledger: %d held name(s) with other bytes not refreshed (%s)", phase, s->n,
                raw.names ? "process heap scope unavailable" : "out of memory");
-        free(raw.names); me_held_free(&held); free(s);
+        free(raw.names); me_held_free(&held); free(s->v); free(s);
         return;
     }
     __try {
@@ -2845,11 +2861,13 @@ static void me_ledger_sweep(const char *phase)
         if (!sh_process_heap_leave(&heap)) me_log("%s: ledger: heap scope did not balance", phase);
     }
     me_log("%s: ledger: %d held name(s) carried other bytes than the open map serves: %d decl(s) re-parsed, %d model(s), "
-           "%d image(s) and %d anim(s) reloaded (%d failed, %d refused)%s%s%s", phase, s->n + s->over,
+           "%d image(s) and %d anim(s) reloaded (%d failed, %d refused)%s%s%s", phase, s->n + s->dropped,
            decls.reparsed, raw.models, raw.images, raw.anims, decls.failed + raw.failed + raw.faulted, raw.refused,
-           restart ? "; needs a restart (no in-place route): " : "", restart_first, s->over ? "; more not checked" : "");
+           restart ? "; needs a restart (no in-place route): " : "", restart_first,
+           s->dropped ? "; out of memory: more not checked" : "");
     free(raw.names);
     me_held_free(&held);
+    free(s->v);
     free(s);
 }
 

@@ -22,7 +22,11 @@
  *                          object of the map fires that SnapMap event.
  *   console_variable(name)             a cvar's value (a number when it reads as one).
  *   console_variable(name, value)      set it for this map; it is put back when the map
- *                          ends.
+ *                          ends while it still holds the script's value (a
+ *                          change made since by the player, the console or a
+ *                          mod's requirement is left as it is), and at the
+ *                          next start when a quit or crash mid-map left it in
+ *                          the game's saved settings.
  *   entities()             every entity of the map now, players first (filter
  *                          with e:definition(), e:class() or e:get(...)).
  *   decl(type, name)       a decl of the mod, or of the game with
@@ -47,14 +51,19 @@ typedef struct sh_script_game_ops {
     int (*signal_number)(const char *event);
     /* Fire it on the entity; 1 when the game ran it. */
     int (*signal_fire)(void *ent, int number, void *activator);
-    /* A cvar's value as text: 1, or 0 when the game has no such cvar. */
-    int (*cvar_get)(const char *name, char *out, size_t cap);
+    /* A cvar's value as text (malloc'd, any length), or NULL when the game has no such cvar. */
+    char *(*cvar_get)(const char *name);
     /* Set it: 1 set, 0 no such cvar, -1 it cannot be changed while the game runs, -2 the game refused. */
     int (*cvar_set)(const char *name, const char *value);
     /* The decl of that type and full name, NULL when the game has none. */
     void *(*decl)(const char *type, const char *name);
     /* The class that describes decls of that type, NULL when the game describes none. */
     const char *(*decl_class)(const char *type);
+    /* A cvar's default as text (malloc'd), or NULL when the game has no such cvar. */
+    char *(*cvar_default)(const char *name);
+    /* Keep the outstanding cvar restores where the next start finds them (`json`, sh_script_game_cvar_journal_text),
+     * or forget them (NULL: none outstanding). */
+    void (*cvar_journal)(const char *json);
 } sh_script_game_ops;
 
 /* The engine's operations, or a test's (NULL turns the calls off). */
@@ -62,6 +71,18 @@ void sh_script_api_game_set(const sh_script_game_ops *ops);
 
 /* Register the calls (once). */
 void sh_script_api_game_register(void);
+
+/* The journal of the cvar restores a running map still owes (NULL when none), and the start's recovery from it: each
+ * cvar that still holds the script's value, when that is not the cvar's default (the game saved it in its settings
+ * at a quit or crash mid-map), gets back the value the script displaced. Returns how many were put back. */
+char *sh_script_game_cvar_journal_text(void);
+int sh_script_game_cvar_recover(const char *journal);
+
+#ifndef SH_SCRIPT_PURE
+/* Once per process, on the main thread after the game read its settings (the frame poll): recover from the journal
+ * a quit or crash left, then forget it. */
+void sh_script_game_cvar_recover_poll(void);
+#endif
 
 /* The detour's report, and a test's: `ent` fired SnapMap event `number`. */
 void sh_script_game_signal_seen(void *ent, const char *event, void *activator);

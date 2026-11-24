@@ -54,7 +54,6 @@ enum { SH_FSM_CONDITION, SH_FSM_SNIPPET, SH_FSM_TRANSITION, SH_FSM_STATE, SH_FSM
 #define SH_FSM_REASON_OFFSET 0x18   /* const char *: why, for the engine's log */
 #define SH_FSM_WORK_CODE     0x6BD8 /* int in the machine: the code a state's Update hands it */
 #define SH_FSM_LOOKUP_STOLEN 15     /* the lookup's detour window: three whole register saves */
-#define SH_FSM_CLASS_CAP     96
 #define SH_FSM_SALT_CAP      16
 
 /* The stock class each kind is copied from (all four are used by stock decls). */

@@ -181,6 +181,7 @@ static int fx_is_restore(const char *path)
  * <root>\.content\served\<hash>\ is a composition of the content cache. `state` is the old
  * .state.json shape, mapped to the block's cause and built. */
 static const char *g_bundle_hash;   /* a whole build hash in place of hash_digit's, when set */
+static const char *g_fx_sha;        /* a whole file SHA-256 in place of the files' blob digits, when set */
 static void make_bundle(const char *parent, const char *folder, const char *id, char hash_digit,
                         const char *shadows, const fx_file *files, int n, const char *state)
 {
@@ -222,8 +223,8 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
         at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
                           "      {\"path\": \"%s\", \"sha256\": \"%s\", \"size\": %lld, "
                           "\"provides\": {\"type\": \"%s\", \"name\": \"%s\"}, \"needs\": %s}%s\n",
-                          ap, hash64(f->blob, b), size, f->ptype, f->pname, f->needs ? f->needs : "[]",
-                          i + 1 < n ? "," : "");
+                          ap, g_fx_sha ? g_fx_sha : hash64(f->blob, b), size, f->ptype, f->pname,
+                          f->needs ? f->needs : "[]", i + 1 < n ? "," : "");
         if (f->body) {
             char *p;
             _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, ap);
@@ -1272,19 +1273,18 @@ static void test_requirements_by_map(void)
     sh_modserve_scope_enable(1);
     CHECK(sh_modserve_index_build(root) == 3);
 
-    /* The map uses bmine000 only, in the editor: its row wins over the earlier
-     * install it does not use (whose Toybox row keeps its requirements here). */
+    /* The map uses bmine000 only, in the editor: its row decides; the earlier install it does not use (a Toybox
+     * row) asks nothing here, its requirements applying only in maps that use it (manager, 2026-11-24). */
     list[0] = h_b;
     log_clear();
     (void)sh_modserve_scope_set(list, 1, 1);
-    CHECK(log_has("MODS: requirements: conflict: com_showFPS: aold0000 asks \"120\", bmine000 asks \"60\"; aold0000, which "
-                  "this map does not use, loses"));
+    CHECK(!log_has("MODS: requirements: conflict: com_showFPS: aold0000"));
     CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[0], "60"));
     g_report[0] = 0;
     CHECK(sh_modserve_requirements_report(report_line, NULL) >= 3);
     CHECK(strstr(g_report, "requirements: bmine000: cvar com_showFPS=60: live\n") != NULL);
-    CHECK(strstr(g_report, "requirements: aold0000: cvar com_showFPS=120: refused (com_showFPS=120 lost to bmine000, which "
-                           "this map uses and asks \"60\")\n") != NULL);
+    CHECK(strstr(g_report, "requirements: aold0000: cvar com_showFPS=120: not active for this map (the open map does not "
+                           "use it") != NULL);
     /* Its Play: only the map's own mods apply. */
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0);
     CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) == 1 && !strcmp(g_text_val[0], "60") && r.live == 1);
@@ -1318,9 +1318,10 @@ static void test_requirements_by_map(void)
     (void)sh_modserve_scope_set(list, 2, 1);
     CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[0], "60"));
 
-    /* No map open: no map decides, and the earliest install wins as before. */
+    /* No map open: no undeclared mod's requirements apply, so none of the three asks the cvar. */
     (void)sh_modserve_scope_set(NULL, 0, 0);
-    CHECK(sh_modserve_requirements_apply(&g_gates, "hub", &r) == 1 && !strcmp(g_text_val[0], "120"));
+    CHECK(sh_modserve_requirements_apply(&g_gates, "hub", &r) == 0 && strcmp(g_text_val[0], "120") &&
+          strcmp(g_text_val[0], "60") && strcmp(g_text_val[0], "30"));
     sh_modserve_scope_enable(0);
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
@@ -1359,6 +1360,72 @@ static void test_many_providers(void)
     list[0] = last_hash;
     CHECK(sh_modserve_scope_set(list, 1, 1) >= 0);
     CHECK(sh_modserve_lookup(MANY_DECL, &hit) && !strcmp(hit.bundle_id, "many0069"));
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(0);
+}
+
+/* No count of the product's own on the texts one path composes, nor on its pick (decision 26): seventy mods add one
+ * whitelist entry each to the same game list. Every entry is composed with scope off (the static composition took
+ * 64 texts), with all seventy declared (the scope's took 64), and the memo of a composition tells apart two sets that
+ * differ only past the 64th provider (its key was a 64-bit mask, so the seventieth's absence served the body with
+ * it). The pick among them also looks at all seventy: only the last one's needs resolve. */
+#define MANY_WL "generated/decls/damage/many_list.decl"   /* a list of a decl of the maps (not an editor tweak) */
+static void test_many_composed(void)
+{
+    static char texts[70][160], hashes[70][65], shas[70][65], body[65536];
+    fx_file f[1];
+    char top[MAX_PATH], root[MAX_PATH], salt[16], want[64];
+    const char *list[70];
+    char *slash;
+    int i, all;
+    printf("-- seventy mods add to one list: every entry composes, and the composition's memo tells sets apart\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\manylist\\mods", top);
+    mkdirs(root);
+    for (i = 0; i < 70; ++i) {
+        _snprintf_s(salt, sizeof salt, _TRUNCATE, "list%04d", i);
+        _snprintf_s(hashes[i], sizeof hashes[i], _TRUNCATE, "%064x", 0x1000 + i);
+        _snprintf_s(texts[i], sizeof texts[i], _TRUNCATE,
+                    "{\n\tedit = {\n\t\tvalidEncounters = {\n\t\t\tnum = 1;\n\t\t\titem[0] = \"entry_%02d\";\n\t\t}\n\t}\n}\n", i);
+        f[0].path = MANY_WL;
+        f[0].body = texts[i];
+        f[0].size = -1;
+        f[0].ptype = "damage";
+        f[0].pname = "many_list";
+        f[0].needs = NULL;
+        f[0].blob = '0';
+        _snprintf_s(shas[i], sizeof shas[i], _TRUNCATE, "%064x", 0x2000 + i);
+        g_fx_sha = shas[i];
+        g_bundle_hash = hashes[i];
+        make_bundle(root, salt, salt, '0', "\"" MANY_WL "\"", f, 1, "{\"installedAt\": 100}");
+        list[i] = hashes[i];
+    }
+    g_bundle_hash = NULL;
+    g_fx_sha = NULL;
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_build(root) == 70);
+    CHECK(open_text(MANY_WL, body, sizeof body) == 1);
+    for (i = 0, all = 1; i < 70; ++i) {
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"entry_%02d\"", i);
+        if (!strstr(body, want)) { printf("  scope off: %s not composed\n", want); all = 0; }
+    }
+    CHECK(all);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_scope_set(list, 70, 1) >= 0);
+    CHECK(open_text(MANY_WL, body, sizeof body) == 1);
+    for (i = 0, all = 1; i < 70; ++i) {
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"entry_%02d\"", i);
+        if (!strstr(body, want)) { printf("  all declared: %s not composed\n", want); all = 0; }
+    }
+    CHECK(all);
+    CHECK(sh_modserve_scope_set(list, 69, 1) >= 0);   /* the seventieth no longer declared */
+    CHECK(open_text(MANY_WL, body, sizeof body) == 1);
+    CHECK(strstr(body, "\"entry_68\"") != NULL && !strstr(body, "\"entry_69\""));
+    CHECK(sh_modserve_scope_set(list, 70, 1) >= 0);   /* and again: the memo keeps each set's own text */
+    CHECK(open_text(MANY_WL, body, sizeof body) == 1);
+    CHECK(strstr(body, "\"entry_69\"") != NULL);
     (void)sh_modserve_scope_set(NULL, 0, 0);
     sh_modserve_scope_enable(0);
 }
@@ -4012,41 +4079,66 @@ static void test_scope(void)
         sh_modserve_each_unopened_shadow(unopened_visit, &u);
         CHECK(!strstr(u.order, "player/coop"));
     }
-    /* No map: ahands00' requirement is not live; rrows000 keeps its own, because
-     * the palette registers its row with no map open too. */
-    CHECK(sh_modserve_requirements_apply(&g_gates, "hub", &r) == 1 && r.commands == 0 && !strcmp(g_text_val[1], "0") &&
-          !strcmp(g_text_val[3], "knights"));
+    /* No map: no undeclared bundle's requirement applies (manager, 2026-11-24): ahands00's is not live, and
+     * rrows000's row registers without its own (g_label stays the game's). */
+    CHECK(sh_modserve_requirements_apply(&g_gates, "hub", &r) == 0 && r.commands == 0 && !strcmp(g_text_val[1], "0") &&
+          !strcmp(g_text_val[3], ""));
+    CHECK(sh_modserve_bundle_scope(h_rows, &si) && !si.listed && si.requirements && !si.requirements_live);
+    {
+        /* its row is not held back for that: the editor's pass registers it, and nothing is blocked */
+        sh_modserve_plan p;
+        gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+        CHECK(sh_modserve_plan_editor(&p) >= 1 && step_index(&p, "snapEditorEntityDef", "mods/rrows000/knight") >= 0);
+        CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates_nodrain, "editor", &r) >= 1 && p.blocked == 0);
+        CHECK(p.steps[step_index(&p, "snapEditorEntityDef", "mods/rrows000/knight")].ready == 1);
+        sh_modserve_plan_free(&p);
+    }
     CHECK(sh_modserve_bundle_scope(h_hands, &si) && si.scope == SH_MODSERVE_SCOPE_MAP && !si.listed && !si.shadows_live &&
           si.shadows == 2 && si.requirements && !si.requirements_live && si.rank == -1 && !si.inert && si.newest);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
     CHECK(strstr(g_report, "scope: ahands00 (0 names, 2 shadows, 0 surfaces, requirements): not declared "
-                           "(no map is open): its names serve for the Toybox and its surfaces serve; its shadows do not\n") != NULL);
+                           "(no map is open): its names serve for the Toybox and its surfaces serve; its shadows do not; its "
+                           "requirements apply only in maps that use it\n") != NULL);
     CHECK(strstr(g_report, "scope: eeditor0 (0 names, 1 shadow, 0 surfaces): editor-time content ("
                            SC_SET "): its editor tweaks serve in every map; the rest only in maps that declare it\n") != NULL);
     CHECK(strstr(g_report, "scope: nnames00 (1 name, 0 shadows, 0 surfaces): not declared (no map is "
                            "open): its names serve for the Toybox") != NULL);
     CHECK(strstr(g_report, "scope: rrows000 (1 name, 1 shadow, 0 surfaces, requirements): not declared "
                            "(no map is open): its names serve for the Toybox and its surfaces serve; its shadows do not; its "
-                           "requirements stay live because it adds Toybox rows\n") != NULL);
+                           "requirements apply only in maps that use it\n") != NULL);
     CHECK(strstr(g_report, "serving: 0 path(s) from mods the open map uses, ") != NULL);
 
     /* A map that declares nothing, in the editor: the same layers. */
     CHECK(sh_modserve_scope_set(NULL, 0, 1) == 0);
     CHECK(sh_modserve_scope_map_open() && !sh_modserve_lookup(SC_ROWDEF, NULL) && sh_modserve_lookup(SC_NEW, NULL));
     g_events[0] = 0;
-    CHECK(sh_modserve_requirements_apply(&g_gates, "map", &r) == 1 && !strcmp(g_text_val[3], "knights") && !strcmp(g_text_val[1], "0"));
+    CHECK(sh_modserve_requirements_apply(&g_gates, "map", &r) == 0 && !strcmp(g_text_val[3], "") && !strcmp(g_text_val[1], "0"));
     CHECK(ev_first("C:echo hands on") < 0);
-    /* Its Play (ADD-L6 K): no undeclared bundle keeps its requirements,
-     * Toybox rows or not, so rrows000' cvar is the game's again; back in the
-     * editor its rows need it, and it is applied again. */
+    /* Its Play: the same, so the editor and the map's Play agree (the editor no longer keeps a Toybox mod's
+     * requirements live for a map that does not use it). */
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0);
     CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) >= 0 && !strcmp(g_text_val[3], ""));
-    g_report[0] = 0;
-    sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: rrows000") && !strstr(g_report, "requirements stay live"));
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0);
-    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) >= 0 && !strcmp(g_text_val[3], "knights"));
+    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) >= 0 && !strcmp(g_text_val[3], ""));
+    {
+        /* The map places the row's object, so it declares rrows000: its requirement applies, and the row the
+         * editor read without it is offered to be read again (it was first opened while not live). */
+        unsigned char *bytes = NULL;
+        size_t n = 0;
+        unopened_seen u;
+        const char *one[1];
+        CHECK(sh_modserve_open(SC_ROW, &bytes, &n) == 1);   /* the editor reads the row now, without the requirement */
+        HeapFree(GetProcessHeap(), 0, bytes);
+        one[0] = h_rows;
+        CHECK(sh_modserve_scope_set(one, 1, 1) >= 1);
+        CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) >= 0 && !strcmp(g_text_val[3], "knights"));
+        memset(&u, 0, sizeof u);
+        (void)sh_modserve_each_unopened_shadow(unopened_visit, &u);
+        CHECK(strstr(u.order, "snapEditorEntityDef:mods/rrows000/knight:rrows000;") != NULL);
+        CHECK(sh_modserve_scope_set(NULL, 0, 1) >= 1);
+        CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) >= 0 && !strcmp(g_text_val[3], ""));
+    }
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
     CHECK(strstr(g_report, "scope: ahands00 (0 names, 2 shadows, 0 surfaces, requirements): not declared "
@@ -4133,8 +4225,8 @@ static void test_scope(void)
     g_events[0] = 0;
     CHECK(sh_modserve_scope_set(NULL, 0, 0) == 1);
     CHECK(!sh_modserve_lookup(SC_COOP, NULL) && !sh_modserve_scope_map_open());
-    CHECK(sh_modserve_requirements_apply(&g_gates, "map exit", &r) == 1);
-    CHECK(ev_first("C:echo hands off") >= 0 && !strcmp(g_text_val[1], "0") && !strcmp(g_text_val[3], "knights"));
+    CHECK(sh_modserve_requirements_apply(&g_gates, "map exit", &r) >= 0);
+    CHECK(ev_first("C:echo hands off") >= 0 && !strcmp(g_text_val[1], "0") && !strcmp(g_text_val[3], ""));
     (void)h_maped;
 
     /* A level load sees an installed mod's names only when its map declares the
@@ -4646,9 +4738,10 @@ static void test_two_builds_requirements(void)
     CHECK(sh_modserve_index_build(root) == 2);
     sh_modserve_scope_enable(1);
 
-    /* No map open (boot, the editor's palette): the root build's rows, all ready. */
+    /* No map open (boot, the editor's palette): the root build's rows, all ready, registered without the mod's
+     * requirements, which apply only in a map that uses it (manager, 2026-11-24). */
     CHECK(sh_modserve_scope_set(NULL, 0, 1) >= 0);
-    CHECK(sh_modserve_bundle_scope(h_new, &si) && si.newest && si.requirements_live);
+    CHECK(sh_modserve_bundle_scope(h_new, &si) && si.newest && !si.requirements_live);
     CHECK(sh_modserve_bundle_scope(h_old, &si) && !si.newest && !si.requirements_live);
     CHECK(!strcmp(ad_served(TB_ENT), "entityDef gun { new }"));
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
@@ -4656,11 +4749,9 @@ static void test_two_builds_requirements(void)
     CHECK(sh_modserve_plan_editor(&p) == 3);
     CHECK(step_index(&p, "snapEditorEntityDef", "mods/twobuild/gun") >= 0);
     CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates_nodrain, "editor", &r) == 3);
-    CHECK(p.blocked == 0 && r.live == 2 && !r.not_live && !log_has("BLOCKED"));
+    CHECK(p.blocked == 0 && !log_has("BLOCKED"));
     for (k = 0; k < p.count; ++k) CHECK(p.steps[k].ready == 1);
-    /* The gates are applied once: each cvar set once, one bundle's requirements accepted. */
-    CHECK(g_gate_sets == 2 && g_gate_val[0] == 0 && g_gate_val[1] == 0);
-    CHECK(log_count("MODS: editor: requirements applied:") == 1);
+    CHECK(g_gate_sets == 0 && log_count("MODS: editor: requirements applied:") == 0);   /* no cvar touched */
     sh_modserve_plan_free(&p);
 
     /* A map pinning the composition's build: that build's bytes and names, all ready. */
@@ -4696,7 +4787,7 @@ static void test_two_builds_requirements(void)
     list[0] = h_other;
     CHECK(sh_modserve_scope_set(list, 1, 1) >= 0);
     CHECK(!strcmp(ad_served(TB_ENT), "entityDef gun { new }"));
-    CHECK(sh_modserve_bundle_scope(h_new, &si) && !si.listed && si.requirements_live);
+    CHECK(sh_modserve_bundle_scope(h_new, &si) && !si.listed && !si.requirements_live);
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     sh_modserve_scope_enable(0);
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
@@ -4957,7 +5048,7 @@ static void test_salt_and_root(void)
     sh_modserve_scope_enable(0);
     log_clear();
     CHECK(sh_modserve_index_build(root) == 2);
-    CHECK(log_has("bundle 'My doors (copy)' skipped: it is a copy of mods\\My doors (work); Refresh "
+    CHECK(log_has("bundle 'My doors (copy)' skipped: it is a copy of your folder My doors (work); Refresh "
                   "in the Mods tab makes it a new mod") && !log_has("the same salt"));
     CHECK(log_has("bundle 'format-one' skipped: " "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
     CHECK(log_has("bundle 'retired-id' skipped: " SH_MB_EARLIER));
@@ -6230,6 +6321,7 @@ int main(void)
     test_requirements_general();
     test_requirements_by_map();
     test_many_providers();
+    test_many_composed();
     test_refresh();
     test_conflicts();
     test_editor_refs();

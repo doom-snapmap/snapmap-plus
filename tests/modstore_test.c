@@ -607,7 +607,7 @@ static void test_copy_gets_new_salt(const char *tmp)
     CHECK(mt_copy_tree(a, b));
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "guards - Copy");
-    CHECK(e && e->refused && strstr(e->cause, "is a copy of mods\\guards"));
+    CHECK(e && e->refused && strstr(e->cause, "is a copy of your folder guards"));
     CHECK(sh_ms_entry_usable(find_entry(&list, "guards")));
     sh_ms_list_free(&list);
     CHECK(sh_ms_sync_pending() == 1);
@@ -631,7 +631,7 @@ static void test_copy_gets_new_salt(const char *tmp)
     CHECK(mt_copy_tree(a, c));
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "a copy");
-    CHECK(e && e->refused && strstr(e->cause, "is a copy of mods\\guards"));
+    CHECK(e && e->refused && strstr(e->cause, "is a copy of your folder guards"));
     sh_ms_list_free(&list);
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 1);
     CHECK(entry_of("guards", sb, NULL, &usable) && usable && !strcmp(sb, sa));
@@ -760,11 +760,11 @@ static void test_retired_places(const char *fixture, const char *tmp)
     sh_ms_list_free(&list);
     /* Named explicitly, a folder of mods\maps\ is refused with the sentence and nothing is written. */
     cause[0] = 0;
-    CHECK(HO(cause, sh_ms_assign_salt(dir, "x", NULL, HO_P(0))) == -1 && strstr(cause, "This folder is in mods\\maps") &&
+    CHECK(HO(cause, sh_ms_assign_salt(dir, "x", NULL, HO_P(0))) == -1 && strstr(cause, "This folder is in the \"maps\" folder of your mods") &&
           strstr(cause, RETIRED_WORDS));
     cause[0] = 0;
     CHECK(!HO2(name, cause, sh_ms_install_from_folder(dir, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))) &&
-          strstr(cause, "This folder is in mods\\maps") && strstr(cause, RETIRED_WORDS));
+          strstr(cause, "This folder is in the \"maps\" folder of your mods") && strstr(cause, RETIRED_WORDS));
     cause[0] = 0;
     CHECK(!HO2(name, cause, sh_ms_install_from_folder(dir2, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))) &&
           strstr(cause, RETIRED_WORDS));
@@ -1430,7 +1430,7 @@ static void test_install_to_root(const char *tmp)
     mt_write(dir, "images\\b.bimage", "the player's own second image");
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
     CHECK(!HO2(name, cause, sh_ms_install_to_root(place, NULL, HO_P(0), &st, NULL, HO_P(1))) &&
-          strstr(cause, "your mods already hold") && strstr(cause, "mods\\crate"));
+          strstr(cause, "your mods already hold") && strstr(cause, "your folder crate") && !strstr(cause, "mods\\"));
     printf("   %s\n", cause);
 }
 

@@ -1,6 +1,6 @@
 /* script_compile.h -- the compile check of one mod script, run by the builder (modbundle.h sh_mb_set_script_check)
  * on every script a mod carries; an error is worded as the runtime's stop line (script_reason.h).
- * Each call parses the text (mode "t") in a fresh Lua state capped at SH_SCRIPT_COMPILE_MEM; any thread. */
+ * Each call parses the text (mode "t") in a fresh Lua state with no memory limit of the product's own; any thread. */
 #ifndef SH_SCRIPT_COMPILE_H
 #define SH_SCRIPT_COMPILE_H
 
@@ -9,8 +9,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#define SH_SCRIPT_COMPILE_MEM (16u << 20)   /* parser memory for one file */
 
 /* The first statement of an entry file is "api = <integer>" (comments, blank lines and a UTF-8 byte order mark may
  * come before it): 1 with the version and its line; 0 when it does not start with it (*line: the first statement). */

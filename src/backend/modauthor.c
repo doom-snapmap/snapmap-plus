@@ -30,6 +30,10 @@ static const ma_row MA_ROWS[] = {
     { "meshes",                  ".bmodel",    "cooked/model/" },
     { "meshes",                  ".dmodel",    "generated/discreteanimation/" },
     { "meshes",                  ".pmodel",    "generated/" },
+    /* an md6 mesh's collision models, where the engine finds them by the mesh's path (manager, 2026-11-24): the
+     * render model and its collision mesh, as a stock mesh's sit at generated/model/md6/<mesh path>/collision/ */
+    { "collision",               ".bmodel",    "generated/model/md6/" },
+    { "collision",               ".bcm",       "generated/cm/md6/" },
     { "animations",              ".bmd6anim",  "cooked/anim/md6/" },
     { "movies",                  ".bswf",      "generated/swf/" },
     { "virtual-textures",        ".mega2",     "virtualtextures/" },
@@ -57,8 +61,8 @@ static const struct { const char *type; const char *folder; } MA_NAMED[] = {
 #define MA_NNAMED (sizeof MA_NAMED / sizeof MA_NAMED[0])
 
 static const char MA_FOLDERS_SENTENCE[] =
-    "materials, images, meshes, animations, effects, environments, particles, entities, sounds, movies, scripts, "
-    "map-modules, virtual-textures, atlases, programs, decls and native";
+    "materials, images, meshes, collision, animations, effects, environments, particles, entities, sounds, movies, "
+    "scripts, map-modules, virtual-textures, atlases, programs, decls and native";
 
 static int ma_starts(const char *s, const char *p) { return _strnicmp(s, p, strlen(p)) == 0; }
 
@@ -87,7 +91,7 @@ static int ma_fail(char **cause, const char *fmt, const char *a, const char *b)
 
 int sh_ma_folder(const char *name, size_t n)
 {
-    static const char *const top[] = { "materials", "images", "meshes", "animations", "effects", "environments", "particles",
+    static const char *const top[] = { "materials", "images", "meshes", "collision", "animations", "effects", "environments", "particles",
                                        "entities", "sounds", "movies", "scripts", "map-modules", "virtual-textures",
                                        "atlases", "programs", "decls", "native", NULL };
     size_t i;
@@ -100,7 +104,9 @@ int sh_ma_folder(const char *name, size_t n)
 #define MA_KIND_LIST                                                                                                    \
     "Put each file in the folder for its kind: entities/ for entities (entities/imp.decl), materials/ for materials "  \
     "(materials/imp_skin.decl), images/ for images (images/imp_skin.bimage), meshes/ for models "                      \
-    "(meshes/imp.md6.decl), animations/ for animation clips (animations/imp_walk.bmd6anim), effects/ for effects "     \
+    "(meshes/imp.md6.decl), collision/ for a model's collision models at its mesh's path "                             \
+    "(collision/imp/collision/imp_chest.bmodel), animations/ for animation clips (animations/imp_walk.bmd6anim), "     \
+    "effects/ for effects "                                                                                            \
     "(effects/imp_sparks.decl), particles/ for particle systems (particles/imp_smoke.decl), sounds/ for sounds and "   \
     "their banks (sounds/imp.bnk), scripts/ for Lua scripts (scripts/imp.lua), movies/ for Flash movies "              \
     "(movies/imp_hud.bswf), programs/ for render programs (programs/imp_glow.decl), map-modules/ for SnapMap modules " \
@@ -281,9 +287,9 @@ int sh_ma_request(const char *salt, const char *path, char **request, char **cau
         free(p);
         return 0;
     }
-    ma_fail(cause, "%s: '%s' is not one of a mod's folders; a mod's files go in materials, images, meshes, animations, "
-            "effects, environments, particles, entities, sounds, movies, scripts, map-modules, virtual-textures, atlases, "
-            "programs, decls or native", path, p);
+    ma_fail(cause, "%s: '%s' is not one of a mod's folders; a mod's files go in materials, images, meshes, collision, "
+            "animations, effects, environments, particles, entities, sounds, movies, scripts, map-modules, "
+            "virtual-textures, atlases, programs, decls or native", path, p);
     free(p);
     return 0;
 }
@@ -349,7 +355,8 @@ static int ma_name_char(unsigned char c)
 static const struct { const char *folder; const char *engine; } MA_NAMES[] = {
     { "materials/", "mods/%s/" }, { "effects/", "mods/%s/" }, { "environments/", "mods/%s/" }, { "particles/", "mods/%s/" },
     { "entities/", "mods/%s/" }, { "images/", "mods/%s/" },   /* sounds/ is decided apart (ma_sound_name) */
-    { "animations/", "md6/mods/%s/" }, { "movies/", "swf/mods/%s/" }, { "scripts/", "mods/%s/scripts/" },
+    { "animations/", "md6/mods/%s/" }, { "collision/", "md6/mods/%s/" }, { "movies/", "swf/mods/%s/" },
+    { "scripts/", "mods/%s/scripts/" },
     { "map-modules/", "maps/modules/mods/%s/" }, { "virtual-textures/", "mods/%s/" }, { "programs/", "mods/%s/" },
 };
 #define MA_NNAMES (sizeof MA_NAMES / sizeof MA_NAMES[0])

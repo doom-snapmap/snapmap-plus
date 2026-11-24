@@ -846,9 +846,6 @@ static int fsm_register(lua_State *L)
     const char *name = lua_type(L, 1) == LUA_TSTRING ? lua_tolstring(L, 1, &n) : NULL;
     if (!name || !n)
         sh_script_refuse(L, "\"fsm.%s\" needs the class name as its first value, such as \"ATRON_UseGrenades\"", call);
-    if (n >= SH_FSM_CLASS_CAP)
-        sh_script_refuse(L, "\"fsm.%s\" takes a class name of at most %d characters; %s has %d", call,
-                         SH_FSM_CLASS_CAP - 1, name, (int)n);
     for (i = 0; i < n; i++) {
         int c = (unsigned char)name[i];
         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
@@ -1974,7 +1971,7 @@ static void tick_mod(shs_mod *m)
         j.chain = m->ents[i].chain;
 #ifdef SH_DIAG
         /* a demon a development listener holds takes no think (diag_status.h) */
-        if (sh_diag_hold_entity && sh_script_handle_entity(j.handle) == sh_diag_hold_entity) continue;
+        if (sh_diag_hold_entity && sh_script_handle_entity((sh_script_handle)j.handle) == sh_diag_hold_entity) continue;
 #endif
         if (!run_job(m, job_think, &j)) return;
         if (g_end_pending) return;

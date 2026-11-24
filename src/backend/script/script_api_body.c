@@ -19,12 +19,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include "script_api_common.h"
 #include "script_api_reflect.h"
 #include "script_api_body.h"
 
-#define BODY_LIST_CAP   256     /* participants, wounds or constraints read from one list */
-#define BODY_NAME_MAX   256
 
 static sh_body_delete_fn g_delete;
 
@@ -96,7 +95,7 @@ static int read_sync(const sh_rf_host *h, void *sync, const char *cls, sync_read
     void *target = NULL, *instigator = NULL;
     if (!at(h, sync, cls, "activeParticipants", &list)) return 0;
     n = list.kind == SH_RF_LIST ? sh_rf_count(h, &list) : -1;
-    for (i = 0; n > 0 && i < (uint32_t)n && i < BODY_LIST_CAP; i++) {
+    for (i = 0; n > 0 && i < (uint32_t)n; i++) {
         sh_rf_loc el, inst, data, type;
         char err[160];
         void *who;
@@ -177,7 +176,7 @@ static int push_wounds(lua_State *L, const sh_rf_host *h, const sh_rf_loc *comp,
     uint32_t i;
     if (!at(h, comp->addr, comp->type, field, &list)) return k;
     n = list.kind == SH_RF_LIST ? sh_rf_count(h, &list) : -1;
-    for (i = 0; n > 0 && i < (uint32_t)n && i < BODY_LIST_CAP; i++) {
+    for (i = 0; n > 0 && i < (uint32_t)n; i++) {
         sh_rf_loc el, node;
         char err[160];
         const void *pn;
@@ -241,10 +240,16 @@ static int figure_physics(const sh_rf_host *h, void *ent, const char *cls, sh_rf
         uint32_t i;
         const char *super;
         for (i = 0; h->class_field && h->class_field(h->ctx, c, i, &f); i++) {
-            char path[BODY_NAME_MAX];
+            char *path;
+            size_t cap;
+            int found;
             if (!f.type || strcmp(f.type, "idAnimator_AF") || (f.ops && f.ops[0]) || !f.name) continue;
-            snprintf(path, sizeof path, "%s.physicsObj", f.name);
-            if (at(h, ent, cls, path, physics)) return 1;
+            cap = strlen(f.name) + sizeof ".physicsObj";
+            if (!(path = (char *)malloc(cap))) return 0;
+            snprintf(path, cap, "%s.physicsObj", f.name);
+            found = at(h, ent, cls, path, physics);
+            free(path);
+            if (found) return 1;
         }
         super = h->class_super ? h->class_super(h->ctx, c) : NULL;
         if (!super || !strcmp(super, c)) break;
@@ -256,7 +261,7 @@ static int figure_physics(const sh_rf_host *h, void *ent, const char *cls, sh_rf
 /* e:break_constraint(name, [impulse]) -> true | false, why */
 static int l_break_constraint(lua_State *L)
 {
-    const char *want = sh_script_api_check_text(L, 2, "break_constraint", "the constraint's name", BODY_NAME_MAX);
+    const char *want = sh_script_api_check_text(L, 2, "break_constraint", "the constraint's name", SH_SCRIPT_TEXT_ANY);
     float impulse[3];
     void *ent;
     const sh_rf_host *h;
@@ -293,7 +298,7 @@ static int l_break_constraint(lua_State *L)
         return 2;
     }
     n = sh_rf_count(h, &list);
-    for (i = 0; n > 0 && i < (uint32_t)n && i < BODY_LIST_CAP && !found; i++) {
+    for (i = 0; n > 0 && i < (uint32_t)n && !found; i++) {
         sh_rf_loc el, name;
         char err[160];
         const void *c;
@@ -301,12 +306,17 @@ static int l_break_constraint(lua_State *L)
         c = el.kind == SH_RF_POINTER ? read_ptr(h, el.addr) : NULL;
         if (c && at(h, c, el.type, "name", &name)) {
             const char *text = (const char *)read_ptr(h, name.addr);   /* idAtomicString: the interned text */
-            char copy[BODY_NAME_MAX];
-            if (text && h->read(h->ctx, text, copy, 1)) {
+            if (text) {
+                /* the game's name against the script's, character by character, whatever its length */
                 size_t k;
-                for (k = 0; k + 1 < sizeof copy && h->read(h->ctx, text + k, copy + k, 1) && copy[k]; k++) { }
-                copy[k] = 0;
-                if (!_stricmp(copy, want)) {
+                int same = 1;
+                for (k = 0;; k++) {
+                    char ch = 0;
+                    if (!h->read(h->ctx, text + k, &ch, 1)) { same = 0; break; }
+                    if (tolower((unsigned char)ch) != tolower((unsigned char)want[k])) { same = 0; break; }
+                    if (!ch) break;
+                }
+                if (same) {
                     found = 1;
                     ran = g_delete((void *)physics.addr, (void *)name.addr);
                 }

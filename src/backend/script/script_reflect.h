@@ -85,6 +85,14 @@ int sh_rf_find_field(const sh_rf_host *h, const char *cls, const char *name, sh_
 int sh_rf_resolve(const sh_rf_host *h, const void *object, const char *cls, const char *path, sh_rf_loc *out,
                   char *err, size_t err_cap);
 
+/* The same walk, also telling where it last stepped through a pointer into an object `is_anchor` takes (an object
+ * that outlives the map, such as a decl): that object, its class (owned text, free it), and `at`, the offset in
+ * `path` where the rest of the walk from it begins. With no such step `anchor->object` is NULL. */
+typedef struct sh_rf_anchor { const void *object; char *cls; size_t at; } sh_rf_anchor;
+int sh_rf_resolve_anchored(const sh_rf_host *h, const void *object, const char *cls, const char *path,
+                           int (*is_anchor)(const char *cls), sh_rf_loc *out, sh_rf_anchor *anchor, char *err,
+                           size_t err_cap);
+
 /* The element `index` of a LIST or ARRAY: 1 with its place, 0 with err. */
 int sh_rf_element(const sh_rf_host *h, const sh_rf_loc *list, uint32_t index, sh_rf_loc *out, char *err, size_t err_cap);
 

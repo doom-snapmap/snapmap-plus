@@ -967,7 +967,7 @@ static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
 {
     char staged[MAX_PATH], why[256];
     unsigned long swaps;
-    printf("\n-- a rawmap whose missing mod names no unit is refused before the engine parses it\n");
+    printf("\n-- a rawmap whose missing mod names no unit and places nothing is held, then opens without it\n");
     mods_begin();
     CHECK(write_file("rawmap_mods_missing.json", MOD_MAP, staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
@@ -976,12 +976,11 @@ static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
     CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
     CHECK(strstr(why, "rawmap_mods_missing.json needs 1 mod(s) you do not have") != NULL);
     CHECK(g_prepared == NULL && !g_in_reload && g_parses == 0 && sh_rawmap_swap_count() == swaps);
-    CHECK(sh_modpub_test_state() == 1 && R.fetches == 0 && R.asks == 0);   /* held; the next tick refuses it */
+    CHECK(sh_modpub_test_state() == 1 && R.fetches == 0 && R.asks == 0);   /* held; the next tick lets it go on */
     ticks(4);
-    CHECK(!sh_modpublished_holding() && R.fetches == 0 && R.resumes == 0);
-    CHECK(!strcmp(R.print, "This map needs test.alpha, which is not on this computer and cannot be downloaded: the map "
-                           "was saved before its content was sent to the mod store. Ask its author to publish it again. "
-                           "The map was not loaded."));
+    /* No guard stops a map from loading (manager, 2026-11-24): it opens without the mod, saying so once. */
+    CHECK(!sh_modpublished_holding() && R.fetches == 0);
+    CHECK(!strcmp(R.print, "This map is playing without test.alpha, which is not on this computer."));
     CHECK(R.asks == 1 && !strcmp(R.ask, R.print));
     DeleteFileA(staged);
     mods_end();

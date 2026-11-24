@@ -228,7 +228,7 @@ function standIn(initial, folders, kept) {
                      borrows: {paths: [], count: 0}, warnings: []});
         data.key = nk;
         data.file = ex.row;
-        msg = 'Created ' + nmName + ' in mods\\' + nk + '. Its Example crate is in the Toybox. After you change its files, press Refresh to see the change.';
+        msg = 'Created ' + nmName + ' in your mods folder, as ' + nk + '. Its Example crate is in the Toybox. After you change its files, press Refresh to see the change.';
       }
       recount();
       data.ok = ok;
@@ -247,7 +247,7 @@ function standIn(initial, folders, kept) {
                      editorRows: 1, modules: 0, folder: made, group: '', description: '', requirements: {cvars: {}},
                      editorRowNames: [made], publishedMaps: 0, facts: null, borrows: {paths: [], count: 0}, warnings: []});
         data.key = made;
-        msg = 'Added ' + made + ' to your mods, in mods\\' + made + '; your own maps can use it now.';
+        msg = 'Added ' + made + ' to your mods, in your folder ' + made + '; your own maps can use it now.';
       }
     } else if (a === 'mapAddMod') {
       if (!docu.map || docu.map.entities === -1 || !Array.isArray(docu.map.mods)) { ok = false; msg = 'No map is open in the editor.'; }
@@ -1065,9 +1065,9 @@ test('Refresh shows what a change still needs, even when quiet; a game part that
   h.nodes.modsNewBtn.click();
   h.nodes.modsNewName.value = 'Late';
   h.nodes.modsNewCreate.click();
-  h.ui.onMessage({kind: 'modsActionResult', action: 'newMod', applyPending: true, ok: true, message: 'Created Late in mods\\Late.',
+  h.ui.onMessage({kind: 'modsActionResult', action: 'newMod', applyPending: true, ok: true, message: 'Created Late in your mods folder, as Late.',
                   data: {key: 'Late'}});
-  assert.equal(h.toasts.pop().text, 'Created Late in mods\\Late. ' + modsTab.APPLY_PENDING_TEXT);
+  assert.equal(h.toasts.pop().text, 'Created Late in your mods folder, as Late. ' + modsTab.APPLY_PENDING_TEXT);
 });
 test('the map modal: the open map\'s details and mods, in plain words', () => {
   const h = live();
@@ -1223,7 +1223,7 @@ test('Uninstall: the confirmation lists what it does; the folder goes to the Rec
   assert.equal(h.nodes.modsMapHost.all('modal-title')[0].textContent, 'Uninstall R2 Imp copy?');
   const items = h.nodes.modsMapHost.tags('li').map(n => n.textContent);
   assert.ok(items.indexOf('Removes 2 Toybox rows from the editor (Imp (R2), Imp (R2, caged)).') >= 0);
-  assert.equal(items[items.length - 1], 'Moves the folder mods\\alex.r2-imp to the Windows Recycle Bin.');
+  assert.equal(items[items.length - 1], 'Moves its folder, alex.r2-imp, to the Windows Recycle Bin.');
   assert.equal(h.nodes.modsMapHost.all('mods-scope')[0].textContent, modsTab.SCOPE.uninstallUsed);
   modalButtons(h)[1].click();
   assert.equal(rowOf(h, 'alex.r2-imp'), undefined);
@@ -1232,13 +1232,13 @@ test('Uninstall: the confirmation lists what it does; the folder goes to the Rec
   /* the consequence lines of the dry run's fields */
   assert.deepEqual(modsTab.consequenceLines(modsTab.normPreview({action: 'uninstall',
     install: {folder: 'older\\Imp copy', savedMaps: 0, keptBuild: 'Imp copy'}})).map(c => c.text),
-    ['Moves the folder mods\\older\\Imp copy to the Windows Recycle Bin.',
-     'Another folder of this mod stays installed (mods\\Imp copy); maps that use the mod open with it.']);
+    ['Moves its folder, older\\Imp copy, to the Windows Recycle Bin.',
+     'Another folder of this mod, Imp copy, stays installed; maps that use the mod open with it.']);
   assert.deepEqual(modsTab.consequenceLines(modsTab.normPreview({action: 'uninstall', install: {folder: 'a', savedMaps: 3}})).map(c => c.text),
-    ['Moves the folder mods\\a to the Windows Recycle Bin.',
+    ['Moves its folder, a, to the Windows Recycle Bin.',
      '3 of your saved maps use it; they will open without its objects until you restore it from the Recycle Bin.']);
   assert.deepEqual(modsTab.consequenceLines(modsTab.normPreview({action: 'uninstall', install: {folder: 'a', savedMaps: 1}})).map(c => c.text),
-    ['Moves the folder mods\\a to the Windows Recycle Bin.',
+    ['Moves its folder, a, to the Windows Recycle Bin.',
      '1 of your saved maps uses it; it will open without its objects until you restore it from the Recycle Bin.']);
   /* a published map: its content in the mod store changes only at the next publish, in the product's words */
   assert.deepEqual(modsTab.consequenceLines(modsTab.normPreview({action: 'mapRemoveModPreview',
@@ -1252,7 +1252,7 @@ test('New mod: a name, the folder made with its example, Refresh named as the wa
   h.ui.show();
   h.nodes.modsNewBtn.click();
   assert.equal(h.nodes.modsNewModal.style.display, 'flex');
-  assert.equal(h.nodes.modsNewNote.textContent, "Snapmap+ makes a folder for it in mods\\ with an example crate you can place right away.");
+  assert.equal(h.nodes.modsNewNote.textContent, "Snapmap+ makes a folder for it in your mods folder with an example crate you can place right away.");
   h.nodes.modsNewName.value = '   ';
   h.nodes.modsNewCreate.click();
   assert.ok(!h.sent.some(m => m.action === 'newMod'));
@@ -1791,7 +1791,7 @@ test('Maps on this computer: Add to my mods posts the token; the copy is selecte
   const add = h.nodes.modsList.children[1].all('mods-content-line')[0].tags('button')[0];
   add.click();
   assert.deepEqual(h.sent.filter(m => m.action === 'addToMine'), [{cmd: 'modsAction', action: 'addToMine', arg: 'maps\\Eternal Demons\\Hell Guards'}]);
-  assert.equal(h.toasts.pop().text, 'Added Hell Guards to your mods, in mods\\Hell Guards; your own maps can use it now.');
+  assert.equal(h.toasts.pop().text, 'Added Hell Guards to your mods, in your folder Hell Guards; your own maps can use it now.');
   assert.equal(h.ui.state().selectedKey, 'Hell Guards', 'your new copy is selected');
   assert.ok(rowOf(h, 'Hell Guards'), 'it is one of your mods now');
   assert.equal(h.nodes.modsBadge.textContent, '8');

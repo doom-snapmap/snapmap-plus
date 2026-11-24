@@ -10,6 +10,7 @@
 #include "../modserve.h"
 #include "../modmanifest.h"
 #include "../modbundle.h"
+#include "../backend_log.h"
 #endif
 
 /* A UTF-8 path as the wide long-path form Windows opens (\\?\ for a
@@ -277,15 +278,16 @@ int sh_script_source_map_mods(sh_script_mod_desc *out, int cap)
 
 /* ---------------------------------------------------------- the map's mods */
 
-typedef struct { const char *hash; char salt[SH_SCRIPT_SALT_CAP]; } hash_salt;
+typedef struct { const char *hash; char salt[SH_SCRIPT_SALT_CAP]; int composition; } hash_salt;
 
 static void salt_of_hash(void *context, const char *id, const char *hash, int admitted,
-                         const char *cause, int files, int place)
+                         const char *cause, int files, int composition)
 {
     hash_salt *h = (hash_salt *)context;
-    (void)cause; (void)files; (void)place;
+    (void)cause; (void)files;
     if (h->salt[0] || !admitted || !id || !hash || _stricmp(hash, h->hash)) return;
     strncpy_s(h->salt, sizeof h->salt, id, _TRUNCATE);
+    h->composition = composition;
 }
 
 /* One served script: its bytes as the mod's folder holds them now (never the
@@ -312,12 +314,16 @@ static void keep_script(void *context, const char *relpath, const char *request,
 
 /* Read the scripts of the map's mods into g_src. Returns the count of mods
  * with scripts, -1 when unreadable; *seed is derived from the builds. */
+static int (*g_foreign_allowed)(void);
+static int g_foreign_said;
+
 static int collect(uint64_t *seed)
 {
     char (*hashes)[SH_MODSERVE_HASH_HEX + 1] = NULL;
     int n, i;
     uint64_t fnv = 1469598103934665603ull;
     sh_script_source_clear();
+    g_foreign_said = 0;
     if (seed) *seed = 0;
     n = sh_modserve_scope_hashes(NULL, 0);
     if (n <= 0) return 0;
@@ -336,6 +342,14 @@ static int collect(uint64_t *seed)
         hs.hash = hashes[i];
         sh_modserve_each_bundle(salt_of_hash, &hs);
         if (!hs.salt[0] || find_src(hs.salt)) continue;
+        if (hs.composition && g_foreign_allowed && !g_foreign_allowed()) {
+            /* content from elsewhere (a pinned row's composition) while the player turned scripts off for it: the
+             * gates' rule, held at the runtime too, whatever path opened the map */
+            if (!g_foreign_said++)
+                backend_log("SCRIPTS: this map's mod content from elsewhere carries scripts and scripts are turned off "
+                            "for it in Settings; they do not run");
+            continue;
+        }
         if (!sh_modserve_script_files(hs.salt, NULL, NULL)) continue;
         memset(&row, 0, sizeof row);
         strncpy_s(row.salt, sizeof row.salt, hs.salt, _TRUNCATE);
@@ -368,8 +382,11 @@ int sh_script_source_map_mods(sh_script_mod_desc *out, int cap)
     return fill(out, cap);
 }
 
-void sh_script_source_install(void)
+void sh_script_source_set_policy(int (*foreign_allowed)(void)) { g_foreign_allowed = foreign_allowed; }
+
+void sh_script_source_install(int (*foreign_allowed)(void))
 {
+    g_foreign_allowed = foreign_allowed;
     sh_script_set_map_provider(provider, NULL);
 }
 #endif /* SH_SCRIPT_PURE */

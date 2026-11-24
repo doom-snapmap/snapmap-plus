@@ -273,8 +273,8 @@ void  sh_prefab_mods_command(int argc, const char *const *argv);
 #define SH_PREFAB_CMD_NAME "sh_prefab"
 #define SH_PREFAB_CMD_HELP "Prefabs and their mods: 'sh_prefab mods \"<name>\"' lists the mods a prefab needs and whether " \
     "each is installed; 'sh_prefab export \"<name>\" \"<path.zip>\"' writes the prefab with its mods to one ZIP; " \
-    "'sh_prefab import \"<path.zip or path.json>\"' installs the mods and adds the prefab to the library (a .json " \
-    "imports the extracted export folder it is in)."
+    "'sh_prefab import \"<path.zip or path.json>\"' puts its mod content into the content cache (nothing is " \
+    "installed) and adds the prefab to the library (a .json imports the extracted export folder it is in)."
 
 struct sh_module_prefab_call;
 /* The details and mods operations of the module_prefab slot

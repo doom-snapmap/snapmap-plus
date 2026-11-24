@@ -37,6 +37,7 @@
 #include "grid_room_native.h"
 #include "engine_build.h"
 #include "prefab_grab.h"
+#include "script/script_api_game.h"
 #include <math.h>
 
 /* Editor layout. */
@@ -3134,6 +3135,7 @@ void sh_apply_prefab_poll_play(void)
     /* Held published or My Maps launches: the question, its answer, the fetch
      * and the resume. Runs in menus too, where the editor frame does not. */
     sh_modpublished_poll();
+    sh_script_game_cvar_recover_poll();   /* once: cvars a script left in the saved settings by a quit or crash mid-map */
     sh_modlobby_poll();     /* a modded map's lobby: the host's line of who is still getting its content */
     sh_modpublish_poll();   /* held publishes, their uploads and claims */
     sh_rawmap_poll_main();  /* a rawmap save's "share the .zip" toast and console line */
