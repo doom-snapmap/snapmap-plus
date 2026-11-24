@@ -631,13 +631,48 @@ int main(int argc, char **argv)
         g_menu_notice[0] = 0;
         rows_local();
         publish(0);
-        CHECK(F.starts == starts + 1 && g_fc.plans == plans + 1 && !sh_modpublish_holding() && !F.toast[0]);
+        /* no unit: the store is not asked */
+        CHECK(F.starts == starts + 1 && g_fc.plans == plans && !sh_modpublish_holding() && !F.toast[0]);
         CHECK(!strcmp(g_menu_notice, "Players will see this map without the Hellguard from Hell Guards: its content is "
                                      "not on this computer or in the mod store."));
         CHECK(engine_save() == 1);
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc4", "rev1");
         PUMP_UNTIL(idle_all());
-        CHECK(g_fc.claims == claims && g_fc.queued == queued);   /* no unit: nothing is claimed or queued */
+        CHECK(g_fc.claims == claims && g_fc.queued == queued);   /* nothing is claimed or queued */
+
+        /* with no unit to claim, no publishing key is needed */
+        F.toast[0] = 0;
+        g_menu_notice[0] = 0;
+        g_fc.signer_fails = 1;
+        publish(0);
+        CHECK(F.starts == starts + 2 && !F.toast[0] && strstr(g_menu_notice, "without the Hellguard from Hell Guards"));
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc5", "rev1");
+        PUMP_UNTIL(idle_all());
+        g_fc.signer_fails = 0;
+
+        /* beside a pinned row, a store that does not answer: the publish goes on queued, and S8 is still said */
+        {
+            sh_modmanifest_row row;
+            rows_pinned(1);
+            memset(&row, 0, sizeof row);
+            strcpy_s(row.salt, sizeof row.salt, "hellguar");
+            strcpy_s(row.build, sizeof row.build, SH_MODMANIFEST_LOCAL_BUILD);
+            sh_modmanifest_row_set_name(&row, "Hell Guards");
+            sh_modmanifest_row_add_name(&row, "mods/hellguar/entities/ai/hellguard");
+            CHECK(sh_modmanifest_list_add(&g_rows, &row));
+            sh_modmanifest_row_free(&row);
+        }
+        g_menu_notice[0] = 0;
+        g_fc.plan_code = MODNET_E_TIMEOUT;
+        publish(0);
+        CHECK(F.starts == starts + 3 && !F.toast[0]);
+        CHECK(strstr(g_menu_notice, "Players will see this map without the Hellguard from Hell Guards: its content is "
+                                    "not on this computer or in the mod store.") != NULL);
+        CHECK(strstr(g_menu_notice, "could not reach the mod store yet") != NULL);
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc6", "rev1");
+        PUMP_UNTIL(idle_all());
         rows_pinned(1);
     }
 

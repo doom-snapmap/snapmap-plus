@@ -628,6 +628,19 @@ static void a_passing_map_says_its_stand_ins(void)
     CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
     tick(3);
     CHECK(g_content.said == 0 && F.asks == 0);
+
+    /* R-LB1 check 4: a published map whose row stayed local (its author's mod on no computer, S8) plays the same way
+     * for every player: the row's stand-in composition serves it (modserve.c ms_row_build, D6a), the gate lets it
+     * through with no hold and no store ask, and the stand-ins' one notice is said. */
+    printf("-- a published map whose row stayed local (S8) plays with stand-ins: no hold, no ask, one notice\n");
+    reset();
+    use_content();
+    F.installed_a = 1;          /* the stand-in composition serves the local row (in the product) */
+    g_content.pending = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && !F.hold_ui);
+    CHECK(g_content.said == 1 && said_notice("This map is playing without the Tyrant", 38));
 }
 
 static void vanilla_and_installed_pass_through(void)

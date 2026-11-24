@@ -550,14 +550,15 @@ static void mp_asked_one(void *context, const char *unit, const char *root, cons
  * which was removed from the mod store." (moderation). Absent units first: they are the author's to fix; with them
  * the objects of a local row no folder here serves (the owner, 2026-11-18: the author proceeds, players see
  * stand-ins). */
-static char *mp_missing_sentence(const mp_job *job)
+static char *mp_missing_sentence(const mp_job *job, int planned)
 {
     sh_cache_absent *a;
     char **names;
     size_t n = 0, i, r, k;
-    int removed_only = !job->plan.absent && !job->nunbuilt;
+    size_t units = planned ? job->plan.n : 0;   /* the plan's units only when the store answered */
+    int removed_only = !(planned && job->plan.absent) && !job->nunbuilt;
     char *subject, *out = NULL;
-    size_t cap = job->plan.n + 1;
+    size_t cap = units + 1;
     for (r = 0; job->unbuilt && r < job->rows.count; r++)
         if (job->unbuilt[r]) cap += job->rows.rows[r].name_count + 1;
     if (!(a = (sh_cache_absent *)calloc(cap, sizeof *a)) || !(names = (char **)calloc(cap, sizeof *names))) {
@@ -576,7 +577,7 @@ static char *mp_missing_sentence(const mp_job *job)
             n++;
         }
     }
-    for (i = 0; i < job->plan.n; i++) {
+    for (i = 0; i < units; i++) {
         int want = removed_only ? job->plan.state[i] == MODCLAIM_REMOVED
                                 : job->plan.state[i] == MODCLAIM_ABSENT || job->plan.state[i] == MODCLAIM_REMOVED;
         if (!want) continue;
@@ -609,10 +610,11 @@ static int mp_prepare(mp_job *job, const modnet_io *io)
 {
     char (*units)[MODNET_HASH_HEX + 1] = NULL;
     size_t n = 0, cap = 0, i, k;
-    int code;
+    int code, signer;
     modclaim_set_budget(MP_STORE_WAIT_MS);
-    if (!modclaim_signer(NULL, &job->made_key, &job->why)) return MODNET_E_KEY;
-    {
+    /* The key signs the claim; a publish with no unit to claim (every row on no computer) needs none. */
+    signer = modclaim_signer(NULL, &job->made_key, &job->why);
+    if (signer) {
         mp_asked asked;
         memset(&asked, 0, sizeof asked);
         if (modclaim_asked(mp_asked_one, &asked, io, NULL) == MODNET_OK && asked.n) sh_modpin_set_asked(asked.v, asked.n);
@@ -625,7 +627,8 @@ static int mp_prepare(mp_job *job, const modnet_io *io)
         memset(&r, 0, sizeof r);
         if (!row->pinned && _stricmp(row->salt, SH_MODMANIFEST_PRODUCT)) {
             int state = sh_modpin_row(row, NULL, 0, NULL, &r);
-            /* No folder here serves it: it publishes local, and players see stand-ins for its objects (S8). */
+            /* No folder here serves it (modpin logs which): it publishes local, and players see stand-ins for its
+             * objects (S8). */
             if (state == SH_MODPIN_ABSENT) {
                 if (!job->unbuilt && !(job->unbuilt = (unsigned char *)calloc(job->rows.count, 1))) {
                     free(r.why);
@@ -634,23 +637,27 @@ static int mp_prepare(mp_job *job, const modnet_io *io)
                 }
                 job->unbuilt[i] = 1;
                 job->nunbuilt++;
-                mp_logf("MODS: publish: %s: the row publishes local; players see stand-ins for its objects (S8)",
-                        r.why ? r.why : "a row's folder is not built here");
             }
             free(r.why);
         }
         for (k = 0; row->pinned && k < row->unit_count; k++)
             if (!mp_units_add(&units, &n, &cap, row->units[k])) { free(units); return MODNET_E_NOMEM; }
     }
-    {
-        const char **list = (const char **)calloc(n ? n : 1, sizeof *list);
+    if (!signer && n) { free(units); return MODNET_E_KEY; }
+    if (!signer) { free(job->why); job->why = NULL; }
+    if (!n) code = MODNET_OK;   /* no unit: nothing to ask the store */
+    else {
+        const char **list = (const char **)calloc(n, sizeof *list);
         if (!list) { free(units); return MODNET_E_NOMEM; }
         for (i = 0; i < n; i++) list[i] = units[i];
         code = modclaim_plan_units(list, n, &job->plan, io, &job->why);
         free((void *)list);
     }
     free(units);
-    if (code == MODNET_OK && (job->plan.absent || job->plan.removed || job->nunbuilt)) job->after = mp_missing_sentence(job);
+    /* S8 for the rows on no computer whatever the store answered (an unreachable store goes on, queued, and still
+     * says it); the plan's absent and removed units only when it answered. */
+    if ((code == MODNET_OK && (job->plan.absent || job->plan.removed)) || job->nunbuilt)
+        job->after = mp_missing_sentence(job, code == MODNET_OK);
     return code;
 }
 
@@ -1732,6 +1739,7 @@ static void mp_prepared(void)
         if (modnet_transient(job->code)) {
             mp_logf("MODS: publish: the mod store did not answer (%s); the publish goes on and its claim is queued",
                     job->why ? job->why : modnet_code_text(job->code));
+            if (job->after) mp_after_add(h, job->after);   /* S8 for the rows on no computer */
             mp_after_add(h, MP_QUEUED_SENTENCE);
             mp_job_free(job);
             mp_resume();
