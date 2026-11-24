@@ -1,14 +1,8 @@
-/* claim_roundtrip.c -- the publisher's side of the mod store (modclaim.c, SPEC-distribution 4.3, 5.3-5.5, 5.21) driven
- * against a mod store, as a publish drives it: this computer's key made at the first publish and reused after; a
- * plan that finds a unit missing and sizes it, its upload, and a plan that finds it held; a claim for a published
- * item (rev 1), a republish whose new unit the store lacks (uploaded by the claim, rev 2), a claim after another
- * computer of the same key moved the rev on (the stale answer taken, rev 3), a claim that could not reach the store
- * queued and sent at the next start, the asked path a player reported read back for the claim, and releases (also of
- * an item already released). Read-only against the pack; every byte it writes is under <work>.
- *
- *   claim_roundtrip store=<url> work=<folder> mod=<built pack folder> doom=<install root> names=<placed A>,<placed B>
- *
- * Run it against the Worker under Miniflare (snapmap-web tests/contract/record_server.js) or the staging store. */
+/* claim_roundtrip.c -- the publisher's side of the mod store (modclaim.c) driven as a publish drives it: key creation
+ * and reuse, upload planning, claims, republishes, stale-rev recovery, queued claims, asked-path reads and releases.
+ * Read-only against the pack; every byte it writes is under <work>. Run it against the Worker under Miniflare
+ * (snapmap-web tests/contract/record_server.js) or the staging store:
+ *   claim_roundtrip store=<url> work=<folder> mod=<built pack folder> doom=<install root> names=<placed A>,<placed B> */
 #include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
@@ -294,7 +288,7 @@ int main(int argc, char **argv)
         step(code == MODNET_OK && a.hit, "asked: the path read back for this computer's claim", why);
     }
 
-    /* 5. A player's clean cache gets a row of both units at once (four at a time, 5.7) and composes it. */
+    /* 5. A player's clean cache gets a row of both units at once (four at a time) and composes it. */
     {
         char proot[MAX_PATH], pdir[MAX_PATH];
         const char *roots[2] = { ua.root, ub.root }, *units[2] = { ua.hash, ub.hash };

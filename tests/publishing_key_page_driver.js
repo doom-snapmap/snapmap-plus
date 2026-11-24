@@ -1,11 +1,7 @@
 /* publishing_key_page_driver.js -- run by tests/publishing_key_dispatch_test.cpp: the Settings page's publishing key
- * (src/ui/webview/publishing_key.js) on a stand-in DOM, driven over stdin one command per line, answering on stdout:
- *   POST <json>    each message the page posts to the host, as chrome.webview.postMessage hands it over
- *   STATE <json>   the page's state (after the STATE command)
- *   END            the command is done
- * Commands: MSG <json> (a message from the host to the page), SETTINGS (the Settings menu opens), NOTNOW (the
- * offer's Not now), BACKUP <passphrase>, RESTORE <passphrase> (the Settings items, typed and confirmed), STATE, QUIT.
- * Timers run at once (the page's retries). Pure ASCII. */
+ * (src/ui/webview/publishing_key.js) on a stand-in DOM, driven over stdin one command per line: MSG <json> (a host
+ * message), SETTINGS, NOTNOW, BACKUP <passphrase>, RESTORE <passphrase>, STATE, QUIT. It answers on stdout with POST
+ * <json> per message the page posts, STATE <json>, and END when the command is done. Timers run at once. Pure ASCII. */
 'use strict';
 const path = require('path');
 const readline = require('readline');

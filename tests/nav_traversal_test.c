@@ -21,7 +21,7 @@ static int g_checks = 0, g_fail = 0;
     if (!(cond)) { g_fail++; printf("  FAIL %s:%d  %s -- %s\n", __FILE__, __LINE__, #cond, msg); } \
 } while (0)
 
-/* ---- writing a decl ---------------------------------------------------- */
+/* writing a decl */
 
 /* Match the declaration's line layout: one assignment per line, separate
  * braces, CRLF endings and no trailing newline. */
@@ -101,7 +101,7 @@ static void dcl_finish(void)
     dcl_end();
 }
 
-/* ---- the table the selection tests run against ------------------------- */
+/* the table the selection tests run against */
 
 static const int ALL_D[6] = { 64, 128, 192, 256, 384, 512 };
 
@@ -172,7 +172,7 @@ static const sh_trav_monster *demon(const char *key)
     return NULL;
 }
 
-/* ---- the pinned name --------------------------------------------------- */
+/* the pinned name */
 
 static void test_decl_name_is_pinned(void)
 {
@@ -182,7 +182,7 @@ static void test_decl_name_is_pinned(void)
         "a wrong resource name misses in silence; nothing else would catch it");
 }
 
-/* ---- the demons -------------------------------------------------------- */
+/* the demons */
 
 static void test_the_roster(void)
 {
@@ -244,7 +244,7 @@ static void test_d30(void)
     CHECK(demon("zombie")->d30 == 0x0200C908u);
 }
 
-/* ---- parsing ----------------------------------------------------------- */
+/* parsing */
 
 static void test_parses_a_table(void)
 {
@@ -292,7 +292,7 @@ static void test_placeholder_rows_are_dropped(void)
     CHECK_MSG(strcmp(path, "zion/characters/monsters/zombie/traversal/climbledgeup128") == 0, path);
 }
 
-/* ---- selection --------------------------------------------------------- */
+/* selection */
 
 static void test_nearest_nominal_ties_to_the_smaller(void)
 {
@@ -439,7 +439,7 @@ static void test_select_is_total(void)
                          NULL, &dist, &tt) == 0);
 }
 
-/* ---- failing closed ---------------------------------------------------- */
+/* failing closed */
 
 static void test_malformed_tables_fail_closed(void)
 {
@@ -553,7 +553,7 @@ static void test_the_buffer_is_never_read_past(void)
     CHECK(sh_trav_ready() == 0);
 }
 
-/* ---- loading through the reader ---------------------------------------- */
+/* loading through the reader */
 
 static int   g_reads;
 static char  g_asked[256];

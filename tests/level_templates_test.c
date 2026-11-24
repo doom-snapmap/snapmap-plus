@@ -1,7 +1,6 @@
-/* level_templates_test.c -- the rule half of level_templates (src/backend/level_templates_rule.c): the template
- * walk's list keeps its count and every entry but those the scope hides, which are cleared; a null entry or an
- * unreadable name stays;
- * the E8 call decoding the install uses to find the list copy. */
+/* level_templates_test.c -- the rule half of level_templates (src/backend/level_templates_rule.c): the template walk's
+ * list keeps its count and every entry except those the scope hides, which are cleared; a null entry or an unreadable
+ * name stays. Also checks the E8 call decoding the install uses to find the list copy. */
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>

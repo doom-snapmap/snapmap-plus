@@ -1,19 +1,10 @@
-/* script_sigs_test.c -- the engine sites the mod-script hooks depend on
- * (src/backend/script/script_sigs.c, script_hooks.c), checked on each build
- * 13954591 executable given on the command line:
- *   - every private signature resolves to one match at its recorded RVA;
- *   - the OnAnimNotify dispatcher's bytes match two functions, and the
- *     callback-name check picks the recorded one;
- *   - each detour window is whole instructions with no RIP-relative operand
- *     or relative branch, and the tick's window is the bytes the installer
- *     compares;
- *   - the tick's only direct caller is idGameLocal::RunFrame, which is the
- *     idGameLocal vtable's slot +0x08;
- *   - idGameLocal vtable +0x7F0 is the spawn-id lookup and +0x7F8 the lookup
- *     followed by the idEntity cast (the handle scheme's resolver);
- *   - the main_thread_id and load_screen globals resolve.
- * Run via run-tests.ps1 with -Doom / -DoomAlt. Each image is checked in its own
- * process because glb_resolve caches the first image's globals. */
+/* script_sigs_test.c -- the engine sites the mod-script hooks depend on (script_sigs.c, script_hooks.c), checked on
+ * each build 13954591 executable given on the command line: every private signature resolves to one match at its
+ * recorded RVA; the OnAnimNotify dispatcher's bytes match two functions and the callback-name check picks the recorded
+ * one; each detour window is whole instructions with no RIP-relative operand or relative branch; the tick's only direct
+ * caller is idGameLocal::RunFrame (vtable slot +0x08); idGameLocal vtable +0x7F0 is the spawn-id lookup and +0x7F8 the
+ * lookup plus the idEntity cast; the main_thread_id and load_screen globals resolve. One process per image (-Doom /
+ * -DoomAlt in run-tests.ps1) because glb_resolve caches the first image's globals. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

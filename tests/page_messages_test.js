@@ -1,6 +1,6 @@
 /* What the window tells the player when something fails: the cause in plain words and the next
  * step, never "see the log", a guess, or a console command. Logic lifted from the shipped page and
- * run; the last check scans every string the page and the host can show. Pure ASCII. */
+ * run; the last check scans every string the page and the host can show. */
 'use strict';
 const fs = require('fs');
 const path = require('path');

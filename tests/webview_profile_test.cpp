@@ -1,9 +1,6 @@
-/* webview_profile_test -- the companion window's WebView2 profile folder
- * (webview_profile.h) against a temporary %LOCALAPPDATA%: a fresh profile is
- * created under the cache folder, an old snapmap-plus\webview2 folder is
- * renamed into it with its content intact (the same files, not copies), a
- * second start finds it there, an old folder next to an existing new one is
- * left alone, and a failed rename keeps using the old folder. */
+/* webview_profile_test -- the companion window's WebView2 profile folder (webview_profile.h) against a temporary
+ * %LOCALAPPDATA%: creation under the cache folder, adoption of a snapmap-plus\webview2 folder by rename (same files,
+ * not copies), a second start finding it, and the cases where the pre-existing folder is left alone or kept in use. */
 #include <windows.h>
 #include <cstdio>
 #include <cstring>

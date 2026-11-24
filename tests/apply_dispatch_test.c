@@ -146,9 +146,8 @@ static void test_maintenance_thread(void)
     CloseHandle(worker);
     assert(maintenance_step == 0);
 
-    /* On the engine thread the poll runs only the navigation refresh; the
-     * retired package maintenance (decl rearm, consent, pending maps) is gone.
-     * Null host/command pointers prevent native writes. */
+    /* On the engine thread the poll runs only the navigation refresh. Null host/command pointers prevent native
+     * writes. */
     maintenance_allowed = 1;
     for (int i = 0; i < 2; i++) {
         maintenance_step = 0;
@@ -183,7 +182,7 @@ static void test_start_menu_update_lifecycle(void)
     sh_apply_engine_nav_request_update();
     ae_nav_refresh_poll();
     assert(nav_queued == 1 && !nav_prepare_calls && (sh_apply_engine_nav_view_state() & 2));
-    /* The command has now read the snapshot; the worker has not finished. */
+    /* The command has read the snapshot while the worker is still running. */
     g_nav_update_requested = 0; g_nav_update_status = SH_NAV_UPDATE_BUILDING;
     ae_nav_refresh_poll();
     assert(nav_prepare_calls == 1 && sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_BUILDING);

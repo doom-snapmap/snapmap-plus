@@ -1,16 +1,12 @@
 /* unit_cli.c -- builds one mod folder, computes the units of the names given, and composes each into a folder of its
- * own (the units' proof instrument, SPEC-distribution 3; R-DS3).
+ * own.
  *
  *   unit_cli mod=<mod folder> out=<folder> doom=<install root> names=<name>[,<name>...] [compose=1]
- *   unit_cli ... names=@objects   every object of the mod (each snapModule, Toybox row and entityDef it adds, by its
- *                                 engine name), one "object <name>\t<type>" line each before its unit line
+ *   (names=@objects lists every object of the mod, one "object <name>\t<type>" line each before its unit line)
  *
- * The folder is built by the product's builder (the look compiler and the script check installed, as served_cli
- * does) and its block written. Each name (a placed name, an author name, or * for the whole mod) gets its unit:
- * one line "unit <name>\t<hash>\t<kind>\t<files>\t<bytes>\t<pointers>" on stdout, its manifest at
- * <out>\units\<hash>.json and the paths it keeps at <out>\units\<hash>.keep.txt; with compose=1 the unit is composed
- * under the mod's salt at <out>\<n>-unit (n its position in names=) for served_cli to serve. Exit 0, 1 when a unit or
- * a composition failed, 2 on a usage error. Nothing outside `out` is written but the folder's own mod.json. */
+ * Each name gets one line "unit <name>\t<hash>\t<kind>\t<files>\t<bytes>\t<pointers>" on stdout and its manifest at
+ * <out>\units\<hash>.json; compose=1 composes the unit at <out>\<n>-unit for served_cli. Exit 0, 1 when a unit or a
+ * composition failed, 2 on a usage error. Nothing outside `out` is written but the folder's own mod.json. */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
 #include <windows.h>

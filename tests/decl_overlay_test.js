@@ -1,7 +1,5 @@
-/* Tests alignment between the transparent textarea and syntax-highlighted pre.
- * Call the shipped language module and assert that stripping markup gives
- * the original text plus the renderer's trailing newline.
- * Run: node tests/decl_overlay_test.js */
+/* Checks that stripping the highlighter's markup gives the original text plus the trailing newline, so the
+ * textarea and the highlighted pre stay aligned. Run: node tests/decl_overlay_test.js */
 'use strict';
 const language = require('../src/ui/webview/decl_language.js').create(null);
 const tokenizeDecl = language.tokenize, renderHl = language.highlight;

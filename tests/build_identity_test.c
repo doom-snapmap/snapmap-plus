@@ -1,11 +1,6 @@
-/* Executable identity and the raw-RVA selection it gates.
- *
- *   build_identity_test                 offline checks only
- *   build_identity_test <image> ...     also hash each image; each must be supported
- *
- * Only the two build 13954591 executables are recognized; the 2018 executables
- * and anything else are not. A recorded Vulkan/OpenGL RVA pair is applied only
- * to an image bound to a supported identity, and only for its renderer. */
+/* Executable identity and the raw-RVA selection it gates: only the two build 13954591 executables are recognized, and a
+ * recorded Vulkan/OpenGL RVA pair applies only to an image bound to a supported identity, for its renderer. Given
+ * image paths, it also hashes each and requires it to be supported. */
 #include <windows.h>
 #include <assert.h>
 #include <stdint.h>

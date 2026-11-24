@@ -1,7 +1,5 @@
-/* Timeline eventCall authoring lifted from the shipped HTML: an engine event on a runtime-named entity
- * (player1) with a typed argument commits as the stock idEventCallInfo shape, arguments keyed by type in
- * signature order, and an authored map round-trips through parseTimeline. Also checks that the page's
- * event catalog header carries the event with its live-registry signature. Pure ASCII. */
+/* Timeline eventCall authoring lifted from the shipped HTML: an engine event on a runtime-named entity commits as the
+ * stock idEventCallInfo shape and round-trips through parseTimeline. Also checks the page's event catalog header. */
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -97,9 +95,8 @@ check(reopened.ok && reopened.tabs.length === 1 && reopened.tabs[0].entity === '
 check(reopened.tabs[0].events[0].eventDef === 'forcePraetorHandsAndBody' && reopened.tabs[0].events[0].time === 0 &&
       JSON.stringify(reopened.tabs[0].events[0].args) === '[{"bool":true}]', 'reopen keeps the event and its argument');
 
-/* Argument labels: every event whose catalogue entry names a bool argument is labelled with that name once
- * the catalogue is loaded (forcePraetorHandsAndBody's 'force' read "(unknown arg)" when the timeline was
- * rendered before the catalogue arrived), and the page renders the open timeline again when it arrives. */
+/* Argument labels: an event whose catalogue entry names a bool argument is labelled with that name once the
+ * catalogue is loaded, and the page renders the open timeline again when the catalogue arrives. */
 {
   const names = [];
   const rowRe = /^ {4}\{ "([^"\n]+)", \d+, (?:SH_EVT_A_\d+|0) \},\r?$/mg;

@@ -1,13 +1,8 @@
-/* mod_store_stub.h -- a minimal HTTP server on 127.0.0.1 for the store client
- * test (modnet_test).
+/* mod_store_stub.h -- a minimal HTTP server on 127.0.0.1 for the store client test (modnet_test).
  *
- * A small Winsock HTTP/1.1 server on a thread, one request per connection
- * (Connection: close). It answers every route with a 404 JSON error, which is
- * enough for the client's request rules to be observed: the last GET path, the
- * request count, and one injected failure (a status for the next request whose
- * "METHOD path" starts with a prefix). The store's whole-build routes were
- * retired with the pre-unit client; the unit routes are checked by the paths
- * the client asks for.
+ * A Winsock HTTP/1.1 server on a thread, one request per connection (Connection: close). It answers every route with a
+ * 404 JSON error, which is enough to observe the client's request rules: the last GET path, the request count, and one
+ * injected failure (a status for the next request whose "METHOD path" starts with a prefix).
  *
  * Requires ws2_32.lib. */
 #ifndef SNAPMAP_PLUS_MOD_STORE_STUB_H

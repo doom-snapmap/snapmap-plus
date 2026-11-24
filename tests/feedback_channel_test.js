@@ -31,7 +31,7 @@ expect('v0.2.1-beta.7', 'beta');
 expect('v0.2.1-beta.3', 'beta');
 expect('v0.2.0', 'stable');
 
-/* the bare form stays accepted -- older clients and hand-typed reports */
+/* the bare form stays accepted (hand-typed reports) */
 expect('0.2.1-beta.7', 'beta');
 expect('0.2.0', 'stable');
 

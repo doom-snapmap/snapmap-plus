@@ -135,8 +135,8 @@ int main(void)
     CHECK(!writes);
     CHECK(tells == 1);   /* the cancelled save is told */
 
-    /* A reload opens through the map it was asked for, and never reads the
-     * saved map whose id it borrows: that read gets a placeholder. */
+    /* A reload opens through the map it names and never reads the saved map whose id it borrows (that read gets
+     * a placeholder). */
     reset();
     queue_reload(&map_a);
     sh_editor_frame_detour(editor, NULL);

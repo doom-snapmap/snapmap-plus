@@ -1,8 +1,5 @@
-/* reflect_fake.h -- a type table shaped like the game's, for the reflection
- * tests: classes with superclasses, nested structs, enums, idStr, idList,
- * idArray, fixed arrays, pointers to objects and entity references. The
- * objects are real structs of the test's process. Include after
- * script_reflect.h; `H` is the host. */
+/* reflect_fake.h -- a type table shaped like the game's (classes, nested structs, enums, idStr, idList, idArray,
+ * fixed arrays, object pointers, entity references) over real structs. Include after script_reflect.h; `H` is the host. */
 #ifndef REFLECT_FAKE_H
 #define REFLECT_FAKE_H
 

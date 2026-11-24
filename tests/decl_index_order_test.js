@@ -1,10 +1,5 @@
-/* Numeric-order regression checks for indexed fields in the Entity State editor.
- *
- * DOOM's canonical declaration text is keyed lexicographically. Once a list reaches
- * four digits that produces item[0], item[1000], ..., item[100], ..., item[1].
- * The editor normalizes those contiguous sibling runs for presentation without
- * changing any bytes outside the reordered entry bodies.
- */
+/* Checks that the editor shows indexed fields in numeric order (item[999] before item[1000]) without changing
+ * any byte outside the reordered entry bodies. */
 'use strict';
 const naturalize = require('../src/ui/webview/decl_language.js').create(null).naturalize;
 

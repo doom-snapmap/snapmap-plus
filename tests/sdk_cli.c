@@ -1,15 +1,9 @@
-/* sdk_cli.c -- compiles Graphics SDK files (sdk.h: effects, environments, looks, values that change) as the build and
- * the server do, and writes what the engine would read. For offline proofs (the research repository's census of the
- * game's own effects said as effect files).
- *
- *   sdk_cli <request path> <in.decl> <out_dir>
- *   sdk_cli @<list> <out_dir>          each line: <request path><TAB><in.decl>
- *
- * The request path names the decl's type and name (generated/decls/fx/<name>.decl). For each file it writes
- * <out_dir>\<name with / as _>.decl (the compiled text, or the file as it is when it is not an SDK file) and, once at
- * the end, every decl the compiles derived as <out_dir>\derived\<type>\<name with / as _>.decl. Per file it prints
- * "ok <request>", "same <request>" or "mistake <request>\t<sentence>"; notes follow as "note <request>\t<line>". Exit 0
- * unless a file could not be read or written. */
+/* sdk_cli.c -- compiles Graphics SDK files (sdk.h) as the build and the server do and writes what the engine reads.
+ *   sdk_cli <request path> <in.decl> <out_dir>      (the request path names the decl: generated/decls/fx/<name>.decl)
+ *   sdk_cli @<list> <out_dir>                       each line: <request path><TAB><in.decl>
+ * Writes <out_dir>\<name with / as _>.decl per file (compiled, or as is when not an SDK file) and each derived decl
+ * under <out_dir>\derived\<type>\; prints "ok|same <request>" or "mistake <request>\t<sentence>", then "note <request>\t<line>"
+ * per note. Exit 0 unless a file could not be read or written. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>

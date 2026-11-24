@@ -40,8 +40,7 @@ int main(void)
     a.limit=40000;assert(!sh_map_bounds_valid(&a));
     assert(!sh_map_bounds_encode(NULL,text,sizeof text));
     a.limit=24000;assert(!sh_map_bounds_encode(&a,text,4));
-    /* The settings row is a toggle: on stores the ceiling, off native, and
-     * any stored value above native (the earlier numeric row) reads as on. */
+    /* The settings row is a toggle: on stores the ceiling, off native, and a stored value above native reads as on. */
     sh_map_bounds_from_toggle(1,&a);assert(a.limit==SH_BOUNDS_CEILING&&sh_map_bounds_valid(&a));
     assert(sh_map_bounds_encode(&a,text,sizeof text)&&!strcmp(text,"1;32671"));
     assert(sh_map_bounds_decode(text,&b)&&sh_map_bounds_enabled(&b)&&sh_map_bounds_effective(&b)==SH_BOUNDS_CEILING);

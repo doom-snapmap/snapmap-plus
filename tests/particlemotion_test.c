@@ -268,7 +268,7 @@ int main(void)
         dead = sh_motion_run_planes(&m, &FR, 12345u, 0.8f, 1.2f, 1.0f, P0, V0, &floor_, p, v);
         want[0] = 178.2798f; want[1] = 206.1119f; want[2] = 40.6895f;
         CHECK(dead == 1 && near3(p, want, 5e-4f));
-        /* no planes, or a stage that does not collide: the flight of before */
+        /* no planes, or a stage that does not collide: the flight without collision */
         {
             float p2[3], v2[3];
             sh_motion plain = m;

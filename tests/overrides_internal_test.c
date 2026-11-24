@@ -74,15 +74,14 @@ static void test_stream_abi_and_memory_streams(void)
     {
         const uint8_t *base = (const uint8_t *)GetModuleHandleA(NULL);
         CHECK(base != NULL);
-        /* Four arbitrary, mutually different in-image offsets: no RVA is privileged any more. */
+        /* Four arbitrary, mutually different in-image offsets: no RVA is privileged. */
         CHECK(sh_overrides_test_supported_build_abi(
                   base,
                   base + 0x1000u, 1,
                   base + 0x1100u, 1,
                   base + 0x1200u, 1,
                   base + 0x1300u, 1) == 1);
-        /* The same four shifted by an arbitrary amount -- exactly what the second shipped build
-         * looks like -- are just as acceptable. */
+        /* The same four shifted by an arbitrary amount are just as acceptable. */
         CHECK(sh_overrides_test_supported_build_abi(
                   base,
                   base + 0x1001u, 1,
@@ -255,10 +254,8 @@ static void test_file_stream_is_read_only(void)
 }
 
 
-/* R-021: the shadow serves map navigation, Grid Room variants, built-in
- * defaults and otherwise the engine. With no engine open installed (this test
- * process) an unclaimed name returns nothing; no user or package file is read,
- * whatever exists under the user-data folder. */
+/* The shadow serves map navigation, Grid Room variants, built-in defaults and otherwise the engine. With no
+ * engine open installed, an unclaimed name returns nothing and no user or package file is read. */
 static void test_builtin_defaults_without_user_files(void)
 {
     char bytes[8] = {0};
@@ -297,11 +294,9 @@ static void test_builtin_defaults_without_user_files(void)
     CHECK(sh_overrides_test_open("strings/policy.json", 0) == NULL);
 }
 
-/* Native-stream slots: the backend reads installed resources through the
- * 34-slot idFile layout of build 13954591 (Read +0x30, GetLength +0x68). The
- * fake native stream answers only at those slots; the 2018 slots (+0x28 Read,
- * +0x58 GetLength) return what the 2024 engine returns there: a field getter
- * and 0. */
+/* Native-stream slots: the backend reads installed resources through the 34-slot idFile layout of build
+ * 13954591 (Read +0x30, GetLength +0x68). The fake native stream answers only at those slots; the 2018 slots
+ * (+0x28 Read, +0x58 GetLength) hold a field getter and 0. */
 static const char g_native_body[] = "entityDef stock_module { }";
 static int g_native_closed;
 typedef struct fake_native_stream { void **vtable; long long position; } fake_native_stream;

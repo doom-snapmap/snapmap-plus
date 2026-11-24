@@ -1,9 +1,5 @@
-/* mod_seam_stub.c -- link stand-ins for the serving layer (modserve.c and
- * modserve_engine.c), for tests that link the map manifest without them.
- *
- * The serving index reports no bundle as indexed, so a caller that needs one asks for a
- * rescan; g_mod_stub_rescans counts the requests. The rawmap ZIP export
- * (modexport.c) is not linked: a .zip path is recognised and refused. */
+/* mod_seam_stub.c -- link stand-ins for the serving layer (modserve.c, modserve_engine.c). The serving index reports
+ * no bundle as indexed (rescans are counted in g_mod_stub_rescans), and a .zip export path is recognised and refused. */
 #include <stddef.h>
 #include <string.h>
 
@@ -77,10 +73,8 @@ int modexport_is_zip_path(const char *path)
     return n > 4 && _stricmp(path + n - 4, ".zip") == 0;
 }
 
-/* The rawmap layer hands the export every path in UTF-8: the stand-ins
- * decode it strictly and look for it through the wide calls, so a path that
- * arrived in another encoding is refused here as it would be on disk. `dir`
- * checks the folder the path is in. */
+/* The rawmap layer hands the export every path in UTF-8: the stand-ins decode it strictly and look for it through the
+ * wide calls, so a path in another encoding is refused as on disk. `dir` checks the folder the path is in. */
 static int stub_utf8_exists(const char *path, int dir)
 {
     wchar_t *w, *slash;

@@ -1,8 +1,6 @@
-/* publishing_key_dispatch_backend.c -- the backend half of publishing_key_dispatch_test.cpp: a mods folder with a
- * publishing key whose backup offer is pending (the first publish made it), the Mods slot the window's worker calls
- * (modui.c sh_modui_slot: RUN, then FETCH for the answer) with the publishing key's requests bound to modclaim as the
- * product binds them (sh_modui_set_key), and the saved record read back from the mods folder's record file, as R-LV9
- * read it. */
+/* publishing_key_dispatch_backend.c -- the backend half of publishing_key_dispatch_test.cpp: a mods folder holding a
+ * publishing key with a pending backup offer, the Mods slot the worker calls (modui.c sh_modui_slot: RUN, then FETCH)
+ * with the key's requests bound to modclaim, and the saved record read back from the mods folder. */
 #include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>

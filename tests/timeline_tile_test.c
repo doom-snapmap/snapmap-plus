@@ -91,7 +91,7 @@ static void test_tile(void)
         CHECK(strstr(tl_ps, "inputs = {") != NULL);
     }
     CHECK(strstr(tl, "outputs") == NULL && strstr(un, "outputs") == NULL);
-    /* The Unknown tile now draws its label; its placement line is load-bearing. */
+    /* The Unknown tile draws its label; its placement line is load-bearing. */
     CHECK(strstr(un, "alwaysDrawLabel = true;") != NULL);
     CHECK(strstr(un, "alwaysDrawLabel = false;") == NULL);
     CHECK(strstr(un, "placementFlags = \"SNAP_ENTITY_PLACE_AIR_UNALIGNED\";") != NULL);
@@ -140,7 +140,7 @@ static void test_rebind_decision(void)
     CHECK(!sh_tl_substate_blocks_rebind(1) && !sh_tl_substate_blocks_rebind(2) && !sh_tl_substate_blocks_rebind(0));
 }
 
-/* D-A44: a stock entity bound to a mod's row on the same entityDef goes to the stock row; an editor tweak (a stock
+/* A stock entity bound to a mod's row on the same entityDef goes to the stock row; an editor tweak (a stock
  * row's own name) and the stock row itself stay; nothing moves without a stock row. */
 static void test_stock_row_first(void)
 {

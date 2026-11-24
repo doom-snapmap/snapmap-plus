@@ -1,12 +1,6 @@
-/* heap_out.h -- the tests' bridge from a heap result to a test's buffer.
- *
- * The product hands every name, path and cause back whole, malloc'd
- * (char **out, or a returned char *). A test that reads the text with strstr
- * or strcmp keeps a buffer of its own: HO(buf, call) runs the call with
- * HO_P(0) (and HO_P(1) for a second result, HO2) as the out parameters and
- * copies each result into its buffer. A result longer than the test's buffer
- * ends the test (reported, then abort), never cut. HOS(buf, call) copies a
- * returned malloc'd string the same way and is 1 when there was one. */
+/* heap_out.h -- copies the product's malloc'd results into a test's buffer: HO(buf, call) passes HO_P(0)
+ * (HO_P(1) with HO2) as the out parameters; HOS(buf, call) takes a returned string and is 1 when there was one.
+ * A result longer than the buffer ends the test (reported, then abort), never cut. */
 #ifndef SNAPMAP_PLUS_HEAP_OUT_H
 #define SNAPMAP_PLUS_HEAP_OUT_H
 

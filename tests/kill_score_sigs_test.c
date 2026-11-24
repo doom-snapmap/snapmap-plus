@@ -1,12 +1,8 @@
-/* kill_score_sigs_test.c -- the Player Score switch kill_score detours (src/backend/kill_score_sigs.c,
- * kill_score.c), checked on each build 13954591 executable given on the command line:
- *   - the switch's signature resolves at its recorded RVA and is the only match in the executable;
- *   - its detour window is whole instructions whose one relative operand is the short branch the hook relocates;
- *   - the branch lands past the window;
- *   - the switch still tests the 18 stock spawn-type bits and ends in "Unsupported AI Type" (the 18 field reads);
- *   - the snapAIScore lookup resolves at its RVA alone, its window is whole instructions with no relative operand,
- *     and it still reads the rules' list (+0x7930, count +0x7938) and each decl's aiType (+0x70).
- * Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
+/* kill_score_sigs_test.c -- checks the Player Score switch kill_score detours (kill_score_sigs.c, kill_score.c) on each
+ * build 13954591 executable given on the command line: the signatures resolve uniquely at their recorded RVAs, both
+ * detour windows are whole instructions (the switch's one relative operand is a short branch landing past the window),
+ * and the switch's 18 stock spawn-type tests, its "Unsupported AI Type" end and the snapAIScore reads (rules list
+ * +0x7930, count +0x7938, decl aiType +0x70) are intact. Run via run-tests.ps1 with -Doom / -DoomAlt. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

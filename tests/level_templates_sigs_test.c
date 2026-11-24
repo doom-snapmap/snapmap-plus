@@ -1,10 +1,8 @@
 /* level_templates_sigs_test.c -- the engine sites level_templates detours (src/backend/level_templates_sigs.c,
- * level_templates.c), checked on each build 13954591 executable given on the command line:
- *   - each walk sequence resolves at its recorded RVA and is the only match in the executable;
- *   - both walk calls reach one function (the resource list copy), and both pass the same list manager;
- *   - the list copy's 22-byte detour window is the expected prologue: whole instructions with no RIP-relative
- *     operand or relative branch.
- * Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
+ * level_templates.c), checked on each build 13954591 executable given on the command line: each walk sequence
+ * resolves uniquely at its recorded RVA, both walk calls reach one function (the resource list copy) with the same
+ * list manager, and that copy's 22-byte detour window is whole instructions with no RIP-relative operand or relative
+ * branch. Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

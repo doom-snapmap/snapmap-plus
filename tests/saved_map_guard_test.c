@@ -1,7 +1,6 @@
-/* The saved-map guard against a faked engine: DeleteBadSaveSlots is handed an
- * idList<idStr> laid out as the engine's, the slot folders are real files in a
- * temporary tree, and the guard must delete nothing, keep a byte-exact copy,
- * and claim only what it verified. */
+/* The saved-map guard against a faked engine: DeleteBadSaveSlots gets an idList<idStr> laid out as the engine's and
+ * real slot folders in a temporary tree, and the guard must delete nothing, keep a byte-exact copy and claim only
+ * what it verified. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

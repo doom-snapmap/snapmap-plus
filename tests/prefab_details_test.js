@@ -27,7 +27,7 @@ function between(begin, end) {
   return html.slice(b, e);
 }
 
-/* ---- Create follows the live selection ---- */
+/* Create follows the live selection */
 {
   const api = {};
   new Function('api', between('  // --- create gate ---', '  // --- create gate end ---') + '\napi.gate = pfCreateGate;')(api);
@@ -59,7 +59,7 @@ function between(begin, end) {
   check(html.includes('if (npCreate.disabled) return;'), 'a disabled confirm creates nothing');
 }
 
-/* ---- Create's refusals name the true cause ---- */
+/* Create's refusals name the true cause */
 {
   const res = html.slice(html.indexOf("} else if (d.kind === 'createPrefabResult') {"), html.indexOf("} else if (d.kind === 'setDisplayNamesResult') {"));
   check(res.includes("d.result === 4) toast('The cursor is over an entity that is not selected -- hover one of the selected entities in the 3D view, then try again'"),
@@ -68,7 +68,7 @@ function between(begin, end) {
   /* The host's precheck itself is a behaviour test: tests/prefab_host_test.cpp. */
 }
 
-/* ---- Load / Place says what is true ---- */
+/* Load / Place says what is true */
 {
   const api = {};
   new Function('api', between('  // --- place toast ---', '  // --- place toast end ---') + '\napi.toast = pfPlaceToast;')(api);
@@ -90,7 +90,7 @@ function between(begin, end) {
         'the host posts an object placement once the game thread has decided it');
 }
 
-/* ---- A prefab's kind is its file's ~type ---- */
+/* A prefab's kind is its file's ~type */
 {
   const api = {};
   new Function('api', 'var prefabBudget = api.budget;\n' + between('  // --- prefab kind ---', '  // --- prefab kind end ---') +
@@ -111,11 +111,11 @@ function between(begin, end) {
   check(list.includes('sh_prefab_host::kind_of_type(ui_file_top_type(path.c_str()))'), 'the list classifies by ~type too');
 }
 
-/* ---- Live Limits, with and without a held prefab ---- */
+/* Live Limits, with and without a held prefab */
 {
   const LIMITS = [768, 14284, 10384, 2038, 672, 1000, 8192, 8192, 0, 0, 500000, 64];
   const USAGE = [32, 67, 91, 1, 30, 0, 1, 0, 1552, 12, 2545, 0];
-  const add = [1, 2, 4, 0, 1, 0, 0, 0, 0, 0, 100, 0];   /* Corpse Dropper, R-006 */
+  const add = [1, 2, 4, 0, 1, 0, 0, 0, 0, 0, 100, 0];   /* Corpse Dropper */
   const held = USAGE.map((v, i) => v + add[i]);         /* usage held = usage after Space */
   const free = budget.meters(add, USAGE, LIMITS);
   const hold = budget.meters(add, held, LIMITS, true);
@@ -146,7 +146,7 @@ function between(begin, end) {
         'no fixed timer posts unchanged values');
 }
 
-/* ---- Legend and Limits table fit ---- */
+/* Legend and Limits table fit */
 {
   check(/@media \(max-height: 520px\) \{[^}]*\.pc-preview \{ flex-basis: 130px; \}[\s\S]*?\.pc-preview\.pc-legend-open \.pc-preview-tag \{ visibility: hidden; \}/.test(css),
         'at the smallest preview the open legend hides the status line instead of covering it');

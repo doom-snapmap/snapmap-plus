@@ -28,8 +28,7 @@ static int g_checks = 0, g_fail = 0;
     if (!(cond)) { g_fail++; printf("  FAIL %s:%d  %s -- %s\n", __FILE__, __LINE__, #cond, msg); } \
 } while (0)
 
-/* ---- what nav_bake.c links against ------------------------------------ */
-
+/* Stubs for what nav_bake.c links against. */
 static char g_log[64][512];
 static int  g_log_count;
 
@@ -72,8 +71,6 @@ int sh_navmesh_validate_aas(const unsigned char *payload, size_t len,
     if (err && err_cap) strcpy_s(err, err_cap, g_damaged ? "edge 3 references a vertex outside the 2 present" : "");
     return !g_damaged;
 }
-
-/* ---- synthetic maps ---------------------------------------------------- */
 
 /* One instance of `module`, and `n` blocking volumes. `marked` and `blocks` are
  * bit masks over the volumes: bit i set means volume i carries that flag. */
@@ -131,8 +128,6 @@ static char *make_map(const char *module, int instances, int n,
     return buf;
 }
 
-/* ---- the name grammar -------------------------------------------------- */
-
 static void test_name_grammar(void)
 {
     char m[SH_NAVR_MODULE_CAP], c[32];
@@ -152,7 +147,7 @@ static void test_name_grammar(void)
     CHECK_MSG(strcmp(m, "ind_dlc/ind_totally_blank_room_4x") == 0, m);
     CHECK_MSG(strcmp(c, "monster128") == 0, c);
 
-    /* The bug that shipped once: 'b' on the class instead of the extension. */
+    /* 'b' on the class instead of the extension is not a cooked name. */
     CHECK_MSG(sh_nav_bake_test_parse_name(
         "generated/maps/modules/ind_dlc/room/room.bmonster48",
         m, sizeof m, c, sizeof c) == 0,
@@ -166,8 +161,6 @@ static void test_name_grammar(void)
     CHECK(sh_nav_bake_test_parse_name("", m, sizeof m, c, sizeof c) == 0);
     CHECK(sh_nav_bake_test_parse_name(NULL, m, sizeof m, c, sizeof c) == 0);
 }
-
-/* ---- planning ---------------------------------------------------------- */
 
 static void test_marked_volume_is_planned(void)
 {
@@ -737,8 +730,6 @@ static void test_source_invalidation_retires_cached_and_inflight_results(void)
 
 
 
-/* ---- degrading instead of refusing ------------------------------------ */
-
 static int g_reads;
 static unsigned char *counting_reader(const char *name, size_t *out_len)
 {
@@ -752,9 +743,8 @@ static const char *ROOM48 = "maps/modules/ind_dlc/room/room.aas_monster48";
 static const char *ROOM96 = "maps/modules/ind_dlc/room/room.aas_monster96";
 static const char *ROOM128 = "maps/modules/ind_dlc/room/room.aas_monster128";
 
-/* A refused monster48 bake no longer costs the copy its monster96 and
- * monster128 navigation, and a refusal already seen at this geometry is not
- * baked again: the engine gets the shipped navigation without a second try. */
+/* A refused monster48 bake does not cost the copy its monster96 and monster128 navigation, and a refusal already seen
+ * at this geometry is not baked again: the engine gets the shipped navigation without a second try. */
 static void test_classes_refuse_independently(void)
 {
     const int owner[1] = { 0 };
@@ -811,10 +801,9 @@ static void report_line(const char *fmt, ...)
     backend_log(line);
 }
 
-/* sh_navmesh's per-face table: one row per volume with a floor edge, compass
- * labels in the header when every box has the same ones and in the cells
- * otherwise, all-"no floor edge" rows omitted and counted, and runs of
- * identical rows collapsed once the table would pass 40 rows. */
+/* sh_navmesh's per-face table: one row per volume with a floor edge, compass labels in the header when every box has
+ * the same ones and in the cells otherwise, "no floor edge" rows omitted and counted, runs of identical rows
+ * collapsed once the table would pass 40 rows. */
 static void test_face_table_layout(void)
 {
     static unsigned vol[60];
@@ -1128,7 +1117,7 @@ static void test_payload_cap_thins_instead_of_refusing(void)
     free(module);
 }
 
-/* More marked boxes and rooms than the former fixed tables held. */
+/* More marked boxes and rooms than a small fixed table could hold are all planned. */
 static void test_plans_past_the_old_tables(void)
 {
     static sh_nav_map map;
@@ -1173,8 +1162,6 @@ static void test_plans_past_the_old_tables(void)
     sh_nav_bake_test_reset();
     free(json);
 }
-
-/* ---- the bake cache ---------------------------------------------------- */
 
 /* Two rooms of three 64 x 64 boxes each, built directly, with knobs for the
  * edits the cache must notice. Box `move_box` of room `move_room` is moved by
@@ -1583,7 +1570,7 @@ static void test_cache_keeps_to_its_budget(void)
     CHECK(play_once(&served) == 2);
     sh_nav_bake_test_cache_stats(&entries, NULL, NULL, &evicted, NULL);
     CHECK(entries == 4 && evicted == 0);
-    /* A new shape for room 1 evicts the oldest entries of the earlier Play. */
+    /* A new shape for room 1 evicts the oldest entries (those of the previous Play). */
     g_two.move_room = 1; g_two.move_box = 0; g_two.move = 64.0f;
     play_once(&served);
     sh_nav_bake_test_cache_stats(&entries, &bytes, NULL, &evicted, NULL);

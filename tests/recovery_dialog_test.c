@@ -133,8 +133,8 @@ static void test_mixed_queue_retirement(void)
     CHECK(!manager[DLGMGR_ACTIVE_OFF] && !widget_visible);
     CHECK(callback_alive); /* Native Think has not retired its owner yet. */
 
-    /* Think releases the old owner while consent remains. A raw flag write
-     * would leave a visible widget calling this now-dead callback. */
+    /* Think releases the owner while consent remains; a raw flag write would leave a visible widget
+     * calling a dead callback. */
     callback_alive = 0;
     CHECK(!widget_visible || callback_alive);
     memmove(queue, queue + DLG_DESC_STRIDE, DLG_DESC_STRIDE);

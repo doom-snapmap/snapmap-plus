@@ -33,9 +33,7 @@ int main(void)
     a.unlocked=2;assert(!sh_map_render_valid(&a)&&!sh_map_render_unlocked(&a));
     assert(sh_map_render_distance(&a)==SH_RENDER_NATIVE_DISTANCE&&!sh_map_render_encode(&a,text,sizeof text));
     assert(!sh_map_render_valid(NULL)&&!sh_map_render_unlocked(NULL)&&sh_map_render_distance(NULL)==8192);
-    /* Earlier builds stored a distance. 8192 reads as off; every other valid
-     * distance, 0 (the former maximum, and before that "follow") included,
-     * reads as on. */
+    /* 8192 reads as off; every other valid distance, 0 included, reads as on. */
     assert(!reads_on("4;8192")&&!reads_on("4;8192.0"));
     assert(reads_on("4;0")&&reads_on("4;-0")&&reads_on("4;256")&&reads_on("4;60000")&&reads_on("4;200000"));
     assert(reads_on("4;106240")&&reads_on("4;60000.0"));

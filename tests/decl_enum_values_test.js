@@ -54,8 +54,7 @@ Object.keys(schema.enums).forEach(function (type) {
   });
 });
 
-/* SNAP_POI_2 is the value in the report that started this: it must validate. TYPE_TWO is the
- * localized label that used to stand in for it: it must not. */
+/* SNAP_POI_2 must validate; TYPE_TWO, the localized label, must not. */
 check(schema.enums.snapPoiElement_t.indexOf('SNAP_POI_2') !== -1,
   'SNAP_POI_2 is not accepted for snapPoiElement_t');
 check(schema.enums.snapPoiElement_t.indexOf('TYPE_TWO') === -1,
