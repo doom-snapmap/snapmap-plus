@@ -384,10 +384,6 @@ document, so it runs beside a job) with `{"kind": "modsScripts", "data": {"mods"
 stop, lines}], salt, log: [...]}}`; the page updates the rows' states and the log in place and draws
 the details again only when the selected mod's state changed.
 
-The one download approval adds the design's sentence ("These mods include scripts (N files). Scripts run only inside
-this map and cannot read or change your files.", `sh_modui_scripts_approval`) once the download gate
-knows, before it asks, that the map's mods carry scripts.
-
 **The setting for scripts from downloaded maps.** In the Settings menu, under Playing: the checkbox item
 "Play Maps Whose Mods Include Scripts" (`#menuScriptedMaps`, on by default, `mods.scripted_maps`) with
 its sentence, "When this is off, Snapmap+ refuses a map whose mods include scripts before it downloads
@@ -547,7 +543,7 @@ part Snapmap+ writes). The plain cause naming the file is shown in the Entity St
 The reads and Open in editor never set the page's busy state.
 
 **New mod.** The header's New mod button and the empty list's card open a small modal (Name, Cancel, Create; Enter creates, Escape cancels) that sends
-`newMod`. Its answer ("Created <name> in mods\<folder>. Its Example crate is in the Toybox. After you
+`newMod`. Its answer ("Created <name> in your mods folder, as <folder>. Its Example crate is in the Toybox. After you
 change its files, press Refresh to see the change.") selects the new mod and opens the Files modal on
 the example's Toybox row, with one line above the editor: "Place Example crate from the Toybox in
 your map. To change the mod, edit this file in the mod's folder, then press Refresh in the Mods
@@ -557,11 +553,11 @@ mod id, and Refresh builds what is in the folder.
 
 **Uninstall goes to the Windows Recycle Bin.** Its confirmation reads "Undo history is cleared. The
 folder can be restored from the Recycle Bin by hand. Uninstalling:" (with a map open; without one,
-the second sentence alone) and lists the map part, the Toybox rows it removes, "Moves the folder
-mods\<folder> to the Windows Recycle Bin." and "N of your saved maps use it; they will open without its objects until
+the second sentence alone) and lists the map part, the Toybox rows it removes, "Moves its folder,
+<folder>, to the Windows Recycle Bin." and "N of your saved maps use it; they will open without its objects until
 you restore it from the Recycle Bin." (`install.savedMaps` above 0), or, when another folder of the
 mod stays installed (`install.keptBuild`: the player's own, or the copy a map brought), "Another
-folder of this mod stays installed (mods\<folder>); maps that use the mod open with it."
+folder of this mod, <folder>, stays installed; maps that use the mod open with it."
 
 A pushed document: once the page has asked for the document, the host reads the backend's
 generation every 500 ms and, when it has moved past the last document's while no job of its own

@@ -530,6 +530,7 @@ engine root:
 | `sounds/` (`.decl`) | `generated/decls/sound/mods/<salt>/<dirs>/<salt>_<leaf>.decl` (the leaf is the Wwise event name every mod shares, so it takes the namespace; a text name `sounds/x` is `mods/<salt>/<salt>_x`; `sh_ma_request`, `sh_ma_engine_name`, `sh_ma_path`) |
 | `sounds/<stem>.bnk` | `sound/soundbanks/pc/<salt>_<stem>.bnk` (served under `<salt>_<stem>.<sha16>` as before) |
 | `meshes/` (`.decl`, `.bmd6model`, `.bmd6skl`, `.bmodel`, `.dmodel`, `.pmodel`) | `generated/decls/md6def/`, `generated/basemodel/md6/`, `generated/skeleton/md6/`, `cooked/model/`, `generated/discreteanimation/`, `generated/` + `mods/<salt>/<rest>` |
+| `collision/<mesh path>/collision/` (`.bmodel`, `.bcm`) | `generated/model/md6/mods/<salt>/<rest>`, `generated/cm/md6/mods/<salt>/<rest>` (an md6 mesh's collision models, where the engine finds them by the mesh's path) |
 | `animations/` (`.bmd6anim`) | `cooked/anim/md6/mods/<salt>/<rest>` |
 | `images/` (`.bimage`); `atlases/decals|lights|transparency/` | `generated/image/`; `generated/decalatlas|lightatlas|transsortatlas/` + `mods/<salt>/<rest>` |
 | `movies/` (`.bswf`, `.bimage`) | `generated/swf/mods/<salt>/<rest>` |
@@ -553,7 +554,8 @@ entries) is its path in the folder; the request is derived from it and the salt.
 Names (`sh_ma_text`, `sh_ma_engine_name`): in a decl text and in `mod.json`'s author part, a run of name characters
 (`[A-Za-z0-9_./$+@~-]`, starting after a character that is not one) that begins with a folder prefix is the mod's
 and is written as the engine names it: `<folder>/<rest>` becomes `mods/<salt>/<rest>`, `animations/` and a `meshes/`
-name ending `.md6mesh` or `.md6skl` become `md6/mods/<salt>/<rest>`, `movies/` becomes `swf/mods/<salt>/<rest>`,
+name ending `.md6mesh` or `.md6skl` become `md6/mods/<salt>/<rest>`, `collision/<rest>` becomes
+`md6/mods/<salt>/<rest>`, `movies/` becomes `swf/mods/<salt>/<rest>`,
 `scripts/` `mods/<salt>/scripts/<rest>`, `map-modules/` `maps/modules/mods/<salt>/<rest>`, `decls/<type>/<rest>`
 `mods/<salt>/<rest>`. Every other name is the game's and is left as written; `native:<name>` is written `<name>` (the
 installed archives hold 452 names under `effects/` and one under `particles/`, and none under the other prefixes),
@@ -833,11 +835,17 @@ These backend files share the work:
 - `modmanifest.c` owns the manifest rows (a placed mod's row and a map-level
   one, `"attached": true`), carried in the map member's `mods` part (The map
   carrier). A pinned row is `{"mod":"<salt>","name","size","objects":{...},
-  "whole"?,"modules"?,"choices"?}`: the salt names the mod, the units name the
+  "whole"?,"modules"?,"choices"?,"labels"?}`: the salt names the mod, the units name the
   content, and the composition hash of the units is the row's build. A local row
   is `{"mod":"<salt>","name","size","local":true,"names":[...],"attached"?,
-  "choices"?}` and carries no build. `name` is the author's, for display. A mod
-  has no version: no player or author sees or sets one. Rows merge by salt and
+  "choices"?,"labels"?}` and carries no build. `name` is the author's, for display. A mod
+  has no version: no player or author sees or sets one. Every row may carry
+  `"labels": {"<placed name>": "<the name the author sees>"}`, the Toybox row
+  name of each placed object (display only, like `name`): a save writes it from
+  the installed mods (`mm_save_labels`, the labeler `mu_labeler` in `modui.c`),
+  keeping a row's loaded labels for a mod that is not here; it travels with a
+  publish and an export, and a notice names an object that is absent by it
+  (`mc_object_label`), never by its unit's root. Rows merge by salt and
   build; a row naming an `id` or a `bundle`, or a mod written `<salt>@<build>`
   (format 1, an earlier shape), does not parse (the parse detour has already
   refused such a map). The display name of a placed mod's row comes from the
@@ -1019,9 +1027,9 @@ cache](#the-map-content-cache)). Nothing reads, lists, builds or writes
 `mods\maps\` or the record's `places` section, and "maps" stays a reserved name
 at the top of `mods\`: New mod names a mod called "maps" `maps mod`, and a mod
 folder given by hand inside `mods\maps\` (an install of it, a salting, a build)
-is refused with one sentence, "This folder is in mods\maps, where earlier
-versions kept the mods of downloaded maps; this version does not read it. Move
-it to the top of the mods folder and press Refresh".
+is refused with one sentence, "This folder is in the "maps" folder of your mods,
+where earlier versions kept the mods of downloaded maps; this version does not
+read it. Move it to the top of your mods folder and press Refresh".
 
 Install at the root (`sh_ms_install_to_root`). A built folder from outside the
 store (a received build unpacked elsewhere) is copied to `mods\<its name>`
@@ -1038,8 +1046,9 @@ named `<the row's name> (my copy)`, at a staging folder of the content cache
 namespace to a new salt drawn then, rewriting every reference as a copied
 folder's are, puts it at `mods\<name>` (` (2)` when taken), and the scan builds
 it. It carries only the objects that map has. It is refused with a sentence when
-no map here has the row, when its content is not all here, or when a unit's
-binaries spell their namespace (`SH_CACHE_COPY_SPELLED`).
+no map here has the row or when its content is not all here. A unit whose
+binaries spell their namespace copies as any other: the copy's build records
+them as `spelled` and serving maps them to the copy's salt.
 
 Install (`sh_ms_install_from_folder`). A folder of the store is built in
 place. From elsewhere the source is only read: a new mod is copied whole to
@@ -1086,7 +1095,12 @@ resolver"), and nothing about the map's origin changes the answer:
   hash of none), which stands in for the map's objects of that mod (D60) with one
   sentence, "This map is playing without the Tyrant from Eternal Demons, which is
   not on this computer." (the gate says it when the map passes with nothing to
-  fetch).
+  fetch). A local row whose folder is here but no longer has an object the row
+  places gets that object stood in beside the folder: the stand-in composition of
+  the salt is declared after the folder's build and serves only what the folder
+  lacks (`ms_standin_supplement`, `sh_modserve_root_lacks`), with "This map is
+  playing without the Tyrant from Eternal Demons, which your folder of the mod
+  no longer has." (`SH_CACHE_ABSENT_LACKED`).
 
 A bare hash (the listing, plans, bundle state) resolves the same way: the root's
 folder at the hash, else the composition; describing a build (its scope, its
@@ -1141,9 +1155,10 @@ file cannot be read is refused with the same kind of line. A record that is
 not JSON is moved aside as `snapmap-plus.json.unreadable-<time>` when a
 section is written, and a new one started; the line names the aside file.
 The player reads the same failure where they acted: install and uninstall in
-the Mods tab (and their console verbs) add "Snapmap+ could not update its
-records: <file> could not be used (<why>); close any program using that file
-and try again." to their result (`sh_mb_record_why`). A claim the publish could
+the Mods tab (and their console verbs) add "Snapmap+'s record of your mods
+could not be saved; close any program that holds files in your mods folder,
+then try again." to their result (`sh_mb_record_why`; the log line names the
+file and why). A claim the publish could
 not record is a log line (`MODS: publish: the claim of '<item>' could not be
 recorded`).
 
@@ -1162,10 +1177,10 @@ mods\<folder> outright; the Recycle Bin could not take it (<why>)") and the
 result text ("Its folder was deleted because the Recycle Bin could not take it
 (<why>).") say so; otherwise the line reads "moved mods\<folder> to the Recycle
 Bin". The product never brings a folder back: a map that still needs it
-refuses to open with the asset rule's sentence until the player restores the
-folder from the Recycle Bin by hand (the next Refresh builds it again) or the
-rawmap or prefab ZIP import that carries it installs it again; a published
-map's content downloads into the content cache, not into the mods folder. Uninstall also clears the open map's undo history (see [The Mods
+opens with that mod's objects standing in (a published map's content is fetched
+into the content cache, never into the mods folder), and the player restores the
+folder from the Recycle Bin by hand (the next Refresh builds it again) or imports
+the rawmap or prefab ZIP that carries it to have the objects again. Uninstall also clears the open map's undo history (see [The Mods
 tab's map scope](#the-mods-tabs-map-scope)), so Ctrl+Z cannot bring back what
 used the mod.
 
@@ -1274,8 +1289,8 @@ holds one build per salt per area (ONE-SHAPE rule 4, `ms_one_per_area`): the
 root of `mods\` (everything but `mods\maps\`, which it never reads) and the
 content cache's compositions (`.content\served\`, one per map row). Of two
 folders of one salt at the root the one built first keeps it (`built`, then
-folder path); the other is skipped ("it is a copy of mods\<folder> (the same
-salt <salt>); Refresh in the Mods tab makes it a new mod") until the store's
+folder path); the other is skipped ("it is a copy of your folder <folder>; Refresh in the Mods tab
+makes it a new mod") until the store's
 next scan settles it. The root build and a composition of one salt are never a
 conflict: each map serves the build it declares and the other is inert for it;
 with no map open only the root folder's build serves its names for the Toybox
@@ -2086,7 +2101,8 @@ site; `hook_test` the jz relocation.
 
 A bundle's `companions` key (author block of `mod.json`, kept under `extra`)
 maps owner entityDefs, which must be the bundle's own `mods/<salt>/` names, to
-1..16 companions `{entityDef, origin, axis, activate, bind}` (`companion.h`
+a list of one or more companions `{entityDef, origin, axis, activate, bind}`
+(any number per owner and any number of owners; `companion.h`
 has the grammar and refusals; a refused block adds nothing and is logged
 `COMPANIONS: <id> REFUSED: ...`). Each admitted build that declares companions
 has a table of its own, and an owner's companions come from the build that
@@ -2222,8 +2238,9 @@ feature.
   edited.
 - **Bounds.** The product imposes none of its own (DECISIONS 26): event texts
   (an `ae_notify` row, a damage decl, a Script node's name) and the stop line
-  are kept whole, of any length; entityDef and decl names in calls and
-  bindings have any length (the script layer sets none; no fixed bound in the
+  are kept whole, of any length; the names a script's calls take (entityDef,
+  decl, decl type, event, signal, cvar, constraint and FSM class names) and the
+  bindings' have any length (the script layer sets none; no fixed bound in the
   engine's decl-name handling is established, and a mod's own names are paths
   of its build, which the builder's request rule bounds); a mod's display name
   is whatever its map row holds (320 bytes, the builder refuses longer); a
@@ -2299,9 +2316,13 @@ feature.
   `SH_MODUI_SCRIPTS_OFF`, though it was downloaded while scripts were on; for
   content a hold fetches, the same check runs once the fetch is done
   (`pub_finish`), so the units stay in the content cache and the map is not
-  loaded. The player's own maps (local rows) are never refused.
-  `sh_modui_scripts_approval` (the sentence of the retired download question)
-  has no caller. A rawmap or prefab ZIP import whose units carry scripts (a
+  loaded. The player's own maps (local rows) are never refused. The runtime
+  holds the same rule whatever path opened the map (`script_source.c`,
+  `sh_script_source_install` takes the setting's predicate): with the setting
+  off, no script of a pinned row's composition (content from elsewhere) runs,
+  with one log line (`SCRIPTS: this map's mod content from elsewhere carries
+  scripts and scripts are turned off for it in Settings; they do not run`), and
+  the player's own local rows always run. A rawmap or prefab ZIP import whose units carry scripts (a
   `scripts/` file in a unit's manifest) is refused with the same sentence while
   the setting is off and brings nothing into the content cache (`modexport.c`
   `me_take`), and a rawmap with a pinned row is refused at every open while the
@@ -2901,7 +2922,8 @@ is touched, and a removed demon answers nil.
   inertia, from the inverse the integration uses, x spin), and answers false
   for a decl that ignores the hit, so the spawn queues no hit record. The
   frame is the owner of the gore component whose ShowWound runs (the ShowWound
-  detour keeps it per thread). The registry is per map (64 defs, 32 pieces).
+  detour keeps it per thread). The registry is per map and holds any number of defs,
+  each with any number of pieces.
   Before the break it also gives the breakable's explosion fx managers
   (idEffectPhysicsBreakable `explosionFX`, which the game starts with no render
   model) the breakable's own pieces model as their `rm`: DOOM Eternal plays a
@@ -3145,7 +3167,18 @@ engine.
   `decl(type, name)` gives a decl object with `get`, `set`, `fields`, `name`
   and `type` (its class is the game's `idDecl<Type>`). Both outlive a map, so
   what a script sets is put back when the map ends (the runtime runs each
-  module's closer after the states close).
+  module's closer after the states close). A write into a decl (directly, or
+  through a pointer from an entity to a decl) is recorded by the decl's class
+  and name and the field's path from it, never by address, and is put back by
+  finding that decl and field again (`sh_rf_resolve_anchored`,
+  `script_api_reflect.c`); a field or cvar changed since by someone else (the
+  player, the console, a mod's requirement) no longer holds the script's value
+  and is left as theirs. The cvar restores still owed are kept in
+  `%LOCALAPPDATA%\snapmap-plus\script-cvars.json`; at the next start, once the
+  game has read its settings (`sh_script_game_cvar_recover_poll`), a cvar that
+  still holds the script's value, when that is not the cvar's default (the game
+  saved it at a quit or crash mid-map), gets back the value the script
+  displaced, and the journal is forgotten.
 - **`entities()`** lists every entity of the map, players first.
 
 ### Mod scripts: combat calls and the events of damage, death, pain and animation
@@ -3569,7 +3602,7 @@ the whitelist inspectors' `validEncounters`, which every boss pack extends),
 or only inside bags of repeated entries in the bare statement grammar of an
 md6Def (the `anim "<clip>" { event ... }` blocks of its `events`, its `alias`
 rows), the winner's text is served with the other declared providers' entries
-appended (composed per listing and memoized on the path, `ms_scope_compose`),
+appended (composed per listing of any number of providers and memoized on the path by the exact provider list, `ms_scope_compose`),
 so several boss packs a map declares work together and several mods may each
 add event rows to the player body; an undeclared mod's entries are never
 composed in. The composed text keeps each `key = value` statement's `;`
@@ -3803,7 +3836,7 @@ command and puts no bound on their number or length (the builder checks their sy
 only), and the Community API does not read them. `modserve.c` takes the admitted
 bundles whose requirements apply for the open listing (`ms_req_conflicts`, at
 every scope change): the open map's rows first, in row order, then the
-undeclared ones (an editor's Toybox rows; every bundle with no map open)
+undeclared ones (every bundle while map scope is off)
 oldest install first. One that asks a cvar a bundle decided before it asks at
 another value loses (one `MODS: requirements: conflict:` line names both): its value is not applied, but the mod is
 still served, its decls registered and its rows placeable, so a map that uses both opens and plays with the first
@@ -3823,7 +3856,7 @@ The state lives across tables (a rescan replaces the index, not what was set);
 Nothing is restored at DOOM's exit; a cvar the engine archives to its own
 configuration may therefore keep a mod's value into the next session.
 A bundle's requirements are accepted only while the map scope has its shadows
-in (below) or, in a map, when the bundle adds Toybox rows; a pass after the
+in (below) and the open map declares it; a pass after the
 listing changes therefore runs the stopped bundles' deactivate lines and
 restores their cvars as it does after an uninstall. `sh_mods status` and
 `sh_mods doctor` print `sh_modserve_requirements_report`, one line per
@@ -4166,12 +4199,14 @@ content). Both walk loops skip a cleared entry, so no template is made or
 demanded for such a name; the list keeps its count, which the walk compares
 with the manager's to notice a template that loaded more entityDefs.
 
-Requirements: a declared bundle's apply; an undeclared root build that adds
-Toybox rows keeps them outside Play, because the palette registers its rows
-in every editor map and with none open; in Play (the editor's, or a hub
-launch) no undeclared bundle's are accepted, so their cvars are the game's
-from the Play entry and applied again when the editor shows a map; any other
-undeclared bundle's are not accepted (`req_off`). A registration step is
+Requirements: only a declared bundle's apply, in the editor, in Play and with
+no map open (`ms_scope_compute`); every other bundle's are not accepted
+(`req_off`), so their cvars are the game's. An undeclared mod's Toybox rows
+register without them, and `sh_modserve_plan_block_unmet` does not block a
+step for the requirements of a bundle that is `req_off`. Once a placement
+declares the mod its requirements apply, and its own decls that were read
+without them are offered to be read again (`sh_modserve_each_unopened_shadow`).
+A registration step is
 gated by the requirements of the build that serves its path for the listing
 (`sh_modserve_plan_block_unmet` through `ms_scoped`), not by the path's static
 winner's: with two builds of one salt installed (the root and a composition) the
@@ -4581,14 +4616,15 @@ with the cause.
 Uninstall, in order: the dry run and confirmation (as Remove from map's,
 headed "Undo history is cleared. The folder can be restored from the Recycle
 Bin by hand." with a map open and "The folder can be restored from the Recycle
-Bin by hand." without, plus the Toybox rows, "Moves the folder mods\<folder> to
-the Windows Recycle Bin.", how many local saves in My Maps carry a row of the
+Bin by hand." without, plus the Toybox rows, "Moves its folder, <folder>, to
+the Windows Recycle Bin." (the console's line still says "moves the folder
+mods\<folder>"), how many local saves in My Maps carry a row of the
 mod, "N of your saved maps use it; they will open without its objects until
 you restore it from the Recycle Bin"). The list is computed per key: when another build
 of the key stays installed (`install.keptBuild`), only the Toybox rows no
-staying build adds are listed, and the saved-maps line becomes "Another build
-of this mod stays installed (mods\<folder>); maps that use the mod open with
-it."; the native delete
+staying build adds are listed, and the saved-maps line becomes "Another folder
+of this mod, <folder>, stays installed; maps that use the mod open with it."
+(the console's line names it as `mods\<folder>`); the native delete
 of the mod's entities from the open map, as Remove from map (a refusal, Play
 running, a load or a busy editor, deletes nothing and is reported); the open
 map's undo and redo history cleared so no snapshot older than the delete
@@ -4707,15 +4743,17 @@ completion no gate knows. `sh_modpub_launch_gate` holds such a lobby launch
 as any hold (its resume runs the manifest step on the retained text and calls
 the launch with its flag, when the screen it was held on is still current).
 An offline launch has no map object left to resume with, so nothing is
-fetched for it. A row of it whose composition exists
-(stand-ins for what is not here, see [The map content
+fetched for it. No guard stops a map from loading. A row of it whose
+composition exists (stand-ins for what is not here, see [The map content
 cache](#the-map-content-cache)) plays, with one log line, and the load says
-once what it plays without (S2 when this computer is offline, B1). The launch
-is refused when a row names no unit and nothing serves it ("This map was not
-loaded: it needs mods that are not on this computer and cannot be downloaded.
-Ask its author to publish it again."), or when a row that names units has no
-composition ("This map was not loaded: its mod content is not on this
-computer. Connect to the internet and open it again."), or when memory ran
+once what it plays without (S2 when this computer is offline, B1). A row that
+places nothing (a mod used map-wide) whose content is not here loads without
+it, with "This map is playing without <mod>, which is not on this computer."
+(and " Connect to the internet and open the map again to get it." for a pinned
+row). The one launch refusal left is a row that places objects whose stand-ins
+could not be written ("This map was not loaded: Snapmap+ could not write the
+stand-ins for its mod content that is not on this computer. Free some disk
+space, then open it again."), and a launch is also refused when memory ran
 out. A launch without a parse of its frame (the lobby's own relaunch from the
 map cache) is not checked. The level load at START MISSION builds from
 the cached map and does not parse again, so this boundary is the last point at
@@ -4749,20 +4787,19 @@ be reached; S6 a newer Snapmap+ is needed; S4b another game revision; S5 not in
 the store; S3 removed), and the load says it once as its one notice
 (`sh_cache_notice_text`).
 
-An editor open asks no store, so its note for a salt no root folder holds
-(`sh_modpub_editor_substitute`) says only what this computer knows: "not
-installed on this computer, so the editor opens the map without it. Playing
-the map asks the mod store for it." When the map's placed
-entities name that mod's namespace (`mods/<salt>/`, read by
-`sh_modmanifest_placed_names`), the engine's validator refuses the map
+An editor open asks no store. A salt no root folder holds is served by its
+stand-in composition, so the editor opens the map with the objects standing in.
+Only when the stand-ins could not be written does
+`sh_modpub_editor_substitute` give its note: for a row that places nothing, "This
+map is playing without <name>, which is not on this computer."; when the map's
+placed entities name that mod's namespace (`mods/<salt>/`, read by
+`sh_modmanifest_placed_names`), the engine's validator would refuse the map
 (`GetLocalSavedMapEdit`'s RepairAndMigrate, then its damaged-save dialog,
-which the fault shield's save guard dismisses), so the editor cannot open it
-without the mod. The note then says so and is also the one-button notice
-raised once no gate took the parse (`sh_modmanifest_load_refusal`): "This
-map needs <name>, which is not installed on this computer, so the editor
-cannot open the map. Restore the mod's folder from the Recycle Bin, or play
-the map from My Maps to get it from the mod store." (My Maps Play holds and
-fetches the content, above.) An editor open has no hold point before the
+which the fault shield's save guard dismisses), so the map is not opened and
+the one-button notice raised once no gate took the parse
+(`sh_modmanifest_load_refusal`) reads "This map was not opened: Snapmap+ could
+not write the stand-ins for <name>, which is not on this computer. Free some
+disk space, then open it again." An editor open has no hold point before the
 engine's load, so nothing is fetched before it; a pinned row's units are
 asked for after the open, with the map open (see [The map content
 cache](#the-map-content-cache)).
@@ -4813,9 +4850,15 @@ the map places of that mod (D60) so the map, its logic and its saves keep them.
 The load goes on and says once, "This map is playing without the Tyrant from
 Eternal Demons, which is not on this computer." (`SH_CACHE_ABSENT_LOCAL`); the
 gate says it when the map passes with nothing to fetch (`pub_pass_said`).
-Nothing is fetched for such a row. A folder that is here but does not provide
-every name the row lists refuses the load with the asset rule's own sentence
-("<cause> The map was not loaded.").
+Nothing is fetched for such a row. A folder that is here but no longer has a
+name the row lists does not refuse the load: that name stands in beside the
+folder (see the resolver above). A row that places nothing (a mod used
+map-wide) whose content is not here loads without it ("This map is playing
+without <mod>, which is not on this computer."; `pub_hold_local`). The load is
+refused only when the row places objects and the stand-ins could not be written
+("This map was not loaded: Snapmap+ could not write the stand-ins for its mod
+content that is not on this computer. Free some disk space, then open it
+again.").
 
 ### Co-op lobbies for modded maps
 
@@ -4868,8 +4911,10 @@ in the engine on both renderers (R-CO1):
 - The joiner's start. A joiner loads when its acting lobby's start byte
   (+0xF58A) is set (`State_Game_Lobby_Peer`). If that happens while its content
   is still downloading (a host without the product, a match already running),
-  the product clears the byte, and the joiner leaves the lobby the engine's way,
-  keeps downloading, and is told to join again.
+  the product clears the byte, and the joiner leaves the lobby the engine's way
+  and keeps downloading, with "The host started the match before this map's mod
+  content was here, so you left the lobby. It keeps downloading (<N> MB); join
+  the lobby again when it is done." (`pub_lobby_check`).
 
 Everything is keyed on the receiver: the host holds its start only when the
 lobby's map (its launch parameters' item and revision) was seen by a gate of
@@ -4886,7 +4931,7 @@ How a download in the lobby ends:
 | A unit cannot be had for this joiner only (the store not reached, a file failed its hash twice, the disk is full) or the fetch failed | says 0xF1, leaves the lobby: "You left the lobby: this map cannot be played without the Tyrant from Eternal Demons: the mod store could not be reached." | the player leaves; its Start runs for the others |
 | The joiner left, was kicked, or the host cancelled or left the lobby | the download stops: "You are no longer in the lobby, so this map's mod content stopped downloading. It continues from where it stopped the next time you join." | nothing waits |
 | The host chose another map, or a playlist moved on | the old download stops without a word; the new map's request brings its own | asks every peer again (verify 1) and waits for the new map |
-| The lobby started anyway | leaves, keeps downloading, "join the lobby again when it is done" | (a host without the product) |
+| The lobby started anyway | leaves, keeps downloading, "The host started the match before this map's mod content was here, so you left the lobby. It keeps downloading (<N> MB); join the lobby again when it is done." | (a host without the product) |
 | The game closed or crashed | the partial files stay in `.content\partial\` and the next download resumes from them by Range | the peer drops |
 
 A partial download is never served: a file reaches `files\` only whole and
@@ -5003,7 +5048,8 @@ Importing it (`modexport_read`) changes nothing the loaded map serves and
 installs nothing (D35): each carried unit goes into the content cache as
 `units\<hash>.json` and each file as a blob, each checked against the hash that
 names it (a damaged export is refused before the rest is read: "the export is
-damaged: <entry> does not hold what its name says"), and one the cache holds
+damaged: one of its mod files is not what it says; export it again", naming no
+entry), and one the cache holds
 already is not written again. The map is then one this computer keeps, and its
 load composes its rows as a downloaded map's are; content the export does not
 carry stands in. While the player has turned off "Play maps whose mods include
