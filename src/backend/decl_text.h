@@ -9,13 +9,9 @@
  * own decl parser remains the semantic authority. */
 int sh_decl_text_well_formed(const unsigned char *text, size_t length);
 
-/* A placed entity's own decl text from its prepared text (`prepared`, the
- * inherit chain merged root first with its own members) and its inherit's
- * prepared text (`inherited`; may be empty). Every leaf whose key path and
- * value equal the inherit's is dropped, as the engine drops them when it
- * reads a saved entity, and so is a block left empty; the first statement is
- * always written. The result is tab-indented `key = value;` lines. Returns 0,
- * with `out` empty, for a malformed or truncated text or a full `out`. */
+/* A placed entity's own decl text from its `prepared` text and its inherit's `inherited` text (may be
+ * empty): leaves equal to the inherit's and blocks left empty are dropped, the first statement is kept.
+ * Writes tab-indented `key = value;` lines; returns 0 with `out` empty for malformed text or a full `out`. */
 int sh_decl_text_own_state(const unsigned char *prepared, size_t prepared_length,
                            const unsigned char *inherited, size_t inherited_length,
                            char *out, size_t capacity, size_t *out_length);

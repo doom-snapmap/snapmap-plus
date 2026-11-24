@@ -1,24 +1,9 @@
-/* Unrestricted entity placement (see place_anywhere.h).
- *
- * Build 13954591 evidence:
- *   placementFlags is the dword at snapEditorEntityDef+0x1d0; its value table
- *     (name/value pairs, VK 0x143529f90 / GL 0x143560ba0) gives FLOOR 1, WALL 2, CEILING 4,
- *     SURFACE_ALIGNED 8, AIR 0x10, AIR_UNALIGNED 0x20.
- *   The held/moving update (VK FUN_14121a280 / GL FUN_1412196d0) sets each
- *     manipulator element's transform from the cursor, then classifies the
- *     surface its box touches into element+8 (FLOOR-flagged defs use a floor
- *     contact query, others a surface-normal query: 0 none, 1 floor, 2
- *     ceiling, 3 wall, 4 sloped), clears it when the flags do not accept it
- *     (VK FUN_14121aff0 / GL FUN_14121a440), sets blocked (+0x30) and the
- *     containing module (+4).
- *   Element gate VK FUN_1412197b0 / GL FUN_141218c00 (ghost colour) and group
- *     gate VK FUN_1412194b0 / GL FUN_141218900 (Place, Duplicate and paste
- *     commits through VK FUN_1412169e0) both refuse an element when
- *     blocked, or module -1, or (surface 0 and (flags & 0x30) == 0). They are
- *     the binary's only tests of placementFlags & 0x30.
- *   PlaceGateCommit VK 0x14121951c / GL 0x14121896c and PlaceGateElement VK
- *     0x1412197b0 / GL 0x141218c00: CMP dword [elem+8],0 then JNZ past the
- *     flags test. The JNZ becomes JMP. */
+/* Unrestricted entity placement (place_anywhere.h). placementFlags is the dword at snapEditorEntityDef+0x1d0
+ * (FLOOR 1, WALL 2, CEILING 4, SURFACE_ALIGNED 8, AIR 0x10, AIR_UNALIGNED 0x20; VK 0x143529f90 / GL 0x143560ba0).
+ * The element gate (VK FUN_1412197b0 / GL FUN_141218c00) and group gate (VK FUN_1412194b0 / GL FUN_141218900)
+ * refuse an element that is blocked (+0x30), in module -1, or has surface (+8) 0 without flags & 0x30. Their
+ * `CMP dword [elem+8],0; JNZ` (PlaceGateCommit VK 0x14121951c / GL 0x14121896c, PlaceGateElement at the element
+ * gate) skips that test, so the JNZ becomes a JMP. */
 #include "place_anywhere.h"
 #include <string.h>
 

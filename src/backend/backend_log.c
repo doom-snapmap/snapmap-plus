@@ -15,9 +15,8 @@ static HANDLE            g_loghandle = INVALID_HANDLE_VALUE;
 static CRITICAL_SECTION  g_loglock;
 static LONG volatile     g_lock_ready = 0;
 
-/* The handle stays open for the session. Opening and closing it per line costs
- * ~313us against ~8us for the write, and the engine's resource path logs
- * thousands of lines inside a single map load. */
+/* Returns the log handle, opened on first use and kept open for the session because a map load logs thousands
+ * of lines. */
 static HANDLE log_handle(void)
 {
     if (g_loghandle != INVALID_HANDLE_VALUE) return g_loghandle;
@@ -55,7 +54,7 @@ void backend_set_logpath_from_module(HINSTANCE self)
     CreateDirectoryW(g_logpath, NULL);
     _snwprintf_s(g_logpath, cap, _TRUNCATE, L"%lssnapmap-plus\\logs\\sh_backend.log", path);
     WideCharToMultiByte(CP_UTF8, 0, g_logpath, -1, g_logpath_utf8, (int)sizeof g_logpath_utf8, NULL, NULL);
-    /* Roll the accumulated log aside before this session appends to it. */
+    /* Rolls the accumulated log aside before this session appends to it. */
     log_rotate_if_large(g_logpath_utf8, LOG_ROTATE_CAP_BYTES);
 }
 
@@ -77,9 +76,7 @@ void backend_log(const char *msg)
     GetLocalTime(&st);
     _snprintf_s(stamp, sizeof stamp, _TRUNCATE, "[snapmap+] %04d-%02d-%02d %02d:%02d:%02d.%03d ",
                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-    /* The whole message, whatever its length (a path inside a mod has none of
-     * its own): a short line stays on the stack (no allocation, as a fault
-     * path needs), a longer one goes to the heap. */
+    /* A short line stays on the stack (no allocation, as a fault path needs); a longer one goes to the heap. */
     if (_snprintf_s(brief, sizeof brief, _TRUNCATE, "%s%s\n", stamp, msg ? msg : "") < 0) {
         held = sh_textf("%s%s\n", stamp, msg ? msg : "");
         if (held) line = held;
@@ -96,8 +93,7 @@ void backend_log(const char *msg)
         HANDLE h = log_handle();
         DWORD wrote;
         if (h != INVALID_HANDLE_VALUE && !WriteFile(h, line, n, &wrote, NULL)) {
-            /* A handle lost to a moved or deleted file reopens once, so a
-             * rotation outside this process does not silence the session. */
+            /* A handle lost to a moved or deleted file reopens once. */
             CloseHandle(h);
             g_loghandle = INVALID_HANDLE_VALUE;
             h = log_handle();

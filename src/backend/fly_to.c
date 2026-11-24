@@ -1,17 +1,6 @@
-/* fly_to.c -- "fly to entity": put the editor in Object Mode and aim the camera at
- * an entity so the centre-screen cursor rests on it.
- *
- * The request is set from any thread (apply kind 4) and serviced on the game
- * thread by the EditorFrame detour, one phase per frame:
- *   SWITCH  in Blueprint, reproduce TAB (three field writes and
- *           GridSetEditorState(2)); nothing to do when already in Object Mode.
- *   PLACE   compute the entity's world bounds centre, put the eye a short
- *           distance away looking slightly down, write the six camera floats.
- *   SETTLE  the walk camera sinks to the floor under gravity, so re-aim the
- *           two angle floats each frame until the eye stops moving or the
- *           budget runs out. Position and angle writes persist: the mover
- *           only adds input deltas.
- * Every engine read is SEH-guarded and a fault retires the module. */
+/* "Fly to entity": puts the editor in Object Mode and aims the camera so the centre-screen cursor rests on an entity.
+ * The game-thread EditorFrame detour services a request set from any thread in phases SWITCH (reproduce TAB), PLACE
+ * and SETTLE (re-aim while the walk camera sinks); every engine read is SEH-guarded and a fault retires the module. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -24,15 +13,15 @@
 #include "snapmap_plus_iface.h"
 
 /* editor */
-#define ED_STATE_OFF        0x23618   /* int: editor state, 1 Blueprint (ModuleMode), 2 Object (EntityMode) */
-#define ED_CAMERA_MODE_OFF  0x3d8     /* int: camera mode, 2 = the FPS view */
-#define ED_CAMERA_OFF       0x170     /* idSnapCamera: eye +0, pitch +0xc, yaw +0x10, roll +0x14 (degrees), fly +0x18 */
+#define ED_STATE_OFF        0x23618   /* int: 1 Blueprint (ModuleMode), 2 Object (EntityMode) */
+#define ED_CAMERA_MODE_OFF  0x3d8     /* int: 2 = the FPS view */
+#define ED_CAMERA_OFF       0x170     /* idSnapCamera: eye +0, pitch +0xc, yaw +0x10, roll +0x14, fly +0x18 */
 #define ED_MAP_OFF          0x204c8   /* loaded map object */
 #define ED_SEL_OFF          0x204d0   /* selection object */
 #define ED_MODULE_MODE_OFF  0x212b8   /* ModuleMode state object */
 #define ED_ENTITY_MODE_OFF  0x22330   /* EntityMode state object */
-#define MM_IDLE_OFF         0x2c      /* ModuleMode: 1 while its idle substate runs */
-#define MM_ENTER_FLAG_OFF   0x1070    /* written 1 by TAB before the state change */
+#define MM_IDLE_OFF         0x2c      /* 1 while ModuleMode idles */
+#define MM_ENTER_FLAG_OFF   0x1070    /* TAB writes 1 before the state change */
 #define SEL_TAB_CLEAR_OFF   0x70      /* cleared by TAB and by EntityMode enter */
 #define EM_SUBSTATE_OFF     0x1ac     /* EntityMode: 1 idle, 2 the other quiet substate */
 /* map */
@@ -94,7 +83,7 @@ static void fly_fail(const char *why)
     fly_done();
 }
 
-/* Read the entity's world bounds centre and radius. 0 when the map or id is unusable. */
+/* Reads the entity's world bounds centre and radius; 0 when the map or id is unusable. */
 static int fly_read_target(unsigned char *ed, int id, sh_fly_vec3 *centre, float *radius)
 {
     unsigned char *map, **ents, *ent, *records;

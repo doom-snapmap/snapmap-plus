@@ -1,18 +1,6 @@
-/* The Snapmap+ tab of the native Settings / Properties panel (editor state 5).
- *
- * Native Populate(panel, category) knows two categories (0 and 1); LB/RB and
- * the diamond notches select them modulo 2. This module owns the panel's hooks
- * (Enter, Exit, Populate, Apply, Reset, the dirty query and the property-change
- * slot), adds a third category for Snapmap+ mod settings and lets features
- * register groups of rows into it. Each group keeps a map-owned draft that
- * native Apply commits and native Cancel / Revert discards.
- *
- * The tab shows one header title (SH_SETTINGS_TAB_TITLE) and then the rows of
- * every active group; the panel has no label-only row, so groups are not
- * titled on screen and row labels must name what they set.
- *
- * When the third category cannot be installed, the same rows appear at the
- * end of category 0. sh_settings_tab_current_mode() reports which. */
+/* The Snapmap+ tab of the native Settings / Properties panel (editor state 5): a third category where features
+ * register groups of rows, each with a map-owned draft that native Apply commits and Cancel / Revert discards. If the
+ * category cannot be installed the rows go at the end of category 0 (sh_settings_tab_current_mode()). */
 #ifndef SH_SETTINGS_TAB_H
 #define SH_SETTINGS_TAB_H
 #include <stddef.h>
@@ -36,9 +24,7 @@ typedef struct sh_settings_float {
     const char *label;       /* "#str_..." label id */
     const char *help;        /* "#str_..." help id */
     float min, max, small_step, large_step;
-    /* Nonzero creates the row with the native wrap: a step past one limit
-     * lands on the other. adjust then sees that jump and decides which wraps
-     * to keep. Zero (the usual case) makes the native step stop at the limit. */
+    /* Nonzero: a step past one limit lands on the other and adjust sees the jump; zero stops at the limit. */
     int wrap;
 } sh_settings_float;
 
@@ -65,10 +51,8 @@ typedef struct sh_settings_group {
     void *user;
 } sh_settings_group;
 
-/* Engine-thread rows. draft and base belong to the group and must stay valid
- * while the panel is open; after a successful commit the tab copies draft to
- * base, and Cancel / Revert copies base to draft. adjust (optional) receives the native widget value
- * and may rewrite *draft (clamping, snapping, dependent fields). */
+/* Engine-thread rows. draft and base belong to the group and stay valid while the panel is open; commit copies
+ * draft to base and Cancel / Revert copies base to draft. adjust (optional) may rewrite *draft from the widget value. */
 int sh_settings_tab_add_float(sh_settings_rows *rows, const sh_settings_float *row,
                               float *draft, float *base,
                               void (*adjust)(void *user, float *draft, float value));
@@ -95,12 +79,8 @@ sh_settings_tab_mode sh_settings_tab_current_mode(void);
 
 /* Pure helpers shared with the tests. */
 int sh_settings_tab_wrap(int category, int delta, int count);
-/* A native float row created with its wrap flag set wraps past its limits.
- * Given the value shown before a step and the widget's new value, returns the
- * limit the user was stepping toward when the step jumped from one end of
- * [min, max] to the other, else value unchanged. The tab now creates its rows
- * with the wrap flag clear (the native step clamps), so this is only a
- * documented helper for rows created by other code. */
+/* For a wrap-flagged float row: returns the limit the step was heading toward when it jumped across [min, max],
+ * else value. */
 float sh_settings_tab_unwrap(float previous, float value, float min, float max,
                              float small_step, float large_step);
 #endif

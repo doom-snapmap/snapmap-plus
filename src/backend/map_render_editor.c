@@ -1,9 +1,6 @@
-/* "Unlock View Distance" as an on/off row of the Snapmap+ settings tab
- * (settings_tab.c owns the native Settings / Properties hooks). The draft
- * belongs to the map open in the editor; native Apply commits it, Cancel /
- * Revert restores it. The setting is the open map's (map_settings.h); on
- * saves it with the map, off saves no row. Applying a change marks the map
- * modified, since the edit map itself does not change. */
+/* "Unlock View Distance" as an on/off row of the Snapmap+ settings tab (settings_tab.c owns the native hooks).
+ * The draft belongs to the open map (map_settings.h): Apply commits it and marks the map modified, Cancel or
+ * Revert restores it; off saves no setting. */
 #include "map_render.h"
 #include "settings_tab.h"
 #include "editor_undo.h"
@@ -43,8 +40,7 @@ static int render_commit(void *user,void *map)
     if(!map||map!=g_map||InterlockedCompareExchange(&g_faulted,0,0))return 0;
     sh_map_render_from_toggle(g_draft,&s);
     __try {
-        /* The editor view renders this map too, so the applied setting
-         * takes effect now instead of at the next Save, Play or load. */
+        /* The editor view renders this map too, so the applied setting takes effect immediately. */
         if(sh_map_render_write(map,&s)) {
             sh_map_render_select(&s);
             ok=1;

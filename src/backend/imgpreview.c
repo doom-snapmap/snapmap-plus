@@ -1,8 +1,5 @@
-/* Read installed resource containers for image and material previews.
- * Materials resolve through their decl map field to a .bimage; direct image
- * requests start there. Decode DEFLATE and BCn on the CPU and publish RGBA.
- * Retain compact catalog metadata while payloads stay on disk.
- */
+/* Reads the installed resource containers for image and material previews: decodes DEFLATE and BCn on the
+ * CPU and publishes RGBA. Compact catalog metadata stays in memory while payloads stay on disk. */
 
 #include <windows.h>
 #include <stdio.h>
@@ -20,18 +17,14 @@
 
 #define MAX_PREVIEW 240u        /* matches megapreview's 2x2-page budget, so both routes agree */
 
-/* ------------------------------------------------------------------- containers ---------------*/
-
 typedef struct { const char *name; unsigned long long roff; unsigned usz, csz;
                  unsigned char kind, box, hidden; } rec_t;
 /* kind: one of SH_ASSET_*, below.  box: which .resources file.
  * hidden: excluded from the browser listing (a duplicate of a SnapMap record, or a base-game
  * record of a type we do not offer). Still findable by name -- see find_rec. */
 
-/* Map indexed decl types to browser kinds, optionally filtering by filename
- * suffix. Models combine .lwo, md6Def and discreteAnimation records. Baked
- * .bmodel geometry has separate brush/module categories.
- */
+/* Maps indexed decl types to browser kinds, optionally filtered by filename suffix. Models combine
+ * .lwo, md6Def and discreteAnimation records; baked .bmodel geometry is its own kind. */
 static const struct { const char *type; unsigned len; unsigned char kind; const char *suffix; unsigned slen; } g_kinds[] = {
     { "material",            8, SH_ASSET_MATERIAL,   NULL,   0 },
     { "image",               5, SH_ASSET_IMAGE,      NULL,   0 },
@@ -43,21 +36,15 @@ static const struct { const char *type; unsigned len; unsigned char kind; const 
     { "decalatlas",         10, SH_ASSET_DECALATLAS, NULL,   0 },
     { "snapEditorEntityDef",19, SH_ASSET_SNAPDEF,    NULL,   0 },
     { "entityDef",           9, SH_ASSET_ENTITYDEF,  NULL,   0 },
-    /* Keep baked brush geometry separate; recognized palette modules are
-     * promoted during catalog loading.
-     */
+    /* Baked brush geometry; recognized palette modules are promoted during catalog loading. */
     { "model",               5, SH_ASSET_BMODEL,     ".bmodel", 7 },
     { "cm",                  2, SH_ASSET_CLIPMODEL,  NULL,   0 },
-    /* Breakable .lwo props can be indexed as discreteAnimation; expose them
-     * with Models.
-     */
+    /* Breakable .lwo props can be indexed as discreteAnimation; they are listed with Models. */
     { "discreteAnimation",  17, SH_ASSET_MODEL,      NULL,   0 },
     { "perks",               5, SH_ASSET_PERK,       NULL,   0 },
     { "projectile",         10, SH_ASSET_PROJECTILE, NULL,   0 },
     { "weapon",              6, SH_ASSET_WEAPON,     NULL,   0 },
-    /* Only .bswf records from the mixed file type enter the browser. Convert
-     * their compiled names to decl-facing .swf names.
-     */
+    /* Only .bswf records from the mixed file type enter the browser, under their .swf names. */
     { "file",                4, SH_ASSET_SWF,        ".bswf", 5 },
     /* Cooked MD6 geometry. An md6Def is the public logical model and names one of these rows through
      * its `mesh` field. Keep the row addressable by exact name, but never expose it as a browser kind. */
@@ -67,10 +54,8 @@ static const struct { const char *type; unsigned len; unsigned char kind; const 
 
 typedef struct { unsigned char *idx; size_t idxLen; HANDLE res; } box_t;
 
-/* Union sound decls with events from soundbanksinfo.xml and deduplicate case-
- * insensitively. Neither source contains every name. Path-form decl wrappers
- * need the later play_<leaf> deduplication pass.
- */
+/* Union of sound decls and soundbanksinfo.xml events, deduplicated case-insensitively (neither source has
+ * every name); path-form decl wrappers need the later play_<leaf> deduplication pass. */
 static unsigned char *g_wwise;           /* compact strings; relevant tag stream only on pool OOM */
 static size_t         g_wwiseBytes;
 static size_t         g_wwiseSourceBytes;
@@ -78,17 +63,12 @@ static size_t         g_wwiseTagBytes;
 static const char   **g_ev;              /* event names NOT already present as a decl */
 static int            g_evCount;
 
-/* Union material decl names with VMTR atlas names. A decl supports
- * customMaterial; an atlas rectangle supports virtualmapping. Keep the decl
- * record on duplicate names and expose has_decl so atlas-only selections use
- * the appropriate carrier.
- */
+/* Union of material decl names and VMTR atlas names. The decl record wins on duplicates; has_decl tells
+ * a decl (customMaterial) from an atlas-only rectangle (virtualmapping). */
 static const char   **g_vt;              /* .vmtr names with NO material decl; point into megapreview */
 static int            g_vtCount;
 
-/* Group sounds by Wwise bank. When an event belongs to multiple banks, prefer
- * a specific bank over the always-loaded doom_initial bank.
- */
+/* Groups sounds by Wwise bank; an event in several banks prefers a specific bank over doom_initial. */
 typedef struct { const char *name; const char *bank; } sndbank_t;
 static sndbank_t     *g_sb;              /* one row per DISTINCT event; both ptrs into g_wwise      */
 static int            g_sbCount;
@@ -112,10 +92,8 @@ static unsigned long long be64(const unsigned char *p)
 static unsigned le32(const unsigned char *p)
 { return (unsigned)p[0]|((unsigned)p[1]<<8)|((unsigned)p[2]<<16)|((unsigned)p[3]<<24); }
 
-/* Convert generated/swf/<name>.bswf to swf/<name>.swf for decl references.
- * The result is shorter, so advance the prefix pointer and rewrite the
- * extension in place. Leave unexpected names unchanged.
- */
+/* Converts generated/swf/<name>.bswf to swf/<name>.swf in place (the result is shorter, so the prefix pointer
+ * advances); unexpected names are left unchanged. */
 static const char *imgpreview_swf_name(char *name, unsigned nl)
 {
     if (nl >= 5 && _stricmp(name + nl - 5, ".bswf") == 0)
@@ -263,10 +241,8 @@ static int __cdecl cmp_rec_name(const void *a, const void *b)
     return c ? c : ia - ib;
 }
 
-/* Intern recognized names into one immutable pool, then release the raw index
- * buffers. Records retain disk offsets and sizes for payload reads. Return
- * the number of raw bytes released.
- */
+/* Interns recognized names into one immutable pool and releases the raw index buffers; records keep their
+ * disk offsets and sizes. Returns the number of raw bytes released. */
 static size_t imgpreview_compact_names(void)
 {
     if (g_namePool) return 0;
@@ -324,10 +300,8 @@ static int __cdecl cmp_ci(const void *a, const void *b)
     return _stricmp(*(const char * const *)a, *(const char * const *)b);
 }
 
-/* Sort indices by kind, box, name and original index. The final tie-break
- * retains the earliest record for duplicate names. g_sortRec supplies qsort
- * context.
- */
+/* Sorts indices by kind, box, name and original index, so the earliest record wins for duplicate names;
+ * g_sortRec supplies qsort context. */
 static int __cdecl cmp_rec_kind_name(const void *a, const void *b)
 {
     int ia = *(const int *)a, ib = *(const int *)b;
@@ -468,10 +442,8 @@ static size_t imgpreview_compact_wwise_strings(void)
     return need;
 }
 
-/* Take ownership of the mutable NUL-padded Wwise tag buffer and retain events
- * without an equal sound decl. Compact retained strings before releasing the
- * buffer. sourceBytes records the original manifest size for diagnostics.
- */
+/* Takes ownership of the mutable NUL-padded Wwise tag buffer and keeps the events that have no equal sound
+ * decl, compacted. sourceBytes is the manifest size, for diagnostics. */
 static void imgpreview_parse_wwise_buffer_sized(unsigned char *buf, size_t len, size_t sourceBytes)
 {
     if (!buf) return;
@@ -693,10 +665,8 @@ static void imgpreview_load_wwise_file(void)
     imgpreview_parse_wwise_buffer_sized(buf, len, sourceBytes);
 }
 
-/* Hide a path-form sound decl when play_<leaf> already exists as a Wwise
- * event or visible flat sound decl. Keep flat names and unmatched path names.
- * This avoids offering a wrapper and its event as separate selections.
- */
+/* Hides a path-form sound decl when play_<leaf> exists as a Wwise event or visible flat sound decl, so a
+ * wrapper and its event are not offered separately. Flat and unmatched path names stay. */
 static int imgpreview_hide_wrapped_sounds(void)
 {
     /* The sound rows the browser would list right now, sorted for a binary search. */
@@ -942,7 +912,7 @@ static int rec_lower_bound(int kind, const char *name, size_t n)
     return lo;
 }
 
-/* The earliest-indexed record of this kind and name, as the catalog has always answered. */
+/* The earliest-indexed record of this kind and name. */
 static const rec_t *find_rec(const char *name, int kind)
 {
     if (!g_byName) return NULL;
@@ -961,11 +931,8 @@ int sh_imgpreview_has(int kind, const char *name)
     if (imgpreview_load()) {
         if (kind == SH_ASSET_SOUND) imgpreview_load_sound_catalog();
         ok = find_rec(name, kind) != NULL;
-        /* Admit Wwise event-only names without a sound decl. Native find-or-
-         * create creates their wrappers; its missing-resource error remains
-         * subject to resource_errorInGame, including the fatal setting 2.
-         * g_ev is sorted case-insensitively.
-         */
+        /* Admits Wwise event-only names with no sound decl (g_ev is sorted case-insensitively). The native
+         * find-or-create makes their wrappers, and its missing-resource error obeys resource_errorInGame (2 is fatal). */
         if (!ok && kind == SH_ASSET_SOUND && g_ev && g_evCount > 0)
             ok = bsearch(&name, g_ev, (size_t)g_evCount, sizeof *g_ev, cmp_ci) != NULL;
     }
@@ -1078,7 +1045,6 @@ static int decl_find_image(const char *txt, size_t len, char *out, size_t cap)
     return 1;
 }
 
-/* --------------------------------------------------------------------- box downscale ----------*/
 static void downscale(const unsigned char *src, unsigned sw, unsigned sh, unsigned pitch,
                       unsigned char *dst, unsigned dw, unsigned dh)
 {
@@ -1117,10 +1083,8 @@ static int bim_read_mip(const unsigned char *bim, size_t blen, size_t at, bim_mi
     return m->w && m->h && m->w <= 8192 && m->h <= 8192 && m->size <= blen - m->data;
 }
 
-/* Face 0 of the smallest mip still at least the preview size on its longer side, so a large
- * image is not decoded at full size only to be shrunk. The records are walked while each face-0
- * record is exactly the next level of the one before; anything else ends the walk at the last
- * good one. */
+/* Face 0 of the smallest mip still at least the preview size on its longer side, so a large image is not
+ * decoded at full size. The walk follows face-0 records that are each the next level of the last. */
 static int bim_pick_mip(const unsigned char *bim, size_t blen, bim_mip *out)
 {
     bim_mip m, next;

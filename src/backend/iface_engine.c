@@ -1,7 +1,5 @@
-/* Editor operations behind the shared UI interface. Globals resolve from
- * code references; functions come from the shared signature results. Field
- * offsets remain build-dependent. SEH contains access faults, but a readable
- * incompatible layout can still produce incorrect engine state. */
+/* Editor operations behind the shared UI interface. Field offsets are build-dependent; SEH contains access
+ * faults, but a readable incompatible layout can still produce incorrect engine state. */
 #include <windows.h>
 #include <shlobj.h>
 #include <knownfolders.h>
@@ -45,23 +43,16 @@
 #include "../common/text.h"
 
 /* Editor layout. */
-/* Extraction RVA for re-derivation only; runtime uses editor_singleton.
- * The editor is an inline object, not a pointer slot. Find its in-place
- * constructor and recover the this address passed to it. */
+/* RVA for re-derivation only; runtime uses editor_singleton. The editor is an inline object, not a pointer
+ * slot: recover the this address passed to its in-place constructor. */
 #define EDITOR_SINGLETON_PINNED_RVA   SH_RVA(0x2F6AD18u, 0x2FB2C08u)
 #define ED_SEL_OBJ_OFF         0x204d0      /* editor+0x204d0 -> selection object ptr */
-#define ED_CAMERA_ORIGIN_OFF   0x170        /* Camera origin. Re-derive from the method at editor vtable +0xD8,
- * which returns the address of this vec3. */
+#define ED_CAMERA_ORIGIN_OFF   0x170        /* camera origin vec3 (returned by the method at editor vtable +0xD8) */
 #define ED_MAP_OBJ_OFF         0x204c8      /* editor+0x204c8 -> loaded-map object ptr (null off-editor) */
 #define ED_SCREEN_OFF          0x21088      /* editor+0x21088 -> menu-screen object (Toast arg0) */
 #define ED_ENTITY_MODE_OFF     0x23618      /* Editor state: 1 ModuleMode, 2 EntityMode. */
-/* EntityMode is inline at editor +0x22330. Native selection changes also
- * update mode +0x1AC and dirty +0xBB8; array-only changes break native
- * deselect/Delete/Move behavior. Re-derive from GetMode(state 2) and the
- * OnDeactivate call identified by its idSnapEditorLocal diagnostic string.
- * Historical newer-retail references: GetMode 0x1183C40, SetSelected
- * 0x1255120, SetIdle 0x1255100. These are not extraction-build call RVAs;
- * no universal address delta exists between those builds. */
+/* EntityMode is inline at editor +0x22330. Native selection changes also update mode +0x1AC and dirty
+ * +0xBB8; array-only changes break native deselect/Delete/Move. */
 #define ED_MODE_OBJ_OFF        0x22330      /* editor+0x22330 -> inline EntityMode object (= GetMode(editor, 2)) */
 #define MODE_SEL_STATE_OFF     0x1ac        /* mode+0x1ac -> 1 = idle/nothing selected, 2 = an entity is selected */
 #define MODE_DIRTY_OFF         0xBB8        /* mode+0xBB8 -> redraw/dirty flag (set alongside every state write) */
@@ -73,14 +64,11 @@
 #define SEL_HOVERED_OFF        0x2c         /* selObj+0x2c -> looked-at/hovered entity id */
 #define ARR_ENT_ARRAY_OFF      0x6a0        /* arrObj+0x6a0 -> entity-ptr array (8-byte entries) */
 #define ARR_ENT_COUNT_OFF      0x6a8        /* arrObj+0x6a8 -> entity count (u32) */
-/* Manipulation capture moves selected entities to the scratch layer and
- * stores original layers in a positional snapshot. Changing selection then
- * makes Escape restore records onto the wrong entities. Re-derive from
- * capture's per-ID layer read and scratch-layer comparison (newer-retail
- * reference 0x11B08D0; do not use as an extraction-build call RVA). */
+/* Manipulation capture moves selected entities to the scratch layer and stores the original layers
+ * positionally, so changing the selection makes Escape restore records onto the wrong entities. */
 #define MAP_ENT_LAYER_ARR_OFF  0x6f0        /* mapObj+0x6f0 -> int* per-entity layer/module index */
 #define MAP_SCRATCH_LAYER_OFF  0x758        /* mapObj+0x758 -> int, the scratch/working layer id */
-/* Loaded-map tables used to format module-qualified entity references. */
+/* Loaded-map tables that format module-qualified entity references. */
 #define LM_ENTPOS_ARR_OFF      0x708        /* loaded-map+0x708 -> entity-id-by-placement-position array (u32) */
 #define LM_ENTPOS_CNT_OFF      0x710        /* loaded-map+0x710 -> placement-position count (u32) */
 #define LM_MODBOUND_ARR_OFF    0x720        /* loaded-map+0x720 -> per-module cumulative-position boundaries (s32, sorted) */
@@ -88,16 +76,13 @@
 #define LM_MODTABLE_OFF        0x750        /* loaded-map+0x750 -> module table (stride 0x98) */
 #define MOD_STRIDE             0x98         /* module-table entry stride */
 #define MOD_NAME_OFF           0x48         /* module entry+0x48 -> module name char* */
-#define LM_ENTINST_ARR_OFF     0x6f0        /* Per-entity instance index. The registrar writes it on create and
- * map loading rebuilds it from instanceEntities. Index == module count
- * means global/no-module; spatial position does not establish membership. */
+#define LM_ENTINST_ARR_OFF     0x6f0        /* per-entity instance index; == module count means no module */
 #define LM_INSTANCES_CNT_OFF   0x758        /* loaded-map+0x758 -> instances(modules) COUNT (== the no-module sentinel) */
 #define ENT_VALID_OFF          0x8          /* entity[id]+8 != 0 => valid (the +0x28 rule) */
 #define ENT_DEFSUB_OFF         0x158        /* entity[id]+0x158 -> def sub-object */
 
-/* Lists hide non-base-layer entities unless the dev-layer cvar is enabled.
- * Native picking also intersects a dev-layer mask. Re-derive by following
- * snapEdit_enableDevLayer registration and the entity +0x160 bit test. */
+/* Lists hide non-base-layer entities unless the dev-layer cvar (snapEdit_enableDevLayer) is enabled;
+ * native picking also intersects a dev-layer mask. */
 #define ENT_LAYER_BITS_OFF     0x160        /* entity[id]+0x160 -> layer bitmask (uint) */
 #define DEVL_CVAR_VALUE_OFF    0x30         /* idCVar+0x30 -> current integer value (== cvars.c value note) */
 #define DEVL_CVAR_NAME_OFF     SH_IDCVAR_NAME /* idCVar registered name char* (== cvars.c IDCVAR_NAME_OFF) */
@@ -120,10 +105,8 @@
 #define DEFSUB_CLASS_OFF        0x60       /* Interned classname pointer slot. */
 #define DEFSUB_INHERIT_OFF      0x58       /* Interned inherit pointer slot. */
 
-/* Display name is a full idStr: assign through IdStrAssignCStr to maintain
- * length, data, and SSO/heap ownership. Class/inherit are pooled pointer
- * slots and use IdStrAssign instead. These helpers are not interchangeable.
- * Audit RVA only; runtime uses the shared signature result. */
+/* The display name is a full idStr, assigned through IdStrAssignCStr to keep length, data and SSO/heap
+ * ownership; class/inherit are pooled pointer slots and use IdStrAssign instead. Audit RVA only. */
 #define IDSTR_OPASSIGN_PINNED_RVA      SH_RVA(0x33A7F0u, 0x33A440u)
 
 /* Asset registry node layout; decl dropdowns use the separate typeinfo walk. */
@@ -410,7 +393,7 @@ static int slot_sound_preview(sh_iface *self, const char *name)
     return sh_soundpreview_play(name);
 }
 
-/* Why the latest image preview failed, and why the latest audition was refused. */
+/* The reason the latest image preview failed, and the reason the latest audition was refused. */
 static char *slot_preview_failure(sh_iface *self)
 {
     (void)self;
@@ -444,10 +427,8 @@ static int prefab_def_model(const char *inherit_name, char *out_model, int out_c
     return sh_prefabpreview_resolve_model(inherit_name, out_model, (size_t)out_capacity);
 }
 
-/* The model the editor draws for the palette row that owns the inherit: the
- * row's renderInfo read live at the last palette build, else the installed
- * sedef text of that row. Demons (an encounter entityDef) and the player start
- * have no renderModelInfo of their own; their rows name an md6. */
+/* The model the editor draws for the palette row that owns the inherit: the row's live renderInfo, else the
+ * installed sedef text. Demons and the player start have no renderModelInfo; their rows name an md6. */
 static int prefab_editor_model(const char *inherit_name, char *out_model, int out_capacity,
                                float size[3], int *have_size)
 {
@@ -536,8 +517,7 @@ static char *slot_navmesh_view(sh_iface *self, int update)
     pending = ((state & 2) || sh_nav_bake_preview_pending()) ? 1 : 0;
     sh_nav_bake_conflicts(&red, &rooms);
     sh_nav_bake_summary_get(&sum);
-    /* The reason worth naming: the read's when the map was refused, else the
-     * first room that kept or lost something. Escaped for JSON. */
+    /* The read's reason when the map was refused, else the first room that kept or lost something; JSON-escaped. */
     why = sum.have_map ? sum.first : sum.read_reason;
     for (i = 0; why[i] && k + 3 < sizeof note; i++) {
         unsigned char ch = (unsigned char)why[i];
@@ -698,7 +678,7 @@ static char *ie_module_of(int id, int *index)
     const uint8_t *ed = editor_session();
     void *lm = NULL, *modTable = NULL, *modObj = NULL, *np = NULL;
     int modIdx;
-    /* Module table stride 0x98 and name +0x48: confirmed live on build 13954591. */
+    /* Module table stride 0x98 and name +0x48 (build 13954591). */
     if (!ed || !ie_read_ptr(ed + ED_MAP_OBJ_OFF, &lm) || !lm) return NULL;
     __try { modIdx = id_module_index((const uint8_t *)lm, (uint32_t)id); }
     __except (EXCEPTION_EXECUTE_HANDLER) { modIdx = -1; }
@@ -826,12 +806,8 @@ static char *slot_get_displayname(sh_iface *self, int id)
     return ie_owned_bytes(data, len);
 }
 
-/* Reduce a whole prepared text in buf to the entity's own state: the
- * prepared text merges the inherit chain in, so without this the Decl Text
- * pane shows the inherit's members as the entity's own and Save to Decl
- * writes them back, which keeps the old inherit's values after the inherit
- * changes. Members equal to the inherit's prepared text are dropped, as the
- * engine drops them when it reads a saved entity. Any failure keeps buf. */
+/* Reduce the prepared text in buf (which merges the inherit chain in) to the entity's own state by dropping
+ * members equal to the inherit's prepared text, so Save to Decl does not freeze inherited values. Any failure keeps buf. */
 static void declsource_own_state(void *defsub, char *buf, int len)
 {
     const char *inherit = NULL;
@@ -874,11 +850,8 @@ static char *slot_get_declsource(sh_iface *self, int id)
 }
 
 
-/* Reject known class/inherit derivation mismatches before engine parsing,
- * and tell the player. Null/empty arguments retain live values. A pair whose
- * types cannot be read at all passes; this checks the known fatal mismatch,
- * not all declaration validity. The ancestry walk reads the type records from
- * any thread (typeinfo.c), so the check holds on the UI thread too. */
+/* Reject known fatal class/inherit derivation mismatches before engine parsing and tell the player; null/empty
+ * arguments keep the live values and a pair whose types cannot be read passes. Callable from any thread. */
 int sh_iface_class_inherit_ok(int id, const char *newClass, const char *newInherit)
 {
     void *defsub = defsub_for_id(id);
@@ -938,10 +911,8 @@ static void slot_set_inherit(sh_iface *self, int id, const char *cstr)
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-/* Validate the final class/inherit pair once, avoiding invalid intermediate
- * checks during cross-family morphs. Null/empty leaves a field unchanged.
- * Preserve both originals before writing and restore them if either write
- * faults. The caller rebuilds only after a complete success. */
+/* Validate the final class/inherit pair once (null/empty leaves a field unchanged), restoring both originals
+ * if either write faults. The caller rebuilds only after a complete success. */
 static int slot_apply_class_inherit(sh_iface *self, int id, const char *cls, const char *inh)
 {
     (void)self;
@@ -1297,10 +1268,8 @@ static int ie_mods_placed_names(sh_modui_name_fn emit, void *context)
     return read;
 }
 
-/* The Mods tab's map operations (modui.h). The open edit is editor+0x204c8
- * (idSnapMapEdit); its saved-map model sits at +0x7F8 with the local id idStr
- * first, the cloud-saved item id at +0x9B0 and the tags list at +0x998 (the
- * offsets modpublish.c binds and checks against PublishStart). */
+/* The Mods tab's map operations (modui.h). The open edit is editor+0x204c8 (idSnapMapEdit); its saved-map
+ * model at +0x7F8 starts with the local id idStr, with the cloud item id at +0x9B0 and tags list at +0x998. */
 #define IE_EDIT_LOCAL_ID 0x7F8
 #define IE_EDIT_CLOUD_ID 0x9B0
 #define ED_ACTIVE_BYTE_OFF   0x09       /* editor_set_active's byte: clear during SnapMap Play */
@@ -1435,14 +1404,9 @@ static int ie_mods_busy(char *cause, size_t cap)
     return 0;
 }
 
-/* The map scope's exit test (modui.h map_left), asked while the editor
- * screen is down. Leaving the map for the hub or the browser stops the
- * editor's state machine (editor+0x23618 reads 0, the test editor_frame.c's
- * reload makes), and an exit passes through state 8. A menu screen opened
- * from the Start menu (Settings) also reads state 8 with the deactivate byte
- * set (observed live), so only the deactivate reason at +0x2366C
- * tells the two apart: 4 while Settings is up, 1 for a shutdown. The
- * loaded-map pointer persists in the hub, so it decides nothing alone. */
+/* The map scope's exit test (modui.h map_left), asked while the editor screen is down. An exit and the Start
+ * menu's Settings screen both read state 8; only the deactivate reason at +0x2366C separates them (4 Settings,
+ * 1 shutdown). The loaded-map pointer persists in the hub, so it decides nothing alone. */
 #define IE_EDITOR_STATE_EXITING 8
 #define IE_DEACT_REASON_SETTINGS 4
 static int ie_mods_map_left(void)
@@ -1566,7 +1530,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     /* Apply installation runs first; collect its checked callbacks into this binding. */
     sh_apply_engine_get_slots(&slots.serialize_entity, &slots.apply_edit, &slots.read_prefab,
                               &slots.apply_sync,        /* +0x290 synchronous apply, marshaled when available. */
-                              &slots.normalize_timeline_inherit); /* +0x298 retired, returns 1 */
+                              &slots.normalize_timeline_inherit); /* +0x298 returns 1 */
 
     sh_apply_engine_get_serialize_selection(&slots.serialize_selection);
     sh_apply_engine_get_run_on_main(&slots.run_on_main);         /* +0x348 ext 28 */

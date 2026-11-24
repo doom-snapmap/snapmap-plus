@@ -1,15 +1,6 @@
-/* Resource-provider file shadowing through the open-by-name vtable slot
- * (+0x148 on build 13954591). Private Grid Room resources are generated from
- * installed originals. Ordinary opens try, in order: the placement grid, map
- * navigation, the generated Grid Room variants, built-in defaults, installed
- * mod bundles (modserve.h; the table is read at startup and a file that cannot
- * be read falls through), then the engine. Mode >= 2 bypasses shadowing. The
- * only user files read are the files of installed mod bundles.
- *
- * Returned streams implement the supported 34-slot idFile ABI and own their
- * heap buffers. Installation requires clean constructor/helper signatures and
- * a decoded read-only provider vtable.
- */
+/* Resource-provider file shadowing through the open-by-name vtable slot (+0x148 on build 13954591). Opens try the
+ * placement grid, navigation, Grid Room variants, built-in defaults and installed mod bundles (modserve.h), then
+ * the engine; mode >= 2 bypasses shadowing, and returned streams implement the 34-slot idFile ABI. */
 #ifndef BACKEND_B1_OVERRIDES_H
 #define BACKEND_B1_OVERRIDES_H
 
@@ -21,36 +12,24 @@
 #define SH_OVERRIDES_STREAM_SLOTS 34u
 #define SH_OVERRIDES_OPEN_SLOT    0x148u
 
-/* Slot indices of the 34-slot idFile layout that both the native streams the
- * provider returns and this module's own stream use. 2018 used Read 5 (+0x28)
- * and GetLength 11 (+0x58); 13954591 inserted slots at +0x18 and +0x50, moving
- * them to 6 (+0x30) and 13 (+0x68). The engine's own ReadFile (idFileSystemLocal
- * vtable +0xF8) calls exactly these. */
+/* Slot indices of the 34-slot idFile layout, shared by native streams and this module's stream; the engine's
+ * ReadFile (idFileSystemLocal vtable +0xF8) calls Read (slot 6) and GetLength (slot 13) on build 13954591. */
 #define SH_IDFILE_SLOT_CLOSE       0u    /* +0x00 destructor: close and free */
 #define SH_IDFILE_SLOT_TRUE_FLAG   2u    /* +0x10 native constant true */
 #define SH_IDFILE_SLOT_READ        6u    /* +0x30 Read(self, buffer, length) */
 #define SH_IDFILE_SLOT_LENGTH      13u   /* +0x68 GetLength(self) */
 #define SH_IDFILE_SLOT_SET_LENGTH  14u   /* +0x70 SetLength(self, length) */
 
-/* Swap the resource-provider open slot. module_base identifies the host
- * image. The constructor and three idStr helpers must be clean SIG_OK matches
- * within it; hooked fallbacks are refused. Decode the constructor to locate a
- * read-only provider vtable, then configure all three native helper slots
- * before publishing the hook. Returns 1 on installation, otherwise 0 and logs
- * the reason.
- */
+/* Swap the resource-provider open slot. The constructor and three idStr helpers must be clean SIG_OK matches in
+ * module_base; returns 1 on installation, otherwise 0 and logs the reason. */
 int sh_overrides_install(const uint8_t *module_base,
                          void *ctor_fn, int ctor_status_ok,
                          void *read_string_fn, int read_string_status_ok,
                          void *compare_fn, int compare_status_ok,
                          void *write_string_fn, int write_string_status_ok);
 
-/* Read the effective base for navigation into a new process-heap buffer.
- * This applies Grid generation to built-in or installed inputs, without
- * re-entering navigation. Caller frees the result. An owned source failure
- * does not fall back to stock. Reading originals requires a previous hook call
- * to capture the provider object.
- */
+/* Read the effective navigation base (Grid generation applied, without re-entering navigation) into a new
+ * process-heap buffer the caller frees. Needs a prior hook call to have captured the provider object. */
 unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_len);
 
 /* Restore the saved resource-open slot. Idempotent; returns 1 when restored,
@@ -58,9 +37,8 @@ unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_l
  */
 int sh_overrides_uninstall(void);
 
-/* The install's byte checks on the executable's code (the base idFile helper's prologue at its recorded RVA,
- * the provider vtable decoded from the constructor). NULL when they hold, else the log line naming the failure.
- * The install and the image-backed test both call this. */
+/* Runs the install's byte checks (the base idFile helper's prologue at its recorded RVA, the provider vtable
+ * decoded from the constructor). Returns NULL when they hold, else the log line naming the failure. */
 const char *sh_overrides_check_sites(const uint8_t *module_base, const void *ctor_fn,
                                      const uint8_t **helper_out, void **vtable_out);
 

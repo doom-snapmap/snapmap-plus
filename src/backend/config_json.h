@@ -1,7 +1,5 @@
-/* Validate bounded JSON values and retain object members as raw fragments.
- * Decode keys and reject duplicates at every nesting level. This lets
- * settings updates preserve unknown values and original number spellings.
- */
+/* Bounded JSON validation that keeps object members as raw fragments, so settings updates preserve
+ * unknown values and original number spellings. Keys are decoded and duplicates rejected at every level. */
 #ifndef SH_CONFIG_JSON_H
 #define SH_CONFIG_JSON_H
 
@@ -32,10 +30,8 @@ typedef struct sh_json_object {
     size_t capacity;
 } sh_json_object;
 
-/* Read-only member spans for a postorder object visitor. Spans and decoded
- * keys are valid only during the callback; values reference the input buffer.
- * A zero callback result refuses traversal. No partial result is trustworthy
- * until the complete document validates. */
+/* Read-only member spans for a postorder object visitor. Spans and keys are valid only during the
+ * callback (values point into the input); a zero result refuses traversal. */
 typedef struct sh_json_field_span {
     char *key;
     size_t key_length;
@@ -48,11 +44,8 @@ typedef int (*sh_json_object_visitor)(void *context, const sh_json_field_span *f
 int sh_json_visit_objects(const char *json, size_t length, unsigned max_depth,
                           sh_json_object_visitor visitor, void *context);
 
-/* The field filter sees each decoded member key before its value is scanned.
- * Positive visits normally, zero suppresses callbacks throughout that value,
- * and negative aborts. Suppressed values still receive full JSON validation,
- * including duplicate keys and depth checks. depth is the containing object's
- * depth. The same context is passed to both callbacks. */
+/* The field filter sees each decoded key before its value is scanned: positive visits, zero suppresses
+ * callbacks in that value (still validated), negative aborts. depth is the containing object's. */
 typedef int (*sh_json_field_filter)(void *context, const char *key,
                                      size_t key_length, unsigned depth);
 int sh_json_visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
@@ -80,13 +73,9 @@ int sh_json_object_set_n(sh_json_object *object, const char *key,
 int sh_json_decode_string(const char *json, size_t length,
                           char *out, size_t out_capacity, size_t *out_length);
 
-/* DOOM's native map/state JSON uses byte strings: unescaped bytes >= 0x80
- * are retained verbatim, even when they are not UTF-8. These entry points
- * share all syntax, escape, duplicate-key and depth checks above. Use them
- * only for engine-owned documents, never package/configuration JSON. They
- * do not guess a code page, transcode text, or repair malformed syntax.
- * Objects share the normal get/free/serialize helpers; raw values survive
- * serialization unchanged. New values passed to object_set remain strict. */
+/* DOOM's native map/state JSON uses byte strings: unescaped bytes >= 0x80 are kept verbatim, even
+ * when not UTF-8. Same checks as above; use only for engine-owned documents, never package or
+ * configuration JSON. Objects share the normal helpers, and new values passed to object_set stay strict. */
 int sh_native_json_validate(const char *json, size_t length, unsigned max_depth,
                             sh_json_kind *out_kind, sh_json_error *error);
 int sh_native_json_visit_objects_filtered(const char *json, size_t length, unsigned max_depth,

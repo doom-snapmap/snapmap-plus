@@ -1,6 +1,5 @@
-/* Register console commands and implement dispatch, resource listings, developer
- * utilities, and command exposure. Entity, reflection, and math handlers live
- * in their respective modules; SnapStack dispatch uses the shared command map. */
+/* Registers console commands and implements dispatch, resource listings, developer utilities, and command
+ * exposure. Entity, reflection, and math handlers live in their own modules. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -39,23 +38,16 @@
 #include "particlemotion.h"
 #include "../fault_shield/static_model_guard.h"
 
-/* Engine call contracts. */
-
-/* AddCommand(self,name,handler,help,argComp,flags). Help is argument 4;
- * argument completion is 5. flags=2 becomes stored flags=6, exposing commands
- * in full/developer tables and exempting them from the developer cheat guard. */
+/* AddCommand(self,name,handler,help,argComp,flags). flags=2 becomes stored flags=6, exposing commands in the
+ * full and developer tables and exempting them from the developer cheat guard. */
 typedef void (*add_command_fn)(void *cmdsys, const char *name, void *handler,
                                const char *help, void *argComp, unsigned int flags);
 
-/* Dispatch takes a pointer to varargs. Preformat text, then supply one %s argument. */
+/* Dispatch takes a pointer to varargs: the text is preformatted and passed as one %s argument. */
 typedef void (*printf_dispatch_fn)(int level, const char *fmt, void *vaptr);
 
-/* Return a typed resource-registry node, or NULL for an unknown class. */
+/* Returns a typed resource-registry node, or NULL for an unknown class. */
 typedef void *(*get_decls_fn)(const char *type_name);
-
-
-
-/* Cached state. */
 
 static add_command_fn     g_add_command = NULL;
 static int                g_dialogtest_ticket = 0;
@@ -66,15 +58,15 @@ static const uint8_t     *g_module_base = NULL;
 static volatile LONG      g_installed   = 0;
 static volatile LONG      g_register_pending = 0;   /* set by install, cleared by the first main frame */
 
-/* Keep the original getter bytes while devmode is forced off. */
+/* The original getter bytes, kept while devmode is forced off. */
 static sh_patch_handle    g_devmode_handle;
 static int               g_devmode_patch_complete;
 
-/* Pass the address of one preformatted string pointer as the engine varargs. */
+/* Prints through the engine, passing the address of one preformatted string pointer as its varargs. */
 void sh_printf(const char *fmt, ...)
 {
     if (!g_printf) return;
-    /* The whole text: a short one on the stack, a longer one on the heap. */
+    /* A short text stays on the stack, a longer one goes to the heap. */
     char buf[1024], *held = NULL;
     va_list ap;
     va_start(ap, fmt);
@@ -94,7 +86,7 @@ void sh_printf(const char *fmt, ...)
     free(held);
 }
 
-/* Shared guarded access to engine-owned command arguments. */
+/* Guarded access to engine-owned command arguments. */
 int cmd_argc(idCmdArgs *a)
 {
     __try { return a ? a->argc : 0; }
@@ -117,22 +109,11 @@ void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *modu
     return NULL;
 }
 
-/* Console handlers run at the engine main-thread command-execution point. */
+/* sh_rawmaps -- raw JSON map files from the console, the same actions as the File menu: state, list [folder],
+ * load [path], save [path] (the OPEN map), savepath ..., default, overwrite on|off (saving may replace the map an
+ * opened rawmap came from). Paths are UTF-8; the folder walks use the wide calls. */
 
-/* sh_rawmaps -- raw JSON map files from the console, the same actions as the File menu.
- *
- *   sh_rawmaps                  state + both paths (changes nothing)
- *   sh_rawmaps list [folder]    the rawmap files in the default folder, the load path's folder, or one
- *   sh_rawmaps load [path]      open a rawmap in the editor now
- *   sh_rawmaps save [path]      write the OPEN map, optionally to a new destination
- *   sh_rawmaps savepath ...     where saves go
- *   sh_rawmaps default          put both paths back to the default location
- *   sh_rawmaps overwrite on|off whether saving an opened rawmap may replace the map it opened over
- *
- * Paths are UTF-8, as everywhere in the backend; the folder walks below use the wide calls. */
-
-/* The folder holding a FILE path (malloc'd). NULL when there is no separator to split on, which
- * is the default resolver's relative fallback and has no folder to speak of. */
+/* Returns the folder holding a FILE path (malloc'd), or NULL when there is no separator to split on. */
 static char *rawmap_dir_of(const char *path)
 {
     const char *slash = path ? strrchr(path, '\\') : NULL;
@@ -140,10 +121,9 @@ static char *rawmap_dir_of(const char *path)
     return sh_textn(path, (size_t)(slash - path));
 }
 
-/* One folder's rawmaps: *.zip exports holding one map (nothing is installed by looking), then the
- * *.json files that are maps. A .json NAME proves nothing -- the folder also holds config.json and
- * the like, and prefabs\ holds *.snapmap.json prefabs -- so only the file's own "~type" settles it
- * (sh_rawmap_looks_like_rawmap). `prefix` is printed before each name. Returns how many it printed. */
+/* Prints one folder's rawmaps: *.zip exports holding one map, then the *.json files whose own "~type" says they
+ * are maps (sh_rawmap_looks_like_rawmap), since the folder also holds config.json and prefabs. `prefix` is printed
+ * before each name. Returns how many it printed. */
 static int rawmap_list_one_dir(const char *dir, const char *prefix)
 {
     static const wchar_t *const patterns[] = { L"*.zip", L"*.json" };
@@ -180,9 +160,8 @@ static int rawmap_list_one_dir(const char *dir, const char *prefix)
     return n;
 }
 
-/* A folder and ONE level of subfolders under it. One level, not a walk: a rawmap library is
- * organised a folder deep, and an unbounded recursion pointed at C:\ by a typo would sit there
- * enumerating the disk while the game waits on the console callback. */
+/* Lists a folder and one level of subfolders under it; the depth is bounded so a mistyped root cannot enumerate
+ * the disk inside the console callback. */
 static int rawmap_list_dir_tree(const char *dir)
 {
     wchar_t *wdir, *glob;
@@ -220,7 +199,7 @@ static void rawmap_list_section(const char *dir, const char *what)
     if (n == 0) sh_printf("  (none)\n");
 }
 
-/* `arg` = a folder to list, or NULL for the default folder and the load path's folder. */
+/* Lists `arg`, or the default folder and the load path's folder when it is NULL. */
 static void rawmap_print_list(const char *arg)
 {
     char *def_path, *cur_path, *def_dir, *cur_dir;
@@ -238,8 +217,7 @@ static void rawmap_print_list(const char *arg)
         return;
     }
 
-    /* The folder rawmaps default to does not move when the load path points elsewhere; the load
-     * path's folder is where the person keeps their files. */
+    /* The default folder stays put when the load path points elsewhere. */
     def_path = sh_rawmap_default_path();
     cur_path = sh_rawmap_load_path();
     def_dir = rawmap_dir_of(def_path);
@@ -271,7 +249,7 @@ static void rawmap_print_state(void)
     sh_printf("  load from: %s%s\n", rawmap_or(load_path, "(none)"),
               readable ? "" : "   <-- cannot be opened right now");
     if (!readable && why && why[0]) sh_printf("             %s\n", why);
-    /* Say whether this is the default file or one the person chose. */
+    /* Says whether the save file is the default or a chosen one. */
     target = sh_rawmap_save_target();
     sh_printf("  save to:   %s%s\n", rawmap_or(save_path, "(none)"),
               target && target[0] ? "   (you chose this file)" : "   (the default file)");
@@ -341,9 +319,7 @@ static void h_sh_rawmaps(idCmdArgs *a)
     if (_stricmp(verb, "help") == 0 || strcmp(verb, "?") == 0) { rawmap_print_usage(); return; }
     if (_stricmp(verb, "list") == 0)    { rawmap_print_list(arg); return; }
 
-    /* Named for the thing a person is choosing to allow, so "on" is the permissive one. Never
-     * persisted: it destroys a map, and a destructive setting that outlives the session it was
-     * turned on in is one someone forgets about and loses work to. */
+    /* "on" is the permissive setting; it is never persisted because it overwrites a map. */
     if (_stricmp(verb, "overwrite") == 0) {
         if (arg != NULL && arg[0] != '\0') {
             if (_stricmp(arg, "on") == 0 || strcmp(arg, "1") == 0) {
@@ -369,10 +345,8 @@ static void h_sh_rawmaps(idCmdArgs *a)
         return;
     }
 
-    /* `load <path>` opens that file now; bare `load` opens the load path again. Either discards
-     * unsaved editor edits, as the File menu's confirm says: the command was typed on purpose, and
-     * it cannot damage a SAVED map -- the rawmap opens as a new map that has to be named. Nothing
-     * is kept for a later map: a rawmap that cannot open now is refused now. */
+    /* `load <path>` opens that file; bare `load` opens the load path again. Either discards unsaved editor edits and
+     * opens the rawmap as a new map that has to be named; a rawmap that cannot open is refused. */
     if (_stricmp(verb, "load") == 0) {
         char *why = NULL, *path = arg && arg[0] ? sh_text(arg) : sh_rawmap_load_path();
         if (sh_rawmap_open_now(arg && arg[0] ? arg : NULL, &why)) {
@@ -387,10 +361,8 @@ static void h_sh_rawmaps(idCmdArgs *a)
         return;
     }
 
-    /* `savepath` is the console's way to say where saves go, the same choice "Save Rawmap As"
-     * makes in the File menu. Bare form reports and changes nothing. `rawmap` is a shortcut for "the
-     * file I have loaded". Opening a different map clears whatever was set, so a downloaded map is
-     * never written over by a choice made while some other map was open. */
+    /* `savepath` sets where saves go, as "Save Rawmap As" does; the bare form only reports, and `rawmap` means the
+     * loaded file. Opening a different map clears the choice. */
     if (_stricmp(verb, "savepath") == 0) {
         char *target, *why = NULL;
 
@@ -430,14 +402,14 @@ static void h_sh_rawmaps(idCmdArgs *a)
     if (_stricmp(verb, "save") == 0) {
         char *why = NULL, *save_path;
 
-        /* Ask before changing anything: a refused save must not move the save path. */
+        /* A refused save must not move the save path, so checks come first. */
         if (!sh_editor_frame_can_rawmap_save(&why)) {
             sh_printf("Cannot save: %s. Nothing was changed.\n", rawmap_or(why, "open a map in the editor first"));
             free(why);
             return;
         }
 
-        /* The candidate destination is only aimed at once every check has passed. */
+        /* The destination is only used once every check has passed. */
         save_path = arg && arg[0] ? sh_text(arg) : sh_rawmap_save_path();
         if (!sh_rawmap_dest_writable_now(save_path, &why)) {
             sh_printf("Cannot save to %s\n", rawmap_or(save_path, "(no save path)"));
@@ -451,8 +423,8 @@ static void h_sh_rawmaps(idCmdArgs *a)
         why = NULL;
         free(save_path);
 
-        /* Queued onto the editor frame -- serializing the open map touches engine state. Only ever
-         * the OPEN map, never a save read off disk. The outcome is told when the write lands. */
+        /* Queued onto the editor frame because serializing the open map touches engine state; the outcome is
+         * printed when the write lands. */
         if (sh_editor_frame_request_rawmap_save_to(arg && arg[0] ? arg : NULL, &why))
             sh_printf("%s\n", rawmap_or(why, "Saving the open map."));
         else
@@ -464,12 +436,11 @@ static void h_sh_rawmaps(idCmdArgs *a)
     rawmap_print_usage();
 }
 
-/* Resource registry: array@node+0x20, count@+0x28, name@decl+0x08.
- * Recheck object layout when porting; reads are guarded and count-bounded. */
-#define LISTRES_ARRAY_OFF   0x20    /* decl-manager node -> decl-pointer array */
-#define LISTRES_COUNT_OFF   0x28    /* decl-manager node -> decl count (uint) */
-#define LISTRES_NAME_OFF    0x08    /* decl object -> name char* (*decl + 8) */
-#define LISTRES_COUNT_CAP   (1u << 20)  /* stale-node guard */
+/* Resource registry: array@node+0x20, count@+0x28, name@decl+0x08; reads are guarded and count-bounded. */
+#define LISTRES_ARRAY_OFF   0x20
+#define LISTRES_COUNT_OFF   0x28
+#define LISTRES_NAME_OFF    0x08
+#define LISTRES_COUNT_CAP   (1u << 20)
 
 static int lr_read_ptr(const void *src, void **out)
 {
@@ -481,15 +452,15 @@ static int lr_read_u32(const void *src, uint32_t *out)
     __try { *out = *(const uint32_t *)src; return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-/* Read the decl name (*decl + 8), SEH-guarded; returns NULL if either hop is unreadable. */
+/* Reads the decl name (*decl + 8), SEH-guarded; returns NULL if either hop is unreadable. */
 static const char *lr_decl_name(const void *decl)
 {
     __try { return *(const char *const *)((const uint8_t *)decl + LISTRES_NAME_OFF); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
 
-/* Accumulate newline-separated names for clipboard copy. Allocation failure
- * stops collection while console output continues. Caller frees the buffer. */
+/* Accumulates newline-separated names for clipboard copy; an allocation failure stops collection while console
+ * output continues. The caller frees the buffer. */
 typedef struct lr_buf {
     char  *data;
     size_t len;
@@ -516,10 +487,8 @@ static void lr_buf_append(lr_buf *b, const char *s)
 }
 
 #ifdef SH_DIAG
-/* Print what the resource layer serves for one engine path (a generated Grid
- * Room variant, a built-in default or the installed original): its length and,
- * when a match string is given, every line of those bytes that contains it.
- * Read-only; it changes no state. */
+/* Prints what the resource layer serves for one engine path: its length and, with a match string, up to 16 lines
+ * containing it. */
 static void h_sh_resread(idCmdArgs *a)
 {
     const char *path = cmd_argv(a, 1), *match = cmd_argv(a, 2);
@@ -553,7 +522,7 @@ static void h_sh_resread(idCmdArgs *a)
 }
 #endif
 
-/* List resource names with optional substring filtering and clipboard copy. */
+/* Lists resource names with optional substring filtering and clipboard copy. */
 static void h_sh_listres(idCmdArgs *a)
 {
     const char *type   = cmd_argv(a, 1);
@@ -615,8 +584,8 @@ static void h_sh_listres(idCmdArgs *a)
     free(buf.data);
 }
 
-/* List live idEntity subclasses, including decl-less types and idTarget_Command.
- * Fall back to the static snapshot when reflection is unavailable. */
+/* Lists live idEntity subclasses, including decl-less types and idTarget_Command, falling back to the static
+ * list when reflection is unavailable. */
 static void h_sh_entlist(idCmdArgs *a)
 {
     const char *filter = cmd_argv(a, 1);
@@ -646,12 +615,11 @@ static void h_sh_entlist(idCmdArgs *a)
     free((void *)names);
 }
 
-/* Force the session devmode getter to return 0, retaining its original bytes
- * for restoration. Resolve and verify the signature at command invocation. */
+/* The session devmode getter is forced to return 0, keeping its original bytes for restoration; the signature is
+ * resolved and verified when the command runs. */
 #define DEVMODE_SIG_NAME   "SessionDevModeGetter"
 
-/* Find a database entry and resolve it now. Return 0 for no entry/base;
- * callers separately check out->status before using the result. */
+/* Finds a signature entry and resolves it. Returns 0 for no entry or base; callers check out->status. */
 static int resolve_sig_by_name(const char *name, sig_result *out)
 {
     if (g_module_base == NULL || name == NULL) return 0;
@@ -678,8 +646,7 @@ static void h_disable_devmode(idCmdArgs *a)
         return;
     }
 
-    /* The getter reads one session byte; its displacement must be this build's
-     * dev-mode field, or the matched function is not this getter. */
+    /* The getter's displacement must be this build's dev-mode field, or the match is not the getter. */
     if (r.status == SIG_OK) {
         uint32_t field = sh_devmode_getter_field((const uint8_t *)r.addr);
         if (field != SH_SESSION_DEVMODE_FIELD) {
@@ -689,7 +656,7 @@ static void h_disable_devmode(idCmdArgs *a)
         }
     }
 
-    /* Replace the verified head with xor eax,eax; ret. */
+    /* Replaces the verified head with xor eax,eax; ret. */
     const uint8_t new_bytes[3] = { 0x31, 0xC0, 0xC3 };
     sh_patch_status st = code_patch_sig(&r, SH_DEVMODE_GETTER_HEAD, new_bytes, 3, &g_devmode_handle);
     g_devmode_patch_complete = st == B2_PATCH_OK;
@@ -722,16 +689,16 @@ static void h_reenable_devmode(idCmdArgs *a)
 }
 
 #ifdef SH_DIAG
-/* Log render trace varargs through a replacement no-op sink. Start-only: the
- * detour and file remain active for the process lifetime, with no trampoline call. */
+/* Logs the render trace varargs to renderlog.txt through a detour that never calls the original; the detour and
+ * file stay active for the process lifetime. */
 #define RENDERLOG_SIG_NAME   "RenderLogStub"
-#define RENDERLOG_STOLEN     14   /* hook.c writes a 14-byte FF25 abs-jmp + requires stolen>=14; 14<=16 room */
+#define RENDERLOG_STOLEN     14   /* hook.c writes a 14-byte FF25 abs-jmp and requires stolen>=14 */
 
 static FILE *g_renderlog_fp    = NULL;
 static void *g_renderlog_tramp = NULL;
 
-/* MSVC cannot combine varargs setup and SEH in one function. Pass the prepared
- * va_list into this guarded writer instead. */
+/* MSVC cannot combine varargs setup and SEH in one function, so the prepared va_list is passed to this guarded
+ * writer. */
 static void renderlog_write(FILE *fp, const char *fmt, va_list ap)
 {
     __try {
@@ -742,7 +709,7 @@ static void renderlog_write(FILE *fp, const char *fmt, va_list ap)
     }
 }
 
-/* Engine ABI: (context,channel,format,...). Only format and varargs are consumed. */
+/* Engine ABI: (context,channel,format,...); only format and varargs are used. */
 static void our_renderlog_hook(void *ctx, void *channel, const char *fmt, ...)
 {
     (void)ctx;
@@ -754,7 +721,7 @@ static void our_renderlog_hook(void *ctx, void *channel, const char *fmt, ...)
     va_end(ap);
 }
 
-/* Open the render trace log and install its sink once. */
+/* Opens the render trace log and installs its sink once. */
 static void h_cs_start_render_logging(idCmdArgs *a)
 {
     (void)a;
@@ -809,10 +776,8 @@ static void h_cs_start_render_logging(idCmdArgs *a)
 }
 #endif
 
-/* Model compilation and render-debug commands. Engine calls resolve at use.
- * Debug traps, machine-specific dumps, and unsupported mutators are refused. */
+/* Model compilation and render-debug commands; engine calls resolve at use. */
 
-/* Model-builder call contracts. */
 typedef void *(*default_idstr_ctor_fn)(void *self);
 typedef void *(*md6_ctor_fn)(void *md6);
 typedef void  (*md6_setoutput_fn)(void *md6, void *output_idstr);
@@ -823,7 +788,7 @@ typedef void  (*idstr_dtor2_fn)(void *self);
 typedef void  (*bmodel_builder_fn)(void *out208, const char *input,
                                    const char *output, void *opts);
 
-/* Resolve each engine helper on invocation; report missing signatures or faults. */
+/* Each engine helper resolves when invoked and reports a missing signature or a fault as failure. */
 static void *eng_default_idstr_ctor(void *self)
 {
     sig_result r;
@@ -889,16 +854,14 @@ static int eng_bmodel_builder(void *out208, const char *input, const char *outpu
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* Local engine-object storage. These bounds cover the supported layouts;
- * a different engine build still requires validation. */
-#define GEN_IDSTR_BYTES   128     /* Scratch storage for an engine idStr. */
+/* Local storage for engine objects. */
+#define GEN_IDSTR_BYTES   128
 #define GEN_MD6_BYTES     1024    /* the idMd6Builder ctx (ctor inits md6+0x38..+0x110; build writes +0xf8) */
-#define GEN_BMODEL_BYTES  256     /* the BModelBuilder out208 result struct (OG memsets/uses 208 = 0xD0 bytes) */
-#define GEN_BOPTS_BYTES   0xD0    /* BModel result buffer, filled with 0x01. Despite this name, arg4 is an idStr. */
+#define GEN_BMODEL_BYTES  256     /* the BModelBuilder out208 result struct (208 = 0xD0 bytes used) */
+#define GEN_BOPTS_BYTES   0xD0    /* BModel result buffer, filled with 0x01; arg4 of the builder is an idStr */
 
-/* Build MD6 output through constructor, input assignment, output setup, and
- * final compile/release. The final operation owns builder teardown; output
- * and scratch option strings retain their separate lifetimes. */
+/* Compiles a .md6model through the engine's builder: constructor, input assignment, output setup, build. The
+ * build owns builder teardown; the output and scratch option strings are destroyed separately. */
 static void h_sh_genmd6model(idCmdArgs *a)
 {
     const char *input  = cmd_argv(a, 1);
@@ -908,7 +871,7 @@ static void h_sh_genmd6model(idCmdArgs *a)
         return;
     }
 
-    /* Initialize scratch before any engine constructor runs. */
+    /* Scratch is zeroed before any engine constructor runs. */
     unsigned char opts[GEN_IDSTR_BYTES];   memset(opts,   0, sizeof opts);
     unsigned char md6 [GEN_MD6_BYTES];     memset(md6,    0, sizeof md6);
     unsigned char inS [GEN_IDSTR_BYTES];   memset(inS,    0, sizeof inS);
@@ -946,7 +909,7 @@ static void h_sh_genmd6model(idCmdArgs *a)
         sh_printf("sh_genmd6model: '%s' could not be compiled; nothing was written.\n", input);
 }
 
-/* Generate a BModel using a 0xD0 result buffer and a constructed options idStr. */
+/* Generates a BModel using a 0xD0 result buffer and a constructed options idStr. */
 static void h_sh_genbmodel(idCmdArgs *a)
 {
     const char *input  = cmd_argv(a, 1);
@@ -956,8 +919,7 @@ static void h_sh_genbmodel(idCmdArgs *a)
         return;
     }
 
-    /* Engine arg1 is the 0xD0 result initialized to 0x01; arg4 is the idStr.
-     * Swapping them breaks the builder ABI. */
+    /* Engine arg1 is the 0xD0 result initialized to 0x01; arg4 is the idStr. */
     unsigned char out208[GEN_BOPTS_BYTES]; memset(out208, 0x01, sizeof out208);
     unsigned char optsS [GEN_IDSTR_BYTES]; memset(optsS,  0,    sizeof optsS);
 
@@ -975,23 +937,18 @@ static void h_sh_genbmodel(idCmdArgs *a)
 }
 
 #ifdef SH_DIAG
-/* Render inspection uses signed render-world anchors; showcursor writes one
- * signed editor-object field. Other toggles are local diagnostics. Unsupported
- * mutators and the original debugger/machine-specific dump paths are refused. */
-#define RW_SLOT_KNOWN_RVA         SH_RVA(0x5C43B30u, 0x45491B0u)  /* Pinned Vulkan fallback slot; the host gate checks filename only. */
-/* Recheck vtable/field offsets when porting. Derive model-count/model/name
- * accesses from the dumpmodelinfo handler and the cursor byte from showcursor. */
-#define RW_VSLOT_MODEL_COUNT      0x188       /* renderWorld vtbl -> GetActiveRenderModelCount() -> uint (BUILD-SPECIFIC) */
-#define RW_VSLOT_GET_MODEL        0x190       /* renderWorld vtbl -> GetRenderModel(idx) -> model* (=400; BUILD-SPECIFIC) */
-#define RW_MODEL_NAME_OFF         0x10        /* render model -> name char* (model+0x10) (BUILD-SPECIFIC) */
-#define ED_SHOWCURSOR_OFF         0x23624u    /* editor -> showcursor byte (OG writes 0) (BUILD-SPECIFIC) */
+/* Render inspection reads the render world through signed anchors (build-specific offsets); showcursor writes one
+ * editor-object field. */
+#define RW_SLOT_KNOWN_RVA         SH_RVA(0x5C43B30u, 0x45491B0u)  /* pinned Vulkan fallback slot */
+#define RW_VSLOT_MODEL_COUNT      0x188
+#define RW_VSLOT_GET_MODEL        0x190
+#define RW_MODEL_NAME_OFF         0x10
+#define ED_SHOWCURSOR_OFF         0x23624u
 #define RW_MODEL_COUNT_CAP        1000000u    /* stale-renderWorld guard on the model count */
-#define EDITOR_SINGLETON_RVA      SH_RVA(0x2F6AD18u, 0x2FB2C08u)  /* Pinned Vulkan audit reference; the editor global anchor locates the object. */
+#define EDITOR_SINGLETON_RVA      SH_RVA(0x2F6AD18u, 0x2FB2C08u)  /* the editor global anchor locates the object */
 
-
-
-/* Resolve renderWorld by accessor, independent global anchor, then a
- * Vulkan-name-gated RVA. Return NULL if no readable non-NULL object is found. */
+/* Resolves renderWorld by accessor, then the global anchor, then a Vulkan-name-gated RVA. Returns NULL if no
+ * readable non-NULL object is found. */
 static void *dr_resolve_renderworld(void)
 {
     sig_result r;
@@ -1003,7 +960,7 @@ static void *dr_resolve_renderworld(void)
             if (sh_safe_read(slot, (uint8_t *)&rw, sizeof rw) && rw) return rw;
         }
     }
-    if (g_module_base) {                     /* second portable path: the signed data-global anchor */
+    if (g_module_base) {                     /* the signed data-global anchor */
         uintptr_t slot = glb_resolve(g_module_base, "render_world_slot", NULL);
         if (slot) {
             void *rw = NULL;
@@ -1018,7 +975,7 @@ static void *dr_resolve_renderworld(void)
     return NULL;
 }
 
-/* SEH-guarded renderWorld vtable-slot calls (the rw shape is engine-owned; never trust it). */
+/* SEH-guarded renderWorld vtable-slot calls. */
 static unsigned dr_model_count(void *rw)
 {
     __try {
@@ -1042,7 +999,7 @@ static const char *dr_model_name(void *model)
     __try { return *(const char * const *)((const uint8_t *)model + RW_MODEL_NAME_OFF); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
-/* Clear the cursor flag only after the editor singleton anchor resolves. */
+/* Clears the cursor flag, only after the editor singleton anchor resolves. */
 static int dr_showcursor(void)
 {
     if (!g_module_base) return 0;
@@ -1056,7 +1013,7 @@ static int dr_showcursor(void)
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-/* Query material-registry presence without modifying declarations. */
+/* Returns the material registry node without modifying declarations. */
 static void *dr_material_decls(void)
 {
     if (!g_get_decls) return NULL;
@@ -1064,7 +1021,7 @@ static void *dr_material_decls(void)
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
 
-/* Diagnostic toggles are local state and do not change engine rendering flags. */
+/* Diagnostic toggle state; it does not change engine rendering flags. */
 static int g_dr_fps_update = 0;
 
 static void h_sh_debugrender(idCmdArgs *a)
@@ -1075,7 +1032,6 @@ static void h_sh_debugrender(idCmdArgs *a)
         return;
     }
 
-    /* Supported inspection and cursor controls. */
     if (strcmp(sub, "dumprenderinfo") == 0 || strcmp(sub, "dumpmodelinfo") == 0) {
         void *rw = dr_resolve_renderworld();
         if (rw == NULL) { sh_printf("sh_debugrender: renderWorld not available (no live render).\n"); return; }
@@ -1113,11 +1069,9 @@ static void h_sh_debugrender(idCmdArgs *a)
 }
 #endif
 
-/* Dispatch sh subcommands inline on the engine main thread. Backend handlers
- * can serialize, edit, commit, select, and toast at this command-execution point;
- * sending them to the frontend worker would make those engine calls off-thread.
- * argv begins at the subcommand name. Borrowed argument strings remain valid
- * for this callback; missing commands and caught handler faults print errors. */
+/* Dispatches sh subcommands inline on the engine main thread, where backend handlers may serialize, edit, commit,
+ * select, and toast. argv begins at the subcommand name and its strings are valid only for this callback; missing
+ * commands and handler faults print errors. */
 static void h_sh_dispatch(idCmdArgs *a)
 {
     sh_iface *iface = sh_ui_get_iface();
@@ -1132,7 +1086,6 @@ static void h_sh_dispatch(idCmdArgs *a)
         return;
     }
 
-
     sh_cmd_handler handler = NULL;
     void          *ctx     = NULL;
     if (!sh_iface_lookup_cmd(iface, sub, &handler, &ctx) || handler == NULL) {
@@ -1140,7 +1093,7 @@ static void h_sh_dispatch(idCmdArgs *a)
         return;
     }
 
-    /* Borrow the subcommand argument tail for this synchronous callback. */
+    /* Borrows the subcommand argument tail for this synchronous callback. */
     int total = cmd_argc(a);
     int sub_argc = total > 1 ? total - 1 : 0;
     const char *sub_argv[64];
@@ -1150,7 +1103,6 @@ static void h_sh_dispatch(idCmdArgs *a)
         sub_argv[i] = v ? v : "";
     }
 
-
     __try {
         handler(ctx, sub_argc, sub_argv);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1159,27 +1111,22 @@ static void h_sh_dispatch(idCmdArgs *a)
 }
 
 #ifdef SH_DIAG
-/* Export engine event names, numbers, and argument specs as C defines.
- * Reach evMgr through declMgr vtable +0x90, then count/name/find through
- * +0x28/+0x20/+0x10. Event records hold name@+0, fspec@+0x10, eventnum@+0x34.
- * Dense registry indices equal event numbers. Resolve all format arguments;
- * missing specs become empty strings.
- * Recheck slots against the decl-manager constructor vtables when porting;
- * the singleton accessor itself resolves through typeinfo's signed call site. */
-#define SS_EVMGR_ACCESSOR_VSLOT   0x90    /* declMgr vtbl -> evMgr sub-object accessor (BUILD-SPECIFIC) */
-#define SS_EV_COUNT_VSLOT         0x28    /* evMgr   vtbl -> event count                (BUILD-SPECIFIC) */
-#define SS_EV_GETNAME_VSLOT       0x20    /* evMgr   vtbl -> name-by-index (char*)       (BUILD-SPECIFIC) */
-#define SS_EV_FINDBYNAME_VSLOT    0x10    /* evMgr   vtbl -> record-by-name              (BUILD-SPECIFIC) */
-#define SS_REC_FSPEC_OFF          0x10    /* eventDef record -> fspec char* (arg-spec)   (BUILD-SPECIFIC) */
-#define SS_EV_COUNT_CAP           65536u  /* stale/garbage-evMgr guard (registrar caps the table at 0x1000) */
-#define SS_DUMP_CAP               0x40000 /* accumulation buffer (~256 KiB; ~1k events * ~200 B each) */
+/* Engine event export (build-specific offsets): evMgr comes from declMgr vtable +0x90, then count/name/find from
+ * +0x28/+0x20/+0x10. Event records hold name@+0, fspec@+0x10, eventnum@+0x34; a missing spec becomes "". */
+#define SS_EVMGR_ACCESSOR_VSLOT   0x90
+#define SS_EV_COUNT_VSLOT         0x28
+#define SS_EV_GETNAME_VSLOT       0x20
+#define SS_EV_FINDBYNAME_VSLOT    0x10
+#define SS_REC_FSPEC_OFF          0x10
+#define SS_EV_COUNT_CAP           65536u  /* stale-evMgr guard */
+#define SS_DUMP_CAP               0x40000
 
 typedef void *(*ss_evmgr_acc_fn)(void *declmgr);
 typedef unsigned (*ss_count_fn)(void *evmgr);
 typedef const char *(*ss_getname_fn)(void *evmgr, unsigned i);
 typedef void *(*ss_findbyname_fn)(void *evmgr, const char *nm);
 
-/* Guarded event-manager vtable calls return NULL/0 on failure. */
+/* Guarded event-manager vtable calls; each returns NULL or 0 on failure. */
 static void *ss_call_evmgr_acc(void *declmgr)
 {
     __try {
@@ -1216,14 +1163,14 @@ static void *ss_call_findbyname(void *evmgr, const char *nm)
         return fn ? fn(evmgr, nm) : NULL;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
-/* SEH-guarded read of the fspec char* at rec+0x10 (the ';'-delimited arg-spec). NULL on any fault. */
+/* Reads the fspec char* at rec+0x10 (the ';'-delimited arg-spec), SEH-guarded; NULL on any fault. */
 static const char *ss_read_fspec(void *rec)
 {
     __try { return *(const char * const *)((const uint8_t *)rec + SS_REC_FSPEC_OFF); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
 
-/* The same truncating SEH-safe buffer-append sh_typeinfo's dump uses (never overruns). */
+/* Appends to a fixed buffer, truncating rather than overrunning. */
 static void ss_dump_append(char *buf, size_t cap, size_t *len, const char *s)
 {
     if (s == NULL || *len >= cap - 1) return;
@@ -1235,7 +1182,7 @@ static void ss_dump_append(char *buf, size_t cap, size_t *len, const char *s)
     buf[*len] = '\0';
 }
 
-/* Copy event definitions as C defines. */
+/* Copies the event definitions to the clipboard as C defines. */
 static void h_sh_superscriptop(idCmdArgs *a)
 {
     (void)a;
@@ -1265,7 +1212,6 @@ static void h_sh_superscriptop(idCmdArgs *a)
     dump[0] = '\0';
     char line[1024];
 
-    /* Describe the emitted name/number/spec pairs. */
     ss_dump_append(dump, sizeof dump, &dlen,
         "// snapmap-plus sh_superscriptop -- engine event definitions\n"
         "// EV_<name> = the event number; FSPEC_<name> = its ';'-delimited arg-spec\n");
@@ -1280,7 +1226,6 @@ static void h_sh_superscriptop(idCmdArgs *a)
         if (rec != NULL) fspec = ss_read_fspec(rec);
         if (fspec == NULL) fspec = "";
 
-
         _snprintf_s(line, sizeof line, _TRUNCATE,
                     "#define EV_%s %u\n#define FSPEC_%s \"%s\"\n", name, i, name, fspec);
         ss_dump_append(dump, sizeof dump, &dlen, line);
@@ -1293,26 +1238,23 @@ static void h_sh_superscriptop(idCmdArgs *a)
         sh_printf("sh_superscriptop: %u event defs generated (clipboard copy failed).\n", emitted);
 }
 
-/* Write engine event definitions as an eventdef_ss_t table in eventdefs.txt.
- * Event numbers come from record+0x34, falling back to the dense index.
- * Derive argument counts from semicolon-delimited fspec; record+0x30 is not
- * populated on the supported build. Return type is unavailable and emitted as 0. */
-#define CDE_REC_EVENTNUM_OFF  0x34    /* eventDef record -> eventnum (uint)   (BUILD-SPECIFIC, [12] layout) */
-#define CDE_OUT_PATH          "eventdefs.txt"   /* Relative to the DOOM working directory. */
+/* Writes the engine event definitions as an eventdef_ss_t table in eventdefs.txt: event numbers from record+0x34 (else
+ * the dense index), argument counts from the ';'-delimited fspec, return type emitted as 0. */
+#define CDE_REC_EVENTNUM_OFF  0x34
+#define CDE_OUT_PATH          "eventdefs.txt"   /* relative to the DOOM working directory */
 
-/* Read the record event number, or use the caller's dense-index fallback. */
+/* Reads the record event number, or returns the caller's dense-index fallback. */
 static unsigned cde_read_eventnum(void *rec, unsigned fallback)
 {
     __try { return *(const unsigned *)((const uint8_t *)rec + CDE_REC_EVENTNUM_OFF); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return fallback; }
 }
 
-/* The recorded event numbers are trusted only when they form a permutation of
- * 0..count-1 (the event-def catalog is the same 1611 entries on build 13954591);
- * otherwise the dump uses the dense table index for every row. */
+/* Recorded event numbers are trusted only when they form a permutation of 0..count-1; otherwise the dump uses
+ * the dense table index for every row. */
 static int cde_eventnums_valid(void *evmgr, unsigned count);
 
-/* Guard file output and report write success. */
+/* Writes the buffer, guarded; returns 1 on success. */
 static int cde_write_file(FILE *fp, const char *buf)
 {
     __try { fputs(buf, fp); return 1; }
@@ -1338,7 +1280,7 @@ static int cde_eventnums_valid(void *evmgr, unsigned count)
     return 1;
 }
 
-/* Export the event table to a file. */
+/* Exports the event table to eventdefs.txt. */
 static void h_cs_dumpeventdefs(idCmdArgs *a)
 {
     (void)a;
@@ -1368,7 +1310,6 @@ static void h_cs_dumpeventdefs(idCmdArgs *a)
     dump[0] = '\0';
     char line[1024];
 
-
     ss_dump_append(dump, sizeof dump, &dlen,
         "struct eventdef_ss_t {const char* m_evname;int m_rettype;const char* m_fspec;"
         "unsigned m_numargs; unsigned m_eventnum;};\n"
@@ -1392,10 +1333,9 @@ static void h_cs_dumpeventdefs(idCmdArgs *a)
             if (recorded_numbers) eventnum = cde_read_eventnum(rec, i);
         }
         if (fspec == NULL) fspec = "";
-        /* Count argument tokens from fspec; the reflected count is not populated. */
+        /* Argument count from the fspec. */
         for (const char *cp = fspec; *cp; cp++) if (*cp == ';') numargs++;
 
-        /* Return type is unavailable; retain the table's 0 placeholder. */
         _snprintf_s(line, sizeof line, _TRUNCATE,
                     "\t{\"%s\", 0, \"%s\", %u, %u},\n", name, fspec, numargs, eventnum);
         ss_dump_append(dump, sizeof dump, &dlen, line);
@@ -1418,13 +1358,13 @@ static void h_cs_dumpeventdefs(idCmdArgs *a)
 }
 #endif
 
-/* Entity handlers share this command ABI. */
+/* Entity handlers. */
 void h_sh_dumpdef(idCmdArgs *a);
 void h_sh_spawninfo(idCmdArgs *a);
 void h_sh_spawn(idCmdArgs *a);
 void h_sh_event(idCmdArgs *a);
 void h_sh_dumpmap(idCmdArgs *a);
-/* Local-player runtime cheat toggles. */
+/* Local-player cheat toggles. */
 void h_noclip(idCmdArgs *a);
 void h_infinitehealth(idCmdArgs *a);
 void h_noplayerdeath(idCmdArgs *a);
@@ -1432,7 +1372,7 @@ void h_noplayerkill(idCmdArgs *a);
 void h_notarget(idCmdArgs *a);
 void h_cheatkeep(idCmdArgs *a);
 
-/* Reflection handlers bind through typeinfo's signed dependencies. */
+/* Reflection handlers. */
 void h_cs_fieldinfo(idCmdArgs *a);
 void h_sh_type(idCmdArgs *a);
 void h_sh_validclasses(idCmdArgs *a);
@@ -1446,7 +1386,7 @@ void h_alginfo(idCmdArgs *a);
 /* Palette visibility toggle. */
 void h_target_any(idCmdArgs *a);
 
-/* Console command names and their displayed help. */
+/* A console command's name, handler and help text. */
 typedef struct cmd_entry {
     const char *name;
     void       *handler;
@@ -1456,14 +1396,13 @@ typedef struct cmd_entry {
 static void h_sh_help(idCmdArgs *a);
 
 #ifdef SH_DIAG
-/* Raise a diagnostic dialog. Join remaining arguments to preserve message spaces. */
+/* Raises a diagnostic dialog from the remaining arguments joined with spaces. */
 static void h_sh_dialogtest(idCmdArgs *a)
 {
     char text[256];
     int argc = cmd_argc(a);
-    /* The id the product's own prompts use (GDM_CONFIRM_VIDEO_CHANGES). The
-     * old default 0x6D is GDM_SNAPMAP_EDITOR_RESTART_MAP, a prompt the shell
-     * acts on. */
+    /* The default id is GDM_CONFIRM_VIDEO_CHANGES; 0x6D is GDM_SNAPMAP_EDITOR_RESTART_MAP, a prompt the shell acts
+     * on. */
     unsigned gdm_id = 0x29u;
     unsigned button_set = 1u;
     int first = 1, i;
@@ -1473,8 +1412,7 @@ static void h_sh_dialogtest(idCmdArgs *a)
         sh_printf("sh_dialogtest: the engine dialog surface is not ready.\n");
         return;
     }
-    /* Optional numeric prefix is GDM id then button set. Both affect layout,
-     * so a button-set value alone does not determine which controls appear. */
+    /* An optional numeric prefix is the GDM id, then the button set; both affect layout. */
     if (lead && lead[0] >= '0' && lead[0] <= '9') {
         gdm_id = (unsigned)strtoul(lead, NULL, 0);
         first = 2;
@@ -1507,7 +1445,7 @@ static void h_sh_dialogtest(idCmdArgs *a)
               g_dialogtest_ticket, gdm_id, button_set);
 }
 
-/* sh_dialogpoll -- read the answer to the dialog sh_dialogtest raised. */
+/* Reads the answer to the dialog sh_dialogtest raised. */
 static void h_sh_dialogpoll(idCmdArgs *a)
 {
     int r;
@@ -1524,7 +1462,7 @@ static void h_sh_dialogpoll(idCmdArgs *a)
     if (r != SH_ENGINE_DIALOG_PENDING) g_dialogtest_ticket = 0;
 }
 
-/* Inspect queued dialog descriptors; button answers arrive through callbacks. */
+/* Prints the queued dialog descriptors. */
 static void h_sh_dialogdump(idCmdArgs *a)
 {
     (void)a;
@@ -1532,7 +1470,7 @@ static void h_sh_dialogdump(idCmdArgs *a)
 }
 #endif
 
-/* Report served baked navigation and reasons for falling back to shipped data. */
+/* Reports the served baked navigation and the reasons for falling back to shipped data. */
 static void h_sh_navmesh(idCmdArgs *a)
 {
     const char *verb = cmd_argv(a, 1);
@@ -1576,11 +1514,10 @@ static void h_sh_navmesh(idCmdArgs *a)
     sh_navmesh_report(sh_printf);
     sh_printf("navigation: the last Play read its boxes from %s.\n",
               sh_apply_engine_nav_build_source());
-    /* Compose stored-shard and marked-volume reports without coupling the modules. */
     sh_nav_bake_report(sh_printf);
 }
 
-/* Where frame time goes inside snapmap-plus. */
+/* Reports where frame time goes inside snapmap-plus. */
 static void h_sh_perf(idCmdArgs *a)
 {
     const char *verb = cmd_argv(a, 1);
@@ -1596,7 +1533,7 @@ static void h_sh_perf(idCmdArgs *a)
     sh_perf_report(sh_printf);
 }
 
-/* What the simulated particle motion has drawn since the start (particlemotion.h): for the test bench. */
+/* Reports what the simulated particle motion has drawn since the start (particlemotion.h). */
 static void h_sh_particles(idCmdArgs *a)
 {
     char line[256];
@@ -1612,16 +1549,15 @@ static void h_sh_particles(idCmdArgs *a)
                 sh_particlemotion_moved(), sh_particlemotion_collided(), sh_particlemotion_killed(),
                 sh_particlemotion_children());
     sh_printf("%s\n", line);
-    {   /* the backend log too: a reader that has no console still gets the counts */
+    {   /* The counts also go to the backend log. */
         char logged[300];
         _snprintf_s(logged, sizeof logged, _TRUNCATE, "PARTICLES: counts: %s", line);
         backend_log(logged);
     }
 }
 
-/* The static model guard's counts since the start: render models rebuilt after their backing static model was
- * reloaded in place (a mod's native/ model at a scope change), render models drawn empty because their table was
- * not a static model's, and session static models whose surface reload was moved to process heap 0. */
+/* Reports the static model guard's counts: render models rebuilt after an in-place static model reload, render
+ * models drawn empty because their table is not a static model's, and surface reloads moved to process heap 0. */
 static void h_sh_staticmodels(idCmdArgs *a)
 {
     char line[256], logged[300];
@@ -1634,9 +1570,8 @@ static void h_sh_staticmodels(idCmdArgs *a)
     backend_log(logged);
 }
 
-/* Resize the selected Grid Room through the inspector's own path (format
- * clamp, boundary fit, native edit, read back). Prints the size and the
- * adapter's sentence for the edit: applied, unchanged, limited or refused. */
+/* Resizes the selected Grid Room through the inspector's own path (format clamp, boundary fit, native edit, read
+ * back) and prints the size and the adapter's sentence for the edit. */
 static void gridsize_print(const char *line)
 {
     sh_printf("%s\n", line);
@@ -1684,9 +1619,8 @@ static void h_sh_gridsize(idCmdArgs *a)
 }
 
 #ifdef SH_DIAG
-/* Take our resource layer back out, so the engine's own cost can be measured
- * without it. One way: the editor's own resources go with it, so the session is
- * for measuring, not for editing. */
+/* Removes the resource layer so the engine's own cost can be measured; the editor's resources go with it, so the
+ * session is not for editing. */
 static void h_sh_overrides_off(idCmdArgs *a)
 {
     (void)a;
@@ -1735,7 +1669,6 @@ static const cmd_entry CMD_TABLE[] = {
       "sh_gridsize [instance] prints the selected Grid Room's size; 'sh_gridsize templates' lists the module entity templates of the stock modern room and each resized variant; 'sh_gridsize <x> <y> <z> [instance]' resizes it through the same path as the room's properties and prints the result or the reason it was limited or refused." },
 
 #ifdef SH_DIAG
-    /* Developer diagnostics: the diagnostic build only. */
     { "sh_overrides_off",     (void *)h_sh_overrides_off, "Remove our resource layer for the rest of this session, to measure the engine without it. Editor resources go with it; restart to get them back." },
     { "cs_fieldinfo",        (void *)h_cs_fieldinfo,"Diagnostic: print the type fields the reflection layer reads." },
     { "sh_dialogtest",       (void *)h_sh_dialogtest, "[gdmid] [buttonset] [text...] raise the engine's own dialog carrying this text (diagnostic)" },
@@ -1755,7 +1688,7 @@ static const cmd_entry CMD_TABLE[] = {
 };
 #define CMD_COUNT ((int)(sizeof(CMD_TABLE) / sizeof(CMD_TABLE[0])))
 
-/* List registered command help and cvar defaults from their source tables. */
+/* Lists registered command help and cvar defaults from their source tables. */
 static void h_sh_help(idCmdArgs *a)
 {
     (void)a;
@@ -1771,35 +1704,29 @@ static void h_sh_help(idCmdArgs *a)
     }
 }
 
-/* Every command answers in and out of developer mode: cmd_lists.h has the
- * two lists, the flags, and why their room is reserved off this thread. */
-/* Resolve list growth from AddCommand's LEA RCX,[RSI+8]; CALL rel32.
- * Generic idList instantiations share their bytes, so use this relationship
- * rather than a direct signature or raw RVA. */
+/* The list-growth helper, found from AddCommand's LEA RCX,[RSI+8]; CALL rel32 because generic idList
+ * instantiations share their bytes. Every command answers in and out of developer mode (cmd_lists.h). */
 typedef sh_idlist_grow_fn idlist_grow_fn;
 static idlist_grow_fn g_idlist_grow;
 
-/* Preserve all six AddCommand arguments while adding exposure flags. */
+/* AddCommand with all six arguments, called through the trampoline. */
 typedef void (*add_command6_fn)(void *cmdsys, const char *name, void *handler, const char *help,
                                 void *argComp, unsigned int flags);
 static add_command6_fn g_addcmd_tramp = NULL;
-#define ADDCMD_STOLEN 15   /* 3 whole `mov [rsp+N],reg` prologue movs (5B each) -- >=14, no RIP/rel */
+#define ADDCMD_STOLEN 15   /* 3 whole `mov [rsp+N],reg` prologue movs (5 bytes each), no RIP-relative operand */
 
 static void hook_add_command(void *cmdsys, const char *name, void *handler, const char *help,
                              void *argComp, unsigned int flags)
 {
     if (!g_addcmd_tramp) return;
-    /* The exposure flags make the engine append the command to the developer
-     * list as well. They are added only while that list has room, so the
-     * append never grows the list inside a frame (cmd_lists.h); without room
-     * the registration goes through as the engine asked for it. */
+    /* The exposure flags make the engine append the command to the developer list too; they are added only while
+     * that list has room, so the append never grows it inside a frame (cmd_lists.h). */
     if (sh_cmd_lists_room((const uint8_t *)cmdsys, 1)) flags |= SH_CMD_BOTH_FLAGS;
     g_addcmd_tramp(cmdsys, name, handler, help, argComp, flags);
 }
 
-/* Later registrations inherit the exposure flags through the AddCommand
- * detour. The detour is committed with the game's other threads suspended
- * (code_patch), so this is safe from the bootstrap thread. */
+/* Gives later registrations the exposure flags through the AddCommand detour, committed with the game's other
+ * threads suspended (code_patch), so it is safe from the bootstrap thread. */
 static int command_unlock_detour(void *add_command)
 {
     if (g_addcmd_tramp) return hook_is_installed((void *)g_addcmd_tramp);
@@ -1809,8 +1736,7 @@ static int command_unlock_detour(void *add_command)
     return g_addcmd_tramp && hook_is_installed((void *)g_addcmd_tramp);
 }
 
-/* flags=2 grants cheat exemption; AddCommand adds developer membership (4).
- * This keeps product commands visible before and after a developer command runs. */
+/* Registers one command with flags=2 (cheat exemption); AddCommand adds developer membership (4). */
 static int register_cmd(const cmd_entry *e)
 {
     __try {
@@ -1841,9 +1767,8 @@ int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void
     return 1;
 }
 
-/* The engine's command lists are its main thread's: registration and the
- * developer-list backfill both run here, once, on the first frame. Room for
- * them is reserved first, off this thread, so nothing here grows a list. */
+/* Registration and the developer-list backfill run here, once, on the first main frame; room is reserved first,
+ * off this thread, so nothing here grows a list. */
 void sh_commands_main_frame(void)
 {
     if (InterlockedCompareExchange(&g_register_pending, 0, 1) != 1) return;

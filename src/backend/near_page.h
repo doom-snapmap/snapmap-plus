@@ -16,10 +16,8 @@ static int sh_near_page_reaches(uintptr_t from, uintptr_t page)
     return lo >= INT32_MIN && hi <= INT32_MAX;
 }
 
-/* Commit the free allocation-granularity slot nearest `from` that it reaches,
- * read-write. `from` is the address a rel32 operand is relative to (the end of
- * its instruction). Release with VirtualFree(page, 0, MEM_RELEASE). NULL when
- * no slot within reach is free. */
+/* Commits the nearest free read-write slot that `from` (the end of the rel32 instruction) reaches; release
+ * with VirtualFree(page, 0, MEM_RELEASE). NULL when none within reach is free. */
 static void *sh_near_page_alloc(uintptr_t from)
 {
     SYSTEM_INFO info;

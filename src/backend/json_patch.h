@@ -12,10 +12,8 @@
 int sh_json_patch_set_leaf(const char *full_json, const char *prop_path,
                             const char *raw_leaf_token, char *out, int outcap);
 
-/* Append raw IDs to a num/item[] reference list, escaping each new value and
- * preserving existing entries. Create a list if absent. Recognized duplicate
- * strings are skipped; unsupported escapes may compare unequal. Return 1 with
- * the patched document or 0 on failure. */
+/* Appends raw IDs to a num/item[] reference list (created if absent), escaping each new value and keeping
+ * existing entries; duplicate strings are skipped. Returns 1 with the patched document, 0 on failure. */
 int sh_json_patch_upsert_reflist(const char *full_json, const char *prop_path,
                                   const char * const *id_strings, int n_ids,
                                   char *out, int outcap);

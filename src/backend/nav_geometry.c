@@ -204,10 +204,8 @@ int sh_nav_geometry_ray_exit(const sh_aug_platform *src,const double start[3],
     return 1;
 }
 
-/* Intersect a face with the occupied standing space. Start with the exact
- * OBB/agent Minkowski half-spaces (three box axes, three world axes and nine
- * edge cross products), then retain the physical floor-contact height on
- * marked walkable planes so a ramp can meet a level support continuously. */
+/* Intersect a face with the occupied standing space: the exact OBB/agent Minkowski half-spaces (3 box axes, 3 world
+ * axes, 9 edge cross products), keeping the true floor-contact height on marked walkable planes. */
 static int ng_obstacle(const ng_face *f,const ng_box *b,double r,double h,
                        double floor_cos,int support,double step,ng_poly *out)
 {
@@ -230,11 +228,9 @@ static int ng_obstacle(const ng_face *f,const ng_box *b,double r,double h,
             double norm[3],d,minimum=1e30;
             for(k=0;k<3;k++)norm[k]=s*axes[a][k];
             d=ng_dot(norm,centre)+rad;
-            /* A walkable support plane is a floor contact, not a wall for the
-             * agent's lower corners. Keep its true height when joining ramps.
-             * Side walls and downward ceiling faces retain full clearance.
-             * Without this distinction, every rising ramp cuts an artificial
-             * agent-radius gap out of its adjoining level floor. */
+            /* A walkable support plane is a floor contact, not a wall for the agent's lower corners, so it keeps
+             * its true height; otherwise a rising ramp cuts an agent-radius gap out of the adjoining floor. Side
+             * walls and downward ceiling faces keep full clearance. */
             if(support && a<3 && norm[2]+1e-7>=floor_cos)
                 d-=r*(fabs(norm[0])+fabs(norm[1]));
             for(j=0;j<p.n;j++){double v=ng_dot(norm,p.p[j])-d;if(v<minimum)minimum=v;}
@@ -342,11 +338,9 @@ static int ng_merge(const ng_poly *a,const ng_poly *b,ng_poly *out)
     return fabs(ng_area(out)-ng_area(a)-ng_area(b))<1e-5;
 }
 
-/* Subtract one solid's occupied standing space from the pieces a[0..np).
- * A walkable-topped marked solid first loses its own footprint at the
- * standing point, then the space its body blocks above the step band; walls
- * that only block and steep solids keep full clearance. Box faces and module
- * floors are cut by this same rule. Returns 0 when the pieces overflow. */
+/* Subtract one solid's occupied standing space from the pieces a[0..np): a walkable-topped marked solid loses its
+ * footprint at the standing point, then the space its body blocks above the step band; walls and steep solids keep
+ * full clearance. Box faces and module floors use this rule; returns 0 on piece overflow. */
 static int ng_cut_solid(const ng_face *face,const sh_aug_platform *src,const ng_box *box,
     double radius,double height,double floor_cos,double step,
     ng_poly **a,ng_poly **b,int *np,int capacity)
@@ -354,10 +348,8 @@ static int ng_cut_solid(const ng_face *face,const sh_aug_platform *src,const ng_
     double step_clearance=0.0;int axis;ng_poly cut;
     if(!src->obstacle_only)for(axis=0;axis<3;axis++)
         if(fabs(box->axis[axis][2])+1e-7>=floor_cos)step_clearance=step;
-    /* Remove buried/overhead geometry at the actual standing point.
-     * At a marked step, the expanded body starts above the step band:
-     * its riser must not erode an agent-width moat between the floors.
-     * Unmarked obstacles, steep walls and headroom retain full checks. */
+    /* Remove buried or overhead geometry at the standing point. At a marked step the expanded body starts above the
+     * step band, so its riser cannot erode a moat between the floors; other obstacles keep full checks. */
     if(step_clearance>0.0) {
         if(!ng_obstacle(face,box,0.0,height,floor_cos,1,0.0,&cut))return 0;
         if(cut.n&&!ng_cut_all(a,b,np,&cut,capacity))return 0;
@@ -488,7 +480,7 @@ static int ng_build(const sh_aug_platform *src,int count,
     for(f=0;f<build_faces;f++) {
         ng_face *face=&faces[f];int np=1,start=nout;
         a=mem;b=mem+capacity;a[0]=face->p;
-        /* A face whose own strips, or a coplanar neighbour's, were not all
+        /* A face whose own strips, or a coplanar neighbour's, are not all
          * stored cannot be trimmed safely. */
         if(any_missing) {
             int unsafe=strip_missing[f];

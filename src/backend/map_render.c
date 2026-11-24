@@ -45,8 +45,7 @@ int sh_map_render_valid(const sh_map_render *s)
 {
     return s&&(s->unlocked==0||s->unlocked==1);
 }
-/* A distance the former numeric row could store: 0 (the maximum) or
- * 256..200000. */
+/* A distance a stored value may carry: 0 (the maximum) or 256..200000. */
 static int stored_distance(float d)
 {
     return isfinite(d)&&(d==0||(d>=SH_RENDER_MIN_DISTANCE&&d<=SH_RENDER_MAX_DISTANCE));
@@ -68,8 +67,7 @@ int sh_map_render_decode(const char *text,sh_map_render *out)
     if(n!=7||!end||text[skip+end])return 0;
     for(i=0;i<7;i++)if(!isfinite(legacy[i]))return 0;
     if(!stored_distance(legacy[0]))return 0;
-    /* An old disabled map must not silently activate its dormant distance
-     * when the former UI switch disappears. */
+    /* A disabled map keeps its dormant distance off. */
     out->unlocked=!native&&legacy[0]!=SH_RENDER_NATIVE_DISTANCE;
     return 1;
 }

@@ -25,7 +25,7 @@ int sh_cmd_lists_room(const uint8_t *cmdsys, uint32_t extra)
     if (!cmdsys) return 0;
     if (!list_read(cmdsys + SH_CMD_FULL_OFF, &fa, &fn, &fc)) return 0;
     if (!list_read(cmdsys + SH_CMD_DEV_OFF, &da, &dn, &dc)) return 0;
-    /* the developer list ends up holding every command of the full list */
+    /* The developer list ends up holding every command of the full list. */
     return fn + extra <= fc && fn + extra <= dc;
 }
 
@@ -56,8 +56,7 @@ static DWORD WINAPI reserve_thread(LPVOID arg)
     if (!list_read(job->cmdsys + SH_CMD_FULL_OFF, &a, &n, &cap)) return 0;
     grow_until(job->cmdsys + SH_CMD_FULL_OFF, job->grow, n + job->extra);
     if (!list_read(job->cmdsys + SH_CMD_FULL_OFF, &a, &n, &cap)) return 0;
-    /* as much room as the full list has: the two then fill together, so the
-     * developer list never needs to grow before the full list does */
+    /* The developer list gets as much room as the full list, so it never needs to grow before it does. */
     grow_until(job->cmdsys + SH_CMD_DEV_OFF, job->grow, cap > n + job->extra ? cap : n + job->extra);
     return 0;
 }

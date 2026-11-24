@@ -32,22 +32,20 @@ typedef void *(*find_typeinfo_fn)(void *reflect, const char *name, void *scope);
 
 typedef void *(*find_enum_fn)(void *reflect, const char *name);
 
-/* Reflection field layout. Array@record+0x20, stride 0x48, and name@field+0x10
- * were checked against engine caller 0x9C79D0. Remaining fields came from the
- * original command metadata and require rechecking when porting builds. */
+/* Reflection field layout: array@record+0x20, stride 0x48 and name@field+0x10 match engine caller 0x9C79D0;
+ * the other offsets are unchecked. */
 #define REC_FIELDS_OFF      0x20    /* type record -> field array */
-#define REC_SUPER_OFF       0x08    /* superclass name; original-command evidence */
+#define REC_SUPER_OFF       0x08    /* superclass name */
 #define FIELD_STRIDE        0x48    /* field-record stride */
 #define FIELD_NAME_OFF      0x10    /* field name; NULL or empty terminates */
-#define FIELD_OFFSET_OFF    0x18    /* field offset; original-command evidence */
-#define FIELD_SIZE_OFF      0x1c    /* field size; original-command evidence */
+#define FIELD_OFFSET_OFF    0x18    /* field offset */
+#define FIELD_SIZE_OFF      0x1c    /* field size */
 #define FIELD_VARTYPE_OFF   0x00    /* primary type string */
 #define FIELD_VAROPS_OFF    0x08    /* pointer/array qualifier */
-#define FIELD_COMMENT_OFF   0x28    /* field comment; original-command evidence */
+#define FIELD_COMMENT_OFF   0x28    /* field comment */
 
-/* Enum array/stride/member fields follow engine caller 0x440230.
- * The enum record name offset has original-command evidence only. */
-#define ENUM_NAME_OFF       0x00    /* enum name; original-command evidence */
+/* Enum array/stride/member offsets follow engine caller 0x440230; the name offset is unchecked. */
+#define ENUM_NAME_OFF       0x00    /* enum name */
 #define ENUM_MEMBERS_OFF    0x10    /* member array */
 #define ENUM_MEMBER_STRIDE  0x10    /* enum-member stride */
 #define EMEMBER_NAME_OFF    0x00    /* member name; NULL terminates */
@@ -68,11 +66,11 @@ static find_enum_fn     g_find_enum    = NULL;
 static volatile LONG    g_installed    = 0;
 
 /* Unresolved dependencies stay NULL; consumers decline rather than use raw RVAs. */
-static declmgr_getter_fn g_declmgr_getter   = NULL;   /* glb "declmgr_accessor" (a CODE address) */
-static const uint8_t    *g_validator_mgr    = NULL;   /* glb "validator_manager" (slot; deref lazily) */
-static void             *g_resource_mgr_ctx = NULL;   /* glb "resource_manager_ctx" (the object itself) */
-static void             *g_material_mgr_ctx = NULL;   /* glb "material_manager_ctx" (the object itself) */
-static const uint8_t    *g_type_container   = NULL;   /* glb "type_container" (the reflection container P) */
+static declmgr_getter_fn g_declmgr_getter   = NULL;   /* "declmgr_accessor": a code address */
+static const uint8_t    *g_validator_mgr    = NULL;   /* "validator_manager": a slot, deref lazily */
+static void             *g_resource_mgr_ctx = NULL;   /* "resource_manager_ctx": the object */
+static void             *g_material_mgr_ctx = NULL;   /* "material_manager_ctx": the object */
+static const uint8_t    *g_type_container   = NULL;   /* "type_container": the reflection container */
 static decl_find_fn      g_decl_find        = NULL;   /* sig "DeclPureFind" */
 static dim_fn            g_material_width   = NULL;   /* sig "MaterialWidth" */
 static dim_fn            g_material_height  = NULL;   /* sig "MaterialHeight" */
@@ -178,13 +176,11 @@ static int ti_read_u32(const void *base, size_t off, uint32_t *out)
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* Walk superclass names, matching the decl validator. Reject definite mismatch
- * before reparse: its Error(6) is caught inside the engine, beyond frame recovery.
- * Return 1 for a match, 0 for mismatch/unknown type, or -1 when reflection is
- * unavailable; callers must not reject solely on -1. Walk at most 64 ancestors. */
-/* The validator uses manager vtable +0x258 (+0x240 in 2018), which includes SnapMap classes
- * missed by declMgr +0x80. Resolve the manager slot through its global anchor;
- * fall back to the decl-manager context when unavailable. */
+/* Walk superclass names (at most 64) as the decl validator does, so a definite mismatch is rejected before
+ * a reparse whose Error(6) the engine catches beyond frame recovery. Returns 1 match, 0 mismatch or unknown
+ * type, -1 when reflection is unavailable (callers must not reject on -1). */
+/* The validator reflects through manager vtable +0x258, which includes SnapMap classes declMgr +0x80 misses;
+ * the slot resolves through its global anchor, falling back to the decl-manager context. */
 #define VALIDATOR_MGR_RVA         SH_RVA(0x35EB618u, 0x3633430u)   /* Pinned Vulkan audit reference; the global anchor locates the slot. */
 #define VSLOT_VALIDATOR_REFLECT   SH_VALIDATOR_REFLECT_SLOT
 static void *ti_get_validator_reflect(void)
@@ -210,8 +206,7 @@ int sh_typeinfo_class_derives(const char *className, const char *baseName)
     if (!className || !baseName || !className[0] || !baseName[0]) return -1;
     void *reflect = ti_get_validator_reflect();      /* the validator's context (resolves SnapMap classes) */
     if (!reflect) reflect = ti_get_reflect();        /* fallback: the declMgr->[+0x80] reflect */
-    /* Off the main thread the accessors can answer nothing; the type records
-     * hold the same name -> superclass chain and read from any thread. */
+    /* Off the main thread the accessors answer nothing; the type records hold the same chain. */
     if (!reflect) return ti_derives_by_records(className, baseName);
     const char *cur = className;
     for (int i = 0; i < 64 && cur && cur[0]; i++) {
@@ -223,9 +218,8 @@ int sh_typeinfo_class_derives(const char *className, const char *baseName)
     return 0;
 }
 
-/* Find the inherit declaration through the read-only hash lookup, then copy
- * className@+0x60. Avoid load-or-create: unresolved names can trigger engine
- * fatal paths there. Return NULL if unavailable; the compatibility guard then opens. */
+/* Find the inherit declaration through the read-only hash lookup and copy className@+0x60; load-or-create is
+ * avoided because unresolved names reach engine fatal paths. Returns NULL if unavailable (the compatibility guard then opens). */
 #define RESOURCE_MGR_CTX_RVA   SH_RVA(0x66C4980u, 0x4FC9F40u)   /* Pinned Vulkan audit reference from the validator call site. */
 #define DECL_PURE_FIND_RVA     SH_RVA(0x1572A80u, 0x1573C10u)   /* Pinned Vulkan audit reference; DeclPureFind resolves the function. */
 #define DECL_CLASSNAME_OFF     0x60u        /* idDeclEntityDef.className char* (vtbl+0xb0 = return *(this+0x60)) */
@@ -346,9 +340,8 @@ size_t sh_typeinfo_inherit_text(const char *inheritName, char *buf, size_t cap)
     } __except (EXCEPTION_EXECUTE_HANDLER) { buf[0] = '\0'; return 0; }
 }
 
-/* Use the read-only declaration lookup with the material-manager context.
- * Shipped material names are available before rendering; this does not imply
- * their GPU images are resident. Dimension getters are best effort. */
+/* Look a material up through the read-only declaration lookup with the material-manager context. Names are
+ * available before rendering, which does not mean GPU images are resident; dimension getters are best effort. */
 /* Pinned Vulkan audit references; all three addresses resolve by signature. */
 #define MATERIAL_MGR_CTX_RVA    SH_RVA(0x66C4A60u, 0x4FCA020u)  /* material type-manager context from the material setter */
 #define MATERIAL_WIDTH_FN_RVA   SH_RVA(0x16C90A0u, 0x16C9D80u)   /* verified idMaterial width getter                       */
@@ -383,9 +376,8 @@ int sh_typeinfo_find_material(const char *name, char *buf, size_t cap)
     }
 }
 
-/* Reflection types form a NULL-name-terminated array at container+0x20,
- * stride 0x38, name@+0 and superclass@+8. FindTypeInfoByName and the registry
- * builders use this same layout. */
+/* Reflection types form a NULL-name-terminated array at container+0x20, stride 0x38, name@+0, superclass@+8
+ * (the layout FindTypeInfoByName uses). */
 #define REGISTRY_TYPEBASE_OFF   0x20      /* container P -> type-record array base (*(P+0x20)) */
 #define REGISTRY_RECORD_STRIDE  0x38      /* per-record stride */
 #define REGISTRY_NAME_OFF       0x00      /* record -> className char* (NULL name terminates the array) */
@@ -497,13 +489,11 @@ int sh_typeinfo_collect_records(sh_ti_record **out)
 #define ENTITYDEF_MGR_ARRAY_OFF  0x20
 #define ENTITYDEF_MGR_COUNT_OFF  0x28
 #define DECL_NAME_OFF            0x08
-/* ---- classes and enums by name (the script layer's reflection) ---- */
+/* Classes and enums by name, for the script layer's reflection. */
 #define REC_SIZE_OFF        0x10    /* type record -> the class's size in bytes (int) */
 
-/* The classes looked up lately: a field walk asks for the same records many
- * times, and for the records of its fields' types between them. Each entry
- * counts the leading fields already seen to have a name, so a walk checks
- * each field once. */
+/* Recently looked-up classes: a field walk asks for the same records repeatedly. Each entry counts the leading
+ * fields already seen to have a name, so a walk checks each field once. */
 #define REC_CACHE 64
 typedef struct ti_rec_entry { char name[160]; void *rec; uint32_t named; } ti_rec_entry;
 static ti_rec_entry g_recs[REC_CACHE];
@@ -595,10 +585,9 @@ int sh_typeinfo_enum_member(const char *name, uint32_t index, const char **membe
     return 1;
 }
 
-/* The enum record keeps {name, flags, members}; the members are {name, value} pairs ending with a NULL name
- * (ENUM_MEMBERS_OFF, ENUM_MEMBER_STRIDE: read in FindEnumByName and the enum string helpers on both renderers,
- * 13954591). The extension is a product-owned copy of the members with the new ones before the terminator, and the
- * record is pointed at it; the game's own array is never written. */
+/* The enum record holds {name, flags, members}; members are {name, value} pairs ending in a NULL name (as
+ * FindEnumByName reads them on both renderers, 13954591). The extension is a product-owned copy with the new
+ * members before the terminator, and the record is pointed at it; the game's array is never written. */
 typedef struct ti_member { const char *name; uint64_t value; } ti_member;
 
 int sh_typeinfo_enum_extend(const char *name, const char *const *names, const long long *values, int n)
@@ -916,8 +905,8 @@ static void vc_emit(const char *C, const char *Y, int *count, int *y_seen)
     }
 }
 
-/* List live types compatible with an inherit declaration. Fall back to the
- * static candidate table only when the live registry is unavailable. */
+/* List live types compatible with an inherit declaration, using the static candidate table only when the live
+ * registry is unavailable. */
 #define SH_REGISTRY_MAX  16384   /* Candidate buffer cap. */
 void h_sh_validclasses(idCmdArgs *a)
 {

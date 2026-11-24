@@ -15,8 +15,6 @@
 #define CR_PARTS 3
 static const char *const cr_parts[CR_PARTS] = {"mods", "settings", "nav"};
 
-/* ------------------------------------------------------------ scanning */
-
 static size_t cr_ws(const char *s, size_t n, size_t i)
 {
     while (i < n && sh_shard_is_ws(s[i])) i++;
@@ -130,8 +128,6 @@ static int cr_key_is(const char *s, const cr_member *m, const char *key)
     return m->key_to - m->key_from == kl && !memcmp(s + m->key_from, key, kl);
 }
 
-/* ------------------------------------------------------------ the view */
-
 typedef struct cr_root_ctx { sh_carrier_view *v; } cr_root_ctx;
 
 static int cr_root_visit(void *ctx, const char *s, const cr_member *m)
@@ -161,7 +157,7 @@ static int cr_inner_visit(void *ctx, const char *s, const cr_member *m)
     sh_carrier_view *v = c->v;
     char first = s[m->value_from];
     if (cr_key_is(s, m, "format")) {
-        c->format_ok = (m->value_to - m->value_from == 1 && (first == '1' || first == '2'));   /* 2: units (SPEC-distribution 2.7) */
+        c->format_ok = (m->value_to - m->value_from == 1 && (first == '1' || first == '2'));   /* format 1 or 2 */
         return 1;
     }
     if (cr_key_is(s, m, "mods")) {
@@ -259,8 +255,6 @@ void sh_carrier_describe(const sh_carrier_view *v, char *out, size_t cap)
                 v->settings.present ? "settings " : "", v->nav.present ? "nav " : "",
                 (v->mods.present || v->settings.present || v->nav.present) ? "" : "no parts");
 }
-
-/* ------------------------------------------------------------ strip / put */
 
 static char *cr_cut(const char *json, size_t len, size_t from, size_t to, size_t *out_len)
 {
@@ -383,8 +377,6 @@ char *sh_carrier_put(const char *json, size_t len, const char *part, const char 
     return out;
 }
 
-/* ------------------------------------------------------------ small readers */
-
 int sh_carrier_array_next(const char **cursor, const char *end, const char **elem, size_t *elem_len)
 {
     const char *base = *cursor;
@@ -450,9 +442,7 @@ int sh_carrier_object_string(const char *obj, const char *end, const char *key, 
     return 1;
 }
 
-/* ------------------------------------------------------------ earlier shapes */
-
-/* The variable families earlier builds wrote (map_carrier.h, sh_map_old_shape). */
+/* The unsupported variable-name families (map_carrier.h, sh_map_old_shape). */
 static const char *const cr_old_families[] = {
     "smpkg.", "smpbind.", "smpref.", "smpmod1.", "smpprod1.", "smp.render.v1", "smp.bounds.v1", "smnav1."
 };
@@ -481,9 +471,8 @@ int sh_map_old_shape(const char *json, size_t len)
             if (!hit) break;
             at = (size_t)(hit - json) + 1;
             if (hit > json && hit[-1] == '"' && cr_is_name_value(json, hit - 1)) {
-                /* A variable's name: its info object's snapVarInfo_t follows.
-                 * An entity or an
-                 * object an author named so is not an earlier shape. */
+                /* A variable's name is followed by its info object's snapVarInfo_t; an entity or object an
+                 * author named so is not an unsupported shape. */
                 const char *q = (const char *)memchr(hit, '"', len - (size_t)(hit - json));
                 size_t w = q ? len - (size_t)(q + 1 - json) : 0;
                 if (w > 256) w = 256;
@@ -491,8 +480,7 @@ int sh_map_old_shape(const char *json, size_t len)
             }
         }
     }
-    /* Rows of the member's "mods" part that name an "id" or a "bundle", or a mod as "<salt>@<build>" (format 1, before
-     * units). */
+    /* Rows of the member's "mods" part that name an "id" or a "bundle", or a mod as "<salt>@<build>" (format 1). */
     if (sh_carrier_part(json, len, "mods", &from, &to) == 1) {
         const char *cursor = json + from, *end = json + to, *elem;
         size_t elem_len;

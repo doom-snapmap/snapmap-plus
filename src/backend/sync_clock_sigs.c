@@ -1,11 +1,6 @@
-/* sync_clock_sigs.c -- the private signature of sync_clock.c (the engine's animation re-anchor), kept apart so the
- * two-image test (tests/sync_clock_sigs_test.c) and detour_windows_test link it without the engine side.
- *
- * Build 13954591 (paired with snaphak-re tools/re/site_pair.py): the re-anchor the adaptive-tick loop calls for
- * every animator, (animator, const int *now, int hz, int old_hz, bool precise, bool is_ai). Its only callers are the
- * eight calls of that loop (VK 0x14038E920, GL 0x14038E1C0). The 49-byte pattern (the null test, its jz with the
- * displacement left open, the five pushes, the frame and the three register saves) is the only match in each
- * executable. A single site, so no call-target check is needed. */
+/* sync_clock_sigs.c -- the signature of the engine's animation re-anchor, apart from sync_clock.c so tests link it.
+ * Build 13954591: the 49-byte pattern is the only match in each executable (callers: the adaptive-tick loop,
+ * VK 0x14038E920, GL 0x14038E1C0), so no call-target check is needed. */
 #include <stddef.h>
 #include "sync_clock.h"
 

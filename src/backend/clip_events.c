@@ -1,21 +1,9 @@
-/* clip_events.c -- the engine side of clip events (clip_events.h).
- *
- * The three event lookups (clip_events_sigs.c) are prepared at boot and committed at the first Play whose mods
- * register a clip; with no registration no hook is committed. Each detour calls the engine first. A lookup the
- * model's own chain answers returns that answer; a lookup it does not answer returns unless some clip is
- * registered and the clip's name is under md6/mods/ (the one test every stock clip leaves at). A registered
- * clip on a model in its carrier's chain (sh_ce_in_chain) gets a second call of the same engine lookup on the
- * carrier, the mod's md6Def: the engine walks the carrier and its parents and fills the list itself. Nothing
- * of a game model is written.
- *
- * The carrier is found by name the first time one of its clips is looked up in a Play: on the main thread
- * through the engine's own find, which loads a served name on demand at the engine's level, as an entity
- * naming it would (sh_modserve_engine_decl); on another thread find only (sh_modserve_engine_decl_held), and
- * a carrier not loaded yet is asked for again at the next lookup. The pointer is kept only for that Play: the
- * registry is built at the Play gate from names and dropped at the next gate, and the pointer is checked by
- * its name before each use. A carrier is never kept across a purge: loaded after the Play's purge, it binds to
- * the models that Play loaded and is freed with them. Lookups while the editor is active are left to the
- * engine. */
+/* clip_events.c -- the engine side of clip events (clip_events.h). The three event lookups are prepared at boot and
+ * committed at the first Play whose mods register a clip; each detour calls the engine first and, when it finds
+ * nothing for a registered clip on a model in its carrier's chain, calls the same lookup on the carrier (not while the
+ * editor is active). The carrier is found by name at the clip's first lookup in a Play (loaded on the main thread
+ * through sh_modserve_engine_decl, find-only elsewhere through sh_modserve_engine_decl_held), kept for that Play and
+ * checked by name before each use. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,7 +23,7 @@
 #define ANIM_NAME     0x08u    /* idMD6Anim: its resource name (the key of the event tables) */
 #define MODEL_NAME    0x08u    /* idDeclMD6: its decl name */
 #define MODEL_PARENT  0x98u    /* idDeclMD6: the md6Def it inherits */
-#define LIST_COUNT    0x08u    /* idList: the number of rows */
+#define LIST_COUNT    0x08u
 #define CARRIER_TYPE  "md6Def"
 
 typedef unsigned char (*win_fn)(void *model, void *anim, uint32_t from, uint32_t to, void *out);
@@ -72,8 +60,6 @@ static int av_only(DWORD code)
     return code == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH;
 }
 
-/* ----------------------------------------------------------------- reads */
-
 static int ce_parent(void *context, const void *model, const void **parent)
 {
     (void)context;
@@ -90,7 +76,7 @@ static const char *ce_name_at(const void *object, size_t offset)
     return name;
 }
 
-/* 1 when the object at `model` is still the md6Def `name` (it is checked before each use). */
+/* Returns 1 when the object at `model` is still the md6Def `name`. */
 static int ce_still(const void *model, const char *name)
 {
     int same = 0;
@@ -99,7 +85,7 @@ static int ce_still(const void *model, const char *name)
     return same;
 }
 
-/* The carrier of a row in this Play, found by name, or NULL. */
+/* Returns the carrier of a row in this Play, found by name, or NULL. */
 static void *ce_model(sh_ce_row *row)
 {
     void *c = row->model;
@@ -127,8 +113,8 @@ static void *ce_model(sh_ce_row *row)
     return c;
 }
 
-/* The carrier whose rows answer this lookup, or NULL: the clip's name is under md6/mods/, it is registered,
- * a Play runs, and `model` is in the carrier's chain. */
+/* Returns the carrier whose rows answer this lookup, or NULL: the clip's name is under md6/mods/, it is
+ * registered, a Play runs, and `model` is in the carrier's chain. */
 static void *ce_carrier(void *model, void *anim, sh_ce_row **out)
 {
     const char *name;
@@ -166,8 +152,6 @@ static void ce_answered(sh_ce_row *row, void *model, void *out)
 #endif
 }
 
-/* --------------------------------------------------------------- detours */
-
 static unsigned char win_detour(void *model, void *anim, uint32_t from, uint32_t to, void *out)
 {
     unsigned char r = g_win(model, anim, from, to, out);
@@ -203,8 +187,6 @@ static unsigned char type2_detour(void *model, void *anim, uint32_t from, uint32
     if (r) ce_answered(row, model, out);
     return r;
 }
-
-/* --------------------------------------------------------------- install */
 
 int sh_clip_events_install(const uint8_t *module_base)
 {
@@ -245,7 +227,7 @@ int sh_clip_events_install(const uint8_t *module_base)
     return 1;
 }
 
-/* All three or none: a lookup left undetoured would play a clip's rows in some events and not others. */
+/* Commits all three detours or none, so a clip's rows never apply to only some lookups. */
 static int ce_commit(void)
 {
     int i;
@@ -265,8 +247,6 @@ static int ce_commit(void)
     return 1;
 }
 
-/* ---------------------------------------------------------- the registry */
-
 typedef struct ce_build { sh_ce_registry *r; int oom; } ce_build;
 
 static void ce_add_bundle(void *context, const char *id, const char *hash, const char *registries)
@@ -275,7 +255,7 @@ static void ce_add_bundle(void *context, const char *id, const char *hash, const
     sh_modserve_scope_info info;
     char *label;
     if (!registries || !strstr(registries, "\"" SH_CE_REGISTRY_KEY "\"") || !hash) return;
-    /* only the builds the open map serves now */
+    /* Only the builds the open map serves. */
     if (!sh_modserve_bundle_scope(hash, &info) || !info.names_live) return;
     label = sh_modserve_bundle_label(hash);
     if (sh_ce_registry_add(b->r, id, label ? label : id, registries, ce_line_log, NULL) < 0) b->oom = 1;
@@ -299,7 +279,7 @@ static void ce_publish(sh_ce_registry *r)
     sh_ce_registry *old;
     InterlockedExchange(&g_any, 0);
     old = (sh_ce_registry *)InterlockedExchangePointer((void *volatile *)&g_reg, r);
-    /* a lookup still reading the one before last has long returned: two gates lie between */
+    /* A lookup still reading the one before last has returned: two gates lie between. */
     if (g_retired) { sh_ce_registry_free(g_retired); free(g_retired); }
     g_retired = old;
     if (r && r->n) InterlockedExchange(&g_any, 1);
@@ -317,7 +297,7 @@ void sh_clip_events_play_begin(void)
         return;
     }
     if (sh_feature_is_off(SH_FEATURE_CLIP_EVENTS) || !g_ready || !ce_commit()) {
-        /* one line per mod and Play */
+        /* One line per mod and Play. */
         for (i = 0; i < r->n; i++) {
             for (k = 0; k < i && strcmp(r->rows[k].salt, r->rows[i].salt); k++) {}
             if (k == i)
@@ -338,8 +318,6 @@ void sh_clip_events_map_end(void)
 {
     if (g_reg) ce_publish(NULL);
 }
-
-/* ------------------------------------------------------------ the console */
 
 void sh_clip_events_command(sh_ce_line_fn line, void *context)
 {
@@ -369,7 +347,7 @@ void sh_clip_events_command(sh_ce_line_fn line, void *context)
         unsigned st = 0, level = 0;
         int held;
         for (k = 0; k < i && !sh_ce_name_eq(reg->rows[k].carrier, w->carrier); k++) {}
-        if (k < i) continue;   /* each carrier once, with its clips */
+        if (k < i) continue;   /* Each carrier once, with its clips. */
         held = sh_modserve_engine_decl_held(CARRIER_TYPE, w->carrier, &obj, &st, &level);
         text = sh_textf("  %s: \"%s\" over \"%s\": %s", w->label, w->carrier, w->base,
                         w->state == SH_CE_ROW_MISSING ? "did not load in this Play"

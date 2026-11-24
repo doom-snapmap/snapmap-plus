@@ -109,7 +109,6 @@ done:
     return result;
 }
 
-/* ------------------------------------------------------------ the open map */
 
 static SRWLOCK g_lock = SRWLOCK_INIT;
 static sh_map_settings g_current = {{0}, {0}};

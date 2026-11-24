@@ -1,40 +1,9 @@
-/* Snapmap+ tab of the native Settings / Properties panel.
- *
- * Build 13954591 evidence:
- *  - Populate(panel, category) VK 0x1282db0 builds category 0 (editor
- *    settings) or 1 (object states). Any other value adds no native rows and
- *    falls through to the shared tail, which divides by the row count
- *    (FUN 0x1284810: index % rows), so a category without rows must not reach
- *    the tail. Rows are therefore injected right after the panel clear call
- *    inside Populate (VK 0x1282e23), before the tail runs.
- *  - The count 2 is compiled into the category cycle (VK 0x118f2d0, LB/RB),
- *    the notch select (VK 0x118f360, '< 2' and 'and 0x80000001') and the
- *    notch loops in Populate (notch_0..1 shown, notch_2..16 hidden). The SWF
- *    holds 17 notch sprites and hitboxes (panel init VK 0x127ecb0), so a third
- *    diamond only needs showing. The settings state keeps its category at
- *    state+0xc and passes it to Populate on Enter.
- *  - Apply / Reset copy the whole profile controller (editor+0x204d8); they
- *    are not scoped per category, so map-owned drafts are committed here.
- *  - The panel has no label-only row. RenderAddTitle (VK 0x12807b0, GL
- *    0x127fd60) instantiates "title_group_template" at y = rows * 0x50, where
- *    rows is the panel's list-row count (+0x200), and keeps it in a separate
- *    title list (+0x228); rows (RenderAddFloat, VK 0x127dbe0) are placed by
- *    the same count. Native Populate adds exactly one title before any row,
- *    which is the category header. A title added after rows is drawn over a
- *    row and a second title before rows over the header, so the
- *    tab adds one header title and its groups add rows only.
- *  - The float step (idMenuPropertySliderInput VK 0x12a4370) adds the small
- *    or large step to the value at +0x120 and, past a limit, goes to the
- *    other limit when the row's wrap flag (+0x10c, RenderAddFloat's last
- *    argument) is set, else stops at the limit. Native rows pass 1; the tab
- *    passes 0 so a step can never land on the opposite end, unless
- *    the row sets sh_settings_float.wrap (no current row does; the former
- *    numeric Map View Distance row used it).
- *  - Toggle rows: RenderAddToggle (VK 0x12808f0, GL 0x127fea0) creates an
- *    idMenuPropertyToggle whose value is the byte at +0xd0; its vtable +0x20
- *    stores the property id at +0x40 and +0x28 sets the value and redraws the
- *    true/false text. The widget flips +0xd0 itself before the panel's
- *    property-change dispatcher runs (VK 0x1282450 reads it for ids 7, 0xc..). */
+/* Snapmap+ tab of the native Settings / Properties panel (build 13954591). Populate(panel, category) VK 0x1282db0
+ * builds only categories 0 and 1 and its shared tail divides by the row count (FUN 0x1284810), so rows are injected
+ * after the panel clear call (VK 0x1282e23). The count 2 is compiled into the category cycle (VK 0x118f2d0), notch
+ * select (VK 0x118f360) and Populate's notch loops; the SWF has 17 notch sprites (VK 0x127ecb0). Apply / Reset copy
+ * the whole profile controller (editor+0x204d8), so map-owned drafts are committed here. The panel has no label-only
+ * row: native Populate adds one title (RenderAddTitle VK 0x12807b0, GL 0x127fd60) before the rows, so the tab adds one. */
 #include "settings_tab.h"
 #include <string.h>
 #include <math.h>
@@ -199,8 +168,7 @@ static void refresh_values(void)
             if(v[0xd0]!=on)(*(toggle_set_fn*)(*(uintptr_t*)v+0x28))(v,on);
         } else if(*(float*)(v+0x120)!=*g_rows[i].draft) {
             /* vtable +0xb8 (VK 0x12a7860): store +0x120 and reformat the
-             * row text. A bare +0x120 write left the old text on screen, so a
-             * clamped or snapped draft was shown as the native value. */
+             * row text; a bare +0x120 write leaves the row text stale. */
             (*(float_set_fn*)(*(uintptr_t*)v+0xb8))(v,*g_rows[i].draft);
         }
         v[0xc8]=(unsigned char)row_changed(&g_rows[i]);
@@ -221,8 +189,7 @@ int sh_settings_tab_add_float(sh_settings_rows *rows,const sh_settings_float *ro
     g_rows[i].kind=ROW_FLOAT;g_rows[i].desc=*row;g_rows[i].draft=draft;g_rows[i].base=base;
     g_rows[i].adjust=adjust;g_rows[i].group=rows->group;g_rows[i].widget=NULL;
     label=g_hash(row->label);help=g_hash(row->help);
-    /* Last argument 0: the native step stops at min / max instead of wrapping;
-     * a row that asks for the wrap gets 1 and filters it in its adjust. */
+    /* Last argument: 0 makes the native step stop at min / max; 1 (row->wrap) wraps and the row's adjust filters it. */
     v=(unsigned char*)g_add(rows->panel,row->name,&label,&help,1,*base,
         row->min,row->max,row->small_step,row->large_step,row->wrap?1:0);
     if(!v)return 0;

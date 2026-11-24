@@ -1,7 +1,5 @@
-/* Text helpers shared by the map's readers: digesting, base64, bounded
- * scanning and container walks over map JSON (the "snapmap-plus" member,
- * map_carrier.h; navigation, navmesh.c and nav_regions.c).
- */
+/* Text helpers shared by the map's readers: digesting, base64, bounded scanning and container walks over map JSON
+ * (the "snapmap-plus" member, map_carrier.h; navigation, navmesh.c and nav_regions.c). */
 #ifndef SNAPMAP_PLUS_MAP_SHARDS_H
 #define SNAPMAP_PLUS_MAP_SHARDS_H
 
@@ -10,15 +8,12 @@
 /* The sha256 hexdigest prefix navigation records (navmesh.h). */
 #define SH_SHARD_DIGEST_CHARS 16
 
-/* Container storage grows geometrically up to this ceiling. Large maps exceed
- * 8192 containers; cap both count and depth without preallocating the
- * maximum.
- */
+/* Container storage grows geometrically up to this ceiling; count and depth are both capped without preallocating
+ * the maximum. */
 #define SH_SHARD_MAX_CONTAINERS (1u << 21)
 #define SH_SHARD_CONTAINERS_MIN 8192u
 #define SH_SHARD_MAX_DEPTH      256u
 
-/* ---------------------------------------------------------------- text ---- */
 
 const char *sh_shard_find(const char *hay, size_t n, const char *needle, size_t m);
 int sh_shard_is_ws(char c);
@@ -30,7 +25,6 @@ int sh_shard_is_hex(char c);
 void sh_shard_digest16(const unsigned char *payload, size_t len,
                        char out[SH_SHARD_DIGEST_CHARS + 1]);
 
-/* ------------------------------------------------------------- base64 ---- */
 
 /* Standard base64 with padding, into a caller-supplied buffer of at least
  * ((len + 2) / 3) * 4 + 1 bytes. Returns the character count written. */
@@ -55,7 +49,6 @@ enum {
 unsigned char *sh_shard_b64_decode(const sh_shard_chunk *chunks, unsigned total,
                                    size_t max_payload, size_t *out_len, int *reason);
 
-/* ----------------------------------------------------------- structure ---- */
 
 typedef struct sh_shard_container {
     size_t open;    /* offset of '{' or '[' */
@@ -69,18 +62,16 @@ typedef struct sh_shard_doc {
     size_t              count;
 } sh_shard_doc;
 
-/* Walk containers forward with string/escape handling. Returns 1 and fills
- * doc (free with sh_shard_doc_free), or 0 for malformed/over-capacity input.
- */
+/* Walk containers forward with string/escape handling. Returns 1 and fills doc (free with sh_shard_doc_free), or 0
+ * for malformed or over-capacity input. */
 int  sh_shard_doc_build(const char *json, size_t len, sh_shard_doc *doc);
 void sh_shard_doc_free(sh_shard_doc *doc);
 
 /* The innermost container holding `off`, or -1. */
 int  sh_shard_doc_innermost(const sh_shard_doc *doc, size_t off);
 
-/* The container that is the value of member `key` DIRECTLY inside `parent`. A
- * map has more than one member called "string"; only the one whose parent is
- * the variables object is the bucket we mean. */
+/* The container that is the value of member `key` DIRECTLY inside `parent`; a map has more than one member called
+ * "string", and only the one whose parent is the variables object is the bucket wanted. */
 int  sh_shard_doc_member(const char *json, size_t len, const sh_shard_doc *doc,
                          int parent, const char *key);
 

@@ -1,8 +1,6 @@
-/* Read Blocking Boxes and their module ownership from bounded map JSON spans.
- * map_shards supplies the container walk; no DOM is allocated. A malformed
- * room table refuses the document; one unreadable box, room or ownership
- * claim drops only that box, and is counted and named.
- */
+/* Reads Blocking Boxes and their module ownership from bounded map JSON spans, with map_shards walking the
+ * containers. A malformed room table refuses the document; one unreadable box, room or ownership claim drops
+ * only that box, counted and named. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,24 +17,17 @@
 #define NAVR_MODULE_PREFIX  "maps/modules/"
 #define NAVR_MODULE_SUFFIX  ".decl"
 
-/* Recognize Blocking Boxes by their inherited decl or idVolume_Blocking
- * class.
- */
+/* Blocking Boxes are recognized by their inherited decl or idVolume_Blocking class. */
 #define NAVR_VOLUME_INHERIT "snapmaps/volume/blocking"
 
-/* Shared marker spelling for the map reader and live prefilter. The engine's
- * own affectsNavmesh is a separate property and is never read or written. */
+/* Marker spelling shared by the map reader and the live prefilter. */
 #define NAVR_MARKER         "noFlood"
 
 /* An omitted clipModelInfo.type uses the box default. */
 #define NAVR_CLIPMODEL_BOX  "CLIPMODEL_BOX"
 
-/* Bound number tokens before conversion. */
+/* Bound on number tokens before conversion. */
 #define NAVR_NUM_MAX        63
-
-/* ==================================================================== */
-/* growable tables                                                       */
-/* ==================================================================== */
 
 static int g_navr_max_regions = SH_NAVR_MAX_REGIONS;
 static int g_navr_max_instances = SH_NAVR_MAX_INSTANCES;
@@ -65,7 +56,7 @@ static int navr_grow(void **items, int *cap, int count, size_t size)
     return 1;
 }
 
-/* A zeroed new element: compared byte for byte later, so no stale padding. */
+/* A zeroed new element, so byte-for-byte comparison sees no stale padding. */
 static void *navr_push(void **items, int *count, int *cap, size_t size)
 {
     unsigned char *at;
@@ -141,10 +132,8 @@ int sh_nav_map_equal(const sh_nav_map *a, const sh_nav_map *b)
     return 1;
 }
 
-/* Two reads of one box agree to within float round trips: the map Play
- * converts carries world positions that are returned to module space, which
- * is exact only for values the float can hold at world magnitude (about 0.004
- * units at 32768). A move the editor can show is far larger than this. */
+/* Two reads of one box agree within float round trips: world positions returned to module space are exact only
+ * to about 0.004 units at 32768. */
 #define NAVR_SAME_EPS        0.05f
 #define NAVR_SAME_NORMAL_EPS 0.0001f
 
@@ -183,10 +172,9 @@ static navr_keyed *navr_keys(const sh_nav_region *r, int n)
     return k;
 }
 
-/* Pair each box of a with an unused close box of b, searching only b's boxes
- * of the same room whose centre x is within the tolerance. to_b[i] is b's
- * index for a's box i, or -1; used_b marks b's paired boxes. Returns the pairs
- * made, or -1 on allocation failure. */
+/* Pairs each box of a with an unused close box of b in the same room whose centre x is within tolerance. to_b[i]
+ * is b's index for a's box i, or -1; used_b marks b's paired boxes. Returns the pairs made, or -1 on allocation
+ * failure. */
 static int navr_match(const sh_nav_region *a, int na, const sh_nav_region *b, int nb,
                       int *to_b, unsigned char *used_b)
 {
@@ -318,7 +306,7 @@ const char *sh_nav_regions_drop_reason(int reason)
     return "unknown";
 }
 
-/* Leave one box out, count it, and say so for the first few of a read. */
+/* Leaves one box out, counts it, and logs the first few of a read. */
 static void navr_drop(sh_nav_map *out, unsigned entity, int uid, int instance,
                       int reason, int marked)
 {
@@ -340,14 +328,8 @@ static void navr_drop(sh_nav_map *out, unsigned entity, int uid, int instance,
     out->dropped_by[reason]++;
 }
 
-/* ==================================================================== */
-/* reading members out of a walked document                              */
-/* ==================================================================== */
-
-/* Test direct membership, excluding descendants. Several entity fields share
- * names such as size. Containers are in opening order, so only the following
- * descendant run needs scanning.
- */
+/* Tests direct membership, excluding descendants, since several entity fields share names such as size.
+ * Containers are in opening order, so only the following descendant run is scanned. */
 static int navr_direct(const sh_shard_doc *doc, int parent, size_t off)
 {
     size_t i, stop;
@@ -390,8 +372,7 @@ static int navr_value(const char *json, size_t len, const sh_shard_doc *doc,
     return 0;
 }
 
-/* The container that opens at `voff`, if it is of `kind`. Containers are stored
- * in open order, so this is a search over a sorted key. */
+/* The container that opens at `voff`, if it is of `kind`; a binary search over the open-ordered containers. */
 static int navr_container(const sh_shard_doc *doc, size_t voff, char kind)
 {
     size_t lo = 0, hi = doc->count;
@@ -414,8 +395,7 @@ static int navr_member(const char *json, size_t len, const sh_shard_doc *doc,
     return navr_container(doc, v, kind);
 }
 
-/* One number, copied out before it is converted: the buffer is not
- * NUL-terminated and strtod would read off the end of it. */
+/* One number, copied out before conversion because the buffer is not NUL-terminated. */
 static int navr_num_at(const char *json, size_t len, size_t off, double *out)
 {
     char text[NAVR_NUM_MAX + 1];
@@ -435,8 +415,7 @@ static int navr_num_at(const char *json, size_t len, size_t off, double *out)
     return end != text && *end == '\0' && _finite(*out);
 }
 
-/* A number member, or its inherited/default value. Native serialization omits
- * unchanged members, including nonzero components inherited from a decl. */
+/* A number member, or its default, since native serialization omits members unchanged from the decl. */
 static float navr_num(const char *json, size_t len, const sh_shard_doc *doc,
                       int parent, const char *key, float dflt)
 {
@@ -447,9 +426,8 @@ static float navr_num(const char *json, size_t len, const sh_shard_doc *doc,
     return (float)d;
 }
 
-/* The resolved declaration is native decl syntax, not the default-eliding
- * JSON state. Walk direct members so model scale, strings and comments cannot
- * masquerade as collision dimensions. All spans remain bounded by the idStr. */
+/* The resolved declaration is native decl syntax, not the default-eliding JSON state; walking direct members
+ * keeps model scale, strings and comments from passing as collision dimensions. */
 typedef struct navr_decl_span { const char *p; size_t n; } navr_decl_span;
 
 static int navr_decl_token(navr_decl_span *rest, navr_decl_span *token)
@@ -541,7 +519,7 @@ int sh_nav_regions_decl_size(const char *text, size_t len, float size[3])
     memcpy(size, result, sizeof result); return 1;
 }
 
-/* Absent flags.noFlood and blockDemons members default to false. */
+/* True for a `true` member; absent flags.noFlood and blockDemons default to false. */
 static int navr_bool(const char *json, size_t len, const sh_shard_doc *doc,
                      int parent, const char *key)
 {
@@ -558,7 +536,7 @@ static int navr_marked(const char *json, size_t len, const sh_shard_doc *doc, in
                      navr_member(json, len, doc, edit, "flags", '{'), NAVR_MARKER);
 }
 
-/* Read a bounded string; refuse overflow instead of accepting a prefix. */
+/* Reads a bounded string, refusing overflow rather than accepting a prefix. */
 static int navr_str(const char *json, size_t len, const sh_shard_doc *doc,
                     int parent, const char *key, char *out, size_t cap)
 {
@@ -570,8 +548,7 @@ static int navr_str(const char *json, size_t len, const sh_shard_doc *doc,
     for (v++; v < len; v++) {
         char c = json[v];
         if (c == '\\') {
-            /* nothing we compare against escapes anything; taking the next byte
-             * literally keeps the scan in step with the closing quote */
+            /* The next byte is taken literally, keeping the scan in step with the closing quote. */
             if (v + 1 >= len) return 0;
             c = json[++v];
         } else if (c == '"') {
@@ -592,15 +569,15 @@ static void navr_vec3(const char *json, size_t len, const sh_shard_doc *doc,
     out[2] = navr_num(json, len, doc, obj, "z", 0.0f);
 }
 
-/* An array index or identifier as read from the map: a non-negative whole
- * number small enough to compare against a position without overflowing. */
+/* An array index or identifier from the map: a non-negative whole number small enough to compare without
+ * overflow, else -1. */
 static int navr_index(double v)
 {
     if (!(v >= 0.0) || v > 1073741824.0 || v != floor(v)) return -1;
     return (int)v;
 }
 
-/* Read the next flat-array number; stop at the end or an invalid element. */
+/* Reads the next flat-array number; stops at the end or an invalid element. */
 static int navr_flat_next(const char *json, size_t *p, size_t stop, double *out)
 {
     size_t at = *p;
@@ -612,10 +589,8 @@ static int navr_flat_next(const char *json, size_t *p, size_t stop, double *out)
     return 1;
 }
 
-/* `maps/modules/ind_dlc/ind_totally_blank_room_4x.decl` -> `ind_dlc/ind_totally_blank_room_4x`.
- *
- * The category is everything before the LAST '/', so a nested category survives
- * intact -- the same right-to-left split the shard header uses. */
+/* Maps `maps/modules/ind_dlc/ind_totally_blank_room_4x.decl` to `ind_dlc/ind_totally_blank_room_4x`; the
+ * category is everything before the last '/'. */
 static int navr_module_name(const char *decl, char *out, size_t cap)
 {
     size_t plen = sizeof NAVR_MODULE_PREFIX - 1;
@@ -639,12 +614,8 @@ static int navr_module_name(const char *decl, char *out, size_t cap)
     return 1;
 }
 
-/* Read spawnOrientation over an identity matrix: reflection omits default
- * members, including diagonal ones. Require orthonormality and determinant +1
- * to reject shear, degenerate transforms and reflections.
- */
-/* Orthonormal with a right-handed determinant, which a rotation always is and
- * a stale or misread block never is. */
+/* True for an orthonormal matrix with determinant +1, which rejects shear, degenerate transforms and
+ * reflections. */
 static int navr_mat3_valid(const float m[3][3])
 {
     double det;
@@ -667,6 +638,8 @@ static int navr_mat3_valid(const float m[3][3])
     return det >= 0.99 && det <= 1.01;
 }
 
+/* Reads spawnOrientation over an identity matrix, since reflection omits default members, diagonal ones
+ * included. Returns 0 for an invalid matrix. */
 static int navr_mat3(const char *json, size_t len, const sh_shard_doc *doc,
                      int edit, float m[3][3])
 {
@@ -698,13 +671,8 @@ static int navr_mat3(const char *json, size_t len, const sh_shard_doc *doc,
     return navr_mat3_valid(m);
 }
 
-/* Encode the box as one representative face and its depth. Local x/y span
- * +/-size/2; local z spans [0,size.z]. Stored matrix rows are local basis
- * vectors in module space.
- *
- * Choose the greatest +Z normal; nav_geometry reconstructs the solid and
- * evaluates all faces. Load and legacy live refresh share this conversion.
- */
+/* Encodes the box as one representative face (the greatest +Z normal) and its depth. Local x/y span +/-size/2,
+ * local z spans [0,size.z], and the matrix rows are the local basis vectors in module space. */
 int sh_nav_regions_box_face(const float origin[3], const float m[3][3],
                             const float size[3], sh_nav_region *r)
 {
@@ -724,8 +692,7 @@ int sh_nav_regions_box_face(const float origin[3], const float m[3][3],
     half[0] = size[0] / 2.0f;
     half[1] = size[1] / 2.0f;
     half[2] = size[2] / 2.0f;
-    /* The origin is the box BOTTOM in LOCAL z, so the centre sits half a
-     * height along the local z axis -- which in module space is row 2. */
+    /* The origin is the box bottom in local z, so the centre is half a height along row 2. */
     centre[0] = cx + m[2][0] * half[2];
     centre[1] = cy + m[2][1] * half[2];
     centre[2] = cz + m[2][2] * half[2];
@@ -736,9 +703,8 @@ int sh_nav_regions_box_face(const float origin[3], const float m[3][3],
         float sg = (i & 1) ? -1.0f : 1.0f;
         float nz = m[ax][2] * sg;
         float ar = half[(ax + 1) % 3] * half[(ax + 2) % 3];
-        /* Ties -- a box at exactly 45 degrees about one axis has two faces at
-         * 0.707 -- break toward the larger face, then the lower index, so the
-         * choice is deterministic rather than dependent on float noise. */
+        /* Ties (a box at exactly 45 degrees has two faces at 0.707) break toward the larger face, then the lower
+         * index, so the choice does not depend on float noise. */
         if (nz > bestz + 1e-4f || (nz > bestz - 1e-4f && ar > bestarea)) {
             best = i; bestz = nz; bestarea = ar;
         }
@@ -755,12 +721,10 @@ int sh_nav_regions_box_face(const float origin[3], const float m[3][3],
                        + SV[i] * half[v] * m[v][k];
     for (k = 0; k < 3; k++) r->n[k] = m[a][k] * s;
     r->face = best;
-    /* Depth reconstructs the occupied solid behind the face for collision tests. */
+    /* Depth is the occupied solid behind the face. */
     r->depth = 2.0f * half[a];
 
-    /* Clockwise from +Z requires negative XY shoelace area. Reject degenerate
-     * projections.
-     */
+    /* Clockwise from +Z needs negative XY shoelace area; degenerate projections are rejected. */
     sh = 0.0;
     for (i = 0; i < 4; i++) {
         int j = (i + 1) & 3;
@@ -776,9 +740,8 @@ int sh_nav_regions_box_face(const float origin[3], const float m[3][3],
     return 1;
 }
 
-/* A clip model this reader has no encoding for. A cylinder is a legitimate
- * thing to build with; it just cannot become a navigation face, so it is left
- * out of the navigation rather than taking the map's navigation down with it. */
+/* True for a clip model this reader has no encoding for, such as a cylinder; that box is left out of the
+ * navigation. */
 static int navr_clip_unsupported(const char *json, size_t len, const sh_shard_doc *doc,
                                  int edit, char *kind, size_t cap)
 {
@@ -792,9 +755,8 @@ static int navr_clip_unsupported(const char *json, size_t len, const sh_shard_do
     return 1;
 }
 
-/* The box a serialized entity describes. A clip model of any other type, or a
- * size the entity does not carry and the caller could not resolve, is not a
- * box this reader can place. */
+/* The box a serialized entity describes; a non-box clip model, or a size neither carried nor resolved, cannot be
+ * placed. */
 static int navr_volume_face(const char *json, size_t len, const sh_shard_doc *doc,
                             int edit, sh_nav_region *r, const float *resolved)
 {
@@ -824,26 +786,16 @@ static int navr_volume_face(const char *json, size_t len, const sh_shard_doc *do
     return sh_nav_regions_box_face(origin, m, size, r);
 }
 
-/* ==================================================================== */
-/* the volumes the load pass saw                                         */
-/* ==================================================================== */
-
-/* Legacy live-refresh ownership cache for all Blocking Boxes in the last
- * parsed map, including unmarked boxes. Newly created entities require a
- * complete-map snapshot to refresh this attribution.
- *
- * The cache belongs only to g_loaded_map. Callers serialize parsing and
- * refresh under their lock. It grows with the map up to the editor's id
- * space; a map with more boxes than that is not refreshed per box.
- */
+/* Ownership cache for all Blocking Boxes in the last parsed map, unmarked ones included; entities created later
+ * need a complete-map snapshot. It belongs only to g_loaded_map, callers serialize parsing and refresh under
+ * their lock, and a map with more boxes than the editor's id space is not refreshed per box. */
 #define NAVR_MAX_VOLUMES    65536
 
 typedef struct navr_volume {
-    unsigned entity;      /* index in the map's entities array (NOT the live id) */
-    int      uid;         /* uniqueId, which is what instanceEntities addresses */
-    int      instance;    /* -1 until the multimap says otherwise */
-    /* Only a property edit moves these, so they are re-read for the volumes an
-     * edit named and carried over for the rest. */
+    unsigned entity;      /* index in the map's entities array, not the live id */
+    int      uid;         /* uniqueId, which instanceEntities addresses */
+    int      instance;    /* -1 until the multimap assigns one */
+    /* Changed only by property edits, so re-read just for edited volumes. */
     int      marked;
     int      block_demons;
     int      unshaped;    /* a shape that carries no navigation, such as a cylinder */
@@ -853,13 +805,13 @@ static struct {
     const sh_nav_map *owner;
     navr_volume      *v;
     int               count, cap;
-    int               capped;     /* a volume past NAVR_MAX_VOLUMES was not cached */
+    int               capped;     /* a volume past NAVR_MAX_VOLUMES is not cached */
     /* uniqueId hash over v: head[bucket] and next[i] chain indices, -1 ends. */
     int              *head, *next;
     int               next_cap;
     unsigned          mask;
-    /* The editor's own module index per entity, checked against the ownership
-     * the map text gave: 0 not yet checked, 1 agreed, -1 disagreed. */
+    /* The editor's module index per entity checked against the map text's ownership: 0 unchecked, 1 agreed,
+     * -1 disagreed. */
     int               live_instance;
     /* Copies the map's ids_unusable: the list still fingerprints, but no refresh may address by id. */
     int               ids_unusable;
@@ -867,7 +819,7 @@ static struct {
 
 static unsigned navr_hash(int uid) { return (unsigned)uid * 2654435761u; }
 
-/* Rebuild the hash for `want` volumes at a load factor of at most 1/2. */
+/* Rebuilds the hash for `want` volumes at a load factor of at most 1/2. */
 static int navr_vhash_rebuild(int want)
 {
     unsigned size = 64;
@@ -887,8 +839,7 @@ static int navr_vhash_rebuild(int want)
     return 1;
 }
 
-/* Record a volume. Returns NULL when it could not be cached. Sets *duplicate
- * when its uniqueId is already held. */
+/* Records a volume; NULL when it could not be cached. Sets *duplicate when its uniqueId is already held. */
 static navr_volume *navr_vadd(int uid, int *duplicate)
 {
     navr_volume *v;
@@ -936,9 +887,7 @@ static void navr_vreset(void)
     if (g_loaded.head) memset(g_loaded.head, 0xff, (g_loaded.mask + 1u) * sizeof *g_loaded.head);
 }
 
-/* The volumes this map's navigation is actually built from: cached, and
- * carrying a flag. A box with neither flag serves nothing, so moving it or
- * deleting it changes no navigation and is not worth noticing. */
+/* Writes the uniqueIds of cached volumes carrying a navigation flag and returns how many. */
 int sh_nav_regions_volume_uids(int *out, int cap)
 {
     int i, n = 0;
@@ -955,25 +904,14 @@ int sh_nav_regions_knows_volume(int uid)
     return v && (v->marked || v->block_demons);
 }
 
-/* ==================================================================== */
-/* attribution                                                           */
-/* ==================================================================== */
-
 /* Region ownership states before the split into floors and walls. */
 #define NAVR_OWNER_NONE     (-1)   /* no bucket lists it */
 #define NAVR_OWNER_OUTSIDE  (-2)   /* the orphan bucket lists it */
 #define NAVR_OWNER_CUT      (-4)   /* a room past the instance ceiling owns it */
 
-/* instanceEntities is a CSR multimap: bucket b uses
- * values[keyValues[b]..keyValues[b+1]), containing entity uniqueIds. It has
- * one bucket per instance plus an orphan bucket, so keyValues has
- * instance_count+2 entries.
- *
- * Do not attribute the orphan bucket by coordinates: repeated modules share
- * local space. The same walk records ownership for marked and unmarked boxes.
- * A malformed table sets invalid_geometry; a box two buckets claim is only
- * marked in `conflict`, and only that box is left out.
- */
+/* instanceEntities is a CSR multimap: bucket b holds uniqueIds in values[keyValues[b]..keyValues[b+1]), one
+ * bucket per instance plus an orphan bucket. Ownership never comes from coordinates; a malformed table sets
+ * invalid_geometry, and a box claimed by two buckets is marked in `conflict`. */
 static void navr_attribute(const char *json, size_t len, const sh_shard_doc *doc,
                            int mm, sh_nav_map *out, const int *uid,
                            int total_instances, unsigned char *conflict)
@@ -1002,7 +940,7 @@ static void navr_attribute(const char *json, size_t len, const sh_shard_doc *doc
         out->invalid_geometry = 1; goto done;
     }
 
-    /* uniqueId -> regions, so the walk below is linear in the table. */
+    /* uniqueId to regions, so the walk below is linear in the table. */
     while (rsize < (unsigned)out->region_count * 2u && rsize < (1u << 30)) rsize <<= 1;
     rmask = rsize - 1;
     rhead = (int *)malloc(rsize * sizeof *rhead);
@@ -1024,7 +962,7 @@ static void navr_attribute(const char *json, size_t len, const sh_shard_doc *doc
         while (bucket < total_instances && bucket + 1 < kv_count &&
                pos >= kv[bucket + 1]) bucket++;
         if (id < 0) { out->invalid_geometry = 1; goto done; }
-        /* past the last instance: the rest of `values` is the orphan bucket */
+        /* Past the last instance, the rest of `values` is the orphan bucket. */
         if (bucket >= total_instances || bucket + 1 >= kv_count) {
             for (r = rhead[navr_hash(id) & rmask]; r >= 0; r = rnext[r]) if (uid[r] == id) {
                 if (out->regions[r].instance != NAVR_OWNER_NONE &&
@@ -1036,8 +974,7 @@ static void navr_attribute(const char *json, size_t len, const sh_shard_doc *doc
         if (pos >= kv[bucket]) {
             int owner = bucket < out->instance_count ? bucket : NAVR_OWNER_CUT;
             for (r = rhead[navr_hash(id) & rmask]; r >= 0; r = rnext[r]) if (uid[r] == id) {
-                /* Shared IDs are usable only when every reference names
-                 * the same room. Attribute every shape with that ID. */
+                /* Shared ids are usable only when every reference names the same room. */
                 if (out->regions[r].instance != NAVR_OWNER_NONE &&
                     out->regions[r].instance != owner) conflict[r] = 1;
                 out->regions[r].instance = owner;
@@ -1057,10 +994,6 @@ static void navr_attribute(const char *json, size_t len, const sh_shard_doc *doc
 done:
     free(kv); free(rhead); free(rnext);
 }
-
-/* ==================================================================== */
-/* the map                                                               */
-/* ==================================================================== */
 
 int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
 {
@@ -1091,7 +1024,7 @@ static int navr_read(const char *json, size_t len, sh_nav_map *out,
                      sh_navr_entity_size read_size, void *ctx,
                      sh_navr_default_size defaults, void *defaults_ctx)
 {
-    /* the volume's uniqueId, parallel to out->regions, until attribution */
+    /* The volume's uniqueId, parallel to out->regions until attribution. */
     int *uid = NULL, uid_count = 0, uid_cap = 0;
     unsigned char *conflict = NULL;
     sh_shard_doc doc;
@@ -1100,8 +1033,8 @@ static int navr_read(const char *json, size_t len, sh_nav_map *out,
 
     if (!out) return 0;
     memset(out, 0, sizeof *out);
-    /* Disown the previous map's volumes before anything can fail: a refresh may
-     * only ever run against a map this function finished reading. */
+    /* Disowns the previous map's volumes first, so a refresh only runs against a map this function finished
+     * reading. */
     navr_vreset();
     if (!json || len == 0) return 0;
     if (!sh_shard_doc_build(json, len, &doc)) return 0;
@@ -1110,8 +1043,7 @@ static int navr_read(const char *json, size_t len, sh_nav_map *out,
         return 0;
     }
 
-    /* A map places modules. Without that list there is nothing an entity could
-     * belong to, and this is not a map document. */
+    /* Without the instance list there is nothing an entity could belong to, so this is not a map document. */
     arr = navr_member(json, len, &doc, 0, "instances", '[');
     if (arr < 0) {
         sh_shard_doc_free(&doc);
@@ -1125,8 +1057,7 @@ static int navr_read(const char *json, size_t len, sh_nav_map *out,
 
         if (doc.c[i].parent != arr || doc.c[i].kind != '{') continue;
         total_instances++;
-        /* Rooms past the ceiling keep their table positions; their boxes are
-         * counted and left out below. */
+        /* Rooms past the ceiling keep their table positions; their boxes are counted and left out below. */
         if (out->instance_count >= g_navr_max_instances) {
             out->truncated = 1;
             continue;
@@ -1134,9 +1065,7 @@ static int navr_read(const char *json, size_t len, sh_nav_map *out,
         in = (sh_nav_instance *)NAVR_PUSH(out->instances, out->instance_count,
                                           out->instance_cap);
         if (!in) { total_instances = -1; break; }
-        /* Preserve instance slots even for invalid names: instanceEntities
-         * addresses them by position.
-         */
+        /* Instance slots are kept even for invalid names, since instanceEntities addresses them by position. */
         if (!navr_str(json, len, &doc, i, "moduleName", decl, sizeof decl) ||
             !navr_module_name(decl, in->module, sizeof in->module))
             in->module[0] = '\0';
@@ -1181,7 +1110,7 @@ static int navr_read(const char *json, size_t len, sh_nav_map *out,
         navr_volume *v;
 
         if (doc.c[i].parent != arr || doc.c[i].kind != '{') continue;
-        /* Diagnostic index counts object elements in entities. */
+        /* The diagnostic index counts object elements in entities. */
         self = index++;
 
         ed = navr_member(json, len, &doc, i, "entityDef", '{');
@@ -1194,7 +1123,7 @@ static int navr_read(const char *json, size_t len, sh_nav_map *out,
 
         marked = navr_marked(json, len, &doc, edit);
         block = navr_bool(json, len, &doc, edit, "blockDemons");
-        /* Cache unmarked boxes too for the legacy live-refresh path. */
+        /* Unmarked boxes are cached too, for live refresh. */
         vuid = navr_index(navr_num(json, len, &doc, i, "uniqueId", -1.0f));
         if (vuid < 0) out->ids_unusable = 1;
         v = navr_vadd(vuid, &duplicate);
@@ -1226,10 +1155,7 @@ static int navr_read(const char *json, size_t len, sh_nav_map *out,
             }
         }
 
-        /* A box that cannot be measured yet is not a broken box. The map has
-         * only just opened and the entity is not answering; the read that
-         * follows gets it. Refusing the map over it would leave the whole map
-         * without navigation until the next edit. */
+        /* A box that cannot be measured yet is counted as unmeasured, not broken; a later read gets it. */
         if (read_size) {
             int got = read_size(self, resolved, ctx);
             if (got < 0) {
@@ -1243,8 +1169,7 @@ static int navr_read(const char *json, size_t len, sh_nav_map *out,
             }
             sizes = resolved;
         } else if (defaults) {
-            /* Map text omits members equal to the entityDef's; take those
-             * from the entityDef so a default-sized box keeps its shape. */
+            /* Map text omits members equal to the entityDef's, so a default-sized box takes its size from it. */
             resolved[0] = resolved[1] = resolved[2] = (float)NAN;
             if (defaults(NAVR_VOLUME_INHERIT, resolved, defaults_ctx)) sizes = resolved;
         }
@@ -1276,15 +1201,13 @@ static int navr_read(const char *json, size_t len, sh_nav_map *out,
 
     conflict = (unsigned char *)calloc((size_t)out->region_count + 1, 1);
     arr = navr_member(json, len, &doc, 0, "instanceEntities", '{');
-    /* Attribute unmarked boxes for later legacy marker refresh. */
     if (!conflict) out->invalid_geometry = 1;
     else if (arr >= 0 && (out->region_count > 0 || g_loaded.count > 0))
         navr_attribute(json, len, &doc, arr, out, uid, total_instances, conflict);
     else if (out->region_count > 0) out->invalid_geometry = 1;
 
-    /* Split into floors and walls, leaving out every box without a usable
-     * owning room. A malformed room table owns nothing, so nothing is
-     * counted against a single box; the map as a whole is refused. */
+    /* Splits into floors and walls, leaving out every box without a usable owning room. A malformed room table
+     * owns nothing, so no single box is counted and the map is refused. */
     for (i = 0, keep = 0; i < out->region_count; i++) {
         sh_nav_region r = out->regions[i];
         int owner = r.instance, reason = -1;
@@ -1328,8 +1251,7 @@ static int navr_read(const char *json, size_t len, sh_nav_map *out,
         backend_log(note);
     }
 
-    /* This map, and only this one, may now be refreshed from the live editor,
-     * and only while every box can be addressed by its own id. */
+    /* Only this map may be refreshed from the live editor, and only while every box has its own id. */
     g_loaded.ids_unusable = out->ids_unusable;
     g_loaded.owner = out;
 
@@ -1351,11 +1273,7 @@ int sh_nav_regions_read_defaults(const char *json, size_t len, sh_nav_map *out,
     return navr_read(json, len, out, NULL, NULL, defaults, ctx);
 }
 
-/* ==================================================================== */
-/* the live editor                                                       */
-/* ==================================================================== */
-
-/* Bound serialized live-entity JSON; oversized entities are skipped. */
+/* Bound on serialized live-entity JSON; oversized entities are skipped. */
 #define NAVR_LIVE_JSON_CAP  (16 * 1024)
 
 /* The highest uniqueId a refresh reads. */
@@ -1366,14 +1284,8 @@ void sh_nav_regions_adopt(sh_nav_map *m)
     if (m && g_loaded.owner) g_loaded.owner = m;
 }
 
-/* The shape a complete snapshot recorded for this box.
- *
- * A live entity carries its current flags, but its spawnPosition is the value
- * it was created with: the editor writes a moved box out only when it
- * serializes the whole map. Reading shape from the entity draws the box where
- * it used to be. Measured on a box dragged 312 units: the entity kept
- * reporting its original spawnPosition indefinitely while the map reported the
- * new one. */
+/* The shape a complete snapshot recorded for this box. A live entity's spawnPosition is its creation value,
+ * refreshed only on whole-map serialization, so a moved box's shape cannot be read from it. */
 static int navr_shape_of(const sh_nav_map *m, unsigned entity, sh_nav_region *r)
 {
     const sh_nav_region *src = NULL;
@@ -1390,9 +1302,7 @@ static int navr_shape_of(const sh_nav_map *m, unsigned entity, sh_nav_region *r)
     return 1;
 }
 
-/* The box this entity is now, taken from the editor's own memory: where it
- * stands, how it is turned and how big it is. Nothing is serialized, so
- * following a box the user moved, turned or resized costs a memory read. */
+/* The box this entity is (position, rotation, size), read from the editor's memory without serializing. */
 static int navr_live_box(const navr_volume *v, sh_navr_entity_transform get_transform,
                          void *ctx, sh_nav_region *r, int *instance)
 {
@@ -1402,8 +1312,7 @@ static int navr_live_box(const navr_volume *v, sh_navr_entity_transform get_tran
     return sh_nav_regions_box_face(origin, m, size, r);
 }
 
-/* Re-read one volume's navigation flags and shape kind. This is the only part
- * of a refresh that serializes, and it runs for the volumes an edit named. */
+/* Re-reads one volume's navigation flags and shape kind; the only part of a refresh that serializes. */
 static int navr_read_flags(navr_volume *v, sh_navr_entity_json get_json,
                            char *json, void *ctx)
 {
@@ -1437,7 +1346,7 @@ int sh_nav_regions_volume_flagged(int uid, sh_navr_entity_json get_json, void *c
 
     if (uid < 0 || uid > NAVR_LIVE_SCAN_MAX || !get_json) return 0;
     json = (char *)malloc(NAVR_LIVE_JSON_CAP);
-    if (!json) return 1;          /* unanswerable: leave the caller its safe path */
+    if (!json) return 1;          /* unanswerable: the caller takes its safe path */
     memset(&probe, 0, sizeof probe);
     probe.uid = uid;
     if (navr_read_flags(&probe, get_json, json, ctx))
@@ -1480,11 +1389,10 @@ int sh_nav_regions_refresh_known(sh_nav_map *m,
         int live = -1, owner;
         *why = "a box carries an unusable id; a complete snapshot is required";
         if (v->uid < 0 || v->uid > NAVR_LIVE_SCAN_MAX) goto done;
-        /* Deleted, or undone back out of the map. The record is kept: the box
-         * returns under the same uniqueId, and is read again when it does. */
+        /* A deleted box keeps its record, since it returns under the same uniqueId and is read again then. */
         if (!valid(v->uid, ctx)) continue;
         if (read_count) (*read_count)++;
-        /* No longer a Blocking Volume, so it serves no navigation. */
+        /* Flags unreadable: the box is dropped from navigation. */
         if (!navr_read_flags(v, get_json, json, ctx)) {
             v->marked = v->block_demons = 0;
             continue;
@@ -1494,16 +1402,14 @@ int sh_nav_regions_refresh_known(sh_nav_map *m,
         memset(&r, 0, sizeof r);
         r.marked = v->marked;
         r.block_demons = v->block_demons;
-        /* Falling back on the shape the last complete snapshot recorded, which
-         * a box that has since become a floor or a wall does not have. */
+        /* Falls back on the shape the last complete snapshot recorded; a box that became a floor or wall has none. */
         *why = "a box became a floor or a wall; a complete snapshot is required";
         if (!navr_live_box(v, get_transform, ctx, &r, &live) &&
             !navr_shape_of(m, v->entity, &r)) goto done;
         if (live >= 0) {
             if (live == v->instance) agreed++; else disagreed++;
         }
-        /* A box dragged into another room belongs to that room now, and its
-         * position is relative to it. */
+        /* A box dragged into another room belongs to that room, and its position is relative to it. */
         owner = (g_loaded.live_instance > 0 && live >= 0) ? live : v->instance;
         if (owner < 0 || owner >= next->instance_count ||
             !next->instances[owner].module[0] || next->instances[owner].unusable) continue;
@@ -1522,9 +1428,8 @@ int sh_nav_regions_refresh_known(sh_nav_map *m,
             if (r.marked) next->instances[r.instance].region_count++;
         }
     }
-    /* Nothing has moved between a complete read and the refresh that follows
-     * it, so any disagreement there means the editor's index is not the
-     * ownership this map records, and it is left alone. */
+    /* Nothing moves between a complete read and the next refresh, so a disagreement then means the editor's index
+     * is not this map's ownership and is ignored. */
     if (g_loaded.live_instance == 0 && (agreed || disagreed)) {
         g_loaded.live_instance = disagreed ? -1 : 1;
         if (disagreed) {

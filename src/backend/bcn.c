@@ -14,8 +14,6 @@ static u8 clamp8(int v) { return (u8)(v < 0 ? 0 : (v > 255 ? 255 : v)); }
 /* Safe fetch: past the end of the source reads as 0 rather than faulting. */
 static u8 at(const u8 *s, size_t len, size_t i) { return i < len ? s[i] : 0u; }
 
-/* ------------------------------------------------------------------ BC1 colour block ----------*/
-
 static void c565(unsigned v, u8 *out)
 {
     unsigned r = (v >> 11) & 31u, g = (v >> 5) & 63u, b = v & 31u;
@@ -24,8 +22,7 @@ static void c565(unsigned v, u8 *out)
     out[2] = (u8)((b * 255u + 15u) / 31u);
 }
 
-/* Fills pal[4][3]. `opaque_only` forces the 4-colour (no punch-through) interpretation, which
- * is what BC3's colour block always uses. */
+/* Fills pal[4][3]. `opaque_only` forces the 4-colour (no punch-through) interpretation that BC3 uses. */
 static void bc1_palette(const u8 *s, size_t len, size_t off, u8 pal[4][3], int *punch, int opaque_only)
 {
     unsigned c0 = (unsigned)at(s, len, off) | ((unsigned)at(s, len, off + 1) << 8);
@@ -44,8 +41,6 @@ static void bc1_palette(const u8 *s, size_t len, size_t off, u8 pal[4][3], int *
         *punch = 1;                      /* index 3 is transparent black */
     }
 }
-
-/* ------------------------------------------------------------------ BC4 alpha block -----------*/
 
 static void bc4_palette(const u8 *s, size_t len, size_t off, u8 pal[8])
 {
@@ -127,9 +122,8 @@ int bcn_decode_bc3(const u8 *src, size_t src_len, unsigned w, unsigned h, u8 *ds
     return 1;
 }
 
-/* ---------------------------------------------------------------------------- BC7 --------------
- * Eight modes over a 128-bit block. The tables below are the format's own partition and anchor
- * tables (shared with BC6H) and are reproduced verbatim from the specification. */
+/* BC7: eight modes over a 128-bit block. The partition and anchor tables below are the format's own, verbatim
+ * from the specification. */
 
 static const u8 P2[64][16] = {
 {0,0,1,1,0,0,1,1,0,0,1,1,0,0,1,1},{0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1},
@@ -242,7 +236,7 @@ static u32 bget(bits_t *s, unsigned n)
     return v;
 }
 
-/* Expand a `bits`-wide value to 8 bits by replicating the high bits, per the spec. */
+/* Expands a `bits`-wide value to 8 bits by replicating the high bits. */
 static u8 unq(u32 v, unsigned bits)
 {
     if (bits >= 8) return (u8)v;
@@ -289,7 +283,7 @@ int bcn_decode_bc7(const u8 *src, size_t src_len, unsigned w, unsigned h, u8 *ds
             if (pk == 1) { for (unsigned i = 0; i < ns; ++i) { u32 p = bget(&s, 1); pbit[i*2] = pbit[i*2+1] = p; } }
             else if (pk == 2) { for (unsigned e = 0; e < nep; ++e) pbit[e] = bget(&s, 1); }
 
-            /* Unquantise endpoints (p-bit becomes the new LSB). */
+            /* Unquantise endpoints; the p-bit becomes the new LSB. */
             u8 col[6][4];
             for (unsigned e = 0; e < nep; ++e) {
                 unsigned cbits = cb + (pk ? 1u : 0u), abits = ab ? ab + (pk ? 1u : 0u) : 0u;

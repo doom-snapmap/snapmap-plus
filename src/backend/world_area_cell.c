@@ -1,22 +1,9 @@
-/* Play's SnapMap world-area cell size (see world_area_cell.h).
- *
- * Build 13954591 evidence:
- *   BuildRenderWorld VK 0x14114fd60 / GL 0x14114ef60 is called only from
- *     SnapMapEditToSnapBuild (VK 0x141153590), which is called only from
- *     VK 0x14114efb0; neither has a data reference. It calls the subdivision
- *     VK FUN_141153a30 / GL FUN_141152cf0 once, at VK 0x14114ff85 / GL
- *     0x14114f185; the subdivision's only other caller is itself.
- *   WorldAreaCellLoad VK 0x14114ff66 / GL 0x14114f166: MOVSS xmm0,[rip+disp32]
- *     (F3 0F 10 05, the shared 512.0 constant VK 0x1420275a8 / GL 0x142041378,
- *     69 readers on VK) stored by MOVSS [rsp+0x20],xmm0 as the subdivision's
- *     fifth argument. The subdivision uses it only as "halve while wider than
- *     this" on X then Y and passes it unchanged to its recursion.
- *   The frontend reads area extents from the built areas' bounds, never from
- *     this value; the only extent test seen is a half-diagonal^2 < 7.86432e7
- *     "small area" heuristic in the area-flag pass (VK FUN_141a35f20).
- * Only this instruction's disp32 is repointed, at a product-owned float that
- * holds 512 except while SnapMapEditToSnapBuild runs for a map that needs a
- * coarser size. */
+/* Play's SnapMap world-area cell size (see world_area_cell.h). BuildRenderWorld (VK 0x14114fd60 / GL
+ * 0x14114ef60) passes the shared 512.0 constant (VK 0x1420275a8 / GL 0x142041378) as the subdivision's
+ * fifth argument via MOVSS xmm0,[rip+disp32] at VK 0x14114ff66 / GL 0x14114f166. Only that instruction's
+ * disp32 is repointed, at a product-owned float that holds 512 except while SnapMapEditToSnapBuild
+ * builds a map needing a coarser size. The frontend reads area extents from the built areas' bounds,
+ * never from this value. */
 #include "world_area_cell.h"
 #include <string.h>
 
@@ -164,10 +151,8 @@ void sh_world_area_cell_map_opened(void)
     g_settle=g_last_n=0;g_opened=1;g_warned=0;
     InterlockedExchange(&g_watch,1);
 }
-/* Engine thread, every editor frame: once the open map's module count has held
- * for a second's worth of frames, count its world areas -- logging the cell
- * size Play will use the first time, and telling the player when the map is
- * too large to load. Each new count is counted once. */
+/* Engine thread, every editor frame: once the map's module count has held for about a second, count its
+ * world areas, log the cell size Play will use, and tell the player when the map is too large to load. */
 void sh_world_area_cell_editor_tick(void)
 {
     sh_render_cell_choice c;void *map;int n=0;char line[320];

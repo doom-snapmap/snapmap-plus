@@ -1,7 +1,5 @@
-/* Report live signature resolution at startup, with the expected and live
- * bytes of every signature that did not resolve. The diagnostic build
- * (SH_DIAG) also exercises the detour engine on scratch code; a release build
- * allocates no writable-executable memory for it. */
+/* Reports live signature resolution at startup, with expected and live bytes of each unresolved signature. The
+ * diagnostic build (SH_DIAG) also tests the detour engine on scratch code; a release build allocates no RWX memory. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -174,7 +172,6 @@ static int scratch_detour_check(const char **why)
 }
 #endif
 
-/* Full smoke check. */
 int sh_smoke_run(const uint8_t *doom_base, const sig_result *results, size_t count,
                  unsigned long deferred_ms)
 {

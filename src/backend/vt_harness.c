@@ -1,12 +1,5 @@
-/* vt_harness.c -- the sh_vt diagnostic (see vt_harness.h), in diagnostic
- * builds only.
- *
- * The engine surface is the one modvt.c binds for the product's own family
- * registration (VtSetSource, VtForMaterial and what is decoded from them);
- * the decoder is megapreview.c's. Registration and release run on DOOM's main
- * thread inside process heap 0, under SEH, through modvt.c. Decoding is pure
- * CPU work on a private thread with an 8 MB stack, as megapreview.c runs it.
- */
+/* The sh_vt diagnostic (see vt_harness.h), built only in diagnostic builds. Registration and release run
+ * on DOOM's main thread under SEH through modvt.c; decoding runs on a private 8 MB-stack thread. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -15,7 +8,6 @@
 #include <string.h>
 #include "vt_harness.h"
 
-/* ------------------------------------------------------------------ pure helpers */
 
 static uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static uint64_t rd64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
@@ -52,7 +44,6 @@ long sh_vt_member_cell(const uint8_t *h, int level, unsigned x, unsigned y)
 
 static uint32_t g_mine;            /* bit k: record k registered with sh_vt register */
 
-/* ------------------------------------------------------------------ log */
 
 static void vt_line(const char *fmt, ...)
 {
@@ -66,7 +57,6 @@ static void vt_line(const char *fmt, ...)
     sh_printf("%s\n", line);
 }
 
-/* ------------------------------------------------------------------ guarded reads */
 
 static int rd_ptr(const void *p, void **v) { __try { *v = *(void *const *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { *v = NULL; return 0; } }
 static int rd_i32(const void *p, int *v) { __try { *v = *(const int *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { *v = 0; return 0; } }
@@ -81,7 +71,6 @@ static void rd_cstr(const void *slot, char *out, size_t cap)
     __except (EXCEPTION_EXECUTE_HANDLER) { strcpy_s(out, cap, "(unreadable)"); }
 }
 
-/* ------------------------------------------------------------------ records */
 
 static int rec_free(uint8_t *r)
 {
@@ -146,7 +135,6 @@ static unsigned long long host_bytes(int levels)
     return sum;
 }
 
-/* ------------------------------------------------------------------ main thread */
 
 typedef struct vt_call {
     char name[256];
@@ -225,7 +213,6 @@ static void run_main(vt_call *c)
                 c->verb == 1 ? "register" : c->verb == 2 ? "release" : "sync");
 }
 
-/* ------------------------------------------------------------------ decode */
 
 typedef struct vt_decode_job {
     unsigned char *page;   /* PAGE_MAX + PAGE_SLACK */
@@ -244,7 +231,7 @@ static DWORD WINAPI decode_thread(LPVOID p)
 
 #define VT_PATH_CAP 32768
 
-/* UTF-8 to a wide path; 0 when it does not convert or fit. */
+/* Convert UTF-8 to a wide path; 0 when it does not convert or fit. */
 static int widen(const char *utf8, wchar_t *out, size_t cap)
 {
     return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, out, (int)cap) > 0;
@@ -396,7 +383,6 @@ static void do_decode(const char *family, int level, unsigned x, unsigned y, con
 }
 
 
-/* ------------------------------------------------------------------ console */
 
 static void do_list(void)
 {

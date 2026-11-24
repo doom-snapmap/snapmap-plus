@@ -59,11 +59,9 @@ int sh_typeinfo_collect_records(sh_ti_record **out);
  * is unavailable or memory runs out. */
 int sh_typeinfo_collect_inherits(const char ***out);
 
-/* A packed name list handed across the interface (snapmap_plus_iface.h): each
- * name and its NUL, then an empty name, as owned text that grows to hold
- * them. put returns 0 when memory runs out; finish hands the list to *out and
- * the count to *out_count and returns 1 for a nonempty list (NULL and 0 for an
- * empty one or when memory ran out). */
+/* A packed name list for the interface (snapmap_plus_iface.h): each name and its NUL, then an empty name, as
+ * growing owned text. put returns 0 when memory runs out; finish hands the list and count to *out and *out_count
+ * and returns 1 for a nonempty list (NULL and 0 otherwise). */
 typedef struct sh_ti_pack { char *text; size_t len, cap; int failed; } sh_ti_pack;
 int sh_ti_pack_put(sh_ti_pack *p, const char *name);
 int sh_ti_pack_finish(sh_ti_pack *p, int names, char **out, int *out_count);
@@ -73,10 +71,8 @@ int sh_ti_pack_finish(sh_ti_pack *p, int names, char **out, int *out_count);
  * into buf. Optional dimension/probe failures do not invalidate the hit. */
 int sh_typeinfo_find_material(const char *name, char *buf, size_t cap);
 
-/* The game's reflected classes and enums by name, for the script layer's
- * reflection (script/script_reflect.h). Strings are the engine's own and
- * stay valid for the session. Every call answers 0 when the type system is
- * unavailable or the name is unknown. */
+/* The game's reflected classes and enums by name, for script/script_reflect.h. Strings are the engine's own
+ * and stay valid for the session; every call answers 0 when the type system or the name is unavailable. */
 typedef struct sh_ti_field {
     const char *type;      /* "float", "idVec3", "idList < idStr , TAG_IDLIST , false >" */
     const char *ops;       /* "", "*", "[4]" */

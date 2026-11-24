@@ -1,23 +1,6 @@
-/* Unrestricted entity placement in the editor.
- *
- * Every snapEditorEntityDef carries placementFlags, a bit set of
- * snapEntityPlaceType_t: FLOOR 0x01, WALL 0x02, CEILING 0x04,
- * SURFACE_ALIGNED 0x08, AIR 0x10, AIR_UNALIGNED 0x20 (DEFAULT is 0). While an
- * entity is held or moved, the editor classifies the surface its box touches
- * (none, floor, ceiling, wall, sloped) and clears that classification when
- * the flags do not accept the surface. An element with no accepted surface is
- * then invalid unless its flags include AIR or AIR_UNALIGNED: the ghost turns
- * red and Place is refused. So demons, the player start, encounter spawners,
- * AI path and combat points and the item hints, all FLOOR only, cannot be
- * dropped in the air.
- *
- * Snapmap+ removes only that refusal. The two places that apply it (the
- * per-element test that colours the ghost, and the group test that admits a
- * Place) accept an element with no accepted surface as if its flags allowed
- * air, so it stays where the cursor holds it. Everything else is native: the
- * surface classification, floor contact, alignment, Drop to Floor, the
- * overlap ("blocked") and outside-every-module refusals. Nothing new is
- * written into the map: the entity's position is its only record. */
+/* Unrestricted entity placement in the editor. The editor refuses an element with no accepted surface unless its
+ * placementFlags include AIR or AIR_UNALIGNED, so FLOOR-only entities cannot be dropped in the air; Snapmap+ patches
+ * the per-element test and the group test to accept it, leaving every other placement refusal native. */
 #ifndef SH_PLACE_ANYWHERE_H
 #define SH_PLACE_ANYWHERE_H
 #include <stddef.h>

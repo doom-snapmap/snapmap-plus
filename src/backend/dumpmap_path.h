@@ -1,8 +1,6 @@
-/* String-only path helpers for sh_dumpmap. Dumps go under <game dir>\snapmap-plus\, never into the game's own
- * folders: the native writer takes an absolute path (a relative one is resolved under base\) and forces the
- * extension. These helpers choose the directory and numbered filename; the command handler owns collision checks
- * and filesystem operations.
- */
+/* String-only path helpers for sh_dumpmap: dumps go under <game dir>\snapmap-plus\, never into the game's
+ * folders (the native writer resolves a relative path under base\ and forces the extension). The command
+ * handler owns collision checks and filesystem operations. */
 #ifndef SNAPMAP_PLUS_DUMPMAP_PATH_H
 #define SNAPMAP_PLUS_DUMPMAP_PATH_H
 
@@ -27,9 +25,7 @@ static void dp_cat(char *dst, size_t cap, const char *src)
     dst[o] = '\0';
 }
 
-/* Validate a game-relative name. Return 1 when usable, otherwise 0 with a
- * printable reason in why.
- */
+/* Validate a game-relative name. Returns 1 when usable, else 0 with a printable reason in why. */
 static int dumpmap_validate(const char *arg, const char **why)
 {
     *why = NULL;
@@ -48,10 +44,8 @@ static int dumpmap_validate(const char *arg, const char **why)
     return 1;
 }
 
-/* The typed name minus any file extension, prefixed with DUMPMAP_SUBDIR when it is a bare name (a
- * name that already contains a separator picks its own folder under base\ and is left where it is).
- * Only an extension on the FILE is stripped: a '.' inside a directory component is left alone, so
- * "my.dir/pass1" keeps its folder. Returns 0 if nothing usable is left. */
+/* The typed name minus its file extension (a '.' in a directory component is kept), prefixed with
+ * DUMPMAP_SUBDIR when bare; a name with a separator picks its own folder. Returns 0 if nothing usable is left. */
 static int dumpmap_stem(const char *arg, char *out, size_t outcap)
 {
     if (outcap == 0) return 0;

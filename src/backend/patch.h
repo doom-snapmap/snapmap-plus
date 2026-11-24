@@ -1,8 +1,6 @@
-/* Code patches with saved originals, signature gates, and inline-detour wrappers.
- * Every write and restore runs with the process's other threads suspended and
- * outside the changed bytes (patch.c), so concurrent execution never sees a
- * partly written instruction. Expected-byte checks reject mismatches before
- * writing; a failed rollback keeps a retryable restore handle. */
+/* Code patches with saved originals, signature gates, and inline-detour wrappers. Every write and restore runs with
+ * the other threads suspended and outside the changed bytes (patch.c); expected-byte checks reject mismatches
+ * before writing. */
 #ifndef BACKEND_PATCH_H
 #define BACKEND_PATCH_H
 
@@ -10,14 +8,13 @@
 #include <stddef.h>
 #include "signatures.h"
 
-/* Caller-owned restore handle. live includes an unfinished rollback; do not
- * discard it or release its destination until code_unpatch succeeds. */
+/* Caller-owned restore handle. live includes an unfinished rollback; keep it until code_unpatch succeeds. */
 #define B2_PATCH_MAX_BYTES 64
 typedef struct sh_patch_handle {
     void     *target;                    /* the patched address */
     uint8_t   orig[B2_PATCH_MAX_BYTES];  /* the original bytes (for restore) */
-    size_t    len;                       /* how many bytes were saved/overwritten */
-    uint32_t  old_protect;               /* the page protection before we touched it */
+    size_t    len;                       /* bytes saved and overwritten */
+    uint32_t  old_protect;               /* the page protection before the patch */
     int       live;                      /* 1 = patched (restorable), 0 = not / already reverted */
 } sh_patch_handle;
 
@@ -25,7 +22,7 @@ typedef struct sh_patch_handle {
 typedef enum sh_patch_status {
     B2_PATCH_OK = 0,
     B2_PATCH_REFUSED_BADARG,    /* NULL target/bytes, len 0, or len > B2_PATCH_MAX_BYTES */
-    B2_PATCH_REFUSED_SIG,       /* sig-anchored entry: resolve was not a clean unique hit (not SIG_OK) */
+    B2_PATCH_REFUSED_SIG,       /* sig-anchored entry: not a clean unique hit (not SIG_OK) */
     B2_PATCH_REFUSED_VERIFY,    /* expected bytes differ from the target */
     B2_PATCH_FAIL_PROTECT,      /* VirtualProtect failed */
     B2_PATCH_FAIL_SEH,          /* an access violation / SEH fault during read or write */
@@ -34,10 +31,9 @@ typedef enum sh_patch_status {
     B2_PATCH_FAIL_BUSY          /* a thread stayed inside the bytes for every attempt; nothing changed */
 } sh_patch_status;
 
-/* Patch 1..B2_PATCH_MAX_BYTES after checking expect, if supplied. Passing NULL
- * skips that byte check and requires prior target validation by the caller.
- * out_handle is required and must not already own a patch. On failure, rollback
- * is attempted. FAIL_ROLLBACK retains a live handle for code_unpatch to retry. */
+/* Patch 1..B2_PATCH_MAX_BYTES after checking expect; NULL skips the check and needs the caller's own target
+ * validation. out_handle is required and must not own a patch. On failure the patch rolls back, and FAIL_ROLLBACK
+ * keeps a live handle for code_unpatch to retry. */
 sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *new_bytes,
                            size_t len, sh_patch_handle *out_handle);
 
@@ -49,9 +45,8 @@ sh_patch_status code_unpatch(sh_patch_handle *handle);
 sh_patch_status code_patch_sig(const sig_result *r, const uint8_t *expect, const uint8_t *new_bytes,
                                size_t len, sh_patch_handle *out_handle);
 
-/* Redirect an existing E8 call: require SIG_OK and both calls to be E8 rel32,
- * then code_patch the five bytes. The destination must be fully initialized
- * before this call, and the caller owns its lifetime until all users finish. */
+/* Redirect an existing E8 call: SIG_OK and both calls E8 rel32 are required, then the five bytes are patched.
+ * The destination must be fully initialized first, and the caller owns its lifetime until all users finish. */
 sh_patch_status code_patch_call_sig(const sig_result *r, const uint8_t expect[5],
                                     const uint8_t replacement[5], sh_patch_handle *handle);
 
@@ -60,8 +55,8 @@ int   sh_uninstall_detour(void *tramp);
 sh_patch_status sh_commit_detour(void *tramp);
 int sh_detour_is_installed(void *tramp);
 
-/* Prepare only for SIG_OK, without changing the target. Publish the returned
- * trampoline to the original callback before sh_commit_detour. */
+/* Prepare only for SIG_OK, leaving the target unchanged; publish the returned trampoline to the original
+ * callback before sh_commit_detour. */
 void *sh_prepare_detour_sig(const sig_result *r, void *detour, size_t stolen);
 
 /* Test patching, execution, restoration, and mismatch refusal on scratch memory.

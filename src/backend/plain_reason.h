@@ -1,20 +1,6 @@
-/* plain_reason.h -- one table that turns a Windows error code, a mod store
- * status or a refused file-name character into a plain reason with the next
- * step, so no message carries a bare number ("error 5", "did not answer",
- * "character 0xc3").
- *
- *   sh_reason(SH_REASON_WIN32, GetLastError(), path, bytes_needed)
- *       subject: the file or folder the call used (its drive names a full disk);
- *       bytes: what the write needed (0 when unknown).
- *   sh_reason(SH_REASON_STORE, modnet code, next_step, 0)
- *       code: a MODNET_E_ value (modnet.h); subject: the caller's next step
- *       ("it is retried at the next launch"), NULL for the table's own.
- *   sh_reason(SH_REASON_NAME, code point, path, 0)
- *       code: the character the game cannot read in a file name; subject: the file.
- *
- * Header-only: every module that reports a failure includes it without a
- * link change. Returns the sentence, malloc'd and sized to the subject it
- * names (free it), or NULL when memory runs out. */
+/* plain_reason.h -- one table turning a Windows error code, a mod store status (MODNET_E_, modnet.h) or a refused
+ * file-name character into a plain reason with the next step: sh_reason(kind, code, subject, bytes) returns the
+ * sentence malloc'd (free it), or NULL when memory runs out. Header-only. */
 #ifndef SNAPMAP_PLUS_PLAIN_REASON_H
 #define SNAPMAP_PLUS_PLAIN_REASON_H
 

@@ -25,48 +25,41 @@ typedef struct sh_grid_warp {
     sh_grid_axis axis[3];
 } sh_grid_warp;
 
-/* Strict identities: ordinary non-grid modules are never admitted. Variant
- * names carry dimensions in the native saved moduleName field, so copying a
- * placement copies its dimensions without a parallel index-keyed sidecar. */
+/* Strict identities: ordinary non-grid modules are never admitted. Variant names carry the dimensions in the saved
+ * moduleName field, so copying a placement copies its dimensions. */
 sh_grid_kind sh_grid_stock_kind(const char *module_name);
 const char *sh_grid_stock_name(sh_grid_kind kind);
 int sh_grid_default(sh_grid_kind kind, sh_grid_size *out);
 int sh_grid_minimum(sh_grid_kind kind, sh_grid_size *out);
-/* Collision node bounds and AAS bounds use signed 16-bit coordinates.
- * These are format limits in module space; world placement is checked later. */
+/* Collision node bounds and AAS bounds use signed 16-bit coordinates; these are format limits in module space, not
+ * world placement limits. */
 int sh_grid_maximum(sh_grid_kind kind, sh_grid_size *out);
-/* Native numeric entry clamps each finite axis independently, then rounds to
- * whole game units. Unknown room kinds and non-finite input are refused. */
+/* Clamps each finite axis independently, then rounds to whole game units, as the native numeric entry does. Unknown
+ * room kinds and non-finite input are refused. */
 int sh_grid_clamp(sh_grid_kind kind, const float requested[3], sh_grid_size *out);
 int sh_grid_name(const sh_grid_size *size, char *out, size_t capacity);
 int sh_grid_parse_name(const char *name, sh_grid_size *out);
 
-/* Numerical deformation limits retain at least 16 units between the rigid
- * doorway and wall/ceiling regions. The authoring layer must additionally
- * enforce tested animated-door clearance; these are not gameplay guarantees. */
+/* The deformation keeps at least 16 units between the rigid doorway and wall/ceiling regions. These are numerical
+ * limits, not animated-door clearance guarantees. */
 int sh_grid_warp_init(const sh_grid_size *size, sh_grid_warp *out);
 float sh_grid_coordinate(const sh_grid_warp *warp, unsigned axis, float value);
 void sh_grid_point(const sh_grid_warp *warp, const float source[3], float target[3]);
 void sh_grid_affine(const sh_grid_warp *warp, unsigned axis, float value,
                     float *scale, float *shift);
 
-/* Pure buffer transforms. Caller owns two disjoint buffers. Equal-sized output is
- * unusable on failure. Reads are bounded; unknown formats/layouts are refused. */
+/* Pure buffer transforms; the caller owns two disjoint buffers and the equal-sized output is unusable on failure.
+ * Reads are bounded; unknown formats and layouts are refused. */
 int sh_grid_bmodel(const sh_grid_warp *warp, const unsigned char *source,
                     size_t length, unsigned char *target);
 int sh_grid_bcm(const sh_grid_warp *warp, const unsigned char *source,
                 size_t length, unsigned char *target);
 
-/* Built-in light policy (one function for resize and for map load):
- * - scale per room axis: X and Y by size/stock; Z by interior height
- *   (modern: height-48 over 3344; classic: height over 2048);
- * - origin scales about the room pivot (modern Y=1280, otherwise 0);
- * - radius and center are on the light's own axes (spawnOrientation rows,
- *   NULL = identity) and follow the room scale along each light axis;
- * - roof_anchor keeps the effective point (origin+center) at its stock
- *   clearance below the ceiling, at most a quarter of the interior height;
- * - intensity, color and every other field are retained.
- * The resulting origin must stay inside the room, or the call fails. */
+/* Built-in light policy for resize and map load: X and Y scale by size/stock and Z by interior height (modern
+ * height-48 over 3344, classic height over 2048); origin scales about the room pivot (modern Y=1280); radius and
+ * center follow the room scale along the light's own axes (spawnOrientation rows, NULL = identity); roof_anchor keeps
+ * origin+center at its stock ceiling clearance, at most a quarter of the interior height. Every other field is kept,
+ * and the call fails if the resulting origin leaves the room. */
 int sh_grid_light_scale(const sh_grid_size *size, float scale[3], float pivot[3],
                         float *roof, float *stock_roof);
 int sh_grid_light_axes(const sh_grid_warp *warp, const float origin[3],

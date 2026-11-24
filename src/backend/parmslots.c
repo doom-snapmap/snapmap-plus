@@ -1,11 +1,6 @@
-/* parmslots.c -- a render parm always gets a slot: the detour of idParmState::AllocParmState (parmslots.h).
- *
- * AllocParmState(state, idDeclRenderParm *) returns the parm's slot: the one a parm of the same name already
- * holds, else the first empty slot of the kind's range, else Error6 ("failed to allocate %s parm state"). `state`
- * begins with the 0x93F holder pointers; a holder is the decl (name pointer +0x08, kind +0x6C). The detour asks
- * sh_parmslots_decide before the engine: the engine places the parm whenever it can, a parm that would be refused
- * is given a shared slot and the engine's function is not called for it (the holder table keeps the slot's first
- * parm, so the parm that shares is found by name at no later call; it is decided again, to the same slot). */
+/* parmslots.c -- the detour of idParmState::AllocParmState that gives every render parm a slot (parmslots.h).
+ * `state` begins with 0x93F holder pointers (decl name +0x08, kind +0x6C); a sharing parm is not recorded there,
+ * so each later call for it is decided again, to the same slot. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdarg.h>

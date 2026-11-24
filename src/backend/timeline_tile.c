@@ -1,16 +1,8 @@
-/* timeline_tile.c -- see timeline_tile.h.
- *
- * Engine surface (build 13954591, snaphak-re editor-palette-surface R-001..R-003):
- *   SnapPaletteBuild   palette at editor+0x20660: entries +0x10, count +0x18,
- *                      stride 0x6f0; entry +0x000 sedef, +0x150 prototype record
- *   sedef              +0x08 decl name, +0x28 resource lifetime, +0x2c load
- *                      state, +0x1c8 resolved entityDef
- *   record             +0x38 text, +0x58 inherit, +0x60 class (pool strings)
- *   entity holder      +0x00 refcount (undo snapshots share holders),
- *                      +0x08 sedef, +0x158 record; EntityDeshare unshares it
- *   DeclRegistryAnchor / DeclTypeByName / DeclRegisterFile / DeclSourceFind /
- *   DeclFind / ResourceGenericLoad   as grid_room_native.c registers a catalog
- * Every engine read is SEH-guarded; a fault retires the module. */
+/* timeline_tile.c -- see timeline_tile.h. Build 13954591: palette at editor+0x20660 (entries +0x10, count +0x18,
+ * stride 0x6f0; entry +0 sedef, +0x150 prototype record); sedef +0x08 decl name, +0x28 lifetime, +0x2c load
+ * state, +0x1c8 entityDef; record +0x38 text, +0x58 inherit, +0x60 class; entity holder +0 refcount (undo
+ * snapshots share holders; EntityDeshare unshares), +0x08 sedef, +0x158 record. Decl registry calls are the
+ * ones grid_room_native.c uses. Every engine read is SEH-guarded; a fault retires the module. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -186,8 +178,6 @@ static const sig_result *clean_result(const sig_result *r, size_t n, const char 
     return NULL;
 }
 
-/* ------------------------------------------------------------ registration */
-
 static void *tl_registry(void)
 {
     int32_t displacement;
@@ -202,10 +192,8 @@ static void *tl_registry(void)
     return r;
 }
 
-/* Publish the tile's name into the snapEditorEntityDef manager and load it,
- * so the palette build that follows enumerates and admits it. The bytes are
- * served by the override provider from overrides_baked.h. Process heap: the
- * decl outlives every map. Returns 1 when the decl is ready. */
+/* Publish the tile's name into the snapEditorEntityDef manager and load it (bytes from overrides_baked.h via
+ * the override provider) so the next palette build admits it. Process heap, as the decl outlives every map; returns 1 when ready. */
 static int tl_register_body(void)
 {
     void *r, *manager, *decl;
@@ -266,9 +254,8 @@ static void tl_error_text(char *out, size_t cap)
     __except (EXCEPTION_EXECUTE_HANDLER) { out[0] = 0; }
 }
 
-/* An engine Error/FatalError formats its text into last_error_msg and then
- * throws a C++ exception (0xE06D7363). Report that text only when the
- * registration changed it, so an earlier error is never blamed. */
+/* An engine Error/FatalError formats its text into last_error_msg, then throws a C++ exception (0xE06D7363).
+ * Report that text only when the registration changed it, so a stale error is never blamed. */
 static void tl_log_fault(const char *before)
 {
     char after[ERROR_TEXT_MAX];
@@ -307,16 +294,10 @@ static void tl_register(void)
     }
 }
 
-/* The engine sorts the palette's rows in place from four places, and the
- * Play build does it twice: once inside its own process-heap scope (the
- * validator) and once right after that scope is popped, in the map heap (the
- * Play map's structure). A sort swaps rows through a temporary and gives a
- * row's string a new buffer, in the current heap, when the value moving into
- * it is longer than the slot's old one; a row that grows during the second
- * sort keeps a map-heap string, the return to the editor frees it, and the
- * next Play's first sort reads it (review A-D3: DOOM+0x339c40 reading a
- * row's clipModelName in released memory). Every sort runs on process heap 0
- * here, as the builder does. */
+/* The engine sorts palette rows in place from four places; the Play build sorts twice, the second time in the
+ * map heap. A sort reallocates a row's string in the current heap when the incoming value is longer, so a row
+ * growing in the map-heap sort is freed on return to the editor and the next Play's sort reads it (DOOM+0x339c40
+ * reads clipModelName in released memory). Every sort here runs on process heap 0, as the builder does. */
 typedef void (*palette_sort_fn)(void *);
 static palette_sort_fn g_sort_orig;
 static volatile LONG g_sorts, g_sorts_unscoped;
@@ -355,8 +336,6 @@ static void tl_palette_build(void *palette, void *progress)
     g_patch_failed_entries = NULL;
     sh_budget_table_palette_rebuilt();
 }
-
-/* ------------------------------------------------------------ palette rows */
 
 /* The mod rows that share their entityDef with a stock row, and that row
  * (sh_tl_stock_row_first). The palette sorts by entityDef, so they are
@@ -499,8 +478,6 @@ static void tl_patch_record(void)
     }
 }
 
-/* ------------------------------------------------------------ rebind */
-
 static uint64_t tl_hash_entities(void **array, uint32_t count)
 {
     uint64_t h = 1469598103934665603ULL;
@@ -554,7 +531,7 @@ static void tl_rebind(unsigned char *editor)
                     want == g_tile_sedef ? SH_TL_TILE_SEDEF : want == g_unknown_sedef ? SH_TL_UNKNOWN_SEDEF
                                                                                        : "its stock row");
     }
-    /* Desharing replaces holders; hash the list as it now stands. */
+    /* Desharing replaces holders, so hash the list after it. */
     g_ent_array = array_ptr;
     g_ent_count = count;
     g_ent_hash = tl_hash_entities(array, count);
@@ -580,8 +557,6 @@ void sh_timeline_tile_tick(void *editor)
         backend_log("TL tile: faulted; disabled for this session");
     }
 }
-
-/* ------------------------------------------------------------ install + slot */
 
 int sh_timeline_tile_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
@@ -613,8 +588,8 @@ int sh_timeline_tile_install(const sig_result *results, size_t count, const uint
     }
     backend_log("TL tile: palette build hook installed");
     {
-        /* The sort guard (tl_palette_sort). Its absence costs the fix for A-D3
-         * only; the build hook above stands either way. */
+        /* The sort guard (tl_palette_sort). Without it only the released-string fix is lost; the build hook above
+         * stands either way. */
         const sig_result *site = clean_result(results, count, "SnapPaletteSortCall");
         const unsigned char *target = site ? sh_timeline_tile_sort_target((const unsigned char *)site->addr + PALETTE_SORT_CALL_OFF) : NULL;
         void *st = target ? hook_prepare_rip_lea((void *)target, (void *)tl_palette_sort, PALETTE_SORT_STOLEN,
@@ -635,16 +610,9 @@ int sh_timeline_tile_install(const sig_result *results, size_t count, const uint
     return 1;
 }
 
-/* A runtime rebuild of the live editor palette, shaped like the engine's own
- * callers of the builder (snaphak-re mod-system-reinstatement lane R3,
- * section 3): process heap 0 is entered and verified, so the new array, rows
- * and strings survive the Play transition that frees the ambient map heap;
- * the detour then runs pending registrations inside that scope, the builder
- * with a NULL progress object (guarded in the builder), and the cache resets
- * after it. The module palette (editor+0x206c0) is not rebuilt; whether it
- * keeps entity-row pointers is an open trace. Main thread only, from a point
- * where no native frame is iterating the palette (the caller checks the
- * thread). */
+/* Rebuild the live editor palette like the engine's builder callers, inside verified process heap 0 so it
+ * survives the Play transition that frees the map heap; pending registrations run in that scope (NULL progress
+ * object), then the cache resets. The module palette (editor+0x206c0) is untouched; main thread only. */
 void *sh_timeline_tile_palette(void)
 {
     return g_built_palette;

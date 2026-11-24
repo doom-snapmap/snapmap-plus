@@ -1,9 +1,6 @@
-/* sdk_runtime.c -- the Graphics SDK's files as the server holds them, for the script calls that play them
- * (script_api_common.h sh_script_sdk_runtime): an effect's emitter, an environment's.
- *
- * A call opens the mod's fx or env decl through the server (sh_modserve_open), which compiles it the way the engine
- * will read it (sdk.h) and so registers everything it derives before the spawn asks for it; the compiled text's first
- * line says whether it is an SDK file (modeffect.h SH_EFFECT_MARK, modenv.h SH_ENV_MARK). */
+/* sdk_runtime.c -- the Graphics SDK's files as the server holds them, for script calls that play an effect's or
+ * environment's emitter (script_api_common.h sh_script_sdk_runtime). A call opens the fx or env decl through
+ * sh_modserve_open, which compiles it (sdk.h); the compiled text's first line marks an SDK file. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>

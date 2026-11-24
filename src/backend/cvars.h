@@ -3,10 +3,8 @@
 #ifndef BACKEND_CVARS_H
 #define BACKEND_CVARS_H
 
-/* Register each row once, then insert it into the full lookup list and hash.
- * Never rerun the engine static registration pass or grow its tables here.
- * A missing cvar_register returns 0; a missing module_base skips lookup insertion.
- * Return the number registered, which may exceed the number made findable. */
+/* Registers each row once, then inserts it into the full lookup list and hash without growing engine tables.
+ * Returns the number registered (0 without cvar_register); a missing module_base skips lookup insertion. */
 int sh_cvars_install(void *cvar_register, const void *module_base);
 
 /* Indices match the cvars.c table and select live values below. */

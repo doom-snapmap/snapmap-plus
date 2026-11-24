@@ -1,10 +1,6 @@
-/* Bake per-instance navigation from map data or a current editor snapshot.
- *
- * Every refusal is as narrow as the engine allows: one unreadable box drops
- * that box (nav_regions), one module copy that cannot be baked keeps its
- * shipped navigation, and one demon class that cannot be baked leaves the
- * other two classes of that copy alone. Each outcome carries a full reason for
- * the log and sh_navmesh and a short one for the toast and View menu. */
+/* Bake per-instance navigation from map data or a current editor snapshot. A refusal is as narrow as possible (one
+ * box, one module copy, one demon class) and carries a full reason for the log and sh_navmesh and a short one for the
+ * toast and View menu. */
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
@@ -38,12 +34,9 @@ static const char *const NAV_CLASSES[] = { "monster48", "monster96", "monster128
 /* Floor climbs per box face, for sh_navmesh and the log. */
 #define BAKE_FACES_CAP  768
 
-/* What sh_navmesh lays out for one built class: the counts of the reason
- * sentence and one row per marked box. A face code is 0 for no floor edge,
- * 1-5 for why no climb was placed (blocked, no floor, edge, too high,
- * inside), BAKE_FACE_WALK for a step-high face, and 0x80 | n when n demons
- * have a floor climb onto it; dir is the compass octant of its outward
- * normal (0 = east, counter-clockwise). */
+/* Face codes in sh_navmesh rows: 0 no floor edge; 1-5 why no climb was placed (blocked, no floor, edge, too high,
+ * inside); BAKE_FACE_WALK a step-high face; 0x80 | n when n demons climb onto it. dir is the compass octant of the
+ * outward normal (0 = east, counter-clockwise). */
 #define BAKE_FACE_ROWS 512
 #define BAKE_FACE_WALK 6
 typedef struct bake_face_row { unsigned volume; unsigned char dir[4], code[4]; } bake_face_row;
@@ -60,7 +53,7 @@ typedef struct bake_detail {
 typedef struct bake_class {
     int           state;                    /* SH_NAV_CLASS_* */
     unsigned long revision;
-    int           logged;                   /* the skip was reported at this revision */
+    int           logged;                   /* the skip is logged for this revision */
     char          reason[BAKE_REASON_CAP];  /* full sentence, for the log and sh_navmesh */
     char          brief[BAKE_BRIEF_CAP];    /* short, for the toast and View menu */
     char          faces[BAKE_FACES_CAP];    /* floor climbs per box face */
@@ -87,9 +80,7 @@ static int          g_module_count, g_module_cap;
 static int          g_have_map;
 static volatile LONG g_bakes;
 static volatile LONG g_faulted;
-/* Last live-read diagnostics distinguish a missing snapshot from an empty
- * one.
- */
+/* Last live-read diagnostics: tell a missing snapshot from an empty one. */
 static int g_live_scanned = -1;   /* entity ids offered, -1 = never ran */
 static int g_live_marked;         /* marked volumes it attributed */
 static int g_live_refused;        /* the read declined to commit */
@@ -111,10 +102,8 @@ static sh_nav_bake_snapshot g_snapshot;
 static void *g_snapshot_ctx;
 static volatile LONG g_building;
 static unsigned long g_geometry_revision;
-/* A volume the bake could not place, in module-local space, so the editor can
- * draw it where it is instead of leaving the mapper to delete things one at a
- * time to find it. Capped because a refusal that marks forty is no more
- * informative than one that marks a couple of dozen. */
+/* A volume the bake could not place, in module-local space, so the editor can draw it where it stands. Capped
+ * because a refusal that marks forty is no more informative than one that marks a couple of dozen. */
 #define BAKE_MAX_REFUSED 24
 typedef struct bake_refused { float c[4][3]; } bake_refused;
 
@@ -139,11 +128,9 @@ static int g_preview_lines_last = -1;   /* -1 until the first pass runs */
 static int g_ids_unusable;              /* last reported duplicate-id state */
 static int g_instance_serving;
 
-/* The editor's placement grid, cut for the boxes: one model per copy and class
- * whose floor the bake cut (nav_overlay.h). Replaced whole when a preview bake
- * is installed and kept while the next one is on the worker, as the green
- * lines are. Its own lock: the engine reads it inside the native surface
- * rebuild and the resource open, never while holding the bake lock. */
+/* The editor's placement grid cut for the boxes: one model per copy and class whose floor was cut (nav_overlay.h).
+ * Replaced whole when a preview bake installs, and kept while the next bake runs. Its own lock: the engine reads it
+ * in the native surface rebuild and the resource open, never while holding the bake lock. */
 typedef struct bake_overlay {
     int                instance, cls;
     unsigned long long hash;               /* of the bytes; part of the private name */
@@ -166,10 +153,8 @@ static int bake_class_index(const char *cls)
     return -1;
 }
 
-/* Say what a refresh changed, so two readers that disagree can be told apart
- * by what each one produced rather than by the flicker they cause. Boxes are
- * matched by shape, not by position in the table or entity index, which two
- * reads of one map need not share. */
+/* Say what a refresh changed, so two readers that disagree can be told apart by what each produced. Boxes are
+ * matched by shape, not by position in the table or entity index, which two reads of one map need not share. */
 static void bake_log_change(const char *who, const sh_nav_map *a, const sh_nav_map *b)
 {
     char line[256];
@@ -251,7 +236,7 @@ static void bake_invalidate_sources_locked(void)
 {
     g_geometry_revision++;
     bake_preview_clear();
-    bake_cache_clear();   /* the shipped files and traversal table may differ now */
+    bake_cache_clear();   /* the shipped files and traversal table may differ */
     sh_trav_invalidate();
     if (g_have_map && !g_live_refused) bake_plan_locked();
 }
@@ -265,8 +250,7 @@ void sh_nav_bake_invalidate_sources(void)
 
 void sh_nav_bake_build_begin(void)
 {
-    /* Play is about to convert the map: bake every box that can be measured
-     * rather than none. */
+    /* Play converts the map next: bake every box that can be measured. */
     sh_nav_bake_refresh_live_partial();
     AcquireSRWLockExclusive(&g_bake_lock);
     bake_cache_begin_pass();
@@ -350,15 +334,9 @@ static int bake_enabled(void)
     return on;
 }
 
-/* ==================================================================== */
-/* the resource-name grammar                                             */
-/* ==================================================================== */
 
-/* Accepted resource names:
- *   maps/modules/<category>/<module>/<module>.aas_<class>
- *   generated/maps/modules/<category>/<module>/<module>.baas_<class>
- * The engine tries the cooked .baas_ spelling first.
- */
+/* Accepted resource names: maps/modules/<category>/<module>/<module>.aas_<class> and the cooked
+ * generated/maps/modules/<category>/<module>/<module>.baas_<class>, which the engine tries first. */
 static int bake_parse_name(const char *name, char *module, size_t module_cap,
                            char *cls, size_t cls_cap)
 {
@@ -411,9 +389,6 @@ static int bake_parse_name(const char *name, char *module, size_t module_cap,
     return 1;
 }
 
-/* ==================================================================== */
-/* per-map state                                                         */
-/* ==================================================================== */
 
 static bake_module *bake_find(const char *module)
 {
@@ -461,11 +436,8 @@ static void bake_plan_locked(void)
     }
 }
 
-/* Refresh on DOOM's main thread while the editor still owns its map, before
- * BuildAAS. Engine reflection is unsafe on the frontend worker or during map
- * conversion. Complete snapshots also refresh ownership and newly created
- * entities.
- */
+/* Refresh on DOOM's main thread while the editor still owns its map, before BuildAAS; engine reflection is unsafe
+ * on the frontend worker or during map conversion. */
 unsigned long sh_nav_bake_geometry_revision(void)
 {
     unsigned long r;
@@ -589,7 +561,7 @@ int sh_nav_bake_refresh_volumes(int *volumes)
     return done;
 }
 
-/* Say once per read what the map read left out, and why a read was refused. */
+/* Log once per read what the map read omitted, and why a read was refused. */
 static void bake_note_read(const sh_nav_map *m)
 {
     char line[256];
@@ -679,8 +651,7 @@ static void bake_refresh_live(int accept_unmeasured)
             g_read_reason = "";
             if (changed) { g_geometry_revision++; bake_preview_clear(); bake_plan_locked(); }
         } else {
-            /* An unreadable current snapshot must never reuse moved or deleted
-             * geometry from an earlier edit generation. */
+            /* An unreadable snapshot must not reuse moved or deleted geometry from an older edit. */
             if (!g_live_refused) g_geometry_revision++;
             g_live_refused = 1;
             g_module_count = 0;
@@ -704,10 +675,8 @@ static int bake_class_refused_locked(const bake_module *m, int ci)
            g_preview[slot].done && !g_preview[slot].bytes;
 }
 
-/* Private resource names are scoped by both edit revision and exact instance.
- * The engine uses them only for a temporary load, then releases the resource.
- * A class already known to refuse gets no private name, so the engine loads
- * the module's shipped navigation for it without a second attempt. */
+/* Private resource names are scoped by edit revision and exact instance, and the engine uses them for one temporary
+ * load. A class already known to refuse gets no private name, so the engine loads the shipped navigation instead. */
 int sh_nav_bake_instance_name(int instance,const char *name,char *out,size_t capacity)
 {
     char module[SH_NAVR_MODULE_CAP],cls[32];int i,ok=0,ci;
@@ -797,14 +766,10 @@ void sh_nav_bake_set_map(const char *json, size_t len)
     backend_log(line);
 }
 
-/* ==================================================================== */
-/* the bake                                                              */
-/* ==================================================================== */
 
-/* The boxes one copy offers the augmenter: its marked boxes that block demons
- * (floors), then its Block Demons boxes (walls that only block). A heap array
- * the caller frees; at most SH_AUG_MAX_PLATFORMS, with *left_out counting the
- * boxes past that ceiling and *not_floor the marked boxes demons fall through. */
+/* The boxes one copy offers the augmenter: marked boxes that block demons (floors), then Block Demons boxes (walls).
+ * Returns a heap array the caller frees, capped at SH_AUG_MAX_PLATFORMS; *left_out counts boxes past the cap and
+ * *not_floor the marked boxes demons fall through. */
 static sh_aug_platform *bake_collect_platforms(const bake_module *m, int *count,
                                                int *left_out, int *not_floor)
 {
@@ -884,9 +849,8 @@ static void bake_mark(bake_refused *list, int *count, const sh_aug_platform *pla
     (*count)++;
 }
 
-/* The whole log story of a refusal: what was offered, what had been placed,
- * which volumes made no floor and, for a route refusal, which volumes route
- * into the full area. */
+/* Log a refusal in full: what was offered, what was placed, which volumes made no floor and, for a route refusal,
+ * which volumes route into the full area. */
 static void bake_log_refusal(const char *name, const bake_outcome *o,
                              const sh_aug_platform *plats, int plat_count,
                              const sh_aug_report *rep)
@@ -939,10 +903,8 @@ static void bake_log_refusal(const char *name, const bake_outcome *o,
     }
 }
 
-/* "volume 2: N 9/9, E 9/9, S none (blocked), W 4/9; ..." -- for each box
- * that offers a top, each top edge by the compass of its outward normal in
- * module space, with the demons that have a floor climb onto it out of every
- * demon with animations, or the commonest reason none was placed. */
+/* "volume 2: N 9/9, E 9/9, S none (blocked), W 4/9; ..." -- per box top edge by compass of its outward normal in
+ * module space: demons with a floor climb onto it out of all demons with animations, or the commonest reason none. */
 static void bake_faces_text(const sh_aug_report *rep, const sh_aug_platform *plats, int count,
                             char *out, size_t cap, int *climbed, int *total, bake_detail *detail)
 {
@@ -1068,9 +1030,8 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
         /* Pieces of the cut module floor come first among the added areas;
          * the preview draws only what stands on the boxes. */
         o->first_area += (unsigned)rep.floor_pieces_added;
-        /* The loader refuses a tree past 128 deep. Rather than lose the copy,
-         * keep three quarters of the floors (every wall stays) and try again,
-         * a few times at most; what was left out is reported. */
+        /* The loader refuses a tree past 128 deep, so retry up to 6 times keeping three quarters of the floors
+         * (every wall stays); omitted floors are reported. */
         if (augmented && rep.depth_exceeded && keep > 1 && tries < 6) {
             sh_aas_free(model);
             if (!tries) depth_first = (int)rep.depth_after;
@@ -1234,8 +1195,7 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
                                   ? "nothing can climb that high"
                                   : "no traversal table, so nothing climbs")) : "",
                     tipped ? "; some volumes are walkable on a side face" : "");
-        /* What was left out so the rest fits comes first among the notes:
-         * it is the part of the result the author asked for and did not get. */
+        /* Omitted floors come first among the notes: they are what the author asked for and did not get. */
         if (depth_cut) {
             bake_append(o->reason, sizeof o->reason,
                         "; %d floor box(es) left out to keep the navigation tree within the "
@@ -1393,26 +1353,12 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
     if (subset) HeapFree(GetProcessHeap(), 0, subset);
 }
 
-/* ==================================================================== */
-/* the bake cache                                                        */
-/* ==================================================================== */
 
-/* Successful class bakes, kept across Plays, map reloads and launches so a copy
- * whose boxes have not changed is served instead of baked again. An entry is
- * keyed by what bake_run reads: the module and class, the shipped file (its
- * length and a 64-bit hash), whether a traversal table was loaded, and the
- * copy's room and boxes. Boxes are compared with sh_nav_map_same_shapes, the
- * comparison the preview uses, on a one-room map of that copy alone, so an edit
- * to one copy leaves every other copy's entries matching.
- *
- * Memory: at most BAKE_CACHE_BUDGET bytes of payloads, box tables and marks,
- * and BAKE_CACHE_MAX_ENTRIES entries. A new entry evicts the least recently
- * used ones, but never one used since the current pass began (a Play or a
- * preview gather): when everything the current pass needs does not fit, the
- * newest bake is not kept rather than evicting one this same pass serves, so
- * a map larger than the budget keeps a stable part of itself cached instead of
- * every entry pushing out the next. Refusals are not kept here; the
- * per-revision refusal memory in bake_class handles them. */
+/* Successful class bakes, kept across Plays, reloads and launches so an unchanged copy is served, not rebaked. An
+ * entry is keyed by what bake_run reads: module, class, shipped file (length and 64-bit hash), traversal table
+ * loaded, and the copy's room and boxes (sh_nav_map_same_shapes on a one-room map).
+ * Bounded by BAKE_CACHE_BUDGET bytes and BAKE_CACHE_MAX_ENTRIES; a new entry evicts the least recently used but never
+ * one used in the current pass, and refusals are not kept (bake_class remembers them per revision). */
 #define BAKE_CACHE_BUDGET      ((size_t)128 * 1024 * 1024)
 #define BAKE_CACHE_MAX_ENTRIES 1024
 
@@ -1572,7 +1518,7 @@ static void bake_cache_store(bake_cache_key *k, const bake_outcome *o)
     bake_cache_entry *e;
     size_t cost;
     if (!o->bytes || o->state == SH_NAV_CLASS_REFUSED) return;
-    if (bake_cache_find(k)) return;   /* already kept, now touched */
+    if (bake_cache_find(k)) return;   /* already kept; mark it used */
     cost = sizeof *e + o->length + sh_nav_map_bytes(&k->shapes);
     while (g_cache_count >= BAKE_CACHE_MAX_ENTRIES || g_cache_bytes + cost > g_cache_budget) {
         int i, oldest = -1;
@@ -1627,10 +1573,8 @@ static void bake_cache_store(bake_cache_key *k, const bake_outcome *o)
     g_cache_stores++;
 }
 
-/* Bake one class inline, for BuildAAS, or serve the same boxes' earlier bake.
- * Inputs are gathered here, on the thread that holds the bake lock; the
- * scratch lives on the heap, not on the loader thread's stack. Sets *reused
- * when the outcome came from the cache. */
+/* Bake one class inline, for BuildAAS, or serve the cached bake of the same boxes. Inputs are gathered on the
+ * thread holding the bake lock, with scratch on the heap; *reused is set when the cache served it. */
 static void bake_one(const char *name, const bake_module *m, int ci,
                      sh_nav_bake_reader read_shipped, bake_outcome *o, int *traversal,
                      int *reused)
@@ -1644,10 +1588,8 @@ static void bake_one(const char *name, const bake_module *m, int ci,
     *reused = 0;
 
     plats = bake_collect_platforms(m, &n, &left_out, &not_floor);
-    /* Load traversal animations lazily through the active provider;
-     * successful reads are cached for the session. Without a table, no climbs
-     * are emitted.
-     */
+    /* Traversal animations load lazily through the active provider and are cached; without a table no climbs
+     * are emitted. */
     if (n) *traversal = sh_trav_load(read_shipped);
     if (n) {
         SH_PERF_BEGIN(tr);
@@ -1713,17 +1655,10 @@ static void bake_preview_polygon(const sh_nav_instance *in,const float p[][3],in
     }
 }
 
-/* ==================================================================== */
-/* the preview bake, off the calling thread                              */
-/* ==================================================================== */
 
-/* Folding the marked volumes into a module's navigation is tens of
- * milliseconds of arithmetic on buffers we own, so it runs on a worker while
- * the frame that asked for it carries on. The two reads that touch the engine
- * -- the traversal table and the module's shipped navigation -- happen on the
- * calling thread, before the hand-off.
- *
- * The cost is that the green trails a change by a frame or two. */
+/* Folding marked volumes into a module's navigation takes tens of milliseconds, so it runs on a worker and the green
+ * trails a change by a frame or two. The two engine-touching reads (traversal table, shipped navigation) happen on
+ * the calling thread before the hand-off. */
 
 typedef struct preview_task {
     int              slot;                   /* index into g_modules and g_preview */
@@ -1795,9 +1730,8 @@ static void preview_batch_free(preview_batch *b)
     HeapFree(GetProcessHeap(), 0, b);
 }
 
-/* The placement grid of one task's classes, cut where its bakes cut the floor.
- * A class that was not cut, or whose model or navigation is missing, keeps
- * its stock model. */
+/* The placement grid of one task's classes, cut where its bakes cut the floor; an uncut class, or one with no model
+ * or navigation, keeps its stock model. */
 static void preview_overlays(preview_task *t)
 {
     int ci;
@@ -1889,8 +1823,7 @@ static DWORD WINAPI preview_worker(LPVOID unused)
     }
 }
 
-/* 1 once a worker exists. A machine that refuses the thread bakes inline, which
- * is what this did before, so the preview still works. */
+/* 1 once a worker exists. A machine that refuses the thread bakes inline, so the preview still works. */
 static int preview_worker_ready(void)
 {
     if (InterlockedCompareExchange(&g_pv_ready, 0, 0) == 2) return g_pv_thread != NULL;
@@ -2080,10 +2013,8 @@ static void bake_overlay_replace(bake_overlay *next, int count)
 
 void sh_nav_bake_overlay_clear(void) { bake_overlay_replace(NULL, 0); }
 
-/* A map is being parsed: whatever was cut belongs to the last one, even when
- * the engine reuses the same map object. Advance the geometry revision so a
- * preview batch gathered from the last map is discarded when it finishes, and
- * the next preview pass bakes the map that is opening. */
+/* A map is being parsed, so earlier cuts belong to the previous map even if the engine reuses the map object.
+ * Advance the geometry revision to discard in-flight preview batches and rebake for the opening map. */
 void sh_nav_bake_map_opened(void)
 {
     AcquireSRWLockExclusive(&g_bake_lock);
@@ -2205,9 +2136,8 @@ static void preview_install_overlays(preview_batch *b)
     bake_overlay_replace(next, next ? n : 0);
 }
 
-/* Move a finished batch into the preview cache. Called with the bake lock
- * held, and only for the geometry it was gathered from -- a batch overtaken by
- * a later edit describes a map that no longer exists. */
+/* Move a finished batch into the preview cache, with the bake lock held and only for the geometry it was gathered
+ * from. */
 static void preview_install(preview_batch *b)
 {
     int i, served = 0;
@@ -2237,7 +2167,7 @@ static void preview_install(preview_batch *b)
         pc->traversal = t->traversal;
         pc->done = 1;
         pc->state = t->out.bytes ? t->out.state : SH_NAV_CLASS_REFUSED;
-        t->out.bytes = NULL;   /* the cache owns it now */
+        t->out.bytes = NULL;   /* the cache owns it */
         pc->refused = bake_copy_marks(t->out.refused, t->out.refused_count);
         pc->refused_count = pc->refused ? t->out.refused_count : 0;
         pc->partial = bake_copy_marks(t->out.partial, t->out.partial_count);
@@ -2309,7 +2239,7 @@ static int preview_prepare_locked(sh_nav_bake_reader read_shipped)
         if (!b) return -1;
         if (preview_worker_ready()) {
             EnterCriticalSection(&g_pv_lock);
-            preview_batch_free(g_pv_queued);   /* an older batch is superseded */
+            preview_batch_free(g_pv_queued);   /* the older batch is superseded */
             g_pv_queued = b;
             LeaveCriticalSection(&g_pv_lock);
             g_pv_inflight = b->revision;
@@ -2477,18 +2407,15 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
         if(instance>=0 && read_shipped) *out_bytes=read_shipped(name,out_len);
         return *out_bytes!=NULL;
     }
-    /* Do not inspect live entities here. This runs inside BuildAAS after
-     * editor-to-build conversion has started; entities may have null defsub
-     * fields. Consume the plan captured by sh_nav_bake_refresh_live before
-     * conversion.
-     */
+    /* Live entities are not read here: this runs inside BuildAAS after conversion began and entities may have null
+     * defsub fields. It consumes the plan captured by sh_nav_bake_refresh_live. */
     m = NULL;
     if(instance>=0) {
         if(revision==g_geometry_revision)
             for(i=0;i<g_module_count;i++)if(g_modules[i].instance==instance&&
                 !strcmp(g_modules[i].module,module)){m=&g_modules[i];break;}
     } else {
-        /* Legacy callers may serve a name only when it identifies one instance. */
+        /* A name with no instance id is served only when the module has exactly one instance. */
         if(sh_nav_regions_nth_instance(&g_map,module,1)<0)m=bake_find(module);
     }
     if (m && m->ok) {

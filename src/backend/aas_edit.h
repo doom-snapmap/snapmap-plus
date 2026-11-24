@@ -1,10 +1,6 @@
-/* Mutable AAS2 3.29 payloads: parse, append records, and serialize.
- *
- * The file has a 30-byte header, 364-byte settings block, and 22 count-
- * prefixed lumps of fixed-size big-endian records. Each lump owns its bytes
- * so appends do not move other lumps. Untouched records are copied verbatim
- * for byte-identical round trips.
- */
+/* Mutable AAS2 3.29 payloads: parse, append records, and serialize. The file is a 30-byte header, a 364-byte
+ * settings block and 22 count-prefixed lumps of fixed-size big-endian records; each lump owns its bytes, and
+ * untouched records are copied verbatim for byte-identical round trips. */
 #ifndef SNAPMAP_PLUS_AAS_EDIT_H
 #define SNAPMAP_PLUS_AAS_EDIT_H
 
@@ -68,12 +64,8 @@ static const sh_aas_lump_def SH_AAS_LUMP_DEFS[SH_AAS_L__COUNT] = {
 
 typedef struct sh_aas sh_aas;
 
-/* ---- lifetime ---------------------------------------------------------- */
-
-/* Parse the header, lump bounds and count relationships. Returns NULL and
- * fills err on failure. Cross-lump indices and BSP integrity require
- * sh_navmesh_validate_aas after editing.
- */
+/* Parses the header, lump bounds and count relationships. Returns NULL and fills err on failure; cross-lump
+ * indices and BSP integrity need sh_navmesh_validate_aas after editing. */
 sh_aas *sh_aas_parse(const unsigned char *bytes, size_t len, char *err, size_t err_cap);
 
 void sh_aas_free(sh_aas *a);
@@ -89,11 +81,9 @@ size_t sh_aas_serialized_size(const sh_aas *a);
 /* The largest payload parse and write accept: SH_AAS_MAX_BAKE_PAYLOAD. */
 size_t sh_aas_payload_cap(void);
 #ifdef SH_AUG_TESTING
-/* Lower the cap so a test reaches it cheaply; 0 restores it. Returns the old one. */
+/* Lower the cap so a test reaches it cheaply; 0 restores it. Returns the previous one. */
 size_t sh_aas_test_set_payload_cap(size_t cap);
 #endif
-
-/* ---- generic lump access ----------------------------------------------- */
 
 unsigned sh_aas_count(const sh_aas *a, int lump);
 unsigned sh_aas_record_size(int lump);
@@ -110,8 +100,6 @@ int sh_aas_append(sh_aas *a, int lump, unsigned n, unsigned *out_first);
 /* Remove a tail after compaction. Does not repair cross-lump references. */
 int sh_aas_truncate(sh_aas *a, int lump, unsigned count);
 
-/* ---- big-endian field helpers ------------------------------------------ */
-
 uint32_t sh_aas_get_u32(const unsigned char *rec, unsigned off);
 uint16_t sh_aas_get_u16(const unsigned char *rec, unsigned off);
 int32_t  sh_aas_get_i32(const unsigned char *rec, unsigned off);
@@ -124,10 +112,8 @@ void sh_aas_put_i32(unsigned char *rec, unsigned off, int32_t v);
 void sh_aas_put_i16(unsigned char *rec, unsigned off, int16_t v);
 void sh_aas_put_f32(unsigned char *rec, unsigned off, float v);
 
-/* Settings occupy 364 bytes at SH_AAS_HEADER_BYTES. Offsets below are
- * relative to that block. Agent bounds determine clearance; maxStepHeight
- * limits walk links.
- */
+/* Settings occupy 364 bytes at SH_AAS_HEADER_BYTES; offsets below are relative to that block. Agent bounds
+ * set clearance and maxStepHeight limits walk links. */
 float sh_aas_setting_f32(const sh_aas *a, unsigned off);
 /* An integer setting, such as a tt_* travel time. */
 uint32_t sh_aas_setting_u32(const sh_aas *a, unsigned off);

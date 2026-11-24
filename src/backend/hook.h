@@ -14,34 +14,24 @@ void *hook_prepare(void *target, void *detour, size_t stolen);
 /* Why the most recent preparation returned NULL ("none" after a success). */
 const char *hook_last_failure(void);
 
-/* Like hook_prepare, but expand one caller-verified 64-bit RIP-relative LEA
- * at lea_offset into MOV reg,imm64. All other stolen instructions must remain
- * whole and position-independent. Reject any other opcode/addressing form. */
+/* Like hook_prepare, but expand one caller-verified RIP-relative LEA at lea_offset into MOV reg,imm64.
+ * Other stolen instructions must be whole and position-independent. */
 void *hook_prepare_rip_lea(void *target, void *detour, size_t stolen, size_t lea_offset);
 
-/* Like hook_prepare_rip_lea, for one caller-verified 64-bit load
- * MOV reg,[RIP+disp32] at load_offset (a security-cookie read, for example):
- * it becomes MOV reg,imm64 then MOV reg,[reg]. RSP, RBP, R12 and R13 as the
- * destination are refused. */
+/* Like hook_prepare_rip_lea, for one MOV reg,[RIP+disp32] load at load_offset (a security-cookie read):
+ * it becomes MOV reg,imm64 then MOV reg,[reg]. RSP, RBP, R12 and R13 destinations are refused. */
 void *hook_prepare_rip_load(void *target, void *detour, size_t stolen, size_t load_offset);
 
-/* Expand one caller-verified E8 rel32 call to an indirect absolute call without
- * consuming a scratch register. The callee returns past the inline address.
- * Other stolen instructions must be whole and position-independent; calls back
- * into the stolen interval are refused. Useful for native stack-probe prologues. */
+/* Expand one caller-verified E8 rel32 call at call_offset to an indirect absolute call that uses no scratch
+ * register; the callee returns past the inline address. A call back into the stolen interval is refused. */
 void *hook_prepare_relative_call(void *target, void *detour, size_t stolen, size_t call_offset);
 
-/* Expand one caller-verified conditional jump at jcc_offset, near (0F 8x
- * rel32) or short (7x rel8), into the inverse short jump over an absolute
- * jump to the same target. Other stolen instructions must be whole and
- * position-independent; a jump into the stolen interval is refused. For a
- * prologue that opens with a null test or a bit test. */
+/* Expand one caller-verified near (0F 8x rel32) or short (7x rel8) conditional jump at jcc_offset into the
+ * inverse short jump over an absolute jump to the same target. A jump into the stolen interval is refused. */
 void *hook_prepare_relative_jcc(void *target, void *detour, size_t stolen, size_t jcc_offset);
 
-/* Publish the trampoline in the detour's original callback BEFORE committing.
- * The prologue is written with every other thread suspended and outside it
- * (code_patch). Commit never releases ownership. A failed commit must be
- * removed or retried; FAIL_ROLLBACK requires removal before another commit. */
+/* Publish the trampoline in the detour's original callback BEFORE committing; the prologue is written with
+ * every other thread suspended and outside it. A failed commit is removed or retried (FAIL_ROLLBACK: removed). */
 sh_patch_status hook_commit(void *tramp);
 
 /* True only after a successful commit and before any attempted removal. */

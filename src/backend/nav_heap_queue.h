@@ -32,15 +32,11 @@ static int sh_nav_heap_cost_order(const void *a, const void *b)
     return (int)x->index - (int)y->index;
 }
 
-/* The engine sizes this complete binary tree for the cluster's reach/portal
- * count, but queues another copy when a candidate improves. Its push has no
- * capacity check. Normally leave its ordering untouched. At capacity, remove
- * redundant copies and incorporate the pending improvement in place.
- *
- * Indices are one-based and cannot exceed the number of slots. Therefore a
- * full queue either already contains the pending index or contains duplicates:
- * coalescing always fits every distinct candidate without allocating or
- * changing the engine list's ownership, count or capacity. */
+/* The engine sizes this binary heap for the cluster's reach/portal count but queues another copy when a candidate
+ * improves, and its push has no capacity check. At capacity, redundant copies are removed and the pending improvement
+ * is merged in place. Indices are one-based and at most the slot count, so a full queue already holds the pending
+ * index or has duplicates: coalescing fits every distinct candidate without allocating or changing the list's
+ * ownership, count or capacity. */
 static int sh_nav_heap_admit(sh_nav_heap_list *list, sh_nav_heap_node pending)
 {
     sh_nav_heap_node *nodes;

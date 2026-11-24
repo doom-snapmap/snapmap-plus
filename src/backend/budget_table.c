@@ -4,8 +4,6 @@
 #include <stdio.h>
 #include "budget_table.h"
 
-/* ------------------------------------------------------------ text */
-
 void sh_bt_buf_free(sh_bt_buf *b)
 {
     if (!b) return;
@@ -69,8 +67,6 @@ void sh_bt_put_block(sh_bt_buf *b, const int block[SH_BT_FIELDS])
     bt_putn(b, "]", 1);
 }
 
-/* ------------------------------------------------------------ arithmetic */
-
 void sh_bt_base(int block[SH_BT_FIELDS])
 {
     memset(block, 0, sizeof(int) * SH_BT_FIELDS);
@@ -122,8 +118,6 @@ void sh_bt_leaf(const char *decl_name, char *out, size_t cap)
     out[n] = 0;
 }
 
-/* ------------------------------------------------------------ table */
-
 void sh_bt_table_init(sh_bt_table *t)
 {
     memset(t, 0, sizeof *t);
@@ -147,8 +141,8 @@ static size_t bt_hash(const char *s)
     return h;
 }
 
-/* Insert key (with a one-letter namespace) into the set. Returns 1 when it
- * was new, 0 when present or out of memory. */
+/* Inserts key (with a one-letter namespace) into the set. Returns 1 when it is added, 0 when already present or
+ * out of memory. */
 static int bt_seen_insert(sh_bt_table *t, char ns, const char *key)
 {
     size_t len = strlen(key), i, h;
@@ -368,9 +362,8 @@ char *sh_bt_error_json(const char *message, unsigned generation)
 #define LAYERS_SOUND_OFF    0x8c
 #define LAYERS_AUTOVIEW_OFF 0x94
 #define NAME_CAP            260
-/* idDeclSnapEditorEntity::renderInfo (snapEntityRenderInfo_t), the model the
- * editor draws for a row: renderModelName is an idStr whose data pointer is at
- * +0x10, size an idVec3 at +0x94. */
+/* idDeclSnapEditorEntity::renderInfo (snapEntityRenderInfo_t), the model the editor draws for a row:
+ * renderModelName is an idStr whose data pointer is at +0x10, size an idVec3 at +0x94. */
 #define SEDEF_RENDERINFO_OFF 0x1e0
 #define RI_MODEL_DATA_OFF    0x10
 #define RI_SIZE_OFF          0x94
@@ -395,9 +388,8 @@ typedef struct bt_row_models { bt_row_model *row; int count, cap, with_model; } 
 static bt_row_models g_rows;
 
 static volatile LONG g_dirty = 1;
-/* When the editor frame last read the usage block. The frame stops when the
- * player leaves the editor, so a reading older than BT_USAGE_FRESH_MS belongs
- * to a map that is no longer open and is not reported. */
+/* Time of the editor frame's last read of the usage block. The frame stops when the player leaves the editor, so a
+ * reading older than BT_USAGE_FRESH_MS is not reported. */
 #define BT_USAGE_FRESH_MS 1000u
 static volatile LONG64 g_usage_at;
 static void *g_built_editor;
@@ -446,9 +438,8 @@ static char *bt_dup(const char *s)
     return d;
 }
 
-/* Record the row that owns `inherit` and its renderInfo model and size. A
- * model string that is not plain path text is dropped; the caller then falls
- * back to the installed sedef text. */
+/* Records the row that owns `inherit` and its renderInfo model and size. A model string that is not plain path text
+ * is dropped. */
 static void bt_rows_add(bt_row_models *rows, const char *inherit, const char *name,
                         const unsigned char *sedef)
 {
@@ -512,7 +503,7 @@ void sh_budget_table_palette_rebuilt(void)
     InterlockedExchange(&g_dirty, 1);
 }
 
-/* The decl registry, as timeline_tile.c decodes it from its anchor. */
+/* Decodes the decl registry from its anchor. */
 static void *bt_registry(void)
 {
     int32_t displacement;
@@ -527,8 +518,8 @@ static void *bt_registry(void)
     return r;
 }
 
-/* snaplayers/layers.decl, the one idDeclSnapLayers the editor reads through
- * its type's first decl. Its reflection has no shift on this build. */
+/* Reads the masks of snaplayers/layers.decl, the one idDeclSnapLayers the editor reads through its type's first
+ * decl. */
 static int bt_layers(unsigned *auto_view, unsigned *sound)
 {
     void *r, *manager, *decl = NULL;
@@ -562,8 +553,8 @@ static void bt_sum_templates(const unsigned char *list, unsigned filter, int vie
         int mask = 0, l[SH_BT_FIELDS];
         if (!rd_ptr(t, &sedef) || !sedef || !rd_i32(t + TEMPLATE_MASK_OFF, &mask)) continue;
         if (!rd_block((const unsigned char *)sedef + SEDEF_LIMITS_OFF, l)) continue;
-        /* VIEW templates become room entities, which the entity rule counts
-         * with the network-static byte; GAME templates never subtract it. */
+        /* VIEW templates become room entities, counted with the network-static byte; GAME templates never subtract
+         * it. */
         if (view && t[ENTRY_STATIC_OFF]) l[SH_BT_NETWORK] = 0;
         sh_bt_parts_add(parts, (unsigned)mask, view ? SH_BT_PART_VIEW : SH_BT_PART_GAME, l);
         if ((unsigned)mask & filter) sh_bt_add(out, l);

@@ -7,8 +7,6 @@
 #include "mp_json.h"
 #include "../common/text.h"
 
-/* ------------------------------------------------------------------ names */
-
 static char ce_fold(char c)
 {
     if (c == '\\') return '/';
@@ -44,7 +42,7 @@ int sh_ce_under_mods(const char *clip)
     return ce_prefix(clip, SH_CE_CLIP_ROOT, SH_CE_CLIP_ROOT_LEN);
 }
 
-/* `name` is <root><salt>/<something>. */
+/* Tests that `name` is <root><salt>/<something>. */
 static int ce_under(const char *name, const char *root, size_t root_len, const char *salt)
 {
     size_t n = salt ? strlen(salt) : 0;
@@ -68,8 +66,6 @@ int sh_ce_decl_under_mods(const char *name)
 {
     return ce_prefix(name, SH_CE_DECL_ROOT, SH_CE_DECL_ROOT_LEN);
 }
-
-/* ------------------------------------------------------------ md6Def text */
 
 enum { T_END, T_WORD, T_STR, T_LB, T_RB, T_OTHER };
 typedef struct ce_tok { int k; const char *p; size_t n; } ce_tok;
@@ -137,7 +133,7 @@ int sh_ce_md6_read(const char *text, size_t len, sh_ce_md6 *out)
     size_t pos = 0;
     int depth = 0, in_init = 0, in_events = 0, cap = 0;
     ce_tok prev = { T_END, NULL, 0 }, prev2 = { T_END, NULL, 0 };
-    /* the anim block being read: its name and whether an event row was seen */
+    /* The anim block being read: its name, and a flag for an event row seen. */
     const char *clip = NULL;
     size_t clip_n = 0;
     int clip_depth = -1, clip_rows = 0;
@@ -148,7 +144,7 @@ int sh_ce_md6_read(const char *text, size_t len, sh_ce_md6 *out)
         if (t.k == T_END) break;
         if (t.k == T_LB) {
             depth++;
-            /* `init {` and `events {` directly inside the decl's own braces */
+            /* `init {` and `events {` directly inside the decl's own braces. */
             if (depth == 2 && ce_word(&prev, "init")) in_init = 1;
             if (depth == 2 && ce_word(&prev, "events")) in_events = 1;
             if (depth == 3 && in_events && prev.k == T_STR && ce_word(&prev2, "anim")) {
@@ -183,8 +179,6 @@ int sh_ce_md6_read(const char *text, size_t len, sh_ce_md6 *out)
     return 1;
 }
 
-/* ------------------------------------------------------------- the build */
-
 typedef struct ce_buf { char *p; size_t n, cap; int oom; } ce_buf;
 
 static void ce_put(ce_buf *b, const char *s, size_t n)
@@ -206,7 +200,7 @@ static void ce_put(ce_buf *b, const char *s, size_t n)
 
 static void ce_puts(ce_buf *b, const char *s) { ce_put(b, s, strlen(s)); }
 
-/* A JSON string; names carry no quote or backslash (the entries are checked before), but escape them anyway. */
+/* Writes a JSON string, escaping quote and backslash. */
 static void ce_put_str(ce_buf *b, const char *s)
 {
     ce_put(b, "\"", 1);
@@ -328,11 +322,9 @@ char *sh_ce_build_registry(const char *salt, const char *const *names, int n, sh
     return out.p;
 }
 
-/* ---------------------------------------------------------- the registry */
-
 static char *ce_dup(const char *s) { return s ? ce_ndup(s, strlen(s)) : NULL; }
 
-/* A JSON string body as the builder writes names (no escapes); NULL for anything else. */
+/* Returns a JSON string's text when it has no escapes, NULL for anything else. */
 static const char *ce_plain(const mpj *v)
 {
     if (!v || v->type != MPJ_STR || !v->text || !v->text[0] || strchr(v->text, '\\')) return NULL;
@@ -440,9 +432,7 @@ void sh_ce_registry_free(sh_ce_registry *r)
     memset(r, 0, sizeof *r);
 }
 
-/* ------------------------------------------------------------- the chain */
-
-/* 1 when `target` is `from` or one of its ancestors; -1 when a parent could not be read. */
+/* Returns 1 when `target` is `from` or one of its ancestors, -1 when a parent could not be read. */
 static int ce_reaches(const void *from, const void *target, sh_ce_parent_fn parent, void *context)
 {
     int hops;
@@ -462,7 +452,7 @@ int sh_ce_in_chain(const void *carrier, const void *model, sh_ce_parent_fn paren
     if (!carrier || !model || !parent) return 0;
     r = ce_reaches(carrier, model, parent, context);
     if (r) return r > 0;
-    /* `model` inherits the carrier's base: a body below the one the carrier names */
+    /* `model` inherits the carrier's base: a body below the one the carrier names. */
     if (!parent(context, carrier, &base) || !base) return 0;
     return ce_reaches(model, base, parent, context) > 0;
 }

@@ -12,10 +12,8 @@
 #include "snapmap_plus_iface.h"
 #include "../common/text.h"
 
-/* One published buffer, consumed through iface ext 13. A shared lock
- * serializes publication, probing, consumption and invalidation; release the
- * buffer after its successful copy.
- */
+/* One published buffer, consumed through iface ext 13; a shared lock serializes publication, probing,
+ * consumption and invalidation, and the buffer is released after its successful copy. */
 static char          *g_preview_b64   = NULL;
 static volatile LONG  g_preview_ready = 0;
 static SRWLOCK        g_preview_lock  = SRWLOCK_INIT;
@@ -92,7 +90,7 @@ void sh_preview_cancel(void)
     discarded = g_preview_b64;
     g_preview_b64 = NULL;
     InterlockedExchange(&g_preview_ready, 0);
-    InterlockedIncrement(&g_request_gen);   /* any producer already decoding now publishes stale */
+    InterlockedIncrement(&g_request_gen);   /* a producer already decoding publishes stale */
     ReleaseSRWLockExclusive(&g_preview_lock);
     if (discarded) HeapFree(GetProcessHeap(), 0, discarded);
     free(request);
@@ -173,10 +171,8 @@ int sh_preview_publish(unsigned long generation, const unsigned char *rgba, unsi
     if (!generation || !rgba || w == 0 || h == 0) return SH_PREVIEW_FAILED;
 
     {
-        /* Use RGBA PNG so icons and decals retain their alpha channel. Encode
-         * zlib with stored DEFLATE blocks of at most 65535 bytes and an
-         * Adler-32; each PNG chunk also has a CRC-32.
-         */
+        /* RGBA PNG keeps alpha: zlib with stored DEFLATE blocks of at most 65535 bytes and an Adler-32, and a CRC-32
+         * per PNG chunk. */
         if ((size_t)w > ((size_t)-1 - 1u) / 4u) return SH_PREVIEW_FAILED;
         const size_t raw_stride = (size_t)w * 4u + 1u;        /* +1 = per-scanline filter byte */
         if ((size_t)h > (size_t)-1 / raw_stride) return SH_PREVIEW_FAILED;

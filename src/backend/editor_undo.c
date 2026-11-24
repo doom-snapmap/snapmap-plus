@@ -169,7 +169,7 @@ int sh_editor_undo_clear(int probe)
 }
 
 /* EditorCommitEdit ends with editor vt+0x160(editor, 1), the call that marks
- * the open map modified (docs: undo snapshots share entity holders). */
+ * the open map modified. */
 #define EU_VT_MARK_MODIFIED 0x160
 typedef void (*eu_mark_fn)(void *editor, int modified);
 

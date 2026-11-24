@@ -1,11 +1,5 @@
-/* Editable AAS payload storage. Header, settings and lump records remain in
- * their original big-endian form, preserving every untouched byte. Per-lump
- * allocations make appends local; serialization concatenates them.
- *
- * Parsing checks the file layout and count relationships. Cross-lump indices
- * and BSP integrity belong to sh_navmesh_validate_aas, which must validate
- * serialized output before the engine receives it.
- */
+/* Editable AAS payload storage: header, settings and lump records stay big-endian, one allocation per lump.
+ * Parsing checks only layout and counts; sh_navmesh_validate_aas checks indices and BSP integrity. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdarg.h>
@@ -17,13 +11,9 @@
 
 #define AAS_LUMPS SH_AAS_LUMP_DEFS   /* aas_edit.h */
 
-/* Settings: u32 type, three length-prefixed strings, then 39 big-endian
- * words. Shipped strings each occupy 64 bytes: 4 + 3*(4+64) + 39*4 = 364.
- * Words 0..5 hold agent mins/maxs; word 12 is maxStepHeight.
- *
- * The word base is derived from the string lengths. If they leave an invalid
- * word span, the reader uses the shipped offset, 208.
- */
+/* Settings: u32 type, three length-prefixed strings, then 39 big-endian words; shipped strings occupy 64 bytes
+ * each (4 + 3*(4+64) + 39*4 = 364). Words 0..5 are agent mins/maxs and word 12 is maxStepHeight. The word base
+ * derives from the string lengths, and an invalid span falls back to the shipped offset 208. */
 #define AAS_SET_WORDS_OFF   208u
 #define AAS_SET_WORD_COUNT  39u
 #define AAS_SET_W_BBOX      0u      /* words 0..2 mins, 3..5 maxs */
@@ -70,10 +60,6 @@ static unsigned aas_lump_cap(int lump)
     return (lump == SH_AAS_L_AREAS) ? (unsigned)SH_AAS_MAX_AREAS
                                     : (unsigned)SH_AAS_MAX_RECORDS;
 }
-
-/* ==================================================================== */
-/* big-endian field helpers                                              */
-/* ==================================================================== */
 
 uint32_t sh_aas_get_u32(const unsigned char *rec, unsigned off)
 {
@@ -140,10 +126,6 @@ void sh_aas_put_f32(unsigned char *rec, unsigned off, float v)
     memcpy(&bits, &v, sizeof bits);
     sh_aas_put_u32(rec, off, bits);
 }
-
-/* ==================================================================== */
-/* lifetime                                                              */
-/* ==================================================================== */
 
 void sh_aas_free(sh_aas *a)
 {
@@ -297,10 +279,6 @@ unsigned char *sh_aas_write(const sh_aas *a, size_t *out_len)
     return out;
 }
 
-/* ==================================================================== */
-/* generic lump access                                                   */
-/* ==================================================================== */
-
 unsigned sh_aas_count(const sh_aas *a, int lump)
 {
     if (!a || !aas_lump_ok(lump)) return 0;
@@ -372,10 +350,6 @@ int sh_aas_append(sh_aas *a, int lump, unsigned n, unsigned *out_first)
     L->count = (unsigned)want;
     return 1;
 }
-
-/* ==================================================================== */
-/* the settings block                                                    */
-/* ==================================================================== */
 
 /* Where the 39 words begin: past the u32 type and the three length-prefixed
  * strings. See the layout note at the top of this file for the fallback. */

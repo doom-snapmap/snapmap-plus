@@ -1,7 +1,6 @@
-/* Optional higher-precision matrix, color, and curve overrides for cs_dontuse.
- * Matrix and curve operations use f64 rather than the original x87 precision;
- * color packing keeps its round-half-up behavior. Hooks replace whole functions
- * and are disabled until the command enables them. */
+/* Optional higher-precision matrix, color and curve overrides for cs_dontuse: matrix and curve math use f64
+ * instead of x87, and color packing keeps round-half-up. Hooks replace whole functions and stay disabled
+ * until the command enables them. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -14,8 +13,6 @@
 #include "patch.h"
 #include "signatures.h"
 #include "backend_log.h"
-
-/* Engine math overrides. */
 
 /* Row-major out = A * B, accumulated in double and stored as float. */
 void sh_algo_matmul(const float *A, const float *B, float *out)
@@ -82,7 +79,6 @@ int sh_algo_inverse(const float *M, float *out)
              - m[4]*m[3]*m[9] - m[8]*m[1]*m[7] + m[8]*m[3]*m[5];
     inv[15] =  m[0]*m[5]*m[10] - m[0]*m[6]*m[9] - m[4]*m[1]*m[10]
              + m[4]*m[2]*m[9] + m[8]*m[1]*m[6] - m[8]*m[2]*m[5];
-
 
     double det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
 
@@ -209,9 +205,8 @@ static double curve_read_time(const uint8_t *times, int n, int idx, int edgeMode
     float tl = 0.0f; curve_rd_f32(times, n - 1, &tl); return (double)tl;
 }
 
-/* The curve's edgeMode (+0x218) and period (+0x21c) are not yet confirmed live on
- * build 13954591. A curve whose fields break the engine's own invariants is handed
- * back to the native evaluator (the detour's trampoline) and logged once. */
+/* A curve whose edgeMode (+0x218) or period (+0x21c) breaks the engine's invariants is handed back to the
+ * native evaluator (the detour's trampoline) and logged once. */
 static void *g_tramp_curve;
 static volatile LONG g_curve_shape_logged;
 static int curve_shape_ok(int count, int edge_mode, float period)
@@ -307,7 +302,6 @@ float sh_algo_curveeval(const void *c, float t, uint8_t mode)
     if (!curve_rd_f32(times, 0, &t0))             return 0.0f;
     if (!curve_rd_f32(times, count - 1, &tlast))  return 0.0f;
 
-
     if (mode0 != 0) {
         if (t <= t0) {
             float v0 = 0.0f; curve_rd_f32(values, 0, &v0); return v0;
@@ -335,7 +329,6 @@ float sh_algo_curveeval(const void *c, float t, uint8_t mode)
     curve_rd_f32(values, idx,     &v_cur);
     curve_rd_f32(values, idx - 1, &v_prev);
 
-
     if (mode1 != 0)
         return v_prev;
 
@@ -354,27 +347,21 @@ float sh_algo_curveeval(const void *c, float t, uint8_t mode)
     return (float)res;
 }
 
-/* Runtime toggle. */
-
-
 #define ALGO_SIG_MATMUL  "AlgoMatMul"
 #define ALGO_SIG_INVERSE "AlgoInverse"
 #define ALGO_SIG_PACK    "AlgoPackRGBA"
 #define ALGO_SIG_CURVE   "AlgoCurveEval"
 
-/* The stolen window ends on the first decoded instruction boundary at or past
- * the 14-byte jump. MatMul, Inverse and PackRGBA replace whole functions and
- * never run their trampolines, so a RIP-relative operand in their window is
- * tolerated. CurveEval falls back to its trampoline for unsupported curve
- * shapes, so its window must replay verbatim: no RIP-relative or relative
- * branch instruction may fall inside it. */
+/* The stolen window ends at the first decoded instruction boundary at or past the 14-byte jump. MatMul,
+ * Inverse and PackRGBA never run their trampolines, so a RIP-relative operand in their window is tolerated;
+ * CurveEval falls back to its trampoline, so its window must replay verbatim (no RIP-relative or relative
+ * branch inside it). */
 #define ALGO_JUMP_BYTES 14
 #define ALGO_STOLEN_MAX 32
 
 static const uint8_t *g_algo_module_base = NULL;
 static volatile LONG  g_algo_installed   = 0;
 static int            g_algo_on          = 0;
-
 
 static void *g_tramp_matmul  = NULL;
 static void *g_tramp_inverse = NULL;
@@ -398,7 +385,6 @@ typedef void     (*matmul_fn) (const float *, const float *, float *);
 typedef int      (*inverse_fn)(const float *, float *);
 typedef uint32_t (*pack_fn)   (const float *);
 typedef float    (*curve_fn)  (const void *, float, uint8_t);
-
 
 static void *algo_prepare_one(const char *name, void *hook, int replays)
 {
@@ -435,7 +421,6 @@ static void *algo_prepare_one(const char *name, void *hook, int replays)
     }
     return tr;
 }
-
 
 static void algo_uninstall_all(void)
 {
@@ -488,7 +473,6 @@ void h_cs_dontuse(struct idCmdArgs *a)
     }
 }
 
-
 void h_alginfo(struct idCmdArgs *a)
 {
     (void)a;
@@ -508,9 +492,6 @@ void sh_algo_install(const uint8_t *module_base)
     /* Commands are registered separately; startup leaves all overrides disabled. */
     backend_log("B2: snaphak_algo ready (cs_dontuse off-by-default; 4 ops f64 + color-pack bit-exact)");
 }
-
-/* In-process math checks. */
-
 
 static int approx_eq(float x, float y, float eps) { return fabsf(x - y) <= eps; }
 

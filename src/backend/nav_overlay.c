@@ -224,7 +224,6 @@ done:
     return written;
 }
 
-/* ---- .bmodel ---------------------------------------------------------- */
 
 static uint32_t ov_be32(const unsigned char *p)
 { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
@@ -307,7 +306,6 @@ int sh_nav_overlay_triangle_count(const unsigned char *model, size_t model_len)
     return triangles > 0x7fffffff ? -1 : (int)triangles;
 }
 
-/* ---- navigation polygons ---------------------------------------------- */
 
 typedef struct ov_area { int count; double (*c)[3]; } ov_area;
 
@@ -372,7 +370,6 @@ static void ov_centre(const ov_area *a, double c[3])
     if (a->count) for (k = 0; k < 3; k++) c[k] /= a->count;
 }
 
-/* ---- vertices --------------------------------------------------------- */
 
 typedef struct ov_vertices {
     unsigned char *bytes;   /* count * 48 */
@@ -452,7 +449,6 @@ static void ov_make_vertex(const unsigned char *a, const unsigned char *b, const
                                           wc * ov_getf(c + 12 + k * 4)));
 }
 
-/* ---- the build -------------------------------------------------------- */
 
 int sh_nav_overlay_build(const unsigned char *model, size_t model_len,
                          const unsigned char *shipped, size_t shipped_len,
@@ -511,8 +507,8 @@ int sh_nav_overlay_build(const unsigned char *model, size_t model_len,
         }
     }
 
-    /* A cut area lost ground: its own polygon shrank, or pieces of it were
-     * appended. Seam stitching can add collinear corners without either. */
+    /* A cut area loses ground when its own polygon shrinks or pieces of it are
+     * appended; seam stitching can add collinear corners without either. */
     cuts = (sh_ov_cut *)calloc(original, sizeof *cuts);
     pieces = (sh_ov_polygon *)calloc((size_t)first_area + 1, sizeof *pieces);
     if (!cuts || !pieces) goto finish;

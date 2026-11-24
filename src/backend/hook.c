@@ -1,6 +1,5 @@
-/* Reversible 14-byte absolute detours. Callers choose instruction boundaries.
- * Explicit preparation variants relocate one verified RIP-relative LEA, one
- * RIP-relative 64-bit load, one relative call or one conditional jump. */
+/* Reversible 14-byte absolute detours; callers choose the instruction boundaries. Explicit preparation variants
+ * relocate one verified RIP-relative LEA, one RIP-relative 64-bit load, one relative call or one conditional jump. */
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
@@ -14,7 +13,7 @@ static void write_absjmp(uint8_t *p, void *dest)
     *(uint64_t *)(p + 6) = (uint64_t)dest;     /* the absolute 8-byte target follows inline */
 }
 
-/* Fixed records retain original bytes and trampoline ownership until unpatch. */
+/* Fixed records keep the original bytes and trampoline ownership until unpatch. */
 #define MAX_PATCHES 128
 typedef struct patch_record {
     void   *target;            /* engine fn whose prologue we overwrote */
@@ -26,8 +25,8 @@ typedef struct patch_record {
     sh_patch_handle patch;    /* Includes partial writes and pending protection restoration. */
 } patch_record;
 
-/* The table is shared by the bootstrap and the main thread (runtime installs);
- * every public entry point holds g_hook_lock. */
+/* The table is shared by the bootstrap and the main thread (runtime installs); every public entry point holds
+ * g_hook_lock. */
 static SRWLOCK      g_hook_lock = SRWLOCK_INIT;
 static patch_record g_patches[MAX_PATCHES];
 static int          g_patch_count = 0;   /* high-water count of slots ever used */
@@ -56,8 +55,8 @@ static void *prepare_locked(void *target, void *detour, size_t stolen, size_t of
             (lea[2] & 0xc7) != 0x05) return NULL;
         emitted += 3;
     } else if (relocation == 3) {
-        /* REX.W 8B /r with mod 00, rm 101: mov reg,[rip+disp32]. RSP, RBP,
-         * R12 and R13 would need a SIB byte or name RIP again in the rewrite. */
+        /* REX.W 8B /r with mod 00, rm 101: mov reg,[rip+disp32]. RSP, RBP, R12 and R13 would need a SIB byte or name
+         * RIP again in the rewrite. */
         const uint8_t *load;
         if (offset > stolen - 7) return NULL;
         load = original + offset;
@@ -118,8 +117,8 @@ static void *prepare_locked(void *target, void *detour, size_t stolen, size_t of
         memcpy(tramp + offset + 2, &address, sizeof(address));
         memcpy(tramp + offset + 10, original + offset + 7, stolen - offset - 7);
     } else if (relocation == 3) {
-        /* mov reg,imm64 (the absolute address), then mov reg,[reg]: the same
-         * register and value, no scratch register, no flags touched. */
+        /* mov reg,imm64 (the absolute address), then mov reg,[reg]: same register and value, no scratch register, no
+         * flags touched. */
         const uint8_t *load = original + offset;
         int32_t displacement;
         uintptr_t address;
@@ -221,7 +220,7 @@ sh_patch_status hook_commit(void *tramp)
     else {
         write_absjmp(patch, rec->detour);
         if (rec->stolen > 14) memset(patch + 14, 0x90, rec->stolen - 14);
-        MemoryBarrier(); /* The caller's original callback and detour dependencies precede target writes. */
+        MemoryBarrier(); /* The original callback and detour dependencies precede the target writes. */
         result = code_patch(rec->target, rec->original, patch, rec->stolen, &rec->patch);
         if (result == B2_PATCH_OK) rec->installed = 1;
     }

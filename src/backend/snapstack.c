@@ -1,7 +1,5 @@
-/* Backend-owned SnapStack stores and console handlers. JSON span edits are
- * delegated to json_patch.c. Console dispatch runs handlers on the engine main
- * thread; frontend stack push/clear slots share the numbered stores under a lock.
- * Named groups are used only by console handlers. */
+/* Backend-owned SnapStack stores and console handlers; JSON span edits go to json_patch.c.
+ * Handlers run on the engine main thread. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -89,10 +87,8 @@ static void ss_ids_free(ss_ids *v) { free(v->items); v->items = NULL; v->count =
 static ss_ids **g_stacks;
 static int      g_stack_count;
 
-/* Main-thread handlers and frontend push/clear slots can mutate numbered stacks.
- * Lock mutations and snapshots so realloc cannot invalidate an active reader.
- * Plain count checks remain unlocked and can be stale; named groups are main-thread
- * only. Initialize before exposing commands or starting the frontend. */
+/* Guards the numbered stacks shared by main-thread handlers and frontend push/clear slots, so realloc
+ * cannot invalidate a reader. Plain count checks are unlocked and may be stale; initialize it first. */
 static CRITICAL_SECTION g_ss_lock;
 static volatile LONG    g_ss_lock_state = 0;   /* 0 uninit, 1 initializing, 2 ready */
 static void ss_lock_init(void)
@@ -217,7 +213,7 @@ static int group_remove(const char *name)
         free(g_groups[i].name);
         for (int j = i; j < g_group_count - 1; j++)
             g_groups[j] = g_groups[j + 1];
-        g_group_count--;                                /* The shifted duplicate no longer owns its buffer. */
+        g_group_count--;                                /* The shifted duplicate does not own the buffer. */
         return had;
     }
     return 0;
@@ -440,11 +436,8 @@ static int encode_bulkset_leaf_json(const char *op, const char *value, char *out
     return sh_json_quote_string(value, out, outcap);      /* bss / default: a JSON string literal */
 }
 
-/* Apply kind 0 edits and return how many the engine completed, or
- * SH_APPLY_IN_PROGRESS when it is still running. The backend reports the
- * result itself (one toast with the true count). An interface without the
- * synchronous slot schedules the edits and returns SH_APPLY_IN_PROGRESS;
- * -1 = nothing could run. */
+/* Apply kind 0 edits; returns the count completed, SH_APPLY_IN_PROGRESS while the engine still runs
+ * them (the backend toasts the true count itself), or -1 when nothing could run. */
 static int ic_apply(sh_iface *iface, const sh_apply_item *items, int n, const char *op)
 {
     if (n <= 0 || !iface || !iface->vtbl) return -1;
@@ -452,11 +445,8 @@ static int ic_apply(sh_iface *iface, const sh_apply_item *items, int n, const ch
     return ic_schedule_apply(iface, items, n, op) ? SH_APPLY_IN_PROGRESS : -1;
 }
 
-/* ---- the open map ------------------------------------------------------------------------
- * Stacks and groups hold entity ids, which name entities of the map that was open when they
- * were pushed. Every map parse moves the load generation (rawmap.h), so the first use after a
- * different map opened empties them: an id never reaches an entity of another map. Stacks are
- * shared with the frontend under the lock; groups are touched by console handlers only. */
+/* Stacks and groups hold entity ids of the map open when they were pushed. A map parse moves the load
+ * generation (rawmap.h), so the first use afterwards empties them and no id reaches another map's entity. */
 static unsigned long g_ss_stack_generation, g_ss_group_generation;
 static int g_ss_generation_known;
 
@@ -748,8 +738,8 @@ static void h_bsi(void *ctx, int argc, const char **argv) { do_bulkset((sh_iface
 static void h_bsf(void *ctx, int argc, const char **argv) { do_bulkset((sh_iface *)ctx, "bsf", argc, argv); }
 static void h_bsb(void *ctx, int argc, const char **argv) { do_bulkset((sh_iface *)ctx, "bsb", argc, argv); }
 
-/* Take a stack of at least two ids: the targets, then the receiver last. Returns the count with
- * *ids owned by the caller, or 0 after telling the player (the stack is left as it was). */
+/* Take a stack of at least two ids (targets, then the receiver last). Returns the count with *ids owned
+ * by the caller, or 0 after telling the player; the stack is unchanged. */
 static int ss_take_targets(sh_iface *iface, const char *op, int index, int **ids)
 {
     int n = stack_move_out(index, ids);
@@ -761,7 +751,7 @@ static int ss_take_targets(sh_iface *iface, const char *op, int index, int **ids
     return 0;
 }
 
-/* bse <stack> <path>: set each earlier entity's property to the last entity's reference. */
+/* bse <stack> <path>: set each target entity's property to the last entity's reference. */
 static void h_bse(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
@@ -788,7 +778,7 @@ static void h_bse(void *ctx, int argc, const char **argv)
     free(ids);
 }
 
-/* accl <stack> <path> / acctargets <stack>: add the earlier entities as references on the last one. */
+/* accl <stack> <path> / acctargets <stack>: add the target entities as references on the last one. */
 static void do_acc(sh_iface *iface, const char *op, int argc, const char **argv, int hardcoded_targets)
 {
     const char *userPath = arg_at(argc, argv, 2);
@@ -911,11 +901,9 @@ static void h_mkcmd(void *ctx, int argc, const char **argv)
     if (!ok) ic_toast(iface, "SnapStack", "mkcmd: the editor did not accept the command entity; open the map in the editor and try again.");
 }
 
-/* Class and inherit edits: bscls <stack> <class>, bsin <stack> <inherit>, bsincls <stack>
- * <inherit> <class>. Each entity's final pair is checked and written together (the engine
- * faults on a class that does not derive from its inherit's type, so a refused pair changes
- * nothing), then its decl source is rebuilt and the pair written again so appended old
- * source cannot win. An entity whose second write did not hold needs the command again. */
+/* bscls <stack> <class>, bsin <stack> <inherit>, bsincls <stack> <inherit> <class>. Each pair is checked
+ * (the engine faults when the class does not derive from the inherit's type), written, then the decl
+ * source is rebuilt and the pair written again so appended old source cannot win. */
 static void do_class_inherit(sh_iface *iface, const char *op, int argc, const char **argv,
                              const char *cls, const char *inh)
 {
@@ -1034,7 +1022,7 @@ static void h_chkgrp(void *ctx, int argc, const char **argv)
     }
 }
 
-/* Remove one group or all groups with *. Deleted groups no longer appear in listings. */
+/* Remove one group, or all groups with *. */
 static void h_clrgrp(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;

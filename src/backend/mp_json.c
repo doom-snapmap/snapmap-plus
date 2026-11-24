@@ -142,7 +142,6 @@ int mpj_is_num(const mpj *v) { return v && v->type == MPJ_NUM; }
 
 int mpj_str_is(const mpj *v, const char *s) { return v && v->type == MPJ_STR && s && !strcmp(v->text, s); }
 
-/* ----------------------------------------------------------------- parse */
 
 static void mpj_ws(mpj_in *in)
 {
@@ -289,7 +288,6 @@ mpj *mpj_clone(const mpj *v)
     return c;
 }
 
-/* ----------------------------------------------------------------- dump */
 
 typedef struct mpj_out { char *p; size_t n, cap; int bad; } mpj_out;
 

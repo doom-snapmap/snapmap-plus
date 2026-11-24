@@ -1,4 +1,4 @@
-/* engine_globals.c -- see engine_globals.h. */
+/* Resolves engine globals from RIP-relative references in signed code; see engine_globals.h. */
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
@@ -9,9 +9,8 @@
 #include "backend_log.h"
 #include "engine_globals_table.gen.h"   /* defines BACKEND_ENGINE_GLOBALS; generated, never hand-edited */
 
-/* Publish each cache address last; readers skip unpublished slots and may resolve
- * them again. Avoid locks because the fault shield also reads this cache from
- * exception handlers. Duplicate resolutions produce the same address. */
+/* Each cache address is published last; readers skip unpublished slots and may resolve them again. Lock-free because
+ * the fault shield also reads this cache from exception handlers. */
 #define GLB_CACHE_MAX 64
 
 static struct {
@@ -33,7 +32,7 @@ static uintptr_t cache_get(const char *name)
     LONG i;
     if (n > GLB_CACHE_MAX) n = GLB_CACHE_MAX;
     for (i = 0; i < n; i++) {
-        uintptr_t   a = g_cache[i].addr;   /* address first: zero means not published yet */
+        uintptr_t   a = g_cache[i].addr;   /* zero means not published yet */
         const char *nm;
         if (!a) continue;
         nm = g_cache[i].name;
@@ -97,8 +96,7 @@ uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *
         if (strcmp(e->name, name) == 0) break;
     if (!e->name) return 0;
 
-    /* The anchor is checked at its recorded code site only; a detour there
-     * would overwrite the displacement, so changed bytes locate nothing. */
+    /* The anchor is checked at its recorded code site only; changed bytes there locate nothing. */
     memset(&anchor_sig, 0, sizeof anchor_sig);
     anchor_sig.name      = e->name;
     anchor_sig.pattern   = e->anchor;

@@ -1,49 +1,9 @@
-/* Blueprint zoom-out and the matching Blueprint far plane.
- *
- * Build 13954591 evidence:
- *   OrbitDollyClamp VK 0x12b57a0 / GL 0x12b4e80: camera mode 0 dolly,
- *     z = clamp(z + d, -limit, limit); MOVSS xmm3,[cameraDistanceLimit] at +0.
- *   OrbitPanClamp VK 0x12b5ae3 / GL 0x12b51c3: mode 0 pan clamps X, Y, Z to
- *     +/-[environmentModuleBounds]; MOVSS xmm1,[rip+disp32].
- *   BlueprintZoomClamp VK 0x12b5130 / GL 0x12b4810: sky-view dolly,
- *     height <= bounds * 0.5; MULSS at +0x23 (disp32 +0x27) reads a shared 0.5.
- *   Editor camera view update VK 0x1242b90 / GL 0x12421c0, called from VK
- *     FUN_141181ba0 with t = EditorClockMs() * 0.001 when editor+9 != 0,
- *     editor+0x2120d == 0 and editor+0x2125c < 1 (EditorFrame); it sets
- *     r_zfar = 33000 when snapEdit_blueprintTransition < blend(camera, t).
- *     The camera is editor+0x170: mode +0x268, previous mode +0x26c, views at
- *     +0x148 (mode 0, orbit), +0x220 (1, sky), +0x188 (2..4, FPS). View slots:
- *     +0x30 transition fraction, +0x38 in transition, +0x40 is blueprint
- *     (orbit always true; sky and FPS read their blueprint cvars).
- *   BlueprintFarClipA/B VK 0x1242faa / 0x12430ee, GL 0x12425da / 0x124271e:
- *     the two r_zfar writes of that update, each
- *     MOVSS xmm1,[rip+disp32 -> 33000.0f] (F3 0F 10 0D, 8 bytes) followed by
- *     LEA rcx,[r_zfar]; MOV r8b,1; CALL idCVar::SetFloat. The environment
- *     blend stops writing r_zfar once the camera leaves the editor environment
- *     volume (+/-snapEdit_environmentFogBounds, 33000), so above z 33000 these
- *     writes alone decide the far clip.
- *   EditorFogVolume VK 0x12397b0 / GL 0x1238c50: called once from the editor
- *     render-world setup (VK 0x123e210, GL 0x123d6a0) with the render world at
- *     editor+0x198. Creates _unitCube (render world vtable +0x90), stores
- *     scale 32768.0f with three MOV dword [rax+0xf8/0xfc/0x100],imm32 (imm at
- *     +0x43/+0x4d/+0x57), then MOVSS xmm1,[snapEdit_environmentFogBounds+0x34]
- *     at +0x67 (disp32 +0x6b) for the +/-value area it adds through render
- *     world vtable +0x38 (AddEnvironmentArea, VK 0x1907ae0). Result kept at
- *     editor+0x418.
- *   Ground plane VK 0x123aac0 / GL 0x1239f60: _unitSquare with scale
- *     (bounds, bounds, 1) at +0xf8/+0xfc/+0x100, kept at editor+0x1a0; the
- *     render entity update RenderEntityUpdate (VK 0x15d8020, GL 0x15d92a0)
- *     commits a change.
- *   ModulePickHover VK 0x11f45cc / GL 0x11f37ec: in the module pick (VK
- *     FUN_1411f45a0 / GL FUN_1411f37c0, called only from the hover update VK
- *     FUN_14118af50 / GL FUN_14118a0b0, which GridBlueprintUpdate and its
- *     sibling Blueprint state call every frame) MOVSS xmm2,[rip+disp32 ->
- *     snapEdit_modulePickingDistance+0x34] (F3 0F 10 15); end = origin +
- *     dir * value with a unit dir, traced per module by GridModuleRay.
- *   ModulePickFocus VK 0x1257a58 / GL 0x1256f58: the same length in
- *     idSnapEditorState_ModuleMode vtable +0x10 (VK FUN_141257870), MOVSS
- *     xmm0,[rip+disp32] (F3 0F 10 05). These are the cvar's only two readers
- *     on each renderer. */
+/* Blueprint zoom-out and far plane: engine loads of the orbit dolly/pan limits (OrbitDollyClamp VK 0x12b57a0 / GL
+ * 0x12b4e80, OrbitPanClamp VK 0x12b5ae3 / GL 0x12b51c3), r_zfar (BlueprintFarClipA/B VK 0x1242faa / 0x12430ee, GL
+ * 0x12425da / 0x124271e), EditorFogVolume (VK 0x12397b0 / GL 0x1238c50) and the module pick length (ModulePickHover VK
+ * 0x11f45cc / GL 0x11f37ec, ModulePickFocus VK 0x1257a58 / GL 0x1256f58) are repointed at a page of floats.
+ * Build 13954591; the editor camera is editor+0x170 (mode +0x268; views +0x148 orbit, +0x220 sky), view slots
+ * +0x30 transition fraction, +0x38 in transition, +0x40 is blueprint. */
 #include "editor_zoom.h"
 #include <math.h>
 #include <string.h>
@@ -73,7 +33,7 @@ float sh_editor_zoom_sky_factor(float scale)
 }
 float sh_editor_zoom_blueprint_far(float bounds,float scale,float blended)
 {
-    /* Native: 33000 for the native 16000 height; keep that proportion. */
+    /* Keeps the native 33000 : 16000 far plane to height proportion. */
     float far_plane=SH_ZOOM_EDITOR_FAR*sh_editor_zoom_orbit_height(bounds,scale)/SH_ZOOM_NATIVE_HEIGHT;
     if(far_plane>SH_ZOOM_FAR_MAX)far_plane=SH_ZOOM_FAR_MAX;
     if(isfinite(blended)&&blended>far_plane)return blended;
@@ -81,23 +41,20 @@ float sh_editor_zoom_blueprint_far(float bounds,float scale,float blended)
 }
 float sh_editor_zoom_far_with_floor(float far_plane,float floor_value)
 {
-    /* A map that unlocks its view distance asks for r_zfar's maximum in every
-     * state, Blueprint included; nothing raises the plane past that maximum. */
+    /* A map that unlocks its view distance asks for r_zfar's maximum in every state; the plane never exceeds it. */
     if(isfinite(floor_value)&&floor_value>far_plane)
         far_plane=floor_value>SH_ZOOM_FAR_MAX?SH_ZOOM_FAR_MAX:floor_value;
     return far_plane;
 }
 float sh_editor_zoom_capped_height(float height,int editor_far_plane)
 {
-    /* Without the editor's own far plane, only the environment blend raises
-     * r_zfar, and it stops above the editor environment volume. */
+    /* Without the editor's far plane only the environment blend raises r_zfar, and it stops above the volume. */
     if(!editor_far_plane&&height>SH_ZOOM_BLEND_CEILING)return SH_ZOOM_BLEND_CEILING;
     return height;
 }
 float sh_editor_zoom_pick_distance(float bounds,float scale,float configured)
 {
-    /* Native: 50000 for the native 33000 far plane; keep that proportion so a
-     * ray reaches anything the Blueprint far plane lets the camera see. */
+    /* Keeps the native 50000 : 33000 pick to far plane proportion so a ray reaches everything the camera sees. */
     float pick=ceilf(sh_editor_zoom_blueprint_far(bounds,scale,0)*(SH_ZOOM_NATIVE_PICK/SH_ZOOM_EDITOR_FAR));
     if(pick<SH_ZOOM_NATIVE_PICK)pick=SH_ZOOM_NATIVE_PICK;
     if(isfinite(configured)&&configured>pick)return configured;
@@ -135,15 +92,15 @@ float sh_editor_zoom_blend(int current,int previous,int transitioning,float frac
     return factor<0?0:factor>1?1:factor;
 }
 
-/* The byte checks the install makes before it repoints anything; pure so a test runs them on the executables' own
- * code. Each reads only the site (a = the signature's address) and the operands it addresses. */
+/* Byte checks the install makes before it repoints anything; each reads only the site (a = the signature's
+ * address) and the operands it addresses. */
 int sh_editor_zoom_check_core(uintptr_t dolly,uintptr_t pan,uintptr_t sky,uintptr_t *half)
 {
     static const unsigned char dolly_op[4]={0xf3,0x0f,0x10,0x1d},pan_op[4]={0xf3,0x0f,0x10,0x0d},
         sky_op[4]={0xf3,0x0f,0x59,0x05};
     int32_t disp;
     if(memcmp((void*)dolly,dolly_op,4)||memcmp((void*)pan,pan_op,4)||memcmp((void*)(sky+0x23),sky_op,4))return 0;
-    /* The sky factor is the shared 0.5 constant; check its value, not an address. */
+    /* The sky factor is the shared 0.5 constant, so its value is checked. */
     memcpy(&disp,(void*)(sky+0x27),4);*half=sky+0x2b+(intptr_t)disp;
     return *(const float*)*half==SH_ZOOM_SKY_FACTOR;
 }
@@ -210,10 +167,8 @@ static uintptr_t g_vtables[3];
 static LONG g_faulted;
 static int g_installed,g_far_live;
 static float g_far_floor;
-/* The editor camera's far-plane condition, sampled on the main thread each
- * editor frame (sh_editor_zoom_tick) and read by the render job threads. A
- * sample older than ZOOM_SAMPLE_MS (the editor frame stopped: Play, the hub)
- * reads as no Blueprint frame. */
+/* The camera's far-plane condition, sampled on the main thread each editor frame and read by the render job
+ * threads; a sample older than ZOOM_SAMPLE_MS reads as no Blueprint frame. */
 #define ZOOM_SAMPLE_MS 250u
 static volatile LONG g_blueprint_now;
 static volatile LONG64 g_blueprint_at;
@@ -247,8 +202,8 @@ static void publish(void)
     /* Far plane first: the editor reads it as soon as the camera may rise. */
     g_page->far_plane=sh_editor_zoom_far_with_floor(sh_editor_zoom_blueprint_far(g_bounds,g_scale,0),g_far_floor);
     {
-        /* The camera stays inside the editor environment volume, and without
-         * the editor's far-plane redirect below the blend's 33000 limit. */
+        /* The camera stays inside the environment volume, and below the blend's 33000 limit without the far-plane
+         * redirect. */
         float height=sh_editor_zoom_orbit_height(g_bounds,g_scale);
         height=sh_editor_zoom_volume_height(height,g_fog);
         if(!g_far_live)height=sh_editor_zoom_capped_height(height,0);
@@ -256,7 +211,7 @@ static void publish(void)
         g_page->pan=fmaxf(fmaxf(g_bounds,SH_ZOOM_NATIVE_BOUNDS),height);
     }
     g_page->sky=sh_editor_zoom_sky_factor(g_scale);
-    /* The cvar's own value still wins when someone raised it further. */
+    /* A larger cvar value wins. */
     g_page->pick=sh_editor_zoom_pick_distance(g_bounds,g_scale,g_pick_configured?*g_pick_configured:SH_ZOOM_NATIVE_PICK);
     snprintf(line,sizeof line,"ZOOM: Blueprint zoom-out x%.3g: height %.0f, pan %.0f, far plane %.0f%s, environment volume %.0f, pick %.0f%s (bounds %.0f)",
         g_scale,g_page->dolly,g_page->pan,g_page->far_plane,
@@ -264,8 +219,7 @@ static void publish(void)
         g_pick_live?g_page->pick:SH_ZOOM_NATIVE_PICK,g_pick_live?"":" native",g_bounds);
     backend_log(line);
 }
-/* Engine thread. The Blueprint ground plane is scaled to the module bound
- * once when the editor render world is set up; rescale the live one. */
+/* Engine thread: rescales the live Blueprint ground plane to the module bound. */
 static void refresh_ground(void)
 {
     unsigned char *e=g_editor,*world,*plane;float *scale;
@@ -274,7 +228,7 @@ static void refresh_ground(void)
         world=*(unsigned char**)(e+0x198);plane=*(unsigned char**)(e+0x1a0);
         if(!world||!plane||*(uintptr_t*)world!=(uintptr_t)g_base+SH_ZOOM_VT_RENDER_WORLD)return;
         scale=(float*)(plane+0xf8);
-        /* Only a plane this code recognises: square, flat, a sane size. */
+        /* Only a square, flat plane of a sane size is touched. */
         if(scale[0]!=scale[1]||scale[2]!=1.0f||!(scale[0]>=1000.0f&&scale[0]<=SH_ZOOM_MAX_BOUNDS))return;
         if(scale[0]==g_bounds)return;
         {
@@ -329,7 +283,7 @@ static int blueprint_frame(void)
     return *g_threshold<sh_editor_zoom_blend(cur,prev,busy,
         busy&&cur!=prev?(*(view_fraction_fn*)(*(uintptr_t*)current+0x30))(current,t):0);
 }
-/* Main thread: the editor's view objects and clock are only called here. */
+/* Main thread: samples the far-plane condition; the editor's view objects and clock are only called here. */
 void sh_editor_zoom_tick(void)
 {
     int blueprint=0;
@@ -342,7 +296,7 @@ void sh_editor_zoom_tick(void)
     InterlockedExchange(&g_blueprint_now,blueprint);
     InterlockedExchange64(&g_blueprint_at,(LONG64)GetTickCount64());
 }
-/* Any thread (the environment blend's job threads): reads only the sample. */
+/* Any thread: returns the far plane for the sampled frame, reading only the sample. */
 float sh_editor_zoom_far_plane(float blended)
 {
     LONG64 at;
@@ -364,10 +318,8 @@ static int redirect(uintptr_t disp_at,uintptr_t end,uintptr_t expected_at,volati
     new_disp=(int32_t)distance;
     return code_patch((void*)disp_at,(const uint8_t*)&old_disp,(const uint8_t*)&new_disp,4,h)==B2_PATCH_OK;
 }
-/* The editor camera update's two r_zfar writes load 33000.0f with
- * MOVSS xmm1,[rip+disp32] and pass r_zfar in rcx (LEA rcx,[rip+disp32] at +8).
- * Repoint both loads at the published Blueprint far plane, after checking the
- * opcode, the 33000 operand and that the LEA names r_zfar. All or nothing. */
+/* Repoints both 33000.0f loads of the camera update's r_zfar writes at the published far plane, after checking the
+ * opcode, the operand and that the LEA names r_zfar. All or nothing. */
 static int install_far_plane(const sig_result *const sites[2],void *zfar_cvar)
 {
     int32_t disp;int i;
@@ -386,11 +338,8 @@ static int install_far_plane(const sig_result *const sites[2],void *zfar_cvar)
     }
     return 1;
 }
-/* The module pick and the Module Mode focus ray load
- * snapEdit_modulePickingDistance with MOVSS xmm,[rip+disp32] (F3 0F 10 and a
- * rip-relative ModRM). Repoint both at the published pick length after
- * checking the opcode and that each operand addresses that cvar's float.
- * All or nothing. */
+/* Repoints both snapEdit_modulePickingDistance loads at the published pick length, after checking the opcode and
+ * that each operand addresses that cvar's float. All or nothing. */
 static int install_pick(const sig_result *const sites[2],void *pick_cvar)
 {
     uintptr_t value;int i;
@@ -409,9 +358,8 @@ static int install_pick(const sig_result *const sites[2],void *pick_cvar)
     }
     return 1;
 }
-/* Size the editor environment volume and its cube for g_fog: repoint the
- * builder's cvar load at the page and rewrite the three 32768.0f scale
- * immediates. All or nothing; checked against the expected bytes first. */
+/* Sizes the environment volume and its cube for g_fog: repoints the cvar load at the page and rewrites the three
+ * 32768.0f scale immediates. All or nothing, after checking the expected bytes. */
 static int install_fog_volume(const sig_result *site,void *fog_cvar)
 {
     float native=SH_ZOOM_NATIVE_FOG_CUBE,cube=sh_editor_zoom_fog_cube(g_fog);uintptr_t a,fog_at;int i;
@@ -471,20 +419,18 @@ int sh_editor_zoom_install(const sig_result *results,size_t count,const uint8_t 
     g_page=near_page(low,high+0x40);if(!g_page)goto unavailable;
     g_base=base;g_clock=(clock_fn)clock->addr;
     g_threshold=(const float*)((unsigned char*)threshold_cvar+0x34);
-    /* The far plane goes live before any height above native can be reached;
-     * without it the height stays inside the editor environment volume. */
+    /* The far plane goes live first; without it the height stays inside the environment volume. */
     g_page->far_plane=sh_editor_zoom_far_with_floor(sh_editor_zoom_blueprint_far(g_bounds,g_scale,0),g_far_floor);
     g_far_live=install_far_plane(far_sites,zfar_cvar);
     if(!g_far_live)backend_log("ZOOM: editor far-plane write unavailable; Blueprint height kept inside the editor environment volume");
-    /* The volume is built when the editor render world is set up, after this
-     * install; sized once for the highest camera on any map. */
+    /* The volume is built after this install, so it is sized once for the highest camera on any map. */
     g_fog=sh_editor_zoom_fog_volume();
     g_fog_live=install_fog_volume(fog_site,fog_cvar);
     if(!g_fog_live) {
         g_fog=SH_ZOOM_NATIVE_FOG;
         backend_log("ZOOM: editor environment volume unavailable; Blueprint height kept inside the native 33000 volume");
     }
-    /* Picking reaches as far as the camera can see; written before the redirect. */
+    /* Picking reaches as far as the camera sees; written before the redirect. */
     g_pick_configured=pick_cvar?(const volatile float*)((unsigned char*)pick_cvar+0x34):NULL;
     g_page->pick=sh_editor_zoom_pick_distance(g_bounds,g_scale,g_pick_configured?*g_pick_configured:SH_ZOOM_NATIVE_PICK);
     g_pick_live=install_pick(pick_sites,pick_cvar);

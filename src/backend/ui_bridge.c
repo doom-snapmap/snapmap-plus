@@ -17,11 +17,8 @@ static sh_iface *g_iface = NULL;
 static sh_ui_argblock g_argblock;
 static void          *g_ui_out_slot = NULL;   /* receives the frontend's loop-state obj address */
 
-/* Stable synthetic argv for the frontend startup ABI: the backend's release
- * version ("--version=v1.0.0", or "dev" for a local build), which the window
- * matches against its own when it loads, and the game identity ("--game=DOOM
- * 2016 build ..."), the single string every report uses; the frontend reads it
- * instead of identifying the executable itself. */
+/* Synthetic argv for the frontend startup ABI: "--version=" (the release, or "dev") and "--game="
+ * (the game identity every report uses). */
 #ifndef SNAPMAP_PLUS_VERSION
 #define SNAPMAP_PLUS_VERSION "dev"
 #endif
@@ -95,7 +92,7 @@ int sh_ui_bridge_install(void)
         slash[1] = L'\0';
         _snwprintf_s(dll, cap, _TRUNCATE, L"%ls%ls", dir, SH_UI_DLL_PATH);
         _snwprintf_s(dir + (slash + 1 - dir), cap - (size_t)(slash + 1 - dir), _TRUNCATE, L"%ls", SH_UI_DLL_DIR);
-        SetDllDirectoryW(dir);   /* the frontend's own dependencies, loaded now and later */
+        SetDllDirectoryW(dir);   /* the frontend's own dependencies, at load and later */
         g_ui_dll = LoadLibraryW(dll);
     }
     if (!g_ui_dll) {

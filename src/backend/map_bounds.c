@@ -1,13 +1,7 @@
-/* "Unlock Map Bounds": the map's setting (map_settings.h) and the engine cvars
- * that bound module placement, the editor camera and Blueprint floors.
- *
- * Engine evidence (snaphak-re editor-fixes-13954591 R-004, build 13954591):
- * every reader of snapEdit_environmentModuleBounds loads the float at idCVar
- * +0x34 (VK 0x145c3e5d0+0x34, GL 0x144543c50+0x34). Readers: ReconnectPortals
- * (module validity, VK 0x11f95d0), the Blueprint ground plane and grid, the
- * editor camera pan clamps and the Blueprint zoom clamp (limit * 0.5). The
- * idSnapMapEdit constructor runs ReconnectPortals while any client compiles a
- * map for Play, so the limit must be selected before that client builds it. */
+/* "Unlock Map Bounds": the map's setting (map_settings.h) and the engine cvars that bound module placement,
+ * the editor camera and Blueprint floors. Every reader of snapEdit_environmentModuleBounds loads the float at
+ * idCVar +0x34 (VK 0x145c3e5d0, GL 0x144543c50), including ReconnectPortals (VK 0x11f95d0), which the
+ * idSnapMapEdit constructor runs on any client compiling a map for Play; select the limit before that. */
 #include "map_bounds.h"
 #include <math.h>
 #include <stdio.h>
@@ -34,8 +28,7 @@ int sh_map_bounds_decode(const char *text,sh_map_bounds *out)
     sh_map_bounds s;int end=0;
     if(!text||!out||strlen(text)>32||strncmp(text,"1;",2))return 0;
     if(sscanf_s(text+2,"%f%n",&s.limit,&end)!=1||!end||text[2+end])return 0;
-    /* Older or hand-edited values outside the range keep their intent:
-     * anything at or below native is native, anything above clamps. */
+    /* Anything at or below native is native, anything above clamps. */
     if(!isfinite(s.limit)||s.limit<0)return 0;
     s.limit=sh_map_bounds_clamp(s.limit);
     *out=s;return 1;
@@ -84,10 +77,8 @@ int sh_map_bounds_floors(float limit)
 
 void backend_log(const char *message);
 
-/* idCVar float value. ReconnectPortals (VK 0x11f95d0) reads the module bound
- * at object 0x145c3e5d0 + 0x34; GL reads 0x144543c50 + 0x34. The integer
- * value is SH_IDCVAR_VALUE_INT (+0x30): the Blueprint floor clamps read
- * VK 0x145c3e420 / 0x145c3e4c0 = objects 0x145c3e3f0 / 0x145c3e490 + 0x30. */
+/* idCVar float value; the integer value is SH_IDCVAR_VALUE_INT (+0x30), which the Blueprint floor clamps
+ * read (VK objects 0x145c3e3f0 / 0x145c3e490). */
 #define SH_BOUNDS_IDCVAR_VALUE_FLOAT 0x34u
 
 /* idCVar::Set(cvar, text, force): VK 0x295780 / GL 0x2959a0. force skips the
@@ -225,10 +216,8 @@ int sh_map_bounds_install(const sig_result *results,size_t count,const uint8_t *
     return 1;
 }
 
-/* Settings tab group: one on/off row. On stores the ceiling, off stores
- * nothing; a map saved with any value above native reads as on and keeps its
- * stored value until the row is changed and applied. Applying a change marks
- * the map modified, since the edit map itself does not change. */
+/* Settings tab group: one on/off row. On stores the ceiling, off stores nothing; a map saved with any value
+ * above native reads as on and keeps it until changed. Applying marks the map modified. */
 static int g_draft,g_saved;
 static void *g_map;
 static int bounds_begin(void *user,void *editor,void *map)

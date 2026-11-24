@@ -1,11 +1,6 @@
-/* Reproduce BuildRenderWorld's world-area partition (see grid_room_areas.h).
- *
- * The kd tree follows BuildDisjointBoundsKdTree: a single module becomes one
- * node splitting X at its own minimum with that module on both sides; more
- * modules split at the sorted, de-duplicated box faces (never the first or
- * last value of an axis), choosing the largest product of boxes wholly above
- * and wholly below, X before Y before Z and lower values first on ties.
- * Boxes that straddle the plane go to both sides, clipped to it. */
+/* Reproduces BuildRenderWorld's world-area partition (see grid_room_areas.h): a BuildDisjointBoundsKdTree split at the
+ * sorted box faces choosing the largest product of boxes above and below (X, Y, Z order; lower value first on ties),
+ * with straddling boxes clipped into both sides. */
 #include "grid_room_areas.h"
 #include <math.h>
 #include <stdlib.h>
@@ -84,8 +79,8 @@ static int build(area_tree *t, const area_item *items, int n, int depth)
     free(upper); free(lower);
     return node;
 }
-/* Halve [lo,hi] while wider than size. internal counts kept splits; final
- * counts kept pieces. With culling, a piece apart from [mlo,mhi] is dropped. */
+/* Halves [lo,hi] while wider than size. internal counts kept splits, final counts kept pieces; with culling a piece
+ * apart from [mlo,mhi] is dropped. */
 static void halve(float lo, float hi, float mlo, float mhi, int cull, float size, int depth,
                   long long *internal, long long *final, int *failed)
 {
@@ -129,8 +124,7 @@ static void walk(const area_tree *t, int ref, const float *cell, const float (*b
         out->areas += nx * ny;
     }
 }
-/* The kd tree and the starting cell do not depend on the cell size, so a
- * prepared layout is walked once per candidate size. */
+/* The kd tree and the starting cell do not depend on the cell size, so a prepared layout is walked once per size. */
 typedef struct area_layout { area_tree tree; int root; float cell[6]; } area_layout;
 static int prepare(const float (*bounds)[6], int n, area_layout *l)
 {
@@ -206,7 +200,7 @@ int sh_render_area_cell_choose(const float (*bounds)[6], int n, int cull, float 
     if (!count_layout(&layout, bounds, n, cull, SH_RENDER_AREA_CELL, &out->native)) goto done;
     out->count = out->coarsest = out->native;
     ok = 1;
-    /* The native size whenever it loads: stock maps keep their exact areas. */
+    /* The native size is used whenever it loads. */
     if (sh_render_areas_fit(&out->native)) { out->fits = 1; goto done; }
     for (size = SH_RENDER_AREA_CELL * 2; size <= max_size; size *= 2) {
         if (!count_layout(&layout, bounds, n, cull, size, &count)) { ok = 0; goto done; }

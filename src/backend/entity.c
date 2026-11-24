@@ -20,8 +20,6 @@
 #include "script/script_hooks.h"
 #include "../fault_shield/load_screen_stop.h"
 
-/* Engine call contracts. */
-
 /* Engine argument order is spawned name, then entityDef name. */
 typedef void *(*spawn_by_def_fn)(void *gamemgr, const char *name, const char *entitydef);
 
@@ -45,10 +43,8 @@ typedef int   (*map_writer_fn)(void *map, const char *path);
 /* Pinned Vulkan fallback; host_image requires a verified executable hash. */
 #define GAMEMGR_KNOWN_RVA    SH_RVA(0x5B0F6D0u, 0x4414D50u)
 
-/* Cached dependencies. */
-
-/* Cache the singleton slot, not its value: the game manager can be NULL at
- * startup and is read lazily after a map loads. */
+/* The singleton slot is cached, not its value: the game manager is NULL at startup and read lazily after a map
+ * loads. */
 static const uint8_t   *g_gamemgr_slot = NULL;
 static void            *g_cmdsys       = NULL;
 static spawn_by_def_fn  g_spawn_by_def = NULL;
@@ -56,8 +52,8 @@ static map_getter_fn    g_map_getter   = NULL;
 static map_writer_fn    g_map_writer   = NULL;
 static volatile LONG    g_installed    = 0;
 
-/* Decode GameMgrLea or an independent global anchor. Return the readable
- * pointer slot even when its current value is NULL. */
+/* Decodes GameMgrLea or an independent global anchor; returns the readable pointer slot even when its value is
+ * NULL. */
 const uint8_t *sh_resolve_gamemgr_slot(const sig_result *results, size_t n, const uint8_t *module_base)
 {
     void *accessor = (void *)sig_addr_by_name(results, n, "GameMgrLea");
@@ -65,7 +61,7 @@ const uint8_t *sh_resolve_gamemgr_slot(const sig_result *results, size_t n, cons
         const uint8_t *slot = sh_decode_rip_slot((const uint8_t *)accessor);
         if (slot) {
             void *probe = NULL;
-            if (sh_safe_read(slot, (uint8_t *)&probe, sizeof probe)) {   /* readable; value may be NULL now */
+            if (sh_safe_read(slot, (uint8_t *)&probe, sizeof probe)) {   /* readable; value may be NULL */
                 char line[128];
                 _snprintf_s(line, sizeof line, _TRUNCATE,
                     "B2: gameMgr slot decoded=%p (current=%p, lazy-deref) (portable)", (void *)slot, probe);
@@ -113,7 +109,7 @@ const uint8_t *sh_resolve_gamemgr_slot(const sig_result *results, size_t n, cons
     return NULL;
 }
 
-/* Read the manager at invocation; a bare shell may have no live game. */
+/* Reads the manager at invocation; a bare shell may have no live game. */
 static void *get_gamemgr(void)
 {
     if (!g_gamemgr_slot) return NULL;
@@ -121,8 +117,6 @@ static void *get_gamemgr(void)
     if (sh_safe_read(g_gamemgr_slot, (uint8_t *)&obj, sizeof obj)) return obj;
     return NULL;
 }
-
-/* Guarded engine vtable calls. */
 
 static void *read_vfn(void *self, size_t slot)
 {
@@ -136,7 +130,7 @@ static void *read_vfn(void *self, size_t slot)
     }
 }
 
-/* gameMgr +0x498 FindEntity(self, name) -> idEntity*. Returns NULL on any fault / missing slot. */
+/* gameMgr +0x498 FindEntity(self, name) -> idEntity*; NULL on any fault or missing slot. */
 static void *gm_find_entity(void *gm, const char *name)
 {
     if (!gm || !name) return NULL;
@@ -152,7 +146,7 @@ static void *gm_find_entity(void *gm, const char *name)
 void *sh_entity_gamemgr(void) { return get_gamemgr(); }
 void *sh_entity_find(const char *name) { void *gm = get_gamemgr(); return gm ? gm_find_entity(gm, name) : NULL; }
 
-/* Return 1 after GetOrigin succeeds, or 0 for a missing slot or memory fault. */
+/* Returns 1 after GetOrigin succeeds, 0 for a missing slot or memory fault. */
 static int ent_get_origin(void *ent, float out[3])
 {
     out[0] = out[1] = out[2] = 0.0f;
@@ -168,7 +162,7 @@ static int ent_get_origin(void *ent, float out[3])
     }
 }
 
-/* cmdSystem +0x48 ExecuteCommandText(self, text). Returns 1 if the call ran, 0 on fault / missing slot. */
+/* cmdSystem +0x48 ExecuteCommandText(self, text); returns 1 if the call ran, 0 on fault or missing slot. */
 static int cmd_exec_text(void *cmdsys, const char *text)
 {
     if (!cmdsys || !text) return 0;
@@ -182,7 +176,7 @@ static int cmd_exec_text(void *cmdsys, const char *text)
     }
 }
 
-/* SEH-guarded two-hop read of the resolved-def-text char* (ent+0x6d0 -> +0x140). NULL on any fault. */
+/* SEH-guarded two-hop read of the resolved def text (ent+0x6d0 -> +0x140); NULL on any fault. */
 static const char *ent_def_text(void *ent)
 {
     __try {
@@ -196,7 +190,7 @@ static const char *ent_def_text(void *ent)
     }
 }
 
-/* Reject non-finite or implausibly large coordinates before teleporting. */
+/* True for a non-finite or implausibly large coordinate. */
 static int coord_is_bogus(float v)
 {
     if (v != v) return 1;                 /* NaN */
@@ -205,9 +199,7 @@ static int coord_is_bogus(float v)
     return 0;
 }
 
-/* Console handlers registered in commands.c. */
-
-/* Print and copy a named live entity's resolved definition. */
+/* Prints and copies a named live entity's resolved definition. */
 void h_sh_dumpdef(idCmdArgs *a)
 {
     const char *name = cmd_argv(a, 1);
@@ -238,8 +230,7 @@ void h_sh_dumpdef(idCmdArgs *a)
         sh_printf("sh_dumpdef: copied the entityDef of '%s' to the clipboard.\n", name);
 }
 
-/* Read getviewpos clipboard output as x y z pitch yaw, then format the
- * spawnPosition and spawnOrientation declaration fields. */
+/* Reads getviewpos clipboard output as x y z pitch yaw and formats the spawnPosition and spawnOrientation fields. */
 void h_sh_spawninfo(idCmdArgs *a)
 {
     (void)a;
@@ -265,7 +256,7 @@ void h_sh_spawninfo(idCmdArgs *a)
         return;
     }
 
-    /* Preserve the command's matrix convention with roll fixed to zero. */
+    /* Orientation matrix with roll fixed to zero. */
     const double DEG2RAD = 3.14159265358979323846 / 180.0;
     double sA = sin(pitch * DEG2RAD), cA = cos(pitch * DEG2RAD);
     double sB = sin(yaw   * DEG2RAD), cB = cos(yaw   * DEG2RAD);
@@ -274,7 +265,7 @@ void h_sh_spawninfo(idCmdArgs *a)
     float m10 = (float)(-sA),       m11 = (float)(cA),        m12 = 0.0f;
     float m20 = (float)(sB * cA),   m21 = (float)(sB * sA),   m22 = (float)(cB);
 
-    /* Preserve the original output spacing and lack of a trailing newline. */
+    /* No trailing newline. */
     char out[0x800];
     _snprintf_s(out, sizeof out, _TRUNCATE,
         "spawnOrientation = {\n\tmat = {\n"
@@ -289,8 +280,8 @@ void h_sh_spawninfo(idCmdArgs *a)
         sh_printf("sh_spawninfo: copied spawnOrientation/spawnPosition to the clipboard.\n");
 }
 
-/* Spawn a named entity, then teleport it to player1 if its origin is readable
- * and plausible. A missing player does not prevent the spawn itself. */
+/* Spawns a named entity, then teleports it to player1 if the origin is readable and plausible; a missing player does
+ * not prevent the spawn. */
 void h_sh_spawn(idCmdArgs *a)
 {
     const char *entitydef = cmd_argv(a, 1);
@@ -309,7 +300,7 @@ void h_sh_spawn(idCmdArgs *a)
         return;
     }
 
-    /* Find player1 first, but spawn even if the lookup misses. */
+    /* player1 is looked up first; the spawn happens even if the lookup misses. */
     void *player = gm_find_entity(gm, "player1");
 
     void *spawned = NULL;
@@ -330,7 +321,7 @@ void h_sh_spawn(idCmdArgs *a)
         return;
     }
 
-    /* Read the destination from the player, not the newly spawned entity. */
+    /* The destination is the player's origin. */
     float v[3];
     if (!ent_get_origin(player, v)) {
         sh_printf("sh_spawn: GetOrigin(player1) failed -- skipping teleport.\n");
@@ -358,10 +349,9 @@ void h_sh_spawn(idCmdArgs *a)
         sh_printf("sh_spawn: teleport dispatch failed.\n");
 }
 
-/* MapWriter resolves a relative path under base/ and takes an absolute one as it is, forces the extension, and
- * can overwrite existing dumps. Dumps go under <game dir>\snapmap-plus\ so nothing is written into the game's own
- * folders: choose a free name there, hand the writer the absolute path and inspect the written file to report its
- * actual destination. Pure path rules live in dumpmap_path.h. */
+/* MapWriter resolves a relative path under base/, takes an absolute one as it is, forces the extension and can
+ * overwrite existing dumps. Dumps go under <game dir>\snapmap-plus\: a free name is chosen there, the writer gets the
+ * absolute path and the written file is inspected to report its destination. Path rules live in dumpmap_path.h. */
 static BOOL dumpmap_base_dir(char *out, size_t outcap)
 {
     char exe[MAX_PATH] = {0};
@@ -378,7 +368,7 @@ static BOOL dumpmap_file_size(const char *ospath, unsigned long long *size_out)
     return TRUE;
 }
 
-/* Create parent directories; existing paths and drive prefixes may fail harmlessly. */
+/* Creates parent directories; existing paths and drive prefixes may fail harmlessly. */
 static void dumpmap_make_dirs(char *ospath)
 {
     for (char *p = ospath; *p; p++) {
@@ -389,8 +379,8 @@ static void dumpmap_make_dirs(char *ospath)
     }
 }
 
-/* Produce game-relative and OS paths. Without a base directory, skip collision
- * checks and leave os empty. Return FALSE with a printable reason for invalid names. */
+/* Produces game-relative and OS paths; without a base directory it skips collision checks and leaves os empty.
+ * Returns FALSE with a printable reason for invalid names. */
 static BOOL dumpmap_resolve(const char *arg, const char *base, char *rel, size_t relcap,
                             char *os, size_t oscap, const char **why)
 {
@@ -411,7 +401,7 @@ static BOOL dumpmap_resolve(const char *arg, const char *base, char *rel, size_t
         return TRUE;
     }
 
-    /* Never clobber an earlier dump: name.map -> name_2.map -> name_3.map -> ... */
+    /* An existing dump is never overwritten: name.map, name_2.map, name_3.map, ... */
     for (int seq = 1; seq <= DUMPMAP_MAX_SEQ; seq++) {
         dumpmap_candidate(stem, seq, rel, relcap);
         dumpmap_ospath(base, rel, os, oscap);
@@ -422,7 +412,7 @@ static BOOL dumpmap_resolve(const char *arg, const char *base, char *rel, size_t
     return FALSE;
 }
 
-/* Export the live map using a validated destination and report the resulting file. */
+/* Exports the live map to a validated destination and reports the resulting file. */
 void h_sh_dumpmap(idCmdArgs *a)
 {
     const char *path = cmd_argv(a, 1);
@@ -454,7 +444,7 @@ void h_sh_dumpmap(idCmdArgs *a)
     char os[MAX_PATH]   = {0};
     const char *why = NULL;
     if (!dumpmap_base_dir(base, sizeof base)) {
-        /* without the game's folder the writer would resolve a relative name under base\: write nothing */
+        /* Without the game's folder the writer would resolve a relative name under base\, so nothing is written. */
         sh_printf("sh_dumpmap: the game's folder could not be read, so there is nowhere outside the game's own "
                   "folders to write the dump; nothing was written.\n");
         return;
@@ -481,18 +471,16 @@ void h_sh_dumpmap(idCmdArgs *a)
         sh_printf("sh_dumpmap: the writer reported %s written, but the file is not there; please report this.\n", os);
 }
 
-/* Player cheat commands toggle runtime enforcement bits. Reflected properties
- * use bits one position lower and must not be substituted here.
- * To rederive offsets, inspect the idClientGameMsg_PlayerCommand_* setters
- * (pinned Vulkan 0x35FA50..0x35FB50) and cross-check the godMode getter 0xB72CA0. */
-#define PLAYER_CHEAT_FLAGS_OFF  0x45ea8u   /* infiniteHealth 0x04 / noPlayerDeath 0x08 / noPlayerKill 0x10 / noTarget 0x20 (godMode 0x02) */
-#define PLAYER_NOCLIP_OFF       0x0ce46u   /* noclip = bit 0x04 in a SEPARATE idPlayer byte */
+/* Player cheat commands toggle runtime enforcement bits, one position above the reflected properties; offsets come
+ * from the idClientGameMsg_PlayerCommand_* setters (Vulkan 0x35FA50..0x35FB50) and the godMode getter 0xB72CA0. */
+#define PLAYER_CHEAT_FLAGS_OFF  0x45ea8u   /* infiniteHealth 0x04, noPlayerDeath 0x08, noPlayerKill 0x10, noTarget 0x20 */
+#define PLAYER_NOCLIP_OFF       0x0ce46u   /* noclip = bit 0x04 in a separate idPlayer byte */
 #define CHEAT_BIT_INFHEALTH     0x04u
 #define CHEAT_BIT_NOPLYDEATH    0x08u
 #define CHEAT_BIT_NOPLYKILL     0x10u
 #define CHEAT_BIT_NOTARGET      0x20u
 #define CHEAT_BIT_NOCLIP        0x04u
-/* idPlayer's spawn count: its spawn reset (VK FUN_140DE2290) increments it and rewrites the cheat byte to 0. */
+/* idPlayer's spawn count; the spawn reset (VK FUN_140DE2290) increments it and rewrites the cheat byte to 0. */
 #define PLAYER_SPAWN_COUNT_OFF  0x27d70u
 
 static sh_cheat_keep g_cheat_keep;   /* cheats turned on, kept over the same player's spawns (cheatkeep.h) */
@@ -505,13 +493,13 @@ static int32_t player_spawns(const uint8_t *player)
     return n;
 }
 
-/* cmdSystem +0x50 BufferCommandText (VK 0x141AA3780; the daemon's console route uses the same slot): the text
- * runs at the next command-buffer drain, inside the game's frame. */
+/* cmdSystem +0x50 BufferCommandText (VK 0x141AA3780): the text runs at the next command-buffer drain, inside the
+ * game's frame. */
 #define VSLOT_BUFFER_CMD_TEXT 0x50
 static volatile LONG g_cheat_keep_queued;
 
-/* sh_cheatkeep (internal): runs from the command buffer, where the game manager is current. Finds the local
- * player and sets the cheats turned on again when the same player has spawned since (cheatkeep.h). */
+/* sh_cheatkeep (internal): runs from the command buffer, where the game manager is current; sets the cheats turned
+ * on again when the local player has spawned since (cheatkeep.h). */
 void h_cheatkeep(idCmdArgs *a)
 {
     void *gm, *player;
@@ -537,18 +525,16 @@ static int32_t held_player_spawns(const void *player)
     return player_spawns((const uint8_t *)player);
 }
 
-/* CancelMapChange, at its entry on the main thread (load_screen_stop.h): the session leaves its map and the engine
- * is about to free the Play's player, so the keep ends first. */
+/* Runs at CancelMapChange entry on the main thread (load_screen_stop.h), before the engine frees the Play's player;
+ * ends the keep. */
 static void cheat_keep_map_end(int during_load)
 {
     (void)during_load;
     sh_cheat_keep_end(&g_cheat_keep);
 }
 
-/* Every main frame (idCommonLocal::Frame, outside the game's frame: the game manager slot is empty there, measured
- * R-LV3): while a cheat is turned on and a Play is still on (the editor's flag, cheatkeep.h), the player it was
- * turned on for is checked for a new spawn by its spawn count, a read only; on a change sh_cheatkeep is queued,
- * which does the checked work inside the game's frame. Once the Play has ended the keep ends unread. */
+/* Every main frame (idCommonLocal::Frame, outside the game's frame): while a cheat and a Play are on, reads the
+ * player's spawn count and queues sh_cheatkeep on a change, which does the checked work inside the game's frame. */
 void sh_player_cheats_frame(void)
 {
     typedef void (*buffer_text_fn)(void *cmdsys, const char *text);
@@ -561,7 +547,7 @@ void sh_player_cheats_frame(void)
     __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedExchange(&g_cheat_keep_queued, 0); }
 }
 
-/* Toggle a runtime player bit in a live map/playtest; command arguments are ignored. A bit turned on stays on
+/* Toggles a runtime player bit in a live map or playtest; command arguments are ignored. A bit turned on stays on
  * over the same player's spawn (sh_player_cheats_frame). */
 static void cheat_toggle(uint32_t field_off, uint8_t bit, const char *label)
 {
@@ -596,8 +582,6 @@ void h_infinitehealth(idCmdArgs *a) { (void)a; cheat_toggle(PLAYER_CHEAT_FLAGS_O
 void h_noplayerdeath(idCmdArgs *a)  { (void)a; cheat_toggle(PLAYER_CHEAT_FLAGS_OFF, CHEAT_BIT_NOPLYDEATH, "noPlayerDeath"); }
 void h_noplayerkill(idCmdArgs *a)   { (void)a; cheat_toggle(PLAYER_CHEAT_FLAGS_OFF, CHEAT_BIT_NOPLYKILL,  "noPlayerKill"); }
 void h_notarget(idCmdArgs *a)       { (void)a; cheat_toggle(PLAYER_CHEAT_FLAGS_OFF, CHEAT_BIT_NOTARGET,   "noTarget"); }
-
-/* Dependency installation. */
 
 int sh_entity_install(const sig_result *results, size_t n, const uint8_t *module_base, void *cmdsys)
 {
