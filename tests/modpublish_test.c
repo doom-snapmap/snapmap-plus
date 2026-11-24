@@ -597,12 +597,17 @@ int main(int argc, char **argv)
                                      "or in the mod store."));
         CHECK(engine_save() == 1);
         {
-            /* F7: every unit is on no computer: the item claims nothing, and nothing untrue is said or queued */
-            int claims = g_fc.claims, queued = g_fc.queued;
+            /* F7: every unit is on no computer: nothing is claimed, and nothing untrue is said or queued. F9: the map
+             * still names mods, so the emptied claim is no release; the item keeps what it claimed */
+            int claims = g_fc.claims, queued = g_fc.queued, releases = g_fc.releases;
+            size_t mark = g_log_n;
             g_menu_notice[0] = 0;
-            sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc4", "rev1");
+            /* the item an earlier revision claimed (above), republished */
+            sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc3", "rev3");
             PUMP_UNTIL(idle_all());
             CHECK(g_fc.claims == claims && g_fc.queued == queued && g_menu_notice[0] == 0);
+            CHECK(g_fc.releases == releases && !strstr(g_log + mark, "uses no mods"));
+            CHECK(strstr(g_log + mark, "its claim is kept as it was") != NULL);
         }
         fc_set_unit(UNIT_T, MODCLAIM_HELD, 0);
         rows_pinned(1);
@@ -767,7 +772,7 @@ int main(int argc, char **argv)
         sh_mb_bundle b;
         sh_modmanifest_row row;
         size_t i;
-        int starts = F.starts, claims = g_fc.claims;
+        int starts = F.starts, claims = g_fc.claims, releases_before = 0;
         _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\repub-src", tmp);
         CreateDirectoryA(src, NULL);
         mt_write(src, "mod.json", "{\"name\":\"Repub Tyrant\",\"snapmap-plus\":{\"format\":2,\"salt\":\"repubm01\"}}");
@@ -866,8 +871,10 @@ int main(int argc, char **argv)
         CHECK(sh_ms_sync(NULL, NULL));
         CHECK(sh_modserve_index_build(store) >= 1);
 
-        /* the republish snapshots the folder's current build: the new unit is uploaded and claimed */
+        /* the republish snapshots the folder's current build: the new unit is uploaded and claimed, and the old one goes
+         * only by that claim's replacing the item's set: no release (F9) */
         claims = g_fc.claims;
+        releases_before = g_fc.releases;
         publish(1);
         CHECK(F.starts == starts + 2);
         CHECK(engine_save() == 1);
@@ -876,6 +883,7 @@ int main(int argc, char **argv)
         CHECK(g_fc.claims == claims + 1 && g_fc.claim_n == 1 && strstr(g_uploaded, g_fc.claim_units[0]));
         strcpy_s(now, sizeof now, g_fc.claim_units[0]);
         CHECK(first[0] && now[0] && strcmp(first, now));
+        CHECK(g_fc.releases == releases_before);
         CHECK(strstr(g_slot, "\"local\":true") && !strstr(g_slot, "\"objects\""));
 
         /* a build whose cloud-save read is not hooked: a map with mods is not published (players would get

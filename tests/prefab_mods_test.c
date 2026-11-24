@@ -1009,6 +1009,54 @@ done:
     sh_cache_local_changed();   /* the local folders' snapshot is read again, as the next map load reads it */
 }
 
+/* R-LB1 F9: a unit pinned from a folder built after the content cache first listed the local folders is here whole,
+ * so a publish uploads it instead of calling it absent. The window's Refresh (modui.c mu_sync) and `sh_mods rescan`
+ * (modcmd.c mc_sync) both build through sh_ms_sync, as here. */
+static void rebuilt_folder_unit_is_here(const char *tmp, const char *store)
+{
+    /* texts no other mod of this test carries, so only the local folder has their bytes */
+    static const char V1[] = "{\r\n\tinherit = \"snapmaps/doors/industrial_door_vertical\";\r\n\t// rebuild one\r\n}";
+    static const char V2[] = "{\r\n\tinherit = \"snapmaps/doors/industrial_door_vertical\";\r\n\t// rebuild two\r\n}";
+    char src[MAX_PATH], folder[MAX_PATH * 2], u1[65] = "", u2[65] = "";
+    sh_modmanifest_row mod, row;
+    sh_modpin_row_result res;
+    printf("-- a unit pinned from a folder rebuilt after boot is here whole: the publish uploads it (F9)\n");
+    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\rebuild-src", tmp);
+    CreateDirectoryA(src, NULL);
+    CHECK(install_mod(src, "rebuil01", "Rebuild Tyrant", "entities\\tyrant.decl", V1, &mod));
+    CHECK(sh_modserve_index_build(store) >= 1);
+    folder_of("rebuil01", folder, sizeof folder);
+    CHECK(folder[0] != 0);
+    /* the first publish's unit, here whole (the cache lists the local folders' files now) */
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, "rebuil01");
+    memset(row.build, '0', SH_MOD_HASH_CHARS);
+    CHECK(sh_modmanifest_row_add_name(&row, "mods/rebuil01/tyrant"));
+    memset(&res, 0, sizeof res);
+    CHECK(sh_modpin_row(&row, NULL, 0, NULL, &res) == SH_MODPIN_PINNED && row.unit_count == 1);
+    free(res.why);
+    if (row.unit_count) strcpy_s(u1, sizeof u1, row.units[0]);
+    sh_modmanifest_row_free(&row);
+    CHECK(u1[0] && sh_cache_unit_state(u1, NULL, NULL, NULL) == 1);
+    /* the author edits the Tyrant and the folder is built again, after the list was made */
+    Sleep(20);
+    mt_write(folder, "entities\\tyrant.decl", V2);
+    CHECK(sh_ms_sync(NULL, NULL));
+    CHECK(sh_modserve_index_rescan() >= 1);
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, "rebuil01");
+    memset(row.build, '0', SH_MOD_HASH_CHARS);
+    CHECK(sh_modmanifest_row_add_name(&row, "mods/rebuil01/tyrant"));
+    memset(&res, 0, sizeof res);
+    CHECK(sh_modpin_row(&row, NULL, 0, NULL, &res) == SH_MODPIN_PINNED && row.unit_count == 1);
+    free(res.why);
+    if (row.unit_count) strcpy_s(u2, sizeof u2, row.units[0]);
+    sh_modmanifest_row_free(&row);
+    CHECK(u2[0] && strcmp(u1, u2));
+    CHECK(sh_cache_unit_state(u2, NULL, NULL, NULL) == 1);   /* here whole: missing at the store, so uploaded */
+    sh_modmanifest_row_free(&mod);
+}
+
 /* Add to my mods end to end: a played map's row staged from the content cache, made a mod of the player's own with a
  * new salt by the store, built by the scan, and served from the root. */
 static void add_to_my_mods_end_to_end(const char *tmp, const char *store)
@@ -2025,6 +2073,7 @@ int main(int argc, char **argv)
     one_demon_of_a_pack(tmp, storeA);
     absent_local_row_stands_in();
     published_map_follows_rebuild(tmp, storeA);
+    rebuilt_folder_unit_is_here(tmp, storeA);
     add_to_my_mods_end_to_end(tmp, storeA);
     copy_a_demon_whose_binary_spells(tmp, storeA);
 

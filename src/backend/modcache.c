@@ -313,6 +313,7 @@ typedef struct mc_local {
 static mc_local *g_local;
 static size_t g_nlocal;
 static int g_local_ready;
+static FILETIME g_local_built_at;   /* when the list was read from the folders (system time) */
 
 static int mc_local_cmp(const void *a, const void *b) { return strcmp(((const mc_local *)a)->sha, ((const mc_local *)b)->sha); }
 
@@ -347,6 +348,7 @@ static void mc_local_build_locked(void)
     HANDLE h = wp ? FindFirstFileW(wp, &fd) : INVALID_HANDLE_VALUE;
     size_t cap = 0;
     g_local_ready = 1;
+    GetSystemTimeAsFileTime(&g_local_built_at);
     while (h != INVALID_HANDLE_VALUE) {
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != L'.' && _wcsicmp(fd.cFileName, L"maps")) {
             char *leaf = sh_mb_utf8(fd.cFileName), *folder = leaf ? sh_textf("%s\\%s", root, leaf) : NULL;
@@ -405,6 +407,47 @@ static int mc_local_verified(mc_local *l)
     return l->checked > 0;
 }
 
+/* 1 when a mod folder's mod.json (which every build writes) is as new as the list or newer: a build made since the list
+ * was read (R-LB1 F9). Lock held exclusively. */
+static int mc_local_stale_locked(void)
+{
+    char *root = g_mods_root ? sh_text(g_mods_root) : (g_store_root && g_store_root() ? sh_text(g_store_root()) : NULL);
+    char *pattern = root ? sh_textf("%s\\*", root) : NULL;
+    wchar_t *wp = pattern ? sh_mb_wpath(pattern) : NULL;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = wp ? FindFirstFileW(wp, &fd) : INVALID_HANDLE_VALUE;
+    int stale = 0;
+    while (h != INVALID_HANDLE_VALUE && !stale) {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != L'.' && _wcsicmp(fd.cFileName, L"maps")) {
+            char *leaf = sh_mb_utf8(fd.cFileName), *json = leaf ? sh_textf("%s\\%s\\mod.json", root, leaf) : NULL;
+            wchar_t *wj = json ? sh_mb_wpath(json) : NULL;
+            WIN32_FILE_ATTRIBUTE_DATA a;
+            if (wj && GetFileAttributesExW(wj, GetFileExInfoStandard, &a) &&
+                CompareFileTime(&a.ftLastWriteTime, &g_local_built_at) >= 0)
+                stale = 1;
+            free(wj);
+            free(json);
+            free(leaf);
+        }
+        if (!FindNextFileW(h, &fd)) { FindClose(h); h = INVALID_HANDLE_VALUE; }
+    }
+    if (h != INVALID_HANDLE_VALUE) FindClose(h);
+    free(wp);
+    free(pattern);
+    free(root);
+    return stale;
+}
+
+/* A file of the list by SHA-256 and size, its bytes checked (malloc'd path), or NULL. Lock held exclusively. */
+static char *mc_local_lookup_locked(const char *sha, unsigned long long size)
+{
+    mc_local key;
+    const mc_local *hit;
+    strcpy_s(key.sha, sizeof key.sha, sha);
+    hit = g_nlocal ? (const mc_local *)bsearch(&key, g_local, g_nlocal, sizeof *g_local, mc_local_cmp) : NULL;
+    return hit && hit->size == size && mc_local_verified((mc_local *)hit) ? sh_text(hit->path) : NULL;
+}
+
 static char *mc_local_find(const char *sha, unsigned long long size)
 {
     char *out = NULL;
@@ -417,12 +460,17 @@ static char *mc_local_find(const char *sha, unsigned long long size)
     if (fn) return fn(ctx, sha, size);
     AcquireSRWLockExclusive(&g_lock);
     if (!g_local_ready) mc_local_build_locked();
-    {
-        mc_local key;
-        const mc_local *hit;
-        strcpy_s(key.sha, sizeof key.sha, sha);
-        hit = g_nlocal ? (const mc_local *)bsearch(&key, g_local, g_nlocal, sizeof *g_local, mc_local_cmp) : NULL;
-        if (hit && hit->size == size && mc_local_verified((mc_local *)hit)) out = sh_text(hit->path);
+    out = mc_local_lookup_locked(sha, size);
+    if (!out && mc_local_stale_locked()) {
+        /* R-LB1 F9: a folder built since the list was made (a Refresh or `sh_mods rescan` after boot) carries files
+         * the list does not know: read the folders again once, then look again */
+        size_t i;
+        for (i = 0; i < g_nlocal; i++) free(g_local[i].path);
+        free(g_local);
+        g_local = NULL;
+        g_nlocal = 0;
+        mc_local_build_locked();
+        out = mc_local_lookup_locked(sha, size);
     }
     ReleaseSRWLockExclusive(&g_lock);
     return out;

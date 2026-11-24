@@ -71,7 +71,8 @@ enum { MP_DIALOG_PENDING = 0, MP_DIALOG_ACCEPTED = 1 };
 enum { HOLD_IDLE = 0, HOLD_PREPARING, HOLD_RAISE, HOLD_ASKING, HOLD_UPLOADING, HOLD_RESUME };
 #define MP_RESUME_TICKS    120     /* no editor frame in two seconds: the tick resumes it itself */
 #define MP_QUESTION_TITLE  "Mod content to upload"
-enum { CTX_NONE = 0, CTX_ROWS, CTX_NO_ROWS, CTX_UNKNOWN };
+/* CTX_KEEP: the map names mods but no unit of them can be claimed: the item's claim stays as it is (R-LB1 F9). */
+enum { CTX_NONE = 0, CTX_ROWS, CTX_NO_ROWS, CTX_UNKNOWN, CTX_KEEP };
 enum { JOB_PREPARE = 1, JOB_UPLOAD, JOB_CLAIM, JOB_RELEASE, JOB_LAUNCH, JOB_FETCH };
 
 static sh_modpublish_ops g_ops;
@@ -1158,9 +1159,13 @@ int sh_modpublish_after_save(void *editor)
             mp_logf("MODS: publish: %zu unit(s) left out of the claim: neither on this computer nor in the mod store, or "
                     "removed from it", left);
         if (!out) {
+            /* The map still names mods: an emptied claim is no release (F9); the item keeps what it claims, and S8 has
+             * told the author what players will miss. */
             free(g_ctx.units);
             g_ctx.units = NULL;
-            g_ctx.kind = CTX_NO_ROWS;   /* the item claims nothing the store could hold */
+            g_ctx.nunits = 0;
+            g_ctx.kind = CTX_KEEP;
+            mp_log("MODS: publish: no unit of the map's mods can be claimed; the published item keeps its claim");
             return 1;
         }
     }
@@ -1220,6 +1225,12 @@ void sh_modpublish_feed_post(void *edit, const char *item_id, const char *revisi
     case CTX_NO_ROWS:
         /* A republish without mods: the item's old set (if any) is no longer needed by its current revision. */
         if (modclaim_known(item_id)) (void)mp_queue_release(item_id, "the republished map uses no mods");
+        break;
+    case CTX_KEEP:
+        /* R-LB1 F9: the map still names mods but none of its units can be claimed (S8 said so): never a release, the
+         * item keeps what it claims */
+        mp_logf("MODS: publish: item '%s' revision '%s' names mods none of whose units the store holds or this publish "
+                "sent; its claim is kept as it was", item_id, revision ? revision : "");
         break;
     default:
         mp_logf("MODS: publish: item '%s' published without the mod check; no claim change", item_id);
