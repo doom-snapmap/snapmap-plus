@@ -669,6 +669,11 @@ typedef struct sh_script_ai_engine {
      * demon's own body included) are passed through. 1 found, with the
      * point in out. */
     int      (*world_ground)(void *ai, const float pos[3], float out[3]);
+    /* Ask the engine for pain reaction `reaction` (painType_t) now, as its pain start does for a frame's damage:
+     * its gates, the pain graph's choice of the clip for a hit from the demon's enemy (or the front) that names
+     * no joint, `damage` giving the intensity, the pending request and the alert cycle's FSM request. 1 the
+     * alert cycle took it, 0 refused (why says by what), -1 unavailable. */
+    int      (*request_pain)(void *ai, int reaction, float damage, char *why, size_t cap);
 } sh_script_ai_engine;
 
 /* The SnapMap order of a temp memory block (pure): `keys[i]` the slot's key
@@ -1077,6 +1082,60 @@ static const unsigned char k_ai_fsm_request_prologue[SH_AI_FSM_REQUEST_STOLEN] =
     0x40, 0x57, 0x48, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00, 0x48, 0xC7, 0x44, 0x24, 0x30, 0xFE, 0xFF, 0xFF, 0xFF
 };
 #define SH_AI_TRANSCODE_NONE        0
+/* A pain a script asks for (request_pain) runs the pain start's own steps with the calls the pain start makes,
+ * each found at its call in the pain start (rel32 targets; the same offsets on both renderers):
+ *   intensity   (ai, damage info, damage) -> 1 light, 2 medium, 3 heavy
+ *   dir index   (ai +0x5008, idVec3 *dir, 4) -> the damage direction's index
+ *   pain group  (ai, int *out, joint) -> out
+ *   check       CheckPainAnim (VK 0x1403F5440 / GL 0x1403F4920): the pain graph's choice of the clip
+ *   str assign  (atomic string *, text): empties the two strings the choice leaves at ai +0x24E38 / +0x24E40
+ *   handle set  (idEntityPtr *, entity)
+ *   damage copy (dst, src) and damage dtor (damage info): the request's damage info at +0x68
+ *   assign      (ai +0x8678, request): the pending request the alert cycle's pain state reads
+ *   busy        (fsm +0x60) -> non-NULL while the FSM moves
+ *   bb set / bb clear (ai +0x25B30, key[, 1]): the blackboard key the pain state checks, around the request
+ * key is the pain start's lea of that key, empty its lea of the engine's empty string. */
+#define SH_AI_PS_INTENSITY_CALL     0x119u
+#define SH_AI_PS_DIR_CALL           0x154u
+#define SH_AI_PS_GROUP_CALL         0x38Du
+#define SH_AI_PS_CHECK_CALL         0x462u
+#define SH_AI_PS_STR_CALL           0x4A9u
+#define SH_AI_PS_HANDLE_CALL        0x533u
+#define SH_AI_PS_DAMAGE_COPY_CALL   0x572u
+#define SH_AI_PS_ASSIGN_CALL        0x5DDu
+#define SH_AI_PS_BUSY_CALL          0x5EAu
+#define SH_AI_PS_BB_SET_CALL        0x61Fu
+#define SH_AI_PS_BB_CLEAR_CALL      0x626u
+#define SH_AI_PS_DAMAGE_DTOR_CALL   0x757u
+#define SH_AI_PS_KEY_LEA            0x606u
+#define SH_AI_PS_EMPTY_LEA          0x4A2u
+/* The pain start's gates (each displacement is the one its instruction at that offset reads; the test checks
+ * them) and the request's layout (the assign copies 0x694 bytes; the damage info is 0x620 at +0x68). */
+#define SH_AI_PS_OFF_REMOTE         0x2AA1Du  /* byte: no pain is started here (+0x4A) */
+#define SH_AI_PS_OFF_FORCED_A       0x2A9ECu  /* byte, with +0xC0E5: the start only asks the FSM for 232 (+0x57) */
+#define SH_AI_PS_OFF_FORCED_B       0xC0E5u   /* (+0x60) */
+#define SH_AI_PS_OFF_DISABLED       0x2A9E0u  /* int: pain disabled (+0x92) */
+#define SH_AI_PS_OFF_BEHAVIOR       0xC120u   /* the aibehavior decl: +0xD4 bit 0 canTakeDamage, +0xD6 bit 2 the
+                                                 injured state disables pain (+0x13C, +0x1EF, +0x21C) */
+#define SH_AI_PS_VSLOT_TRAVERSAL    0x6C8u    /* idAI2 vtable: playing a traversal (+0x259) */
+#define SH_AI_PS_OFF_ANIMFSM        0x23198u  /* the animFSM: +0x199C dead (+0x287, +0x28E) */
+#define SH_AI_PS_OFF_INJURED        0x8518u   /* int: the injured state's index, its table at +0x4E48, stride 0x48,
+                                                 +0x44 bit 1 lets pain start (+0x2BB, +0x2CA) */
+#define SH_AI_PS_OFF_INJURED_TABLE  0x4E48u
+#define SH_AI_PS_OFF_CAN_PAIN       0xC2B0u   /* byte: 0 takes no pain at all (+0x357) */
+#define SH_AI_PS_OFF_DIRS           0x5008u   /* (+0x143) */
+#define SH_AI_PS_OFF_PAIN_STRINGS   0x24E38u  /* the two strings the choice leaves (+0x48F, +0x4AE) */
+#define SH_AI_PS_OFF_REQUEST        0x8678u   /* the pending request (+0x5D2) */
+#define SH_AI_PS_OFF_BB_FLAG        0x2A9D8u  /* object whose +0xD8 byte picks set or clear (+0x5F8, +0x610) */
+#define SH_AI_PS_OFF_BLACKBOARD     0x25B30u  /* (+0x5FF) */
+#define SH_AI_PS_REQUEST_SIZE       0x694u
+#define SH_AI_PS_REQ_DAMAGE         0x68u
+#define SH_AI_PS_REQ_DIR            0x688u
+/* The request a script's pain answers to: whether it may go to the engine at all. `current` is the demon's
+ * pain now (painType_t, ordered weakest to strongest). A reaction it already plays at least as strongly is not
+ * asked (Eternal raises a wound's requested pain only over a weaker one; it also covers the pain start's own
+ * refusal of a stagger while staggered). 1 may be asked, 0 not, with *why. Pure. */
+int sh_ai_request_pain_admits(int reaction, int current, const char **why);
 /* The entrance move (SH_AI_SIG_FSM_MOVE, VK 0x14064D330 / GL 0x14064C5B0): an FSM's states are an array at +0x38
  * with their count at +0x40; the move loads idTransitionCode's vtable with a lea at +0xF0, stores code 5 at +0x10F
  * and takes the transition through the FSM's vtable +0xA8 at +0x138 (fsm, move, time, 1, 1). */

@@ -187,6 +187,15 @@ int sh_ai_pain_take_next(int alive, int playing, int now_ms, int until_ms)
     return alive && playing == SH_COMBAT_PAIN_NONE && now_ms <= until_ms;
 }
 
+int sh_ai_request_pain_admits(int reaction, int current, const char **why)
+{
+    const char *w = NULL;
+    if (reaction <= SH_COMBAT_PAIN_NONE || reaction >= SH_AI_PAIN_REACTIONS) w = "it is not a pain reaction";
+    else if (current >= reaction) w = "the demon already plays a pain at least as strong";
+    if (why) *why = w;
+    return w == NULL;
+}
+
 int sh_ai_fsm_state_find(const char *const *names, int n, const char *want)
 {
     int i;
@@ -3270,6 +3279,40 @@ static int l_block_pain(lua_State *L)
     return 0;
 }
 
+/* ai:request_pain(reaction [, damage]): ask the engine for pain reaction `reaction` ("PAIN_FALTER", ...) now, as
+ * its own pain start does for a hit: the pain graph picks the clip, `damage` (default 0) gives the intensity
+ * against the demon's health, the alert cycle plays it. Not asked while the demon plays a pain at least as
+ * strong, nor while the reaction is blocked (block_pain). true when the alert cycle took it; false and why. */
+static int l_request_pain(lua_State *L)
+{
+    const char *name;
+    char why[96] = "";
+    double damage = 0.0;
+    int reaction = -1, i, r;
+    void *ai;
+    if (lua_type(L, 2) != LUA_TSTRING)
+        sh_script_refuse(L, "\"request_pain\" needs a pain reaction name, as \"PAIN_FALTER\", got %s",
+                         lua_isnoneornil(L, 2) ? "nothing" : luaL_typename(L, 2));
+    name = lua_tostring(L, 2);
+    for (i = 1; i < SH_AI_PAIN_REACTIONS; i++) {
+        const char *n = sh_script_combat_pain_name(i);
+        if (n && (!_stricmp(name, n) || !_stricmp(name, n + 5))) reaction = i;
+    }
+    if (reaction < 0) sh_script_refuse(L, "\"request_pain\" does not know the pain reaction \"%s\"", name);
+    if (!lua_isnoneornil(L, 3)) {
+        damage = sh_script_api_check_number(L, 3, "request_pain", "the damage the pain answers");
+        if (!(damage >= 0.0 && damage <= 1e9)) sh_script_refuse(L, "\"request_pain\" needs a damage from 0 to 1e9, got %g", damage);
+    }
+    NEED_OP(L, request_pain, "request_pain");
+    ai = self_ai(L, "request_pain", NULL);
+    if (!ai) { lua_pushboolean(L, 0); lua_pushstring(L, "the demon is gone"); return 2; }
+    r = g_engine->request_pain(ai, reaction, (float)damage, why, sizeof why);
+    if (r > 0) { lua_pushboolean(L, 1); return 1; }
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, r < 0 ? "the game's pain start is unavailable in this session" : why);
+    return 2;
+}
+
 int sh_script_ai_park(void *ai, sh_script_handle h)
 {
     return g_engine && ai && park(ai, h) != NULL;
@@ -3780,7 +3823,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "force_animation_via", l_anim_force_via }, { "firing_position", l_firing_position },
     { "path_points", l_path_points },   { "spline_clear", l_spline_clear },
     { "monster_type", l_monster_type }, { "pain_string", l_pain_string },
-    { "block_pain", l_block_pain },
+    { "block_pain", l_block_pain }, { "request_pain", l_request_pain },
     { "fire_mode", l_fire_mode },       { "pull_trigger", l_pull_trigger },
     { "release_trigger", l_release_trigger }, { "muzzle_on_target", l_muzzle_on_target },
     { "focus", l_focus },               { "hold", l_hold },
@@ -4731,6 +4774,195 @@ static void pain_take_commit(void)
     (void)commit_hook((void *)g_fsm_request_target, (void *)fsm_request_detour, k_ai_fsm_request_prologue,
                       SH_AI_FSM_REQUEST_STOLEN, (void **)&g_fsm_request_orig, &g_fsm_request_failed,
                       "a scripted demon's pain and death");
+}
+
+/* ---- a pain a script asks for (ai:request_pain)
+ *
+ * The engine starts a pain only for a frame's damage: the pain start (SH_AI_SIG_PAIN_START) runs its gates, has
+ * the pain graph choose the clip (CheckPainAnim), writes the pending request at ai +0x8678 and asks the alert
+ * cycle's FSM for the request's transition (232 pain, 233 light, 237/238 stagger), whose pain state then reads the
+ * request. DOOM 2016's own scripted pain (PinkyCombat_Charge's pushback, VK 0x14062FA00) builds that request with
+ * no hit. request_pain runs the pain start's steps with its own calls (script_api_ai.h, SH_AI_PS_*): a hit from
+ * the demon's enemy (from the front when it has none) naming no joint, the intensity of `damage` against the
+ * demon's health, and the damage info of the demon's last request. The script event enterPainState (1450) is not
+ * that route: its handler (VK 0x1414A1FAA, idAI2's event jump table) writes the pain field only, with no state to
+ * end it. */
+typedef int      (*ps_intensity_fn)(void *ai, void *damage_info, float damage);
+typedef int      (*ps_dir_fn)(void *dirs, const float *dir, int n);
+typedef void    *(*ps_group_fn)(void *ai, int *out, uint16_t joint);
+typedef uint64_t (*ps_check_fn)(void *ai, void *damage_info, uint16_t *joint, int intensity, const float *dir,
+                                void *row, int *dir_index, int *reaction, const char **str_a, const char **str_b,
+                                int *index, uint8_t *flag_a, uint8_t *flag_b, uint8_t *flag_c);
+typedef void    *(*ps_str_fn)(void *str, const char *text);
+typedef void     (*ps_handle_fn)(void *handle, void *entity);
+typedef void    *(*ps_copy_fn)(void *dst, const void *src);
+typedef void     (*ps_dtor_fn)(void *damage_info);
+typedef void    *(*ps_busy_fn)(void *p);
+typedef void     (*ps_bb_set_fn)(void *bb, const void *key, int value);
+typedef void     (*ps_bb_clear_fn)(void *bb, const void *key);
+static struct {
+    ps_intensity_fn intensity;
+    ps_dir_fn       dir_index;
+    ps_group_fn     group;
+    ps_check_fn     check;
+    ps_str_fn       str_assign;
+    ps_handle_fn    handle_set;
+    ps_copy_fn      damage_copy;
+    ps_dtor_fn      damage_dtor;
+    ps_copy_fn      assign;
+    ps_busy_fn      busy;
+    ps_bb_set_fn    bb_set;
+    ps_bb_clear_fn  bb_clear;
+    const void     *key;
+    const char     *empty;
+} g_ps;
+
+static void ps_resolve(const uint8_t *s)
+{
+#define PS_CALL(off) ((const void *)(s + (off) + 5 + rel32_at(s + (off) + 1)))
+#define PS_LEA(off)  ((const void *)(s + (off) + 7 + rel32_at(s + (off) + 3)))
+    static const uint32_t calls[] = {
+        SH_AI_PS_INTENSITY_CALL, SH_AI_PS_DIR_CALL, SH_AI_PS_GROUP_CALL, SH_AI_PS_CHECK_CALL, SH_AI_PS_STR_CALL,
+        SH_AI_PS_HANDLE_CALL, SH_AI_PS_DAMAGE_COPY_CALL, SH_AI_PS_ASSIGN_CALL, SH_AI_PS_BUSY_CALL,
+        SH_AI_PS_BB_SET_CALL, SH_AI_PS_BB_CLEAR_CALL, SH_AI_PS_DAMAGE_DTOR_CALL
+    };
+    size_t i;
+    memset(&g_ps, 0, sizeof g_ps);
+    for (i = 0; i < sizeof calls / sizeof calls[0]; i++) if (s[calls[i]] != 0xE8) return;
+    if (memcmp(s + SH_AI_PS_KEY_LEA, "\x48\x8D\x15", 3) || memcmp(s + SH_AI_PS_EMPTY_LEA, "\x48\x8D\x15", 3)) return;
+    g_ps.intensity = (ps_intensity_fn)PS_CALL(SH_AI_PS_INTENSITY_CALL);
+    g_ps.dir_index = (ps_dir_fn)PS_CALL(SH_AI_PS_DIR_CALL);
+    g_ps.group = (ps_group_fn)PS_CALL(SH_AI_PS_GROUP_CALL);
+    g_ps.check = (ps_check_fn)PS_CALL(SH_AI_PS_CHECK_CALL);
+    g_ps.str_assign = (ps_str_fn)PS_CALL(SH_AI_PS_STR_CALL);
+    g_ps.handle_set = (ps_handle_fn)PS_CALL(SH_AI_PS_HANDLE_CALL);
+    g_ps.damage_copy = (ps_copy_fn)PS_CALL(SH_AI_PS_DAMAGE_COPY_CALL);
+    g_ps.assign = (ps_copy_fn)PS_CALL(SH_AI_PS_ASSIGN_CALL);
+    g_ps.busy = (ps_busy_fn)PS_CALL(SH_AI_PS_BUSY_CALL);
+    g_ps.bb_set = (ps_bb_set_fn)PS_CALL(SH_AI_PS_BB_SET_CALL);
+    g_ps.bb_clear = (ps_bb_clear_fn)PS_CALL(SH_AI_PS_BB_CLEAR_CALL);
+    g_ps.damage_dtor = (ps_dtor_fn)PS_CALL(SH_AI_PS_DAMAGE_DTOR_CALL);
+    g_ps.key = PS_LEA(SH_AI_PS_KEY_LEA);
+    g_ps.empty = (const char *)PS_LEA(SH_AI_PS_EMPTY_LEA);
+#undef PS_CALL
+#undef PS_LEA
+}
+
+static int ps_why(char *why, size_t cap, const char *text)
+{
+    if (why && cap) _snprintf_s(why, cap, _TRUNCATE, "%s", text);
+    return 0;
+}
+
+/* The pain start's gates that need no hit, in its order. NULL passes. */
+static const char *ps_gate(void *ai, int reaction)
+{
+    const uint8_t *a = (const uint8_t *)ai;
+    const uint8_t *bdef, *fsm_anim, *table;
+    int injured, now = 0;
+    const char *why = NULL;
+    uint8_t (*traversal)(void *);
+    if (a[SH_AI_PS_OFF_REMOTE]) return "this machine does not start the demon's pain";
+    if (a[SH_AI_PS_OFF_FORCED_A] && a[SH_AI_PS_OFF_FORCED_B]) return "the demon's pain is forced elsewhere";
+    if (*(const int *)(a + SH_AI_PS_OFF_DISABLED)) return "the demon's pain is disabled";
+    if (!sh_ai_request_pain_admits(reaction, *(const int *)(a + SH_COMBAT_AI_PAIN), &why)) return why;
+    if (gm_clock(&now) && sh_ai_blocked(ai, spawn_id_of(ai), reaction, now)) return "the reaction is blocked (block_pain)";
+    bdef = *(const uint8_t *const *)(a + SH_AI_PS_OFF_BEHAVIOR);
+    if (!bdef || !(bdef[0xD4] & 1)) return "the demon cannot take damage";
+    if (bdef[0xD6] & 4) return "the demon's injured state disables pain";
+    traversal = (uint8_t (*)(void *))vfn(ai, SH_AI_PS_VSLOT_TRAVERSAL);
+    if (!traversal || traversal(ai)) return "the demon plays a traversal";
+    fsm_anim = *(const uint8_t *const *)(a + SH_AI_PS_OFF_ANIMFSM);
+    if (!fsm_anim || fsm_anim[0x199C]) return "the demon is dead";
+    injured = *(const int *)(a + SH_AI_PS_OFF_INJURED);
+    table = *(const uint8_t *const *)(a + SH_AI_PS_OFF_INJURED_TABLE);
+    if (injured >= 1 && (!table || !(table[0x44 + (size_t)injured * 0x48] & 2))) return "the demon's injured state takes no pain";
+    if (!a[SH_AI_PS_OFF_CAN_PAIN]) return "the demon takes no pain";
+    return NULL;
+}
+
+static int e_request_pain(void *ai, int reaction, float damage, char *why, size_t cap)
+{
+    __declspec(align(16)) uint8_t req[0x6A0];
+    __declspec(align(16)) uint8_t row[0x40];
+    uint8_t *a = (uint8_t *)ai, *bb;
+    const char *refused = NULL, *str_a, *str_b;
+    void *fsm, *enemy, *damage_info;
+    float dir[3] = { 0.0f, 0.0f, 0.0f }, me[3], them[3], len;
+    uint16_t joint = 0xFFFF;
+    int intensity = 1, dir_index = 0, group = 0, index = 0, asked = reaction, code = 0, flags;
+    uint8_t flag_a = 1, flag_b = 0, flag_c = 0, taken = 0;
+    if (!g_ps.check || !g_pain_code || !g_fsm_request_target) return -1;
+    if (reaction <= SH_COMBAT_PAIN_NONE || reaction >= SH_AI_PAIN_REACTIONS) return ps_why(why, cap, "it is not a pain reaction");
+    __try {
+        refused = ps_gate(ai, reaction);
+        if (refused) return ps_why(why, cap, refused);
+        fsm = alert_fsm_of(ai);
+        if (!fsm) return ps_why(why, cap, "the demon has no alert cycle");
+        /* the hit: from the enemy toward the demon, or from the front (the engine's own scripted pushback) */
+        enemy = e_enemy(ai);
+        if (enemy && e_origin(ai, me) && e_origin(enemy, them)) {
+            dir[0] = me[0] - them[0]; dir[1] = me[1] - them[1]; dir[2] = me[2] - them[2];
+        }
+        len = (float)sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+        if (len > 1e-3f) { dir[0] /= len; dir[1] /= len; dir[2] /= len; }
+        else {
+            float yaw = 0.0f;
+            if (!e_yaw(ai, &yaw)) return ps_why(why, cap, "the demon's facing is unreadable");
+            dir[0] = -(float)cos(yaw * AI_PI / 180.0); dir[1] = -(float)sin(yaw * AI_PI / 180.0); dir[2] = 0.0f;
+        }
+        damage_info = a + SH_AI_PS_OFF_REQUEST + SH_AI_PS_REQ_DAMAGE;
+        intensity = g_ps.intensity(ai, damage_info, damage);
+        dir_index = g_ps.dir_index(a + SH_AI_PS_OFF_DIRS, dir, 4);
+        g_ps.group(ai, &group, joint);
+        memset(row, 0, sizeof row);
+        str_a = str_b = g_ps.empty;
+        if (!(uint8_t)g_ps.check(ai, damage_info, &joint, intensity, dir, row, &dir_index, &asked, &str_a, &str_b,
+                                 &index, &flag_a, &flag_b, &flag_c))
+            return ps_why(why, cap, "the pain graph has no clip for it");
+        {
+            const char **left = (const char **)(a + SH_AI_PS_OFF_PAIN_STRINGS);
+            if (left[0] && left[0][0]) { str_b = left[0]; g_ps.str_assign(&left[0], g_ps.empty); }
+            if (left[1] && left[1][0]) { str_a = left[1]; g_ps.str_assign(&left[1], g_ps.empty); }
+        }
+        memset(req, 0, sizeof req);
+        memcpy(req + 0x00, &asked, 4);
+        memcpy(req + 0x08, &str_a, 8);
+        memcpy(req + 0x10, &str_b, 8);
+        memcpy(req + 0x18, &index, 4);
+        flags = (flag_a ? 1 : 0) | (flag_b ? 2 : 0) | (flag_c ? 4 : 0);
+        memcpy(req + 0x1C, &flags, 4);
+        memcpy(req + 0x20, &joint, 2);
+        {
+            static const int32_t none_id = 0x1FFFFFE;
+            static const int64_t none_spawn = -1;
+            memcpy(req + 0x28, &none_id, 4); memcpy(req + 0x2C, &none_spawn, 8);
+            memcpy(req + 0x40, &none_id, 4); memcpy(req + 0x44, &none_spawn, 8);
+            g_ps.handle_set(req + 0x28, enemy);
+            g_ps.handle_set(req + 0x40, enemy);
+        }
+        memcpy(req + 0x58, &group, 4);
+        memcpy(req + 0x5C, &dir_index, 4);
+        memcpy(req + 0x60, &intensity, 4);
+        g_ps.damage_copy(req + SH_AI_PS_REQ_DAMAGE, damage_info);
+        memcpy(req + SH_AI_PS_REQ_DIR, dir, 12);
+        g_ps.assign(a + SH_AI_PS_OFF_REQUEST, req);
+        if (g_ps.busy(*(void **)((uint8_t *)fsm + 0x60))) refused = "the alert cycle is moving";
+        else {
+            bb = a + SH_AI_PS_OFF_BLACKBOARD;
+            if (!(*(const uint8_t *const *)(a + SH_AI_PS_OFF_BB_FLAG))[0xD8]) g_ps.bb_clear(bb, g_ps.key);
+            else g_ps.bb_set(bb, g_ps.key, 1);
+            code = g_pain_code(ai);
+            taken = code ? g_fsm_request_target(fsm, code) : 0;
+            g_ps.bb_clear(bb, g_ps.key);
+            if (!taken) refused = code ? "the alert cycle refused it" : "the alert cycle takes no pain now";
+        }
+        g_ps.damage_dtor(req + SH_AI_PS_REQ_DAMAGE);
+    } __except (av_only(GetExceptionCode())) {
+        return ps_why(why, cap, "the demon's memory was unreadable");
+    }
+    if (refused) return ps_why(why, cap, refused);
+    return 1;
 }
 
 static int e_park(void *ai)
@@ -5968,7 +6200,7 @@ static const sh_script_ai_engine k_engine = {
     e_laser_add, e_laser_remove, e_rear_footsteps,
     e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose,
     e_interrupt_blend, e_destructible, e_weapon_use, e_wound_damage_counts, e_snapmap_order,
-    e_release, e_anim_variable, e_relations, e_off_limits, e_world_clear, e_world_ground
+    e_release, e_anim_variable, e_relations, e_off_limits, e_world_clear, e_world_ground, e_request_pain
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -6085,7 +6317,9 @@ int sh_script_ai_install(const uint8_t *module_base)
         g_pain_code = (ai_pain_code_fn)(site + SH_AI_PAIN_START_CODE_CALL + 5 +
                                         rel32_at(site + SH_AI_PAIN_START_CODE_CALL + 1));
         sh_script_api_on_frame(pain_take_step);
+        ps_resolve(site);
     } else ai_log("Mod scripts: a demon a script drives will play no pain reaction or death clip in this session.");
+    if (!g_ps.check) g_live.request_pain = NULL;
     /* The step calls read the stage where the move update reads it and end a
      * command with the context's own call; without either an order is given
      * as it comes. */

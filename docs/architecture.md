@@ -3022,7 +3022,17 @@ is touched, and a removed demon answers nil.
   then compares with each pain anim's +0x48 string; `block_pain(reaction,
   seconds)` makes a detour of the threat table's row check (VK 0x1406E08D0 /
   GL 0x1406DFD00, 15-byte window) refuse that reaction's rows for the demon
-  until the game clock passes the time; `anim_variable(name, value)` sets a
+  until the game clock passes the time; `request_pain(reaction [, damage])` runs
+  the pain start's own steps (VK 0x140402FA0 / GL 0x140402480) with no hit, as
+  PinkyCombat_Charge builds its pushback: the start's gates, CheckPainAnim for the
+  clip (a hit from the demon's enemy, or the front, naming no joint; `damage`
+  against the demon's health gives the intensity), the request copied to ai +0x8678
+  and the alert cycle's FSM request with the request's own transition code, each
+  engine function taken from its call in the pain start (`SH_AI_PS_*`, checked on
+  both executables). It is not asked while the demon plays a pain at least as
+  strong or while the reaction is blocked; the script event enterPainState (1450)
+  is not this route, since its handler only writes the pain field;
+  `anim_variable(name, value)` sets a
   variable of the demon's body anim web by name with the engine's own
   set-by-name (VK 0x14170A950 / GL 0x14170B3C0, on the animator at
   ai+0x222B8, the name made an atom by the same atomic-string set): the

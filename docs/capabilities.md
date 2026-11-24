@@ -1003,7 +1003,7 @@ where its model places it at the speed and spin its decl draws, and keeps the hi
 piece whose decl ignores it, where the game throws them by explosions the hit joins, and lets
 the pieces' explosion effect tint and fade the pieces themselves as DOOM Eternal's does
 (`destructible`),
-`spline_clear`, `pain_string`, `block_pain` and the rest; `animation_state` and `force_animation` work on
+`spline_clear`, `pain_string`, `block_pain`, `request_pain` (a pain reaction asked of the engine with no hit, the clip its pain graph picks) and the rest; `animation_state` and `force_animation` work on
 demons too; `monster_type` names any demon's type, `ground_below` finds the floor under a point, `note` leaves a line for a development tool when one listens (`noting`) and
 `difficulty` reads the game's difficulty, `relations` reads a demon's social relations as the game keeps
 them (who it hates, players, bots and demons of other teams alike), `anim_variable` sets a variable of a demon's anim web by

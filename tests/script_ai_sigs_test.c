@@ -541,6 +541,66 @@ static void check_image(const char *path)
         /* the pain code reads the request at ai +0x8678 and answers 232, 233 or 237/238 */
         CHECK(window_has(base, code, 0x90, "\x8B\x91\x78\x86\x00\x00", 6));
         CHECK(window_has(base, code, 0x90, "\xB8\xE8\x00\x00\x00", 5));
+        /* request_pain: the pain start's own calls, each at its call site (the same offsets on both renderers) */
+        {
+            static const struct { uint32_t at, vk, gl; } calls[] = {
+                { SH_AI_PS_INTENSITY_CALL,   0x74A9B0u,  0x74A2C0u },
+                { SH_AI_PS_DIR_CALL,         0x74A640u,  0x749F50u },
+                { SH_AI_PS_GROUP_CALL,       0x74BF70u,  0x74B880u },
+                { SH_AI_PS_CHECK_CALL,       0x3F5440u,  0x3F4920u },   /* CheckPainAnim */
+                { SH_AI_PS_STR_CALL,         0x32B3D0u,  0x32B040u },
+                { SH_AI_PS_HANDLE_CALL,      0x3B7330u,  0x3B6A50u },
+                { SH_AI_PS_DAMAGE_COPY_CALL, 0x365FF0u,  0x365980u },
+                { SH_AI_PS_ASSIGN_CALL,      0x3F48E0u,  0x3F3DC0u },
+                { SH_AI_PS_BUSY_CALL,        0x13350D0u, 0x1335080u },
+                { SH_AI_PS_BB_SET_CALL,      0x3CFA90u,  0x3CF400u },
+                { SH_AI_PS_BB_CLEAR_CALL,    0x3DA310u,  0x3D9830u },
+                { SH_AI_PS_DAMAGE_DTOR_CALL, 0x6E5480u,  0x6E48A0u },
+            };
+            /* the gates and fields, each the displacement its instruction at that offset reads */
+            static const struct { uint32_t at, disp; } reads[] = {
+                { 0x04Au, SH_AI_PS_OFF_REMOTE }, { 0x057u, SH_AI_PS_OFF_FORCED_A }, { 0x060u, SH_AI_PS_OFF_FORCED_B },
+                { 0x092u, SH_AI_PS_OFF_DISABLED }, { 0x13Cu, SH_AI_PS_OFF_BEHAVIOR }, { 0x143u, SH_AI_PS_OFF_DIRS },
+                { 0x177u, 0x5060u }, { 0x1EFu, 0xD4u }, { 0x21Cu, 0xD6u }, { 0x259u, SH_AI_PS_VSLOT_TRAVERSAL },
+                { 0x287u, SH_AI_PS_OFF_ANIMFSM }, { 0x28Eu, 0x199Cu }, { 0x2BBu, SH_AI_PS_OFF_INJURED },
+                { 0x2CAu, SH_AI_PS_OFF_INJURED_TABLE }, { 0x357u, SH_AI_PS_OFF_CAN_PAIN },
+                { 0x48Fu, SH_AI_PS_OFF_PAIN_STRINGS }, { 0x4AEu, SH_AI_PS_OFF_PAIN_STRINGS + 8u },
+                { 0x5D2u, SH_AI_PS_OFF_REQUEST }, { 0x5F8u, SH_AI_PS_OFF_BB_FLAG }, { 0x5FFu, SH_AI_PS_OFF_BLACKBOARD },
+                { 0x610u, 0xD8u },
+            };
+            size_t k;
+            for (k = 0; k < sizeof calls / sizeof calls[0]; k++) {
+                CHECK(base[s + calls[k].at] == 0xE8);
+                CHECK(rel_target(base, s + calls[k].at, 5, 1) == (vk ? calls[k].vk : calls[k].gl));
+            }
+            for (k = 0; k < sizeof reads / sizeof reads[0]; k++) {
+                uint32_t d = reads[k].disp;
+                CHECK(window_has(base, s + reads[k].at, 8, (const char *)&d, 4));
+            }
+            /* the blackboard key and the engine's empty string the start leas */
+            CHECK(!memcmp(base + s + SH_AI_PS_KEY_LEA, "\x48\x8D\x15", 3) && !memcmp(base + s + SH_AI_PS_EMPTY_LEA, "\x48\x8D\x15", 3));
+            CHECK(rel_target(base, s + SH_AI_PS_KEY_LEA, 7, 3) == (vk ? 0x5B65720u : 0x446ADA0u));
+            CHECK(rel_target(base, s + SH_AI_PS_EMPTY_LEA, 7, 3) == (vk ? 0x1FE5308u : 0x1FFF108u));
+            CHECK(base[rel_target(base, s + SH_AI_PS_EMPTY_LEA, 7, 3)] == 0);
+            /* the request: built at rbp-0x20 and copied to ai +0x8678; its damage info at +0x68 (rbp+0x48), its
+             * direction at +0x688 (rbp+0x668), the copy ends at +0x690 (the assign's last dword, 0x1A4 x 4) */
+            CHECK(!memcmp(base + s + SH_AI_PS_ASSIGN_CALL - 4, "\x48\x8D\x55\xE0", 4));
+            CHECK(!memcmp(base + s + SH_AI_PS_DAMAGE_COPY_CALL - 4, "\x48\x8D\x4D\x48", 4));
+            CHECK(!memcmp(base + s + 0x57C, "\xF2\x0F\x11\x85\x68\x06\x00\x00", 8) &&
+                  SH_AI_PS_REQ_DIR == 0x688u && SH_AI_PS_REQ_DAMAGE == 0x68u);
+            {
+                uint32_t assign = rel_target(base, s + SH_AI_PS_ASSIGN_CALL, 5, 1);
+                /* its last copies: the direction at +0x688 and the request's last dword at +0x690 */
+                CHECK(window_has(base, assign, 0xC0, "\x89\x83\x88\x06\x00\x00", 6) &&
+                      window_has(base, assign, 0xC0, "\x89\x83\x90\x06\x00\x00", 6));
+                CHECK(SH_AI_PS_REQUEST_SIZE == 0x694u);
+            }
+            /* CheckPainAnim holds the pain string site (SH_AI_SIG_PAIN_STRING_SITE) */
+            if (rva[SH_AI_SIG_PAIN_STRING_SITE]) {
+                uint32_t check = rel_target(base, s + SH_AI_PS_CHECK_CALL, 5, 1);
+                CHECK(rva[SH_AI_SIG_PAIN_STRING_SITE] > check && rva[SH_AI_SIG_PAIN_STRING_SITE] < check + 0x2000u);
+            }
+        }
     }
     if (rva[SH_AI_SIG_MESH_HIDE_SITE]) {
         uint32_t s = rva[SH_AI_SIG_MESH_HIDE_SITE];

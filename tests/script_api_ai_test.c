@@ -114,6 +114,7 @@ typedef struct fent {
     int   aimed;
     char  pain[512];
     int   block_reaction, block_ms;
+    int   pain_asked; float pain_damage;
     uint32_t monster;      /* getMonsterType */
     char  node[96];        /* the animWeb node playing */
     float vel[3];
@@ -483,6 +484,12 @@ static int f_spline(void *ai, const sh_ai_spline_query *q, float (*out)[3], int 
 }
 static int f_pain_string(void *ai, const char *t) { strcpy(((fent *)ai)->pain, t ? t : "(engine)"); return 1; }
 static int f_block_pain(void *ai, int r, int ms) { ((fent *)ai)->block_reaction = r; ((fent *)ai)->block_ms = ms; return 1; }
+static int f_request_pain(void *ai, int r, float damage, char *why, size_t cap)
+{
+    ((fent *)ai)->pain_asked = r; ((fent *)ai)->pain_damage = damage;
+    if (r == 3) { strncpy(why, "the pain graph has no clip for it", cap - 1); why[cap - 1] = '\0'; return 0; }
+    return 1;
+}
 
 static int f_step_state(void *ai, sh_ai_step_state *out)
 {
@@ -526,7 +533,7 @@ static const sh_script_ai_engine g_fake = {
     f_laser_add, f_laser_remove, f_rear_footsteps,
     f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose,
     f_interrupt_blend, f_destructible, f_weapon_use, f_wound_damage_counts, f_snapmap_order,
-    f_release, f_anim_variable, f_relations, f_off_limits, f_world_clear, f_world_ground
+    f_release, f_anim_variable, f_relations, f_off_limits, f_world_clear, f_world_ground, f_request_pain
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -724,6 +731,16 @@ static void test_move_state(void)
     CHECK(sh_ai_pain_take_next(1, 0, 1000, 1250) == 1 && sh_ai_pain_take_next(1, 0, 1250, 1250) == 1);
     CHECK(sh_ai_pain_take_next(1, 0, 1251, 1250) == 0);
     CHECK(sh_ai_pain_take_next(1, 7, 1000, 1250) == 0);
+    /* a script's pain request: only over a weaker pain (Eternal's wound pain), never PAIN_NONE or out of range */
+    {
+        const char *why = NULL;
+        CHECK(sh_ai_request_pain_admits(6, 0, &why) == 1 && why == NULL);          /* falter, no pain now */
+        CHECK(sh_ai_request_pain_admits(6, 1, &why) == 1);                         /* over a twitch */
+        CHECK(sh_ai_request_pain_admits(6, 6, &why) == 0 && why != NULL);          /* already faltering */
+        CHECK(sh_ai_request_pain_admits(6, 9, &why) == 0);                         /* staggered */
+        CHECK(sh_ai_request_pain_admits(9, 9, &why) == 0 && sh_ai_request_pain_admits(9, 10, &why) == 0);
+        CHECK(sh_ai_request_pain_admits(0, 0, &why) == 0 && sh_ai_request_pain_admits(14, 0, &why) == 0);
+    }
     CHECK(sh_ai_pain_take_next(0, 0, 1000, 1250) == 0);
     CHECK(sh_ai_park_holds(0, 0, 0) == 0);          /* dead: the engine's dying cycle takes it */
     CHECK(sh_ai_park_holds(1, 1, 0) == 0);          /* this frame's damage asked for a pain */
@@ -1260,6 +1277,7 @@ static void test_brain_calls(void)
         "    print('mt ' .. tostring(ent(4):monster_type()) .. ' ' .. tostring(ent(3):monster_type()) .. ' ' .. tostring(self:monster_type()))\n"
         "    self:pain_string('combo')\n"
         "    self:block_pain('PAIN_PUSHBACK', 7)\n"
+        "    print('pain ' .. tostring(self:request_pain('PAIN_FALTER', 800)) .. ' ' .. table.concat({tostring(select(1, self:request_pain('falter_light'))), select(2, self:request_pain('falter_light'))}, ' '))\n"
         "  else\n"
         "    local p = self:path_points({x = 30, y = 40, z = 0})\n"
         "    print('pts2 ' .. #p .. ' ' .. p[2].x .. ' ' .. p[3].y)\n"
@@ -1301,7 +1319,9 @@ static void test_brain_calls(void)
     CHECK(strstr(log, "valid true\nvalid2 true\nvalid3 false\nvalid4 nil no such node\n") != NULL);
     CHECK(strstr(log, "pts nil searching\n") != NULL);
     CHECK(strstr(log, "mt AI_MONSTER_BARON nil AI_MONSTER_NONE\n") != NULL);
+    CHECK(strstr(log, "pain true false the pain graph has no clip for it\n") != NULL);
     CHECK(g_ent[1].block_reaction == 7 && g_ent[1].block_ms == 7000);    /* PAIN_PUSHBACK */
+    CHECK(g_ent[1].pain_asked == 3 && g_ent[1].pain_damage == 0.0f);   /* the last ask: PAIN_FALTER_LIGHT, no damage */
     CHECK(!strcmp(g_ent[1].pain, "(engine)"));                            /* combo, then nil */
     CHECK(strstr(log, "pts2 3 30.0 40.0\n") != NULL);
     CHECK(strstr(log, "fp true nil\n") != NULL);
@@ -2679,7 +2699,7 @@ int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 58);
+    CHECK(sh_script_ai_register() == 59);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();
