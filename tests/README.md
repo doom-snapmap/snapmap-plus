@@ -282,7 +282,18 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   name another record holds never taken or released, a full table refused
   once with one player notice and the stock records and record 31 untouched,
   a cache that cannot be adopted, a refused SetSource retried, and a VT
-  system that is not up. The detours with a fake binder and parameter set:
+  system that is not up. Shared records: with one record free, a second board
+  is placed in the first's family (its squares to the lowest free ones), the
+  lookup answers the record for both names, the binder moves the placed
+  board's material mappings to its new squares once (a second bind does not
+  move them again) and leaves the host's alone, the record stays while a
+  placed board is served and is released with it after, and a board with no
+  record and no free squares, or whose members do not load, is refused once;
+  the pure square map, mapping shift, page-source move (header level table,
+  page table last, counts on both sides) and parm-block read. With the
+  executables, the mega2 loader decoded from inside SetSource on both
+  renderers with its idStr and checked against the loader's constants.
+  The detours with a fake binder and parameter set:
   the lookup returns a board for its own name only, two boards' materials get
   their own page table and feedback word, a stock material's parameters and
   record 1 are byte-identical with and without boards, and a board served

@@ -630,12 +630,14 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   into the game's own board and no game file changes. A board is registered for each mod the loaded
   map uses (in the editor, each mod the Toybox shows) before any of its materials is read, and
   released once the map no longer uses it; `sh_mods status` shows them. Each board takes one of the
-  game's page-source records (DOOM has 31; the game's own board, the map's own textures and one the
-  engine keeps for itself use some, so about 26 to 28 boards fit at once) and about 14 MB of memory,
-  its pages sharing the game's page pool. A map that needs more is told "DOOM has no room for another
-  mod texture board on this map, so <mod> draws with plain textures; a map with fewer mods that
-  carry their own textures avoids this." The format a tool must write is in
-  [vt-baker.md](vt-baker.md).
+  game's page-source records while one is free (DOOM has 31; the game's own board, the map's own
+  textures and one the engine keeps for itself use some, so about 26 to 28 are free) and about 14 MB
+  of memory, its pages sharing the game's page pool. Past that, a board is placed in the free squares
+  of another board's record (a record holds 16 squares, and most boards use one), so it draws in full
+  fidelity at no extra memory: 26 to 28 records hold hundreds of boards. Only a map whose boards fill
+  every square of every free record is told "DOOM has no room for another mod texture board on this
+  map, so <mod> draws with plain textures; a map with fewer mods that carry their own textures avoids
+  this." The format a tool must write is in [vt-baker.md](vt-baker.md).
 - Converting the mods, maps and prefabs of earlier releases is not in this release; it will be built into the
   installer, `snapmap-plus.exe`, with no separate tool. Until then neither DOOM nor the installer converts
   anything: what an earlier release left stays as it is, a map, export or prefab saved by an earlier Snapmap+ is

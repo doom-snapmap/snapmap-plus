@@ -930,8 +930,9 @@ These backend files share the work:
   `modbankinfo.c` reading the game's bank index, as in [Mod sounds](#mod-sounds).
 - `modvt.c` gives each virtual-texture board a mod carries
   (`virtualtextures/mods/<salt>/<name>_sq<N>.mega2`, the builder's only form of
-  `.mega2`) its own page-source record on the game's material page cache and
-  feeds it to the stock lit programs, as in
+  `.mega2`) its own page-source record on the game's material page cache, or
+  free squares of another board's record when none is free, and feeds it to
+  the stock lit programs, as in
   [Mod virtual-texture boards](#mod-virtual-texture-boards).
 - `companion.c` reads the `companions` key of every admitted bundle's author
   block and `companion_engine.c` spawns them, as in
@@ -3539,12 +3540,41 @@ its materials are parsed.
   so the engine has records 1 to 31. Record 1 is the game's own board, record 31
   is reused by the engine on every lookup miss, and each map's own unique
   families (the hub, module palettes) hold some of the rest; the boards take
-  what is free among 2 to 30. A board that finds none is refused with one `VT:`
-  line and the player is told, once, "DOOM has no room for another mod texture
-  board on this map, so <mod> draws with plain textures; a map with fewer mods
-  that carry their own textures avoids this." Each board costs about 14 MB of
-  host memory (11,184,810 bytes of host page table, the reader's index and the
-  page-table image); its resident pages share the game's page pool.
+  what is free among 2 to 30. Each board with a record of its own costs about
+  14 MB of host memory (11,184,810 bytes of host page table, the reader's index
+  and the page-table image); its resident pages share the game's page pool.
+- Shared records: a board that finds no free record is placed in the free
+  squares of a record another board holds (`mv_share`, `op_join`). A record's
+  page source (`idMegaTexture2`, `SH_VT_M2_*` in `modvt.h`) is a 4 x 4 family
+  of member slots; a page read takes the slot its coordinates fall in (levels 0
+  to 9), slot 0 or the first present one (level 10) and slot 0 (level 11). The
+  engine's own loader, which SetSource calls (decoded from inside it with its
+  idStr, and checked against the loader's constants), reads the board's
+  members through the provider into a temporary page source; each member moves
+  into the lowest free slot of the record's (its header's level table rewritten
+  for that square, its page table stored last), the temporary one is deleted
+  with nothing left in it, and the record's header is filled again by the page
+  source, as SetSource fills it. The material parser binds a material only to
+  a record of its landpagefile's name, so a placed board's materials parse
+  unbound; at the next frame (after the placement, and after every decl pass
+  while boards are placed) each parsed one is bound with the engine's rebind,
+  and the binder's detour also moves its `virtualMapping` to the board's new
+  squares (from the value its text gave; a second bind does not move it
+  twice). The `virtualMapping` handle is the renderParm decl the engine's
+  lookup answers, checked by the same lookup answering the feedback handle the
+  per-view setter holds. A placed board stays until its record is released,
+  which waits while a board placed in it is still served (a later build of the
+  host is registered anew and the boards beside it are placed again); its
+  squares are never handed to another board, since pages of them may still be
+  resident under that record's coordinates. The two coarsest levels of a
+  shared family come from one member, as in any family of several squares (a
+  material is then a few texels on screen). Only a board that finds neither a
+  record nor enough free squares is refused, with one `VT:` line, and the
+  player is told, once, "DOOM has no room for another mod texture board on this
+  map, so <mod> draws with plain textures; a map with fewer mods that carry
+  their own textures avoids this." Without the decoded loader or the checked
+  handle, a board that finds no record draws plain as before, and one `VT:`
+  line says why.
 - Failure: any of the eight engine sites (`VtSetSource`, `VtForMaterial`,
   `VtMaterialBind`, `VtMaterialRebind`, `VtViewPageTable`, `VtViewFeedback`,
   `JobsWaitAll`, `VtFrameCall`) that does not match its

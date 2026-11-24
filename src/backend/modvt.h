@@ -58,8 +58,14 @@
  * source, so the engine has records 1..31. Record 1 is the game's own board,
  * record 31 is reused by the engine on every lookup miss, and each map's own
  * unique families (the hub, module palettes) hold some of the rest; the
- * boards take what is free among 2..30. A board that finds none is refused;
- * the player is told in one sentence.
+ * boards take what is free among 2..30. A board that finds none shares a
+ * record another board holds: its squares are placed in that family's free
+ * squares (the engine's own loader reads its members; modvt moves them in) and
+ * its materials, which the material parser left unbound because no record has
+ * their name, are bound to it at the next frame (sh_modvt_each_guest, the
+ * engine's rebind). 29 records of 16 squares each hold any map's boards; only a
+ * board that finds neither a record nor squares draws with its plain textures,
+ * and the player is told in one sentence.
  */
 #ifndef SH_MODVT_H
 #define SH_MODVT_H
@@ -136,6 +142,10 @@ typedef struct sh_modvt_ops {
     int (*rebind)(void *context, void *material, int record, const char *name);
                                                          /* bind a material again to the record: 1 done */
     void (*notice)(void *context, const char *text);    /* tell the player (a board found no record) */
+    int (*join)(void *context, int record, const char *path, const unsigned char to[16]);
+                                                         /* load the board at `path` and place its member square j at
+                                                          * square to[j] - 1 of the board record `record` holds: 1 placed,
+                                                          * 0 refused (nothing changed), -1 faulted; NULL: no sharing */
 } sh_modvt_ops;
 
 typedef struct sh_modvt_result {
@@ -149,6 +159,7 @@ typedef struct sh_modvt_result {
     int lost;          /* records the engine no longer held under the board's name */
     int rebound;       /* materials bound again to a board registered again */
     int not_ready;     /* 1 when the VT system was not up and nothing was done */
+    int shared;        /* boards placed in squares of a record another board holds (no record was free) */
 } sh_modvt_result;
 
 /* Bring the boards in line with `wanted`: verify the records held, release
@@ -169,9 +180,65 @@ int sh_modvt_owned_count(void);
 /* Forget every board and every remembered material (tests only). */
 void sh_modvt_reset(void);
 
-/* The player's sentence when a board found no free record (malloc'd, the mod
- * named whole). */
+/* The player's sentence when a board found neither a free record nor free squares in a record another board holds
+ * (malloc'd, the mod named whole): DOOM's own limit, said on the mod. */
 char *sh_modvt_full_notice(const char *mod);
+
+/* ------------------------------------------------------------------ shared records */
+
+/* A record holds one 4 x 4 family of squares (square N at slot N - 1). When no record is free, a board joins a record
+ * another board holds: each of its member squares goes to a free square of that family and its materials' mapping
+ * moves with it (sh_modvt_mapping_shift). The engine reads a family's squares by slot and position only, so two mods'
+ * squares in one family draw as one family's do; its two coarsest levels (10 and 11, where every square is under one
+ * page) come from one member, as in any family of several squares. */
+
+/* Squares for a board's members (`members`: bit j, member square j + 1) among the squares `used` leaves free, lowest
+ * first, so a family's slots stay contiguous: to[j] = new square index + 1 for each member, 0 elsewhere. 1 when every
+ * member has one, else 0 (to[] cleared). */
+int sh_modvt_square_map(unsigned used, unsigned members, unsigned char to[16]);
+
+/* A material's virtualMapping {w, h, x, y} (fractions of the family) moved from its own square to the square to[]
+ * gives it: 1 with out[] set, 0 when its square is none the board placed (out[] = in[]). */
+int sh_modvt_mapping_shift(const unsigned char to[16], const float in[4], float out[4]);
+
+/* The engine's mega2 page source (idMegaTexture2, VirtualTexture.cpp; equal on both renderers, build 13954591, checked
+ * by the install against the loader's own constants): two groups of members, the squares (log2 of the side at +0x08,
+ * the side at +0x0C, 16 member slots of 0x188 bytes from +0x10, the family's geometry at +0x1890, the member count at
+ * +0x18A8) and the quarters (the same, 0x18A8 further). A member slot is the member's 0x170-byte header (its level
+ * table at +0x50: x, y, w, h, first, count per level), then its page table, its cell index and its reader. A page
+ * read takes the member at slot (y >> (9 - L)) * 4 + (x >> (9 - L)) for levels 0 to 9, slot 0 or the first present
+ * at level 10 and slot 0 at level 11, and requires that slot's page table; the destructor frees slots 0 to count - 1. */
+#define SH_VT_M2_SIZE     0x3158
+#define SH_VT_M2_LOG2     0x08
+#define SH_VT_M2_SIDE     0x0C
+#define SH_VT_M2_SLOTS    0x10
+#define SH_VT_M2_SLOT     0x188
+#define SH_VT_M2_LEVELS   0x50     /* in a slot: the header's level table, 0x18 per level */
+#define SH_VT_M2_PAGES    0x170    /* in a slot: the page table */
+#define SH_VT_M2_CELLS    0x178    /* in a slot: the cell index */
+#define SH_VT_M2_READER   0x180    /* in a slot: the reader */
+#define SH_VT_M2_GEOMETRY 0x1890   /* squares (16), levels (12), texels, pages, ... of the first member */
+#define SH_VT_M2_COUNT    0x18A8
+
+/* 1 when `m` reads as a square family of 16 squares and 12 levels with a member count in range. */
+int sh_modvt_mega_ok(const uint8_t *m);
+
+/* Move every member `src` loaded into the square to[] gives it in `dst` (header level table rewritten for the new
+ * square, page table stored last), raise dst's count to cover it, and leave in src only the members not moved, from
+ * slot 0 with its count set, so src's destructor frees exactly those. Returns how many moved; -1 (nothing moved) when
+ * a target square is taken in dst or a member has no square. */
+int sh_modvt_mega_move(uint8_t *dst, uint8_t *src, const unsigned char to[16]);
+
+/* The vec4 an idParmBlock holds for the parm whose index is `index` (the last op naming it, as the engine's setter
+ * finds it: ops at +0x00, their count at +0x08, values at +0x18; an op's parm index is its u16 at +2). 1 found. */
+int sh_modvt_parm_get(const void *parms, int index, float out[4]);
+
+/* Boards placed in a shared record now. */
+int sh_modvt_guest_count(void);
+
+/* The boards placed in shared records (name, build, record), for the material scan. */
+typedef void (*sh_modvt_guest_fn)(void *context, const char *name, const char *bundle_hash, int record);
+void sh_modvt_each_guest(sh_modvt_guest_fn fn, void *context);
 
 /* ------------------------------------------------------------------ the two detours */
 
@@ -187,12 +254,17 @@ typedef struct sh_modvt_bind_ops {
     void (*set_texture)(void *parms, void *handle, void *image);
     void *feedback_handle;                                          /* renderParm vmtrFeedbackFloat */
     void *pagetable_handle;                                         /* renderParm vmtrPageTableMap */
+    void *mapping_handle;                                           /* renderParm virtualMapping (NULL: no sharing) */
+    int (*get_vec4)(void *parms, void *handle, float *out4);        /* the value the material holds: 1 found */
 } sh_modvt_bind_ops;
 
 /* After the engine's binder wrote `parms` (a material's parameter set) for
  * `record`: when the record is a board's, also set vmtrFeedbackFloat and
- * vmtrPageTableMap and remember the material for a later rebind. Returns 1
- * when it added them, 0 for every other record (nothing is touched). */
+ * vmtrPageTableMap and remember the material for a later rebind; for a material
+ * of a board placed in a shared record (its landpagefile names that board),
+ * also move its virtualMapping to the board's squares, from the value its text
+ * gave (a second bind does not move it again). Returns 1 when it added them, 0
+ * for every other record (nothing is touched). */
 int sh_modvt_bind_board(void *parms, void *record, const sh_modvt_bind_ops *ops);
 
 /* Materials remembered for a board name. */
@@ -272,6 +344,19 @@ int sh_modvt_decode_frame_call(const uint8_t *code, size_t len, uint32_t rva, ui
 /* The frame update's prologue: MOV [RSP+8],RBX; MOV [RSP+0x10],RSI; PUSH RDI;
  * SUB RSP,0x50, the 15 whole position-independent bytes the detour takes. */
 int sh_modvt_frame_head_ok(const uint8_t *code, size_t len);
+
+/* Inside SetSource, where it loads a mega2 family: LEA RCX,[RBP+d]; CALL idStr(path); NOP; LEA RCX,[RBP+d];
+ * CALL idMegaTexture2 loader; MOV [RSI+0x2F0],RAX; LEA RCX,[RBP+d]; CALL ~idStr (VK +0x41A, GL +0x41C). */
+typedef struct sh_modvt_loader {
+    uint32_t loader_rva;       /* idMegaTexture2 *Load(const idStr &path): every _sq<N> member of the path's family */
+    uint32_t str_ctor_rva;     /* idStr(const char *) */
+    uint32_t str_dtor_rva;     /* ~idStr() */
+} sh_modvt_loader;
+int sh_modvt_decode_loader(const uint8_t *ss, size_t len, uint32_t rva, sh_modvt_loader *out);
+
+/* The loader's own constants: operator new(0x3158) at +0x43 and the member magic 0xA63FBB21 in its first 0x400
+ * bytes, the layout SH_VT_M2_* reads. */
+int sh_modvt_loader_body_ok(const uint8_t *code, size_t len);
 
 /* ------------------------------------------------------------------ engine */
 #ifndef SH_MODVT_PURE

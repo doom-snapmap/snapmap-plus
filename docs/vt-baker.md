@@ -178,8 +178,8 @@ by 245,760, written with at least 8 significant digits. Do not write
 |---|---|
 | Member file | no size of the builder's own (DECISIONS 26). The cell index alone is 1,398,108 bytes and the header 368. |
 | Bundle | no size or file count of the builder's own. |
-| Families per bundle | no limit of its own; each family takes one record. |
-| Records | 31 in the game, shared with its own board, the map's own textures and the engine (see below). |
+| Families per bundle | no limit of its own; each family takes one record, or squares of a shared one (see below). |
+| Records | 31 in the game, shared with its own board, the map's own textures and the engine (see below). A record holds 16 squares, so a family that uses few squares can share one. |
 | Memory per board | about 14 MB while registered (13.9 MB measured on Vulkan): 11,184,810 bytes of host page table, the member's index and page table, and a 2048 x 2048, 12-level page-table image. |
 
 Measured sizes of the reference family's one member, `fam_sq1.mega2`:
@@ -206,8 +206,15 @@ hold, with no cap of Snapmap+'s own.
   `skinvmtr` and `skinvmtrwounds` read the board as they read the game's own.
 - The game has 31 records; the game's own board, the map's own textures and
   record 31 use some, and boards take the rest among 2 to 30. A board that
-  finds none is refused with one `VT:` log line and the player is told in one
-  sentence.
+  finds none is placed in the free squares of a record another board holds:
+  its members move into that family's lowest free squares and its materials'
+  `virtualmapping` moves with them, so it draws exactly as in its own record.
+  A baker needs to do nothing for this; write only the squares the family
+  uses, from square 1, so a family leaves the most squares free. In a shared
+  family the two coarsest levels (10 and 11) come from one member, as in any
+  family of several squares. Only a board that finds neither a record nor
+  enough free squares is refused, with one `VT:` log line, and the player is
+  told in one sentence.
 - A board the loaded map no longer uses is released at the engine's next VT
   frame update; served again, its materials are bound to it again.
 - `vt_reloadMega2Vmtrs` does not reload a served board.

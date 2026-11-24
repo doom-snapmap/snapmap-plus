@@ -563,6 +563,248 @@ static void families(void)
     mt_remove_tree(root);
 }
 
+/* ------------------------------------------------------------------ shared records */
+
+/* The fake engine's join: what it was asked, and the squares it fills. */
+static int g_joins, g_join_record, g_join_refuse;
+static unsigned char g_join_to[16];
+static char g_join_path[HO_TEXT];
+static int f_join(void *c, int k, const char *path, const unsigned char to[16])
+{
+    (void)c;
+    g_joins++;
+    if (g_join_refuse) return 0;
+    g_join_record = k;
+    memcpy(g_join_to, to, 16);
+    strcpy_s(g_join_path, sizeof g_join_path, path);
+    return 1;
+}
+
+static int sync_shared(fake *f, const char *phase, int release_now, sh_modvt_result *res)
+{
+    sh_modvt_family *fams = NULL;
+    sh_modvt_ops ops = { f, f_ready, f_find, f_is_free, f_set, f_adopt, f_release, f_record, f_rebind, f_notice, f_join };
+    int n = sh_modvt_collect(&fams), r;
+    r = sh_modvt_sync(fams, n, &ops, phase, release_now, res);
+    free(fams);
+    return r;
+}
+
+/* A material for the shared-record binder: its parameter set (16-byte slots by handle, as the fake binder writes),
+ * with its landpagefile where the engine keeps it (material + SH_VT_MAT_LANDPAGE). */
+#define H_MAPPING 6
+typedef struct shared_material { uint8_t bytes[0x200]; } shared_material;
+static uint8_t *sm_parms(shared_material *m) { return m->bytes + SH_VT_MAT_PARMS; }
+static void sm_init(shared_material *m, const char *landpage, float w, float h, float x, float y)
+{
+    float v[4];
+    v[0] = w; v[1] = h; v[2] = x; v[3] = y;
+    memset(m, 0, sizeof *m);
+    put_ptr(m->bytes + SH_VT_MAT_LANDPAGE, (void *)landpage);
+    memcpy(sm_parms(m) + 16 * H_MAPPING, v, 16);
+}
+static int sm_get(void *parms, void *handle, float *out)
+{
+    memcpy(out, (uint8_t *)parms + 16 * (size_t)handle, 16);
+    return 1;
+}
+static void sm_mapping(shared_material *m, float *out) { memcpy(out, sm_parms(m) + 16 * H_MAPPING, 16); }
+
+static void shared_records(void)
+{
+    char root[MAX_PATH], mods[MAX_PATH], a[MAX_PATH], b[MAX_PATH];
+    static fake f;
+    static shared_material ma, mb;
+    sh_modvt_result res;
+    sh_modvt_bind_ops bops = g_bops;
+    float v[4];
+    int k;
+
+    printf("-- no free record: a board is placed in free squares of a board's record\n");
+    CHECK(mt_temp_dir("modvt_share", root, sizeof root));
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
+    _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\vtsharea", mods);
+    _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\vtshareb", mods);
+    CreateDirectoryA(mods, NULL);
+    put_mod(a, "vtsharea");
+    mt_write(a, "virtual-textures\\fam_sq1.mega2", "a one");
+    put_mod(b, "vtshareb");
+    mt_write(b, "virtual-textures\\fam_sq1.mega2", "b one");
+    mt_write(b, "virtual-textures\\fam_sq2.mega2", "b two");
+    CHECK(build_folder(a, NULL) && build_folder(b, NULL));
+    CHECK(sh_modserve_index_build(mods) == 2);
+    sh_modvt_reset();
+    fake_init(&f);
+    for (k = 4; k <= 29; ++k) {   /* only record 30 is free */
+        _snprintf_s(f.name[k], sizeof f.name[k], _TRUNCATE, "maps/stock/%d", k);
+        _snprintf_s(f.path[k], sizeof f.path[k], _TRUNCATE, "virtualtextures/maps/stock/%d.pages", k);
+    }
+    g_nlog = 0;
+    g_joins = 0;
+    CHECK(sync_shared(&f, "editor", 0, &res) == 1 && res.registered == 1 && res.shared == 1 && res.full == 0 &&
+          res.refused == 0 && f.notices == 0 && sh_modvt_guest_count() == 1);
+    CHECK(f_find(&f, "mods/vtsharea/fam") == 30 && g_joins == 1 && g_join_record == 30 &&
+          !strcmp(g_join_path, "virtualtextures/mods/vtshareb/fam.pages"));
+    /* The host keeps square 1; the guest's squares 1 and 2 go to 2 and 3, lowest first. */
+    CHECK(g_join_to[0] == 2 && g_join_to[1] == 3 && g_join_to[2] == 0);
+    CHECK(log_count("board 'mods/vtshareb/fam' (vtshareb, 2 members) placed in record 30 beside board 'mods/vtsharea/fam'") == 1);
+    /* The lookup answers the record for the guest's name too. */
+    CHECK(sh_modvt_board_record("mods/vtshareb/fam") == f.rec[30] && sh_modvt_board_record("mods/vtsharea/fam") == f.rec[30]);
+    /* Idempotent. */
+    CHECK(sync_shared(&f, "frame", 1, &res) == 1 && res.kept == 2 && res.shared == 0 && g_joins == 1);
+
+    /* The binder: the guest's material gets the record's parameters and its mapping moved one square right (its
+     * square 1 is the family's square 2); bound again, it is not moved twice. The host's own material is untouched. */
+    bops.mapping_handle = (void *)(uintptr_t)H_MAPPING;
+    bops.get_vec4 = sm_get;
+    sm_init(&mb, "mods/vtshareb/fam", 0.0625f, 0.0625f, 0.125f, 0.0f);
+    CHECK(sh_modvt_bind_board(sm_parms(&mb), f.rec[30], &bops) == 1);
+    sm_mapping(&mb, v);
+    CHECK(v[0] == 0.0625f && v[1] == 0.0625f && v[2] == 0.375f && v[3] == 0.0f);
+    memcpy(v, sm_parms(&mb) + 16 * H_VMTR_FEEDBACK, 16);
+    CHECK(v[0] == 30.0f);
+    CHECK(sh_modvt_bind_board(sm_parms(&mb), f.rec[30], &bops) == 1);
+    sm_mapping(&mb, v);
+    CHECK(v[2] == 0.375f && v[3] == 0.0f);
+    /* A second square's material: square 2 (x 0.25..0.5) -> square 3. */
+    sm_init(&mb, "mods/vtshareb/fam", 0.0625f, 0.0625f, 0.25f, 0.125f);
+    CHECK(sh_modvt_bind_board(sm_parms(&mb), f.rec[30], &bops) == 1);
+    sm_mapping(&mb, v);
+    CHECK(v[2] == 0.5f && v[3] == 0.125f);
+    sm_init(&ma, "mods/vtsharea/fam", 0.0625f, 0.0625f, 0.125f, 0.0f);
+    CHECK(sh_modvt_bind_board(sm_parms(&ma), f.rec[30], &bops) == 1);
+    sm_mapping(&ma, v);
+    CHECK(v[2] == 0.125f && v[3] == 0.0f);
+
+    /* The host no longer served while the guest is: the record stays. Neither served: released, the guest dropped. */
+    mt_remove_tree(a);
+    CHECK(sh_modserve_index_build(mods) == 1);
+    CHECK(sync_shared(&f, "frame", 1, &res) >= 0 && res.released == 0 && f_find(&f, "mods/vtsharea/fam") == 30 &&
+          sh_modvt_guest_count() == 1 && res.kept == 1);
+    mt_remove_tree(b);
+    CHECK(sh_modserve_index_build(mods) == 0);
+    CHECK(sync_shared(&f, "frame", 1, &res) == 0 && res.released == 1 && f_is_free(&f, 30) && sh_modvt_guest_count() == 0 &&
+          sh_modvt_board_record("mods/vtshareb/fam") == NULL);
+
+    /* No room in any held record's family, or no held record at all: refused once with the player's sentence. */
+    put_mod(a, "vtsharea");
+    mt_write(a, "virtual-textures\\fam_sq1.mega2", "a one");
+    put_mod(b, "vtshareb");
+    mt_write(b, "virtual-textures\\fam_sq1.mega2", "b one");
+    CHECK(build_folder(a, NULL) && build_folder(b, NULL));
+    CHECK(sh_modserve_index_build(mods) == 2);
+    sh_modvt_reset();
+    fake_init(&f);
+    for (k = 4; k <= 30; ++k) {
+        _snprintf_s(f.name[k], sizeof f.name[k], _TRUNCATE, "maps/stock/%d", k);
+        _snprintf_s(f.path[k], sizeof f.path[k], _TRUNCATE, "virtualtextures/maps/stock/%d.pages", k);
+    }
+    g_joins = 0;
+    g_nlog = 0;
+    CHECK(sync_shared(&f, "editor", 0, &res) == 0 && res.full == 2 && g_joins == 0 && f.notices == 2 &&
+          log_count("no board's record has 1 free square") == 2);
+    /* A join the engine refuses (its members did not load): logged once, the board draws plain. */
+    sh_modvt_reset();
+    fake_init(&f);
+    for (k = 4; k <= 29; ++k) {
+        _snprintf_s(f.name[k], sizeof f.name[k], _TRUNCATE, "maps/stock/%d", k);
+        _snprintf_s(f.path[k], sizeof f.path[k], _TRUNCATE, "virtualtextures/maps/stock/%d.pages", k);
+    }
+    g_join_refuse = 1;
+    g_nlog = 0;
+    CHECK(sync_shared(&f, "editor", 0, &res) == 1 && res.refused == 1 && res.shared == 0 && sh_modvt_guest_count() == 0 &&
+          log_count("not placed in record 30") == 1);
+    g_join_refuse = 0;
+    sh_modvt_reset();
+    mt_remove_tree(root);
+}
+
+/* The pure helpers of sharing: squares, the mapping, the page-source move, the parm read. */
+static void shared_helpers(void)
+{
+    unsigned char to[16];
+    float in[4], out[4];
+    static uint8_t dst[SH_VT_M2_SIZE], src[SH_VT_M2_SIZE];
+    uint8_t *ds, *ss;
+    int one = 1, two = 2, four = 4, sixteen = 16, twelve = 12, zero = 0, x, y, count;
+    void *pages = (void *)(uintptr_t)0x1111, *cells = (void *)(uintptr_t)0x2222, *reader = (void *)(uintptr_t)0x3333;
+    struct { uint8_t ops[3][8]; int n, cap; uint8_t pad[8]; float (*vals)[4]; } block;
+    float vals[3][4] = { { 1, 2, 3, 4 }, { 5, 6, 7, 8 }, { 9, 10, 11, 12 } };
+    uint16_t idx;
+
+    printf("-- the pure helpers of shared records\n");
+    CHECK(sh_modvt_square_map(0x1u, 0x1u, to) == 1 && to[0] == 2);
+    CHECK(sh_modvt_square_map(0x5u, 0x3u, to) == 1 && to[0] == 2 && to[1] == 4);
+    CHECK(sh_modvt_square_map(0xFFFFu, 0x1u, to) == 0 && to[0] == 0);
+    CHECK(sh_modvt_square_map(0x7FFFu, 0x3u, to) == 0);
+    memset(to, 0, sizeof to);
+    to[0] = 6;   /* square 1 -> square 6 (column 1, row 1) */
+    in[0] = 0.0625f; in[1] = 0.0625f; in[2] = 0.125f; in[3] = 0.0625f;
+    CHECK(sh_modvt_mapping_shift(to, in, out) == 1 && out[2] == 0.375f && out[3] == 0.3125f && out[0] == in[0]);
+    in[2] = 0.5f;   /* square 3: not the board's */
+    CHECK(sh_modvt_mapping_shift(to, in, out) == 0 && out[2] == 0.5f);
+
+    /* The page source: dst holds square 1; src's square 1 moves to square 2. */
+    memset(dst, 0, sizeof dst);
+    memset(src, 0, sizeof src);
+    for (x = 0; x < 2; ++x) {
+        uint8_t *m = x ? src : dst;
+        memcpy(m + SH_VT_M2_LOG2, &two, 4);
+        memcpy(m + SH_VT_M2_SIDE, &four, 4);
+        memcpy(m + SH_VT_M2_GEOMETRY, &sixteen, 4);
+        memcpy(m + SH_VT_M2_GEOMETRY + 4, &twelve, 4);
+        memcpy(m + SH_VT_M2_COUNT, &one, 4);
+    }
+    put_ptr(dst + SH_VT_M2_SLOTS + SH_VT_M2_PAGES, pages);
+    ss = src + SH_VT_M2_SLOTS;
+    memcpy(ss, "\x21\xBB\x3F\xA6", 4);
+    put_ptr(ss + SH_VT_M2_PAGES, pages);
+    put_ptr(ss + SH_VT_M2_CELLS, cells);
+    put_ptr(ss + SH_VT_M2_READER, reader);
+    memset(to, 0, sizeof to);
+    to[0] = 1;
+    CHECK(sh_modvt_mega_move(dst, src, to) == -1);   /* square 1 is taken */
+    CHECK(get_ptr(ss + SH_VT_M2_PAGES) == pages);
+    to[0] = 2;
+    CHECK(sh_modvt_mega_move(dst, src, to) == 1);
+    ds = dst + SH_VT_M2_SLOTS + SH_VT_M2_SLOT;
+    CHECK(get_ptr(ds + SH_VT_M2_PAGES) == pages && get_ptr(ds + SH_VT_M2_CELLS) == cells &&
+          get_ptr(ds + SH_VT_M2_READER) == reader && !memcmp(ds, "\x21\xBB\x3F\xA6", 4));
+    memcpy(&x, ds + SH_VT_M2_LEVELS, 4);
+    memcpy(&y, ds + SH_VT_M2_LEVELS + 4, 4);
+    CHECK(x == 512 && y == 0);
+    memcpy(&x, ds + SH_VT_M2_LEVELS + 9 * 0x18, 4);
+    CHECK(x == 1);
+    memcpy(&x, ds + SH_VT_M2_LEVELS + 10 * 0x18, 4);
+    CHECK(x == 0);
+    memcpy(&count, dst + SH_VT_M2_COUNT, 4);
+    CHECK(count == 2);
+    memcpy(&count, src + SH_VT_M2_COUNT, 4);
+    CHECK(count == 0 && get_ptr(ss + SH_VT_M2_PAGES) == NULL && get_ptr(ss + SH_VT_M2_READER) == NULL);
+    memcpy(src + SH_VT_M2_COUNT, &zero, 4);
+    memcpy(src + SH_VT_M2_GEOMETRY, &zero, 4);
+    CHECK(sh_modvt_mega_ok(src) == 0 && sh_modvt_mega_ok(dst) == 1);
+
+    /* An idParmBlock: the last op naming the index wins, as the setter finds it. */
+    memset(&block, 0, sizeof block);
+    idx = 7;  memcpy(block.ops[0] + 2, &idx, 2);
+    idx = 9;  memcpy(block.ops[1] + 2, &idx, 2);
+    idx = 7;  memcpy(block.ops[2] + 2, &idx, 2);
+    block.n = 3;
+    block.vals = vals;
+    {
+        uint8_t raw[0x28];
+        void *opsp = block.ops, *valsp = vals;
+        memset(raw, 0, sizeof raw);
+        memcpy(raw, &opsp, sizeof opsp);
+        memcpy(raw + 8, &block.n, 4);
+        memcpy(raw + 0x18, &valsp, sizeof valsp);
+        CHECK(sh_modvt_parm_get(raw, 7, out) == 1 && out[0] == 9.0f);
+        CHECK(sh_modvt_parm_get(raw, 9, out) == 1 && out[3] == 8.0f);
+        CHECK(sh_modvt_parm_get(raw, 8, out) == 0);
+    }
+}
+
 /* The detours with the fake engine: the lookup, the binder addition, a stock
  * material untouched, a board's materials bound again when it returns. */
 static void detours(void)
@@ -774,6 +1016,16 @@ static void image(const char *path)
     CHECK(l.release_rva + 0x50 <= sz && sh_modvt_release_head_ok(base + l.release_rva, 0x50));
     CHECK(sh_modvt_decode_binder(base + bd->rva, 0xC0, bd->rva, &b) == 1);
     CHECK(sh_modvt_decode_rebind(base + rb->rva, 0x70, rb->rva, &r) == 1);
+    {
+        /* Sharing a record: the mega2 loader SetSource calls, with its idStr, and the loader's own constants. */
+        sh_modvt_loader ld;
+        CHECK(sh_modvt_decode_loader(base + ss->rva, 0x600, ss->rva, &ld) == 1 &&
+              ld.loader_rva == (vk ? 0x1859BF0u : 0x185AC50u) && ld.loader_rva + 0x400 <= sz &&
+              sh_modvt_loader_body_ok(base + ld.loader_rva, 0x400) == 1);
+        if (vk) CHECK(ld.str_ctor_rva == 0x33A0F0u && ld.str_dtor_rva == 0x33A320u);
+        else CHECK(ld.str_ctor_rva != 0 && ld.str_dtor_rva != 0 && ld.str_ctor_rva != ld.str_dtor_rva);
+        printf("    mega2 loader 0x%X, idStr 0x%X / 0x%X\n", ld.loader_rva, ld.str_ctor_rva, ld.str_dtor_rva);
+    }
     printf("    %s: VT system 0x%X, sync 0x%X, Release 0x%X, table sys+0x%X; binder feedback 0x%X, vec4 0x%X, "
            "texture 0x%X; rebind copy 0x%X, VT off 0x%X; view handles 0x%X 0x%X, record 1 0x%X; jobs 0x%X\n",
            vk ? "Vulkan" : "OpenGL", l.sys_rva, l.sync_rva, l.release_rva, l.table_off, b.feedback_rva, b.set_vec4_rva,
@@ -853,6 +1105,8 @@ int main(int argc, char **argv)
     decode_helpers();
     plain_map();
     families();
+    shared_records();
+    shared_helpers();
     detours();
     families_follow_the_map();
     if (argc < 2) printf("[skip] the executables (pass DOOMx64vk.exe and DOOMx64.exe)\n");
