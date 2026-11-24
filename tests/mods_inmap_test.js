@@ -1,8 +1,6 @@
-/* The page's half of mods_inmap_test.c: at every step of tests/fixtures/mods_inmap_cases.json (the document the
-   backend wrote, reduced to what the page reads, and the rows the save then wrote), the Mods tab's own rule
-   (mods_tab.js mapState) says "In this map" for exactly the installed mods the save writes, the This map window
-   lists exactly the save's mods, a mod used by the whole map is said to be one, and a mod of editor tweaks only is
-   never in a map. The native half holds the document to the save and the committed cases to its run. Pure ASCII. */
+/* The page's half of mods_inmap_test.c: at every step of tests/fixtures/mods_inmap_cases.json the Mods tab's own rule
+   (mods_tab.js mapState) says "In this map" for exactly the installed mods the save writes, and the This map window
+   lists exactly the save's mods. The native half holds the document to the save. Pure ASCII. */
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -54,7 +52,7 @@ cases.forEach(c => {
   });
 });
 
-/* The steps the owner named are in the cases. */
+/* The listed steps are in the cases. */
 ['a mod\'s object placed, before any save', 'the last object of a saved mod deleted, before the next save',
  'that delete undone', 'a mod reached only through another mod\'s object', 'a mod used by the whole map (Use in this map)',
  'a published map\'s content, the installed folder of the mod alongside', 'Update to the installed version',
