@@ -118,15 +118,14 @@ names a mod you do not have asks first and downloads only what you approve,
 verified by hash, into that map's own folder under `mods\maps\`. A mod may carry
 Lua scripts that run during Play, sandboxed, on the host only.
 
-This release's installer does not convert what earlier releases left.
-`snapmap-plus-store.exe` is built and packaged with the release, but the
-installer does not place or run it, and `snapmap-plus migrate` reports that
-there is nothing to convert. A map, export or prefab saved by an earlier
-Snapmap+ is refused with "... was saved by an earlier Snapmap+; run the
-Snapmap+ installer to update it.", and a mod folder made for an earlier version
-is listed with "This mod was made for an earlier version of Snapmap+. This
-version does not read it yet." Converting those earlier shapes is the
-installer's job: its migration must do it, and it is on the release gate. See
+Converting the mods, maps and prefabs of earlier releases is not in this
+release; it will be built into the installer, `snapmap-plus.exe`, with no
+separate tool to manage. Until then what an earlier release left stays as it
+is. A map, export or prefab saved by an earlier Snapmap+ is refused with "...
+was saved by an earlier Snapmap+; run the Snapmap+ installer to update it.",
+and a mod folder made for an earlier version is listed with "This mod was made
+for an earlier version of Snapmap+. This version does not read it yet." The
+installer's conversion is on the release gate. See
 [Mods](docs/capabilities.md#mods).
 
 ## Credits

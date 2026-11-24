@@ -1,8 +1,7 @@
 # Packaging — the deployable bundle
 
 `package.ps1` assembles the **deployable overlay** into `dist/`: the two clone DLLs (built by `build.ps1`),
-laid out exactly as they drop into a DOOM install, with the store tool `snapmap-plus-store.exe`
-beside them.
+laid out exactly as they drop into a DOOM install.
 This is the artifact an end user installs; `dist/` is gitignored (binaries are never committed).
 
 ## The bundle
@@ -11,7 +10,7 @@ This is the artifact an end user installs; `dist/` is gitignored (binaries are n
 |---|---|---|
 | `XINPUT1_4.dll` | `build/` | the backend: XInput proxy + hook layer + cvar-unlock + fault-shield + the SnapStack subsystem (all merged in) |
 | `snapmap-plus\snapmap-plus-ui-13954591.dll` | `build/webview/snapmap-plus-ui.dll` | the frontend: the Snapmap+ UI, rendered in a Microsoft Edge **WebView2** control (HTML/CSS/JS), with the HTML embedded in the DLL. The path names the supported build; it is `SH_UI_DLL_PATH` in `src/backend/ui_bridge.h` |
-| `snapmap-plus-store.exe` | `build/` | the store tool (`src/store/`), which converts what earlier releases left: not installed into DOOM; the installer does not place or run it in this release (`storeConversion` is off in `installer/storemigrate.go`; see [Mods](#mods)) |
+
 
 **The bundle carries the April 2024 pair only.** `tools/bundle_guard.ps1`, which `ci.yml` and
 `release.yml` run, refuses a `dist/` that holds the 2018 build's `XINPUT1_3.dll` or
@@ -19,10 +18,9 @@ This is the artifact an end user installs; `dist/` is gitignored (binaries are n
 any bundle, and it removes the other build's pair wherever it finds it (see
 [The installed file contract](#the-installed-file-contract)).
 
-Plus `MANIFEST.sha256` (the installer's file list + per-file hash verify) and `TOOLS.sha256`. The
-manifest lists only what goes into DOOM, because every installer, the earliest included, installs each
-file it lists; the store tool is listed in `TOOLS.sha256` instead, which the installer checks before it
-places and runs the tool, so earlier installers never see it. **Nothing else ships** — the
+Plus `MANIFEST.sha256` (the installer's file list + per-file hash verify). The manifest lists only what
+goes into DOOM, because every installer, the earliest included, installs each file it lists. **Nothing
+else ships** — the
 frontend renders in the **system-installed WebView2 runtime** (preinstalled on Windows 11; the evergreen
 runtime on most Windows 10), so there is no UI-toolkit runtime to bundle. The two DLLs' exact sizes shift per build
 (MSVC embeds a build timestamp), so equivalence is judged on the export/ordinal surface, not byte size.
@@ -44,8 +42,7 @@ overlay remains the same two DLLs. Configuration is runtime-owned and installer-
     └── snapmap-plus-ui-13954591.dll
 ```
 
-`dist/` mirrors this tree (it also holds `snapmap-plus-store.exe` and `TOOLS.sha256`, which never go
-into DOOM). The installer (`snapmap-plus.exe`) — or a manual drop-in — merges it into the DOOM
+`dist/` mirrors this tree (plus `MANIFEST.sha256`, which never goes into DOOM). The installer (`snapmap-plus.exe`) — or a manual drop-in — merges it into the DOOM
 root. The Snapmap+ window opens beside the game in the SnapMap editor.
 
 ## The installed file contract
@@ -85,8 +82,8 @@ auto under `--yes`). This never blocks the mod install — the DLLs deploy regar
 ## Per-user data is NOT shipped
 
 The bundle ships no player content. At startup the backend creates `%LOCALAPPDATA%\snapmap-plus\`
-with its `prefabs\` folder, and nothing else (the `strings\` folder of earlier releases is retired: the
-store tool moves its document into the mod My overrides). Snapmap+'s small built-in default
+with its `prefabs\` folder, and nothing else (the `strings\` folder of earlier releases is retired and
+not read). Snapmap+'s small built-in default
 declarations are served from memory by the backend DLL. The companion window keeps its WebView2
 profile in `cache\webview2\`, regenerable data the installer never backs up or copies (an older
 top-level `webview2\` folder is renamed into `cache\` at the window's first start). The installer keeps
@@ -95,14 +92,13 @@ ours.
 
 ### Mods
 
-The bundle ships no mods. Installed mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`. DOOM converts
-nothing at startup, and the installer converts nothing in this release: `storeConversion` in
-`installer/storemigrate.go` is off, so install and update do not check, place or run
-`snapmap-plus-store.exe`, and `snapmap-plus migrate` says there is nothing to convert. A map, export or
-prefab saved by an earlier Snapmap+ is refused with "... was saved by an earlier Snapmap+; run the
-Snapmap+ installer to update it.", and a mod folder made for an earlier version is listed with "This mod was made for an earlier version of Snapmap+. This version does not read it yet."
-Converting those earlier shapes is the installer's job: its migration must do it, and it is on the release gate.
-The tool's `check` and `migrate <folder> --doom <the DOOM folder>` commands stay in `src/store/`. Apart from
+The bundle ships no mods. Installed mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`. Converting the
+mods, maps and prefabs of earlier releases is not in this release; it will be built into the installer,
+`snapmap-plus.exe`, with no separate tool, and it is on the release gate. Until then neither DOOM nor
+the installer converts anything. A map, export or prefab saved by an earlier Snapmap+ is refused with
+"... was saved by an earlier Snapmap+; run the Snapmap+ installer to update it.", and a mod folder made
+for an earlier version is listed with "This mod was made for an earlier version of Snapmap+. This
+version does not read it yet." Apart from
 removing an empty `override-backups\`, `package-cache\` or `package-staging\` folder, the installer itself
 never creates, changes or removes `mods\` or the retired package folders. See
 [Mods](capabilities.md#mods) for what each step does and [Mods](architecture.md#mods) for the design.

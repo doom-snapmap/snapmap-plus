@@ -17,7 +17,6 @@ in the snaphak-re findings system.
 | Frontend | Companion window, messages, editor views and preview controls. | [WebView UI](webview-ui.md) |
 | Fault shield | Selected engine-fault recovery and local crash evidence. | `src/fault_shield/fault_shield.c` |
 | Installer | Verified deployment, migration, update and uninstall. | [Installer README](../installer/README.md) |
-| Store tool | Migrates a mods folder of earlier releases. The installer does not run it (`storeConversion`, off: decision 30 freezes it, and migrating releases before beta.26 is a future installer's job). | `src/store/store_tool.h` |
 | Feedback relay | Files in-app reports as GitHub issues. | [Services](services.md), [feedback](feedback.md) |
 
 The backend is an XInput proxy named `XINPUT1_4.dll`. It forwards controller calls
@@ -158,10 +157,8 @@ parts in the order mods, settings, nav. No step writes a variable or touches
 `variables.allocCount`. A map with nothing to carry has no member and saves as
 exactly the engine's bytes.
 
-Earlier shapes are the installer's store tool's: the readers of every family
-above and the writer of the current member live in `map_old.c` (with
-`map_legacy_payload.c`), built only by `src/store/build.ps1` and never linked
-into the DLL (`map_old.h` describes each family and the conversion).
+A map in an earlier shape is refused before the engine parses it
+(`sh_map_old_shape`, `SH_MAP_OLD_REFUSAL`). Converting the mods, maps and prefabs of earlier releases is not in this release; it will be built into the installer, `snapmap-plus.exe`, with no separate tool.
 
 Navigation chunks: the engine's lexer sees the member only where Snapmap+ is
 not installed. Measured live on Vulkan, an undeclared root member holding one
@@ -514,10 +511,8 @@ install of those folders, so sharing stays offline; every rawmap save of a map
 that names mods writes that ZIP beside the JSON (see
 [Rawmaps that name mods](#rawmaps-that-name-mods) and
 [Prefabs that name mods](#prefabs-that-name-mods)). Plain saves never upload. The retired
-`%LOCALAPPDATA%\snapmap-plus\overrides\` tree is read once, by the store tool's
-migration below, never served or written, and moved to the Recycle Bin once
-everything in it is in `mods\`; no `package-cache` or `package-staging`
-folder is created.
+`%LOCALAPPDATA%\snapmap-plus\overrides\` tree is never read, served or written;
+no `package-cache` or `package-staging` folder is created.
 
 ### The mod folder
 
@@ -674,12 +669,8 @@ These backend files share the work:
   `sh_mb_build` takes the salt from the block, or from its caller for a folder
   not salted yet; `sh_mb_salt_modjson` writes the block a first scan gives a
   folder (`{"format": 2, "salt": ...}`); it rewrites no text, because no
-  text carries the salt. The readers of earlier shapes live
-  only in the store tool (`modbundle_old.c`, `sh_mb_old_load`), which converts
-  existing folders once at update; the game DLL never links them. What they
-  write is the engine's layout, and the build now refuses it until the
-  installer also lays a converted folder out by kind (owner, 2026-11-17:
-  converting releases' mods is the installer's, not yet done). The Mods
+  text carries the salt. A folder of an earlier shape is refused with
+  `SH_MB_SHAPE` and never read; converting the mods, maps and prefabs of earlier releases is not in this release; it will be built into the installer, `snapmap-plus.exe`, with no separate tool. The Mods
   tab's New mod writes an example that places and plays untouched: an
   entityDef `entities/example_crate` with the game's SnapMap `crate01`
   model, its Toybox row (`snapEditorEntityDef`, nothing binary: the game's
@@ -771,7 +762,7 @@ These backend files share the work:
   `"closure": true`, a rebuild drops them and derives the set again from its
   own needs (a pointer whose need is gone is gone, and the hash changes; an
   unchanged folder keeps its hash), while an author `stock` entry and a
-  pointer a download or migration brought stay. A block of rules 3, which
+  pointer a download brought stay. A block of rules 3, which
   had no mark, hands its pointers at the game's own path to content only
   `gameresources` holds to the closure the same way. Measured on build
   13954591: the owner's SP doors folder gains 29 pointers (the
@@ -783,9 +774,8 @@ These backend files share the work:
   materials, the gauss_beam transparency atlas and the `switch2_up` and
   `automap_hell` movies with their atlases (11 names, the ones fidelity87
   added by hand); the other four gain none.
-- `modstore.c` owns the store: the mod folders, install, verification, the
-  rebuild rule and the one-time upgrade of the retired layout, below, which the
-  store tool runs. Files are hashed at install and on `sh_mods doctor verify`,
+- `modstore.c` owns the store: the mod folders, install, verification and the
+  rebuild rule. Files are hashed at install and on `sh_mods doctor verify`,
   never at boot.
 - `modstock.c` is the read-only installed-resource bridge behind stock
   pointers, below. Its `container` operation (`sh_mb_stock_container`) names
@@ -795,9 +785,7 @@ These backend files share the work:
   from, and `mod.json` does not record it.
 - `modcmd.c` is the `sh_mods` console command. It dispatches the serving verbs
   (`status`, `rescan`, `palette rebuild`, `held`) to `modserve_engine.c` (a rescan runs
-  the rebuild rule first) and owns `build`, `install`, `list` and `verify`. Its
-  `modbundle_build_folder` is the builder entry the legacy converter calls, with
-  the game's archives as the stock resolver.
+  the rebuild rule first) and owns `build`, `install`, `list` and `verify`.
 - `modserve.c` reads every `mod.json` once at boot, checking sizes and never
   hashes, into one immutable table from request path to file; a bundle that
   fails is skipped with one `MODS:` line and nothing else is affected. Needs are
@@ -926,9 +914,6 @@ These backend files share the work:
   plain JSON), refuses an older prefab (a sidecar and no block), resolves
   the mods before Load / Place, and writes and reads a prefab's ZIP, as in
   [Prefabs that name mods](#prefabs-that-name-mods).
-- `modmigrate.c` moves the retired `overrides\` tree and `strings\strids.json`
-  into the store once (the store tool runs it; the DLL does not link it), as in
-  [Migration of the retired overrides folder](#migration-of-the-retired-overrides-folder).
 - `modsound.c` delivers the Wwise sound banks bundles carry, and loads the
   stock banks SnapMap skips that a declared mod's sound events need, with
   `modbankinfo.c` reading the game's bank index, as in [Mod sounds](#mod-sounds).
@@ -1021,11 +1006,8 @@ or New mod; there is no folder watcher. Under the store lock it:
 
 A folder in an earlier shape (a format-1 block, `package.json`, a retired
 author key) is listed with its plain reason ("This mod folder is not in a shape
-Snapmap+ can build: ...") and nothing in it is written; the installer's store
-tool converts every such folder it finds each time it runs. A converted folder
-is in the engine's layout (`assets\`), which the build now refuses until the
-installer also lays it out by kind (owner, 2026-11-17: converting releases'
-mods is the installer's, not yet done).
+Snapmap+ can build: ...") and nothing in it is written. Converting such a
+folder is not in this release; it will be built into the installer.
 
 The retired `mods\maps\` (`SH_MS_RETIRED_PLACES`). Earlier versions kept the
 builds a downloaded map brought in per-map folders there; a map's content is its
@@ -1065,8 +1047,7 @@ salt already holds that build nothing is copied (`present`), else its carried
 files and `mod.json` are copied beside the others under its own name and
 verified, and when the root already holds the salt the arriving copy gets a
 new salt and is built under it (`resalted`: the arriving folder is the newer
-copy whatever its `built`). `sh_ms_install_as` names the store tool's target, which it
-replaces. A local row (the player's own map) follows the root folders with no
+copy whatever its `built`). A local row (the player's own map) follows the root folders with no
 prompt: every row is activated through the build the resolver below answers,
 the root folder of the row's salt (a local row carries no build), and the next
 save writes the rows again from the serving index. The map scope's listing
@@ -1145,10 +1126,9 @@ other (an install drops nothing).
 
 `mods\snapmap-plus.json` is the product's one record:
 `map-claims`, `map-pending` (both `modclaim.c`, see [Publishing a map with
-mods](#publishing-a-map-with-mods)), `links` and `migration`, each section
-written whole under one lock. The `claims`
-and `pending` sections the store tool's migration folds in from earlier
-releases' files are not read by the product. The
+mods](#publishing-a-map-with-mods)), `links` and `salts`, each section
+written whole under one lock. Sections earlier releases wrote (`claims`,
+`pending`, `migration`, `converted`) are not read by the product. The
 build cache, aliases, snapshots and first-build renames of earlier releases
 are gone: the block's `tree` is the rebuild rule's key.
 A record another program holds open is waited for, up to a second. A read
@@ -1170,8 +1150,7 @@ covered builds move the folder there (`sh_ms_delete_mod_folder`: a mod
 folder of the store, under the store lock, through `SHFileOperationW`
 `FO_DELETE` with `FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT |
 FOF_NOERRORUI | FOF_NORECURSEREPARSE`, a double-NUL-terminated plain path,
-reparse points moved as themselves and never entered), and rescan. `sh_ms_remove_folder`, which the store upgrade and an
-import's rollback use, takes the same route under the same lock. The shell is
+reparse points moved as themselves and never entered), and rescan. `sh_ms_remove_folder` takes the same route under the same lock. The shell is
 offered only a folder on a fixed drive whose plain path is shorter than
 `MAX_PATH`; on a network or removable drive there is no bin and the shell would
 delete without saying so. When the bin cannot take the folder (that drive or
@@ -1189,112 +1168,8 @@ tab's map scope](#the-mods-tabs-map-scope)), so Ctrl+Z cannot bring back what
 used the mod.
 
 The retired recycle bin. Earlier builds moved removed folders to
-`removed-mods\` beside `mods\` and recorded them in the record's `removed`
-section. The store tool's `migrate`, after the store upgrade, runs
-`sh_ms_bin_sweep`: every entry of `removed-mods\` goes to the Windows Recycle
-Bin (links removed, never followed), then the empty folder and the `removed`
-section go, with one line per entry ("removed-mods: <name> moved to the Recycle
-Bin") and one summary ("removed-mods: 3 folder(s) moved to the Recycle Bin; the
-bin is retired"); a later run finds nothing. An entry that cannot be moved
-stays for the next run.
-
-The store tool. The game converts nothing at boot.
-`snapmap-plus-store.exe` (`src/store/`) links the store sources (`modstore.c`,
-`modstore_upgrade.c`, the store tool's half of the store: the earliest
-per-build layout, the second upgrade step over format-1 folders read with
-`modbundle_old.c`, and the bin sweep, never linked into the game DLL;
-`modmigrate.c`, `modlegacy.c`, `modbundle.c`, `modstock.c` and what they use)
-with a stand-in for the serving layer (`store_seam.c`), and no engine, DLL or
-WebView code. `check <store>` lists the work it finds, one line per kind
-(folders of the retired layout, `blobs\`, `legacy\`, the old record files, the
-second upgrade step, `removed-mods\` or its record section, package entries of
-`overrides\` the record does not mark as migrated, the loose files of
-`overrides\` and a `strings\strids.json` not yet moved, a document that is not
-a strings document, and an `overrides\` or `strings\` folder left to retire)
-and exits 0 when there is none, 1 when there is, 2 on an error; it changes
-nothing (`sh_ms_upgrade_scan`, `sh_modmigrate_loose_scan`).
-`migrate <store> [--doom <folder>]` refuses while DOOM runs, then runs the
-layout upgrade, the bin sweep, the overrides migration, the loose step and the
-retirement of `overrides\` and `strings\` (`sh_modmigrate_retire`), each only
-when `check` finds its work, with every delete through `sh_ms_set_discard` to
-the Recycle Bin (`store_recycle.c`: `SHFileOperationW` with `FOF_ALLOWUNDO`, on
-a fixed local disk only, links removed first). The overrides migration and the
-loose step's loose files need the game's archives for their stock pointers: the
-`--doom` folder, else the one Steam names; without either they are reported and
-left (a strings document alone needs neither). It prints the store's own log
-lines as its action lines and a summary, and exits 0 when nothing is left to do,
-1 when a later run could still do something, 2 on an error; a second run finds
-nothing and changes nothing. The installer runs it on install and update (see
-[installer/README.md](../installer/README.md#mods-and-retired-package-folders)).
-A folder without a builder block is salted and built at the next scan, or at
-the next boot (below). A folder in that earliest layout is written as a format-1 `mod.json`
-(its manifest's author fields and a block naming its key and build) for the
-conversion below; one whose `bundle.json` does not read is left as it was and
-logged.
-
-The conversion to the one shape (`store_convert.c`, store tool only) runs after
-those steps, once per store: what an earlier release wrote is converted so the
-game reads only the current shape. Folders: every folder of `mods\` outside
-`mods\maps\` whose `mod.json` is an earlier shape (`sh_mb_old_is_old`, or a
-`package.json` alone) has its old key (author `id`, else the block's `key`,
-else its name). Of several folders of one key, the player's own are kept and
-the extra copies the product made (`<key>@<hash16>`, those under `downloads\`
-or `imports\`) go to the Recycle Bin once a kept one is converted; with only
-product-made ones the one that held the key first is kept. Which folder holds
-a key is read from the record (the `converted` record's folder for the key,
-else the folder named after the key, else the first by path), never from a
-`built` time (DECISIONS 15). A kept folder's author part is cut free of the
-block, the retired author keys and a hud `schema` (every other byte kept),
-salted into `<name>.staging-<pid>` by `sh_ms_salt_copy` with `from` the old key
-(the engine's layout of its day: paths, texts, strings keys
-`<salt>_<key>` and their `#str_` references, from a view of `mod.json` and
-`assets\` only, its sound banks renamed `<salt>_<name>` with their BKHD id and every text of the folder that names one (decls, mod.json)),
-every other file beside them copied unchanged (DECISIONS 16), and built there
-by the real builder over the store's installed bundles and the game's archives
-(`sh_modstock_exists`, replacements kept, stock-bank needs recorded through `sh_mb_set_bank_need(sh_mbi_bundle_need)` as the game records them). A build that fails, or a salting the
-folder refuses (the folder is then copied as it is with a fresh salt), is
-written as a failed build (`sh_mb_write_failed`) with the builder's plain cause
-(DECISIONS 14). The work folder is swapped in under the folder's own name and
-the folder as it was goes to the Recycle Bin. That output is in the engine's
-layout, and the build now refuses it until the installer also lays a converted
-folder out by kind (owner, 2026-11-17: converting releases' mods is the
-installer's, not yet done); only a folder whose descriptor
-does not read is left as it was. Folders that need another one's names are
-tried again after it. The record section `converted` keeps `keys` (old key to
-salt), `builds` (every old build hash to its salt: the folders', the removed
-copies', `.builds\` snapshots' and the retired `aliases`), `folders`,
-`pending`, `refused` and `maps` (maps left as they were, by content hash; `check` tries each again in memory and counts it as work as soon as it would convert). It
-is written after every folder and every map; a folder's row is `pending` from
-just before its swap to just after, so a run stopped anywhere resumes: the
-next run puts back a `<name>.old-<pid>` whose folder is missing, removes work
-folders, and commits a pending row whose folder carries its salt. The whole run
-holds the mods folder's named lock (`src/common/store_lock.h`, DECISIONS 19),
-and every run looks at every folder and map again (DECISIONS 21). Maps: every `SNAPMAPS<id>\map.decl` of
-`Saved Games\id Software\DOOM\base\savegame.user` (`store_saves.c`; both
-renderers share it, `--saves` names another for tests), the data folder's
-`rawmap.json` and every prefab under `prefabs\`. A text of an earlier shape
-(`sh_map_old_read`; packages a map carried are converted first by
-`sh_modlegacy_process`) has each old row resolved by key, else by build hash,
-to a root folder's salt and current build, and is written in the current
-shape by `sh_map_old_write` (a prefab's block rows rewritten to
-`<salt>@<build>` and its names rekeyed). The file is written through a
-temporary and a replacing rename, with a copy of it as it was beside it
-(`<name>.before-snapmap-plus-1.0`). A saved map is re-framed (its 4-byte header
-kept, the text deflated by `store_deflate.c` and read back before anything is
-written) and its `map.decl.verify` signed again (HMAC-SHA256 keyed by the
-sidecar's own salt and the id the game binds saves to) only after the present
-sidecar verifies with a candidate id (the account folder's name, or that id
-with its instance field cleared); `game.details` is left as it is. The new
-`map.decl.verify` and `map.decl` are written beside them first and then put in
-place map first, so a run stopped in between leaves only the new signature
-beside the new map, which the next run puts in place. A settings variable an
-author's variable follows keeps its index under the name `unused` with an empty
-value, its setting moved into the member, so no converted map carries a name
-the game's earlier-format check refuses. A map
-naming a key no converted folder provides, or whose signature matches no
-candidate, is left untouched with its cause. Last, `mods\.builds\` goes to the
-Recycle Bin and the record's retired sections (`cache`, `aliases`, `snapshots`,
-`renamed`, `downloads`) are removed.
+`removed-mods\` beside `mods\`; the product does not read it, and it stays as an earlier release
+left it. The game converts nothing at boot. Converting the mods, maps and prefabs of earlier releases is not in this release; it will be built into the installer, `snapmap-plus.exe`, with no separate tool.
 
 Crash leftovers. An install, a download and a salting assemble a
 folder as `<name>.staging-<pid>` and move the folder they replace aside as
@@ -1326,10 +1201,10 @@ and the path, size and time of every file in the mod's folders) or the builder's
 its block's, or its last build failed; that runs on a rescan (the Mods tab, `sh_mods rescan`,
 an install) and at boot (`sh_ms_boot_sync`): after the boot index, a thread of
 its own checks the trees and, when a folder is not built yet or changed while
-the game was closed (the first boot after a conversion), builds it as a rescan
+the game was closed (the first boot after an update), builds it as a rescan
 would, with the install's indexes (`modstock.c`) as the stock reader, then
 rebuilds the serving index, whose listeners pass the table to the game. A first
-build of the 15 converted folders takes about 10 s, so it never runs on the
+build of 15 folders takes about 10 s, so it never runs on the
 boot thread; the same folders built this way carry the same bundle hashes as an
 in-game rescan's. The thread waits until the startup install has released the
 store (`sh_ms_boot_release`, at the end of the install in `dllmain.c`): the
@@ -1338,35 +1213,6 @@ the claims), and a build holding it delayed the startup by the build's length.
 While it builds, the thread hands the store to any operation waiting for it
 between two folders, so an editor map open in that time waits one folder's
 build at most; only the index rebuild at its end touches serving.
-The store tool's `sh_ms_upgrade` converts the retired layout once (before the
-overrides migration): every
-`<id>@<version>+<build>\` folder gets `mod.json` from its `bundle.json` and
-`.state.json` (read back with the same hash before the old files go), hard
-links become copies (the linked file is renamed aside, copied back to its name
-and checked against its hash, and only then is the renamed original retired;
-on any failure the original is put back, and one an interrupted run left aside
-is put back at the next run), a missing file is restored from `blobs\`, product folders
-are renamed to `<id>` (or `<id>@<version>` when one id has several), `legacy\`
-folders move into `mods\` or are dropped as aliases, `blobs\` is removed, and
-`claims.json`, `publish-links.json`, `pending-uploads.json` and
-`.migrated.json` are folded into the record. Everything it retires goes to the
-Recycle Bin. It logs one `MODS: store:` line per folder and a summary (the
-tool prints them), and every step can be repeated. A second step runs
-once per store, also on one that went through the first already (the record's
-`layout` section becomes 2): it removes every delivered package an installed
-mod answers by the rule above and aliases its hash, renames a product folder
-left alone with its id under `<id>@<version>` to `<id>` and any folder named
-after a generated version, and collapses a completed `migration` section to
-`complete`, `migratedAt`, `source`, the rows of folders not done (skipped,
-refused or pending) and `trees`, which maps each converted overrides tree to
-its folder and still resolves maps published by the earliest releases (aliases map
-hashes, not trees); the folder names in it follow the drops and renames. A
-pass of the overrides migration writes the same collapsed section when it
-completes, and the next run counts an `overrides\` entry the section
-does not list as done unless it was created or written after `migratedAt`.
-The product block's `legacy` record (tree fingerprint, grandfathered shadows)
-is kept as it is. One `MODS: store:` line per dropped or renamed folder and a
-summary.
 
 A bundle file may be a stock pointer instead of carried bytes: the
 file kind `stock`, `{"needs", "path", "provides", "request", "stock":
@@ -1377,7 +1223,7 @@ bytes equal installed content, and an author writes one in the descriptor's
 `stock` object (`{"<request>": {"source": "<installed path>", "sha256":
 "<optional>"}}`, the hash filled in by the builder) to alias installed content
 under a mod name. The extension whitelist does not apply to pointers, because nothing is carried
-for them; an upload never sends their bytes, so a converted package or a
+for them; an upload never sends their bytes, so a
 copy-of-stock mod uploads only its authored and edited files. An install keeps
 every file of the folder it installs, a copy of a game file included (the
 builder decides what is a borrow; nothing is dropped at install), and the
@@ -1491,12 +1337,9 @@ map starts) and sorts it through the hooked sort; that drops the injected
 rows, so every later top-level sort the engine makes re-adds them (in the
 process heap) before it orders the table, and decls parsed and Toybox rows
 read after a rebuild find a mod's names. The player's own document of earlier releases,
-`%LOCALAPPDATA%\snapmap-plus\strings\strids.json`, is not read: the store
-tool's loose step moves its keys into the mod My overrides (see [Migration of
-the retired overrides folder](#migration-of-the-retired-overrides-folder)), so
-they are ordinary bundle strings and outrank no other mod. The first injection runs after the boot index
+`%LOCALAPPDATA%\snapmap-plus\strings\strids.json`, is not read. The first injection runs after the boot index
 is built, so it already carries bundle strings. Every later index build
-(`sh_mods rescan`, an install, a migration, a fetched bundle) requests a
+(`sh_mods rescan`, an install, a fetched bundle) requests a
 refresh that re-reads the layers and re-sorts the table on the main thread: at
 once when the build ran there, otherwise through the apply call slot or at the
 next editor palette build or map activation. A pass first gathers every row
@@ -1528,7 +1371,6 @@ and without `_sp`, `_snapmaps` or
 BKHD chunk must be version 113. The build does not check the chunk's id
 against the name (R-NM1; the earlier build refused a renamed bank). A bank is
 always carried: never a stock pointer, never a shadow.
-A converted first-generation package keeps its banks as plain files.
 
 Wwise reads banks with its own `CreateFileW`, not through the provider, and
 the engine lists the bank folder only inside LoadBanks, so `modsound.c`
@@ -2001,7 +1843,7 @@ the carrier with its own md6Def parser, so every event type is available with
 its own argument types; the product never builds an event.
 
 The build (`sh_ce_build_registry`, registered with the builder through
-`sh_mb_set_clip_events` by the DLL and the store tool) records the registries
+`sh_mb_set_clip_events` by the DLL) records the registries
 member `clipEvents`, `[{"md6Def", "base", "clips": [...]}]`, outside the
 canonical text. Every mistake is a warning, never the build's cause: a value
 that is not a list, an entry that is not a name, an entry that is not one of
@@ -2116,7 +1958,7 @@ and names it in the author key `"attachment_tags":
 own md6Def parser, so the product never builds a tag.
 
 The build (`sh_at_build_registry`, registered with the builder through
-`sh_mb_set_attach_tags` by the DLL and the store tool, reading the md6Def texts
+`sh_mb_set_attach_tags` by the DLL, reading the md6Def texts
 through the same `mb_ce_text` as clip events) records the registries member
 `attachmentTags`, `[{"md6Def", "base", "props": [...]}]`, outside the canonical
 text; it sorts first among the registries members. Every mistake is a warning,
@@ -2337,7 +2179,7 @@ feature.
   row's cause, worded as the stop line words it:
   `scripts\door.lua line 4: "end" expected to close "function" on line 2.
   Correct it, then press Refresh.` A build without a registered check (any
-  program but the game and the store tool) refuses a script. The static pass
+  program but the game) refuses a script. The static pass
   (`sh_mb_script_scan`) reads the literal registration calls without running
   anything: a `require` of a module the mod does not carry, or a name under
   another mod's `mods/<salt>/`, is refused with the file and line; an
@@ -3446,7 +3288,7 @@ damage comes from the world entity, as a trigger's does.
   a scan that skips comments and strings; the builder records it as the
   scripts member's `node`) gets one built-in Toybox row, "Script", generated by
   `sh_script_node_row_make` (`script_node_row.c`, no Lua, linked by the
-  builder, the store tool and the serving index) and never written into its
+  builder and the serving index) and never written into its
   folder: the
   entityDef `mods/<salt>/script` inheriting the stock Relay
   (`snapmaps/logic/relay`, `idSnapMapLogic_Relay`) and the row
@@ -4504,8 +4346,8 @@ map's choices).
   your copy and the mod borrows the game's, or put your version in
   the mod's own folder for its kind and point your decls at it"; a binary at a name the game does
   not ship keeps "the game has no file of that name for it to replace"),
-  except in a folder the product received (origin `download`, `delivery`,
-  `migration`, or a thread that called `sh_mb_keep_replacements_here(1)`,
+  except in a folder the product received (a thread that called
+  `sh_mb_keep_replacements_here(1)`, which no product path does today,
   where it stays a replacement, as does a decl whose game text cannot be read
   there). A grandfathered bundle keeps its shadows and derives nothing. The
   retired author keys `player`, `extends` and `replaces` are ignored with one
@@ -4655,117 +4497,15 @@ map's choices).
   is. A folder built before derived edits is in an earlier shape and serves
   nothing; the serving index reads no partials.
 
-### Migration of the retired overrides folder
-
-Earlier releases kept packages in `overrides\`. The store tool's
-`migrate`, after the store upgrade and the bin sweep, runs `modmigrate.c`'s
-pass once when `overrides\` exists and the record's `migration` section does
-not (or records an unfinished pass), with the `--doom` folder as the stock
-bridge's install (`sh_modstock_set_install`):
-
-- each direct child folder with `package.json` or `mod.json` is converted the
-  way a carrier is (layout moved under `assets/`, files a bundle cannot carry
-  left out) into a staging folder outside the store and installed by
-  `modstore.c` as `mods\<folder>\` (its own name; with the tree's first 8 hex
-  when another mod holds that name), `mod.json` and real files. The package's
-  keys are the author part in the one shape: its name, requirements, strings and
-  hud and its other keys, without the retired ones (`id`, `version`, `composes`,
-  an era B `schema`) and with no
-  product block. The staged folder is salted with `from` its id (or, for an
-  era B pack without one, its folder name; `sh_ms_assign_salt`, which also names
-  its strings `<salt>_<key>`) and built under the current rules with its
-  replacements kept, so a pack that only built under the retired `legacy`
-  relaxations is refused alone with its cause. The result is in the engine's
-  layout (`assets/`), which the build refuses (a file outside the mod's folders) until the installer also
-  lays a converted folder out by kind (owner, 2026-11-17: converting releases'
-  mods is the installer's, not yet done). Moved again into the folder an
-  earlier pass made of the same tree (the record's `trees`), it keeps that
-  folder's salt (`sh_ms_assign_salt_as`). Two folders with one id are both built,
-  each in its own folder with its own salt, and the duplicate is reported;
-- each delivered package, `overrides\map-<16 hex>\<package>\`, becomes a mod
-  folder `mods\<id>\` the same way; the record's `trees` gives its earlier tree
-  fingerprint (entries sorted case-insensitively, then by bytes; a `d` or `f`
-  byte, the NUL-terminated relative path and the file's SHA-256) to it, which is
-  how a map's carrier `delivery.<tree>` of the same delivery is answered when the
-  store tool converts that map;
-- a folder without a descriptor whose only package is one direct child folder
-  (earlier releases read unmarked folders as groups) has that child migrated under the
-  child's own id, and its line says so; a folder without a descriptor and with
-  several such children and a ZIP are skipped with the reason (every other
-  file, and a folder with no descriptor and no package child, is the loose
-  layer below); a folder over
-  512 MiB or 8192 files is skipped before it is read;
-- a file byte-identical to installed game content becomes a stock pointer (see
-  above): its file stays in the folder and an upload never sends it. Each
-  folder's line says `N file(s), P of them stock pointer(s) to installed
-  content, K KiB not stored`, the summary line totals them, and the record
-  carries `stockPointers` and `stockBytes`. Measured on the owner's packs:
-  453 of 472 files of the cyberdemon pack (9.1 of 9.7 MB), 306 of 388 of the
-  doors pack (8.1 of 8.3 MB), and 6 of the Imp's 11 (renamed copies, 1.8 MB);
-- the pass itself creates and changes nothing under `overrides\`; an empty
-  `override-backups\` folder is removed and a non-empty one is left alone.
-
-The loose step (`sh_modmigrate_loose_run`, after the pass) moves what SnapHak
-and the first releases served without a package, with the strings document,
-into one mod, `mods\my-overrides\`. The loose layer is every file directly in
-`overrides\` that is not a ZIP and every folder with no descriptor and no
-package folder one level down (`overrides\generated\...`, a tree of engine
-paths); `strings\strids.json` is the flat `"id": "text"` object `strids.c` read
-before (UTF-8, with or without a BOM). The loose files are converted as a
-package is: placed under `assets\` at their paths below `overrides\`, files a
-mod cannot carry left out and counted, copies of installed content made stock
-pointers, with a descriptor of id `my-overrides`, name `My overrides` and the
-document's keys as `strings.en`, and installed by `modstore.c` as
-`mods\my-overrides\`, salted from `my-overrides` (its own strings `<salt>_<key>`;
-a key the game or the product defines stays as it is, a string edit).
-With the document alone the folder is `mod.json` (the same author part) and an
-empty `assets\`. When `mods\my-overrides\` already exists only what it lacks is added
-(files compared by path, keys case-insensitively) and one `MODS: migration:
-kept my-overrides' <path or key>` line names each it has with other bytes or
-text; an identical one is counted, not named. The changed tree is built again at
-the next start or rescan by the rebuild rule, and its strings serve from that
-build. A file merged into a folder the player made is built under that folder's
-rules: a binary at a game name with other bytes than the game's is refused
-there, and the folder's build is marked failed with that cause until it is
-fixed (there is no last good build). A document that is not a strings
-document is left with one line naming why. The record's `loose` section
-(`complete`, `migratedAt`, `folder`) marks the step done; a loose entry or a
-document created or written after `migratedAt` is due again. The step holds the
-store lock throughout.
-
-Then `sh_modmigrate_retire` moves `overrides\` to the Recycle Bin once every
-entry of it is in `mods\` (a package entry the record marks done, a loose entry
-the loose step moved), and `strings\` once it holds no document left to move,
-both through `sh_ms_retire_sibling`, which acts only when a discard is set: the
-store tool's Recycle Bin. An entry still skipped (a ZIP, an over-cap folder)
-keeps `overrides\`, and one line names the first.
-
-The tool runs the pass on its own thread, folder by folder, and writes the
-record when it is done. The record lists every folder with its kind,
-outcome, reason, id, version, store folder, bundle hash and tree, and a `trees`
-map from tree to store folder; it says `"complete": false` until the pass
-ends, and an unfinished record makes the next run do the pass again (every
-step is idempotent). Each folder logs one `MODS: migration:` line and the pass
-one summary line; a line that leaves files out names how many and how many of
-them are `.bswf` movies (bundles carry movies under `generated/swf/` only, served
-by `modswf.c`). A migrated pack that shares its old key with a delivered or
-converted package (such as the `doors` packs) is converted below like any
-copied folder: one keeps the salt and the other gets its own. Stock names are not checked during the migration because the
-pass runs without the game's resource reader, so unresolved needs only warn, as
-for a converted carrier.
-
 Every writer of the store serialises on one recursive lock, `modstore_lock`
 (`modstore.c`): the mods folder's
-named mutex (`src/common/store_lock.h`), which the record lock
-(`sh_mb_record_lock`) shares and which the store tool holds for its whole run,
-so a second game or the store tool waits instead of overwriting. The scan
+named mutex (`src/common/store_lock.h`, `Local\snapmap-plus-mods-<16 hex>`), which the record lock
+(`sh_mb_record_lock`) shares, so a second game waits instead of overwriting. The scan
 records each root salt's folder in the record's `salts` section.
-Each install and verification takes it; each migration folder, a rawmap or
-prefab import's install, `sh_mods install` and an export hold it around their
-whole step. A second writer waits for the first instead of failing, and logs
-one `MODS: store: waiting` line; because the migration takes the lock per
-folder, an install on the main thread (the Mods tab or `sh_mods install`) waits
-for at most one folder, not for the whole pass.
+Each install and verification takes it; a rawmap or prefab import's install,
+`sh_mods install` and an export hold it around their whole step. A second
+writer waits for the first instead of failing, and logs one `MODS: store:
+waiting` line.
 
 ### The Mods tab's map scope
 

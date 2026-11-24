@@ -83,9 +83,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1
 This compiles both DLLs into **`build/`**: the backend `XINPUT1_4.dll` and the frontend
 `build/webview/snapmap-plus-ui.dll` (the WebView2 SDK is auto-fetched from NuGet on the first build). `build/`
 is gitignored. (`build.ps1` first builds the backend, then the frontend, so the two never drift out of ABI
-sync; their shared ABI is declared in `src/common/snapmap_plus_iface.h`.) It also builds
-`build/snapmap-plus-store.exe`, the store tool (the installer does not run it in this release), from the backend's store sources
-(`src/store/build.ps1`).
+sync; their shared ABI is declared in `src/common/snapmap_plus_iface.h`.)
 
 `build.ps1` is the one top-level build script (used above, by CI and by the release workflow); build
 the product only through it or the component scripts it calls. Pass `-BackendOnly` to skip the frontend
@@ -113,8 +111,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File package.ps1
 
 This assembles the bundle into **`dist/`**: the **2-file overlay** (the two clone DLLs, laid out exactly
 as they drop into a DOOM install; the frontend renders in the system-installed WebView2 runtime) with its
-`MANIFEST.sha256`, and beside it the store tool `snapmap-plus-store.exe` with its own `TOOLS.sha256` (the
-installer does not place it in this release; it never goes into DOOM). `dist/` is gitignored. No game assets or per-user
+`MANIFEST.sha256`. `dist/` is gitignored. No game assets or per-user
 data are bundled. `tools/bundle_guard.ps1` checks that layout; CI and the release run it.
 
 A release build stamps its tag into the DLLs: `build.ps1 -Version v1.2.3` passes it to every compile as
@@ -300,7 +297,7 @@ that are merged but not yet tagged do not appear.
 7. **Push** to your fork and open a **pull request against `main`**.
 8. The **CI gate** runs automatically, as three parallel jobs: a security scan (no-new-binaries ·
    capability-surface scan · gitleaks); the build (`build.ps1` / `package.ps1`, `tools/bundle_guard.ps1`,
-   which asserts the bundle is the 2-file overlay plus the store tool, XInput ordinal parity, `tests/run-tests.ps1` and the
+   which asserts the bundle is the 2-file overlay, XInput ordinal parity, `tests/run-tests.ps1` and the
    Worker runtime suite); and the installer's `gofmt` / `vet` / `test` / `build`. CI calls the same
    scripts as a local build and caches fetched dependencies (the WebView2 SDK, miniflare and the Go
    caches) and `build/obj/`, whose content keys decide what a run recompiles. It runs in a **secretless** sandbox — fork PRs get a read-only token and zero
@@ -520,14 +517,14 @@ release. **Do not open a public issue for a security problem.** Use GitHub's **p
 | `src/ui/` | the frontend DLL (`snapmap-plus-ui.dll`): the WebView2 host, HTML page, styles, declaration module and native message codecs |
 | `src/fault_shield/` | the recover-in-place vectored-exception fault shield (compiled into the backend) |
 | `src/common/` | the shared backend↔frontend interface ABI (`snapmap_plus_iface.h`) |
-| `src/store/` | `snapmap-plus-store.exe`, the console tool that converts the mods, maps and override folders of earlier releases (the installer does not run it in this release) |
+
 | `installer/` | `snapmap-plus.exe` — the Go install / update / uninstall CLI |
 | `tests/` | the native unit tests + `run-tests.ps1` |
 | `tools/` | the changelog parser (`changelog.py`), the release-notes drafter (`draft_changelog.py`), the published-release sync (`sync_release_notes.py`) and their tests |
 | `CHANGELOG.md` | the user-facing release notes -- the single source every consumer reads |
 | `docs/` | contributor guides and cross-component contracts, indexed in [README.md](README.md) |
 | `build.ps1` | compile the DLLs → `build/` (backend + frontend; `-BackendOnly` for backend alone) |
-| `package.ps1` | assemble the deployable overlay → `dist/` (the two clone DLLs, and the store tool beside them) |
+| `package.ps1` | assemble the deployable overlay → `dist/` (the two clone DLLs and their manifest) |
 | `.github/workflows/` | `ci.yml` (the PR gate) · `prepare-release.yml` (drafts a release's notes) · `release.yml` (tag-triggered release) |
 | `LICENSE` | MIT |
 
