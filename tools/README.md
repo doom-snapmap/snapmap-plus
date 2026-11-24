@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Contains maintainer tools for release notes, frontend assets and portable engine signatures.
+Contains maintainer tools for release notes, the package check, the generated tables, frontend assets and portable engine signatures.
 
 ## Contents
 
@@ -10,6 +10,9 @@ Contains maintainer tools for release notes, frontend assets and portable engine
 - `draft_changelog.py` prepares release-note drafts for review.
 - `sync_release_notes.py` synchronizes reviewed notes to GitHub releases.
 - `cbuild.ps1` holds the shared MSVC build helpers the component build scripts and `tests/run-tests.ps1` dot-source: one vcvars import, incremental parallel compiles, the link step and a bounded process pool.
+- `bundle_guard.ps1` checks a packaged `dist/` folder before it is published (CI and `release.yml` run it).
+- `gen_programs.js` embeds the render programs' shaders (`src/backend/programs/shaders/*.rp`) in the backend; `gen_script_sdk.js` embeds the script SDK (`src/sdk/lua/*.lua`) as `src/backend/script/script_sdk_lua.c`. Each takes `--check`.
+- [worker-tests/](worker-tests/) pins miniflare (`package.json`, `package-lock.json`) for the Worker runtime suite.
 - `update-avatar.ps1` deliberately refreshes the embedded organization avatar; normal builds use committed assets.
 - [signatures/](signatures/README.md) derives and checks engine patterns.
 - [tests/](tests/) tests changelog parsing and drafting.

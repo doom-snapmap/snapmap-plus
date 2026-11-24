@@ -32,16 +32,19 @@ ordinals 2 and 3; `xinput1_4.def` pins the real System32 `XINPUT1_4.dll` ordinal
 set (named and unnamed) and exports nothing else. The proxy loads the system `XInput1_4.dll`
 from the system directory (`LOAD_LIBRARY_SEARCH_SYSTEM32`), wherever Windows is installed.
 Only the diagnostic build (`build.ps1 -Diag`) links `xinput1_4_diag.def`, the same set plus
-`sh_diag_status` at ordinal 300: one JSON object with the product version, the interface
-table's size, the features off this session and the last rawmap open (`diag_status.h`), for
-the development daemon. A release has neither the export nor its code.
+four exports for the development daemon (`diag_status.h`): `sh_diag_status` at ordinal 300 (one
+JSON object with the product version, the interface table's size, the features off this session
+and the last rawmap open), the script notes `sh_diag_note` (301) and `sh_diag_note_listening`
+(302, data), and the inspector's demon hold `sh_diag_hold_entity` (303, data). A release has
+neither the exports nor their code.
 
 `host_image.c` identifies the host by the SHA-256 of its executable file
 (`SH_KNOWN_BUILDS`: the Vulkan and OpenGL executables of build 13954591). Any other
 executable, the 2018 build included, is unsupported: the backend logs one line
-naming the supported build and the final 2018 release, shows the same once in a
-message box from its bootstrap thread (a DOOM update is otherwise silent), then
-only forwards XInput.
+naming the executable and its hash ("Snapmap+ is off and only forwards controller
+input"), shows a message box once from its bootstrap thread naming the supported build
+and telling the player to run the installer again (a DOOM update is otherwise silent),
+then only forwards XInput. Only the installer knows the final 2018 release.
 Every engine constant is a build 13954591 value: struct and slot offsets in
 `engine_build.h`, function RVAs as Vulkan/OpenGL pairs in the signature table, and
 global RVAs in the generated globals table. Raw RVAs are applied only on a
@@ -531,7 +534,7 @@ engine root:
 | `images/` (`.bimage`); `atlases/decals|lights|transparency/` | `generated/image/`; `generated/decalatlas|lightatlas|transsortatlas/` + `mods/<salt>/<rest>` |
 | `movies/` (`.bswf`, `.bimage`) | `generated/swf/mods/<salt>/<rest>` |
 | `scripts/`, `scripts/lib/` (`.lua`) | `mods/<salt>/scripts/<rest>` |
-| `programs/` (`.decl`, `.bin`), `programs/permutations/`, `programs/spirv/`, `programs/spirv/permutations/` | `generated/decls/renderprog/`, `generated/renderprogs/`, `generated/renderprogs/permutations/`, `generated/spirv/`, `generated/spirv/generated/renderprogs/permutations/` + `mods/<salt>/<rest>` |
+| `programs/` (`.decl`, `.bin`), `programs/permutations/`, `programs/spirv/`, `programs/spirv/permutations/` (`.vspv`, `.fspv`, `.cspv`) | `generated/decls/renderprog/`, `generated/renderprogs/`, `generated/renderprogs/permutations/`, `generated/spirv/`, `generated/spirv/generated/renderprogs/permutations/` + `mods/<salt>/<rest>` |
 | `map-modules/` (any), `map-modules/palettes/<p>/`, a `.baas_*` | `maps/modules/mods/<salt>/<rest>`, `maps/modules/palettes/<p>/mods/<salt>/<rest>`, `generated/maps/modules/mods/<salt>/<rest>` |
 | `virtual-textures/` (`.mega2`, `.pages`) | `virtualtextures/mods/<salt>/<rest>` |
 | `decls/<type>/` (`.decl`; not a type with a folder of its own) | `generated/decls/<type>/mods/<salt>/<rest>` |
@@ -618,10 +621,10 @@ These backend files share the work:
   with its program's cooked `.bin` and SPIR-V, so the author either deletes
   the copy (the mod borrows the game's) or ships a whole program under
   `mods/<salt>/` (in the folder, under `programs/`). Of the 494 permutation decls the installed archives hold,
-  324 parse as decl trees; the rest carry HLSL with `=` at statement level. Rules 13 (`SH_MB_RULES`):
+  324 parse as decl trees; the rest carry HLSL with `=` at statement level. Rules 15 (`SH_MB_RULES`):
   files beside `mod.json` are ignored, campaign content derives its requirements, `native/` holds DOOM's changed files, a
   sound decl's leaf takes the namespace and the block may carry `spelled` (the namespace the carried binaries spell),
-  so every own folder is built again once.
+  and an SDK effect's emitter names its fx as `idEntityFx` plays it (`fxEffect`), so every own folder is built again once.
 
   Lengths: the product puts no bound of its own on a name, author,
   homepage, request path, folder path, nesting depth, cause or script path.
@@ -643,7 +646,9 @@ These backend files share the work:
   (the first successful build of that salt in that folder), `tree` (the
   rebuild rule's tree hash, `sh_mb_tree_hash`), `build` (the build hash),
   `cause` (while a build fails or a verification found one), `warnings`, the
-  derived `classes`, `editor`, `registries`, `edits`, `shadows`, and the
+  derived `classes`, `editor`, `registries`, `edits`, `scripts` (what the mod's
+  scripts bind, when it carries scripts), `spelled` (when its binaries spell a
+  namespace), `units_of` (a composition's units), `shadows`, and the
   `files` and `stock` lists (a pointer the campaign-only closure derived is
   marked `"closure": true`). A failed build writes the block with `format`,
   `salt`, `rules`, `built`, `tree` and `cause` only (`sh_mb_write_failed`):
@@ -794,8 +799,6 @@ These backend files share the work:
 - `modserve_engine.c` registers editor rows inside the palette build (Timeline
   tile detour), answers the decl existence probe for served decls (the probe, lookup and load hooks only when the table holds a decl), activates a map's gameplay decls at
   the engine's own level 1, and rebuilds the live palette inside process heap 0.
-  A grandfathered bundle's shadows are planned like new names; the engine
-  already knowing the source marks a stock decl, which is left to the provider.
   It applies a refresh in place (re-parse, reload, the anims of a map pass) and
   arms the companions detour at its main-thread gates.
 - `modtypeinfo.c` serves the default property trees of the entity types the
@@ -937,8 +940,8 @@ the builder's, the whole built manifest with its salt, rules, built time,
 tree hash, build hash, cause while failing, the derived `classes` counts
 (`adds`, `borrows`, `edits`, `replaces`, `editor`, `surfaces`: an edited copy of a game file
 counts under `edits`, never `replaces`, which counts binaries at a game name;
-the build and `sh_mods list` lines print them the same way), `editor` (the editor tweaks' request paths), `registries` (banks,
-conductor, strings), `edits` (the derived edits of each decl at a game name), shadows, `files` (path, sha256, size, provides, needs) and
+the build and `sh_mods list` lines print them the same way), `editor` (the editor tweaks' request paths), `registries` (attachment tags, banks,
+clip events, conductor, strings), `edits` (the derived edits of each decl at a game name), shadows, `files` (path, sha256, size, provides, needs) and
 `stock` (pointers; `"closure": true` on those the campaign-only closure derived).
 There is no last good build (ONE-SHAPE rule 2): a build that fails writes the
 block of a failed build (`sh_mb_write_failed`: format, salt, rules, built, tree
@@ -1053,9 +1056,8 @@ the root folder of the row's salt (a local row carries no build), and the next
 save writes the rows again from the serving index. The map scope's listing
 holds that served build (`mu_listing_set` asks `sh_modserve_row_build`), so
 everything the scope declares comes from the root's build: its decls,
-registries, scripts, virtual-texture boards, strings and banks. A load logs one
-line for each local row whose build the resolver answers
-(`mm_note_followed`) and the Mods tab's doctor says the same; no notice
+registries, scripts, virtual-texture boards, strings and banks. A local row carries
+no build, so a load has nothing to log about it, and no notice
 interrupts an author who rebuilds a mod while iterating. A pinned row is listed
 at its composition, and a build at the root never stands in for it. There is no
 upgrade action and there are no aliases.
@@ -2273,7 +2275,7 @@ feature.
   The mod's log (prints, warnings, the stop line; every line of the map,
   whole; the Mods tab shows the newest 1,000 and Copy log copies all) stays
   readable after the map until the mod's next map start:
-  `sh_script_log_read`, `sh_script_stop_line`, `sh_script_status`,
+  `sh_script_log_read`, `sh_script_stop_line_dup`, `sh_script_status`,
   `sh_script_mods`.
 - **In the window.** The Mods tab reads these through `modui.c`'s engine
   binding (`script_info`, `script_log`, `script_mods`, defaulting to
@@ -2502,7 +2504,8 @@ the map, as any error does).
   entity's look, below; a glow adds its colour times `strength`, a soft 0.08 when
   none is given, so the surface stays readable under it);
   `entities_near(pos, radius)` (every entity in range, nearest first),
-  `trace(from, to, [radius], [ignore])`, `ground_below(pos)` (the floor under a
+  `trace(from, to, [radius], [ignore], ["demon"])` (with `"demon"` the line also stops at a Blocking Box with
+  Block Demons ticked), `ground_below(pos)` (the floor under a
   point: the trace straight down from 16 inches above it, the first surface
   flat enough to stand on, normal at least 0.7 up; it does not consult the
   navigation areas), `difficulty()` (idGameLocal vtable +0x670, the game's
@@ -3246,7 +3249,7 @@ damage comes from the world entity, as a trigger's does.
   `projectile:explode()` (the projectile's own Explode, vtable `+0xAA0`), all only for
   a projectile one of the mod's entities launched. A script may hold `p` for
   as long as it likes: once the projectile is gone `p:steer`, `p:gravity`, `p:explode` and
-  `p:pos` answer nil and `p:alive` false, as every call on a removed entity
+  `p:position` answer nil and `p:alive` false, as every call on a removed entity
   does, and the mod runs on. `ai:fire` parks the demon first
   (`sh_script_ai_park`), as a move does.
 - **Events.** `on.damage(name, fn(self, hit))` with `hit.amount` (what the
@@ -3509,9 +3512,9 @@ its materials are parsed.
   that carry their own textures avoids this." Each board costs about 14 MB of
   host memory (11,184,810 bytes of host page table, the reader's index and the
   page-table image); its resident pages share the game's page pool.
-- Failure: any of the seven engine sites (`VtSetSource`, `VtForMaterial`,
+- Failure: any of the eight engine sites (`VtSetSource`, `VtForMaterial`,
   `VtMaterialBind`, `VtMaterialRebind`, `VtViewPageTable`, `VtViewFeedback`,
-  `JobsWaitAll`) that does not match its
+  `JobsWaitAll`, `VtFrameCall`) that does not match its
   signature, or a decode that does not cross-check (the rebind must call the
   signed lookup and binder), leaves every site as shipped and turns "mod
   virtual textures on lit materials" off in the features line.
@@ -3594,10 +3597,12 @@ new name is not registered. A load the engine refuses although it reports
 success is caught by its error text naming the decl's file (the reporter
 copies it to `last_error_msg` before the throw); the decl is not loaded a
 second time and is withdrawn. A withdrawn file is not parsed again in the
-session, and each skip or refusal prints one console line,
-`Snapmap+ mods: <bundle>: animWeb '<name>' not loaded: it names model
-'<md6>', which SnapMap cannot load (campaign-only or missing)` or `... not
-loaded: the game refused it: <engine error>`. Before
+session, and each skip or refusal prints one console line naming the mod and the file:
+`<mod>: <file> was not loaded because it names the model <md6>, which SnapMap cannot load (it is
+campaign-only or missing). Name a model SnapMap has, then press Refresh.` (a stock shadow: `<mod>: its
+animation file <file> names the model <md6>, which SnapMap cannot load, so the game's own animation is
+used. ...`), or `<mod>: the game could not read <file>: <engine error>. Fix the file and press Refresh.`;
+the backend log has the `animWeb '<name>' (<bundle>) shadow WITHDRAWN` or `NOT READY` line. Before
 the Play level load the SnapBuild detour re-checks the bundles' requirements
 (`MODS: play: requirements live: ...`); the engine itself does not reset the
 blacklist gates between the editor and the level load. The editor pass
@@ -3794,8 +3799,8 @@ values, `true`/`false` as `1`/`0`, console lines trimmed and in the author's
 order, `"cvars"` always present and `"commands"` only when not empty, so a
 bundle carrying only the two blacklist gates keeps the text and hash it had
 when they were the only accepted requirement. The product names no cvar or
-command; the bounds (`SH_MB_REQ_*` in `modbundle.h`) are syntax only, and the
-Community API's manifest check mirrors them. `modserve.c` takes the admitted
+command and puts no bound on their number or length (the builder checks their syntax
+only), and the Community API does not read them. `modserve.c` takes the admitted
 bundles whose requirements apply for the open listing (`ms_req_conflicts`, at
 every scope change): the open map's rows first, in row order, then the
 undeclared ones (an editor's Toybox rows; every bundle with no map open)
@@ -3827,9 +3832,7 @@ for this map (with the reason, and the mod that holds the same value when one
 does, so another bundle's value never reads as live for this one), refused
 (lost a conflict), NOT live with the engine's cause, restored (its
 requirements ran and stopped; `modserve.c` keeps the stopped ids until they
-start again), or not applied yet. Packages converted from the
-retired formats keep only the two blacklist gates (below): their requirements
-were never accepted by a player installing them.
+start again), or not applied yet.
 
 On every parse the `DeserializeFromJson` detour sees, a map in an earlier
 shape (a retired package carrier among them) is refused first (The map
@@ -4080,8 +4083,9 @@ dependents search) is not recorded. Records live in a chain of open-address
 levels (32,768 slots, then twice the last; only the newest takes new paths,
 until half full), published once and never moved, and updated under a
 per-record sequence count, so readers take no lock and only a path's first
-serve takes a writer lock. There is no fixed bound: a new path that finds no
-level (one cannot be allocated) is counted and the ledger then calls itself
+serve takes a writer lock. The chain stops at `SH_MODLEDGER_LEVELS` (12 levels,
+about 67 million paths): a new path that finds no level (the chain is full or a
+level cannot be allocated) is counted and the ledger then calls itself
 incomplete. It is bound in `sh_modserve_install`
 and is complete only when the provider served nothing before that. At a
 refresh, a pending model, image or anim is reloaded only when the ledger says
@@ -4280,8 +4284,7 @@ a map, the state the launched map's parse replaced comes back
 EDITOR when the editor next shows a map,
 and an editor palette pass does it first (a pass in PLAY would not register
 undeclared rows). A
-`mod.json` author key `"scope"` stays in the manifest's `extra`, so a mod with
-it keeps its canonical text and hash; it is ignored.
+`mod.json` author key `"scope"` is a retired key: the folder is refused as an earlier shape.
 `sh_modserve_index_boot` enables scope for the product's index; the native
 tests enable it where they test it (`sh_modserve_scope_enable`).
 `sh_mods status`, `sh_mods doctor` and `sh_mods map` print
@@ -4355,15 +4358,12 @@ map's choices).
   the product derives the edits from the whole edited copy"); a game text the
   reader cannot supply. A binary at a game name with other bytes is a
   replacement (`classes.replaces`, SPEC-distribution 3.10), served only to
-  maps that use the mod. A grandfathered bundle keeps its shadows and derives nothing. The
-  retired author keys `player`, `extends` and `replaces` are ignored with one
-  line each and kept out of `extra`; a partial they name (an `extends` value,
-  `player.bodyEvents`) is refused: "this is a partial; put the whole edited
-  copy of <game file> at its game name".
+  maps that use the mod. The
+  retired author keys `player`, `extends` and `replaces` (with `legacy` and the
+  others of ONE-SHAPE rule 6) refuse the folder as an earlier shape.
 - **Applied per map.** The index carries one synthetic file per game file an
   admitted bundle's edits name. For the listing, the sources are the bundles
-  that serve and edit a game file (or carry one: a grandfathered package's own
-  served copy at that name is diffed on the fly and is that package's edits),
+  that serve and edit a game file,
   in row order, then editor-time bundles by key. `sh_dt_apply` takes the
   game's text and applies every source's operations in that order: an
   identical operation merges, additions union, a named entry two sources add
@@ -4478,12 +4478,13 @@ map's choices).
   one line per generated file, what each source's edits did, every clash, the
   merged body's totals (`player body: the merged body holds <clips> clips and
   <aliases> aliases`), and one `registry edits <path>` line per edited copy.
-  The doctor lists the same copies as `edit source <path>: from <folders>;
-  diffed at build against the game's text, generated per map that declares
-  it, the copy is never served`, never as a conflict or a shadow, and its
-  summary counts them apart: `N conflict(s), N shadow(s), N grandfathered
-  shadow(s), N edit source(s) of N game file(s)`, so its conflict count
-  agrees with the serving index's.
+  The doctor lists the same copies as `edited game file <path>: by <folders>;
+  compared with the game's text when built, and written for each map that uses
+  the mod (the copy itself is never served)`, never as a conflict or a
+  replacement, and its summary counts them apart: `N conflict(s), N replaced
+  game file(s), N edited copy(ies) of N game file(s) (never served, so neither a
+  replacement nor a conflict)`, so its conflict count agrees with the serving
+  index's.
 - **Choices.** A choice applies at once and is kept with the open map's
   manifest; the map's next save writes it on the row of the key it names; a
   load reads them from every row (first row per slot) and gives them to the
@@ -5322,16 +5323,11 @@ over the service's 10,485,760-byte bound is refused through the engine's own
 `PublishFail`, with a toast giving the size and the overage, and so is a mod
 list that cannot be read ("The map was not published: its list of mods cannot
 be read. Save the map again, then publish it." or the sentence naming the mod).
-The rules of the store's that the
-builder would otherwise admit (an author key outside `^[a-z][a-z0-9_-]{0,63}$`
-such as `displayName` or `$schema`, a control character such as a tab in the
-name or author) are mirrored as build warnings in one table,
-`MB_STORE_RULES` in `modbundle.c`, so the author hears them at the build
-rather than at publish. They are derived again whenever a built `mod.json` is
-read, so they also reach `sh_mods doctor` (one "warning i of n" line per
-bundle), each rescan (one line per mod with warnings), the Refresh result
-(`warnings`, `firstWarning`) and each mod of the Mods tab's payload
-(`warnings`: the first `SH_MB_WARNINGS_KEPT`, in plain words). The builder's other warnings are its build report's. A publish whose save
+The builder's warnings (its own checks; the store adds no rules of its own
+to mirror) reach `sh_mods doctor` (one `mod mods\<name>: warning i of n` line per
+warning), each rescan (one line per mod with warnings, with its first), the
+Refresh result (`warnings`, the count) and each mod of the Mods tab's payload
+(`warnings`, every one, in plain words). A publish whose save
 carries rows also carries the search tag `mods`, so players can see that the
 map needs Snapmap+. So does a map that uses a feature of Snapmap+ itself that a
 game without it cannot load (`map_uses.c`: a Grid Room resized past its stock
@@ -5655,10 +5651,10 @@ named by their own SHA-256); a published map claims the units its rows name.
 Reads are anonymous. Every write is signed by the publishing key through a
 signer (`X-Publisher-Key`, `-Name` and `-Signature` headers, `modkey.c`), and
 the bytes are untrusted: the content cache checks every manifest and blob
-against the hash a map names before anything serves (I10). The build routes of
-earlier releases (`/mods/build/*`, `/mods/claim`, `/mods/release`, the unsigned
-`/mods/asked` and `/mods/build/<hash>/asked`) are not spoken; the store answers
-them with 410, and `modsync.c` and `modexport_fetch_build` are gone.
+against the hash a map names before anything serves (I10). The routes of
+earlier releases (`/mods/build/*`, `/mods/bundle/*`, `/mods/author/*`, `/mods/claim`,
+`/mods/release`, `/mods/missing` and a whole-file `PUT /mods/blob/<sha>`) are not spoken;
+the store answers them with 410, and `modsync.c` and `modexport_fetch_build` are gone.
 
 `modnet.c` speaks the routes over WinHTTP, one process-wide session (https
 only, plain http for a loopback host; no redirects). Every request carries the

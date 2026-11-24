@@ -59,8 +59,9 @@ snapmap-plus help
 Any command also takes `--plain` (see [Output](#output)).
 
 With no arguments, the executable opens an interactive prompt. Installation,
-update and uninstall ask for confirmation after checks; `--yes` or `-y` skips
-that prompt, and input that ends before an answer counts as no. Both DOOM executables
+update and uninstall ask for confirmation after checks when standard input is a
+terminal; `--yes` or `-y` skips that prompt, piped or redirected input never sees
+it, and input that ends before an answer counts as no. Both DOOM executables
 must be closed before changing installed DLLs: the check looks for any running
 `DOOMx64vk.exe` or `DOOMx64.exe` process by name, wherever it was started from.
 The Go lifecycle tests use temporary game and profile directories with a controlled
@@ -164,15 +165,15 @@ After any install, update or migration:
 - **The data folder**, `%LOCALAPPDATA%\snapmap-plus`, holds `snapmap-plus.exe`,
   `install.json` and the player's own data (`config.json`,
   `prefabs\`, `mods\`, `rawmap.json`, `test-maps\`, `cache\`, and the
-  `token` and `pinned.json` files when present). The retired `overrides\`,
+  `pinned.json` file when present), and the saved GitHub `token` when present. The retired `overrides\`,
   `strings\` and `removed-mods\` folders of a release that had them stay as they
   are (see [Mods and retired package folders](#mods-and-retired-package-folders)).
   Empty `override-backups\`, `package-cache\` and `package-staging\` folders are
   removed; one that holds files is kept and listed.
 - **Uninstall** removes every file of ours from DOOM, restores any backup from
   `cache\installer\backup\`, removes the runtime log and crash folders, the
-  data folder's installer copy and `install.json`, and leaves the
-  player's data. An installer copy that is the one running cannot be removed: it
+  data folder's installer copy, `install.json` and the saved `token`, and leaves
+  the player's data. An installer copy that is the one running cannot be removed: it
   stays, and `install.json` then records that copy alone. Without an install
   record, `uninstall --doom <path>` cleans that folder by content: it removes the
   files whose bytes show they are Snapmap+'s (the rule above) and nothing else. A
@@ -250,7 +251,8 @@ step that has something to report.
    unrelated proxy DLL alone never triggers it. "Removing the original SnapHak"
    lists its files as they go, and backups an earlier install kept of them are
    discarded so uninstall cannot restore them. "Migrating player data" copies
-   prefabs, strings and rawmaps into the data folder: existing destination files
+   everything the old folder holds (prefabs, strings, rawmaps and any other file)
+   into the data folder, except the retired package folders and `cache\webview2`: existing destination files
    keep their contents, differing sources and failed copies stay in the old
    location, and the old folder is retired only once every file is verified.
    Then the pair is installed.
@@ -268,6 +270,10 @@ step that has something to report.
 4. **From the current release**: a plain update. The pair is replaced and nothing
    else changes.
 5. **A fresh machine**: the pair is installed and the data folder created.
+
+An install made before the rename kept its record and token in
+`%LOCALAPPDATA%\open-snaphak\`. Any installer run reads them from there and moves
+them into the data folder; the old folder is removed once it is empty.
 
 ## Installation and player data
 
