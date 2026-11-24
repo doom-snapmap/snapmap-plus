@@ -7296,6 +7296,17 @@ static void mb_tree_walk(mb_tlist *l, const wchar_t *top, const char *top_rel)
                     }
                     if (l->n == l->cap) { free(child); l->failed = 1; }
                     else {
+                        /* The file's own size and write time, not the folder listing's copy of them: the listing
+                         * keeps the old ones while another program still holds a file it wrote (an editor that
+                         * keeps it open), so a Refresh then saw no change (R-LB1 F8). */
+                        WIN32_FILE_ATTRIBUTE_DATA a;
+                        wchar_t *full = mb_wjoin(cur.dir, fd.cFileName);
+                        if (full && GetFileAttributesExW(full, GetFileExInfoStandard, &a)) {
+                            fd.nFileSizeHigh = a.nFileSizeHigh;
+                            fd.nFileSizeLow = a.nFileSizeLow;
+                            fd.ftLastWriteTime = a.ftLastWriteTime;
+                        }
+                        free(full);
                         l->e[l->n].rel = child;
                         l->e[l->n].size = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
                         l->e[l->n].mtime = ((unsigned long long)fd.ftLastWriteTime.dwHighDateTime << 32) |
