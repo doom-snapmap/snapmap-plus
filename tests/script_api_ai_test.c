@@ -2312,11 +2312,33 @@ static void test_destructible(void)
     CHECK(dd_near3(lin, 0, 0, 1574.8f, 0.1f) && dd_near3(ang, 0, 0, 31.42f, 0.001f));
     printf("-- destructible: the registry\n");
     memset(&s, 0, sizeof s);
-    s.ignore_external = 1; s.max_speed = 1574.8f; s.n = 1; s.piece[0].preset = SH_AI_PRESET_ANGEL_WINGS;
+    {
+        /* more pieces than any fixed table held (the registry keeps every one, a copy of its own) */
+        static sh_ai_destruct_piece many[40];
+        memset(many, 0, sizeof many);
+        many[0].preset = SH_AI_PRESET_ANGEL_WINGS;
+        many[39].preset = SH_AI_PRESET_SPHERICAL;
+        s.ignore_external = 1; s.max_speed = 1574.8f; s.n = 40; s.piece = many;
+    }
     sh_ai_destructible_reset();
     CHECK(!sh_ai_destructible_find(chain, 2, &got));
     CHECK(sh_ai_destructible_add("mods/aaaaaaaa/breakable/tyrant/chest", &s) == 1);
-    CHECK(sh_ai_destructible_find(chain, 2, &got) == 1 && got.ignore_external == 1 && got.n == 1);
+    CHECK(sh_ai_destructible_find(chain, 2, &got) == 1 && got.ignore_external == 1 && got.n == 40);
+    CHECK(got.piece && got.piece != s.piece && got.piece[0].preset == SH_AI_PRESET_ANGEL_WINGS &&
+          got.piece[39].preset == SH_AI_PRESET_SPHERICAL);
+    {
+        /* any number of defs */
+        char def[64];
+        int k, all = 1;
+        for (k = 0; k < 100; k++) {
+            _snprintf_s(def, sizeof def, _TRUNCATE, "mods/aaaaaaaa/breakable/many/%d", k);
+            all &= sh_ai_destructible_add(def, &s) == 1;
+        }
+        CHECK(all);
+        chain[0] = "mods/aaaaaaaa/breakable/many/99";
+        CHECK(sh_ai_destructible_find(chain, 2, &got) == 1 && got.n == 40);
+        chain[0] = "mods/aaaaaaaa/breakable/tyrant/chest";
+    }
     s.n = 0;
     CHECK(sh_ai_destructible_add("mods/aaaaaaaa/breakable/tyrant/x", &s) == 0);
     sh_ai_destructible_reset();
@@ -2345,7 +2367,7 @@ static void test_destructible(void)
     sh_script_map_end();
     g_destructible_ready = 1;
     (void)start("api = 1\ndestructible('breakable/tyrant/chest', { pieces = {} })\n");
-    CHECK(strstr(stop_of("aaaaaaaa"), "takes 1 to 32 pieces, got 0") != NULL);
+    CHECK(strstr(stop_of("aaaaaaaa"), "needs at least one piece in pieces") != NULL);
     sh_script_map_end();
     (void)start("api = 1\ndestructible('mods/bbbbbbbb/breakable/x', { pieces = { {} } })\n");
     CHECK(strstr(stop_of("aaaaaaaa"), "belongs to another mod") != NULL);

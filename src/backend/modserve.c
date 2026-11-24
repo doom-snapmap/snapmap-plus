@@ -104,8 +104,9 @@ typedef struct ms_file {
 typedef struct ms_body {
     const unsigned char *p;
     size_t len;
-    uint64_t set;                         /* which of the winner's candidates (bit 0 the winner) it was composed from */
-    uint64_t order;                       /* a hash of their order (the pick first, then the map's rows) */
+    const int *from;                      /* the providers it was composed from, in order (the pick first, then the
+                                           * map's rows): the memo's key, exact for any number of providers */
+    int nfrom;
     int added;
     struct ms_body *next;
 } ms_body;
@@ -2165,6 +2166,35 @@ static char *ms_compose(const unsigned char *const *texts, const size_t *lens, i
     return out.p;
 }
 
+/* The texts of `files[0..n)` composed in that order (ms_compose), a file whose bytes an earlier one carries left
+ * out; NULL when fewer than two texts differ or they do not compose (a file is not a decl or cannot be read). Any
+ * number of providers and any size: no count or size of the product's own. */
+static char *ms_compose_files(const ms_index *x, const int *files, int n, size_t *len, int *added)
+{
+    const unsigned char **texts = (const unsigned char **)calloc((size_t)(n ? n : 1), sizeof *texts);
+    size_t *lens = (size_t *)calloc((size_t)(n ? n : 1), sizeof *lens);
+    int nt = 0, k, q, ok = texts && lens;
+    char *text = NULL;
+    *added = 0;
+    *len = 0;
+    for (k = 0; k < n && ok; ++k) {
+        const ms_file *f = &x->files[files[k]];
+        int dup = 0;
+        for (q = 0; q < k && !dup; ++q) {
+            const ms_file *g = &x->files[files[q]];
+            if (g->blob && f->blob && !strcmp(g->blob, f->blob)) dup = 1;
+        }
+        if (dup) continue;
+        if (!f->is_decl || !(texts[nt] = ms_file_raw(f, &lens[nt]))) { ok = 0; break; }
+        nt++;
+    }
+    if (ok && nt > 1) text = ms_compose(texts, lens, nt, len, added);
+    for (q = 0; texts && q < nt; ++q) HeapFree(GetProcessHeap(), 0, (void *)texts[q]);
+    free((void *)texts);
+    free(lens);
+    return text;
+}
+
 #ifdef SH_MODSERVE_TESTING
 char *sh_modserve_test_compose(const char *const *texts, int n, int *added)
 {
@@ -2253,7 +2283,19 @@ static int ms_static_before(const ms_index *x, int a, int b)
 /* Index of the winning key in keys[i..j), and the reason. */
 static int ms_pick(const ms_index *x, const ms_avail *av, const ms_key *keys, int i, int j, const char **reason)
 {
-    int k, best = i, unres[64], share[64], m = j - i > 64 ? 64 : j - i, tie_un = 1, tie_sh = 1, tie_key = 1;
+    /* Every provider takes part (no count of its own, decision 26): past the stack's room the counts are allocated;
+     * without memory the first provider wins, with a log line. */
+    int k, best = i, s_unres[64], s_share[64], *unres = s_unres, *share = s_share, m = j - i, tie_un = 1, tie_sh = 1,
+        tie_key = 1;
+    if (m > 64) {
+        unres = (int *)malloc(sizeof(int) * 2 * (size_t)m);
+        if (!unres) {
+            ms_log("out of memory: %s is served by its first provider", x->files[keys[i].file].request);
+            *reason = "out of memory";
+            return i;
+        }
+        share = unres + m;
+    }
     for (k = 0; k < m; ++k) {
         const ms_file *f = &x->files[keys[i + k].file];
         int q;
@@ -2281,6 +2323,7 @@ static int ms_pick(const ms_index *x, const ms_avail *av, const ms_key *keys, in
     else if (!tie_sh) *reason = "most providers carry these bytes";
     else if (tie_key) *reason = "the root folder's build of its salt";
     else *reason = "no rule separates them; the first salt in name order (a map's rows decide while it is open)";
+    if (unres != s_unres) free(unres);
     return best;
 }
 
@@ -2397,34 +2440,15 @@ static int ms_resolve(ms_index *x)
                 ms_text_put(&who, one, strlen(one));
             }
             ms_text_put(&who, "", 1);
-            /* Decls whose providers only add list entries are composed. */
+            /* Decls whose providers only add list entries are composed (the winner's text first). */
             {
-                const unsigned char *texts[64];
-                size_t lens[64];
-                unsigned char *owned[64];
-                int nt = 0, ok = 1, q;
-                memset(owned, 0, sizeof owned);
-                for (k = -1; k < j - i && ok && nt < 64; ++k) {
-                    int file = k < 0 ? winner : keys[i + k].file, dup = 0;
-                    const ms_file *f = &x->files[file];
-                    if (k >= 0 && file == winner) continue;
-                    if (!f->is_decl || f->size > SH_MODSERVE_CACHE_FILE) { ok = 0; break; }
-                    /* Identical bytes add nothing. */
-                    for (q = i; q < i + k && !dup; ++q) {
-                        const ms_file *g = &x->files[keys[q].file];
-                        if (g->blob && f->blob && !strcmp(g->blob, f->blob)) dup = 1;
-                    }
-                    if (k >= 0 && f->blob && x->files[winner].blob && !strcmp(f->blob, x->files[winner].blob)) dup = 1;
-                    if (dup) continue;
-                    /* A stock pointer's text is the installed decl's. */
-                    owned[nt] = ms_file_raw(f, &lens[nt]);
-                    if (!owned[nt] || lens[nt] > SH_MODSERVE_CACHE_FILE) { ok = 0; break; }
-                    texts[nt] = owned[nt];
-                    nt++;
-                }
-                if (ok && nt > 1) {
+                int *from = (int *)malloc(sizeof(int) * (size_t)(j - i)), nf = 0;
+                if (from) {
                     size_t len = 0;
-                    char *text = ms_compose(texts, lens, nt, &len, &added);
+                    char *text;
+                    from[nf++] = winner;
+                    for (k = i; k < j; ++k) if (keys[k].file != winner) from[nf++] = keys[k].file;
+                    text = ms_compose_files(x, from, nf, &len, &added);
                     if (text) {
                         unsigned char *body = (unsigned char *)ms_alloc(x, len ? len : 1);
                         if (body) {
@@ -2435,8 +2459,8 @@ static int ms_resolve(ms_index *x)
                         }
                         free(text);
                     }
-                }
-                for (q = 0; q < nt; ++q) if (owned[q]) HeapFree(GetProcessHeap(), 0, owned[q]);
+                    free(from);
+                } else ms_log("out of memory: %s is not composed with its other providers", x->files[winner].request);
             }
             x->files[winner].served = 1;
             if (any_shadow) ms_record_alts(x, &avail, keys, i, j, winner, 1);
@@ -2990,46 +3014,24 @@ static int ms_avail_declared(ms_index *x, ms_avail *av)
 }
 
 /* The text the declared providers `d[0..nd)` compose to (d[0] the pick),
- * memoized on the winner by the set of candidates; NULL when they do not
- * compose (not all decls, too large, a parse the list grammar refuses). */
-static ms_body *ms_scope_compose(ms_index *x, int winner, const int *cand, int ncand, const int *d, int nd)
+ * memoized on the winner by that exact list; NULL when they do not compose
+ * (not all decls, unreadable, a parse the list grammar refuses). */
+static ms_body *ms_scope_compose(ms_index *x, int winner, const int *d, int nd)
 {
-    const unsigned char *texts[64];
-    size_t lens[64], len = 0;
-    unsigned char *owned[64];
-    uint64_t set = 0;
-    int nt = 0, ok = 1, q, k, added = 0;
     ms_body *m;
     char *text;
-    uint64_t order = 1469598103934665603ull;
-    for (k = 0; k < nd; ++k) {
-        for (q = 0; q < ncand && q < 64; ++q) if (cand[q] == d[k]) set |= 1ull << q;
-        order = (order ^ (uint64_t)(unsigned)d[k]) * 1099511628211ull;
-    }
+    size_t len = 0;
+    int added = 0, *from;
     for (m = (ms_body *)x->files[winner].scope_composed; m; m = m->next)
-        if (m->set == set && m->order == order) return m->p ? m : NULL;
-    memset(owned, 0, sizeof owned);
-    for (k = 0; k < nd && ok && nt < 64; ++k) {
-        const ms_file *f = &x->files[d[k]];
-        int dup = 0;
-        if (!f->is_decl || f->size > SH_MODSERVE_CACHE_FILE) { ok = 0; break; }
-        for (q = 0; q < k && !dup; ++q) {
-            const ms_file *g = &x->files[d[q]];
-            if (g->blob && f->blob && !strcmp(g->blob, f->blob)) dup = 1;
-        }
-        if (dup) continue;
-        owned[nt] = ms_file_raw(f, &lens[nt]);
-        if (!owned[nt] || lens[nt] > SH_MODSERVE_CACHE_FILE) { ok = 0; break; }
-        texts[nt] = owned[nt];
-        nt++;
-    }
-    text = ok && nt > 1 ? ms_compose(texts, lens, nt, &len, &added) : NULL;
-    for (q = 0; q < nt; ++q) if (owned[q]) HeapFree(GetProcessHeap(), 0, owned[q]);
+        if (m->nfrom == nd && !memcmp(m->from, d, sizeof *d * (size_t)nd)) return m->p ? m : NULL;
+    text = ms_compose_files(x, d, nd, &len, &added);
     m = (ms_body *)ms_alloc(x, sizeof *m);
-    if (!m) { free(text); return NULL; }
+    from = (int *)ms_alloc(x, sizeof *d * (size_t)(nd ? nd : 1));
+    if (!m || !from) { free(text); return NULL; }
     memset(m, 0, sizeof *m);
-    m->set = set;
-    m->order = order;
+    memcpy(from, d, sizeof *d * (size_t)nd);
+    m->from = from;
+    m->nfrom = nd;
     if (text) {
         unsigned char *body = (unsigned char *)ms_alloc(x, len ? len : 1);
         if (body) { memcpy(body, text, len); m->p = body; m->len = len; m->added = added; }
@@ -3821,7 +3823,7 @@ static int ms_scope_compute(ms_index *x, int mark)
                 why = MS_WHY_ALWAYS;
                 for (k = 1; k < nd; ++k) if (!ms_pick_same(x, d[0], NULL, d[k], NULL)) break;
                 if (k < nd) {
-                    body = ms_scope_compose(x, i, cand, nc, d, nd);
+                    body = ms_scope_compose(x, i, d, nd);
                     if (body) why = MS_WHY_COMPOSED;
                 }
             } else if (nd > 1) {
@@ -3862,7 +3864,7 @@ static int ms_scope_compute(ms_index *x, int mark)
                                 order[q] = order[q - 1]; ook[q] = ook[q - 1];
                                 order[q - 1] = t; ook[q - 1] = tk;
                             }
-                        body = ms_scope_compose(x, i, cand, nc, order, no);
+                        body = ms_scope_compose(x, i, order, no);
                         if (body) why = MS_WHY_COMPOSED;
                     }
                 }

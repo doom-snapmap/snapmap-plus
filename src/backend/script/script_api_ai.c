@@ -3414,28 +3414,41 @@ static void anim_wait_step(void)
 
 /* ---- destructibles: DOOM Eternal's activation of a gore breakable's pieces (script_api_ai.h) */
 
-#define AI_DEF_NAME_MAX 160
-typedef struct { char def[AI_DEF_NAME_MAX]; sh_ai_destruct_spec spec; } ai_destruct_def;
-static ai_destruct_def g_dd[SH_AI_DESTRUCT_DEFS];
+/* The map's destructibles: any number of defs, each with any number of pieces (no count of the product's own). */
+typedef struct { char *def; sh_ai_destruct_spec spec; } ai_destruct_def;
+static ai_destruct_def *g_dd;
+static int g_dd_cap;
 static volatile LONG g_dd_n;
 static SRWLOCK g_dd_lock = SRWLOCK_INIT;
 
 int sh_ai_destructible_add(const char *def, const sh_ai_destruct_spec *spec)
 {
     int i, n, ok = 0;
-    if (!def || !def[0] || strlen(def) >= AI_DEF_NAME_MAX || !spec || spec->n < 1 ||
-        spec->n > SH_AI_DESTRUCT_PIECES)
-        return 0;
+    sh_ai_destruct_piece *pieces;
+    char *name = NULL;
+    if (!def || !def[0] || !spec || spec->n < 1 || !spec->piece) return 0;
+    pieces = (sh_ai_destruct_piece *)malloc(sizeof *pieces * (size_t)spec->n);
+    if (!pieces) return 0;
+    memcpy(pieces, spec->piece, sizeof *pieces * (size_t)spec->n);
     AcquireSRWLockExclusive(&g_dd_lock);
     n = (int)g_dd_n;
     for (i = 0; i < n; i++) if (!_stricmp(g_dd[i].def, def)) break;
-    if (i < n || n < SH_AI_DESTRUCT_DEFS) {
-        strcpy_s(g_dd[i].def, sizeof g_dd[i].def, def);
+    if (i == n && n == g_dd_cap) {
+        int cap = g_dd_cap ? g_dd_cap * 2 : 16;
+        ai_destruct_def *grown = (ai_destruct_def *)realloc(g_dd, sizeof *grown * (size_t)cap);
+        if (grown) { g_dd = grown; g_dd_cap = cap; }
+    }
+    if (i < n || (n < g_dd_cap && (name = _strdup(def)) != NULL)) {
+        if (i < n) free(g_dd[i].spec.piece);
+        else g_dd[i].def = name;
         g_dd[i].spec = *spec;
+        g_dd[i].spec.piece = pieces;
+        pieces = NULL;
         if (i == n) InterlockedExchange(&g_dd_n, n + 1);
         ok = 1;
     }
     ReleaseSRWLockExclusive(&g_dd_lock);
+    free(pieces);
     return ok;
 }
 
@@ -3460,7 +3473,9 @@ int sh_ai_destructible_find(const char *const *names, int n, sh_ai_destruct_spec
 
 void sh_ai_destructible_reset(void)
 {
+    int i;
     AcquireSRWLockExclusive(&g_dd_lock);
+    for (i = 0; i < (int)g_dd_n; i++) { free(g_dd[i].def); free(g_dd[i].spec.piece); }
     InterlockedExchange(&g_dd_n, 0);
     ReleaseSRWLockExclusive(&g_dd_lock);
 }
@@ -3621,8 +3636,12 @@ static int l_destructible(lua_State *L)
     if (lua_type(L, -1) != LUA_TTABLE)
         sh_script_refuse(L, "\"destructible\" needs pieces, a list of the pieces' motions");
     n = (int)lua_rawlen(L, -1);
-    if (n < 1 || n > SH_AI_DESTRUCT_PIECES)
-        sh_script_refuse(L, "\"destructible\" takes 1 to %d pieces, got %d", SH_AI_DESTRUCT_PIECES, n);
+    if (n < 1) sh_script_refuse(L, "\"destructible\" needs at least one piece in pieces");
+    /* the pieces live in a userdata under the list while they are read (a refusal frees them with it); the registry
+     * keeps its own copy */
+    s.piece = (sh_ai_destruct_piece *)lua_newuserdatauv(L, sizeof *s.piece * (size_t)n, 0);
+    memset(s.piece, 0, sizeof *s.piece * (size_t)n);
+    lua_insert(L, -2);
     for (i = 0; i < n; i++) {
         sh_ai_destruct_piece *p = &s.piece[i];
         int top = lua_gettop(L);
@@ -3655,7 +3674,7 @@ static int l_destructible(lua_State *L)
         }
     }
     s.n = n;
-    lua_pop(L, 1);
+    lua_pop(L, 1);   /* the list; the pieces' userdata stays on the stack until the call returns */
     NEED_OP(L, destructible, "destructible");
     if (!g_engine || g_engine->destructible() != 1) {
         lua_pushboolean(L, 0);
@@ -3664,7 +3683,7 @@ static int l_destructible(lua_State *L)
     }
     if (!sh_ai_destructible_add(def, &s)) {
         lua_pushboolean(L, 0);
-        lua_pushstring(L, "too many entityDefs name a destructible in this map");
+        lua_pushstring(L, "there was not enough memory to keep the destructible");
         return 2;
     }
     lua_pushboolean(L, 1);
@@ -6014,7 +6033,7 @@ static int dd_phys_vec(void *ent, size_t slot, float *out, int n)
 static void destruct_activate(void *brk, const sh_ai_destruct_spec *spec, void *owner, const float *hit, int add)
 {
     uint8_t *phys = (uint8_t *)brk + SH_AI_BRK_PHYSICS, **bodies;
-    float lpos[SH_AI_DESTRUCT_PIECES][3], lax[SH_AI_DESTRUCT_PIECES][9], org[3], ax[9], oorg[3], ext[3] = { 0, 0, 1 };
+    float (*lpos)[3] = NULL, (*lax)[9] = NULL, org[3], ax[9], oorg[3], ext[3] = { 0, 0, 1 };
     int i, n, fresh;
     bodies = *(uint8_t ***)(phys + SH_AI_FXB_BODIES);
     n = *(const int *)(phys + SH_AI_FXB_BODIES + 8);
@@ -6022,15 +6041,24 @@ static void destruct_activate(void *brk, const sh_ai_destruct_spec *spec, void *
      * destructible's render entity */
     (void)sh_ai_destruct_fx_model(phys);
     if (!bodies || n <= 0) { g_brk_break(brk, 0); return; }
-    if (n > SH_AI_DESTRUCT_PIECES) n = SH_AI_DESTRUCT_PIECES;
     fresh = *(const int32_t *)((uint8_t *)brk + SH_AI_BRK_BROKEN) == -1;
+    /* every piece the breakable has, however many (where each sat before the break) */
+    if (fresh) {
+        lpos = (float (*)[3])malloc(sizeof *lpos * (size_t)n);
+        lax = (float (*)[9])malloc(sizeof *lax * (size_t)n);
+        if (!lpos || !lax) fresh = 0;   /* without memory the pieces stay where the break put them */
+    }
     for (i = 0; i < n && fresh; i++) {
         if (!bodies[i]) continue;
         memcpy(lpos[i], bodies[i] + SH_AI_RB_POS, sizeof lpos[i]);
         memcpy(lax[i], bodies[i] + SH_AI_RB_AXIS, sizeof lax[i]);
     }
     g_brk_break(brk, 0);
-    if (!dd_phys_vec(brk, SH_AI_VSLOT_ORIGIN, org, 3) || !dd_phys_vec(brk, SH_AI_VSLOT_AXIS, ax, 9)) return;
+    if (!dd_phys_vec(brk, SH_AI_VSLOT_ORIGIN, org, 3) || !dd_phys_vec(brk, SH_AI_VSLOT_AXIS, ax, 9)) {
+        free(lpos);
+        free(lax);
+        return;
+    }
     if (!owner || !dd_phys_vec(owner, SH_AI_VSLOT_ORIGIN, oorg, 3)) memcpy(oorg, org, sizeof oorg);
     if (hit && !add) hit = NULL;
     if (hit) { memcpy(ext, hit, sizeof ext); dd_unit(ext); if (dd_len(ext) <= 0.0f) { ext[0] = 0; ext[1] = 0; ext[2] = 1; } }
@@ -6076,6 +6104,8 @@ static void destruct_activate(void *brk, const sh_ai_destruct_spec *spec, void *
         b[SH_AI_RB_SETTLED] = 0;
         b[SH_AI_RB_ACTIVE] = 1;
     }
+    free(lpos);
+    free(lax);
 }
 
 static char brk_gore_detour(void *mgr, void *brk, const float *tag, const float *axis, const float *pos,

@@ -181,6 +181,7 @@ static int fx_is_restore(const char *path)
  * <root>\.content\served\<hash>\ is a composition of the content cache. `state` is the old
  * .state.json shape, mapped to the block's cause and built. */
 static const char *g_bundle_hash;   /* a whole build hash in place of hash_digit's, when set */
+static const char *g_fx_sha;        /* a whole file SHA-256 in place of the files' blob digits, when set */
 static void make_bundle(const char *parent, const char *folder, const char *id, char hash_digit,
                         const char *shadows, const fx_file *files, int n, const char *state)
 {
@@ -222,8 +223,8 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
         at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
                           "      {\"path\": \"%s\", \"sha256\": \"%s\", \"size\": %lld, "
                           "\"provides\": {\"type\": \"%s\", \"name\": \"%s\"}, \"needs\": %s}%s\n",
-                          ap, hash64(f->blob, b), size, f->ptype, f->pname, f->needs ? f->needs : "[]",
-                          i + 1 < n ? "," : "");
+                          ap, g_fx_sha ? g_fx_sha : hash64(f->blob, b), size, f->ptype, f->pname,
+                          f->needs ? f->needs : "[]", i + 1 < n ? "," : "");
         if (f->body) {
             char *p;
             _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, ap);
@@ -1359,6 +1360,72 @@ static void test_many_providers(void)
     list[0] = last_hash;
     CHECK(sh_modserve_scope_set(list, 1, 1) >= 0);
     CHECK(sh_modserve_lookup(MANY_DECL, &hit) && !strcmp(hit.bundle_id, "many0069"));
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(0);
+}
+
+/* No count of the product's own on the texts one path composes, nor on its pick (decision 26): seventy mods add one
+ * whitelist entry each to the same game list. Every entry is composed with scope off (the static composition took
+ * 64 texts), with all seventy declared (the scope's took 64), and the memo of a composition tells apart two sets that
+ * differ only past the 64th provider (its key was a 64-bit mask, so the seventieth's absence served the body with
+ * it). The pick among them also looks at all seventy: only the last one's needs resolve. */
+#define MANY_WL "generated/decls/damage/many_list.decl"   /* a list of a decl of the maps (not an editor tweak) */
+static void test_many_composed(void)
+{
+    static char texts[70][160], hashes[70][65], shas[70][65], body[65536];
+    fx_file f[1];
+    char top[MAX_PATH], root[MAX_PATH], salt[16], want[64];
+    const char *list[70];
+    char *slash;
+    int i, all;
+    printf("-- seventy mods add to one list: every entry composes, and the composition's memo tells sets apart\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\manylist\\mods", top);
+    mkdirs(root);
+    for (i = 0; i < 70; ++i) {
+        _snprintf_s(salt, sizeof salt, _TRUNCATE, "list%04d", i);
+        _snprintf_s(hashes[i], sizeof hashes[i], _TRUNCATE, "%064x", 0x1000 + i);
+        _snprintf_s(texts[i], sizeof texts[i], _TRUNCATE,
+                    "{\n\tedit = {\n\t\tvalidEncounters = {\n\t\t\tnum = 1;\n\t\t\titem[0] = \"entry_%02d\";\n\t\t}\n\t}\n}\n", i);
+        f[0].path = MANY_WL;
+        f[0].body = texts[i];
+        f[0].size = -1;
+        f[0].ptype = "damage";
+        f[0].pname = "many_list";
+        f[0].needs = NULL;
+        f[0].blob = '0';
+        _snprintf_s(shas[i], sizeof shas[i], _TRUNCATE, "%064x", 0x2000 + i);
+        g_fx_sha = shas[i];
+        g_bundle_hash = hashes[i];
+        make_bundle(root, salt, salt, '0', "\"" MANY_WL "\"", f, 1, "{\"installedAt\": 100}");
+        list[i] = hashes[i];
+    }
+    g_bundle_hash = NULL;
+    g_fx_sha = NULL;
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_build(root) == 70);
+    CHECK(open_text(MANY_WL, body, sizeof body) == 1);
+    for (i = 0, all = 1; i < 70; ++i) {
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"entry_%02d\"", i);
+        if (!strstr(body, want)) { printf("  scope off: %s not composed\n", want); all = 0; }
+    }
+    CHECK(all);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_scope_set(list, 70, 1) >= 0);
+    CHECK(open_text(MANY_WL, body, sizeof body) == 1);
+    for (i = 0, all = 1; i < 70; ++i) {
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"entry_%02d\"", i);
+        if (!strstr(body, want)) { printf("  all declared: %s not composed\n", want); all = 0; }
+    }
+    CHECK(all);
+    CHECK(sh_modserve_scope_set(list, 69, 1) >= 0);   /* the seventieth no longer declared */
+    CHECK(open_text(MANY_WL, body, sizeof body) == 1);
+    CHECK(strstr(body, "\"entry_68\"") != NULL && !strstr(body, "\"entry_69\""));
+    CHECK(sh_modserve_scope_set(list, 70, 1) >= 0);   /* and again: the memo keeps each set's own text */
+    CHECK(open_text(MANY_WL, body, sizeof body) == 1);
+    CHECK(strstr(body, "\"entry_69\"") != NULL);
     (void)sh_modserve_scope_set(NULL, 0, 0);
     sh_modserve_scope_enable(0);
 }
@@ -6230,6 +6297,7 @@ int main(void)
     test_requirements_general();
     test_requirements_by_map();
     test_many_providers();
+    test_many_composed();
     test_refresh();
     test_conflicts();
     test_editor_refs();

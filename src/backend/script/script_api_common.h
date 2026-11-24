@@ -242,7 +242,8 @@ int  sh_script_api_check_point(lua_State *L, int arg, const char *call, const ch
 double sh_script_api_check_number(lua_State *L, int arg, const char *call, const char *what);
 /* The same, or 0 when absent or nil (then *out is untouched). */
 int  sh_script_api_opt_number(lua_State *L, int arg, const char *call, const char *what, double *out);
-/* Text of at most max_len bytes. */
+/* Text of at most max_len bytes (SH_SCRIPT_TEXT_ANY: any length, for a name the game looks up itself). */
+#define SH_SCRIPT_TEXT_ANY ((size_t)-1 >> 1)
 const char *sh_script_api_check_text(lua_State *L, int arg, const char *call, const char *what, size_t max_len);
 
 /* A new table {x=, y=, z=}. */

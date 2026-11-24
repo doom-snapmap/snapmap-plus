@@ -84,17 +84,28 @@ static void test_refusals(void)
         CHECK(r == -1 && t.count == 0 && g_lines == before + 1);
         sh_companion_table_free(&t);
     }
-    /* Seventeen companions is one too many. */
+    /* Any number of companions per owner and of owners in all (no count of the product's own): 40 companions of one
+     * owner (the former limit was 16) and 300 owners (the former limit was 256). */
     {
-        char json[4096];
+        static char json[65536];
         size_t n;
         int k;
         sh_companion_table t = {0};
+        const sh_companion_owner *o;
         n = (size_t)_snprintf_s(json, sizeof json, _TRUNCATE, "{\"companions\":{\"mods/a.b/p\":[");
-        for (k = 0; k < 17; k++)
-            n += (size_t)_snprintf_s(json + n, sizeof json - n, _TRUNCATE, "%s{\"entityDef\":\"func/gui\"}", k ? "," : "");
+        for (k = 0; k < 40; k++)
+            n += (size_t)_snprintf_s(json + n, sizeof json - n, _TRUNCATE, "%s{\"entityDef\":\"func/gui_%d\"}", k ? "," : "", k);
         _snprintf_s(json + n, sizeof json - n, _TRUNCATE, "]}}");
-        CHECK(add(&t, "a.b", json) == -1 && t.count == 0);
+        CHECK(add(&t, "a.b", json) == 1 && t.count == 1);
+        o = sh_companion_find(&t, "mods/a.b/p");
+        CHECK(o && o->count == 40 && !strcmp(o->entries[39].entitydef, "func/gui_39"));
+        sh_companion_table_free(&t);
+        n = (size_t)_snprintf_s(json, sizeof json, _TRUNCATE, "{\"companions\":{");
+        for (k = 0; k < 300; k++)
+            n += (size_t)_snprintf_s(json + n, sizeof json - n, _TRUNCATE, "%s\"mods/a.b/p%d\":[{\"entityDef\":\"func/gui\"}]",
+                                     k ? "," : "", k);
+        _snprintf_s(json + n, sizeof json - n, _TRUNCATE, "}}");
+        CHECK(add(&t, "a.b", json) == 300 && t.count == 300 && sh_companion_find(&t, "mods/a.b/p299"));
         sh_companion_table_free(&t);
     }
     /* A refused block leaves nothing of itself, including owners before the bad one. */

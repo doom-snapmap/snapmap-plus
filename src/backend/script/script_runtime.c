@@ -846,9 +846,6 @@ static int fsm_register(lua_State *L)
     const char *name = lua_type(L, 1) == LUA_TSTRING ? lua_tolstring(L, 1, &n) : NULL;
     if (!name || !n)
         sh_script_refuse(L, "\"fsm.%s\" needs the class name as its first value, such as \"ATRON_UseGrenades\"", call);
-    if (n >= SH_FSM_CLASS_CAP)
-        sh_script_refuse(L, "\"fsm.%s\" takes a class name of at most %d characters; %s has %d", call,
-                         SH_FSM_CLASS_CAP - 1, name, (int)n);
     for (i = 0; i < n; i++) {
         int c = (unsigned char)name[i];
         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
