@@ -1,9 +1,5 @@
-/* Heap text sized to its content.
- *
- * Names, paths and sentences that carry them have no length of their own
- * (DECISIONS 26): they are formatted into a buffer allocated for exactly what
- * they hold, never into a fixed array that would cut them. Header-only, so
- * every target and test links it without a source line. */
+/* Heap text sized to its content: names and paths are formatted into a buffer allocated for exactly what
+ * they hold, never a fixed array that would cut them. Header-only. */
 #ifndef SNAPMAP_PLUS_TEXT_H
 #define SNAPMAP_PLUS_TEXT_H
 

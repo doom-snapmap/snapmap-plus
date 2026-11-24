@@ -1,10 +1,7 @@
-/* saved_map_guard.c -- see saved_map_guard.h.
- *
- * DeleteBadSaveSlots (VK 0xFCEE30, GL 0xFCE320) takes the browser helper and
- * the idList<idStr> of slot names the savegame manager marked unreadable while
- * it listed My Maps; it deletes each slot and then queues GDM 0x8D ("removed
- * corrupt data"). It is the only caller of the per-slot delete, so replacing it
- * leaves the player's own Delete alone. The detour never calls the original. */
+/* saved_map_guard.c -- see saved_map_guard.h. DeleteBadSaveSlots (VK 0xFCEE30, GL 0xFCE320) takes the
+ * browser helper and the idList<idStr> of unreadable slot names, deletes each slot, then queues GDM 0x8D.
+ * It is the only caller of the per-slot delete, so the detour, which never calls the original, leaves the
+ * player's own Delete alone. */
 #include <windows.h>
 #include <shlobj.h>
 #include <stdint.h>
@@ -237,7 +234,7 @@ static void smg_keep(const char *folder, smg_kept *k)
     smg_title(slot, k->title, sizeof k->title, folder);
     k->result = SMG_KEPT_IN_PLACE;
     sh_wpath_utf8(slot, k->where, sizeof k->where);
-    /* kept-maps\SNAPMAPS<id>, or <id>-2, -3 ... when an earlier copy holds other bytes. */
+    /* kept-maps\SNAPMAPS<id>, or <id>-2, -3 ... when an existing copy holds other bytes. */
     if (!sh_wpath_ensure_dir(g_kept_root)) {
         static wchar_t parent[SH_WPATH_MAX];
         wchar_t *slash;

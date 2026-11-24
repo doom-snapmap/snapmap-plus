@@ -1,13 +1,8 @@
-/* Wide file paths with no MAX_PATH limit.
- *
- * Every path is built as UTF-16 and handed to the W file APIs in its long form
- * ("\\?\C:\..." or "\\?\UNC\server\share\..."), so a game folder or user name
- * outside the ANSI code page, or deeper than 260 characters, works. Text that
- * leaves the process (logs, JSON records) takes the UTF-8 form, without the
- * long-form prefix. Buffers are the caller's; SH_WPATH_MAX wide characters
- * hold any path Windows accepts. Nothing here allocates except the known-folder
- * lookup, so the rest is usable from a fault handler. Header-only: callers link
- * shell32 and ole32 for sh_wpath_local_appdata. */
+/* Wide file paths with no MAX_PATH limit: every path is UTF-16 in its long form ("\?\C:\..." or
+ * "\?\UNC\server\share\...") for the W file APIs, and text leaving the process (logs, JSON) is UTF-8
+ * without the prefix. Buffers are the caller's; SH_WPATH_MAX wide characters hold any Windows path. Nothing
+ * allocates except the known-folder lookup, so the rest is usable from a fault handler. Header-only: callers
+ * link shell32 and ole32 for sh_wpath_local_appdata. */
 #ifndef SNAPMAP_PLUS_WIDE_PATH_H
 #define SNAPMAP_PLUS_WIDE_PATH_H
 

@@ -1,13 +1,7 @@
-/* Classify engine faults and attempt bounded recovery. Visibility-leaf faults
- * return false for the bad node. Repaired CSR/render-node faults can unwind to
- * editor Think (Class A); a remaining wild access violation redirects to
- * Error(6) and requests editor exit (Class B). Other hardware faults (divide,
- * floating point, misalignment, in-page) are left to the engine's own handlers
- * and redirected only when nothing handled them (shield_second_chance, from the
- * unhandled-exception filter). redirect_policy.h decides when a redirect is
- * declined and bounds each incident.
- * Engine C++ throws continue to their handlers after recovery-gate adjustments.
- * Fault logging is independent of recovery and may also record non-engine faults. */
+/* Classify engine faults and attempt bounded recovery. Visibility-leaf faults return false for the bad node,
+ * repaired CSR/render-node faults unwind to editor Think (Class A), and a remaining wild access violation
+ * redirects to Error(6) and requests editor exit (Class B). Other hardware faults are redirected only when
+ * nothing handled them (shield_second_chance); redirect_policy.h decides when a redirect is declined. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -44,8 +38,7 @@ static int resolver_range(uintptr_t *lo, uintptr_t *hi)
     return 1;
 }
 
-/* Resolve handler globals during installation to avoid image scans while
- * handling faults. Zero means unavailable; callers skip dependent operations. */
+/* Handler globals resolved at install time; zero means unavailable and callers skip dependent operations. */
 static uintptr_t g_errstate_at   = 0;   /* errState        -- Frame's catch requires its low byte == 0 */
 static uintptr_t g_load_state_at = 0;   /* load_state      -- only the LOADING value 1 blocks recovery */
 static uintptr_t g_suppr_a_at    = 0;   /* throw-gate suppressor A */
@@ -90,7 +83,7 @@ static void veh_resolve_globals(void)
     v = glb_resolve(base, "vis_leaf_lo", NULL);
     if (v) {
         g_visleaf_lo_rva    = v - (uintptr_t)base;
-        g_visleaf_hi_rva    = g_visleaf_lo_rva + VIS_LEAF_SPAN;   /* body end, same span as before */
+        g_visleaf_hi_rva    = g_visleaf_lo_rva + VIS_LEAF_SPAN;   /* body end */
         g_visleaf_false_rva = g_visleaf_lo_rva + VIS_LEAF_FALSE_OFF;  /* its own XOR AL,AL; RET tail */
         g_visleaf_ok        = 1;
     } else {
@@ -101,9 +94,7 @@ static void veh_resolve_globals(void)
     }
 }
 
-/* Resolve suppressor B through the dispatcher's CMP anchor. Its displacement
- * is followed by an immediate byte; engine_globals accounts for that tail.
- * Callers guard the write with SEH. */
+/* Clear suppressor B, resolved through the dispatcher's CMP anchor; callers guard the write with SEH. */
 static void write_suppressor_b(void)
 {
     uintptr_t b;
@@ -134,14 +125,14 @@ static char g_crashstk[512];
 static volatile LONG g_firstchance_seen = 0;
 static char g_fcdiag[320];
 
-/* crash-class = a severity-ERROR status code (0xC.../0xE...), minus the benign first-chance noise + the DOOM
- * C++ throw (0xE06D7363) which LAYER 2 below handles + logs on its own. */
+/* A severity-ERROR status code, excluding debugger notifications and the C++ throw (0xE06D7363), which
+ * shield_veh handles on its own. */
 static int is_crash_class(DWORD c)
 {
     if (c == 0x80000003u /*BREAKPOINT*/ || c == 0x80000004u /*SINGLE_STEP*/ ||
         c == 0x40010005u /*DBG_CONTROL_C*/ || c == 0x40010006u /*DBG_PRINTEXCEPTION_C*/ ||
         c == 0x4001000Au /*DBG_PRINTEXCEPTION_WIDE_C*/ || c == 0x406D1388u /*MS_VC_SET_THREAD_NAME*/ ||
-        c == 0xE06D7363u /*C++ throw -- handled by LAYER 2*/)
+        c == 0xE06D7363u /*C++ throw -- handled in shield_veh*/)
         return 0;
     return (c >> 30) == 3;   /* STATUS_SEVERITY_ERROR */
 }
@@ -206,10 +197,8 @@ static int is_wild(void *addr)
     return 0;
 }
 
-/* Unwind a context copy to [lo,hi), restoring nonvolatile registers and RSP.
- * Return 1 at the target frame, or 0 after maxframes without a match. Frameless
- * leaves pop their return address. UNW_FLAG_NHANDLER skips cleanup handlers, so
- * this recovery may leak frame temporaries and requires an intact stack. */
+/* Unwind a context copy to the RVA range [lo,hi); returns 1 at the target frame, 0 after maxframes without a
+ * match. UNW_FLAG_NHANDLER skips cleanup handlers, so frame temporaries can leak and the stack must be intact. */
 static int unwind_to_rva_range(CONTEXT *ctx, uintptr_t lo_rva, uintptr_t hi_rva, int maxframes)
 {
     int i;
@@ -260,9 +249,8 @@ static int unwind_one_frame(CONTEXT *ctx)
     return ctx->Rip != 0 && rip_in_doom((void *)ctx->Rip);
 }
 
-/* ---- Capture the FAULTING call stack as a compact "DOOM+0xRVA <- ..." string (for the crash log + popup).
- * Walks a COPY of the fault context with the OS unwinder (like unwind_to_rva_range); non-DOOM frames show as
- * module+off. SEH-guarded per frame so a wild frame just ends the walk -- never re-faults the VEH. */
+/* Capture the faulting call stack as newline-separated "DOOM+0xRVA" lines (other modules as module+off) by
+ * walking a copy of the fault context. SEH-guarded per frame, so a wild frame ends the walk. */
 static void capture_fault_stack(const CONTEXT *ctx_in, char *out, size_t cap, int maxframes)
 {
     CONTEXT ctx = *ctx_in;
@@ -298,7 +286,7 @@ static void capture_fault_stack(const CONTEXT *ctx_in, char *out, size_t cap, in
     }
 }
 
-/* Public wrapper (veh.h): the crash-record writer captures fatal-path stacks with the same walker. */
+/* Public wrapper (veh.h) of capture_fault_stack. */
 void shield_capture_stack(const CONTEXT *ctx, char *out, size_t cap, int maxframes)
 {
     capture_fault_stack(ctx, out, cap, maxframes);
@@ -315,10 +303,8 @@ static int writable_int(uintptr_t addr)
     return 1;
 }
 
-/* Repair the bad CSR column using the original resolver frame. RBP locates the
- * column array and loop index, RSI is the faulty value, and R12 is the source
- * entity index. Require a matching slot, known fault range, and writable storage.
- * Return 1 after replacing the column; otherwise leave recovery to the caller. */
+/* Repair the bad CSR column from the resolver frame (RBP locates the column array and loop index, RSI is the
+ * bad value, R12 the source entity index) when the slot matches and is writable. Returns 1 after replacing it. */
 static int try_revert_csr_entry(const CONTEXT *ctx)
 {
     uintptr_t rva, rbp, holder, colArr, entry_addr;
@@ -412,10 +398,9 @@ static int is_other_hw_fault(DWORD code)
 /* Count of C++ throws the shield has gate-forced (log rate-limit only). */
 static volatile LONG g_cxx_seen = 0;
 
-/* Open Frame's recovery gate before the engine catch reads it: zero errState,
- * change load_state only when it equals the blocking value 1, and clear resolved
- * throw suppressors. Frame tests errState's low byte; this code clears the word.
- * This cannot recover an error caught by an inner engine handler first. */
+/* Open Frame's recovery gate before its catch reads it: zero errState (Frame tests its low byte), zero
+ * load_state only when it is the blocking value 1, and clear the resolved throw suppressors. An error caught
+ * first by an inner engine handler is not recovered. */
 static void force_recovery_gate(void)
 {
     if (g_doom_base == NULL) return;
@@ -430,9 +415,8 @@ static void force_recovery_gate(void)
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
 
-/* Read the engine's thread ID: 1 = main, 0 = off-main, -1 = unknown/unreadable.
- * Bootstrap runs on another thread, so its ID cannot identify Frame's thread.
- * Only a definite off-main result blocks the Class-B redirect. */
+/* Compare against the engine's main-thread id: 1 = main, 0 = off-main, -1 = unknown or unreadable. Only a
+ * definite off-main result blocks the Class-B redirect. */
 static int shield_on_main_thread(void)
 {
     uint32_t mt = 0;
@@ -475,10 +459,8 @@ static uintptr_t primary_function_rva(DWORD64 rip, DWORD64 *image_base)
     return 0;
 }
 
-/* Does the faulting stack unwind to idCommonLocal::Frame? The C++ dispatch of
- * Error(6)'s throw walks the same unwind data, so a stack this walk cannot
- * take to Frame is one the throw cannot either. 1 found, 0 the walk ended
- * without it, -1 Frame unresolved, the walk faulted or ran out of frames. */
+/* Does the faulting stack unwind to idCommonLocal::Frame? Error(6)'s throw walks the same unwind data. Returns
+ * 1 found, 0 the walk ended without it, -1 Frame unresolved, the walk faulted or ran out of frames. */
 #define FRAME_WALK_MAX 96
 static int shield_frame_on_stack(const CONTEXT *fault)
 {
@@ -599,8 +581,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
     if (!rip_in_doom(rip))
         return EXCEPTION_CONTINUE_SEARCH;
 
-    /* DIAGNOSTIC (first 40 faults): log every captured hardware fault + the redirect-decision inputs, so an
-     * un-redirected crash tells us WHY (fault addr committed / wrong class / etc.). */
+    /* Log the first 40 hardware faults with their redirect-decision inputs. */
     if (InterlockedIncrement(&g_diag_seen) <= 40) {
         MEMORY_BASIC_INFORMATION mbi;
         SIZE_T q = fault_addr ? VirtualQuery(fault_addr, &mbi, sizeof mbi) : 0;
@@ -637,19 +618,15 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
 
     uintptr_t rva = (uintptr_t)rip - (uintptr_t)g_doom_base;
 
-    /* AV-specific: a WILD data AV is the in-editor draw-fault class (Class-A). A committed-but-valid AV is
-     * left to the engine's own SEH (redirecting one the engine would have handled is worse than its local
-     * handling -- fault-shield-recovery.md scope). Non-AV hardware faults skip this gate -> Class-B. */
+    /* A wild data AV is the in-editor draw-fault class (Class A); a committed, valid AV is left to the
+     * engine's own SEH. Non-AV hardware faults skip this gate and go to Class B. */
     {
-        /* Visibility-leaf faults return false for this node by resuming at the leaf
-         * tail. The leaf is frameless, so RSP still holds the caller return address.
-         * This skips one predicate without unwinding active resolver/build frames.
-         * Use only a resolved leaf with the measured false-return offset; otherwise
-         * fall through to the ordinary recovery classification. */
+        /* A visibility-leaf fault returns false for this node by resuming at the frameless leaf's tail, so
+         * RSP still holds the caller's return address. Only a resolved leaf is used. */
         if (g_visleaf_ok && g_doom_base &&
             rva >= g_visleaf_lo_rva && rva < g_visleaf_false_rva) {
-            /* Return through the leaf itself. Unwinding past active builder frames here
-             * caused heap corruption on exit from Play; preserve those frames. */
+            /* Return through the leaf itself: unwinding past active builder frames corrupts the heap on
+             * exit from Play. */
             if (InterlockedIncrement(&g_visleaf_seen) <= 3) {
                 _snprintf_s(g_visleaf_log, sizeof g_visleaf_log, _TRUNCATE,
                     "vis-leaf render-node fault @ 0x%llx (rip+0x%llx) -> predicate forced FALSE (skip node), resumed",
@@ -673,9 +650,8 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
             /* Use the original resolver registers to repair the persistent bad connection. */
             int reverted   = try_revert_csr_entry(ep->ContextRecord);
             int rn_cleared = try_neutralize_rendernode(ep->ContextRecord);
-            /* A frame on this stack does not establish a draw-only failure.
-             * Collision/resource faults must reach the native error boundary;
-             * skipping their callers left a second invalid return address. */
+            /* Unwind only after a known repair: collision/resource faults must reach the native error
+             * boundary, since skipping their callers leaves an invalid return address. */
             if(reverted || rn_cleared) {
             if (InterlockedIncrement(&g_classa_seen) <= 5) {
                 _snprintf_s(g_classa_log, sizeof g_classa_log, _TRUNCATE,
@@ -705,10 +681,8 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
 static LONG redirect_to_error6(PEXCEPTION_POINTERS ep, DWORD code, uintptr_t rva, void *fault_addr)
 {
     void *rip = (void *)ep->ContextRecord->Rip;
-    /* Error(6) relies on Frame's catch on the engine main thread. On a known worker
-     * thread, record the fault and continue normal exception search instead. This
-     * does not recover or prove containment; a surrounding handler may catch it.
-     * Unknown thread identity preserves the existing Class-B fallback behavior. */
+    /* Error(6) relies on Frame's catch on the engine main thread, so a known worker thread records the
+     * fault and continues the exception search; an unknown thread identity proceeds as Class B. */
     if (shield_on_main_thread() == 0) {
         if (InterlockedIncrement(&g_offthread_seen) <= SHIELD_MAX_OFFTHREAD) {
             __try {
@@ -787,7 +761,7 @@ static LONG redirect_to_error6(PEXCEPTION_POINTERS ep, DWORD code, uintptr_t rva
 
     /* Capture stack and a nonterminal record, capped separately from redirects.
      * Raw hardware faults do not populate engine error text; reading that buffer
-     * here would attach an unrelated earlier message. */
+     * here would attach an unrelated stale message. */
     if (InterlockedIncrement(&g_popup_seen) <= SHIELD_MAX_POPUP) {
         __try {
             capture_fault_stack(ep->ContextRecord, g_crashstk, sizeof g_crashstk, 14);
@@ -795,9 +769,8 @@ static LONG redirect_to_error6(PEXCEPTION_POINTERS ep, DWORD code, uintptr_t rva
             shield_emit(&sk);   /* the full call stack -> shield_faults.log */
             crash_report_file("classB", code, rva, (uintptr_t)fault_addr, sh_host_image_name(),
                               g_crashstk, SHIELD_RECOVERED_TEXT, "");
-            /* FREE THE MOUSE: DOOM clips the cursor to its window + hides it (captured input); un-clip +
-             * force it visible (ShowCursor is a refcount -- bounded loop) so the user can actually reach
-             * the Snapmap+ window where the crash dialog appears. */
+            /* Free the mouse: un-clip the cursor and force it visible (ShowCursor is a refcount, so the
+             * loop is bounded) so the user can reach the Snapmap+ crash dialog. */
             ClipCursor(NULL);
             { int cc = 0; while (ShowCursor(TRUE) < 0 && ++cc < 32) {} }
         } __except (EXCEPTION_EXECUTE_HANDLER) {}

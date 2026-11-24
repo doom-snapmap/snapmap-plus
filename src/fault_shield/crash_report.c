@@ -28,8 +28,7 @@ extern uint8_t *g_doom_base;
 typedef BOOL (WINAPI *minidump_write_t)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
                                         PMINIDUMP_EXCEPTION_INFORMATION, PVOID, PVOID);
 
-/* Wide paths of any length, built at init; a record's file name is built into
- * static storage at fault time. */
+/* Wide paths of any length, built at init; a record's file name is built into static storage at fault. */
 static wchar_t g_crash_dir[SH_WPATH_MAX];    /* <game>\snapmap-plus\crash */
 static wchar_t g_dump_path[SH_WPATH_MAX];    /* <game>\snapmap-plus\logs\sh_crash.dmp */
 static char    g_dump_utf8[3 * SH_WPATH_MAX]; /* the same, as the record names it */

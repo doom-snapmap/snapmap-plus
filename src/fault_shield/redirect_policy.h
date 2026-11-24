@@ -1,25 +1,9 @@
-/* redirect_policy.h -- when the shield may turn a fault into Error(6).
- *
- * The Class-B redirect throws an idException that only idCommonLocal::Frame's
- * catch handles (build 13954591: VK FUN_14159d930, catch funclet 0x141f5ecd7).
- * That catch is a full teardown: it syncs the renderer, then CancelMapChange
- * (common vtable +0x28) unloads the game and loads game/shell_map, all inside
- * the catch funclet and so outside Frame's try. The redirect is declined, and
- * the fault left to the fatal handlers that write the crash report, when:
- *   - the thread is not the engine main thread (no Frame catch at all);
- *   - the loading-screen thread is running (idLoadScreen thread byte +0x4b2) and
- *     the load-screen stop (load_screen_stop.h) is not armed: only
- *     idLoadScreen::LevelLoadCompleted stops that thread, the throw skips that call,
- *     and without the stop the thread keeps rendering the menu SWF while the main
- *     thread recovers (an engine render race on the shared GUI batch; a deadlock in
- *     a Play load). With the stop armed, CancelMapChange stops the thread first and
- *     the fault is recovered like any other;
- *   - a redirect already happened in this Frame call, so the fault is inside
- *     that catch's own recovery, where a second throw escapes to the game-loop
- *     catch that ends the process;
- *   - the stack does not unwind to Frame, so no engine catch can receive it.
- * An input of -1 (unknown) never declines: it keeps the behaviour the shield
- * had before the input existed. Pure; unit-tested in tests/redirect_policy_test.c. */
+/* When the shield may turn a fault into Error(6). The redirect throws an idException that only
+ * idCommonLocal::Frame's catch handles (VK FUN_14159d930, catch funclet 0x141f5ecd7), a full teardown
+ * through CancelMapChange. It is declined, leaving the fault to the fatal handlers, when the thread is not
+ * the engine main thread, the loading-screen thread (byte +0x4b2) runs without the load-screen stop armed,
+ * a redirect already happened in this Frame call (a second throw ends the process), or the stack does not
+ * unwind to Frame. An input of -1 (unknown) never declines. */
 #ifndef SHIELD_REDIRECT_POLICY_H
 #define SHIELD_REDIRECT_POLICY_H
 
@@ -60,11 +44,9 @@ static __inline const char *shield_redirect_decline_reason(shield_redirect_verdi
     }
 }
 
-/* Redirects allowed per incident. An incident starts at its first redirect
- * and lasts SHIELD_INCIDENT_WINDOW_MS; it may redirect SHIELD_INCIDENT_REDIRECTS
- * times. A fault past that budget means the recovery itself keeps faulting and
- * is left to the fatal handlers; a fault after the window starts a new
- * incident, so a long session survives any number of separate recoveries. */
+/* An incident starts at its first redirect, lasts SHIELD_INCIDENT_WINDOW_MS and allows
+ * SHIELD_INCIDENT_REDIRECTS redirects; a fault past that budget goes to the fatal handlers, and one after
+ * the window starts a new incident. */
 #define SHIELD_INCIDENT_REDIRECTS 4
 #define SHIELD_INCIDENT_WINDOW_MS 30000ull
 

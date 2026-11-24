@@ -1,6 +1,5 @@
-/* The shield's engine functions, taken from the bootstrap's signature results
- * (resolved before any detour was committed). Data and call-site-derived
- * addresses use engine_globals; see engine_layout.h for layout constants. */
+/* The shield's engine functions, taken from the bootstrap's signature results (resolved before any detour
+ * is committed). */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

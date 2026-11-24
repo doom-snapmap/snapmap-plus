@@ -1,9 +1,6 @@
-/* Persist fault records under <game>\snapmap-plus\crash\pending-*.json (UTF-8 JSON).
- * The UI polls these records for notices or report prompts. Recovery paths,
- * terminal engine throws, and fatal handlers can produce records; a Class-B or
- * off-thread record alone does not establish that the process survived.
- * Fatal handlers also attempt a local minidump. Capture does not alter exception
- * disposition, and write failures are ignored. */
+/* Persist fault records under <game>\snapmap-plus\crash\pending-*.json (UTF-8 JSON) for the UI to poll; a
+ * Class-B or off-thread record alone does not show the process survived. Fatal handlers also attempt a local
+ * minidump; capture does not alter exception disposition and write failures are ignored. */
 #ifndef SHIELD_CRASH_REPORT_H
 #define SHIELD_CRASH_REPORT_H
 

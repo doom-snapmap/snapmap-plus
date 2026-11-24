@@ -1,18 +1,8 @@
-/* Stop the loading-screen thread before the engine leaves a failed map load.
- *
- * An error during a map load (the engine's own recoverable Error, or the shield's
- * Error(6) redirect) unwinds past idLoadScreen::LevelLoadCompleted, the only code
- * that stops the loading-screen thread. idCommonLocal::Frame's catch then calls
- * idCommonLocal::CancelMapChange (common vtable +0x28), whose menu load syncs the
- * renderer and draws the same load GUI while that thread is still drawing: a
- * deadlock (a load that never finishes) or a race on the shared GUI.
- *
- * The detour on CancelMapChange runs LevelLoadCompleted first when, on the engine
- * main thread, the thread is still running (idLoadScreen thread byte +0x4B2). That
- * is the engine's own order on a load that completes: stop the thread with no lock
- * held, sync the renderer, free the load GUI, then load the next map. The original
- * CancelMapChange then runs unchanged. Install once at startup from the bootstrap's
- * signature results; armed only on a clean, verified prologue. */
+/* Stop the loading-screen thread before the engine leaves a failed map load. An error during a load unwinds
+ * past idLoadScreen::LevelLoadCompleted, so CancelMapChange (common vtable +0x28) would draw the load GUI
+ * while that thread still draws: a deadlock or a race. The CancelMapChange detour runs LevelLoadCompleted
+ * first when the thread is still running (byte +0x4B2) on the engine main thread, then the original;
+ * it arms only on a clean, verified prologue. */
 #ifndef SHIELD_LOAD_SCREEN_STOP_H
 #define SHIELD_LOAD_SCREEN_STOP_H
 
@@ -32,14 +22,9 @@ static const uint8_t k_cancel_map_change_prologue[LOAD_SCREEN_STOP_STOLEN] = {
 /* Return 1 when armed (or already armed), 0 when not installed. */
 int sh_load_screen_stop_install(const uint8_t *module_base, const sig_result *results, size_t count);
 
-/* The map-end subscribers (mod scripts, script/script_hooks.h; the player
- * cheats kept over a spawn, cheatkeep.h): each called on the engine main
- * thread at every CancelMapChange, in the order added, before the loading
- * screen is stopped and before the original runs (which frees the game and
- * its entities), with during_load 1 when the loading-screen thread was still
- * drawing (a failed load). Added once at boot; adding one twice keeps one.
- * Returns 1 when subscribed, 0 when fn is NULL or the four places are taken.
- * Called only while the detour is armed. */
+/* Map-end subscribers run on the engine main thread at every CancelMapChange, in add order, before the
+ * original frees the game; during_load is 1 when the loading-screen thread was still drawing. Returns 1 when
+ * subscribed (a repeat keeps one), 0 when fn is NULL or all four places are taken. */
 typedef void (*sh_map_end_fn)(int during_load);
 int sh_load_screen_stop_add_map_end(sh_map_end_fn fn);
 

@@ -1,23 +1,9 @@
-/* store_lock.h -- the named lock on a mods folder and its record, shared by
- * every process that writes them (DECISIONS 19): each game process takes it
- * through this one header.
- *
- * Name. "Local\snapmap-plus-mods-<16 hex>", where the hex is the 64-bit
- * FNV-1a (offset 0xcbf29ce484222325, prime 0x100000001b3) over the UTF-16LE
- * code units, two bytes each, low byte first, of the mods folder's path:
- * GetFullPathNameW of it, without a "\\?\" prefix ("\\?\UNC\" read as "\\"),
- * without trailing separators, every '/' as '\', lowercased with
- * LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE). The data folder's
- * mods\ and a copy of it elsewhere have different locks, so a test on a copy
- * never waits for the player's game.
- *
- * Protocol. A writer opens the mutex (CreateMutexW, not initially owned) and
- * waits for it; WAIT_ABANDONED also gives it (the last holder ended without
- * releasing, and the store's own work-folder recovery puts its leftovers
- * right). It holds it around one whole store step: the game around each
- * install, download, salting, scan build or record write. The mutex is
- * recursive within a thread.
- * A reader that only lists the folder takes no lock. */
+/* store_lock.h -- the named lock on a mods folder and its record, shared by every process that writes them.
+ * Name: "Local\snapmap-plus-mods-<16 hex>", the 64-bit FNV-1a (offset 0xcbf29ce484222325, prime 0x100000001b3)
+ * over the UTF-16LE bytes, low byte first, of the mods folder's GetFullPathNameW with no "\?\" prefix
+ * ("\?\UNC\" read as "\\"), no trailing separators, '/' as '\', lowercased by LCMapStringEx
+ * (LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE). A writer holds the mutex (WAIT_ABANDONED also grants it) around one
+ * whole store step; it is recursive within a thread, and a reader that only lists the folder takes no lock. */
 #ifndef SNAPMAP_PLUS_STORE_LOCK_H
 #define SNAPMAP_PLUS_STORE_LOCK_H
 
