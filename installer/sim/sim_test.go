@@ -61,7 +61,7 @@ func TestCheckAcceptsTheContract(t *testing.T) {
 	}
 }
 
-// Every kind of leftover the owner reported fails loudly.
+// Every kind of leftover fails the contract check.
 func TestCheckFailsOnEveryLeftover(t *testing.T) {
 	for _, c := range []struct {
 		name, root, rel, want string

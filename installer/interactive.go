@@ -82,8 +82,8 @@ func enterDefault(installed bool, installedVersion, latestTag string) string {
 	return ""
 }
 
-// legacyNeedsUpdate reports a 2018 install whose record names another release, which an earlier
-// installer's update leaves behind: the next update restores a clean legacyReleaseTag install.
+// legacyNeedsUpdate reports a 2018 install whose record names a release other than legacyReleaseTag;
+// the next update restores a clean legacyReleaseTag install.
 func legacyNeedsUpdate(b doomBuild, installedVersion string) bool {
 	return b.build == build2018 && installedVersion != legacyReleaseTag
 }

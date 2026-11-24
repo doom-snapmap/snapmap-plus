@@ -25,7 +25,7 @@ var relaunchSelf = func(exe string, args []string) (int, error) {
 }
 
 // selfUpdateSkipsCommand reports the commands that never need a current installer first: reading the
-// version or help, storing a token, and removing the install (an old installer removes what it placed).
+// version or help, storing a token, and removing the install (any installer removes what it placed).
 func selfUpdateSkipsCommand(cmd string) bool {
 	switch cmd {
 	case "", "version", "--version", "-v", "help", "--help", "-h", "set-token", "uninstall":
@@ -35,11 +35,8 @@ func selfUpdateSkipsCommand(cmd string) bool {
 }
 
 // selfUpdateFirst runs before any other work: when the resolved release ships a newer snapmap-plus.exe,
-// the running image is replaced on disk and the new one is started with the same arguments, so the
-// mod work is always done by the current installer. It returns true when the caller must exit with
-// `code` because the relaunched process did the work. A dev build, an offline (--local) run, a
-// relaunched process, --no-self and the commands that need no release stay put. Network trouble is a
-// warning, never a stop.
+// the running image is replaced and relaunched with the same arguments. It returns true when the
+// caller must exit with `code`; dev builds, --local, --no-self and release-free commands stay put.
 func selfUpdateFirst(rawArgs []string) (relaunched bool, code int) {
 	if os.Getenv(relaunchEnv) == "1" || version == "" || version == "dev" {
 		return false, 0

@@ -16,11 +16,8 @@ type legacyRun struct {
 }
 
 // fakeLegacyInstaller stands in for running v0.2.1-beta.19's snapmap-plus.exe: it records the call
-// and does what that installer's install does to app data and the DOOM folder: it copies itself into
-// app data under its own name and records that copy in installer-files.json, rewrites install.json in
-// its own format (dropping fields it does not know), places the 2018 pair, backs up a file that is in
-// the way as <file>.snapmap-plus-bak in DOOM, and keeps the my-overrides starter package. fail makes
-// it exit with status 3 instead.
+// and does what that installer does to app data and DOOM (copies itself, rewrites install.json, places
+// the 2018 pair, backs up a file in the way as <file>.snapmap-plus-bak); fail makes it exit with 3.
 func fakeLegacyInstaller(t *testing.T, fail bool) *[]legacyRun {
 	t.Helper()
 	var runs []legacyRun
@@ -135,7 +132,7 @@ func TestInstall2018BuildRunsTheLegacyInstaller(t *testing.T) {
 	r.noTempLeftovers(t, "2018 lifecycle")
 }
 
-// On the 2018 build after an earlier installer's blind update, the April 2024 pair goes, the legacy
+// On the 2018 build with the April 2024 pair present, that pair goes, the legacy
 // installer's backup of a file that was not ours leaves DOOM for cache\installer, and that file comes
 // back at uninstall.
 func TestInstall2018BuildCleansAnEarlierBlindUpdate(t *testing.T) {

@@ -11,10 +11,9 @@ import (
 	"time"
 )
 
-// The layouts earlier releases left, written with stand-in bytes. A stand-in for a Snapmap+ DLL
-// carries the "snapmap-plus" marker every Snapmap+ DLL does (the snapmap-plus\ paths it loads and
-// logs to), so the installer recognises it as ours exactly as it does a real one. A stand-in for the
-// original SnapHak or for another tool does not.
+// The layouts a previous install left, written with stand-in bytes. A stand-in for a Snapmap+ DLL
+// carries the "snapmap-plus" marker, so the installer recognises it as ours; one for the original
+// SnapHak or another tool does not.
 
 const (
 	pair2024UI = `snapmap-plus\snapmap-plus-ui-13954591.dll`
@@ -65,7 +64,7 @@ type oldBackup struct {
 	Backup string `json:"backup"`
 }
 
-// cmdSeed writes one earlier layout into the scratch DOOM, data and profile folders.
+// cmdSeed writes one previous layout into the scratch DOOM, data and profile folders.
 func cmdSeed(args []string) error {
 	o, rest := parseOpts(args)
 	if err := o.need("doom", "data", "profile"); err != nil {
@@ -88,8 +87,8 @@ func cmdSeed(args []string) error {
 	}
 	switch rest[0] {
 	case "snaphak":
-		// Chrispy's original SnapHak in DOOM, its player data under %USERPROFILE%\snaphak, and a
-		// file another tool left beside it.
+		// The original SnapHak in DOOM, its player data under %USERPROFILE%\snaphak, and a file
+		// another tool left beside it.
 		for _, rel := range []string{"dinput8.dll", "XINPUT1_3.dll", "snaphak_algo.dll", "snaphak_ext.dll", "changelog.txt",
 			"doomlegacymod.txt", `snaphak\snaphakui.dll`, `snaphak\Qt5Core.dll`, `snaphak\Qt5Gui.dll`, `snaphak\Qt5Widgets.dll`,
 			`snaphak\Qt5Svg.dll`, `snaphak\lua51.dll`, `snaphak\ds_descriptions.json`, `plugins\platforms\qwindows.dll`,
@@ -101,8 +100,8 @@ func cmdSeed(args []string) error {
 		add(profile, `snaphak\strings\en.json`, []byte(`{"hello":"world"}`))
 		add(profile, `snaphak\rawmap.json`, []byte(`{"rawmap":1}`))
 	case "beta19":
-		// v0.2.1-beta.19's pair left in an April 2024 folder, its install record and installer copy,
-		// and a data folder of that era (tests/fixtures/store-retired) with an overrides\ package.
+		// v0.2.1-beta.19's pair in an April 2024 folder, its install record and installer copy, and a
+		// data folder (tests/fixtures/store-retired) with an overrides\ package.
 		add(doom, "XINPUT1_3.dll", ourStandIn("v0.2.1-beta.19 XINPUT1_3.dll"))
 		add(doom, pair2018UI, ourStandIn("v0.2.1-beta.19 frontend"))
 		exe := []byte("simulated v0.2.1-beta.19 snapmap-plus.exe")
@@ -119,8 +118,8 @@ func cmdSeed(args []string) error {
 			}
 		}
 	case "beta20":
-		// v0.2.1-beta.20's blind update: both pairs, backups of our own DLLs in DOOM, a file another
-		// tool left, and every bookkeeping file of that release in the data folder.
+		// v0.2.1-beta.20's layout: both pairs, backups of our own DLLs in DOOM, a file another tool
+		// left, and every bookkeeping file of that release in the data folder.
 		add(doom, "XINPUT1_4.dll", ourStandIn("v0.2.1-beta.20 XINPUT1_4.dll"))
 		add(doom, pair2024UI, ourStandIn("v0.2.1-beta.20 frontend"))
 		add(doom, "XINPUT1_3.dll", ourStandIn("v0.2.1-beta.19 XINPUT1_3.dll"))
@@ -150,7 +149,7 @@ func cmdSeed(args []string) error {
 		add(data, "config.json", []byte(`{"schema_version":1,"settings":{"theme":"light"}}`))
 		add(data, `prefabs\corridor.snapmap.json`, []byte(`{"prefab":"corridor"}`))
 		add(data, `mods\imp\mod.json`, []byte(`{"id":"imp","version":"1.0.0"}`))
-		if err := os.MkdirAll(filepath.Join(data, "override-backups"), 0o755); err != nil { // a retired package folder the beta.20 layout left behind
+		if err := os.MkdirAll(filepath.Join(data, "override-backups"), 0o755); err != nil { // a package folder this release does not ship
 			return err
 		}
 	default:

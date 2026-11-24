@@ -162,9 +162,8 @@ type ghAsset struct {
 // downloadReleaseFn is the download step; tests replace it so routing runs without a network.
 var downloadReleaseFn = downloadRelease
 
-// downloadRelease resolves the requested release (fetchRelease), refuses one older than the
-// installation in f.doom unless --release names it, downloads
-// its snapmap-plus-bundle.zip asset (with the token if set), and extracts it into a temp dir.
+// downloadRelease resolves the requested release, refuses one older than the installation in f.doom
+// unless --release names it, then downloads its bundle zip (with the token if set) into a temp dir.
 func downloadRelease(f flags) (dir string, tag string, cleanup func(), err error) {
 	noop := func() {}
 	token := resolveToken(f)
@@ -437,7 +436,7 @@ func tokenPath() (string, error) {
 	return filepath.Join(dir, "token"), nil
 }
 
-// resolveToken: --token flag > SNAPMAP_PLUS_TOKEN env > the saved token file (new location, then the pre-rename one).
+// resolveToken: --token flag > SNAPMAP_PLUS_TOKEN env > the saved token file (current location, then the open-snaphak one).
 func resolveToken(f flags) string {
 	if f.token != "" {
 		return f.token
@@ -450,7 +449,7 @@ func resolveToken(f flags) string {
 			return strings.TrimSpace(string(b))
 		}
 	}
-	// Pre-rename installs saved the token under %LOCALAPPDATA%\open-snaphak\.
+	// The token may also sit under %LOCALAPPDATA%\open-snaphak\.
 	if op := oldTokenPath(); op != "" {
 		if b, err := os.ReadFile(op); err == nil {
 			return strings.TrimSpace(string(b))
@@ -481,9 +480,8 @@ func cmdSetToken(args []string) error {
 	return nil
 }
 
-// cmdChangelog shows the newest release in full and indexes older releases,
-// or selects a requested version. Fetching current release bodies also exposes
-// notes newer than the installed version.
+// cmdChangelog shows the newest release in full and indexes older releases, or selects a requested
+// version; it fetches current release bodies, so it shows notes newer than the installed version.
 func cmdChangelog(f flags, args []string) error {
 	list, err := listReleases(resolveToken(f))
 	if err != nil {

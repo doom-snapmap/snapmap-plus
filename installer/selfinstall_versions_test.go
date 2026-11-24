@@ -33,7 +33,7 @@ func TestCompareVersions(t *testing.T) {
 }
 
 // An older downloaded installer refuses to replace a newer stable copy unless --force is given;
-// a newer one replaces an older copy as before.
+// a newer one replaces an older copy.
 func TestOlderInstallerKeepsANewerStableCopy(t *testing.T) {
 	r := newUpdateRig(t, "v1.0.0-beta.2")
 	m := newMockGitHub(t)
@@ -82,7 +82,7 @@ func TestOlderInstallerKeepsANewerStableCopy(t *testing.T) {
 	}
 }
 
-// A copy written by an earlier installer has no recorded version and is replaced as before.
+// A copy with no recorded version is replaced.
 func TestUnrecordedStableCopyIsReplaced(t *testing.T) {
 	r := newUpdateRig(t, "v1.0.0-beta.1")
 	stable := filepath.Join(r.data, selfExeAsset)

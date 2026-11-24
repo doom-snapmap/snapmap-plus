@@ -7,9 +7,9 @@ import (
 	"strings"
 )
 
-// The executables this installer places in the data folder (snapmap-plus.exe; earlier releases also
-// placed the executables in retiredExecutables) are recorded in install.json by name with their SHA-256, so uninstall never deletes, and an update
-// never overwrites, a file the player put at the same name.
+// The executables this installer places in the data folder (snapmap-plus.exe, and those a previous
+// install placed that this release does not ship, in retiredExecutables) are recorded in install.json
+// by name with their SHA-256, so uninstall never deletes, and an update never overwrites, a player's file.
 
 // executableRecord maps an executable's file name to the SHA-256 of the bytes this installer placed.
 type executableRecord map[string]string
@@ -18,7 +18,7 @@ func executableName(name string) bool {
 	return name != "" && filepath.Base(name) == name && !strings.ContainsAny(name, `:/\`) && strings.EqualFold(filepath.Ext(name), ".exe")
 }
 
-// loadExecutableRecord reads dir's recorded executables, including any still listed in the retired
+// loadExecutableRecord reads dir's recorded executables, including any listed in a leftover
 // installer-files.json.
 func loadExecutableRecord(dir string) (executableRecord, error) {
 	rec, err := loadStateAt(dir)
@@ -53,7 +53,7 @@ func saveExecutableRecord(dir string, m executableRecord) error {
 		r.Executables = next
 	})
 	if err == nil {
-		os.Remove(filepath.Join(dir, retiredExecutableRecord)) // its entries are in install.json now
+		os.Remove(filepath.Join(dir, retiredExecutableRecord)) // its entries are in install.json
 	}
 	return err
 }
@@ -81,7 +81,7 @@ func installSelfCopy(src, dst string) error {
 		return err
 	}
 	if identicalFiles(src, dst) {
-		// An earlier installer may have created this copy before records existed.
+		// Identical bytes are adopted even when no record names this copy.
 	} else if _, err := os.Lstat(dst); os.IsNotExist(err) {
 		if err := copyMissingFile(src, dst); err != nil {
 			return err

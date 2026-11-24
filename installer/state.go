@@ -10,23 +10,22 @@ import (
 	"time"
 )
 
-// install.json is the installer's only bookkeeping file. It lives in %LOCALAPPDATA%\snapmap-plus and
-// records the installed version, the DOOM folder, the files placed there, the executables placed in
-// the data folder with their hashes, and the self-update state. The backend and the frontend read the
-// first "version" key of this file for their reports, so Version stays the first field.
+// install.json, in %LOCALAPPDATA%\snapmap-plus, is the installer's only bookkeeping file. The backend and
+// the frontend read its first "version" key, so Version stays the first field.
 const stateName = "install.json"
 
-// The bookkeeping files of earlier releases, folded into install.json and removed when found.
+// Bookkeeping files a previous install placed that this release does not ship; they are folded into
+// install.json and removed.
 const (
 	retiredExecutableRecord = "installer-files.json"    // name -> SHA-256 of the executables placed
 	retiredVersionsRecord   = "installer-versions.json" // name -> {sha256, version}
 	retiredUpdatesSuffix    = ".updates.json"           // <exe>.updates.json: self-update backups
 )
 
-// retiredExecutables are executables earlier releases placed in the data folder that this release does
-// not ship: the copy an install placed is removed (retireExecutables).
+// retiredExecutables are executables a previous install placed in the data folder that this release does
+// not ship; retireExecutables removes the copy an install placed.
 var retiredExecutables = []string{
-	"snapmap-plus-store.exe", // the store migration tool; converting earlier releases' data is not in this release
+	"snapmap-plus-store.exe", // the store migration tool, which this release does not ship
 }
 
 // installRecord is install.json.
@@ -37,7 +36,7 @@ type installRecord struct {
 	InstalledAt string   `json:"installed_at"`
 	Files       []string `json:"files"`   // DOOM-relative paths of the pair placed under DoomPath
 	Backups     []backup `json:"backups"` // files that were not ours and were replaced, kept in cache\installer
-	// LegacyRemoved: original-SnapHak files a migration deleted (informational; carried forward).
+	// LegacyRemoved: original-SnapHak files an install deleted (informational; carried forward).
 	LegacyRemoved []string `json:"legacy_removed,omitempty"`
 	// Executables: the executables this installer placed in the data folder, by file name.
 	Executables map[string]exeEntry `json:"executables,omitempty"`
@@ -64,8 +63,8 @@ type selfUpdateState struct {
 	SetAside     []setAside `json:"set_aside,omitempty"`     // replaced images still to remove
 }
 
-// setAside is a replaced executable moved out of the way because it was still running. It is removed
-// at the next start while its bytes are unchanged and the executable it was replaced by exists.
+// setAside is a replaced executable moved aside because it was running. It is removed at the next start
+// while its bytes are unchanged and the executable that replaced it exists.
 type setAside struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
@@ -183,8 +182,8 @@ func loadRecord() (*installRecord, error) {
 	}
 	dir := filepath.Dir(p)
 	if !stateExists(dir) {
-		// Pre-rename installs kept the record at %LOCALAPPDATA%\open-snaphak\; fall back to it and migrate it
-		// forward, so update / status / uninstall still recognise an existing install after the rename.
+		// A record at %LOCALAPPDATA%\open-snaphak\ is copied into the data folder, so update / status /
+		// uninstall recognise an install made under that folder name.
 		op := oldRecordPath()
 		od, oerr := os.ReadFile(op)
 		if op == "" || oerr != nil {
@@ -254,9 +253,8 @@ func recordSetAside(path, sum, forExe string) error {
 	})
 }
 
-// sweepSetAside removes the replaced images recorded by earlier runs: each one whose bytes are
-// unchanged and whose replacement exists. A locked image stays recorded for the next start; one that
-// changed is forgotten and left alone; one whose replacement is missing is a recovery copy and stays.
+// sweepSetAside removes each recorded replaced image whose bytes are unchanged and whose replacement exists.
+// A locked image stays recorded, a changed one is forgotten, and one without a replacement is kept.
 func sweepSetAside() {
 	dir := appDataDir()
 	if dir == "" || !stateExists(dir) {
@@ -313,8 +311,8 @@ func pruneEmptyDirs(root string) {
 // command that reports it.
 var startupTidy, startupKept []string
 
-// startupCleanup runs at every start: it removes replaced installer images from earlier runs and
-// retires the bookkeeping files of earlier releases into install.json.
+// startupCleanup runs at every start: it removes recorded replaced installer images and folds
+// bookkeeping files a previous install placed into install.json.
 func startupCleanup() {
 	dir := appDataDir()
 	if dir == "" {
@@ -344,12 +342,9 @@ func reportStartupTidy() {
 	startupTidy, startupKept = nil, nil
 }
 
-// retireBookkeeping folds installer-files.json and installer-versions.json into install.json and
-// removes them, removes <exe>.updates.json files, and removes the <exe>.old images earlier releases
-// kept beside an executable in the data folder or beside the running image while that executable
-// exists (a locked one is moved into cache\installer and removed at the next start), then the retired
-// executables (retireExecutables). It returns one line per file removed, and adds what it kept to
-// startupKept.
+// retireBookkeeping folds installer-files.json and installer-versions.json into install.json, removes
+// them with the <exe>.updates.json and <exe>.old files, then calls retireExecutables. It returns one line
+// per file removed and adds what it kept to startupKept.
 func retireBookkeeping(dir, running string) []string {
 	var removed []string
 	files := readRetiredExecutables(dir)
@@ -465,10 +460,9 @@ func retireUpdateLeftovers(dir, exe string) []string {
 	return removed
 }
 
-// retireExecutables removes each retired executable an install placed while its bytes are the recorded
-// ones, and forgets its record entry. A copy whose bytes changed, or one no install recorded, is the
-// player's: it stays, its entry is forgotten, and it is listed as kept. A recorded copy that cannot be
-// removed yet (it is running) keeps its entry, so the next start removes it.
+// retireExecutables removes each retired executable whose bytes are the recorded ones and forgets its
+// entry. A changed or unrecorded copy is the player's and is listed as kept; a running one keeps its
+// entry for the next start.
 func retireExecutables(dir string) (removed, kept []string) {
 	rec, err := loadExecutableRecord(dir)
 	if err != nil {

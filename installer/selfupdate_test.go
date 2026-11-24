@@ -139,7 +139,7 @@ func TestSweepSetAsideKeepsRecoveryAndChangedFiles(t *testing.T) {
 	}
 }
 
-// Older recovery copies remain intact while a free aside name is selected.
+// Existing recovery copies stay intact while a free aside name is selected.
 func TestReplaceExePreservesEarlierRecoveryCopies(t *testing.T) {
 	data, path, newExe := replaceRig(t)
 	stale := filepath.Join(installerCacheDir(data), "snapmap-plus.exe.old")
@@ -155,8 +155,8 @@ func TestReplaceExePreservesEarlierRecoveryCopies(t *testing.T) {
 	}
 }
 
-// Earlier releases' bookkeeping is folded into install.json and removed, and their .old images go while
-// the executable they belong to exists.
+// Bookkeeping files a previous install placed are folded into install.json and removed, and their .old
+// images go while the executable they belong to exists.
 func TestRetireBookkeepingFoldsAndRemoves(t *testing.T) {
 	tmp := t.TempDir()
 	dir := filepath.Join(tmp, "snapmap-plus")

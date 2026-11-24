@@ -7,11 +7,10 @@ import (
 	"strings"
 )
 
-// Snapmap+ supports one DOOM 2016 build: the April 2024 update (Steam build 13954591), whose
-// executables import XINPUT1_4.dll. The 2018 build (Steam build 2642713) is served by the final
-// release made for it, legacyReleaseTag, installed exactly as that release's installer would.
-// The installer identifies the build by the SHA-256 of the installed executables before it
-// downloads anything (the same digests as src/backend/host_image.c and installer/install.ps1).
+// Snapmap+ supports the April 2024 DOOM 2016 build (Steam build 13954591, executables import
+// XINPUT1_4.dll); the 2018 build (Steam build 2642713) is served by legacyReleaseTag's own installer.
+// The build is identified by the SHA-256 of the installed executables before anything downloads
+// (the same digests as src/backend/host_image.c and installer/install.ps1).
 
 // legacyReleaseTag is the final Snapmap+ release for the 2018 DOOM build. It must stay
 // published unchanged: release.yml refuses to rebuild it (see docs/packaging.md).
@@ -26,7 +25,7 @@ const currentProxy = "XINPUT1_4.dll"
 const currentUIDll = `snapmap-plus\snapmap-plus-ui-13954591.dll`
 
 // splitBundleForBuild returns the bundle's files that make up pair, and the others it carries (a
-// bundle of an earlier release also carried the 2018 release's files), which are not installed.
+// bundle can also carry the 2018 release's files), which are not installed.
 func splitBundleForBuild(files []manifestEntry, pair []string) (install, other []manifestEntry) {
 	for _, e := range files {
 		if containsRel(pair, e.rel) {
