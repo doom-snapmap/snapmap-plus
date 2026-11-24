@@ -3751,12 +3751,11 @@ static int ms_scope_compute(ms_index *x, int mark)
             else if (inert) sv = 0;
             else if (play || !b->root_build) sv = ms_scope_always(b) ? MS_SV_EDITOR : 0;
             else sv = (ms_scope_always(b) ? MS_SV_EDITOR : 0) | MS_SV_NEW | MS_SV_RESTORE;
-            /* Requirements are cvars: a declared bundle's apply; a root build
-             * with Toybox rows keeps them outside Play, because the palette
-             * registers its rows in every editor map and with none open; in
-             * Play no undeclared bundle's apply; an inert build never. A
-             * composition serves only for its map (ONE-SHAPE rule 4). */
-            roff = on && rank[i] < 0 && (inert || play || !(b->has_rows && b->root_build));
+            /* Requirements are cvars: only a declared bundle's apply (manager, 2026-11-24, SPEC 5.10). An
+             * undeclared mod's Toybox rows register without them (its steps are not blocked for it), and once a
+             * placement declares the mod its requirements apply and what was read without them is read again
+             * (ms_stale). A composition serves only for its map (ONE-SHAPE rule 4). */
+            roff = on && rank[i] < 0;
             b->inert = inert;
             was_sv = InterlockedExchange(&b->sv, sv);
             was_rank = InterlockedExchange(&b->rank, on ? rank[i] : -1);
@@ -4311,7 +4310,7 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
             state = sh_textf("not declared%s: its names serve for the Toybox and its surfaces serve; its shadows do not",
                              si.map_open ? " by the open map" : " (no map is open)");
         ms_say(fn, context, "scope: %s%s: %s%s", ms_label(b), what, state ? state : "(out of memory)",
-                    si.requirements && !si.listed && si.requirements_live ? "; its requirements stay live because it adds Toybox rows" : "");
+                    si.requirements && !si.listed ? "; its requirements apply only in maps that use it" : "");
         free(state);
         lines++;
     }
@@ -7453,8 +7452,8 @@ static int ms_req_accepted(const ms_bundle *b)
 }
 
 /* The order in which requirements are decided: bundles the open map declares
- * first, in its row order (rank), then the others (an editor's Toybox rows,
- * or every bundle with no map open) oldest install first. 1 when bundle `a`
+ * first, in its row order (rank), then the others (every bundle while map scope
+ * is off) oldest install first. 1 when bundle `a`
  * is decided after bundle `b`. Install order never decides between two of a
  * map's own rows, so every player of the map gets the same result. */
 static int ms_req_after(const ms_index *x, int a, int b)
@@ -8029,8 +8028,10 @@ int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates
         const ms_bundle *b = ms_gate_of(x, &x->files[g >= 0 ? g : s->file]);
         /* A step registered while its requirements were live stays ready. A mod whose cvar lost to another mod the map
          * uses (D-A24) is still served: its decls register and its rows place; only its value is not applied, and the
-         * log and the Mods tab say which mod's value the map uses. */
+         * log and the Mods tab say which mod's value the map uses. A mod the open map does not declare registers its
+         * rows without its requirements, which apply only in a map that uses it (req_off): nothing of it waits. */
         if (ms_req_needs(b) && !InterlockedCompareExchange((volatile LONG *)&b->req_lost_to, 0, 0) &&
+            !InterlockedCompareExchange((volatile LONG *)&b->req_off, 0, 0) &&
             !InterlockedCompareExchange((volatile LONG *)&b->req_live, 0, 0) && !s->blocked &&
             x->files[s->file].reg_state != 1) {
             s->blocked = b->req_cause && b->req_cause[0] ? b->req_cause : "requirements are not live";
@@ -8740,10 +8741,15 @@ int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context)
         for (i = 0; i < x->nfiles; ++i) {
             ms_file *f = (ms_file *)&x->files[i], *ef;
             int eff;
-            if (f->rank != rank || !f->is_decl || !f->is_shadow || f->is_restore || !f->served || f->withdrawn ||
+            if (f->rank != rank || !f->is_decl || f->is_restore || !f->served || f->withdrawn ||
                 !x->bundles[f->bundle].admitted || !f->ptype || !f->pname || (eff = ms_scoped(x, i)) < 0)
                 continue;
             ef = (ms_file *)&x->files[eff];   /* the provider that serves the path for the open map */
+            /* A mod's own decl (not a shadow) is offered only when it was read before its requirements were live and
+             * they are live now: an undeclared mod's Toybox row, read without them, once a placement declares it. */
+            if (!f->is_shadow && !(InterlockedCompareExchange((volatile LONG *)&ef->opens, 0, 0) &&
+                                   InterlockedCompareExchange(&ef->opened_ungated, 0, 0)))
+                continue;
             if (InterlockedCompareExchange(&ef->reparse_tried, 0, 0) || !ms_stale(x, ef)) continue;
             visited++;
             if (fn(context, f->ptype, f->pname, f->request, x->bundles[ef->bundle].id) == 1)

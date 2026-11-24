@@ -583,9 +583,9 @@ int sh_modserve_map_rows_sync(const char *const *bundle_hashes, int n, const sh_
  * sh_mb_requirements_canonical): any cvar at any value, any single console
  * line, within the builder's bounds; this layer names none of them. A bundle
  * whose requirements the builder refuses is skipped with that first cause.
- * Among the bundles whose requirements apply for the listing, the open map's
- * rows are decided first, in row order, then the undeclared ones (an editor's
- * Toybox rows, every bundle with no map open) in install order (built time,
+ * Among the bundles whose requirements apply for the listing (the open map's
+ * rows, or every bundle while map scope is off), the open map's
+ * rows are decided first, in row order, then the others in install order (built time,
  * then folder name); one that asks a cvar a bundle decided before it asks at
  * another value loses, both named once in the log, and none of its
  * requirements is applied (its steps are blocked):
@@ -661,8 +661,9 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
  * Returns what sh_modserve_requirements_apply returns. */
 int sh_modserve_requirements_check(const sh_modserve_gate_ops *ops, const char *phase, sh_modserve_gates *out);
 
-/* Block the steps of bundles whose cvar requirements are not live (first
- * cause "requirement <cvar>=<value> is not live"), except steps already registered. A bundle whose cvar lost a
+/* Block the steps of bundles the map declares whose cvar requirements are not live (first
+ * cause "requirement <cvar>=<value> is not live"), except steps already registered; an undeclared bundle's
+ * requirements do not apply and never block its steps. A bundle whose cvar lost a
  * conflict to another the map uses is not blocked (D-A24): it is served, only its value is not applied (the conflict
  * line and the requirements report name who won). Returns how many were blocked. */
 int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates *gates);
@@ -717,12 +718,13 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context);
  * its editor tweaks serve in every map, logged once:
  *   MODS: scope: <mod name> shadows editor-time content (<request>); its editor tweaks serve in every map ...
  *
- * Requirements: a declared bundle's apply; an undeclared bundle that adds
- * Toybox rows (its root folder's build) keeps them live outside Play, because the
- * palette registers its rows in every editor map and with none open (in Play
- * no undeclared bundle's are accepted); any other undeclared
- * bundle's are not accepted (sh_modserve_requirements_apply runs its
- * deactivate lines and restores its cvars).
+ * Requirements: only a declared bundle's apply, in the editor, in Play and
+ * with no map open (manager, 2026-11-24). An undeclared bundle's Toybox rows
+ * register without its requirements (its steps are not blocked for them;
+ * sh_modserve_requirements_apply runs its deactivate lines and restores its
+ * cvars); once a placement declares it, its requirements apply and every file
+ * of it read without them is offered again (sh_modserve_each_unopened_shadow,
+ * sh_modserve_each_ungated_raw), so the editor and the map's Play agree.
  *
  * Scope is off until sh_modserve_scope_enable(1) (the product enables it in
  * sh_modserve_index_boot); with it off every bundle serves everything, by the
@@ -1086,7 +1088,9 @@ int sh_modserve_script_files(const char *salt, sh_modserve_script_fn fn, void *c
  * backend's signature scan, while the engine is already parsing boot decls,
  * so a shadow parsed before then holds the game's bytes. Visit, in plan rank
  * order, every served shadow decl (type and name in the engine's spelling)
- * that the provider has never opened and that no earlier visit settled; `fn`
+ * that the provider has never opened and that no earlier visit settled, and
+ * every served decl (a mod's own included) first opened while its bundle's
+ * cvar requirements were not live, once they are; `fn`
  * returns 1 when it re-parsed the decl (the file is not offered again) and 0
  * when the engine has not parsed it yet (offered again at the next pass). A
  * rescan keeps both marks for files whose bytes did not change. Returns the
