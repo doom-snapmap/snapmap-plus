@@ -3,8 +3,8 @@
  * The builder (modbundle.h sh_mb_set_script_check) runs it on every script a
  * mod carries, so a syntax error fails the build on the mod's row with the
  * file and line, worded as the runtime's stop line words it (script_reason.h).
- * A fresh Lua state per call, with a counting allocator capped at
- * SH_SCRIPT_COMPILE_MEM; the text is only parsed (luaL_loadbufferx, mode
+ * A fresh Lua state per call, with no memory limit of the product's own (a
+ * script of any size builds); the text is only parsed (luaL_loadbufferx, mode
  * "t", so compiled Lua is refused by the loader too). Any thread.
  *
  * Pure: the Lua core and script_reason.c, no engine, no serving layer. */
@@ -16,8 +16,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#define SH_SCRIPT_COMPILE_MEM (16u << 20)   /* parser memory for one file */
 
 /* The first statement of an entry file is "api = <integer>" (comments, blank
  * lines and a UTF-8 byte order mark may come before it): 1 with the version
