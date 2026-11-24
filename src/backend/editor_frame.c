@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <shlobj.h>
+#include <intrin.h>   /* _ReturnAddress: which engine read the filter sees */
 
 #include "editor_frame.h"
 #include "world_area_cell.h"
@@ -22,6 +23,7 @@
 #include "timeline_tile.h"
 #include "budget_table.h"
 #include "editor_zoom.h"
+#include "modpublish.h"   /* a publish held at FINISH resumes in the editor's frame */
 #include "hook.h"
 #include "backend_log.h"
 #include "engine_globals.h"
@@ -391,6 +393,8 @@ static void sh_editor_frame_detour(void *editor, void *arg)
 
     /* A queued fly-to advances one phase per frame; idle costs one read. */
     sh_fly_to_tick(editor);
+    /* A publish held at the publish screens' FINISH closes them and starts (S7 at FINISH); idle, one read. */
+    sh_modpublish_editor_tick(editor);
     /* A staged module prefab installs, then follows its grab, one step per frame. */
     sh_module_prefab_tick(editor);
     /* The Timeline tile's prototype record, and entity rows after list changes. */
@@ -475,14 +479,24 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
 /* The read the reload's LoadMap makes of the borrowed id gets a placeholder: the slot's files are
  * never opened, so nothing about them can fail and mark the slot unreadable. Every other read is
  * the engine's own. */
+static void (*volatile g_read_filter)(const char *id, void *text, const void *caller);
+
+void sh_editor_frame_set_read_filter(void (*filter)(const char *id, void *text, const void *caller)) { g_read_filter = filter; }
+int sh_editor_frame_read_filter_live(void) { return g_read_text_orig != NULL && g_read_filter != NULL; }
+
 static int ef_read_text_detour(const char *id, void *text, void *a3, void *a4)
 {
     const char *borrowed = g_borrowed_id;
+    void (*filter)(const char *, void *, const void *);
+    int r;
     if (borrowed && GetCurrentThreadId() == g_borrow_thread && id && strcmp(id, borrowed) == 0) {
         g_assign_cstr(text, "{}");   /* the load detour parses the rawmap's text in its place */
         return 0;
     }
-    return g_read_text_orig(id, text, a3, a4);
+    r = g_read_text_orig(id, text, a3, a4);
+    /* the cloud save's read of a publish's slot gets the published copy (modpublish.c) */
+    if (r == 0 && (filter = g_read_filter) != NULL && text) filter(id, text, _ReturnAddress());
+    return r;
 }
 
 int sh_editor_frame_carrier_install(void *read_text_fn, int status_ok, void *assign_cstr_fn)

@@ -3577,6 +3577,20 @@ int sh_modui_scope_launch(const char *why)
     return changed;
 }
 
+int sh_modui_editor_shows_map(void)
+{
+    const sh_modui_engine *e = mu_engine();
+    sh_modui_map_info info;
+    if (!e->map_info) return -1;
+    return e->map_info(&info) == 1;
+}
+
+int sh_modui_game_busy(void)
+{
+    char cause[200];
+    return mu_busy(cause, sizeof cause);
+}
+
 int sh_modui_scope_launch_refused(const char *why)
 {
     const sh_modui_engine *e = mu_engine();

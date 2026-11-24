@@ -16,6 +16,8 @@ void sh_module_prefab_tick(void *editor) { (void)editor; }
 void sh_timeline_tile_tick(void *editor) { (void)editor; }
 void sh_budget_table_tick(void *editor) { (void)editor; }
 void sh_editor_zoom_tick(void) {}
+static int publish_ticks;
+void sh_modpublish_editor_tick(void *editor) { (void)editor; ++publish_ticks; }
 uintptr_t glb_resolve(const uint8_t *base, const char *name, glb_status *status)
 { (void)base; (void)name; (void)status; return 0; }
 void *hook_prepare(void *target, void *detour, size_t stolen)
@@ -44,6 +46,11 @@ static void original_frame(void *ed, void *arg) { (void)ed; (void)arg; }
 static int disk_read(const char *id, void *text, void *a3, void *a4)
 { (void)id; (void)text; (void)a3; (void)a4; ++disk_reads; return 4; }
 static void assign_cstr(void *idstr, const char *text) { (void)idstr; strcpy_s(placeholder, sizeof placeholder, text); }
+/* A read that succeeds, and the read filter that sees it. */
+static int good_read(const char *id, void *text, void *a3, void *a4) { (void)id; (void)text; (void)a3; (void)a4; return 0; }
+static int filtered;
+static const void *filter_caller;
+static void t_filter(const char *id, void *text, const void *caller) { (void)id; (void)text; filtered++; filter_caller = caller; }
 /* LoadMap reads the slot it is named, as the engine does. */
 static int load_map(void *ed, void *id)
 {
@@ -142,6 +149,24 @@ int main(void)
     CHECK(ef_read_text_detour("FFFFFFFFFFFFFFFFFFFF", NULL, NULL, NULL) == 4 && disk_reads == 2);
     g_borrowed_id = NULL;
 
+    /* The read filter (the published copy, modpublish.c) sees only a read that succeeded, with its caller, and never
+     * the borrowed id's placeholder. */
+    reset();
+    sh_editor_frame_set_read_filter(t_filter);
+    CHECK(sh_editor_frame_read_filter_live());
+    CHECK(ef_read_text_detour("0123456789abcdef0123", NULL, NULL, NULL) == 4 && filtered == 0);   /* failed: none */
+    g_read_text_orig = good_read;
+    {
+        char text[8] = "x";
+        CHECK(ef_read_text_detour("0123456789abcdef0123", text, NULL, NULL) == 0 && filtered == 1 && filter_caller);
+        g_borrowed_id = "0123456789abcdef0123";
+        g_borrow_thread = GetCurrentThreadId();
+        CHECK(ef_read_text_detour("0123456789abcdef0123", text, NULL, NULL) == 0 && filtered == 1);   /* placeholder */
+        g_borrowed_id = NULL;
+    }
+    sh_editor_frame_set_read_filter(NULL);
+    CHECK(!sh_editor_frame_read_filter_live());
+
     /* A reload that fails anyway marks the engine's notices about the borrowed map untrue. */
     reset();
     load_rc = 4;
@@ -185,8 +210,10 @@ int main(void)
     sh_editor_frame_detour(editor, NULL);
     CHECK(loads == 1 && done_faulted == 1 && g_reload_faulted && refusals == 1 && !g_borrowed_id);
     ticks = 0;
+    publish_ticks = 0;
     sh_editor_frame_detour(editor, NULL);
     CHECK(ticks == 1);
+    CHECK(publish_ticks == 1);   /* a publish held at FINISH resumes in the editor's frame */
     CHECK(!HO(msg, sh_editor_frame_can_reload(HO_P(0))) && strstr(msg, "restart DOOM"));
     CHECK(HO(msg, sh_editor_frame_request_rawmap_save_to(NULL, HO_P(0))));
     sh_editor_frame_detour(editor, NULL);

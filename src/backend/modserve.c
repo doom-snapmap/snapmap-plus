@@ -6524,6 +6524,107 @@ static char *ms_asker(void)
     return out;
 }
 
+int sh_modserve_standin_name(const char *name)
+{
+    static const char dir[] = SH_MODSERVE_STANDIN_DIR;
+    const size_t dn = sizeof dir - 1;
+    const char *p;
+    for (p = name; p && *p; p++) {
+        if ((p == name || p[-1] == '/' || p[-1] == '\\') && !_strnicmp(p, dir, dn) && (p[dn] == '/' || p[dn] == '\\'))
+            return 1;
+    }
+    return 0;
+}
+
+/* The name key of a request, as the unit walk keys a build's files (modunit.h sh_unit_key): from its first mods/<x>/
+ * on, lower case, '\' as '/', cut at '$', the last segment's extensions cut. malloc'd, or NULL. */
+static char *ms_miss_key(const char *request)
+{
+    const char *p, *at = NULL;
+    char *k, *slash, *dot;
+    size_t i;
+    for (p = request; p && *p && !at; p++)
+        if ((p == request || p[-1] == '/' || p[-1] == '\\') && !_strnicmp(p, "mods/", 5)) at = p;
+    if (!at || !(k = _strdup(at))) return NULL;
+    for (i = 0; k[i]; i++) {
+        if (k[i] == '\\') k[i] = '/';
+        else if (k[i] == '$') { k[i] = 0; break; }
+        else k[i] = (char)tolower((unsigned char)k[i]);
+    }
+    slash = strrchr(k, '/');
+    if ((dot = strchr(slash ? slash + 1 : k, '.')) != NULL) *dot = 0;
+    return k;
+}
+
+/* The decl type folder of a decl request (generated/decls/<type>/...): its length, with *at its start; 0 for none. */
+static size_t ms_decl_type(const char *request, const char **at)
+{
+    static const char head[] = "generated/decls/";
+    const char *t, *end;
+    if (!request || _strnicmp(request, head, sizeof head - 1)) return 0;
+    t = request + sizeof head - 1;
+    if (!(end = strchr(t, '/')) || end == t) return 0;
+    *at = t;
+    return (size_t)(end - t);
+}
+
+static int ms_ends_with(const char *s, const char *tail)
+{
+    size_t n = s ? strlen(s) : 0, m = strlen(tail);
+    return n >= m && !_stricmp(s + n - m, tail);
+}
+
+/* 1 when `b` carries a file of name key `key` that is, with `decl_type` (length `decl_len`), a decl of another type;
+ * with `decl_type` NULL, a skeleton. Under the index's readers. */
+static int ms_bundle_carries_key(const ms_index *x, const ms_bundle *b, const char *key, const char *decl_type,
+                                 size_t decl_len)
+{
+    int i, hit = 0;
+    for (i = b->first_file; !hit && i < b->first_file + b->file_count && i < x->nfiles; ++i) {
+        const char *request = x->files[i].request, *type = NULL;
+        size_t tl;
+        char *own;
+        if (!request) continue;
+        if (decl_type) {
+            if (!(tl = ms_decl_type(request, &type)) || (tl == decl_len && !_strnicmp(type, decl_type, tl))) continue;
+        } else if (!ms_ends_with(request, ".bmd6skl") && !ms_ends_with(request, ".md6skl")) continue;
+        own = ms_miss_key(request);
+        hit = own && !strcmp(own, key);
+        free(own);
+    }
+    return hit;
+}
+
+/* 1 when the engine's request is a probe of a name the mod's build never carried, read from what the composition
+ * carries (R-LB1). The unit walk keeps every decl of a name a kept text spells, whatever its type (modunit.c
+ * uw_reach_spelled), and a model whole, its skeleton's default clip included whenever the build holds one (modbundle.c
+ * mb_model_needs). So
+ *   - a decl request whose name the composition carries as a decl of another type
+ *     (generated/decls/entityDef/mods/<x>/<name>.decl where <name> is a sound decl: a field typed idDeclEntityDef,
+ *     such as a wave blast's emitterSound, names it), and
+ *   - the default clip of a skeleton the composition carries (<cooked|generated>/anim/<skeleton>.md6skl/
+ *     _default.bmd6anim: the engine probes it for every model it loads and makes a default clip when nothing holds it)
+ * are the engine's lookups, never a file a unit lost. Any other file of a carried name (an image beside its material,
+ * a skeleton beside its mesh) is still a miss. */
+static int ms_miss_is_probe(const ms_index *x, const ms_bundle *b, const char *request)
+{
+    char *key = ms_miss_key(request), *tail;
+    const char *type = NULL;
+    size_t tl;
+    int probe = 0;
+    if (!key) return 0;
+    if ((tl = ms_decl_type(request, &type)) != 0) probe = ms_bundle_carries_key(x, b, key, type, tl);
+    else if ((tail = strrchr(key, '/')) != NULL && !strcmp(tail, "/_default") && strstr(request, "/anim/")) {
+        char *dot;
+        *tail = 0;
+        tail = strrchr(key, '/');
+        if ((dot = strchr(tail ? tail + 1 : key, '.')) != NULL) *dot = 0;
+        probe = ms_bundle_carries_key(x, b, key, NULL, 0);
+    }
+    free(key);
+    return probe;
+}
+
 int sh_modserve_note_miss(const char *request)
 {
     const ms_index *x;
@@ -6533,6 +6634,8 @@ int sh_modserve_note_miss(const char *request)
     sh_modserve_miss_fn fn = g_miss_fn;
     int i, b, fresh = 1;
     if (!request || !ms_request_salt(request, salt)) return 0;
+    /* A stand-in's own name is the product's, never a file a unit lost (R-LB1). */
+    if (sh_modserve_standin_name(request)) return 0;
     /* A board's squares a unit leaves out are left out on purpose: the engine draws a family with absent squares
      * (R-DS2 5.1), and its level-1 quarters (_q<N>) no build carries (R-LV2). A request of a kind no build can carry
      * (an image's source spelling, .tga) is the engine's probe before the cooked name, never a file a unit lost. */
@@ -6547,6 +6650,7 @@ int sh_modserve_note_miss(const char *request)
         const ms_bundle *bd = &x->bundles[b];
         if (bd->admitted && bd->unit && bd->id && !strcmp(bd->id, salt) && bd->rank >= 0) part = bd;
     }
+    if (part && ms_miss_is_probe(x, part, request)) part = NULL;   /* the engine's lookup: nothing to note */
     if (part) {
         strcpy_s(hash, sizeof hash, part->unit);
         label = _strdup(ms_label(part));
@@ -8807,11 +8911,29 @@ static int ms_gates_ok(const ms_index *x, const ms_file *f)
     return !ms_req_needs(ms_gate_of(x, f)) || ms_gates_live_for(x, f);
 }
 
+/* A stand-in's own name (modserve.h SH_MODSERVE_STANDIN_DIR) once the open map declares a unit composition of its
+ * salt: the real content serves the row now, so nothing asks the engine to read the stand-in again (R-LB1: a read of it
+ * was logged as a file the unit lacked and reported to the store). */
+static int ms_standin_superseded(const ms_index *x, const char *request)
+{
+    char salt[SH_MODSERVE_HASH_HEX + 1];
+    int b;
+    if (!x || !sh_modserve_standin_name(request) || !ms_request_salt(request, salt)) return 0;
+    for (b = 0; b < x->nbundles; ++b) {
+        const ms_bundle *bd = &x->bundles[b];
+        if (bd->admitted && bd->unit && bd->id && !strcmp(bd->id, salt) &&
+            InterlockedCompareExchange((volatile LONG *)&bd->rank, 0, 0) >= 0)
+            return 1;
+    }
+    return 0;
+}
+
 static int ms_refresh_one(const ms_index *x, ms_file *f, int kind, sh_modserve_refresh_fn fn, void *context)
 {
     sh_modserve_refresh_item it;
     int eff = ms_scoped(x, (int)(f - x->files));
     const ms_file *ef = eff >= 0 ? &x->files[eff] : f;   /* the provider serving the path for the open map */
+    if (ms_standin_superseded(x, f->request)) { InterlockedExchange(&f->refresh, 0); return 0; }
     /* A surface holds the game's own bytes: nothing to refresh, ever. */
     if (ms_surface(f) || (eff >= 0 && ms_surface(ef))) { InterlockedExchange(&f->refresh, 0); return 0; }
     /* A name no bundle serves for the open map has no game bytes to go back
@@ -8863,6 +8985,7 @@ int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int 
                 ms_gone *g = (ms_gone *)&x->gone[i];
                 sh_modserve_refresh_item it;
                 if (!InterlockedCompareExchange(&g->pending, 0, 0)) continue;
+                if (ms_standin_superseded(x, g->request)) { InterlockedExchange(&g->pending, 0); continue; }
                 it.type = g->type; it.name = g->name; it.request = g->request;
                 it.bundle_id = g->bundle_id;
                 it.kind = SH_MODSERVE_RF_DECL; it.gone = 1; it.shadow = g->is_shadow; it.gates_live = 1;

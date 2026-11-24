@@ -5020,6 +5020,16 @@ engine's load, so nothing is fetched before it; a pinned row's units are
 asked for after the open, with the map open (see [The map content
 cache](#the-map-content-cache)).
 
+A parse no gate took is the editor's open only once the editor shows the map
+(its screen over its edit, as the Mods tab's tick reads it, `map_info`): its
+notice and its store ask wait for that (`pub_open_owed_poll`), the time a load
+keeps the game busy not counted. The hub reads a map after its play (the map
+just played, under RECOMMEND MAP), which the editor never shows: after four
+seconds and 120 idle frames without the editor it is dropped, logged "a map
+read outside the editor (the hub after a play) says nothing and asks nothing".
+The editor object's edit and session byte are no such sign: both outlive the
+editor, so they read the hub as an editor with a map (R-LB1, check 5).
+
 The progress line. While the job runs the player sees where it is in the
 game's own progress line, the one the game shows while it downloads a published
 map: "Getting this map's mod content: Eternal Demons (2 of 3), 84 of 212 MB."
@@ -5084,18 +5094,26 @@ in the engine on both renderers (R-CO1):
   sentence in the game's own dialog ("The match starts when every player has
   this map's mod content. Still getting it: Sam (40%)."), and the countdown's
   end when a player joined during it, which puts the controller back in its
-  idle state the way its own pump drops a countdown when players leave. A host
-  whose own copy of the map stands in for objects (a unit it could not get)
-  cannot host it: every joiner needs the whole content, so the Start is refused
-  with "This map cannot be hosted: some of its mod content (Eternal Demons) is
-  not on this computer, and every player needs all of it. Play the map once
-  online to get it, then host it." (`sh_modpub_lobby_map_whole`).
+  idle state the way its own pump drops a countdown when players leave. Every
+  player plays the same bytes, and every published play is a lobby the player
+  hosts, solo included (`sh_modpub_lobby_host_content`). A host whose copy
+  stands in for content some player could get waits, with that cause's
+  sentence (the store not reached: "This map cannot be hosted yet: the mod
+  store could not be reached for Eternal Demons. Try again when it can be
+  reached."; not on this computer, no disk space, a newer Snapmap+). One that
+  stands in only for content nobody can get (removed S3, never uploaded S5,
+  another DOOM revision S4b) starts: every player composes the same stand-ins.
+  A joiner whose missing content is of those causes plays the stand-ins too and
+  says 0xF2; the Start is refused, naming the player, when a joiner holds the
+  content the host stands in for, or stands in for content the host holds
+  (`sh_modlobby_standins_agree`).
 - Who is getting what. A joiner tells its host its state in the lobby's ready
   command (game reliable 0xB6: its lobby user and one byte), sent through the
   lobby screen's own sender. The host's lobby applies 0 toggle, 1 set and 2
   unset to the player's ready flag and ignores every other byte; the product
   uses the bytes it ignores: 0x80 + percent while downloading (steps of 5 %),
-  0xF0 once the content is here, 0xF1 when it cannot be had. A host with the
+  0xF0 once the content is here, 0xF1 when it cannot be had, 0xF2 when it plays
+  the stand-ins every player has. A host with the
   product reads them where the engine applies the command
   (`SetLobbyUserReady`, idLobby vtable +0x210), and shows "Waiting for this
   map's mod content: Sam 40%, Robin." in the lobby's progress line while anyone
@@ -5117,7 +5135,8 @@ How a download in the lobby ends:
 | What happens | The joiner | The host |
 |---|---|---|
 | The content arrives whole | answers the map check (CacheReady runs), says 0xF0 | its Start runs |
-| A unit cannot be had (the store refused it, a file failed its hash twice, the disk is full) or the fetch failed | says 0xF1, leaves the lobby: "You left the lobby: this map cannot be played without the Tyrant from Eternal Demons, which was removed from the mod store." | the player leaves; its Start runs for the others |
+| A unit no player can get (removed, never uploaded, another DOOM revision) | answers the map check with the same stand-ins as every player, says 0xF2 and the S3 sentence | its Start runs (refused, naming the player, if the host has the real content) |
+| A unit cannot be had for this joiner only (the store not reached, a file failed its hash twice, the disk is full) or the fetch failed | says 0xF1, leaves the lobby: "You left the lobby: this map cannot be played without the Tyrant from Eternal Demons: the mod store could not be reached." | the player leaves; its Start runs for the others |
 | The joiner left, was kicked, or the host cancelled or left the lobby | the download stops: "You are no longer in the lobby, so this map's mod content stopped downloading. It continues from where it stopped the next time you join." | nothing waits |
 | The host chose another map, or a playlist moved on | the old download stops without a word; the new map's request brings its own | asks every peer again (verify 1) and waits for the new map |
 | The lobby started anyway | leaves, keeps downloading, "join the lobby again when it is done" | (a host without the product) |
@@ -5418,15 +5437,14 @@ its content is on this computer (a pinned row). It changes nothing.
 
 What is sent: the units the published map's rows name (see [Units](#units)),
 those the store lacks and only those, as a map with mod rows is published. The
-publish is held at its start, not at its save (`modpublish.h` is the
-summary).
+publish is held at the publish screens' FINISH, before the screens close and
+before the engine's `PublishStart` (`modpublish.h` is the summary).
 
-`PublishStart` is detoured (`sh_modpublish_publish_start`). A map whose
-placed names give no mod rows publishes as the engine does. Otherwise the
-call is held (the detour returns without the original; a second Publish while
-one is held waits for it) and a job on the modnet worker prepares the content
-(`mp_prepare`) while the editor's pacifier reads "Preparing this map's mod
-content." The job makes this computer's publishing key when there is none
+A map whose placed names give no mod rows publishes as the engine does.
+Otherwise PUBLISH on FINISH is held with the screens up (the FINISH step,
+below; a second PUBLISH while one is held waits for it), and a job on the
+modnet worker prepares the content (`mp_prepare`) while the editor's pacifier
+reads "Preparing this map's mod content." The job makes this computer's publishing key when there is none
 (`modclaim_signer`; see [The map content cache](#the-map-content-cache)),
 reads the paths players asked of the units this computer's claims name
 (`modclaim_asked`, which seeds the unit walk, see [Units](#units)), computes
@@ -5437,19 +5455,21 @@ files the store does not hold); one the store lacks and this computer does not
 have is absent (S8); one moderation removed is removed.
 
 - A row whose mod is not on this computer (its folder is not built here)
-  refuses the publish with one sentence ("The map was not published: Snapmap+
-  cannot find the mod <name> on this computer. Build or install it in the Mods
-  tab, or remove its objects, then publish again."); no request is made for it.
-- Bytes to send: the game's own Yes/No (GDM 0x29) asks "Publishing uploads 212
-  MB of mod content that the mod store does not have yet. Publish?" (S7,
-  `sh_modpublish_compose_question`). No ends the hold and the publish never
-  starts, with no notice. A question that cannot be shown refuses the publish
+  does not stop the publish (the owner, 2026-11-18, the SPEC's S8 question:
+  the author proceeds). It publishes as it is, a local row, so players see
+  stand-ins for its objects; nothing of it is asked of the store or claimed,
+  and S8 below names its objects.
+- Bytes to send: the editor's own Yes/No over the screens asks "Publishing
+  uploads 212 MB of mod content that the mod store does not have yet.
+  Publish?" (S7, `sh_modpublish_compose_question`). No ends the hold and leaves
+  the author on FINISH, with no notice. A question that cannot be shown refuses the publish
   with "its question could not be shown", so nothing is uploaded without an
   answer. Nothing to send: no question.
 - Yes: a second job uploads the missing units (`modclaim_upload`, which sends
   each through `sh_cache_publish_unit`), the pacifier reading "Uploading mod
   content: 84 of 212 MB." (`sh_modpublish_progress_text`).
-- Absent or removed units do not stop the publish: one notice follows it,
+- Absent or removed units, and the objects of a row no folder here serves, do
+  not stop the publish: one notice follows it,
   "Players will see this map without the Marauder from Eternal Demons: its
   content is not on this computer or in the mod store." (S8), or "..., which
   was removed from the mod store." when only moderation removed units.
@@ -5464,18 +5484,89 @@ have is absent (S8); one moderation removed is removed.
   A worker busy for about three minutes refuses with "Snapmap+ is busy with the
   mod store. Publish again in a moment."
 
+The FINISH step. By the time `PublishStart` runs, the publish screens are
+already closed: the MapProperties frame's PUBLISH case (VK 0x14118FDD0, GL 0x14118EF50) calls the
+game's gate (limits, start module, deprecated entity; `PublishFinishGateCall`,
+VK 0x1190362, GL 0x118F4E2), then the screens' close (the editor's state stack
+pops), then `PublishStart(editor, state+0x21)`, so a question raised there
+would draw over the editor, behind the shell's backdrop. The game raises its own
+publish errors earlier, while the screens are still up, in the editor screen's
+own dialog: `[editor+0x21088]+0x8E8`. The show is `EditorGdmShow`; the
+descriptor is title, text, two labels and a kind (+0xC0, 0 for Yes/No and 1
+for one button). It sets `+0xA2C` bit 0. While that bit is set, EditorFrame
+skips the state's frame and runs the dialog's input. The input writes the
+answer to `+0x1DC` (0 for the first button, 1 for the second or Back) under
+the flag `+0x1D8`. EditorFrame clears the bit once the flag is set
+(`EditorGdmAnswerCall`).
+
+S7 is asked there, the only shape (proven live on both renderers, R-LV9). At
+the bind the gate call is repointed at a near relay (`mov r9,rsi`, the state).
+The gate runs first, and its refusals stay the game's. Then
+`sh_modpublish_finish_gate` holds a map with mod rows and returns 1, so the
+screens stay up. The pacifier shows over the screens, as the game's own
+profanity check does. The question is the editor's Yes/No over them, titled
+"Mod content to upload".
+
+- No leaves the author on FINISH. The screens' pending result (`+0xA18` ->
+  `+0x8E0`) is cleared.
+- A refusal is the game's one-button "publish failed" dialog over the screens,
+  or the editor toast when that dialog cannot show.
+- A republish of an existing item ends as the native one does: the game's
+  "published" toast, with no share-tag notice. Only a first publish shows the
+  share tag (the publish request's success, VK 0x14119A9E0; an update's
+  success, VK 0x14119A930, is the toast alone).
+- When the content is ready, the EditorFrame detour (`sh_modpublish_editor_tick`,
+  after the engine's frame, where `fly_to.c` also changes state) closes the
+  screens and starts `PublishStart` through its detour, which passes. It then
+  writes the frame's own success event, as the frame does after
+  `PublishStart`: `idStructuredLogManager::CreateInfoLog` with
+  "snapeditor.publish.success", a structured info log (VK 0x1417B0380, GL
+  0x1417B1710; the game's own strings, read from the frame). If no editor
+  frame comes within two seconds, the tick does it.
+
+The bind checks every byte of this in `sh_modpublish_check_finish`
+(`modpub_sites.c`; `tests/modpub_sites_test.c` runs it on both executables).
+When a check fails, nothing holds at FINISH, and `sh_modpublish_publish_start`
+refuses a map with mods with one sentence ("Snapmap+ cannot send its mod
+content with this game version"), since its content would never be prepared.
+
 When the units are in the store, or the publish goes on queued, the held
 `PublishStart` runs (`mp_resume`, through its own detour, which passes) and
-arms the pin step for 30 seconds. The save the publish makes then writes its
-rows pinned: `sh_modpublish_pin_save` is bound as the manifest's pin step
-(`sh_modmanifest_set_pin`) and replaces each local row with a pinned row naming
-the units of the objects the save places, from the walk the preparation did (a
-lookup, not another walk). A row that cannot be pinned is logged, and
+arms the pin step for 30 seconds. The save the publish makes hands its rows to
+the pin step: `sh_modpublish_pin_save`, bound as the manifest's pin step
+(`sh_modmanifest_set_pin`), pins a copy of them, each local row becoming a
+pinned row naming the units of the objects the save places, from the walk the
+preparation did (a lookup, not another walk). That copy is the published copy's
+alone. The open map keeps its own rows, and so does its slot on disk: the
+author's own map follows their local folders, published or not, in the editor
+and in their own Play, and a reopen of it is local too (the owner's ruling,
+R-LB1 F6). Every publish and republish therefore snapshots the folders' current
+builds.
+
+The published copy is made where the game reads the slot back to upload it.
+`PublishAfterSave` calls `idSnapMapEdit::TryCloudSave`, whose request reads the
+slot's text with `ReadLocalSavedMapText` before it packs and uploads it. That
+is VK 0x1411BE200 / GL 0x1411BD5D0, the read at `CloudSaveSlotReadCall`; there
+is one slot file, not a copy. `editor_frame.c`'s detour of that read hands the
+text to `sh_modpublish_cloud_text` when the read's return address is that call.
+It returns the slot's text with the pinned rows, and that is what is uploaded.
+The request then reads the slot's metadata (`ReadLocalSaveMeta`, at
+`CloudSaveMetaReadCall`) and uploads it with the text. Its `declChecksum`
+(model +0xB8) is the game's hash of the map text (VK 0x1402D6A90 / GL
+0x1402D68F0; the local save and `CreateLocalSavedMapInternal` compute it), so
+that read is relayed and the published copy's checksum is set to the same hash
+of the pinned text. No client recomputes that hash on a download (it has no
+other SnapMap caller on either renderer); `TryCloudSave` compares it to decide
+whether a republish has changes.
+The bound and the claim count the same text (`sh_modpublish_save_seen`). A
+build where that read cannot be reached refuses to publish a map with mods
+("Snapmap+ cannot send its mod content with this game version"), since players
+would otherwise get stand-ins. A row that cannot be pinned is logged, and
 `g_save.local` rows left local are logged at the save ("players get stand-ins
-for them"). The open map keeps its own rows; only the cloud-saved text the
-engine publishes names units. A publish whose pin step was not reached in 30
-seconds logs that its rows were not pinned. The editor leaving, or a save while
-a publish is held, abandons the hold.
+for them"). Update stays for maps opened pinned: someone else's map, or a kept
+copy, with the mod also installed (D26, D23). A publish whose pin step was not
+reached in 30 seconds logs that its rows were not pinned. The editor leaving,
+or a save while a publish is held, abandons the hold.
 
 The `SerializeToJson` detour reports each save's final text
 (`sh_rawmap_set_save_observer`); `PublishAfterSave`, the Save state's callback
@@ -5519,8 +5610,7 @@ list grow and idStr assignment are bound from its own calls). The save then
 copies that model back to the editor. A tag that cannot be written is logged
 and the map publishes without it; a held publish whose save was not tagged
 logs that too. A refusal while the publish is
-held (a mod not on this computer, a refused upload, a question that cannot be
-shown, a busy worker) clears the pacifier and shows the sentence as the
+held (a refused upload, a question that cannot be shown, a busy worker) clears the pacifier and shows the sentence as the
 editor's toast (`mp_refuse`); the engine's `PublishStart` never ran, so nothing
 reached the map service. A No clears the pacifier and says nothing.
 

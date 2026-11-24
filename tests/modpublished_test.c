@@ -35,6 +35,7 @@
 #include "../src/backend/modmanifest.h"
 #include "../src/backend/modserve.h"
 #include "../src/backend/modlobby.h"
+#include "../src/backend/modcache.h"   /* SH_CACHE_ABSENT_*: the absence causes */
 
 static int g_failed, g_checks;
 #define CHECK(expr) do {                                                         \
@@ -78,6 +79,9 @@ typedef struct fake {
     int fetch_calls, fetch_cancelled;
     HANDLE fetch_gate;               /* when set, the fetch waits on it */
     int can_ask_after;               /* ticks before the surface is idle */
+    long long screen;                /* ops.screen: the shell's screen token, -1 between screens, 0 unknown */
+    int editor_open;                 /* ops.editor_open: 1 (the default after reset) while the editor shows a map */
+    int busy;                        /* ops.busy: 1 while a map loads or Play runs */
     int ticks;
     int asks, ask_gdm, ask_buttons, releases;
     char last_ask[256];
@@ -182,9 +186,16 @@ static struct {
     int served;                /* a pinned row serves (stand-ins included) */
     int pending, said, said_at_resumes, drops, refreshes, refresh_answer, absent_after_fetch;
     int unserve_after_fetch;   /* the composed row does not serve after the fetch */
+    unsigned causes;           /* content_causes' mask (1 << SH_CACHE_ABSENT_*); 0: the op answers no composition */
 } g_content;
 static int f_resumes_now(void);
 static int f_content_complete(void *c, const sh_modmanifest_row *row) { (void)c; (void)row; return g_content.complete; }
+static int f_content_causes(void *c, const sh_modmanifest_row *row, unsigned *mask)
+{
+    (void)c; (void)row;
+    *mask = g_content.complete ? 0 : g_content.causes;
+    return g_content.causes != 0 || g_content.complete;
+}
 static char *f_content_notice(void *c)
 {
     (void)c;
@@ -253,6 +264,9 @@ static int f_poll(void *c, int ticket)
     return F.answer;
 }
 static void f_release(void *c, int ticket) { (void)c; (void)ticket; F.releases++; }
+static long long f_screen(void *c) { (void)c; return F.screen; }
+static int f_editor_open(void *c) { (void)c; return F.editor_open; }
+static int f_busy(void *c) { (void)c; return F.busy; }
 
 typedef struct job_thread { void (*job)(void *); void *ctx; } job_thread;
 static DWORD WINAPI f_thread(void *p)
@@ -351,11 +365,15 @@ static int f_resume(void *c, const sh_modpub_resume *r)
     }
     return 1;
 }
+static char g_last_logs[8192];   /* the module's recent lines */
 static void f_log(void *c, const char *line)
 {
     (void)c;
     if (getenv("MODPUB_TEST_LOG")) printf("    %s\n", line);
+    if (line && strlen(g_last_logs) + strlen(line) + 2 >= sizeof g_last_logs) g_last_logs[0] = 0;
+    if (line) { strcat_s(g_last_logs, sizeof g_last_logs, line); strcat_s(g_last_logs, sizeof g_last_logs, "\n"); }
 }
+static int said_log(const char *text) { return strstr(g_last_logs, text) != NULL; }
 static void f_launch_refused(void *c, int hook) { (void)c; F.launch_refused++; F.refused_hook = hook; }
 static void f_print(void *c, const char *line)
 {
@@ -398,7 +416,7 @@ static void f_scope_play(void *c, const char *why) { (void)c; (void)why; g_scope
 
 static const sh_modpub_ops OPS = {
     .on_main = f_on_main, .row_state = f_row_state, .rescan = f_rescan, .activate = f_activate,
-    .can_ask = f_can_ask, .ask = f_ask, .poll = f_poll, .release = f_release, .worker_run = f_worker_run,
+    .can_ask = f_can_ask, .ask = f_ask, .poll = f_poll, .release = f_release, .screen = f_screen, .editor_open = f_editor_open, .busy = f_busy, .worker_run = f_worker_run,
     .fetch_for = f_fetch_for, .metadata_copy = f_metadata_copy, .metadata_free = f_metadata_free,
     .metadata_ids = f_metadata_ids, .hold_token = f_hold_token, .owner_current = f_owner_current,
     .host_matches = f_host_matches, .hold_ui = f_hold_ui, .drop_ui = f_drop_ui, .resume = f_resume, .log = f_log,
@@ -421,6 +439,7 @@ static void use_content(void)
 {
     g_ops_content = OPS;
     g_ops_content.content_complete = f_content_complete;
+    g_ops_content.content_causes = f_content_causes;
     g_ops_content.content_notice = f_content_notice;
     g_ops_content.content_pending = f_content_pending;
     g_ops_content.content_drop = f_content_drop;
@@ -434,6 +453,7 @@ static void reset(void)
     if (F.worker) { WaitForSingleObject(F.worker, 5000); CloseHandle(F.worker); }
     sh_modpub_test_reset();
     memset(&F, 0, sizeof F);
+    F.editor_open = 1;
     F.install_on_fetch = 1;
     F.host_ok = 1;
     F.owner_ok = 1;
@@ -608,6 +628,19 @@ static void a_passing_map_says_its_stand_ins(void)
     CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
     tick(3);
     CHECK(g_content.said == 0 && F.asks == 0);
+
+    /* R-LB1 check 4: a published map whose row stayed local (its author's mod on no computer, S8) plays the same way
+     * for every player: the row's stand-in composition serves it (modserve.c ms_row_build, D6a), the gate lets it
+     * through with no hold and no store ask, and the stand-ins' one notice is said. */
+    printf("-- a published map whose row stayed local (S8) plays with stand-ins: no hold, no ask, one notice\n");
+    reset();
+    use_content();
+    F.installed_a = 1;          /* the stand-in composition serves the local row (in the product) */
+    g_content.pending = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && !F.hold_ui);
+    CHECK(g_content.said == 1 && said_notice("This map is playing without the Tyrant", 38));
 }
 
 static void vanilla_and_installed_pass_through(void)
@@ -898,6 +931,25 @@ static void one_notice_queue(void)
     CHECK(F.asks == 0 && !strcmp(sh_modpub_test_notice(), "kept until the surface is free"));
     tick(200);
     CHECK(F.asks == 1 && !strcmp(F.last_ask, "kept until the surface is free"));
+
+    /* R-LB1: a notice is raised on a settled screen, and withdrawn when the game changes screen under it, so nothing
+     * of it draws through the game's own screens (the RECOMMEND MAP popup after a published play) */
+    reset();
+    F.screen = -1;   /* between screens */
+    sh_modpublished_notice("on the next screen");
+    tick(5);
+    CHECK(F.asks == 0);
+    F.screen = 0x100000041ll;
+    tick(1);
+    CHECK(F.asks == 1);
+    tick(3);
+    CHECK(F.releases == 0);   /* still up on its screen */
+    F.screen = 0x200000042ll;   /* the game moved on */
+    tick(1);
+    CHECK(F.releases == 1 && said_log("the notice was withdrawn: the game changed screen under it"));
+    tick(3);
+    CHECK(F.asks == 1);   /* not raised again */
+    F.screen = 0;
 }
 
 static void a_copied_map_fetches_then_passes(void)
@@ -1507,6 +1559,26 @@ static void coop_lobby_joiner_cannot_get_it(void)
                       "store could not be reached.", 104));
     CHECK(!strstr(F.last_ask, HASH_A) && !strstr(sh_modpub_test_notice(), HASH_A));   /* no hash in player text */
 
+    printf("-- co-op: a joiner whose missing content nobody can get (S3) plays the same stand-ins and answers\n");
+    reset();
+    use_lobby();
+    g_content.absent_after_fetch = 1;
+    g_content.causes = 1u << SH_CACHE_ABSENT_REMOVED;
+    join_pinned();
+    tick_until_idle();
+    tick(2);
+    CHECK(F.fetch_calls == 1 && F.resumes == 1 && F.resume_hook == SH_MODPUB_CACHE_READY && g_leaves == 0);
+    CHECK(last_code() == SH_MODLOBBY_CODE_STANDS_IN && !sent_code(SH_MODLOBBY_CODE_FAILED));
+    g_content.causes = 1u << SH_CACHE_ABSENT_UNREACHABLE;   /* S4: another player could get it: it leaves, as before */
+    reset();
+    use_lobby();
+    g_content.absent_after_fetch = 1;
+    g_content.causes = 1u << SH_CACHE_ABSENT_UNREACHABLE;
+    join_pinned();
+    tick_until_idle();
+    tick(2);
+    CHECK(F.resumes == 0 && g_leaves == 1 && last_code() == SH_MODLOBBY_CODE_FAILED);
+
     printf("-- co-op: a failed download (network, disk, hash) tells the host and leaves the lobby\n");
     reset();
     use_lobby();
@@ -1585,15 +1657,46 @@ static void coop_lobby_map_is_modded(void)
     CHECK(sh_modpub_lobby_map_modded(METADATA, "rev1"));
     CHECK(!sh_modpub_lobby_map_modded(METADATA, "rev2"));
 
-    printf("-- co-op: a host whose own content stands in for objects cannot host the map (D-A41 Q2)\n");
+    printf("-- co-op: a host whose copy stands in waits only while some player could get it (R-LB1 F5, SPEC 5.19)\n");
     {
+        /* Every absence cause: a start waits (with the cause's own sentence) while some player could get the content,
+         * and runs (solo too: every published play is a lobby the player hosts) when nobody can. */
+        static const struct { int cause; int expect; const char *says; } CASES[] = {
+            { SH_CACHE_ABSENT_REMOVED,      SH_MODPUB_HOST_SHARED,  NULL },   /* S3 */
+            { SH_CACHE_ABSENT_NOT_IN_STORE, SH_MODPUB_HOST_SHARED,  NULL },   /* S5 */
+            { SH_CACHE_ABSENT_GAME,         SH_MODPUB_HOST_SHARED,  NULL },   /* S4b */
+            { SH_CACHE_ABSENT_UNREACHABLE,  SH_MODPUB_HOST_REFUSED, "This map cannot be hosted yet: the mod store could not "
+                                                                    "be reached for " },   /* S4 */
+            { SH_CACHE_ABSENT_OFFLINE,      SH_MODPUB_HOST_REFUSED, "This map cannot be hosted yet: " },   /* S2 */
+            { SH_CACHE_ABSENT_DISK,         SH_MODPUB_HOST_REFUSED, "there is not enough free disk space for " },
+            { SH_CACHE_ABSENT_NEWER,        SH_MODPUB_HOST_REFUSED, "needs a newer Snapmap+" },   /* S6 */
+            { SH_CACHE_ABSENT_LOCAL,        SH_MODPUB_HOST_REFUSED, "Open the map once online to get it" },
+            { SH_CACHE_ABSENT_BROKEN,       SH_MODPUB_HOST_REFUSED, "Open the map once online to get it" },
+            { 0,                            SH_MODPUB_HOST_REFUSED, "Open the map once online to get it" },   /* not known */
+        };
         char out[256];
-        CHECK(sh_modpub_lobby_map_whole(METADATA, "rev1", out, sizeof out) == 1 && !out[0]);   /* whole */
-        CHECK(sh_modpub_lobby_map_whole(METADATA, "rev2", out, sizeof out) == 1);              /* never seen */
+        size_t i;
+        CHECK(sh_modpub_lobby_host_content(METADATA, "rev1", out, sizeof out) == SH_MODPUB_HOST_WHOLE && !out[0]);
+        CHECK(sh_modpub_lobby_host_content(METADATA, "rev2", out, sizeof out) == SH_MODPUB_HOST_WHOLE);   /* never seen */
         g_content.complete = 0;
-        CHECK(sh_modpub_lobby_map_whole(METADATA, "rev1", out, sizeof out) == 0);
-        CHECK(strstr(out, "This map cannot be hosted: some of its mod content (") == out && strstr(out, ") is not on this "
-              "computer, and every player needs all of it. Play the map once online to get it, then host it.") && strlen(out) < 256);
+        for (i = 0; i < sizeof CASES / sizeof CASES[0]; i++) {
+            int got;
+            g_content.causes = 1u << CASES[i].cause;
+            got = sh_modpub_lobby_host_content(METADATA, "rev1", out, sizeof out);
+            CHECK(got == CASES[i].expect);
+            CHECK(CASES[i].says ? strstr(out, CASES[i].says) != NULL && strlen(out) < 256 : !out[0]);
+            CHECK(!strstr(out, "Play the map once online"));   /* the old advice, wrong for a removed unit */
+            if (got != CASES[i].expect || (CASES[i].says && !strstr(out, CASES[i].says)))
+                printf("   cause %d: %d \"%s\"\n", CASES[i].cause, got, out);
+        }
+        /* a row standing in for a cause nobody can get beside one somebody could: the start waits */
+        g_content.causes = (1u << SH_CACHE_ABSENT_REMOVED) | (1u << SH_CACHE_ABSENT_UNREACHABLE);
+        CHECK(sh_modpub_lobby_host_content(METADATA, "rev1", out, sizeof out) == SH_MODPUB_HOST_REFUSED &&
+              strstr(out, "could not be reached"));
+        /* no composition on disk: the start waits */
+        g_content.causes = 0;
+        CHECK(sh_modpub_lobby_host_content(METADATA, "rev1", out, sizeof out) == SH_MODPUB_HOST_REFUSED);
+        CHECK(sh_modpub_standin_shared(SH_CACHE_ABSENT_REMOVED) && !sh_modpub_standin_shared(SH_CACHE_ABSENT_UNREACHABLE));
         g_content.complete = 1;
     }
 }
@@ -1655,6 +1758,73 @@ static void editor_open_fetches_its_content(void)
     tick(2);
     CHECK(F.fetch_calls == 1 && g_content.said == 1 && F.asks == 1 && F.ask_buttons == 0);   /* the notice alone */
     CHECK(said_notice("This map is playing without the Tyrant", 38));
+
+    printf("-- a map read outside the editor (the hub after a published play) asks nothing and says nothing (R-LB1)\n");
+    reset();
+    use_content();
+    g_content.armed = 1;
+    g_content.served = 1;
+    g_content.pending = 1;
+    g_content.absent_after_fetch = 1;
+    F.editor_open = 0;
+    g_last_logs[0] = 0;
+    parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
+    tick(1);
+    tick_until_idle();
+    tick(2);
+    CHECK(F.fetch_calls == 0 && F.asks == 0 && !sh_modpub_test_notice()[0]);
+    {
+        /* idle at the hub, the editor never showing the map: the read is dropped, said nowhere, even if an editor
+         * shows a map later (the editor's own open parses again) */
+        int i;
+        for (i = 0; i < 700 && !strstr(g_last_logs, "a map read outside the editor"); i++) { tick(1); Sleep(10); }
+        CHECK(strstr(g_last_logs, "a map read outside the editor (the hub after a play) says nothing") != NULL);
+        CHECK(g_content.pending == 0);   /* its stand-ins' notice is dropped */
+        F.editor_open = 1;
+        tick(3);
+        CHECK(F.fetch_calls == 0 && F.asks == 0 && g_content.said == 0 && !sh_modpub_test_notice()[0]);
+    }
+
+    printf("-- an editor open whose screen comes up frames after its parse (a load between) says its notice then\n");
+    reset();
+    use_content();
+    g_content.armed = 1;
+    g_content.served = 1;
+    g_content.pending = 1;
+    g_content.absent_after_fetch = 1;
+    g_content.refresh_answer = 0;
+    F.editor_open = 0;
+    F.busy = 1;                       /* the level load */
+    g_last_logs[0] = 0;
+    parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
+    {
+        int i;
+        for (i = 0; i < 500; i++) { tick(1); if (i % 50 == 0) Sleep(50); }   /* a long load: polls and time pass */
+        CHECK(F.fetch_calls == 0 && F.asks == 0 && !strstr(g_last_logs, "outside the editor"));   /* busy counts not */
+        F.busy = 0;
+        tick(20);                     /* idle frames before the editor screen is up */
+        CHECK(F.fetch_calls == 0 && !strstr(g_last_logs, "outside the editor"));
+    }
+    F.editor_open = 1;                /* the editor shows the map */
+    tick(1);
+    tick_until_idle();
+    tick(2);
+    CHECK(F.fetch_calls == 1 && g_content.said == 1 && F.asks == 1 && F.ask_buttons == 0);
+    CHECK(said_notice("This map is playing without the Tyrant", 38));
+
+    printf("-- an editor open does not ask the store again for what moderation removed (S3)\n");
+    reset();
+    use_content();
+    g_content.armed = 1;
+    g_content.served = 1;
+    g_content.pending = 1;
+    g_content.causes = 1u << SH_CACHE_ABSENT_REMOVED;
+    parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
+    tick(1);
+    tick_until_idle();
+    tick(2);
+    CHECK(F.fetch_calls == 0 && F.asks == 1);   /* the open's one notice, from what is here */
+    g_content.causes = 0;
 
     printf("-- the editor shows what arrived at the next open: it says so\n");
     reset();

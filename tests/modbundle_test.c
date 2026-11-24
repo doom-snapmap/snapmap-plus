@@ -644,6 +644,26 @@ static void test_modjson(const char *fixture, const char *tmp)
     mt_write(folder, "mod.json", author);
     mt_append(folder, "entities\\imp_copy.decl", "\r\n");
     CHECK(sh_mb_tree_hash(folder, tree2) && strcmp(tree1, tree2));
+    /* R-LB1 F8: a file a program still holds open after writing it (an editor) changes the tree hash too: the folder
+     * listing keeps the old size and time until the handle closes, the file's own attributes do not. */
+    {
+        char held[MAX_PATH], before[65], during[65];
+        wchar_t wheld[MAX_PATH];
+        HANDLE h;
+        DWORD wrote = 0;
+        CHECK(sh_mb_tree_hash(folder, before));
+        _snprintf_s(held, sizeof held, _TRUNCATE, "%s\\entities\\imp_copy.decl", folder);
+        MultiByteToWideChar(CP_UTF8, 0, held, -1, wheld, MAX_PATH);
+        h = CreateFileW(wheld, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, NULL);
+        CHECK(h != INVALID_HANDLE_VALUE);
+        if (h != INVALID_HANDLE_VALUE) {
+            SetFilePointer(h, 0, NULL, FILE_END);
+            CHECK(WriteFile(h, "// held open\r\n", 15, &wrote, NULL) && wrote == 15);
+            CHECK(sh_mb_tree_hash(folder, during) && strcmp(before, during));   /* seen while still open */
+            CloseHandle(h);
+        }
+    }
     free(first);
 
     /* A bundle with no author text gets a synthesized author part; the

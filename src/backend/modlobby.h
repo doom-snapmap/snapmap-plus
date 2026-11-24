@@ -47,12 +47,15 @@ extern "C" {
 #define SH_MODLOBBY_CODE_PROGRESS 0x80   /* + percent (0..100): downloading the map's content */
 #define SH_MODLOBBY_CODE_HOLDS    0xF0   /* the map's content is here */
 #define SH_MODLOBBY_CODE_FAILED   0xF1   /* the content could not be had; the joiner leaves */
+#define SH_MODLOBBY_CODE_STANDS_IN 0xF2  /* some of the content no player can get (removed, never uploaded, another
+                                          * DOOM revision): the joiner plays the stand-ins every player composes */
 
 enum sh_modlobby_state {
     SH_MODLOBBY_UNKNOWN = 0,   /* no code from this member (no product, or nothing said yet) */
     SH_MODLOBBY_DOWNLOADING,
     SH_MODLOBBY_HOLDS,
-    SH_MODLOBBY_FAILED
+    SH_MODLOBBY_FAILED,
+    SH_MODLOBBY_STANDS_IN
 };
 
 /* The code for a download at `done` of `total` bytes (total 0: 0 %). */
@@ -82,6 +85,14 @@ typedef struct sh_modlobby_member {
  * 256 bytes, the native dialog body): "The match starts when every player has
  * this map's mod content. Still getting it: Sam (42%) and Alex." */
 int sh_modlobby_gate(const sh_modlobby_member *members, size_t count, char *out, size_t cap);
+
+/* Every player of a match plays the same bytes (a stand-in is not the content it stands for: the snapshot templates
+ * would differ, a fatal mismatch). `host_stands_in`: the host's copy stands in for content no player can get (S3, S5,
+ * S4b). 1 when the members agree with the host: none holds the real content while the host stands in, and none stands
+ * in while the host holds it; else 0 with the sentence in `out` (under 256 bytes). A member that said nothing (no
+ * product) is not counted. */
+int sh_modlobby_standins_agree(int host_stands_in, const sh_modlobby_member *members, size_t count, char *out,
+                               size_t cap);
 
 /* The host's waiting line, shown in the lobby's progress line while a member
  * is getting the content: "Waiting for this map's mod content: Sam 42%, Alex."

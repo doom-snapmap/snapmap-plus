@@ -2288,20 +2288,21 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
         if (ctx.list.rows[i].name_count > 1)
             qsort(ctx.list.rows[i].names, ctx.list.rows[i].name_count, sizeof(char *), mm_cstr_cmp);
     {
-        /* A publish's save writes its rows pinned (modpin.h, bound by modpublish.c while a publish is armed); the open
-         * map keeps the rows it has, so its session goes on serving what it served. */
+        /* A publish's save hands its rows to the pin step (modpin.h, bound by modpublish.c while a publish is armed),
+         * which pins a copy for the published copy alone: the text the cloud save reads back from the slot gets them
+         * there (sh_modpublish_cloud_text). The slot and the open map keep the map's own rows, so the author's map
+         * follows their local folders, published or not, and a reopen of it is local too (owner, R-LB1 F6). */
         sh_modmanifest_pin_fn pin = g_pin;
-        sh_modmanifest_list pinned;
-        size_t k;
-        int use_pinned = 0;
-        memset(&pinned, 0, sizeof pinned);
         if (pin) {
-            pinned.uses = ctx.list.uses;
-            for (k = 0; k < ctx.list.count && sh_modmanifest_list_add(&pinned, &ctx.list.rows[k]); k++) {}
-            use_pinned = k == ctx.list.count && pin(&pinned, json, length) > 0;
+            sh_modmanifest_list copy;
+            size_t k;
+            memset(&copy, 0, sizeof copy);
+            copy.uses = ctx.list.uses;
+            for (k = 0; k < ctx.list.count && sh_modmanifest_list_add(&copy, &ctx.list.rows[k]); k++) {}
+            if (k == ctx.list.count) (void)pin(&copy, json, length);
+            sh_modmanifest_list_free(&copy);
         }
-        out = sh_modmanifest_write(json, length, use_pinned ? &pinned : &ctx.list, &written, err, sizeof err);
-        sh_modmanifest_list_free(&pinned);
+        out = sh_modmanifest_write(json, length, &ctx.list, &written, err, sizeof err);
     }
     described = mm_describe(&ctx.list);
     if (out) {

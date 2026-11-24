@@ -133,6 +133,11 @@ static unsigned long g_notes_frame;
 /* A rawmap hold asked the store for its map's content and resumed: the reopen's editor parse has been asked for
  * already, so it does not ask again (R-LV6: one load sent two fetches to an unreachable store); its notice is said. */
 static int g_reopen_asked;
+/* An untaken parse's notice waits for the editor to show the map (pub_open_owed_poll): the idle polls and the time
+ * since the game was first seen idle without it. */
+static int g_open_owed;
+static unsigned g_open_idle_polls;
+static ULONGLONG g_open_idle_since;
 
 /* The content notice the parse's stand-ins made (modcache.h), taken by the gate: said when the gate lets the map
  * through with nothing to fetch (a local row whose folder is not here stands in, D6a, manager Q8), dropped when a hold
@@ -143,6 +148,7 @@ static void pub_notes_gated(void)
 {
     free(g_pass_notice);
     g_pass_notice = NULL;
+    g_open_owed = 0;   /* a gate took this load: no earlier read waits for the editor */
     if (!g_notes_held) return;
     g_notes_held = 0;
     (void)sh_modmanifest_load_notes_flush(0);
@@ -409,6 +415,7 @@ static void pub_launch_refused(int hook)
  * long as the surface stays busy. */
 static char *g_notice;
 static int g_notice_ticket, g_notice_waited;
+static long long g_notice_screen;   /* the screen the raised notice belongs to (ops.screen), 0 unknown */
 
 static void pub_notice(const char *text)
 {
@@ -584,7 +591,8 @@ void sh_modpublished_parse_seen(int kind, const char *text, void *out_map, int p
     if (InterlockedCompareExchange(&g_resuming, 0, 0)) { (void)sh_modmanifest_load_notes_flush(0); return; }
     if (!pub_on_main()) { g_record.valid = 0; return; }
     pub_record_clear(&g_record);
-    g_notes_held = sh_modmanifest_load_notes_pending() > 0 || (g_ops.content_pending && g_ops.content_pending(g_ops.context));
+    g_open_owed = 0;   /* another load: an earlier read waiting for the editor is over (this load's notices replaced it) */
+    g_notes_held =sh_modmanifest_load_notes_pending() > 0 || (g_ops.content_pending && g_ops.content_pending(g_ops.context));
     g_notes_frame = g_frame;
     /* The same map launched again while its hold asks or downloads (the
      * player pressed Play once more, or the browser re-issued the request):
@@ -972,15 +980,22 @@ out:
 static void pub_poll_notice(void)
 {
     int answer;
+    long long screen = g_ops.screen ? g_ops.screen(g_ops.context) : 0;
     if (g_notice_ticket) {
         answer = g_ops.poll ? g_ops.poll(g_ops.context, g_notice_ticket) : -1;
-        if (answer == PUB_DIALOG_PENDING) return;
+        if (answer == PUB_DIALOG_PENDING) {
+            /* The game changed screen under it (a published play's end showing RECOMMEND MAP): the notice is withdrawn,
+             * so nothing of it draws through the game's own screens. */
+            if (!g_notice_screen || !screen || screen == g_notice_screen) return;
+            pub_log("MODS: the notice was withdrawn: the game changed screen under it");
+        }
         if (g_ops.release) g_ops.release(g_ops.context, g_notice_ticket);
         g_notice_ticket = 0;
+        g_notice_screen = 0;
         return;
     }
     if (!g_notice) return;
-    if (!g_ops.can_ask || !g_ops.can_ask(g_ops.context)) {
+    if (!g_ops.can_ask || !g_ops.can_ask(g_ops.context) || screen < 0) {   /* busy, or between screens */
         if (++g_notice_waited == PUB_RAISE_TICKS)
             pub_log("MODS: the notice is waiting: the dialog surface stayed busy; it is raised when the game can ask");
         if (g_notice_waited > PUB_RAISE_TICKS) g_notice_waited = PUB_RAISE_TICKS + 1;
@@ -992,6 +1007,7 @@ static void pub_poll_notice(void)
     g_notice_ticket = g_ops.ask ? g_ops.ask(g_ops.context, PUB_GDM_ID, PUB_BUTTONS_ACCEPT,
                                             strlen(g_notice) < PUB_TEXT_CAP ? g_notice : PUB_DIALOG_OVER) : 0;
     if (!g_notice_ticket) pub_log("MODS: the notice dialog would not raise");
+    g_notice_screen = g_notice_ticket ? screen : 0;
     pub_notice_clear();
 }
 
@@ -1137,9 +1153,15 @@ static int pub_editor_fetch(void)
     memset(&now, 0, sizeof now);
     memset(&want, 0, sizeof want);
     (void)sh_modmanifest_current(&now);
-    for (size_t i = 0; i < now.count; i++)
-        if (now.rows[i].pinned && !g_ops.content_complete(g_ops.context, &now.rows[i]) &&
-            !sh_modmanifest_list_add(&want, &now.rows[i])) break;
+    for (size_t i = 0; i < now.count; i++) {
+        unsigned mask = 0;
+        if (!now.rows[i].pinned || g_ops.content_complete(g_ops.context, &now.rows[i])) continue;
+        /* what moderation removed is not asked for again: the store will not have it (S3) */
+        if (g_ops.content_causes && g_ops.content_causes(g_ops.context, &now.rows[i], &mask) &&
+            mask == (1u << SH_CACHE_ABSENT_REMOVED))
+            continue;
+        if (!sh_modmanifest_list_add(&want, &now.rows[i])) break;
+    }
     if (want.count) begun = pub_hold_begin(SH_MODPUB_EDITOR_OPEN, NULL, NULL, NULL, "", "", &want, NULL) == 1;
     if (begun) pub_logf("MODS: the open map stands in for objects of %u row(s); asking the mod store for them",
                         (unsigned)g_hold.missing_count);
@@ -1153,12 +1175,25 @@ static char *pub_content_said(void);
 /* A joiner downloading in the lobby enters the match only with every unit its map names: stand-ins would not be the
  * host's served bytes (its snapshot templates would differ, a fatal mismatch). 1 when the content is whole and the host
  * is told so; else the joiner tells the host it failed and leaves the lobby with one sentence (the fallback, D27). */
+/* 1 when a pinned row's composition stands in only for content no player can get (S3, S5, S4b): every player composes
+ * the same stand-ins, the host included (sh_modpub_lobby_host_content), so the joiner plays them (R-LB1 F5). */
+static int pub_row_standin_shared(const sh_modmanifest_row *row)
+{
+    unsigned mask = 0;
+    int c;
+    if (!g_ops.content_causes || !g_ops.content_causes(g_ops.context, row, &mask) || !mask) return 0;
+    for (c = 0; c < 32; c++) if ((mask & (1u << c)) && !sh_modpub_standin_shared(c)) return 0;
+    return 1;
+}
+
 static int pub_joiner_content_whole(pub_hold *h)
 {
     char *said;
+    int stands_in = 0;
     for (size_t i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
         if (!row->pinned || !g_ops.content_complete || g_ops.content_complete(g_ops.context, row)) continue;
+        if (pub_row_standin_shared(row)) { stands_in = 1; continue; }
         pub_report(h, SH_MODLOBBY_CODE_FAILED);
         /* The composition's own sentence says what is absent and why (S2-S6): "This map is playing without the Tyrant
          * from Eternal Demons, which was removed from the mod store." A joiner does not play it: it leaves. */
@@ -1179,6 +1214,16 @@ static int pub_joiner_content_whole(pub_hold *h)
         }
         free(said);
         return 0;
+    }
+    if (stands_in) {
+        /* What no player can get stands in for every player alike: the joiner plays the map, and says so once (S3). */
+        said = pub_content_said();
+        pub_logf("MODS: lobby join: the map plays with stand-ins every player has: %s",
+                 said ? said : "some of its mod content no player can get");
+        if (said) pub_notice(said);
+        free(said);
+        pub_report(h, SH_MODLOBBY_CODE_STANDS_IN);
+        return 1;
     }
     pub_report(h, SH_MODLOBBY_CODE_HOLDS);
     return 1;
@@ -1576,28 +1621,100 @@ int sh_modpub_lobby_map_modded(const char *item, const char *revision)
     return seen && seen->rows.count > 0;
 }
 
-int sh_modpub_lobby_map_whole(const char *item, const char *revision, char *out, size_t cap)
+int sh_modpub_standin_shared(int cause)
+{
+    return cause == SH_CACHE_ABSENT_REMOVED || cause == SH_CACHE_ABSENT_NOT_IN_STORE || cause == SH_CACHE_ABSENT_GAME;
+}
+
+/* The causes a start waits for, most actionable first, and what the host is told for each (%s: the mods). A cause
+ * not listed (none recorded, a local row's) has the last sentence. */
+static const struct { int cause; const char *text; } PUB_HOST_HOLDS[] = {
+    { SH_CACHE_ABSENT_UNREACHABLE, "This map cannot be hosted yet: the mod store could not be reached for %s. Try again "
+                                   "when it can be reached." },
+    { SH_CACHE_ABSENT_OFFLINE,     "This map cannot be hosted yet: %s is not on this computer. Connect to the internet "
+                                   "and open the map once to get it, then host it." },
+    { SH_CACHE_ABSENT_DISK,        "This map cannot be hosted yet: there is not enough free disk space for %s. Free some "
+                                   "space, then host it." },
+    { SH_CACHE_ABSENT_NEWER,       "This map cannot be hosted: %s needs a newer Snapmap+. Run the Snapmap+ installer to "
+                                   "update, then host it." },
+    { 0,                           "This map cannot be hosted yet: some of its mod content (%s) is not on this computer. "
+                                   "Open the map once online to get it, then host it." },
+};
+
+int sh_modpub_lobby_host_content(const char *item, const char *revision, char *out, size_t cap)
 {
     pub_seen *seen;
     char names[160] = "";
-    size_t i, n = 0;
+    size_t i, n = 0, worst = sizeof PUB_HOST_HOLDS / sizeof PUB_HOST_HOLDS[0];
+    int shared = 0;
     if (out && cap) out[0] = 0;
-    if (!item || !item[0] || !revision || !(seen = pub_seen_find(item, revision))) return 1;
+    if (!item || !item[0] || !revision || !(seen = pub_seen_find(item, revision))) return SH_MODPUB_HOST_WHOLE;
     for (i = 0; i < seen->rows.count; i++) {
         const sh_modmanifest_row *row = &seen->rows.rows[i];
+        unsigned mask = 0;
+        size_t k;
+        int c, held = 0;
         if (!row->pinned || !g_ops.content_complete || g_ops.content_complete(g_ops.context, row)) continue;
+        /* A row standing in: which causes. One that no player can get is shared; any other holds the start. */
+        if (!g_ops.content_causes || !g_ops.content_causes(g_ops.context, row, &mask) || !mask) mask = 1u;   /* not known */
+        for (c = 0; c < 32; c++) {
+            if (!(mask & (1u << c)) || sh_modpub_standin_shared(c)) continue;
+            held = 1;
+            for (k = 0; k + 1 < sizeof PUB_HOST_HOLDS / sizeof PUB_HOST_HOLDS[0] && PUB_HOST_HOLDS[k].cause != c; k++) {}
+            if (k < worst) worst = k;
+        }
+        if (!held) { shared = 1; continue; }
         if (n++ < 3) {
             const char *label = pub_row_label(row);
             strncat_s(names, sizeof names, n > 1 ? (n == 3 ? " and " : ", ") : "", _TRUNCATE);
             strncat_s(names, sizeof names, label && label[0] ? label : "a mod", _TRUNCATE);
         }
     }
-    if (!n) return 1;
-    if (out && cap)
-        _snprintf_s(out, cap, _TRUNCATE, "This map cannot be hosted: some of its mod content (%s%s) is not on this computer, "
-                    "and every player needs all of it. Play the map once online to get it, then host it.", names,
-                    n > 3 ? " and more" : "");
-    return 0;
+    if (!n) return shared ? SH_MODPUB_HOST_SHARED : SH_MODPUB_HOST_WHOLE;
+    if (n > 3) strncat_s(names, sizeof names, " and more", _TRUNCATE);
+    if (out && cap) _snprintf_s(out, cap, _TRUNCATE, PUB_HOST_HOLDS[worst].text, names);
+    return SH_MODPUB_HOST_REFUSED;
+}
+
+/* An untaken parse waits for the editor to show its map, idle time and polls both counted: an editor open's parse runs
+ * before its level load (busy) and the screen comes up after it, while the hub's read of a map after its play is never
+ * shown in the editor (R-LB1: the editor object keeps its edit and session flag after the editor is left, so they
+ * could not tell the hub from the editor). */
+#define PUB_OPEN_IDLE_MS    4000u
+#define PUB_OPEN_IDLE_POLLS 120u
+
+static void pub_open_owed_poll(void)
+{
+    int shows = g_ops.editor_open ? g_ops.editor_open(g_ops.context) : -1;
+    ULONGLONG now;
+    if (shows != 0) {
+        /* The editor shows the map (or that cannot be told: as before, the editor's). */
+        g_open_owed = 0;
+        if (!g_reopen_asked && pub_editor_fetch()) {
+            /* The open's notice is the store's answer (pub_editor_fetched). */
+        } else if (g_ops.content_notice) {
+            /* An editor open composed stand-ins (modcache.h) and nothing could be asked: its one notice (S2). */
+            char *said = g_ops.content_notice(g_ops.context);
+            if (said) pub_notice(said);
+            free(said);
+        }
+        g_reopen_asked = 0;
+        return;
+    }
+    if (g_ops.busy && g_ops.busy(g_ops.context) == 1) {   /* a load or Play: the wait starts again after it */
+        g_open_idle_polls = 0;
+        g_open_idle_since = 0;
+        return;
+    }
+    now = GetTickCount64();
+    if (!g_open_idle_since) g_open_idle_since = now;
+    g_open_idle_polls++;
+    if (g_open_idle_polls < PUB_OPEN_IDLE_POLLS || now - g_open_idle_since < PUB_OPEN_IDLE_MS) return;
+    /* Not the editor's: the hub read a map after its play (the lobby, RECOMMEND MAP); it says nothing there. */
+    g_open_owed = 0;
+    g_reopen_asked = 0;
+    if (g_ops.content_drop) g_ops.content_drop(g_ops.context);
+    pub_log("MODS: a map read outside the editor (the hub after a play) says nothing and asks nothing");
 }
 
 void sh_modpublished_poll(void)
@@ -1618,17 +1735,18 @@ void sh_modpublished_poll(void)
         if (refused && refusal) {
             if (g_ops.refused_load) g_ops.refused_load(g_ops.context);
             pub_notice(refusal);
-        } else if (!g_reopen_asked && pub_editor_fetch()) {
-            /* The open's notice is the store's answer (pub_editor_fetched). */
-        } else if (g_ops.content_notice) {
-            /* An editor open composed stand-ins (modcache.h) and nothing could be asked: its one notice (S2). */
-            char *said = g_ops.content_notice(g_ops.context);
-            if (said) pub_notice(said);
-            free(said);
+            g_open_owed = 0;
+            g_reopen_asked = 0;
+        } else {
+            /* The editor's open, once the editor shows the map (pub_open_owed_poll): a read it never shows is the
+             * hub's (a map read after its play) and says nothing. */
+            g_open_owed = 1;
+            g_open_idle_polls = 0;
+            g_open_idle_since = 0;
         }
         free(refusal);
-        g_reopen_asked = 0;
     }
+    if (g_open_owed && pub_on_main()) pub_open_owed_poll();
     if (h->state == HOLD_IDLE && !g_notice && !g_notice_ticket && !g_orphans) return;
     if (!pub_on_main()) return;
     pub_orphans_retire();
@@ -1690,6 +1808,7 @@ void sh_modpub_test_reset(void)
     free(g_pass_notice); g_pass_notice = NULL;
     InterlockedExchange(&g_resuming, 0);
     g_reopen_asked = 0;
+    g_open_owed = 0; g_open_idle_polls = 0; g_open_idle_since = 0;
 }
 int sh_modpub_test_state(void) { return g_hold.state; }
 const char *sh_modpub_test_notice(void) { return g_notice ? g_notice : ""; }
@@ -1856,6 +1975,28 @@ static int eng_row_state(void *c, const sh_modmanifest_row *row, const char *sub
 static int eng_rescan(void *c) { (void)c; return sh_modserve_index_rescan(); }
 static int eng_activate(void *c, const sh_modmanifest_list *rows) { (void)c; return sh_modmanifest_activate(rows); }
 static int eng_can_ask(void *c) { (void)c; return sh_engine_dialog_can_ask(); }
+
+/* 1 while the editor shows a map, as the Mods tab's tick reads it (its screen over its edit: modui.h map_info), 0 not,
+ * -1 unknown. Not the edit and the session byte alone: both outlive the editor, so the hub after a published play read
+ * as an editor with a map (R-LB1, check 5). */
+static int eng_editor_open(void *c) { (void)c; return sh_modui_editor_shows_map(); }
+static int eng_busy(void *c) { (void)c; return sh_modui_game_busy(); }
+
+/* idMenuManager_Shell: the current screen +0x8, the next +0xC, the shell state +0x910 (SHELL_SCREEN, SHELL_STATE;
+ * the same on both renderers). One token for a settled screen, -1 while it moves, 0 unknown. */
+static long long eng_screen(void *c)
+{
+    void *manager = eng_shell_manager();
+    (void)c;
+    if (!manager) return 0;
+    __try {
+        int current = *(const volatile int *)((const uint8_t *)manager + 0x08);
+        int next = *(const volatile int *)((const uint8_t *)manager + 0x0C);
+        int state = *(const volatile int *)((const uint8_t *)manager + 0x910);
+        if (next != current) return -1;
+        return ((long long)(unsigned)(state + 1) << 32) | (unsigned)(current + 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
 static int eng_ask(void *c, unsigned gdm, unsigned set, const char *text) { (void)c; return sh_engine_dialog_ask(gdm, set, text); }
 static int eng_poll(void *c, int ticket) { (void)c; return sh_engine_dialog_poll(ticket); }
 static void eng_release(void *c, int ticket) { (void)c; sh_engine_dialog_release(ticket); }
@@ -2265,6 +2406,11 @@ static int eng_content_complete(void *c, const sh_modmanifest_row *row)
     (void)c;
     return row && sh_cache_composed(row->build, &complete) && complete;
 }
+static int eng_content_causes(void *c, const sh_modmanifest_row *row, unsigned *mask)
+{
+    (void)c;
+    return row && sh_cache_absent_causes(row->build, mask);
+}
 static char *eng_content_notice(void *c) { (void)c; return sh_cache_take_notice(); }
 static int eng_content_pending(void *c) { (void)c; return sh_cache_notice_pending(); }
 static void eng_content_drop(void *c) { (void)c; sh_cache_notice_drop(); }
@@ -2309,14 +2455,15 @@ void sh_modpublished_lobby_line(const char *text)
 
 static const sh_modpub_ops ENG_OPS = {
     .on_main = eng_on_main, .row_state = eng_row_state, .rescan = eng_rescan, .activate = eng_activate,
-    .can_ask = eng_can_ask, .ask = eng_ask, .poll = eng_poll, .release = eng_release, .worker_run = eng_worker_run,
+    .can_ask = eng_can_ask, .ask = eng_ask, .poll = eng_poll, .release = eng_release, .screen = eng_screen, .editor_open = eng_editor_open,
+    .busy = eng_busy, .worker_run = eng_worker_run,
     .fetch_for = eng_fetch_for, .metadata_copy = eng_metadata_copy, .metadata_free = eng_metadata_free,
     .metadata_ids = eng_metadata_ids, .hold_token = eng_hold_token, .owner_current = eng_owner_current,
     .host_matches = eng_host_matches, .hold_ui = eng_hold_ui, .drop_ui = eng_drop_ui, .resume = eng_resume,
     .log = eng_log, .print = eng_print, .launch_refused = eng_launch_refused,
     .scripted_maps_allowed = eng_scripted_maps_allowed, .served_scripts = eng_served_scripts, .progress = eng_progress,
     .refused_load = eng_refused_load, .leave_lobby = eng_leave_lobby,
-    .cold_read = eng_cold_read_op, .scope_play = eng_scope_play_op, .content_complete = eng_content_complete,
+    .cold_read = eng_cold_read_op, .scope_play = eng_scope_play_op, .content_complete = eng_content_complete, .content_causes = eng_content_causes,
     .content_notice = eng_content_notice, .content_pending = eng_content_pending, .content_drop = eng_content_drop,
     .content_refresh = eng_content_refresh, .lobby_report = eng_lobby_report, .lobby_state = eng_lobby_state
 };

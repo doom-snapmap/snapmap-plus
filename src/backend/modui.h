@@ -290,6 +290,10 @@ int  sh_modui_scope_launch(const char *why);
  * Main thread. Returns the bundles whose serving changed. */
 int  sh_modui_scope_launch_refused(const char *why);
 
+/* What the tick reads (sh_modui_poll_main): 1 while the editor shows a map (map_info), 0 not, -1 unbound; and 1 while
+ * the game is busy (a map loads or Play runs), else 0. Main thread. */
+int  sh_modui_editor_shows_map(void);
+int  sh_modui_game_busy(void);
 
 /* `sh_mods doctor [verify]`: every mod folder with its state and its plain
  * cause, conflicts with their winners, the game files mods replace, and with

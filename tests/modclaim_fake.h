@@ -22,6 +22,7 @@ typedef struct fc_state {
     unsigned upload_delay_ms;      /* the upload takes this long, reporting progress */
     /* the record */
     int plans, uploads, claims, releases, queued, launches, signers;
+    int claims_refused;   /* claims refused because they named a unit the store does not hold (the Worker's 409) */
     char claim_ref[64], release_ref[64], queued_ref[64];
     size_t claim_n, queued_n;
     char claim_units[FC_MAX][MODNET_HASH_HEX + 1];

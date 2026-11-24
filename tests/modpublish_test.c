@@ -19,6 +19,7 @@
 #include "../src/backend/modcache.h"
 #include "../src/backend/modpin.h"
 #include "../src/backend/modstore.h"
+#include "../src/backend/modserve.h"
 #include "../src/backend/config.h"
 #include "../src/backend/nav_bake.h"
 #include "../src/backend/script/script_runtime.h"
@@ -83,16 +84,6 @@ static void *const MODEL = (void *)(uintptr_t)0x2000;
 
 static void f_log(void *c, const char *line) { (void)c; backend_log(line); }
 static int f_on_main(void *c) { (void)c; return 1; }
-static int f_can_ask(void *c) { (void)c; return 1; }
-static int f_ask(void *c, unsigned gdm, unsigned set, const char *text)
-{
-    (void)c; (void)gdm;
-    F.asks++; F.ask_buttons = (int)set;
-    strcpy_s(F.asked, sizeof F.asked, text);
-    return 7;
-}
-static int f_poll(void *c, int ticket) { (void)c; (void)ticket; return F.answer; }
-static void f_release(void *c, int ticket) { (void)c; (void)ticket; }
 static unsigned long long f_token(void *c, void *editor) { (void)c; return editor == EDITOR ? F.token : 0; }
 static void f_fail(void *c, void *editor) { (void)c; if (editor == EDITOR) F.fails++; }
 /* The engine's PublishStart, through its detour: the hold passes it while resuming, then the search tag is armed. */
@@ -156,15 +147,44 @@ static void f_notice(void *c, void *editor, const char *text) { (void)c; (void)e
 static char g_menu_notice[512];
 static void f_menu_notice(void *c, const char *text) { (void)c; strcpy_s(g_menu_notice, sizeof g_menu_notice, text); }
 static int f_window_open(void *c) { (void)c; return 1; }
+/* The publish screens' FINISH step: the editor's own dialog over them, their close, their pending result. */
+static struct {
+    int asks, yes_no, answer, closes, clears, refuse_one_button, busy_blocks;
+    int dones, starts_at_close, starts_at_done;   /* the frame's order: close, PublishStart, the success event */
+    char title[64], text[256];
+} FF;
+static void f_finish_done(void *c, void *editor) { (void)c; if (editor == EDITOR) { FF.dones++; FF.starts_at_done = F.starts; } }
+static int g_cloud_unhooked;   /* the cloud save's read of the slot is not hooked on this build */
+static int f_cloud_ready(void *c) { (void)c; return !g_cloud_unhooked; }
+static int f_finish_can_ask(void *c, void *editor) { (void)c; return editor == EDITOR && !(FF.busy_blocks && F.busy_on); }
+static int f_finish_ask(void *c, void *editor, const char *title, const char *text, int yes_no)
+{
+    (void)c;
+    if (editor != EDITOR || (!yes_no && FF.refuse_one_button)) return 0;
+    FF.asks++;
+    FF.yes_no = yes_no;
+    strcpy_s(FF.title, sizeof FF.title, title ? title : "(publish failed)");
+    strcpy_s(FF.text, sizeof FF.text, text);
+    /* the one question surface: a Yes/No is the S7 question (buttons as the old shell set, 6), one button a refusal */
+    if (yes_no) { F.asks++; F.ask_buttons = 6; strcpy_s(F.asked, sizeof F.asked, text); }
+    else strcpy_s(F.toast, sizeof F.toast, text);
+    return 1;
+}
+static int f_finish_poll(void *c, void *editor) { (void)c; return editor == EDITOR ? (FF.answer ? FF.answer : F.answer) : 2; }
+static void f_finish_close(void *c, void *editor) { (void)c; if (editor == EDITOR) { FF.closes++; FF.starts_at_close = F.starts; } }
+static void f_finish_clear(void *c, void *editor) { (void)c; if (editor == EDITOR) FF.clears++; }
 static void set_ops(void)
 {
     sh_modpublish_ops ops;
     memset(&ops, 0, sizeof ops);
-    ops.on_main = f_on_main; ops.can_ask = f_can_ask; ops.ask = f_ask; ops.poll = f_poll; ops.release = f_release;
+    ops.on_main = f_on_main;
     ops.editor_token = f_token; ops.publish_fail = f_fail; ops.start = f_start; ops.busy = f_busy;
     ops.placed_names = f_placed_names; ops.editor_notice = f_notice; ops.log = f_log;
     ops.add_tag = f_add_tag; ops.remove_tag = f_remove_tag; ops.edit_ids = f_edit_ids;
     ops.published_query = f_published_query; ops.notice = f_menu_notice;
+    ops.finish_can_ask = f_finish_can_ask; ops.finish_ask = f_finish_ask; ops.finish_poll = f_finish_poll;
+    ops.finish_close = f_finish_close; ops.finish_clear = f_finish_clear; ops.finish_done = f_finish_done;
+    ops.cloud_ready = f_cloud_ready;
     sh_modpublish_test_set_ops(&ops);
 }
 
@@ -242,6 +262,16 @@ static void rows_local(void)
 }
 
 static char *no_folder(void *context, const struct sh_modmanifest_row *row) { (void)context; (void)row; return NULL; }
+/* The game as the unit walk sees it: nothing of a mod's namespace, every other path a stock file. */
+static int t_game(void *ctx, const char *request, char sha[SH_MB_HASH_HEX + 1], char *source, size_t cap)
+{
+    (void)ctx;
+    if (strstr(request, "mods/")) return 0;
+    memset(sha, 'a', SH_MB_HASH_HEX);
+    sha[SH_MB_HASH_HEX] = 0;
+    strcpy_s(source, cap, "snap_gameresources");
+    return 1;
+}
 
 static const char EMPTY_MAP[] = "{\"name\":\"t\",\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
 
@@ -254,21 +284,33 @@ static char *rows_text(const sh_modmanifest_list *rows, size_t *len)
     return text;
 }
 
-/* The engine after the resume: the Save state's save (the pin step, the save observer, the metadata write), then the
- * Save state's callback. Returns what PublishAfterSave's gate said. */
+/* The engine after the resume: the Save state's save (the pin step on a copy of the rows, the slot's text written from
+ * the rows themselves, the save observer, the metadata write), then the Save state's callback, then the cloud save's
+ * read of the slot. Returns what PublishAfterSave's gate said; the slot's text and the uploaded text are kept. */
+static char g_slot[64 * 1024], g_uploaded[64 * 1024];
 static int engine_save(void)
 {
-    sh_modmanifest_list rows;
-    char *text;
-    size_t len = 0;
+    sh_modmanifest_list rows, copy;
+    char *text, *up;
+    size_t len = 0, ul = 0, i;
     int pass;
     memset(&rows, 0, sizeof rows);
+    memset(&copy, 0, sizeof copy);
     (void)t_rows_for(NULL, 0, &rows);
+    for (i = 0; i < rows.count; i++) (void)sh_modmanifest_list_add(&copy, &rows.rows[i]);
     text = rows_text(&rows, &len);
-    (void)sh_modpublish_pin_save(&rows, text, len);
+    (void)sh_modpublish_pin_save(&copy, text, len);   /* the slot keeps the rows as they are */
+    sh_modmanifest_list_free(&copy);
     sh_modpublish_save_seen(text, len);
     (void)sh_modpublish_save_tag(LOCAL_ID, MODEL);
     pass = sh_modpublish_after_save(EDITOR);
+    g_slot[0] = g_uploaded[0] = 0;
+    if (text && len < sizeof g_slot) { memcpy(g_slot, text, len); g_slot[len] = 0; }
+    /* the cloud save reads the slot back to upload it: the published copy */
+    up = pass && text ? sh_modpublish_cloud_text(LOCAL_ID, text, len, &ul) : NULL;
+    if (up && ul < sizeof g_uploaded) { memcpy(g_uploaded, up, ul); g_uploaded[ul] = 0; }
+    else if (!up && text && len < sizeof g_uploaded) { memcpy(g_uploaded, text, len); g_uploaded[len] = 0; }
+    if (up) HeapFree(GetProcessHeap(), 0, up);
     if (text) HeapFree(GetProcessHeap(), 0, text);
     sh_modmanifest_list_free(&rows);
     return pass;
@@ -298,10 +340,23 @@ static int make_sized(const char *path, unsigned long long size)
 /* One publish of the rows in g_rows through the hold, answering `answer` if asked; returns with the hold idle. */
 static void publish(int answer)
 {
+    int i;
     F.answer = answer;
-    CHECK(sh_modpublish_publish_start(EDITOR, 1) == 0);
-    PUMP_UNTIL(!sh_modpublish_holding());
+    CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
+    for (i = 0; i < 3000 && sh_modpublish_holding(); i++) {
+        sh_modpublish_poll();
+        sh_modpublish_editor_tick(EDITOR);   /* the frame after the engine's, where the screens close */
+        Sleep(5);
+    }
 }
+
+/* Tick until the condition holds, the editor's frame running too. */
+#define PUMP_FRAMES_UNTIL(cond) do {                                              \
+    int pump_i_;                                                                  \
+    for (pump_i_ = 0; pump_i_ < 3000 && !(cond); pump_i_++) {                     \
+        sh_modpublish_poll(); sh_modpublish_editor_tick(EDITOR); Sleep(5);        \
+    }                                                                             \
+} while (0)
 
 int main(int argc, char **argv)
 {
@@ -346,6 +401,7 @@ int main(int argc, char **argv)
     printf("-- a map without mod rows publishes as the engine would\n");
     {
         sh_modmanifest_list_free(&g_rows);
+        CHECK(sh_modpublish_finish_gate(EDITOR, 0) == 0);   /* FINISH goes on as the game's */
         CHECK(sh_modpublish_publish_start(EDITOR, 0) == 1);
         CHECK(!sh_modpublish_holding() && F.busy_calls == 0 && g_fc.plans == 0 && !sh_modpublish_test_pin_armed());
         sh_modpublish_save_seen(EMPTY_MAP, strlen(EMPTY_MAP));
@@ -360,11 +416,12 @@ int main(int argc, char **argv)
         size_t mark = g_log_n;
         rows_pinned(1);
         F.busy_seen[0] = 0;
-        CHECK(sh_modpublish_publish_start(EDITOR, 1) == 0);
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
         CHECK(sh_modpublish_holding() && sh_modpublish_test_state() == 1 && F.starts == 0);
         CHECK(F.busy_on && !strcmp(F.busy, "Preparing this map's mod content."));
-        CHECK(sh_modpublish_publish_start(EDITOR, 1) == 0 && F.starts == 0);   /* a second Publish waits */
-        PUMP_UNTIL(!sh_modpublish_holding());
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1 && F.starts == 0);   /* a second PUBLISH waits */
+        CHECK(sh_modpublish_publish_start(EDITOR, 1) == 0 && F.starts == 0);
+        PUMP_FRAMES_UNTIL(!sh_modpublish_holding());
         CHECK(F.starts == 1 && F.resumed_pass == 1 && F.overwrite == 1 && !F.busy_on && F.asks == 0);
         CHECK(g_fc.plans == 1 && g_fc.uploads == 0 && g_fc.signers >= 1);
         CHECK(strstr(g_log + mark, "2 unit(s): 2 held by the store, 0 to upload") != NULL);
@@ -513,8 +570,18 @@ int main(int argc, char **argv)
         CHECK(!strcmp(g_menu_notice, "Players will see this map without the Tyrant from Eternal Demons: its content is "
                                      "not on this computer or in the mod store."));
         CHECK(engine_save() == 1);
-        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc3", "rev1");
-        PUMP_UNTIL(idle_all());
+        {
+            /* R-LB1 F7: the claim names only what the store holds; the absent Tyrant is left out, so it succeeds, nothing
+             * is queued, and the only notice is S8's */
+            int claims = g_fc.claims, refused = g_fc.claims_refused, queued = g_fc.queued;
+            size_t mark = g_log_n;
+            g_menu_notice[0] = 0;
+            sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc3", "rev1");
+            PUMP_UNTIL(idle_all());
+            CHECK(g_fc.claims == claims + 1 && g_fc.claims_refused == refused && g_fc.queued == queued);
+            CHECK(g_fc.claim_n == 1 && !strcmp(g_fc.claim_units[0], UNIT_M));
+            CHECK(g_menu_notice[0] == 0 && !strstr(g_log + mark, "does not hold every unit"));
+        }
         g_menu_notice[0] = 0;
         fc_set_unit(UNIT_T, MODCLAIM_REMOVED, 0);
         publish(0);
@@ -537,20 +604,75 @@ int main(int argc, char **argv)
         CHECK(!strcmp(g_menu_notice, "Players will see this map without Eternal Demons: its content is not on this computer "
                                      "or in the mod store."));
         CHECK(engine_save() == 1);
-        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc4", "rev1");
-        PUMP_UNTIL(idle_all());
+        {
+            /* F7: every unit is on no computer: nothing is claimed, and nothing untrue is said or queued. F9: the map
+             * still names mods, so the emptied claim is no release; the item keeps what it claimed */
+            int claims = g_fc.claims, queued = g_fc.queued, releases = g_fc.releases;
+            size_t mark = g_log_n;
+            g_menu_notice[0] = 0;
+            /* the item an earlier revision claimed (above), republished */
+            sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc3", "rev3");
+            PUMP_UNTIL(idle_all());
+            CHECK(g_fc.claims == claims && g_fc.queued == queued && g_menu_notice[0] == 0);
+            CHECK(g_fc.releases == releases && !strstr(g_log + mark, "uses no mods"));
+            CHECK(strstr(g_log + mark, "its claim is kept as it was") != NULL);
+        }
         fc_set_unit(UNIT_T, MODCLAIM_HELD, 0);
         rows_pinned(1);
     }
 
-    printf("-- a mod that is not on this computer refuses the publish\n");
+    /* The owner (2026-11-18, the SPEC's S8 question): the author proceeds. A local row no folder here serves publishes
+     * as it is, players see stand-ins for its objects, and S8 is the one notice; nothing of it is claimed (R-LV9 check
+     * 4 was refused with "cannot find the mod"). */
+    printf("-- a mod that is not on this computer publishes with S8, its row local and nothing of it claimed\n");
     {
-        int starts = F.starts, plans = g_fc.plans;
+        int starts = F.starts, plans = g_fc.plans, claims = g_fc.claims, queued = g_fc.queued;
+        F.toast[0] = 0;
+        g_menu_notice[0] = 0;
         rows_local();
         publish(0);
-        CHECK(F.starts == starts && g_fc.plans == plans && !F.busy_on);
-        CHECK(!strcmp(F.toast, "The map was not published: Snapmap+ cannot find the mod Hell Guards on this computer. "
-                               "Build or install it in the Mods tab, or remove its objects, then publish again."));
+        /* no unit: the store is not asked */
+        CHECK(F.starts == starts + 1 && g_fc.plans == plans && !sh_modpublish_holding() && !F.toast[0]);
+        CHECK(!strcmp(g_menu_notice, "Players will see this map without the Hellguard from Hell Guards: its content is "
+                                     "not on this computer or in the mod store."));
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc4", "rev1");
+        PUMP_UNTIL(idle_all());
+        CHECK(g_fc.claims == claims && g_fc.queued == queued);   /* nothing is claimed or queued */
+
+        /* with no unit to claim, no publishing key is needed */
+        F.toast[0] = 0;
+        g_menu_notice[0] = 0;
+        g_fc.signer_fails = 1;
+        publish(0);
+        CHECK(F.starts == starts + 2 && !F.toast[0] && strstr(g_menu_notice, "without the Hellguard from Hell Guards"));
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc5", "rev1");
+        PUMP_UNTIL(idle_all());
+        g_fc.signer_fails = 0;
+
+        /* beside a pinned row, a store that does not answer: the publish goes on queued, and S8 is still said */
+        {
+            sh_modmanifest_row row;
+            rows_pinned(1);
+            memset(&row, 0, sizeof row);
+            strcpy_s(row.salt, sizeof row.salt, "hellguar");
+            strcpy_s(row.build, sizeof row.build, SH_MODMANIFEST_LOCAL_BUILD);
+            sh_modmanifest_row_set_name(&row, "Hell Guards");
+            sh_modmanifest_row_add_name(&row, "mods/hellguar/entities/ai/hellguard");
+            CHECK(sh_modmanifest_list_add(&g_rows, &row));
+            sh_modmanifest_row_free(&row);
+        }
+        g_menu_notice[0] = 0;
+        g_fc.plan_code = MODNET_E_TIMEOUT;
+        publish(0);
+        CHECK(F.starts == starts + 3 && !F.toast[0]);
+        CHECK(strstr(g_menu_notice, "Players will see this map without the Hellguard from Hell Guards: its content is "
+                                    "not on this computer or in the mod store.") != NULL);
+        CHECK(strstr(g_menu_notice, "could not reach the mod store yet") != NULL);
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc6", "rev1");
+        PUMP_UNTIL(idle_all());
         rows_pinned(1);
     }
 
@@ -559,7 +681,7 @@ int main(int argc, char **argv)
         int starts = F.starts;
         fc_set_unit(UNIT_M, MODCLAIM_MISSING, 1024 * 1024);
         F.answer = 0;   /* the question stays open */
-        CHECK(sh_modpublish_publish_start(EDITOR, 1) == 0);
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
         PUMP_UNTIL(sh_modpublish_test_state() == 3);
         F.token = 0;
         sh_modpublish_poll();
@@ -567,6 +689,271 @@ int main(int argc, char **argv)
         F.token = 0xED18;
         PUMP_UNTIL(idle_all());
         fc_set_unit(UNIT_M, MODCLAIM_HELD, 0);
+    }
+
+    printf("-- S7 at FINISH: the publish holds with the screens up and asks over them, the only shape (R-LB1)\n");
+    {
+        int starts = F.starts;
+        size_t mark = g_log_n;
+        /* a map without mod rows: FINISH goes on as the game's */
+        sh_modmanifest_list_free(&g_rows);
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 0 && !sh_modpublish_holding());
+        rows_pinned(1);
+
+        /* every unit held: no question; the screens close and the publish starts in the editor's frame */
+        memset(&FF, 0, sizeof FF);
+        FF.busy_blocks = 1;
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
+        CHECK(sh_modpublish_holding() && sh_modpublish_test_state() == 1 && F.busy_on && FF.closes == 0);
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);   /* a second PUBLISH waits for it */
+        PUMP_UNTIL(sh_modpublish_test_state() == 5);
+        CHECK(sh_modpublish_test_state() == 5 && F.starts == starts && FF.closes == 0 && F.busy_on);
+        sh_modpublish_editor_tick((void *)(uintptr_t)0x9999);   /* another editor's frame does nothing */
+        CHECK(sh_modpublish_test_state() == 5);
+        sh_modpublish_editor_tick(EDITOR);
+        CHECK(!sh_modpublish_holding() && FF.closes == 1 && F.starts == starts + 1 && F.resumed_pass == 1 &&
+              F.overwrite == 1 && !F.busy_on && FF.asks == 0);
+        /* in the frame's own order: the screens' close, PublishStart, then its success event */
+        CHECK(FF.dones == 1 && FF.starts_at_close == starts && FF.starts_at_done == starts + 1);
+        CHECK(strstr(g_log + mark, "publish held at FINISH: preparing 1 row(s)") != NULL);
+        CHECK(strstr(g_log + mark, "the publish screens close and the publish starts") != NULL);
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ddddddddddddddddddddddd1", "rev1");
+        PUMP_UNTIL(idle_all());
+
+        /* units the store lacks: asked in the editor's dialog over the screens; No leaves them as they were */
+        fc_set_unit(UNIT_M, MODCLAIM_MISSING, 5ull * 1024 * 1024);
+        memset(&FF, 0, sizeof FF);
+        FF.busy_blocks = 1;
+        FF.answer = 2;
+        F.toast[0] = 0;
+        starts = F.starts;
+        CHECK(sh_modpublish_finish_gate(EDITOR, 0) == 1);
+        PUMP_UNTIL(sh_modpublish_test_state() >= 2);
+        /* prepared: the pacifier stays up until the tick that raises the question, so the screens take no input */
+        CHECK(sh_modpublish_test_state() == 2 && F.busy_on && FF.asks == 0);
+        PUMP_UNTIL(!sh_modpublish_holding());
+        CHECK(FF.asks == 1 && FF.yes_no == 1 && !strcmp(FF.title, "Mod content to upload"));
+        CHECK(!strcmp(FF.text, "Publishing uploads 5 MB of mod content that the mod store does not have yet. Publish?"));
+        CHECK(F.starts == starts && FF.closes == 0 && FF.clears == 1 && !F.busy_on && F.toast[0] == 0);
+        CHECK(!sh_modpublish_test_pin_armed());
+
+        /* Yes: the upload with progress on the pacifier over the screens, then they close and the publish starts */
+        memset(&FF, 0, sizeof FF);
+        FF.busy_blocks = 1;
+        FF.answer = 1;
+        F.busy_seen[0] = 0;
+        g_fc.upload_delay_ms = 200;
+        {
+            int uploads = g_fc.uploads;
+            CHECK(sh_modpublish_finish_gate(EDITOR, 0) == 1);
+            PUMP_UNTIL(sh_modpublish_test_state() == 5);
+            CHECK(FF.asks == 1 && g_fc.uploads == uploads + 1 && F.starts == starts && FF.closes == 0);
+            CHECK(strstr(F.busy_seen, "Uploading mod content: 0 of 5 MB.\n") != NULL);
+            sh_modpublish_editor_tick(EDITOR);
+            CHECK(!sh_modpublish_holding() && FF.closes == 1 && F.starts == starts + 1 && F.overwrite == 0);
+        }
+        g_fc.upload_delay_ms = 0;
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ddddddddddddddddddddddd1", "rev2");
+        PUMP_UNTIL(idle_all());
+
+        /* a refusal is the editor's one-button dialog over the screens; the toast when that cannot show */
+        fc_set_unit(UNIT_M, MODCLAIM_MISSING, 5ull * 1024 * 1024);
+        memset(&FF, 0, sizeof FF);
+        FF.answer = 1;
+        F.toast[0] = 0;
+        starts = F.starts;
+        g_fc.upload_code = MODNET_E_REFUSED;
+        strcpy_s(g_fc.why, sizeof g_fc.why, "over the size limit");
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
+        PUMP_UNTIL(!sh_modpublish_holding());
+        CHECK(F.starts == starts && FF.closes == 0 && FF.clears == 1 && FF.asks == 2 && FF.yes_no == 0);
+        CHECK(!strcmp(FF.title, "(publish failed)") && !strcmp(FF.text, "The map was not published. Over the size limit."));
+        memset(&FF, 0, sizeof FF);
+        FF.answer = 1;
+        FF.refuse_one_button = 1;
+        g_fc.upload_code = MODNET_E_REFUSED;
+        strcpy_s(g_fc.why, sizeof g_fc.why, "over the size limit");
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
+        PUMP_UNTIL(!sh_modpublish_holding());
+        CHECK(F.starts == starts && !strcmp(F.toast, "The map was not published. Over the size limit."));
+        g_fc.why[0] = 0;
+
+        /* the editor leaving abandons it, the question open */
+        memset(&FF, 0, sizeof FF);
+        FF.answer = 0;
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
+        PUMP_UNTIL(sh_modpublish_test_state() == 3);
+        CHECK(sh_modpublish_test_state() == 3 && FF.asks == 1);
+        F.token = 0;
+        sh_modpublish_poll();
+        CHECK(!sh_modpublish_holding() && F.starts == starts && FF.closes == 0);
+        F.token = 0xED19;
+        PUMP_UNTIL(idle_all());
+        fc_set_unit(UNIT_M, MODCLAIM_HELD, 0);
+
+        /* no editor frame comes (its hook not installed): the tick closes the screens and starts it itself */
+        memset(&FF, 0, sizeof FF);
+        mark = g_log_n;
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
+        PUMP_UNTIL(!sh_modpublish_holding());
+        CHECK(FF.closes == 1 && F.starts == starts + 1);
+        CHECK(strstr(g_log + mark, "no editor frame came to close the publish screens") != NULL);
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ddddddddddddddddddddddd1", "rev3");
+        PUMP_UNTIL(idle_all());
+
+        /* one shape: a map with mods that reaches PublishStart without its FINISH hold (FINISH did not bind) is not
+         * published, with one sentence; a vanilla map still is */
+        {
+            int fails = F.fails, plans = g_fc.plans;
+            F.toast[0] = 0;
+            CHECK(sh_modpublish_publish_start(EDITOR, 1) == 0 && !sh_modpublish_holding() && F.fails == fails + 1);
+            CHECK(g_fc.plans == plans && !strcmp(F.toast, "The map was not published: Snapmap+ cannot send its mod "
+                                                          "content with this game version. Use Send feedback in the "
+                                                          "Snapmap+ window."));
+        }
+    }
+
+    printf("-- the author's own map: the slot keeps its local rows, the published copy is pinned, and a republish after the folder changed claims the new unit (R-LB1 F6)\n");
+    {
+        static const char V1[] = "{\r\n\tvalue = \"first\";\r\n}";
+        static const char V2[] = "{\r\n\tvalue = \"second\";\r\n}";
+        char src[MAX_PATH * 2], key[HO_TEXT + 1], cause[HO_TEXT], folder[MAX_PATH * 2] = "", first[65] = "", now[65] = "";
+        sh_ms_install_stats st;
+        sh_ms_list l;
+        sh_mb_bundle b;
+        sh_modmanifest_row row;
+        size_t i;
+        int starts = F.starts, claims = g_fc.claims, releases_before = 0;
+        _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\repub-src", tmp);
+        CreateDirectoryA(src, NULL);
+        mt_write(src, "mod.json", "{\"name\":\"Repub Tyrant\",\"snapmap-plus\":{\"format\":2,\"salt\":\"repubm01\"}}");
+        mt_write(src, "entities\\tyrant.decl", V1);
+        memset(&b, 0, sizeof b);
+        CHECK(HO2(key, cause, sh_ms_install_from_folder(src, NULL, HO_P(0), &st, &b, HO_P(1))));
+        CHECK(sh_modserve_index_build(store) >= 1);
+        sh_cache_set_mods_root(store);      /* the content cache the units go to */
+        sh_modpin_set_folder(NULL, NULL);   /* the folder the serving index names, as the game's publish uses */
+        sh_modpin_set_game(t_game, NULL);
+        /* the author's map: a local row of the installed folder */
+        memset(&row, 0, sizeof row);
+        strcpy_s(row.salt, sizeof row.salt, "repubm01");
+        strcpy_s(row.build, sizeof row.build, b.hash);
+        sh_modmanifest_row_set_name(&row, "Repub Tyrant");
+        sh_modmanifest_row_add_name(&row, "mods/repubm01/tyrant");
+        sh_modmanifest_list_free(&g_rows);
+        CHECK(sh_modmanifest_list_add(&g_rows, &row));
+        sh_modmanifest_row_free(&row);
+        sh_mb_free(&b);
+
+        /* the first publish: the store lacks the Tyrant's unit, so it is asked about and uploaded; the slot keeps the
+         * local row, the cloud save's read of it is pinned, and that unit is claimed */
+        {
+            sh_modmanifest_list probe;
+            sh_modpin_row_result pr;
+            memset(&probe, 0, sizeof probe);
+            CHECK(sh_modmanifest_list_add(&probe, &g_rows.rows[0]));
+            memset(&pr, 0, sizeof pr);
+            CHECK(probe.count && sh_modpin_row(&probe.rows[0], NULL, 0, NULL, &pr) == SH_MODPIN_PINNED &&
+                  probe.rows[0].unit_count == 1);
+            free(pr.why);
+            if (probe.count && probe.rows[0].unit_count) fc_set_unit(probe.rows[0].units[0], MODCLAIM_MISSING, 1024 * 1024);
+            sh_modmanifest_list_free(&probe);
+        }
+        {
+            int uploads = g_fc.uploads, asks = F.asks;
+            publish(1);
+            CHECK(g_fc.uploads == uploads + 1 && F.asks == asks + 1);
+        }
+        CHECK(F.starts == starts + 1);
+        CHECK(engine_save() == 1);
+        CHECK(strstr(g_slot, "\"local\":true") && !strstr(g_slot, "\"objects\""));
+        CHECK(strstr(g_uploaded, "\"objects\"") && !strstr(g_uploaded, "\"local\":true"));
+        {
+            size_t ul = 0;
+            char *other;
+            unsigned sum = 0;
+            /* the request's metadata read takes the published copy's checksum once, for its own slot */
+            sh_modpublish_cloud_sum_note(LOCAL_ID, 0x1234abcdu);
+            CHECK(!sh_modpublish_cloud_sum_take("ANOTHERSLOT", &sum));
+            CHECK(sh_modpublish_cloud_sum_take(LOCAL_ID, &sum) && sum == 0x1234abcdu);
+            CHECK(!sh_modpublish_cloud_sum_take(LOCAL_ID, &sum));
+            /* another slot's read is left as it is, and forgets a checksum noted for a served copy */
+            sh_modpublish_cloud_sum_note(LOCAL_ID, 7);
+            other = sh_modpublish_cloud_text("ANOTHERSLOT", g_slot, strlen(g_slot), &ul);
+            CHECK(other == NULL && !sh_modpublish_cloud_sum_take(LOCAL_ID, &sum));
+            if (other) HeapFree(GetProcessHeap(), 0, other);
+        }
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "eeeeeeeeeeeeeeeeeeeeeee1", "rev1");
+        PUMP_UNTIL(idle_all());
+        CHECK(g_fc.claims == claims + 1 && g_fc.claim_n == 1 && strstr(g_uploaded, g_fc.claim_units[0]));
+        strcpy_s(first, sizeof first, g_fc.claim_units[0]);
+        {
+            /* after the feed post the slot's reads are its own again */
+            size_t ul = 0;
+            char *late = sh_modpublish_cloud_text(LOCAL_ID, g_slot, strlen(g_slot), &ul);
+            CHECK(late == NULL);
+            if (late) HeapFree(GetProcessHeap(), 0, late);
+        }
+
+        /* an unchanged republish: the map's text goes up again (its published copy's checksum differs from the slot's),
+         * but the mod content the store holds is not asked about or uploaded again, and nothing else is said */
+        {
+            int uploads = g_fc.uploads, asks = F.asks, claims0 = g_fc.claims;
+            g_menu_notice[0] = 0;
+            F.toast[0] = 0;
+            publish(1);
+            CHECK(F.starts == starts + 2 && g_fc.uploads == uploads && F.asks == asks);
+            CHECK(engine_save() == 1 && strstr(g_uploaded, first));
+            sh_modpublish_feed_post((void *)(uintptr_t)F.token, "eeeeeeeeeeeeeeeeeeeeeee1", "rev1b");
+            PUMP_UNTIL(idle_all());
+            CHECK(g_fc.claims == claims0 + 1 && g_fc.claim_n == 1 && !strcmp(g_fc.claim_units[0], first));
+            CHECK(g_menu_notice[0] == 0 && F.toast[0] == 0);
+            starts++;
+        }
+
+        /* the author changes the Tyrant in the folder and presses Refresh; the map's row is still local */
+        if (sh_ms_enumerate(&l)) {
+            for (i = 0; i < l.count; i++)
+                if (!_stricmp(l.items[i].salt, "repubm01") && l.items[i].folder) strcpy_s(folder, sizeof folder, l.items[i].folder);
+            sh_ms_list_free(&l);
+        }
+        CHECK(folder[0] != 0);
+        mt_write(folder, "entities\\tyrant.decl", V2);
+        CHECK(sh_ms_sync(NULL, NULL));
+        CHECK(sh_modserve_index_build(store) >= 1);
+
+        /* the republish snapshots the folder's current build: the new unit is uploaded and claimed, and the old one goes
+         * only by that claim's replacing the item's set: no release (F9) */
+        claims = g_fc.claims;
+        releases_before = g_fc.releases;
+        publish(1);
+        CHECK(F.starts == starts + 2);
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "eeeeeeeeeeeeeeeeeeeeeee1", "rev2");
+        PUMP_UNTIL(idle_all());
+        CHECK(g_fc.claims == claims + 1 && g_fc.claim_n == 1 && strstr(g_uploaded, g_fc.claim_units[0]));
+        strcpy_s(now, sizeof now, g_fc.claim_units[0]);
+        CHECK(first[0] && now[0] && strcmp(first, now));
+        CHECK(g_fc.releases == releases_before);
+        CHECK(strstr(g_slot, "\"local\":true") && !strstr(g_slot, "\"objects\""));
+
+        /* a build whose cloud-save read is not hooked: a map with mods is not published (players would get
+         * stand-ins), with no hold and nothing asked of the store */
+        {
+            int plans = g_fc.plans;
+            g_cloud_unhooked = 1;
+            F.toast[0] = 0;
+            CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1 && !sh_modpublish_holding() && g_fc.plans == plans);
+            CHECK(!strcmp(F.toast, "The map was not published: Snapmap+ cannot send its mod content with this game "
+                                   "version. Use Send feedback in the Snapmap+ window."));
+            g_cloud_unhooked = 0;
+        }
+        sh_modpin_set_folder(no_folder, NULL);
+        sh_cache_set_mods_root(NULL);
+        rows_pinned(1);
     }
 
     printf("-- PublishAfterSave refuses a text over the service bound and an unreadable mod list\n");
@@ -849,12 +1236,14 @@ int main(int argc, char **argv)
         for (k = 0; k < 2; k++) {
             sh_modpublish_ops ops;
             memset(&ops, 0, sizeof ops);
-            ops.on_main = f_on_main; ops.can_ask = f_can_ask; ops.ask = f_ask; ops.poll = f_poll; ops.release = f_release;
+            ops.on_main = f_on_main;
             ops.editor_token = f_token; ops.publish_fail = f_fail; ops.start = f_start; ops.busy = f_busy;
             ops.placed_names = f_placed_names; ops.editor_notice = f_notice; ops.log = f_log;
             ops.add_tag = f_add_tag; ops.remove_tag = f_remove_tag; ops.edit_ids = f_edit_ids;
             ops.published_query = f_published_query; ops.notice = f_menu_notice;
             ops.window_open = k ? f_window_open : NULL;
+            ops.finish_can_ask = f_finish_can_ask; ops.finish_ask = f_finish_ask; ops.finish_poll = f_finish_poll;
+            ops.finish_close = f_finish_close; ops.finish_clear = f_finish_clear; ops.finish_done = f_finish_done;
             sh_modpublish_test_set_ops(&ops);
             rows_pinned(0);
             fc_set_unit(UNIT_T, MODCLAIM_HELD, 0);

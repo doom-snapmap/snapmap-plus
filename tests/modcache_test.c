@@ -536,6 +536,13 @@ static void test_cache(const char *top)
         (void)sh_cache_take_notice();
         load_rows(rows, 1, placed, 2);
         CHECK(sh_cache_composed(chash, &complete) && !complete);
+        {
+            /* the causes of what stands in (R-LB1 F5: a host waits only while someone could get it): not asked, S2 */
+            unsigned mask = 0;
+            CHECK(sh_cache_absent_causes(chash, &mask) && mask == (1u << SH_CACHE_ABSENT_OFFLINE));
+            CHECK(!sh_cache_absent_causes("0000000000000000000000000000000000000000000000000000000000000000", &mask) &&
+                  !mask);
+        }
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\barrel.decl", mods3, chash);
         t = read_text(path);
         CHECK(t && strstr(t, "snapmaps/unknown"));
@@ -562,6 +569,10 @@ static void test_cache(const char *top)
             t = sh_cache_take_notice();
             CHECK(t && strstr(t, "the mod store could not be reached") && !strstr(t, "not on this computer"));
             free(t);
+            {
+                unsigned mask = 0;
+                CHECK(sh_cache_absent_causes(chash, &mask) && mask == (1u << SH_CACHE_ABSENT_UNREACHABLE));   /* S4 */
+            }
             /* B2: no name resolves (this computer is not connected): S2, not S4. */
             CHECK(modnet_set_base_url("https://snapmapplus-offline-test.invalid/"));
             CHECK(sh_cache_prepare(chash, &io) == 0);
@@ -573,6 +584,10 @@ static void test_cache(const char *top)
         download(&barrel, &b, pack, 1);
         load_rows(rows, 1, placed, 2);
         CHECK(sh_cache_composed(chash, &complete) && complete);
+        {
+            unsigned mask = 7;
+            CHECK(sh_cache_absent_causes(chash, &mask) && mask == 0);   /* whole: nothing stands in */
+        }
         t = read_text(path);
         CHECK(t && !strstr(t, "snapmaps/unknown") && strstr(t, "renderModelInfo"));
         free(t);

@@ -90,11 +90,43 @@ static void gate(void)
     }
 }
 
+/* R-LB1 F5: every player plays the same bytes; stand-ins for content nobody can get are the same everywhere. */
+static void standins(void)
+{
+    char out[256];
+    int state = -1;
+    sh_modlobby_member m[3] = { { "Sam", 1, 0 }, { "Alex", 2, 0 }, { "Robin", 3, 0 } };
+    printf("-- the host and its joiners play the same content: stand-ins for what nobody can get, or the content\n");
+    sh_modlobby_test_reset();
+    CHECK(sh_modlobby_decode(SH_MODLOBBY_CODE_STANDS_IN, &state, NULL) && state == SH_MODLOBBY_STANDS_IN);
+    /* solo: nothing to agree with */
+    CHECK(sh_modlobby_standins_agree(1, NULL, 0, out, sizeof out) == 1 && !out[0]);
+    CHECK(sh_modlobby_standins_agree(0, NULL, 0, out, sizeof out) == 1);
+    /* the host stands in; joiners that stand in alike, or said nothing, agree */
+    sh_modlobby_note(1, SH_MODLOBBY_CODE_STANDS_IN);
+    CHECK(sh_modlobby_standins_agree(1, m, 3, out, sizeof out) == 1 && !out[0]);
+    /* a joiner holds the real content the host cannot get: the start is refused, naming it */
+    sh_modlobby_note(2, SH_MODLOBBY_CODE_HOLDS);
+    CHECK(sh_modlobby_standins_agree(1, m, 3, out, sizeof out) == 0);
+    CHECK(!strcmp(out, "The match cannot start: Alex has this map's mod content, which this computer cannot get, and "
+                       "every player needs the same content. Ask Alex to host it.") || (printf("%s\n", out), 0));
+    sh_modlobby_note(3, SH_MODLOBBY_CODE_HOLDS);
+    CHECK(sh_modlobby_standins_agree(1, m, 3, out, sizeof out) == 0 && strstr(out, "Alex and Robin have") &&
+          strstr(out, "Ask one of them to host it.") && strlen(out) < 256);
+    /* the host holds the content; a joiner standing in for it cannot play the same bytes */
+    CHECK(sh_modlobby_standins_agree(0, m, 3, out, sizeof out) == 0 && strstr(out, "Sam cannot get some of this map's") &&
+          strlen(out) < 256);
+    sh_modlobby_note(1, SH_MODLOBBY_CODE_HOLDS);
+    CHECK(sh_modlobby_standins_agree(0, m, 3, out, sizeof out) == 1);
+    sh_modlobby_test_reset();
+}
+
 int main(void)
 {
     codes();
     table();
     gate();
+    standins();
     printf("modlobby_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

@@ -2,15 +2,18 @@
  *
  * A map that places mod objects reaches players with its mod content in the mod store, named by units (2.8):
  *
- *   PublishStart  (the editor's Publish) a map with mod rows is held before the engine starts: on the modnet worker the
- *                 units of its local rows are computed (modpin.h), the store says which it holds, and what it lacks is
- *                 sized. Bytes to send: "Publishing uploads 212 MB of mod content that the mod store does not have
- *                 yet. Publish?" (S7); No and the publish never starts. Yes: the units go up with progress on the
- *                 editor's pacifier. Then the engine's PublishStart runs. A row whose mod is not on this computer
- *                 refuses the publish with one sentence; a busy store past two minutes lets it go on, queued (N27).
- *   save          the publish's save writes its rows pinned to the prepared units (sh_modpublish_pin_save, bound as
- *                 modmanifest.h's pin step): the cloud-saved text the engine publishes names units only. The open map
- *                 keeps its own rows. The SerializeToJson detour (rawmap.c) reports the final text.
+ *   FINISH        (PUBLISH on the publish screens) a map with mod rows is held with the screens up: on the modnet
+ *                 worker the units of its local rows are computed (modpin.h), the store says which it holds, and what
+ *                 it lacks is sized. Bytes to send: "Publishing uploads 212 MB of mod content that the mod store does
+ *                 not have yet. Publish?" (S7), in the editor's own dialog over the screens; No leaves the author on
+ *                 FINISH. Yes: the units go up with progress on the editor's pacifier. Then the screens close and the
+ *                 engine's PublishStart runs. A row whose mod is not on this computer publishes local, players see
+ *                 stand-ins for its objects, and S8 names them; a busy store past two minutes lets it go on, queued
+ *                 (N27).
+ *   save          the publish's save pins a copy of its rows to the prepared units (sh_modpublish_pin_save, bound
+ *                 as modmanifest.h's pin step): the text the engine publishes (the cloud save's read of the slot,
+ *                 sh_modpublish_cloud_text) names units, but for a row no folder here serves, which stays local. The open map and its slot keep their own rows. The
+ *                 SerializeToJson detour (rawmap.c) reports the final text.
  *   PublishAfterSave  a text over the service bound (10,485,760 bytes) or an unreadable mod list is refused through
  *                 the engine's own PublishFail.
  *   PublishFeedPost   (the item id known) the save's units are claimed for the item (modclaim.h); a republish replaces
@@ -71,8 +74,20 @@ void sh_modpublish_save_seen(const char *text, size_t length);
 /* ------------------------------------------------------------ decisions */
 
 /* PublishStart(editorLocal, overwrite), before the engine's: 1 to call it now (a map without mod rows, or the resume
- * of a held publish), 0 when the publish is held (or a held one is still preparing). Main thread. */
+ * of a FINISH hold), 0 when a hold is on its way, or when a map with mod rows reaches it without its FINISH hold (the
+ * FINISH step did not bind): that publish is refused with one sentence. Main thread. */
 int  sh_modpublish_publish_start(void *editor, unsigned char overwrite);
+
+/* The publish screens' PUBLISH on FINISH, after the game's own checks passed and before the screens close (the
+ * MapProperties frame's gate call). 1 holds the publish with the screens up: the hold prepares, asks S7 in the editor's
+ * own dialog over them (the one the game's publish errors use), uploads, then closes the screens and starts the
+ * engine's PublishStart itself, then the frame's success event. 0 lets the frame go on (a map without mod rows).
+ * Main thread. */
+int  sh_modpublish_finish_gate(void *editor, unsigned char overwrite);
+
+/* The EditorFrame detour, after the engine's frame: a publish held at FINISH closes the screens and starts here, where
+ * the product already changes the editor's state (fly_to.c). Idle cost: one read. */
+void sh_modpublish_editor_tick(void *editor);
 
 /* The pin step of a held publish's save (modmanifest.h sh_modmanifest_pin_fn): pins `rows` from the prepared units.
  * Unarmed (no publish resumed in the last 30 s) it returns 0 and the save writes its rows as they are. */
@@ -93,6 +108,11 @@ void sh_modpublish_publish_started(const char *local_id);
  * armed publish's own write disarms the arm. -1 when the list could not be
  * changed, 0 when nothing was asked (no fresh save, no model). */
 int  sh_modpublish_save_tag(const char *local_id, void *model);
+
+/* The cloud save's read of a map's slot (ReadLocalSavedMapText, while it uploads a publish): the slot's text with the
+ * publish's pinned rows (the published copy, HeapFree), or NULL to upload the slot as it is. The slot itself keeps the
+ * map's own rows, so the author's map follows their folders (R-LB1 F6). Main thread. */
+char *sh_modpublish_cloud_text(const char *local_id, const char *text, size_t length, size_t *out_length);
 
 /* PublishAfterSave(editorLocal): 1 to call the original now, 0 when the
  * publish was held or refused (the detour returns without the original). */
@@ -145,10 +165,6 @@ char *sh_modpublish_cache_path(const char *item_id, const char *revision);
 typedef struct sh_modpublish_ops {
     void *context;
     int  (*on_main)(void *c);
-    int  (*can_ask)(void *c);
-    int  (*ask)(void *c, unsigned gdm_id, unsigned button_set, const char *text);
-    int  (*poll)(void *c, int ticket);            /* an sh_engine_dialog_result */
-    void (*release)(void *c, int ticket);
     /* The editor's live edit object (its token) or 0 outside a session. */
     unsigned long long (*editor_token)(void *c, void *editor);
     void (*publish_fail)(void *c, void *editor);   /* the engine's PublishFail */
@@ -186,6 +202,19 @@ typedef struct sh_modpublish_ops {
     /* 1 when the Snapmap+ window is showing (it shows the backup offer itself). NULL or 0: the publish's notice says
      * where the offer is (SH_MODPUBLISH_KEY_MADE_TEXT). */
     int  (*window_open)(void *c);
+    /* The publish held at FINISH (sh_modpublish_finish_gate), with the publish screens up. NULL: FINISH never holds,
+     * and a map with mods is not published. */
+    int  (*finish_can_ask)(void *c, void *editor);   /* 1 when neither the editor's dialog nor its pacifier is up */
+    /* The editor's own dialog over the screens: Yes/No (yes_no 1) or one button; title NULL is the game's "publish
+     * failed" title. 1 when it shows. */
+    int  (*finish_ask)(void *c, void *editor, const char *title, const char *text, int yes_no);
+    int  (*finish_poll)(void *c, void *editor);   /* 0 still up, 1 the first button, 2 the second or Back */
+    void (*finish_close)(void *c, void *editor);  /* the screens close, as the frame closes them before PublishStart */
+    void (*finish_done)(void *c, void *editor);   /* the frame's success event, as it follows PublishStart there */
+    /* 1 when the cloud save's read of the slot reaches sh_modpublish_cloud_text, so the published copy can carry the
+     * pinned rows. NULL: it does (tests). */
+    int  (*cloud_ready)(void *c);
+    void (*finish_clear)(void *c, void *editor);  /* a screens' result left while the publish was held is forgotten */
 } sh_modpublish_ops;
 
 /* After a publish that made the key while the Snapmap+ window was closed (the editor has no passphrase field). */
@@ -194,7 +223,7 @@ typedef struct sh_modpublish_ops {
 #ifdef SH_MODPUBLISH_TESTING
 void sh_modpublish_test_set_ops(const sh_modpublish_ops *ops);
 void sh_modpublish_test_reset(void);
-/* 0 idle, 1 preparing, 2 raise, 3 asking, 4 uploading */
+/* 0 idle, 1 preparing, 2 raise, 3 asking, 4 uploading, 5 waiting for the editor frame to resume the hold */
 int  sh_modpublish_test_state(void);
 int  sh_modpublish_test_pin_armed(void);          /* the next save pins its rows */
 /* The rows a publish finds (NULL: the save's own rule, modmanifest.h sh_modmanifest_rows_for). */
@@ -224,6 +253,43 @@ typedef struct sh_modpublish_bound {
  * filled), else the name of the first check that failed, for the log. The bind and tests/modpub_sites_test.c both
  * run this function. */
 const char *sh_modpublish_check_sites(const sh_modpublish_sites *sites, sh_modpublish_bound *out);
+
+/* The cloud-save request's read of the slot (CloudSaveSlotReadCall, VK 0x11BE407, GL 0x11BD7D7), the read the
+ * published copy is made at: NULL when its bytes hold, else the first check that failed. */
+const char *sh_modpublish_check_cloud_read(const uint8_t *call, const uint8_t *read_text);
+
+/* The cloud-save request's read of the slot's metadata (CloudSaveMetaReadCall, VK 0x11BE673, GL 0x11BDA43, calling
+ * `meta_read`, ReadLocalSaveMeta), and id's hash of the map text that fills a model's declChecksum (+0xB8): `create`
+ * (NewSavedMapDeclChecksumCall) and `local` (LocalSaveDeclChecksumCall) both call it. NULL when every byte holds,
+ * with *hash the hash function. */
+const char *sh_modpublish_check_cloud_meta(const uint8_t *meta, const uint8_t *meta_read, const uint8_t *create,
+                                           const uint8_t *local, const void **hash);
+
+/* The published copy's declChecksum: noted when the cloud save's read of the slot gets the pinned text (the engine's
+ * own hash of it), taken once by that request's metadata read of the same slot. 1 with *sum, 0 none. */
+void sh_modpublish_cloud_sum_note(const char *local_id, unsigned sum);
+int  sh_modpublish_cloud_sum_take(const char *local_id, unsigned *sum);
+
+/* The FINISH step (VK 0x1190362, GL 0x118F4E2: the MapProperties frame's PUBLISH case): `call` is its gate call
+ * (PublishFinishGateCall), `start` PublishStart, `gdm_show` the editor dialog's show (EditorGdmShow), `answer` the
+ * EditorFrame call of that dialog's input (EditorGdmAnswerCall). */
+typedef struct sh_modpublish_finish_sites {
+    const uint8_t *call, *start, *gdm_show, *answer;
+} sh_modpublish_finish_sites;
+typedef struct sh_modpublish_finish_bound {
+    const void *gate;    /* (editor, show 1, back 1): the game's limits, start-module and deprecated-entity checks */
+    const void *close;   /* (editor): the screens close (the editor's state stack pops) */
+    const void *input;   /* (dialog, input): the dialog's answer, +0x1DC under the flag +0x1D8 */
+    /* the frame's own success event after PublishStart: event_log(event_owner(), event_name, event_desc) */
+    const void *event_owner, *event_log;
+    const char *event_name, *event_desc;
+} sh_modpublish_finish_bound;
+/* Every byte the FINISH hold relies on, in the functions' own code: the case's arguments (editor rdi, state rsi, the
+ * overwrite byte +0x21), the gate, the screens' close and PublishStart in order, the gate's own dialog on
+ * [editor+0x21088]+0x8E8 with +0xA2C bit 0, the descriptor the show reads, the screens' pending result
+ * [editor+0x21088]+0xA18 -> +0x8E0, and the answer EditorFrame waits for before it clears bit 0. NULL when each
+ * holds, else the first check that failed. The bind and tests/modpub_sites_test.c both run it. */
+const char *sh_modpublish_check_finish(const sh_modpublish_finish_sites *sites, sh_modpublish_finish_bound *out);
 
 #ifndef SH_MODPUBLISH_PURE
 #include "signatures.h"

@@ -938,14 +938,24 @@ int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bund
  * the map plays on if the game can, and the asked name is recorded. The
  * provider (overrides.c) calls sh_modserve_note_miss with every request it
  * found nowhere; one under mods/<salt>/ of a composition (a board square
- * aside: a unit leaves the squares its materials do not draw out on purpose)
- * is noted once per process, with the name of the load that asked for it
+ * aside: a unit leaves the squares its materials do not draw out on purpose;
+ * and the engine's probes of names the build never carried aside: a name the
+ * composition carries as a decl of another type, such as a sound decl's name
+ * a field typed idDeclEntityDef asks for as an entityDef, and a carried
+ * skeleton's default clip, which the unit walk would have kept had the build
+ * held one) is noted once per process, with the name of the load that asked for it
  * when the main thread's open loads say (`by`, else ""), logged:
  *   MODS: <mod name> came with this map without <request>, which <by> asked for; the map goes on without it
  * and handed to the bound reporter with the composition's first unit
  * (modpublish.c: the store keeps it for the publishers of maps that claim the
  * unit, whose next publish carries the file, SPEC-distribution 3.8). Returns
  * 1 when noted now, 0 otherwise. Any thread. */
+/* The folder the content cache composes a row's stand-ins under (modcache.c, D60): a palette row's stand-in is the
+ * snapEditorEntityDef mods/<salt>/snapmapplus_standin/<placed name>. Its names are the product's, never a unit's. */
+#define SH_MODSERVE_STANDIN_DIR "snapmapplus_standin"
+/* 1 when `name` (an engine request, a decl name or an author path) lies under a stand-in folder: never a file a unit
+ * lost, never asked of the store, never read again once the row's real composition serves (R-LB1). */
+int sh_modserve_standin_name(const char *name);
 typedef void (*sh_modserve_miss_fn)(const char *salt, const char *unit, const char *request, const char *by);
 void sh_modserve_set_miss_reporter(sh_modserve_miss_fn fn);
 int  sh_modserve_note_miss(const char *request);

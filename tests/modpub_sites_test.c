@@ -101,6 +101,85 @@ static void check_image(const char *path)
             IMG_CHECK(sh_modpublish_check_sites(&hs, &hb) == NULL);
         }
     }
+
+    /* The cloud-save request's read of the slot: the published copy is made there (R-LB1 F6). */
+    {
+        const uint8_t *call = image_site(base, results, n, "CloudSaveSlotReadCall", vk);
+        const uint8_t *read = image_site(base, results, n, "ReadLocalSavedMapText", vk);
+        failed = sh_modpublish_check_cloud_read(call, read);
+        printf("  the cloud-save read's checks: %s\n", failed ? failed : "all hold");
+        IMG_CHECK(failed == NULL);
+        IMG_CHECK(call == base + (vk ? 0x11BE407u : 0x11BD7D7u));
+        if (!failed) {
+            uint8_t *at = (uint8_t *)call - 1, keep = *at;   /* the model's local id, +0x10 */
+            *at ^= 0x08;
+            failed = sh_modpublish_check_cloud_read(call, read);
+            IMG_CHECK(failed && strstr(failed, "cloud-save read -0x04"));
+            *at = keep;
+        }
+    }
+
+    /* The cloud-save request's metadata read and the declChecksum hash: the published copy's metadata names its own
+     * text (R-LB1 F6). */
+    {
+        const uint8_t *meta = image_site(base, results, n, "CloudSaveMetaReadCall", vk);
+        const uint8_t *create = image_site(base, results, n, "NewSavedMapDeclChecksumCall", vk);
+        const uint8_t *local = image_site(base, results, n, "LocalSaveDeclChecksumCall", vk);
+        const uint8_t *meta_read = base + (vk ? 0x11CB8C0u : 0x11CAC90u);
+        const void *hash = NULL;
+        failed = sh_modpublish_check_cloud_meta(meta, meta_read, create, local, &hash);
+        printf("  the cloud-save metadata's checks: %s\n", failed ? failed : "all hold");
+        IMG_CHECK(failed == NULL);
+        IMG_CHECK(hash == (const void *)(base + (vk ? 0x2D6A90u : 0x2D68F0u)));
+        if (!failed) {
+            uint8_t *at = (uint8_t *)create + 7, keep = *at;   /* +0xB8 */
+            *at ^= 0x10;
+            failed = sh_modpublish_check_cloud_meta(meta, meta_read, create, local, &hash);
+            IMG_CHECK(failed && strstr(failed, "declChecksum at +0xB8"));
+            *at = keep;
+        }
+    }
+
+    /* The publish screens' FINISH step (modpublish.c eng_bind_finish, R-LB1 S7). */
+    {
+        sh_modpublish_finish_sites fs;
+        sh_modpublish_finish_bound fb;
+        fs.call = image_site(base, results, n, "PublishFinishGateCall", vk);
+        fs.start = hs.start;
+        fs.gdm_show = image_site(base, results, n, "EditorGdmShow", vk);
+        fs.answer = image_site(base, results, n, "EditorGdmAnswerCall", vk);
+        failed = sh_modpublish_check_finish(&fs, &fb);
+        printf("  the FINISH step's checks: %s\n", failed ? failed : "all hold");
+        IMG_CHECK(failed == NULL);
+        if (!failed) {
+            const uint8_t *gate_expect = base + (vk ? 0x1199CC0u : 0x1198F20u);
+            const uint8_t *close_expect = base + (vk ? 0x1182430u : 0x1181590u);
+            const uint8_t *input_expect = base + (vk ? 0x128DAA0u : 0x128D0F0u);
+            /* the decoded targets are the functions read in Ghidra on this renderer */
+            IMG_CHECK(fb.gate == (const void *)gate_expect && fb.close == (const void *)close_expect &&
+                      fb.input == (const void *)input_expect);
+            /* the success event the resume writes after PublishStart: idStructuredLogManager::CreateInfoLog */
+            IMG_CHECK(fb.event_owner == (const void *)(base + (vk ? 0x17B2690u : 0x17B3A20u)) &&
+                      fb.event_log == (const void *)(base + (vk ? 0x17B0380u : 0x17B1710u)) &&
+                      !strcmp(fb.event_name, "snapeditor.publish.success"));
+            printf("  the success event: %s, \"%s\"\n", fb.event_name, fb.event_desc);
+            {
+                uint8_t *at = (uint8_t *)fs.call + 0x17, keep = *at;   /* the overwrite byte's offset, +0x21 */
+                *at ^= 0x01;
+                failed = sh_modpublish_check_finish(&fs, &fb);
+                IMG_CHECK(failed && strstr(failed, "FINISH gate call +0x15"));
+                *at = keep;
+            }
+            {
+                uint8_t *at = (uint8_t *)fs.answer + 0x0B, keep = *at;   /* the answered flag's offset, +0x1D8 */
+                *at ^= 0x08;
+                failed = sh_modpublish_check_finish(&fs, &fb);
+                IMG_CHECK(failed && strstr(failed, "EditorFrame dialog answer"));
+                *at = keep;
+            }
+            IMG_CHECK(sh_modpublish_check_finish(&fs, &fb) == NULL);
+        }
+    }
     free(results);
     (void)sh_host_test_bind_image(NULL, NULL);
     free(base);
@@ -114,7 +193,8 @@ static int synthetic(void)
     memset(&hs, 0, sizeof hs);
     /* No site, no bind: never a crash or a pass. */
     if (!sh_modpub_check_sites(NULL, NULL) || !sh_modpub_check_sites(&ps, NULL) ||
-        !sh_modpublish_check_sites(NULL, NULL) || !sh_modpublish_check_sites(&hs, NULL)) {
+        !sh_modpublish_check_sites(NULL, NULL) || !sh_modpublish_check_sites(&hs, NULL) ||
+        !sh_modpublish_check_finish(NULL, NULL)) {
         printf("FAIL a missing site passed\n");
         return 1;
     }

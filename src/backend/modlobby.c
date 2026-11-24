@@ -28,6 +28,9 @@ int sh_modlobby_decode(unsigned code, int *state, int *percent)
         p = 100;
     } else if (code == SH_MODLOBBY_CODE_FAILED) {
         s = SH_MODLOBBY_FAILED;
+    } else if (code == SH_MODLOBBY_CODE_STANDS_IN) {
+        s = SH_MODLOBBY_STANDS_IN;
+        p = 100;
     } else {
         return 0;
     }
@@ -130,6 +133,37 @@ int sh_modlobby_gate(const sh_modlobby_member *members, size_t count, char *out,
     if (out && cap) out[0] = 0;
     if (!members || !lb_pending_list(members, count, 1, " and ", list, sizeof list - sizeof head)) return 1;
     if (out && cap) _snprintf_s(out, cap, _TRUNCATE, "%s%s.", head, list);
+    return 0;
+}
+
+int sh_modlobby_standins_agree(int host_stands_in, const sh_modlobby_member *members, size_t count, char *out,
+                               size_t cap)
+{
+    char names[160] = "";
+    const char *who[3] = { NULL, NULL, NULL };
+    size_t n = 0, i;
+    int against = host_stands_in ? SH_MODLOBBY_HOLDS : SH_MODLOBBY_STANDS_IN;
+    if (out && cap) out[0] = 0;
+    for (i = 0; members && i < count; i++) {
+        if (sh_modlobby_state_of(members[i].user, NULL) != against) continue;
+        if (n < 3) who[n] = members[i].name && members[i].name[0] ? members[i].name : "a player";
+        n++;
+    }
+    if (!n) return 1;
+    for (i = 0; i < n && i < 3; i++) {
+        if (i) strncat_s(names, sizeof names, i + 1 == (n < 3 ? n : 3) && n <= 3 ? " and " : ", ", _TRUNCATE);
+        strncat_s(names, sizeof names, who[i], _TRUNCATE);
+    }
+    if (out && cap) {
+        if (host_stands_in)
+            _snprintf_s(out, cap, _TRUNCATE, "The match cannot start: %s%s %s this map's mod content, which this computer "
+                        "cannot get, and every player needs the same content. Ask %s to host it.", names,
+                        n > 3 ? " and more" : "", n > 1 ? "have" : "has", n > 1 ? "one of them" : names);
+        else
+            _snprintf_s(out, cap, _TRUNCATE, "The match cannot start: %s%s cannot get some of this map's mod content, which "
+                        "the mod store no longer has, and every player needs the same content.", names,
+                        n > 3 ? " and more" : "");
+    }
     return 0;
 }
 
@@ -339,18 +373,31 @@ static int lb_host_may_start(const char *where)
     char names[8][64], item[128], rev[128], sentence[256];
     void *lobby = lb_game_lobby();
     size_t n;
+    int content;
     if (!lb_hosting_modded(lobby, item, sizeof item, rev, sizeof rev)) return 1;
-    /* D-A41 Q2: a host whose own copy stands in for objects cannot host: every joiner needs the whole content. */
-    if (!sh_modpub_lobby_map_whole(item, rev, sentence, sizeof sentence)) {
-        lb_logf("MODS: lobby: the %s of '%s' is refused: this computer plays the map with stand-ins", where, item);
+    /* Every player plays the same bytes. A host whose copy stands in for content some player could get waits for it
+     * (its cause's sentence); one that stands in only for content nobody can get (S3, S5, S4b) starts, solo or with
+     * joiners that compose the same stand-ins (R-LB1 F5; every published play is a lobby the player hosts). */
+    content = sh_modpub_lobby_host_content(item, rev, sentence, sizeof sentence);
+    if (content == SH_MODPUB_HOST_REFUSED) {
+        lb_logf("MODS: lobby: the %s of '%s' waits: this computer lacks content a player could get", where, item);
         sh_modpublished_notice(sentence);
         return 0;
     }
     n = lb_members(lobby, members, names, 8);
-    if (sh_modlobby_gate(members, n, sentence, sizeof sentence)) return 1;
-    lb_logf("MODS: lobby: the %s of '%s' waits: a player has not got the map's mod content yet", where, item);
-    sh_modpublished_notice(sentence);
-    return 0;
+    if (!sh_modlobby_gate(members, n, sentence, sizeof sentence)) {
+        lb_logf("MODS: lobby: the %s of '%s' waits: a player has not got the map's mod content yet", where, item);
+        sh_modpublished_notice(sentence);
+        return 0;
+    }
+    if (!sh_modlobby_standins_agree(content == SH_MODPUB_HOST_SHARED, members, n, sentence, sizeof sentence)) {
+        lb_logf("MODS: lobby: the %s of '%s' is refused: a player's content and this computer's differ", where, item);
+        sh_modpublished_notice(sentence);
+        return 0;
+    }
+    if (content == SH_MODPUB_HOST_SHARED)
+        lb_logf("MODS: lobby: the %s of '%s' runs with stand-ins for content no player can get", where, item);
+    return 1;
 }
 
 /* idMenuScreen_Shell_SnapmapLobby::TryToStartMatch (the lobby's Start, and the Update that starts after a kick). */

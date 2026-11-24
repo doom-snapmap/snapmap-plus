@@ -571,6 +571,8 @@ int modclaim_claim(const char *ref, const char *const *units, size_t n, char (**
     long long rev, got = 0;
     int code, uploaded = 0;
     unsigned attempt = 0, stale = 0;
+    const char **kept = NULL;   /* the units left once those on no computer are left out */
+    size_t nkept = 0;
     if (removed) *removed = NULL;
     if (nremoved) *nremoved = 0;
     if (!mc_ref_ok(ref)) { mc_why(why, "the published item's id is not one Snapmap+ can use"); return MODNET_E_ARG; }
@@ -591,11 +593,32 @@ int modclaim_claim(const char *ref, const char *const *units, size_t n, char (**
         free(gone);
         if (code == MODNET_E_CONFLICT && got >= 0 && stale++ < 2) { rev = got + 1; continue; }   /* this key's earlier rev */
         if (code == MODNET_E_CONFLICT && got < 0 && !uploaded) {
-            /* a unit the store lacks (deleted after the delay, or a queued upload): send what this computer has */
+            /* a unit the store lacks (deleted after the delay, or a queued upload): send what this computer has, and
+             * leave out of the claim what is on no computer and not in the store (R-LB1 F7): no claim of it could
+             * succeed, and no later start could send it */
             modclaim_plan plan;
             uploaded = 1;
             if (modclaim_plan_units(units, n, &plan, io, why) == MODNET_OK) {
                 int up = modclaim_upload(&plan, io, why);
+                size_t i, k, left = 0;
+                for (i = 0; i < plan.n; i++)
+                    if (plan.state[i] == MODCLAIM_ABSENT || plan.state[i] == MODCLAIM_REMOVED) left++;
+                if (up == MODNET_OK && left && !kept) {
+                    kept = (const char **)calloc(n ? n : 1, sizeof *kept);
+                    for (i = 0; kept && i < n; i++) {
+                        int gone = 0;
+                        for (k = 0; k < plan.n && !gone; k++)
+                            gone = !strcmp(plan.units[k], units[i]) &&
+                                   (plan.state[k] == MODCLAIM_ABSENT || plan.state[k] == MODCLAIM_REMOVED);
+                        if (!gone) kept[nkept++] = units[i];
+                    }
+                    if (kept) {
+                        mc_logf("MODS: publish: item '%s': %zu unit(s) are on no computer and not in the mod store; the "
+                                "claim names the other %zu", ref, n - nkept, nkept);
+                        units = kept;
+                        n = nkept;
+                    }
+                }
                 modclaim_plan_free(&plan);
                 if (up == MODNET_OK) continue;
             }
@@ -604,6 +627,7 @@ int modclaim_claim(const char *ref, const char *const *units, size_t n, char (**
         mc_why(why, "%s", r.message ? r.message : modnet_code_text(code));
         break;
     }
+    free((void *)kept);
     SecureZeroMemory(secret, sizeof secret);
     return code;
 }

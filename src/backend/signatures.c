@@ -1553,6 +1553,36 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "4C 8B DC 57 41 56 41 57 48 81 EC 90 00 00 00 48 C7 44 24 20 FE FF FF FF 49 89 5B 10 49 89 6B 18 49 89 73 20 48 8B 05 "
       "?? ?? ?? ??"
       , 0x119AD00u, 0x1199F60u },
+    /* The publish screens' FINISH step (modpublish.c, R-LB1 S7): the MapProperties frame's PUBLISH case calls the
+     * gate (editor, 1, 1), then the screens' close, then PublishStart(editor, state+0x21). The gate call is repointed
+     * at a near relay, where a map with mods is held; the editor dialog's show and the EditorFrame call of its input
+     * are read, never hooked. Each unique on both build 13954591 executables. */
+    { "PublishFinishGateCall",
+      "E8 ?? ?? ?? ?? 84 C0 0F 85 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ?? 0F B6 56 21 48 8B CF E8 ?? ?? ?? ??"
+      , 0x1190362u, 0x118F4E2u },
+    { "EditorGdmShow", /* (dialog [editor+0x21088]+0x8E8, descriptor 0xD0): title, text, labels, kind +0xC0 */
+      "40 55 56 57 48 81 EC C0 00 00 00 48 C7 44 24 50 FE FF FF FF 48 89 9C 24 F0 00 00 00 48 8B 05 ?? ?? ?? ?? "
+      "48 33 C4 48 89 84 24 B8 00 00 00 48 8B F2 48 8B F9 E8 ?? ?? ?? ?? 84 C0 0F 84"
+      , 0x128F0E0u, 0x128E730u },
+    { "CloudSaveSlotReadCall", /* the cloud-save request's ReadLocalSavedMapText(model->localId, ...): the read the
+                                * published copy is made at (modpublish.c eng_cloud_read, R-LB1 F6). Read, never hooked. */
+      "E8 ?? ?? ?? ?? 44 8B F8 85 C0 0F 84 EF 00 00 00"
+      , 0x11BE407u, 0x11BD7D7u },
+    { "CloudSaveMetaReadCall", /* the cloud-save request's ReadLocalSaveMeta(model->localId, &model, ...): the slot's
+                                * metadata into the model it uploads; relayed so the published copy's declChecksum is
+                                * its own text's (modpublish.c eng_cloud_meta_detour, R-LB1 F6). */
+      "E8 ?? ?? ?? ?? 44 8B E0 85 C0 0F 84 C9 00 00 00"
+      , 0x11BE673u, 0x11BDA43u },
+    { "NewSavedMapDeclChecksumCall", /* CreateLocalSavedMapInternal: model.declChecksum (+0xB8) = id's hash of the
+                                      * map text; read for that hash function and the field, never hooked. */
+      "E8 ?? ?? ?? ?? 89 87 B8 00 00 00 E8"
+      , 0x11BEF65u, 0x11BE335u },
+    { "LocalSaveDeclChecksumCall", /* the local save: the same hash over the saved JSON into the slot's declChecksum */
+      "E8 ?? ?? ?? ?? 89 06 B0 01 EB 02 32 C0"
+      , 0x11C539Cu, 0x11C476Cu },
+    { "EditorGdmAnswerCall", /* EditorFrame: the dialog's input, then +0xA2C bit 0 cleared once it is answered */
+      "E8 ?? ?? ?? ?? 44 38 BB D8 01 00 00 0F 84 ?? ?? ?? ?? 48 8B 86 88 10 02 00 83 A0 2C 0A 00 00 FE"
+      , 0x118301Bu, 0x118217Bu },
     { "PublishedPrevQuery", /* (ctx, const char *parentItemId, const char *cursor, ok, fail): the maps_pub_prev_pub search for the items the player published from one cloud-saved item; ok gets idList<idPublishedMapModel> (stride 0x588, id idStr at +0). Not hooked: called by the delete check. */
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 C8 FE FF FF 48 81 EC 38 02 00 00 48 C7 45 E0 FE FF FF FF 48 8B 05 "
       "?? ?? ?? ?? 48 33 C4 48 89 85 20 01 00 00 4D 8B E1 49 8B F0 4C 8B EA 48 8B D9 48 89 4D D0 4C 8B B5 A0 01 00 00"

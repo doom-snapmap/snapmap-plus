@@ -331,9 +331,9 @@ size_t sh_modmanifest_rows_choices(const sh_modmanifest_list *rows, char **out);
  * map's map-level rows, its pinned rows kept), without a map text. The count, -1 on failure; *out to free. */
 int sh_modmanifest_rows_for(const char *const *names, size_t count, sh_modmanifest_list *out);
 
-/* The publish's pin step (modpin.h), bound while a publish is armed: called by the save with the rows it will write
- * (a copy) and the saved text; returns 1 when it pinned them (the save writes the pinned copy), 0 to write the rows as
- * they are. NULL unbinds. */
+/* The publish's pin step (modpin.h), bound while a publish is armed: called by the save with the rows it writes (a
+ * copy) and the saved text, to pin that copy for the published copy alone (modpublish.h sh_modpublish_cloud_text);
+ * returns 1 when it pinned them. The slot and the open map keep the map's own rows either way. NULL unbinds. */
 typedef int (*sh_modmanifest_pin_fn)(sh_modmanifest_list *rows, const char *json, size_t length);
 void sh_modmanifest_set_pin(sh_modmanifest_pin_fn pin);
 

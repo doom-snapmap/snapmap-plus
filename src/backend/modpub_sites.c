@@ -190,3 +190,112 @@ const char *sh_modpublish_check_sites(const sh_modpublish_sites *s, sh_modpublis
     if (out) *out = b;
     return NULL;
 }
+
+/* ------------------------------------------------------------ the cloud save's read of the slot */
+
+/* idSnapMapCloud's cloud-save request (VK 0x1411BE200, GL 0x1411BD5D0) reads the map's slot back,
+ * ReadLocalSavedMapText(model->localId, &text, 0, -1), then packs and uploads what it read: `call` is that call
+ * (CloudSaveSlotReadCall: mov rcx,[r13+0x10] before it; mov r15d,eax; test eax,eax; je after). The other caller of the
+ * read (the editor's open) is not it. */
+const char *sh_modpublish_check_cloud_read(const uint8_t *call, const uint8_t *read_text)
+{
+    if (!call || !read_text) return "a site is missing";
+    if (memcmp(call - 4, "\x49\x8b\x4d\x10", 4)) return "cloud-save read -0x04: the model's local id";
+    if (eng_call(call) != (void *)read_text) return "cloud-save read +0x00: ReadLocalSavedMapText";
+    if (memcmp(call + 5, "\x44\x8b\xf8\x85\xc0\x0f\x84", 7)) return "cloud-save read +0x05: its result";
+    return NULL;
+}
+
+/* The slot's metadata the cloud-save request uploads with the text: ReadLocalSaveMeta(model->localId, &model, -1, -1)
+ * (`meta`: mov rbx,rdx; mov rcx,[rdx+0x10] before it; mov r12d,eax; test eax,eax; je after). Its declChecksum
+ * (+0xB8) is id's hash of the map text, which the local save computes (`local`: the hash, then mov [rsi],eax) and
+ * CreateLocalSavedMapInternal stores at +0xB8 (`create`). VK 0x1402D6A90 / GL 0x1402D68F0, the same function at all
+ * three. *hash gets it. */
+const char *sh_modpublish_check_cloud_meta(const uint8_t *meta, const uint8_t *meta_read, const uint8_t *create,
+                                           const uint8_t *local, const void **hash)
+{
+    const void *h;
+    if (hash) *hash = NULL;
+    if (!meta || !meta_read || !create || !local) return "a site is missing";
+    if (memcmp(meta - 7, "\x48\x8b\xda\x48\x8b\x4a\x10", 7)) return "cloud-save metadata read -0x07: the model and its id";
+    if (eng_call(meta) != (void *)meta_read) return "cloud-save metadata read +0x00: ReadLocalSaveMeta";
+    if (memcmp(meta + 5, "\x44\x8b\xe0\x85\xc0\x0f\x84", 7)) return "cloud-save metadata read +0x05: its result";
+    if (!(h = eng_call(create)) || memcmp(create + 5, "\x89\x87\xb8\x00\x00\x00", 6))
+        return "new saved map +0x05: declChecksum at +0xB8";
+    if (eng_call(local) != h || memcmp(local + 5, "\x89\x06", 2)) return "local save +0x00: the same checksum";
+    if (hash) *hash = h;
+    return NULL;
+}
+
+/* ------------------------------------------------------------ the FINISH step (modpublish.c eng_bind_finish) */
+
+/* MapProperties frame (VK 0x14118FDD0, GL 0x14118EF50), its PUBLISH case:
+ *   -0x16  lea rcx,[rsi+0x28]; mov rdx,rdi; call <settings copy>
+ *   -0x0A  mov r8b,1; movzx edx,r8b; mov rcx,rdi
+ *   +0x00  call <gate>            the game's own refusals: a dialog, the screens closed, 1
+ *   +0x05  test al,al; jne <out>
+ *   +0x0D  mov rcx,rdi; call <close>   the screens close (the editor's state stack pops)
+ *   +0x15  movzx edx,byte [rsi+0x21]; mov rcx,rdi; call PublishStart
+ * and, 0x3E3 bytes before the gate call, the frame takes the screens' pending result: [editor+0x21088]+0xA18 -> +0x8E0,
+ * read and zeroed. The gate shows its dialogs on [editor+0x21088]+0x8E8 and sets +0xA2C bit 0; the show reads the
+ * descriptor's title (+0x10), text (+0x40), button labels (+0x68/+0x70, +0x98/+0xA0) and kind (+0xC0) and clears the
+ * answered flag +0x1D8; EditorFrame calls the dialog's input while bit 0 is set and clears the bit once the flag is
+ * set; the input writes the answer +0x1DC (0 the first button, 1 the second or Back) and the flag. Same bytes on
+ * both renderers. */
+const char *sh_modpublish_check_finish(const sh_modpublish_finish_sites *s, sh_modpublish_finish_bound *out)
+{
+    static const uint8_t GATE_DIALOG[] = { 0x48, 0x8b, 0x88, 0xe8, 0x08, 0x00, 0x00, 0xe8 };
+    static const uint8_t GATE_MODAL[] = { 0x48, 0x8b, 0x83, 0x88, 0x10, 0x02, 0x00, 0x83, 0x88, 0x2c, 0x0a, 0x00, 0x00, 0x01 };
+    sh_modpublish_finish_bound b;
+    const uint8_t *gate, *slot;
+    size_t i, dialogs = 0;
+    memset(&b, 0, sizeof b);
+    if (out) memset(out, 0, sizeof *out);
+    if (!s || !s->call || !s->start || !s->gdm_show || !s->answer) return "a site is missing";
+    if (memcmp(s->call - 0x16, "\x48\x8d\x4e\x28\x48\x8b\xd7\xe8", 8) ||
+        memcmp(s->call - 0x0A, "\x41\xb0\x01\x41\x0f\xb6\xd0\x48\x8b\xcf", 10))
+        return "FINISH gate call -0x16: the PUBLISH case's arguments";
+    if (!(b.gate = eng_call(s->call))) return "FINISH gate call +0x00: the gate";
+    if (memcmp(s->call + 0x05, "\x84\xc0\x0f\x85", 4) || memcmp(s->call + 0x0D, "\x48\x8b\xcf", 3) ||
+        !(b.close = eng_call(s->call + 0x10)))
+        return "FINISH gate call +0x05: the screens' close";
+    if (memcmp(s->call + 0x15, "\x0f\xb6\x56\x21\x48\x8b\xcf", 7) || eng_call(s->call + 0x1C) != (void *)s->start)
+        return "FINISH gate call +0x15: PublishStart(editor, overwrite)";
+    /* then the frame's success event: idStructuredLogManager::CreateInfoLog(manager(), "snapeditor.publish.success",
+     * "idSnapEditorState_MapProperties::Frame - snap editor publish success") */
+    if (!(b.event_owner = eng_call(s->call + 0x21)) || memcmp(s->call + 0x26, "\x48\x8b\xc8", 3) ||
+        !(b.event_desc = (const char *)eng_rip(s->call + 0x29, "\x4c\x8d\x05", 3)) ||
+        !(b.event_name = (const char *)eng_rip(s->call + 0x30, "\x48\x8d\x15", 3)) || !(b.event_log = eng_call(s->call + 0x37)))
+        return "FINISH gate call +0x21: the publish success event";
+    if (strcmp(b.event_name, "snapeditor.publish.success") ||
+        strncmp(b.event_desc, "idSnapEditorState_MapProperties::Frame - ", 41))
+        return "FINISH gate call +0x29: the success event's name";
+    if (memcmp(b.close, "\x8b\x81\x78\x10\x02\x00", 6)) return "screens' close +0x00: the editor's state stack";
+    slot = s->call - 0x3E3;
+    if (memcmp(slot, "\x48\x8b\x8f\x88\x10\x02\x00\x48\x8b\x81\x18\x0a\x00\x00\x39\x98\xe0\x08\x00\x00\x74", 21) ||
+        memcmp(slot + 0x16, "\x8b\x98\xe0\x08\x00\x00\xc7\x80\xe0\x08\x00\x00\x00\x00\x00\x00", 16))
+        return "FINISH gate call -0x3E3: the screens' pending result";
+    /* the gate's three dialogs (limits, start module, deprecated entity), each on the editor screen's dialog */
+    gate = (const uint8_t *)b.gate;
+    for (i = 0; i + sizeof GATE_DIALOG + 4 + sizeof GATE_MODAL <= 0x280; i++)
+        if (!memcmp(gate + i, GATE_DIALOG, sizeof GATE_DIALOG) &&
+            eng_call(gate + i + sizeof GATE_DIALOG - 1) == (void *)s->gdm_show &&
+            !memcmp(gate + i + sizeof GATE_DIALOG + 4, GATE_MODAL, sizeof GATE_MODAL))
+            dialogs++;
+    if (dialogs != 3) return "FINISH gate: its dialogs on the editor screen's dialog";
+    if (memcmp(s->gdm_show + 0x8A, "\x48\x8b\x56\x10", 4) || memcmp(s->gdm_show + 0xDD, "\x48\x8b\x56\x40", 4))
+        return "dialog show +0x8A: the title and text";
+    if (memcmp(s->gdm_show + 0xF5, "\x40\x88\xaf\xd8\x01\x00\x00\x39\x6e\x68", 10) ||
+        memcmp(s->gdm_show + 0x117, "\x83\xbe\x98\x00\x00\x00\x00", 7))
+        return "dialog show +0xF5: the answered flag and the button labels";
+    if (memcmp(s->gdm_show + 0x13C, "\x8b\x8e\xc0\x00\x00\x00", 6)) return "dialog show +0x13C: the dialog's kind";
+    if (!(b.input = eng_call(s->answer)) ||
+        memcmp(s->answer + 0x05, "\x44\x38\xbb\xd8\x01\x00\x00\x0f\x84", 9) ||
+        memcmp(s->answer + 0x12, "\x48\x8b\x86\x88\x10\x02\x00\x83\xa0\x2c\x0a\x00\x00\xfe", 14))
+        return "EditorFrame dialog answer +0x05: the flag, then bit 0 cleared";
+    if (memcmp((const uint8_t *)b.input + 0x83, "\xc7\x83\xdc\x01\x00\x00\x00\x00\x00\x00\xc6\x83\xd8\x01\x00\x00\x01", 17) ||
+        memcmp((const uint8_t *)b.input + 0xB0, "\xc7\x83\xdc\x01\x00\x00\x01\x00\x00\x00\xc6\x83\xd8\x01\x00\x00\x01", 17))
+        return "dialog input +0x83: the answer and its flag";
+    if (out) *out = b;
+    return NULL;
+}
