@@ -1971,7 +1971,7 @@ static void tick_mod(shs_mod *m)
         j.chain = m->ents[i].chain;
 #ifdef SH_DIAG
         /* a demon a development listener holds takes no think (diag_status.h) */
-        if (sh_diag_hold_entity && sh_script_handle_entity(j.handle) == sh_diag_hold_entity) continue;
+        if (sh_diag_hold_entity && sh_script_handle_entity((sh_script_handle)j.handle) == sh_diag_hold_entity) continue;
 #endif
         if (!run_job(m, job_think, &j)) return;
         if (g_end_pending) return;
