@@ -5417,6 +5417,9 @@ static void test_miss_reporter_skips_probes(void)
     static const char CHASH[] = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
     static const fx_file comp[] = {
         { "generated/decls/entitydef/mods/ecompos1/x.decl", "{ }", -1, "entityDef", "mods/ecompos1/x", NULL, 'e' },
+        { "generated/decls/sound/mods/ecompos1/ecompos1_play_wave_blast.decl", "{ }", -1, "sound",
+          "mods/ecompos1/ecompos1_play_wave_blast", NULL, 'e' },
+        { "generated/skeleton/md6/mods/ecompos1/monster/mesh/monster.bmd6skl", "SM", -1, NULL, NULL, NULL, 'e' },
     };
     printf("-- a unit composition's misses: real ones reported, board members and source names not\n");
     strcpy_s(top, sizeof top, g_root);
@@ -5427,7 +5430,7 @@ static void test_miss_reporter_skips_probes(void)
     mkdirs(served);
     /* the block's "units_of" makes it a unit composition (the reporter arms for it) */
     g_block_edits = "[], \"units_of\": [\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"]";
-    make_bundle(served, CHASH, "ecompos1", 'e', NULL, comp, 1, NULL);
+    make_bundle(served, CHASH, "ecompos1", 'e', NULL, comp, sizeof comp / sizeof comp[0], NULL);
     g_block_edits = NULL;
     sh_modserve_scope_enable(1);
     CHECK(sh_modserve_index_build(root) == 1);
@@ -5440,6 +5443,21 @@ static void test_miss_reporter_skips_probes(void)
     CHECK(sh_modserve_note_miss("mods/ecompos1/effect/texture/misc/rays.tga") == 0);
     CHECK(g_miss_calls == 0);
     CHECK(sh_modserve_note_miss("generated/image/mods/ecompos1/effect/texture/misc/rays.bimage") == 1 && g_miss_calls == 1);
+    /* R-LB1: the engine's probes of names the build never carried are not noted. A sound name in a field typed
+     * idDeclEntityDef (a wave blast's emitterSound) is asked for as an entityDef; a carried skeleton's default clip is
+     * asked for under both roots, and the engine defaults it when nothing holds it. */
+    printf("-- the engine's probes of names the build never carried (another type of a carried name, a skeleton's "
+           "default clip) are not misses\n");
+    g_miss_calls = 0;
+    CHECK(sh_modserve_note_miss("generated/decls/entityDef/mods/ecompos1/ecompos1_play_wave_blast.decl") == 0);
+    CHECK(sh_modserve_note_miss("cooked/anim/md6/mods/ecompos1/monster/mesh/monster.md6skl/_default.bmd6anim") == 0);
+    CHECK(sh_modserve_note_miss("generated/anim/md6/mods/ecompos1/monster/mesh/monster.md6skl/_default.bmd6anim") == 0);
+    CHECK(g_miss_calls == 0);
+    /* a name the composition does not carry, and a default clip of a skeleton it does not carry, stay misses */
+    CHECK(sh_modserve_note_miss("generated/decls/entityDef/mods/ecompos1/ecompos1_other_blast.decl") == 1);
+    CHECK(sh_modserve_note_miss("cooked/anim/md6/mods/ecompos1/other/mesh/other.md6skl/_default.bmd6anim") == 1);
+    CHECK(sh_modserve_note_miss("cooked/anim/md6/mods/ecompos1/monster/mesh/monster.md6skl/walk.bmd6anim") == 1);
+    CHECK(g_miss_calls == 3);
     sh_modserve_set_miss_reporter(NULL);
     (void)sh_modserve_scope_set(NULL, 0, 0);
     sh_modserve_scope_enable(was_on);

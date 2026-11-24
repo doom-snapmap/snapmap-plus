@@ -938,8 +938,12 @@ int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bund
  * the map plays on if the game can, and the asked name is recorded. The
  * provider (overrides.c) calls sh_modserve_note_miss with every request it
  * found nowhere; one under mods/<salt>/ of a composition (a board square
- * aside: a unit leaves the squares its materials do not draw out on purpose)
- * is noted once per process, with the name of the load that asked for it
+ * aside: a unit leaves the squares its materials do not draw out on purpose;
+ * and the engine's probes of names the build never carried aside: a name the
+ * composition carries as a file of another type, such as a sound decl's name
+ * a field typed idDeclEntityDef asks for as an entityDef, and a carried
+ * skeleton's default clip, which the unit walk would have kept had the build
+ * held one) is noted once per process, with the name of the load that asked for it
  * when the main thread's open loads say (`by`, else ""), logged:
  *   MODS: <mod name> came with this map without <request>, which <by> asked for; the map goes on without it
  * and handed to the bound reporter with the composition's first unit

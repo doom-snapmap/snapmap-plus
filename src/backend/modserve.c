@@ -6536,6 +6536,63 @@ int sh_modserve_standin_name(const char *name)
     return 0;
 }
 
+/* The name key of a request, as the unit walk keys a build's files (modunit.h sh_unit_key): from its first mods/<x>/
+ * on, lower case, '\' as '/', cut at '$', the last segment's extensions cut. malloc'd, or NULL. */
+static char *ms_miss_key(const char *request)
+{
+    const char *p, *at = NULL;
+    char *k, *slash, *dot;
+    size_t i;
+    for (p = request; p && *p && !at; p++)
+        if ((p == request || p[-1] == '/' || p[-1] == '\\') && !_strnicmp(p, "mods/", 5)) at = p;
+    if (!at || !(k = _strdup(at))) return NULL;
+    for (i = 0; k[i]; i++) {
+        if (k[i] == '\\') k[i] = '/';
+        else if (k[i] == '$') { k[i] = 0; break; }
+        else k[i] = (char)tolower((unsigned char)k[i]);
+    }
+    slash = strrchr(k, '/');
+    if ((dot = strchr(slash ? slash + 1 : k, '.')) != NULL) *dot = 0;
+    return k;
+}
+
+/* 1 when `key` is the key of a file `b` carries. Under the index's readers. */
+static int ms_bundle_carries_key(const ms_index *x, const ms_bundle *b, const char *key)
+{
+    int i, hit = 0;
+    for (i = b->first_file; !hit && i < b->first_file + b->file_count && i < x->nfiles; ++i) {
+        char *own = x->files[i].request ? ms_miss_key(x->files[i].request) : NULL;
+        hit = own && !strcmp(own, key);
+        free(own);
+    }
+    return hit;
+}
+
+/* 1 when the engine's request is a probe of a name the mod's build never carried, read from what the composition
+ * carries (R-LB1): the unit walk keeps every file of a name it reaches, of every decl type, and a model whole (its
+ * skeleton's default clip whenever the build holds one, modbundle.c mb_model_needs). So
+ *   - a request whose name the composition carries as another file (generated/decls/entityDef/mods/<x>/<name>.decl
+ *     where <name> is a sound decl: a field typed idDeclEntityDef, such as a wave blast's emitterSound, names it) and
+ *   - a carried skeleton's default clip (<cooked|generated>/anim/<skeleton>.md6skl/_default.bmd6anim: the engine
+ *     probes it for every model it loads and makes a default clip when nothing holds it)
+ * are the engine's lookups, never a file a unit lost. */
+static int ms_miss_is_probe(const ms_index *x, const ms_bundle *b, const char *request)
+{
+    char *key = ms_miss_key(request), *tail;
+    int probe = 0;
+    if (!key) return 0;
+    probe = ms_bundle_carries_key(x, b, key);
+    if (!probe && (tail = strrchr(key, '/')) != NULL && !strcmp(tail, "/_default")) {
+        char *dot;
+        *tail = 0;
+        tail = strrchr(key, '/');
+        if ((dot = strchr(tail ? tail + 1 : key, '.')) != NULL) *dot = 0;
+        probe = ms_bundle_carries_key(x, b, key);
+    }
+    free(key);
+    return probe;
+}
+
 int sh_modserve_note_miss(const char *request)
 {
     const ms_index *x;
@@ -6561,6 +6618,7 @@ int sh_modserve_note_miss(const char *request)
         const ms_bundle *bd = &x->bundles[b];
         if (bd->admitted && bd->unit && bd->id && !strcmp(bd->id, salt) && bd->rank >= 0) part = bd;
     }
+    if (part && ms_miss_is_probe(x, part, request)) part = NULL;   /* the engine's lookup: nothing to note */
     if (part) {
         strcpy_s(hash, sizeof hash, part->unit);
         label = _strdup(ms_label(part));
