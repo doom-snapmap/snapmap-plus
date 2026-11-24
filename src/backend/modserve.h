@@ -940,7 +940,7 @@ int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bund
  * found nowhere; one under mods/<salt>/ of a composition (a board square
  * aside: a unit leaves the squares its materials do not draw out on purpose;
  * and the engine's probes of names the build never carried aside: a name the
- * composition carries as a file of another type, such as a sound decl's name
+ * composition carries as a decl of another type, such as a sound decl's name
  * a field typed idDeclEntityDef asks for as an entityDef, and a carried
  * skeleton's default clip, which the unit walk would have kept had the build
  * held one) is noted once per process, with the name of the load that asked for it

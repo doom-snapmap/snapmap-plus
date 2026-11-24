@@ -5420,6 +5420,8 @@ static void test_miss_reporter_skips_probes(void)
         { "generated/decls/sound/mods/ecompos1/ecompos1_play_wave_blast.decl", "{ }", -1, "sound",
           "mods/ecompos1/ecompos1_play_wave_blast", NULL, 'e' },
         { "generated/skeleton/md6/mods/ecompos1/monster/mesh/monster.bmd6skl", "SM", -1, NULL, NULL, NULL, 'e' },
+        { "generated/basemodel/md6/mods/ecompos1/prop/mesh/prop.bmd6model", "MM", -1, NULL, NULL, NULL, 'e' },
+        { "generated/decls/material2/mods/ecompos1/wall.decl", "{ }", -1, "material2", "mods/ecompos1/wall", NULL, 'e' },
     };
     printf("-- a unit composition's misses: real ones reported, board members and source names not\n");
     strcpy_s(top, sizeof top, g_root);
@@ -5457,7 +5459,12 @@ static void test_miss_reporter_skips_probes(void)
     CHECK(sh_modserve_note_miss("generated/decls/entityDef/mods/ecompos1/ecompos1_other_blast.decl") == 1);
     CHECK(sh_modserve_note_miss("cooked/anim/md6/mods/ecompos1/other/mesh/other.md6skl/_default.bmd6anim") == 1);
     CHECK(sh_modserve_note_miss("cooked/anim/md6/mods/ecompos1/monster/mesh/monster.md6skl/walk.bmd6anim") == 1);
-    CHECK(g_miss_calls == 3);
+    /* a carried name's other files that are not decls stay misses: an image beside its material, a skeleton beside its
+     * mesh, and the default clip of a model whose skeleton the composition does not carry */
+    CHECK(sh_modserve_note_miss("generated/image/mods/ecompos1/wall.bimage") == 1);
+    CHECK(sh_modserve_note_miss("generated/skeleton/md6/mods/ecompos1/prop/mesh/prop.bmd6skl") == 1);
+    CHECK(sh_modserve_note_miss("cooked/anim/md6/mods/ecompos1/prop/mesh/prop.md6skl/_default.bmd6anim") == 1);
+    CHECK(g_miss_calls == 6);
     sh_modserve_set_miss_reporter(NULL);
     (void)sh_modserve_scope_set(NULL, 0, 0);
     sh_modserve_scope_enable(was_on);

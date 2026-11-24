@@ -6556,12 +6556,39 @@ static char *ms_miss_key(const char *request)
     return k;
 }
 
-/* 1 when `key` is the key of a file `b` carries. Under the index's readers. */
-static int ms_bundle_carries_key(const ms_index *x, const ms_bundle *b, const char *key)
+/* The decl type folder of a decl request (generated/decls/<type>/...): its length, with *at its start; 0 for none. */
+static size_t ms_decl_type(const char *request, const char **at)
+{
+    static const char head[] = "generated/decls/";
+    const char *t, *end;
+    if (!request || _strnicmp(request, head, sizeof head - 1)) return 0;
+    t = request + sizeof head - 1;
+    if (!(end = strchr(t, '/')) || end == t) return 0;
+    *at = t;
+    return (size_t)(end - t);
+}
+
+static int ms_ends_with(const char *s, const char *tail)
+{
+    size_t n = s ? strlen(s) : 0, m = strlen(tail);
+    return n >= m && !_stricmp(s + n - m, tail);
+}
+
+/* 1 when `b` carries a file of name key `key` that is, with `decl_type` (length `decl_len`), a decl of another type;
+ * with `decl_type` NULL, a skeleton. Under the index's readers. */
+static int ms_bundle_carries_key(const ms_index *x, const ms_bundle *b, const char *key, const char *decl_type,
+                                 size_t decl_len)
 {
     int i, hit = 0;
     for (i = b->first_file; !hit && i < b->first_file + b->file_count && i < x->nfiles; ++i) {
-        char *own = x->files[i].request ? ms_miss_key(x->files[i].request) : NULL;
+        const char *request = x->files[i].request, *type = NULL;
+        size_t tl;
+        char *own;
+        if (!request) continue;
+        if (decl_type) {
+            if (!(tl = ms_decl_type(request, &type)) || (tl == decl_len && !_strnicmp(type, decl_type, tl))) continue;
+        } else if (!ms_ends_with(request, ".bmd6skl") && !ms_ends_with(request, ".md6skl")) continue;
+        own = ms_miss_key(request);
         hit = own && !strcmp(own, key);
         free(own);
     }
@@ -6569,25 +6596,30 @@ static int ms_bundle_carries_key(const ms_index *x, const ms_bundle *b, const ch
 }
 
 /* 1 when the engine's request is a probe of a name the mod's build never carried, read from what the composition
- * carries (R-LB1): the unit walk keeps every file of a name it reaches, of every decl type, and a model whole (its
- * skeleton's default clip whenever the build holds one, modbundle.c mb_model_needs). So
- *   - a request whose name the composition carries as another file (generated/decls/entityDef/mods/<x>/<name>.decl
- *     where <name> is a sound decl: a field typed idDeclEntityDef, such as a wave blast's emitterSound, names it) and
- *   - a carried skeleton's default clip (<cooked|generated>/anim/<skeleton>.md6skl/_default.bmd6anim: the engine
- *     probes it for every model it loads and makes a default clip when nothing holds it)
- * are the engine's lookups, never a file a unit lost. */
+ * carries (R-LB1). The unit walk keeps every decl of a name a kept text spells, whatever its type (modunit.c
+ * uw_reach_spelled), and a model whole, its skeleton's default clip included whenever the build holds one (modbundle.c
+ * mb_model_needs). So
+ *   - a decl request whose name the composition carries as a decl of another type
+ *     (generated/decls/entityDef/mods/<x>/<name>.decl where <name> is a sound decl: a field typed idDeclEntityDef,
+ *     such as a wave blast's emitterSound, names it), and
+ *   - the default clip of a skeleton the composition carries (<cooked|generated>/anim/<skeleton>.md6skl/
+ *     _default.bmd6anim: the engine probes it for every model it loads and makes a default clip when nothing holds it)
+ * are the engine's lookups, never a file a unit lost. Any other file of a carried name (an image beside its material,
+ * a skeleton beside its mesh) is still a miss. */
 static int ms_miss_is_probe(const ms_index *x, const ms_bundle *b, const char *request)
 {
     char *key = ms_miss_key(request), *tail;
+    const char *type = NULL;
+    size_t tl;
     int probe = 0;
     if (!key) return 0;
-    probe = ms_bundle_carries_key(x, b, key);
-    if (!probe && (tail = strrchr(key, '/')) != NULL && !strcmp(tail, "/_default")) {
+    if ((tl = ms_decl_type(request, &type)) != 0) probe = ms_bundle_carries_key(x, b, key, type, tl);
+    else if ((tail = strrchr(key, '/')) != NULL && !strcmp(tail, "/_default") && strstr(request, "/anim/")) {
         char *dot;
         *tail = 0;
         tail = strrchr(key, '/');
         if ((dot = strchr(tail ? tail + 1 : key, '.')) != NULL) *dot = 0;
-        probe = ms_bundle_carries_key(x, b, key);
+        probe = ms_bundle_carries_key(x, b, key, NULL, 0);
     }
     free(key);
     return probe;
