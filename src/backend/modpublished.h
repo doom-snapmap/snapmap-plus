@@ -186,6 +186,13 @@ typedef struct sh_modpub_ops {
     int  (*ask)(void *c, unsigned gdm_id, unsigned button_set, const char *text);
     int  (*poll)(void *c, int ticket);          /* an sh_engine_dialog_result */
     void (*release)(void *c, int ticket);
+    /* The shell's screen and state as one token (0 unknown), -1 while it is moving to another screen. A notice is raised
+     * only on a settled screen and withdrawn when the game changes screen under it (R-LB1: an S3 notice showed through
+     * the RECOMMEND MAP popup after a published play). NULL: never withdrawn. */
+    long long (*screen)(void *c);
+    /* 1 while the editor has a map open, 0 not, -1 unknown. A parse no gate took counts as the editor's open only while
+     * it does: the hub's reads of a map after its play are no editor open and say nothing. NULL counts as -1. */
+    int  (*editor_open)(void *c);
     int  (*worker_run)(void *c, void (*job)(void *), void *job_context);   /* 1 started */
     /* Fetch the row's units into the content cache and compose it (modcache.h sh_cache_prepare). Worker thread;
      * stops early when *cancel is set; 0 ok (what could not be had stands in), else a MODNET_E_ code. */

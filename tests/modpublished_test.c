@@ -79,6 +79,8 @@ typedef struct fake {
     int fetch_calls, fetch_cancelled;
     HANDLE fetch_gate;               /* when set, the fetch waits on it */
     int can_ask_after;               /* ticks before the surface is idle */
+    long long screen;                /* ops.screen: the shell's screen token, -1 between screens, 0 unknown */
+    int editor_open;                 /* ops.editor_open: 1 (the default after reset) while the editor has a map */
     int ticks;
     int asks, ask_gdm, ask_buttons, releases;
     char last_ask[256];
@@ -261,6 +263,8 @@ static int f_poll(void *c, int ticket)
     return F.answer;
 }
 static void f_release(void *c, int ticket) { (void)c; (void)ticket; F.releases++; }
+static long long f_screen(void *c) { (void)c; return F.screen; }
+static int f_editor_open(void *c) { (void)c; return F.editor_open; }
 
 typedef struct job_thread { void (*job)(void *); void *ctx; } job_thread;
 static DWORD WINAPI f_thread(void *p)
@@ -359,11 +363,15 @@ static int f_resume(void *c, const sh_modpub_resume *r)
     }
     return 1;
 }
+static char g_last_logs[8192];   /* the module's recent lines */
 static void f_log(void *c, const char *line)
 {
     (void)c;
     if (getenv("MODPUB_TEST_LOG")) printf("    %s\n", line);
+    if (line && strlen(g_last_logs) + strlen(line) + 2 >= sizeof g_last_logs) g_last_logs[0] = 0;
+    if (line) { strcat_s(g_last_logs, sizeof g_last_logs, line); strcat_s(g_last_logs, sizeof g_last_logs, "\n"); }
 }
+static int said_log(const char *text) { return strstr(g_last_logs, text) != NULL; }
 static void f_launch_refused(void *c, int hook) { (void)c; F.launch_refused++; F.refused_hook = hook; }
 static void f_print(void *c, const char *line)
 {
@@ -406,7 +414,7 @@ static void f_scope_play(void *c, const char *why) { (void)c; (void)why; g_scope
 
 static const sh_modpub_ops OPS = {
     .on_main = f_on_main, .row_state = f_row_state, .rescan = f_rescan, .activate = f_activate,
-    .can_ask = f_can_ask, .ask = f_ask, .poll = f_poll, .release = f_release, .worker_run = f_worker_run,
+    .can_ask = f_can_ask, .ask = f_ask, .poll = f_poll, .release = f_release, .screen = f_screen, .editor_open = f_editor_open, .worker_run = f_worker_run,
     .fetch_for = f_fetch_for, .metadata_copy = f_metadata_copy, .metadata_free = f_metadata_free,
     .metadata_ids = f_metadata_ids, .hold_token = f_hold_token, .owner_current = f_owner_current,
     .host_matches = f_host_matches, .hold_ui = f_hold_ui, .drop_ui = f_drop_ui, .resume = f_resume, .log = f_log,
@@ -443,6 +451,7 @@ static void reset(void)
     if (F.worker) { WaitForSingleObject(F.worker, 5000); CloseHandle(F.worker); }
     sh_modpub_test_reset();
     memset(&F, 0, sizeof F);
+    F.editor_open = 1;
     F.install_on_fetch = 1;
     F.host_ok = 1;
     F.owner_ok = 1;
@@ -907,6 +916,25 @@ static void one_notice_queue(void)
     CHECK(F.asks == 0 && !strcmp(sh_modpub_test_notice(), "kept until the surface is free"));
     tick(200);
     CHECK(F.asks == 1 && !strcmp(F.last_ask, "kept until the surface is free"));
+
+    /* R-LB1: a notice is raised on a settled screen, and withdrawn when the game changes screen under it, so nothing
+     * of it draws through the game's own screens (the RECOMMEND MAP popup after a published play) */
+    reset();
+    F.screen = -1;   /* between screens */
+    sh_modpublished_notice("on the next screen");
+    tick(5);
+    CHECK(F.asks == 0);
+    F.screen = 0x100000041ll;
+    tick(1);
+    CHECK(F.asks == 1);
+    tick(3);
+    CHECK(F.releases == 0);   /* still up on its screen */
+    F.screen = 0x200000042ll;   /* the game moved on */
+    tick(1);
+    CHECK(F.releases == 1 && said_log("the notice was withdrawn: the game changed screen under it"));
+    tick(3);
+    CHECK(F.asks == 1);   /* not raised again */
+    F.screen = 0;
 }
 
 static void a_copied_map_fetches_then_passes(void)
@@ -1715,6 +1743,35 @@ static void editor_open_fetches_its_content(void)
     tick(2);
     CHECK(F.fetch_calls == 1 && g_content.said == 1 && F.asks == 1 && F.ask_buttons == 0);   /* the notice alone */
     CHECK(said_notice("This map is playing without the Tyrant", 38));
+
+    printf("-- a map read outside the editor (the hub after a published play) asks nothing and says nothing (R-LB1)\n");
+    reset();
+    use_content();
+    g_content.armed = 1;
+    g_content.served = 1;
+    g_content.pending = 1;
+    g_content.absent_after_fetch = 1;
+    F.editor_open = 0;
+    parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
+    tick(1);
+    tick_until_idle();
+    tick(2);
+    CHECK(F.fetch_calls == 0 && F.asks == 0 && !sh_modpub_test_notice()[0]);
+    F.editor_open = 1;
+
+    printf("-- an editor open does not ask the store again for what moderation removed (S3)\n");
+    reset();
+    use_content();
+    g_content.armed = 1;
+    g_content.served = 1;
+    g_content.pending = 1;
+    g_content.causes = 1u << SH_CACHE_ABSENT_REMOVED;
+    parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
+    tick(1);
+    tick_until_idle();
+    tick(2);
+    CHECK(F.fetch_calls == 0 && F.asks == 1);   /* the open's one notice, from what is here */
+    g_content.causes = 0;
 
     printf("-- the editor shows what arrived at the next open: it says so\n");
     reset();

@@ -409,6 +409,7 @@ static void pub_launch_refused(int hook)
  * long as the surface stays busy. */
 static char *g_notice;
 static int g_notice_ticket, g_notice_waited;
+static long long g_notice_screen;   /* the screen the raised notice belongs to (ops.screen), 0 unknown */
 
 static void pub_notice(const char *text)
 {
@@ -972,15 +973,22 @@ out:
 static void pub_poll_notice(void)
 {
     int answer;
+    long long screen = g_ops.screen ? g_ops.screen(g_ops.context) : 0;
     if (g_notice_ticket) {
         answer = g_ops.poll ? g_ops.poll(g_ops.context, g_notice_ticket) : -1;
-        if (answer == PUB_DIALOG_PENDING) return;
+        if (answer == PUB_DIALOG_PENDING) {
+            /* The game changed screen under it (a published play's end showing RECOMMEND MAP): the notice is withdrawn,
+             * so nothing of it draws through the game's own screens. */
+            if (!g_notice_screen || !screen || screen == g_notice_screen) return;
+            pub_log("MODS: the notice was withdrawn: the game changed screen under it");
+        }
         if (g_ops.release) g_ops.release(g_ops.context, g_notice_ticket);
         g_notice_ticket = 0;
+        g_notice_screen = 0;
         return;
     }
     if (!g_notice) return;
-    if (!g_ops.can_ask || !g_ops.can_ask(g_ops.context)) {
+    if (!g_ops.can_ask || !g_ops.can_ask(g_ops.context) || screen < 0) {   /* busy, or between screens */
         if (++g_notice_waited == PUB_RAISE_TICKS)
             pub_log("MODS: the notice is waiting: the dialog surface stayed busy; it is raised when the game can ask");
         if (g_notice_waited > PUB_RAISE_TICKS) g_notice_waited = PUB_RAISE_TICKS + 1;
@@ -992,6 +1000,7 @@ static void pub_poll_notice(void)
     g_notice_ticket = g_ops.ask ? g_ops.ask(g_ops.context, PUB_GDM_ID, PUB_BUTTONS_ACCEPT,
                                             strlen(g_notice) < PUB_TEXT_CAP ? g_notice : PUB_DIALOG_OVER) : 0;
     if (!g_notice_ticket) pub_log("MODS: the notice dialog would not raise");
+    g_notice_screen = g_notice_ticket ? screen : 0;
     pub_notice_clear();
 }
 
@@ -1137,9 +1146,15 @@ static int pub_editor_fetch(void)
     memset(&now, 0, sizeof now);
     memset(&want, 0, sizeof want);
     (void)sh_modmanifest_current(&now);
-    for (size_t i = 0; i < now.count; i++)
-        if (now.rows[i].pinned && !g_ops.content_complete(g_ops.context, &now.rows[i]) &&
-            !sh_modmanifest_list_add(&want, &now.rows[i])) break;
+    for (size_t i = 0; i < now.count; i++) {
+        unsigned mask = 0;
+        if (!now.rows[i].pinned || g_ops.content_complete(g_ops.context, &now.rows[i])) continue;
+        /* what moderation removed is not asked for again: the store will not have it (S3) */
+        if (g_ops.content_causes && g_ops.content_causes(g_ops.context, &now.rows[i], &mask) &&
+            mask == (1u << SH_CACHE_ABSENT_REMOVED))
+            continue;
+        if (!sh_modmanifest_list_add(&want, &now.rows[i])) break;
+    }
     if (want.count) begun = pub_hold_begin(SH_MODPUB_EDITOR_OPEN, NULL, NULL, NULL, "", "", &want, NULL) == 1;
     if (begun) pub_logf("MODS: the open map stands in for objects of %u row(s); asking the mod store for them",
                         (unsigned)g_hold.missing_count);
@@ -1672,6 +1687,10 @@ void sh_modpublished_poll(void)
         if (refused && refusal) {
             if (g_ops.refused_load) g_ops.refused_load(g_ops.context);
             pub_notice(refusal);
+        } else if (g_ops.editor_open && g_ops.editor_open(g_ops.context) == 0) {
+            /* not the editor's: the hub reads a map after its play (the lobby, RECOMMEND MAP); it says nothing there */
+            if (g_ops.content_drop) g_ops.content_drop(g_ops.context);
+            pub_log("MODS: a map read outside the editor (the hub after a play) says nothing and asks nothing");
         } else if (!g_reopen_asked && pub_editor_fetch()) {
             /* The open's notice is the store's answer (pub_editor_fetched). */
         } else if (g_ops.content_notice) {
@@ -1815,6 +1834,7 @@ static struct {
     eng_parse_fn parse;                  /* the DeserializeFromJson entry: our detour runs */
     DWORD *main_thread;
     void **shell_slot, **session_slot;
+    const uint8_t *editor;   /* the editor object: in a session while +0x8 is set and its edit +0x204C8 is there */
     size_t slot_lobby, slot_parameters;
     const uint8_t *snap_params;          /* the 16-byte head of OnSnapPlay's dialog block */
     const char *snap_source;
@@ -1910,6 +1930,31 @@ static int eng_row_state(void *c, const sh_modmanifest_row *row, const char *sub
 static int eng_rescan(void *c) { (void)c; return sh_modserve_index_rescan(); }
 static int eng_activate(void *c, const sh_modmanifest_list *rows) { (void)c; return sh_modmanifest_activate(rows); }
 static int eng_can_ask(void *c) { (void)c; return sh_engine_dialog_can_ask(); }
+
+/* 1 while the editor has a map in a session (as modpublish.c's editor token reads it), 0 not, -1 unknown. */
+static int eng_editor_open(void *c)
+{
+    (void)c;
+    if (!g_eng.editor) return -1;
+    __try { return g_eng.editor[0x8] != 0 && *(void *const *)(g_eng.editor + 0x204C8) != NULL; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+
+/* idMenuManager_Shell: the current screen +0x8, the next +0xC, the shell state +0x910 (SHELL_SCREEN, SHELL_STATE;
+ * the same on both renderers). One token for a settled screen, -1 while it moves, 0 unknown. */
+static long long eng_screen(void *c)
+{
+    void *manager = eng_shell_manager();
+    (void)c;
+    if (!manager) return 0;
+    __try {
+        int current = *(const volatile int *)((const uint8_t *)manager + 0x08);
+        int next = *(const volatile int *)((const uint8_t *)manager + 0x0C);
+        int state = *(const volatile int *)((const uint8_t *)manager + 0x910);
+        if (next != current) return -1;
+        return ((long long)(unsigned)(state + 1) << 32) | (unsigned)(current + 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
 static int eng_ask(void *c, unsigned gdm, unsigned set, const char *text) { (void)c; return sh_engine_dialog_ask(gdm, set, text); }
 static int eng_poll(void *c, int ticket) { (void)c; return sh_engine_dialog_poll(ticket); }
 static void eng_release(void *c, int ticket) { (void)c; sh_engine_dialog_release(ticket); }
@@ -2368,7 +2413,8 @@ void sh_modpublished_lobby_line(const char *text)
 
 static const sh_modpub_ops ENG_OPS = {
     .on_main = eng_on_main, .row_state = eng_row_state, .rescan = eng_rescan, .activate = eng_activate,
-    .can_ask = eng_can_ask, .ask = eng_ask, .poll = eng_poll, .release = eng_release, .worker_run = eng_worker_run,
+    .can_ask = eng_can_ask, .ask = eng_ask, .poll = eng_poll, .release = eng_release, .screen = eng_screen, .editor_open = eng_editor_open,
+    .worker_run = eng_worker_run,
     .fetch_for = eng_fetch_for, .metadata_copy = eng_metadata_copy, .metadata_free = eng_metadata_free,
     .metadata_ids = eng_metadata_ids, .hold_token = eng_hold_token, .owner_current = eng_owner_current,
     .host_matches = eng_host_matches, .hold_ui = eng_hold_ui, .drop_ui = eng_drop_ui, .resume = eng_resume,
@@ -2532,6 +2578,9 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
     shell = glb_resolve(base, "shell_ptr_slot", NULL);
     thread = glb_resolve(base, "main_thread_id", NULL);
     if (!shell || !thread) { backend_log("MODS: the shell or main-thread global did not resolve"); return 0; }
+    /* the editor object (idSnapEditorLocal), for whether a parse no gate took was the editor's */
+    g_eng.editor = (const uint8_t *)glb_resolve(base, "editor_singleton", NULL);
+    if (!g_eng.editor) backend_log("MODS: the editor object did not resolve; every parse no gate takes counts as the editor's");
     ready = g_eng.site[ENG_READY];
     sites.on_snap = g_eng.site[ENG_ON_SNAP]; sites.browser = g_eng.site[ENG_BROWSER];
     sites.ready = ready; sites.lobby = g_eng.site[ENG_LOBBY]; sites.feed = g_eng.site[ENG_FEED];
