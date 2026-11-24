@@ -274,18 +274,26 @@ static char *mp_upload_text_locked(const char *text, size_t length, size_t *out_
 
 char *sh_modpublish_cloud_text(const char *local_id, const char *text, size_t length, size_t *out_length)
 {
-    char *out = NULL;
+    char *out = NULL, other[MP_ID_CAP] = "";
     size_t n = 0;
     if (out_length) *out_length = 0;
     if (!g_ops_set || !text || !length) return NULL;
     AcquireSRWLockExclusive(&g_upload_lock);
     if (mp_upload_live_locked() && (!g_upload.local[0] || (local_id && !_stricmp(local_id, g_upload.local)))) {
+        size_t i;
         out = mp_upload_text_locked(text, length, out_length);
-        n = g_upload.rows.count;
+        for (i = 0; i < g_upload.rows.count; i++) n += g_upload.rows.rows[i].pinned != 0;   /* a local row is no pin */
         if (out) g_upload.served = 1;
     }
+    else if (mp_upload_live_locked() && g_upload.local[0])
+        strcpy_s(other, sizeof other, g_upload.local);
     if (!out) g_cloud_sum.set = 0;   /* this request uploads the slot as it is, with its own checksum */
     ReleaseSRWLockExclusive(&g_upload_lock);
+    /* armed for another slot: this read uploads that slot as it is (logged, so a "never reached" at the feed post is
+     * told apart from a read of the wrong slot) */
+    if (other[0])
+        mp_logf("MODS: publish: the cloud save read slot '%s', not the published slot '%s'; it uploads as it is",
+                local_id ? local_id : "", other);
     if (out) mp_logf("MODS: publish: the published copy carries %zu pinned row(s); the map's slot keeps its own rows", n);
     return out;
 }
@@ -782,8 +790,10 @@ static int mp_queue_release(const char *ref, const char *why)
 static void mp_menu_notice(const char *text)
 {
     if (!text || !text[0]) return;
-    mp_logf("MODS: notice: %s", text);
+    /* The queue logs the notice it takes (pub_notice), so one notice is one line; only a host without the queue
+     * logs it here. */
     if (g_ops.notice) g_ops.notice(g_ops.context, text);
+    else mp_logf("MODS: notice: %s", text);
 }
 
 static void mp_editor_notice(void *editor, const char *text)
@@ -1219,9 +1229,25 @@ void sh_modpublish_feed_post(void *edit, const char *item_id, const char *revisi
 {
     mp_job *job;
     if (!g_ops_set || !mp_on_main()) return;
-    if (mp_upload_live() && !g_upload.served)
-        mp_log("MODS: publish: the cloud save's read of the slot never reached Snapmap+; the published map carries the "
-               "slot's local rows, so players get stand-ins for its mods' objects");
+    {
+        /* With a row pinned, a cloud save that never read the slot published it without its pins: players get
+         * stand-ins, a failure. With no row pinned there is nothing to substitute, so the published map is the slot's
+         * text either way, its rows local (R-LV9: once on 963873d2 the read did not come for such a publish; it came
+         * for the next one). */
+        int live, served;
+        size_t i, pinned = 0;
+        AcquireSRWLockShared(&g_upload_lock);
+        live = mp_upload_live_locked();
+        served = g_upload.served;
+        for (i = 0; live && i < g_upload.rows.count; i++) pinned += g_upload.rows.rows[i].pinned != 0;
+        ReleaseSRWLockShared(&g_upload_lock);
+        if (live && !served && pinned)
+            mp_log("MODS: publish: the cloud save's read of the slot never reached Snapmap+; the published map carries "
+                   "the slot's local rows, so players get stand-ins for its mods' objects");
+        else if (live && !served)
+            mp_log("MODS: publish: no row was pinned, so the published map is the slot's text as it is, its rows local: "
+                   "a player who has the mod plays it, others get stand-ins for its objects");
+    }
     mp_upload_clear();   /* the published copy is uploaded */
     if (!item_id || !modnet_valid_ref(item_id)) {
         mp_logf("MODS: publish: the published item id '%s' is not a usable claim ref; no claim change",
