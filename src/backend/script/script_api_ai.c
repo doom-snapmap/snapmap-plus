@@ -191,6 +191,7 @@ int sh_ai_request_pain_admits(int reaction, int current, const char **why)
 {
     const char *w = NULL;
     if (reaction <= SH_COMBAT_PAIN_NONE || reaction >= SH_AI_PAIN_REACTIONS) w = "it is not a pain reaction";
+    else if (reaction >= SH_AI_PAIN_DEATH) w = "a death is not a pain to ask for";
     else if (current >= reaction) w = "the demon already plays a pain at least as strong";
     if (why) *why = w;
     return w == NULL;

@@ -740,6 +740,8 @@ static void test_move_state(void)
         CHECK(sh_ai_request_pain_admits(6, 9, &why) == 0);                         /* staggered */
         CHECK(sh_ai_request_pain_admits(9, 9, &why) == 0 && sh_ai_request_pain_admits(9, 10, &why) == 0);
         CHECK(sh_ai_request_pain_admits(0, 0, &why) == 0 && sh_ai_request_pain_admits(14, 0, &why) == 0);
+        CHECK(sh_ai_request_pain_admits(11, 0, &why) == 1);                        /* a knockdown may be asked */
+        CHECK(sh_ai_request_pain_admits(12, 0, &why) == 0 && sh_ai_request_pain_admits(13, 0, &why) == 0);   /* deaths */
     }
     CHECK(sh_ai_pain_take_next(0, 0, 1000, 1250) == 0);
     CHECK(sh_ai_park_holds(0, 0, 0) == 0);          /* dead: the engine's dying cycle takes it */

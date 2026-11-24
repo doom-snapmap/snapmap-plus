@@ -1134,7 +1134,9 @@ static const unsigned char k_ai_fsm_request_prologue[SH_AI_FSM_REQUEST_STOLEN] =
 /* The request a script's pain answers to: whether it may go to the engine at all. `current` is the demon's
  * pain now (painType_t, ordered weakest to strongest). A reaction it already plays at least as strongly is not
  * asked (Eternal raises a wound's requested pain only over a weaker one; it also covers the pain start's own
- * refusal of a stagger while staggered). 1 may be asked, 0 not, with *why. Pure. */
+ * refusal of a stagger while staggered). PAIN_DEATH and PAIN_FULL_GIB are deaths, which the damage gives, not a
+ * pain to ask for. 1 may be asked, 0 not, with *why. Pure. */
+#define SH_AI_PAIN_DEATH 12
 int sh_ai_request_pain_admits(int reaction, int current, const char **why);
 /* The entrance move (SH_AI_SIG_FSM_MOVE, VK 0x14064D330 / GL 0x14064C5B0): an FSM's states are an array at +0x38
  * with their count at +0x40; the move loads idTransitionCode's vtable with a lea at +0xF0, stores code 5 at +0x10F
