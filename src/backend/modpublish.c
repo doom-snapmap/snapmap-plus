@@ -1491,8 +1491,14 @@ static void mp_uploaded(void)
     mp_hold *h = &g_hold;
     mp_job *job = h->job;
     h->job = NULL;
+    /* The plan went to the upload job; it comes back to the hold, so what is said next counts what this publish sent
+     * (R-LB1: the summary read the emptied hold and said 0 units, 0 bytes after each unit's upload line). */
+    modclaim_plan_free(&h->plan);
+    h->plan = job->plan;
+    memset(&job->plan, 0, sizeof job->plan);
     if (job->code == MODNET_OK) {
-        mp_logf("MODS: publish: uploaded %zu unit(s), %llu bytes", h->plan.missing, h->plan.missing_bytes);
+        mp_logf("MODS: publish: uploaded %zu unit(s), %.1f MB (%llu bytes)", h->plan.missing,
+                (double)h->plan.missing_bytes / 1048576.0, h->plan.missing_bytes);
         mp_job_free(job);
         mp_resume();
         return;

@@ -33,7 +33,17 @@ var publishingKey = (function () {
 
   function create(env) {
     var byId = env.byId, post = env.post, toast = env.toast || function () {};
+    var after = env.after || function (fn, ms) { return setTimeout(fn, ms); };
     var st = {open: false, page: '', busy: false, error: '', key: null, offered: false};
+    /* Not now is sent until the backend's answer shows the offer answered: the host turns a request away while
+     * another mods action runs (a publish's refresh), and the offer must not come back for that. */
+    var LATER_RETRY_MS = 1000, LATER_TRIES = 30;
+    var later = {pending: false, tries: 0};
+
+    function sendLater() {
+      later.tries++;
+      post({cmd: 'modsAction', action: 'publishingKey', arg: 'later'});
+    }
 
     function show(id, on) { var e = byId(id); if (e) e.style.display = on ? '' : 'none'; }
     function setText(id, t) { var e = byId(id); if (e) e.textContent = t; }
@@ -77,7 +87,7 @@ var publishingKey = (function () {
 
     function cancel() {
       if (st.busy) return;
-      if (st.page === 'offer') post({kind: 'modsAction', action: 'publishingKey', arg: 'later'});
+      if (st.page === 'offer') { later.pending = true; later.tries = 0; sendLater(); }
       close();
     }
 
@@ -89,7 +99,7 @@ var publishingKey = (function () {
       if (bad) { st.error = bad; render(); return; }
       st.busy = true; st.error = '';
       render();
-      post({kind: 'modsAction', action: 'publishingKey', arg: st.page + '\t' + a});
+      post({cmd: 'modsAction', action: 'publishingKey', arg: st.page + '\t' + a});
     }
 
     function openBackup() {
@@ -107,6 +117,11 @@ var publishingKey = (function () {
     function onResult(d) {
       var data = d.data || {};
       if (data.key) noteKey(data.key);
+      if (later.pending) {
+        if (data.key && !data.key.offer) later.pending = false;           /* answered and saved */
+        else if (!d.data && later.tries < LATER_TRIES)                     /* turned away: another action ran */
+          after(function () { if (later.pending) sendLater(); }, LATER_RETRY_MS);
+      }
       if (data.cancelled) { st.busy = false; render(); return; }   /* the file picker was closed */
       if (!st.open || (st.page !== 'backup' && st.page !== 'restore')) return;
       st.busy = false;
@@ -120,9 +135,9 @@ var publishingKey = (function () {
         var on = function (id, ev, fn) { var e = byId(id); if (e) e.addEventListener(ev, fn); };
         // The key's state: asked once now, and each time the Settings menu opens (it also arms the pushed list,
         // whose next document carries the offer after a first publish).
-        post({kind: 'modsAction', action: 'publishingKey', arg: 'status'});
+        post({cmd: 'modsAction', action: 'publishingKey', arg: 'status'});
         if (env.settingsLabel) env.settingsLabel.addEventListener('click', function () {
-          post({kind: 'modsAction', action: 'publishingKey', arg: 'status'});
+          post({cmd: 'modsAction', action: 'publishingKey', arg: 'status'});
         });
         on('menuKeyBackup', 'click', function () { if (env.closeMenus) env.closeMenus(); openBackup(); });
         on('menuKeyRestore', 'click', function () { if (env.closeMenus) env.closeMenus(); open('restore'); });
@@ -144,7 +159,10 @@ var publishingKey = (function () {
       openRestore: function () { open('restore'); },
       confirm: confirm,
       cancel: cancel,
-      state: function () { return {open: st.open, page: st.page, busy: st.busy, error: st.error, key: st.key, offered: st.offered}; }
+      state: function () {
+        return {open: st.open, page: st.page, busy: st.busy, error: st.error, key: st.key, offered: st.offered,
+                laterPending: later.pending};
+      }
     };
   }
 

@@ -22,6 +22,8 @@ const standin = fs.readFileSync(path.join(web, 'preview_standin.js'), 'utf8').re
 const source = fs.readFileSync(path.join(web, 'mods_tab.js'), 'utf8');
 const host = fs.readFileSync(path.join(web, 'snapmap_plus_ui_webview.cpp'), 'utf8').replace(/\r\n/g, '\n');
 const iface = fs.readFileSync(path.join(root, 'src', 'common', 'snapmap_plus_iface.h'), 'utf8').replace(/\r\n/g, '\n');
+/* The host reads a page request's route, action and argument through mods_message.h, which holds its action table. */
+const hostMessage = fs.readFileSync(path.join(web, 'mods_message.h'), 'utf8').replace(/\r\n/g, '\n');
 const css = fs.readFileSync(path.join(web, 'studio.css'), 'utf8').replace(/\r\n/g, '\n');
 const docs = fs.readFileSync(path.join(root, 'docs', 'webview-ui.md'), 'utf8').replace(/\r\n/g, '\n');
 let passed = 0;
@@ -1935,7 +1937,9 @@ test('host and interface contract', () => {
   assert.ok(host.includes('} else if (cmd == L"modsAction") {'));
   assert.ok(host.includes('SH_IFACE_HAS_SLOT(g_iface, mods)'), 'an older backend is never called past its table');
   for (const a of modsTab.ACTIONS.filter((x) => x !== 'openFolder' && x !== 'openFile'))
-    assert.ok(host.includes('if (name == L"' + a + '")'), 'every page action reaches the backend: ' + a);
+    assert.ok(hostMessage.includes('return L"' + a + '";'), 'every page action reaches the backend: ' + a);
+  assert.ok(host.includes('sh_mods_message::parse_action(json, act, arg);') &&
+            host.includes('return sh_mods_message::action_code(name);'), 'the host routes through mods_message.h');
   assert.ok(host.includes('if (act == L"openFolder") ui_mods_open_folder(arg);'), 'openFolder opens the named mod folder');
   assert.ok(host.includes('else if (act == L"openFile") ui_mods_open_file(arg);'), 'openFile opens one file of a mod folder');
   assert.ok(host.includes('ui_mods_relative_file(rel)'), 'openFile takes a path below the mod folder');

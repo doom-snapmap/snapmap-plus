@@ -399,9 +399,13 @@ int main(int argc, char **argv)
     {
         int starts = F.starts;
         F.busy_seen[0] = 0;
+        size_t mark = g_log_n;
         g_fc.upload_delay_ms = 400;
         publish(1);
         CHECK(F.asks == 2 && g_fc.uploads == 1 && g_fc.uploaded_bytes == 212ull * 1024 * 1024);
+        /* the summary counts what this publish sent, not the emptied hold (R-LB1) */
+        CHECK(strstr(g_log + mark, "MODS: publish: uploaded 1 unit(s), 212.0 MB (222298112 bytes)") != NULL);
+        if (!strstr(g_log + mark, "MODS: publish: uploaded 1 unit(s)")) printf("%s\n", g_log + mark);
         CHECK(strstr(F.busy_seen, "Uploading mod content: 0 of 212 MB.\n") != NULL);
         CHECK(strstr(F.busy_seen, "of 212 MB.\n") != NULL);
         CHECK(F.starts == starts + 1 && !F.busy_on);
