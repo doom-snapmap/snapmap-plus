@@ -5020,6 +5020,16 @@ engine's load, so nothing is fetched before it; a pinned row's units are
 asked for after the open, with the map open (see [The map content
 cache](#the-map-content-cache)).
 
+A parse no gate took is the editor's open only once the editor shows the map
+(its screen over its edit, as the Mods tab's tick reads it, `map_info`): its
+notice and its store ask wait for that (`pub_open_owed_poll`), the time a load
+keeps the game busy not counted. The hub reads a map after its play (the map
+just played, under RECOMMEND MAP), which the editor never shows: after four
+seconds and 120 idle frames without the editor it is dropped, logged "a map
+read outside the editor (the hub after a play) says nothing and asks nothing".
+The editor object's edit and session byte are no such sign: both outlive the
+editor, so they read the hub as an editor with a map (R-LB1, check 5).
+
 The progress line. While the job runs the player sees where it is in the
 game's own progress line, the one the game shows while it downloads a published
 map: "Getting this map's mod content: Eternal Demons (2 of 3), 84 of 212 MB."

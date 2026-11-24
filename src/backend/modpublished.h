@@ -190,9 +190,13 @@ typedef struct sh_modpub_ops {
      * only on a settled screen and withdrawn when the game changes screen under it (R-LB1: an S3 notice showed through
      * the RECOMMEND MAP popup after a published play). NULL: never withdrawn. */
     long long (*screen)(void *c);
-    /* 1 while the editor has a map open, 0 not, -1 unknown. A parse no gate took counts as the editor's open only while
-     * it does: the hub's reads of a map after its play are no editor open and say nothing. NULL counts as -1. */
+    /* 1 while the editor shows a map (its screen is up over its edit), 0 not, -1 unknown. A parse no gate took is the
+     * editor's open only once the editor shows its map: its notice waits for that, and a read the editor never shows
+     * (the hub reads a map after its play, R-LB1) says nothing once the game has been idle without the editor for a
+     * while. NULL counts as -1 (the editor's at once). */
     int  (*editor_open)(void *c);
+    /* 1 while a map loads or Play runs (modui.h busy), 0 not. The wait above counts only idle time. NULL: never busy. */
+    int  (*busy)(void *c);
     int  (*worker_run)(void *c, void (*job)(void *), void *job_context);   /* 1 started */
     /* Fetch the row's units into the content cache and compose it (modcache.h sh_cache_prepare). Worker thread;
      * stops early when *cancel is set; 0 ok (what could not be had stands in), else a MODNET_E_ code. */

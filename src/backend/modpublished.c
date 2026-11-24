@@ -133,6 +133,11 @@ static unsigned long g_notes_frame;
 /* A rawmap hold asked the store for its map's content and resumed: the reopen's editor parse has been asked for
  * already, so it does not ask again (R-LV6: one load sent two fetches to an unreachable store); its notice is said. */
 static int g_reopen_asked;
+/* An untaken parse's notice waits for the editor to show the map (pub_open_owed_poll): the idle polls and the time
+ * since the game was first seen idle without it. */
+static int g_open_owed;
+static unsigned g_open_idle_polls;
+static ULONGLONG g_open_idle_since;
 
 /* The content notice the parse's stand-ins made (modcache.h), taken by the gate: said when the gate lets the map
  * through with nothing to fetch (a local row whose folder is not here stands in, D6a, manager Q8), dropped when a hold
@@ -143,6 +148,7 @@ static void pub_notes_gated(void)
 {
     free(g_pass_notice);
     g_pass_notice = NULL;
+    g_open_owed = 0;   /* a gate took this load: no earlier read waits for the editor */
     if (!g_notes_held) return;
     g_notes_held = 0;
     (void)sh_modmanifest_load_notes_flush(0);
@@ -585,7 +591,8 @@ void sh_modpublished_parse_seen(int kind, const char *text, void *out_map, int p
     if (InterlockedCompareExchange(&g_resuming, 0, 0)) { (void)sh_modmanifest_load_notes_flush(0); return; }
     if (!pub_on_main()) { g_record.valid = 0; return; }
     pub_record_clear(&g_record);
-    g_notes_held = sh_modmanifest_load_notes_pending() > 0 || (g_ops.content_pending && g_ops.content_pending(g_ops.context));
+    g_open_owed = 0;   /* another load: an earlier read waiting for the editor is over (this load's notices replaced it) */
+    g_notes_held =sh_modmanifest_load_notes_pending() > 0 || (g_ops.content_pending && g_ops.content_pending(g_ops.context));
     g_notes_frame = g_frame;
     /* The same map launched again while its hold asks or downloads (the
      * player pressed Play once more, or the browser re-issued the request):
@@ -1669,6 +1676,47 @@ int sh_modpub_lobby_host_content(const char *item, const char *revision, char *o
     return SH_MODPUB_HOST_REFUSED;
 }
 
+/* An untaken parse waits for the editor to show its map, idle time and polls both counted: an editor open's parse runs
+ * before its level load (busy) and the screen comes up after it, while the hub's read of a map after its play is never
+ * shown in the editor (R-LB1: the editor object keeps its edit and session flag after the editor is left, so they
+ * could not tell the hub from the editor). */
+#define PUB_OPEN_IDLE_MS    4000u
+#define PUB_OPEN_IDLE_POLLS 120u
+
+static void pub_open_owed_poll(void)
+{
+    int shows = g_ops.editor_open ? g_ops.editor_open(g_ops.context) : -1;
+    ULONGLONG now;
+    if (shows != 0) {
+        /* The editor shows the map (or that cannot be told: as before, the editor's). */
+        g_open_owed = 0;
+        if (!g_reopen_asked && pub_editor_fetch()) {
+            /* The open's notice is the store's answer (pub_editor_fetched). */
+        } else if (g_ops.content_notice) {
+            /* An editor open composed stand-ins (modcache.h) and nothing could be asked: its one notice (S2). */
+            char *said = g_ops.content_notice(g_ops.context);
+            if (said) pub_notice(said);
+            free(said);
+        }
+        g_reopen_asked = 0;
+        return;
+    }
+    if (g_ops.busy && g_ops.busy(g_ops.context) == 1) {   /* a load or Play: the wait starts again after it */
+        g_open_idle_polls = 0;
+        g_open_idle_since = 0;
+        return;
+    }
+    now = GetTickCount64();
+    if (!g_open_idle_since) g_open_idle_since = now;
+    g_open_idle_polls++;
+    if (g_open_idle_polls < PUB_OPEN_IDLE_POLLS || now - g_open_idle_since < PUB_OPEN_IDLE_MS) return;
+    /* Not the editor's: the hub read a map after its play (the lobby, RECOMMEND MAP); it says nothing there. */
+    g_open_owed = 0;
+    g_reopen_asked = 0;
+    if (g_ops.content_drop) g_ops.content_drop(g_ops.context);
+    pub_log("MODS: a map read outside the editor (the hub after a play) says nothing and asks nothing");
+}
+
 void sh_modpublished_poll(void)
 {
     pub_hold *h = &g_hold;
@@ -1687,21 +1735,18 @@ void sh_modpublished_poll(void)
         if (refused && refusal) {
             if (g_ops.refused_load) g_ops.refused_load(g_ops.context);
             pub_notice(refusal);
-        } else if (g_ops.editor_open && g_ops.editor_open(g_ops.context) == 0) {
-            /* not the editor's: the hub reads a map after its play (the lobby, RECOMMEND MAP); it says nothing there */
-            if (g_ops.content_drop) g_ops.content_drop(g_ops.context);
-            pub_log("MODS: a map read outside the editor (the hub after a play) says nothing and asks nothing");
-        } else if (!g_reopen_asked && pub_editor_fetch()) {
-            /* The open's notice is the store's answer (pub_editor_fetched). */
-        } else if (g_ops.content_notice) {
-            /* An editor open composed stand-ins (modcache.h) and nothing could be asked: its one notice (S2). */
-            char *said = g_ops.content_notice(g_ops.context);
-            if (said) pub_notice(said);
-            free(said);
+            g_open_owed = 0;
+            g_reopen_asked = 0;
+        } else {
+            /* The editor's open, once the editor shows the map (pub_open_owed_poll): a read it never shows is the
+             * hub's (a map read after its play) and says nothing. */
+            g_open_owed = 1;
+            g_open_idle_polls = 0;
+            g_open_idle_since = 0;
         }
         free(refusal);
-        g_reopen_asked = 0;
     }
+    if (g_open_owed && pub_on_main()) pub_open_owed_poll();
     if (h->state == HOLD_IDLE && !g_notice && !g_notice_ticket && !g_orphans) return;
     if (!pub_on_main()) return;
     pub_orphans_retire();
@@ -1763,6 +1808,7 @@ void sh_modpub_test_reset(void)
     free(g_pass_notice); g_pass_notice = NULL;
     InterlockedExchange(&g_resuming, 0);
     g_reopen_asked = 0;
+    g_open_owed = 0; g_open_idle_polls = 0; g_open_idle_since = 0;
 }
 int sh_modpub_test_state(void) { return g_hold.state; }
 const char *sh_modpub_test_notice(void) { return g_notice ? g_notice : ""; }
@@ -1834,7 +1880,6 @@ static struct {
     eng_parse_fn parse;                  /* the DeserializeFromJson entry: our detour runs */
     DWORD *main_thread;
     void **shell_slot, **session_slot;
-    const uint8_t *editor;   /* the editor object: in a session while +0x8 is set and its edit +0x204C8 is there */
     size_t slot_lobby, slot_parameters;
     const uint8_t *snap_params;          /* the 16-byte head of OnSnapPlay's dialog block */
     const char *snap_source;
@@ -1931,14 +1976,11 @@ static int eng_rescan(void *c) { (void)c; return sh_modserve_index_rescan(); }
 static int eng_activate(void *c, const sh_modmanifest_list *rows) { (void)c; return sh_modmanifest_activate(rows); }
 static int eng_can_ask(void *c) { (void)c; return sh_engine_dialog_can_ask(); }
 
-/* 1 while the editor has a map in a session (as modpublish.c's editor token reads it), 0 not, -1 unknown. */
-static int eng_editor_open(void *c)
-{
-    (void)c;
-    if (!g_eng.editor) return -1;
-    __try { return g_eng.editor[0x8] != 0 && *(void *const *)(g_eng.editor + 0x204C8) != NULL; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
-}
+/* 1 while the editor shows a map, as the Mods tab's tick reads it (its screen over its edit: modui.h map_info), 0 not,
+ * -1 unknown. Not the edit and the session byte alone: both outlive the editor, so the hub after a published play read
+ * as an editor with a map (R-LB1, check 5). */
+static int eng_editor_open(void *c) { (void)c; return sh_modui_editor_shows_map(); }
+static int eng_busy(void *c) { (void)c; return sh_modui_game_busy(); }
 
 /* idMenuManager_Shell: the current screen +0x8, the next +0xC, the shell state +0x910 (SHELL_SCREEN, SHELL_STATE;
  * the same on both renderers). One token for a settled screen, -1 while it moves, 0 unknown. */
@@ -2414,7 +2456,7 @@ void sh_modpublished_lobby_line(const char *text)
 static const sh_modpub_ops ENG_OPS = {
     .on_main = eng_on_main, .row_state = eng_row_state, .rescan = eng_rescan, .activate = eng_activate,
     .can_ask = eng_can_ask, .ask = eng_ask, .poll = eng_poll, .release = eng_release, .screen = eng_screen, .editor_open = eng_editor_open,
-    .worker_run = eng_worker_run,
+    .busy = eng_busy, .worker_run = eng_worker_run,
     .fetch_for = eng_fetch_for, .metadata_copy = eng_metadata_copy, .metadata_free = eng_metadata_free,
     .metadata_ids = eng_metadata_ids, .hold_token = eng_hold_token, .owner_current = eng_owner_current,
     .host_matches = eng_host_matches, .hold_ui = eng_hold_ui, .drop_ui = eng_drop_ui, .resume = eng_resume,
@@ -2578,9 +2620,6 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
     shell = glb_resolve(base, "shell_ptr_slot", NULL);
     thread = glb_resolve(base, "main_thread_id", NULL);
     if (!shell || !thread) { backend_log("MODS: the shell or main-thread global did not resolve"); return 0; }
-    /* the editor object (idSnapEditorLocal), for whether a parse no gate took was the editor's */
-    g_eng.editor = (const uint8_t *)glb_resolve(base, "editor_singleton", NULL);
-    if (!g_eng.editor) backend_log("MODS: the editor object did not resolve; every parse no gate takes counts as the editor's");
     ready = g_eng.site[ENG_READY];
     sites.on_snap = g_eng.site[ENG_ON_SNAP]; sites.browser = g_eng.site[ENG_BROWSER];
     sites.ready = ready; sites.lobby = g_eng.site[ENG_LOBBY]; sites.feed = g_eng.site[ENG_FEED];

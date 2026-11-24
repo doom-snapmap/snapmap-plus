@@ -80,7 +80,8 @@ typedef struct fake {
     HANDLE fetch_gate;               /* when set, the fetch waits on it */
     int can_ask_after;               /* ticks before the surface is idle */
     long long screen;                /* ops.screen: the shell's screen token, -1 between screens, 0 unknown */
-    int editor_open;                 /* ops.editor_open: 1 (the default after reset) while the editor has a map */
+    int editor_open;                 /* ops.editor_open: 1 (the default after reset) while the editor shows a map */
+    int busy;                        /* ops.busy: 1 while a map loads or Play runs */
     int ticks;
     int asks, ask_gdm, ask_buttons, releases;
     char last_ask[256];
@@ -265,6 +266,7 @@ static int f_poll(void *c, int ticket)
 static void f_release(void *c, int ticket) { (void)c; (void)ticket; F.releases++; }
 static long long f_screen(void *c) { (void)c; return F.screen; }
 static int f_editor_open(void *c) { (void)c; return F.editor_open; }
+static int f_busy(void *c) { (void)c; return F.busy; }
 
 typedef struct job_thread { void (*job)(void *); void *ctx; } job_thread;
 static DWORD WINAPI f_thread(void *p)
@@ -414,7 +416,7 @@ static void f_scope_play(void *c, const char *why) { (void)c; (void)why; g_scope
 
 static const sh_modpub_ops OPS = {
     .on_main = f_on_main, .row_state = f_row_state, .rescan = f_rescan, .activate = f_activate,
-    .can_ask = f_can_ask, .ask = f_ask, .poll = f_poll, .release = f_release, .screen = f_screen, .editor_open = f_editor_open, .worker_run = f_worker_run,
+    .can_ask = f_can_ask, .ask = f_ask, .poll = f_poll, .release = f_release, .screen = f_screen, .editor_open = f_editor_open, .busy = f_busy, .worker_run = f_worker_run,
     .fetch_for = f_fetch_for, .metadata_copy = f_metadata_copy, .metadata_free = f_metadata_free,
     .metadata_ids = f_metadata_ids, .hold_token = f_hold_token, .owner_current = f_owner_current,
     .host_matches = f_host_matches, .hold_ui = f_hold_ui, .drop_ui = f_drop_ui, .resume = f_resume, .log = f_log,
@@ -1752,12 +1754,50 @@ static void editor_open_fetches_its_content(void)
     g_content.pending = 1;
     g_content.absent_after_fetch = 1;
     F.editor_open = 0;
+    g_last_logs[0] = 0;
     parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
     tick(1);
     tick_until_idle();
     tick(2);
     CHECK(F.fetch_calls == 0 && F.asks == 0 && !sh_modpub_test_notice()[0]);
-    F.editor_open = 1;
+    {
+        /* idle at the hub, the editor never showing the map: the read is dropped, said nowhere, even if an editor
+         * shows a map later (the editor's own open parses again) */
+        int i;
+        for (i = 0; i < 700 && !strstr(g_last_logs, "a map read outside the editor"); i++) { tick(1); Sleep(10); }
+        CHECK(strstr(g_last_logs, "a map read outside the editor (the hub after a play) says nothing") != NULL);
+        CHECK(g_content.pending == 0);   /* its stand-ins' notice is dropped */
+        F.editor_open = 1;
+        tick(3);
+        CHECK(F.fetch_calls == 0 && F.asks == 0 && g_content.said == 0 && !sh_modpub_test_notice()[0]);
+    }
+
+    printf("-- an editor open whose screen comes up frames after its parse (a load between) says its notice then\n");
+    reset();
+    use_content();
+    g_content.armed = 1;
+    g_content.served = 1;
+    g_content.pending = 1;
+    g_content.absent_after_fetch = 1;
+    g_content.refresh_answer = 0;
+    F.editor_open = 0;
+    F.busy = 1;                       /* the level load */
+    g_last_logs[0] = 0;
+    parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
+    {
+        int i;
+        for (i = 0; i < 500; i++) { tick(1); if (i % 50 == 0) Sleep(50); }   /* a long load: polls and time pass */
+        CHECK(F.fetch_calls == 0 && F.asks == 0 && !strstr(g_last_logs, "outside the editor"));   /* busy counts not */
+        F.busy = 0;
+        tick(20);                     /* idle frames before the editor screen is up */
+        CHECK(F.fetch_calls == 0 && !strstr(g_last_logs, "outside the editor"));
+    }
+    F.editor_open = 1;                /* the editor shows the map */
+    tick(1);
+    tick_until_idle();
+    tick(2);
+    CHECK(F.fetch_calls == 1 && g_content.said == 1 && F.asks == 1 && F.ask_buttons == 0);
+    CHECK(said_notice("This map is playing without the Tyrant", 38));
 
     printf("-- an editor open does not ask the store again for what moderation removed (S3)\n");
     reset();
