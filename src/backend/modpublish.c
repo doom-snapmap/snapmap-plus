@@ -1550,7 +1550,10 @@ static void mp_prepared(void)
             h->plan.missing_bytes, h->plan.absent, h->plan.removed);
     mp_job_free(job);
     if (!h->plan.missing) { mp_resume(); return; }
-    mp_busy(h->editor, NULL);   /* the question is the game's own dialog, over the editor */
+    /* The question is the game's own dialog, over the editor. Held at FINISH, the pacifier stays until the tick that
+     * raises the dialog, so the publish screens never take input in between (the game's profanity check clears and
+     * shows in one frame too). */
+    if (!h->finish) mp_busy(h->editor, NULL);
     h->state = HOLD_RAISE;
 }
 
@@ -1621,8 +1624,10 @@ static void mp_poll_hold(void)
         mp_prepared();
         break;
     case HOLD_RAISE:
+        if (h->finish) mp_busy(h->editor, NULL);   /* cleared in the tick that raises (or puts it back below) */
         if (h->finish ? g_ops.finish_can_ask && !g_ops.finish_can_ask(g_ops.context, h->editor)
                       : !g_ops.can_ask || !g_ops.can_ask(g_ops.context)) {
+            if (h->finish) mp_busy(h->editor, "Preparing this map's mod content.");
             if (++h->waited > MP_RAISE_TICKS)
                 mp_refuse("The map was not published: its question could not be shown. Publish it again.",
                           "the dialog surface never became idle");

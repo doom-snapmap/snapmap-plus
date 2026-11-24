@@ -966,6 +966,19 @@ static void published_map_follows_rebuild(const char *tmp, const char *store)
     memset(&cur, 0, sizeof cur);
     CHECK(sh_modmanifest_current(&cur) == 1 && cur.rows[0].pinned);
     CHECK(cur.count && back.count && !strcmp(cur.rows[0].build, back.rows[0].build));
+    /* a reopen changes nothing: the open map's row is the saved row, field by field */
+    if (cur.count && back.count) {
+        const sh_modmanifest_row *a = &cur.rows[0], *z = &back.rows[0];
+        size_t q;
+        int same = a->unit_count == z->unit_count && a->name_count == z->name_count && a->size == z->size &&
+                   a->attached == z->attached && !strcmp(a->salt, z->salt) &&
+                   !strcmp(sh_modmanifest_row_name(a), sh_modmanifest_row_name(z)) &&
+                   (!a->modules == !z->modules) && (!a->modules || !strcmp(a->modules, z->modules));
+        for (q = 0; same && q < a->unit_count; q++)
+            same = !strcmp(a->units[q], z->units[q]) && !strcmp(a->roots[q], z->roots[q]);
+        for (q = 0; same && q < a->name_count; q++) same = !strcmp(a->names[q], z->names[q]);
+        CHECK(same);
+    }
     memset(&ref, 0, sizeof ref);
     CHECK(cur.count && sh_modserve_row_build(&cur.rows[0], &ref) && ref.place && !strcmp(ref.place, SH_MODSERVE_CONTENT));
     sh_modserve_bundle_ref_free(&ref);

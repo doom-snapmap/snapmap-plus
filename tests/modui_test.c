@@ -1515,14 +1515,17 @@ int main(int argc, char **argv)
             {
                 char *saved;
                 size_t sl = 0;
+                unsigned gen;
                 g_row_differs = 1;
                 doc = list_doc();
                 CHECK(!has(doc, "\"update\":\"This map uses another version"));   /* local: it follows the folder */
                 free(doc);
+                gen = sh_modui_generation();
                 sh_modmanifest_set_pin(t_publish_pin);
                 saved = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &sl);
                 sh_modmanifest_set_pin(NULL);
                 CHECK(saved != NULL && g_pins == 1);
+                CHECK(sh_modui_generation() != gen);   /* the page hears of the pinned rows */
                 memset(&now, 0, sizeof now);
                 CHECK(sh_modmanifest_current(&now) == 1 && now.rows[0].pinned);
                 sh_modmanifest_list_free(&now);

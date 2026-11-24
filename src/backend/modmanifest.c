@@ -2305,6 +2305,13 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
         }
         out = sh_modmanifest_write(json, length, use_pinned ? &pinned : &ctx.list, &written, err, sizeof err);
         if (out && use_pinned) {
+            /* Exactly what a reopen reads: the rows of the text just written. */
+            sh_modmanifest_list back;
+            memset(&back, 0, sizeof back);
+            if (sh_modmanifest_read(out, written, &back, NULL) == pinned.count) {
+                sh_modmanifest_list_free(&pinned);
+                pinned = back;
+            } else sh_modmanifest_list_free(&back);
             sh_modmanifest_content_for(json, length, &pinned);
             if (scope) scope(&pinned, NULL, 0, SH_MODSERVE_AT_SAVE);
             sh_modmanifest_list_free(&ctx.list);

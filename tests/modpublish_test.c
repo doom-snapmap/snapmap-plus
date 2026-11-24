@@ -630,6 +630,9 @@ int main(int argc, char **argv)
         F.toast[0] = 0;
         starts = F.starts;
         CHECK(sh_modpublish_finish_gate(EDITOR, 0) == 1);
+        PUMP_UNTIL(sh_modpublish_test_state() >= 2);
+        /* prepared: the pacifier stays up until the tick that raises the question, so the screens take no input */
+        CHECK(sh_modpublish_test_state() == 2 && F.busy_on && FF.asks == 0);
         PUMP_UNTIL(!sh_modpublish_holding());
         CHECK(FF.asks == 1 && FF.yes_no == 1 && !strcmp(FF.title, "Mod content to upload"));
         CHECK(!strcmp(FF.text, "Publishing uploads 5 MB of mod content that the mod store does not have yet. Publish?"));
