@@ -359,6 +359,7 @@ typedef struct pub_hold {
     int in_lobby;                        /* a joiner's units download while it stays in the lobby (SPEC 5.11) */
     int start_held;                      /* the lobby asked it to load before its content was here: it leaves */
     int reported;                        /* the last state code sent to the host (modlobby.h), 0 none */
+    long long screen;                    /* the shell screen the play was held on (ops.screen, its low half), 0 unknown */
 } pub_hold;
 
 static pub_hold g_hold;
@@ -563,14 +564,17 @@ static void pub_abandon(const char *why)
     pub_hold_free();
 }
 
-/* A browser or feed play whose player left its screen while its mods downloaded (Esc to the hub): the download is
+/* A browser, feed or My Maps play whose player left its screen while its mods downloaded (Esc to the hub): the download is
  * cancelled, its line taken down, and the browser out of its loading state, so a play the player backed out of never
  * starts later on its own (R-LV9). */
 static int pub_left_screen(pub_hold *h)
 {
-    if ((h->hook != SH_MODPUB_BROWSER_PLAY && h->hook != SH_MODPUB_FEED_PLAY) || !h->token || !g_ops.owner_current ||
-        g_ops.owner_current(g_ops.context, h->hook, h->owner, h->extra, h->token))
+    long long now;
+    if ((h->hook != SH_MODPUB_BROWSER_PLAY && h->hook != SH_MODPUB_FEED_PLAY && h->hook != SH_MODPUB_LOCAL_OFFLINE) ||
+        !h->screen || !g_ops.screen)
         return 0;
+    now = g_ops.screen(g_ops.context);
+    if (now <= 0 || (now & 0xFFFFFFFFll) == h->screen) return 0;   /* unknown, moving, or still there */
     pub_progress_hide(h);
     if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, h->hook, h->owner);
     pub_launch_refused(h->hook);
@@ -684,6 +688,10 @@ static int pub_hold_begin(int hook, void *owner, const void *metadata, void *ext
     pub_hold *h = &g_hold;
     if (h->state != HOLD_IDLE) pub_abandon("a newer map launch replaced it");
     memset(h, 0, sizeof(*h));
+    if (g_ops.screen) {
+        long long screen = g_ops.screen(g_ops.context);
+        h->screen = screen > 0 ? (screen & 0xFFFFFFFFll) : 0;
+    }
     if (!pub_list_copy(&h->rows, rows)) goto nomem;
     h->missing = calloc(rows->count ? rows->count : 1, sizeof(*h->missing));
     if (!h->missing) goto nomem;
