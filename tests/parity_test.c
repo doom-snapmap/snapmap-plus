@@ -17,8 +17,11 @@
  * serves pub-author's or pub-player's composition.
  *
  * What is compared. From the map's placed names, every file the placed objects reach: a name resolves to every file
- * of that name an installed build provides (by request, by provided name, by stem across extensions, a Lua module by
- * its script), and a file served in a mode reaches every such name its served bytes spell (texts and binaries alike).
+ * of that name an installed build provides (by request, by provided name, by stem across extensions, a name require
+ * takes by its scripts\lib file), and a file served in a mode reaches every such name its served bytes spell (texts
+ * and binaries alike). A script spells what its runtime can read: its string literals, never a comment, and a literal
+ * reaches a script only as require loads one (scripts\lib\<name>.lua); an entry script is reached by the entity it
+ * binds (R-UC1).
  * This reference closure is the data's, not the builder's: it reads the bytes, never the recorded needs, so a need
  * the builder or the unit walk misses still shows. For every file reached in any mode, each mode's answer (the
  * SHA-256 of the bytes served, or nothing) must be the same. Also: every entityDef of a namespace a Play mode does not
@@ -217,7 +220,7 @@ static void u_add_file(const char *request, const char *pname)
 }
 static int u_cmp(const void *a, const void *b) { return strcmp(((const uentry *)a)->key, ((const uentry *)b)->key); }
 static void u_sort(void) { if (!g_u.sorted) { qsort(g_u.v, g_u.n, sizeof *g_u.v, u_cmp); g_u.sorted = 1; } }
-/* Every request `name` reaches; `lua`: the name is a script's (a bare word is a Lua module only in a script's text). */
+/* Every request `name` reaches; `lua`: the name is a whole literal of a script (a word is a module only there). */
 static void u_requests(const char *name, pset *out, int lua)
 {
     uentry key;
@@ -231,20 +234,13 @@ static void u_requests(const char *name, pset *out, int lua)
     for (pass = 0; pass < 3; pass++) {
         if (pass == 1) { u_stem(low, stem, sizeof stem); if (!strcmp(stem, low)) continue; key.key = stem; }
         else if (pass == 2) {
-            /* a Lua module name: lib.foo is scripts/lib/foo.lua, and a bare module the SDK finds in scripts/ or
-             * scripts/lib/ (any namespace's) */
-            char *p;
-            if (!lua || strchr(low, '/')) continue;
-            _snprintf_s(stem, sizeof stem, _TRUNCATE, "%s", low);
-            for (p = stem; *p; p++) if (*p == '.') *p = '/';
-            {
-                size_t i, sl = strlen(stem);
-                for (i = 0; i < g_scripts.n; i++) {
-                    const char *r = g_scripts.v[i], *s = strstr(r, "/scripts/");
-                    if (s && !strncmp(s + 9, stem, sl) && !strcmp(s + 9 + sl, ".lua")) ps_add(out, r);
-                    if (s && !strncmp(s + 9, "lib/", 4) && !strncmp(s + 13, stem, sl) && !strcmp(s + 13 + sl, ".lua"))
-                        ps_add(out, r);
-                }
+            /* a name require takes: scripts/lib/<name>.lua (any namespace's), the one file require loads
+             * (script_lib_base.c sb_require); an entry script in scripts/ is never required */
+            size_t i, sl = strlen(low);
+            if (!lua || !sh_mb_script_module_name(low, sl)) continue;
+            for (i = 0; i < g_scripts.n; i++) {
+                const char *r = g_scripts.v[i], *s = strstr(r, "/scripts/lib/");
+                if (s && !strncmp(s + 13, low, sl) && !strcmp(s + 13 + sl, ".lua")) ps_add(out, r);
             }
             continue;
         } else key.key = low;
@@ -320,6 +316,30 @@ static void tokens(const unsigned char *p, size_t n, pset *names)
             if (strlen(t) >= 3) ps_add(names, t);
         }
     }
+}
+
+/* What a script spells, as its runtime reads it (sh_mb_script_literals): the tokens of its string literals in `names`
+ * (a comment is never read), and in `modules` each literal that is a name require takes. */
+typedef struct script_spell { pset *names, *modules; } script_spell;
+static int script_literal(void *ctx, const char *s, size_t n)
+{
+    script_spell *sp = (script_spell *)ctx;
+    tokens((const unsigned char *)s, n, sp->names);
+    if (sp->modules && n < 500 && sh_mb_script_module_name(s, n)) {
+        char t[512];
+        memcpy(t, s, n);
+        t[n] = 0;
+        u_lower(t);
+        ps_add(sp->modules, t);
+    }
+    return 1;
+}
+static void script_names(const unsigned char *p, size_t n, pset *names, pset *modules)
+{
+    script_spell sp;
+    sp.names = names;
+    sp.modules = modules;
+    (void)sh_mb_script_literals((const char *)p, n, script_literal, &sp);
 }
 
 /* ------------------------------------------------------------ one mode's answers */
@@ -453,10 +473,11 @@ static void mode_draws(mode_run *m)
 /* The reference closure from the placed names under the scope in force. */
 static void mode_reach(mode_run *m, const char *const *placed, size_t np)
 {
-    pset queue, names;
+    pset queue, names, modules;
     size_t q = 0, i;
     memset(&queue, 0, sizeof queue);
     memset(&names, 0, sizeof names);
+    memset(&modules, 0, sizeof modules);
     for (i = 0; i < np; i++) u_requests(placed[i], &queue, 0);
     if (getenv("PARITY_REG")) { printf("  -- %s registries:\n", m->name); sh_modserve_registry_report(print_line, NULL); sh_modserve_scope_report(print_line, NULL); }
     /* Every DOOM file the map's mods change (a native/ replacement, an edited decl, a registry the product generates:
@@ -476,16 +497,21 @@ static void mode_reach(mode_run *m, const char *const *placed, size_t np)
             serve_sha(r, sha, &bytes, &len);
             if (!bytes) continue;
             ps_free(&names);
-            tokens(bytes, len, &names);
+            ps_free(&modules);
+            if (lua) script_names(bytes, len, &names, &modules);
+            else tokens(bytes, len, &names);
             HeapFree(GetProcessHeap(), 0, bytes);
             for (k = 0; k < names.n; k++) {
                 if (getenv("PARITY_TOKENS") && strstr(names.v[k], "mods/")) printf("  %s: %s spells %s\n", m->name, r, names.v[k]);
-                u_requests(names.v[k], &queue, lua);
+                u_requests(names.v[k], &queue, 0);
             }
+            for (k = 0; k < modules.n; k++) u_requests(modules.v[k], &queue, 1);
             ps_free(&names);
+            ps_free(&modules);
         }
-        /* A script is run for an entity it binds: the runtime starts every served script whose text names a reached
-         * entityDef (its static bind), and what that script requires is then reached through its names. */
+        /* A script is run for an entity it binds: the runtime starts every served entry script, and the one whose
+         * literals name a reached entityDef (its bind) acts for it; what that script requires is then reached through
+         * its names. */
         before = queue.n;
         for (i = 0; i < g_scripts.n; i++) {
             const char *r = g_scripts.v[i];
@@ -493,11 +519,12 @@ static void mode_reach(mode_run *m, const char *const *placed, size_t np)
             size_t len = 0, k;
             char sha[SH_MB_HASH_HEX + 1];
             int binds = 0;
-            if (ps_has(&queue, r)) continue;
+            /* only an entry script runs on its own; a scripts/lib file runs when a script requires it */
+            if (ps_has(&queue, r) || sh_mb_script_request(r, NULL, NULL) != SH_MB_SCRIPT_ENTRY) continue;
             serve_sha(r, sha, &bytes, &len);
             if (!bytes) continue;
             ps_free(&names);
-            tokens(bytes, len, &names);
+            script_names(bytes, len, &names, NULL);
             HeapFree(GetProcessHeap(), 0, bytes);
             for (k = 0; k < names.n; k++) {
                 char req[700];
@@ -519,6 +546,7 @@ static void mode_reach(mode_run *m, const char *const *placed, size_t np)
     }
     ps_free(&queue);
     ps_free(&names);
+    ps_free(&modules);
     mode_draws(m);
 }
 
@@ -1347,6 +1375,57 @@ static void case_kinds(void)
     mt_remove_tree(work);
 }
 
+/* Two demons of one pack, each with its entry script and brain, a library both require, and graphs a brain names by a
+ * literal it passes on (require(B.SPEC.graph)), as Doomforge writes an Eternal pack. The shared library's comment names
+ * the other demon's graph, and a graph's data names the other demon's entry script by its word ("beta" in a list of AI
+ * types): neither is a name the runtime loads (it reads no comment, and require loads only scripts/lib/<name>.lua; an
+ * entry script runs for the entity it binds). A map placing one demon serves the same in every mode, and the reference
+ * still follows the graph the brain names (R-UC1: the three-demon pack's plasmacombat.lua and arachnotron.lua). */
+#define SQ "pi9salt9"
+static void case_pack_scripts(void)
+{
+    static const char *const demons[] = { "alpha", "beta" };
+    char work[MAX_PATH], author[MAX_PATH * 2], player[MAX_PATH * 2], rel[MAX_PATH], text[1024];
+    size_t d;
+    CHECK(mt_temp_dir("paritys", work, sizeof work));
+    _snprintf_s(author, sizeof author, _TRUNCATE, "%s\\author", work);
+    _snprintf_s(player, sizeof player, _TRUNCATE, "%s\\player", work);
+    CreateDirectoryA(author, NULL);
+    CreateDirectoryA(player, NULL);
+    write_mod(author, "pack", SQ, "Pack");
+    put_text(author, "pack", "scripts\\lib\\shared.lua",
+             "-- every brain names its graph by a literal (beta_graph for the second demon)\n"
+             "local S = {}\nfunction S.bind(def, brain) return brain end\nreturn S\n");
+    for (d = 0; d < 2; d++) {
+        const char *n = demons[d];
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "entities\\ai\\demon\\%s.decl", n);
+        put_text(author, "pack", rel, "{\n\tinherit = \"snapmaps/props/crate\";\n\tedit = {\n\t}\n}\n");
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "scripts\\%s.lua", n);
+        _snprintf_s(text, sizeof text, _TRUNCATE,
+                    "api = 1\nrequire(\"shared\").bind(\"ai/demon/%s\", require(\"%s_brain\").new())\n", n, n);
+        put_text(author, "pack", rel, text);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "scripts\\lib\\%s_brain.lua", n);
+        _snprintf_s(text, sizeof text, _TRUNCATE,
+                    "local B = {}\nB.SPEC = { graph = \"%s_graph\" }\n"
+                    "function B.new() return { graph = require(B.SPEC.graph) } end\nreturn B\n", n);
+        put_text(author, "pack", rel, text);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "scripts\\lib\\%s_graph.lua", n);
+        put_text(author, "pack", rel, "local M = {}\nM.aiTypes = { \"imp\", \"beta\" }\nreturn M\n");
+    }
+    CHECK(kinds_run("one demon of a pack whose scripts name the other's", author, player,
+                    "{\"entities\":[{\"inherit\":\"mods/" SQ "/ai/demon/alpha\"}],\"instances\":[]}") == 0);
+    CHECK(g_last_q6 == 0);
+    CHECK(ps_has(&g_last_served, "mods/" SQ "/scripts/alpha.lua"));
+    CHECK(ps_has(&g_last_served, "mods/" SQ "/scripts/lib/alpha_graph.lua"));   /* named by the literal passed on */
+    CHECK(!ps_has(&g_last_served, "mods/" SQ "/scripts/beta.lua"));
+    CHECK(!ps_has(&g_last_served, "mods/" SQ "/scripts/lib/beta_graph.lua"));
+    CHECK(kinds_run("both demons of the pack", author, player,
+                    "{\"entities\":[{\"inherit\":\"mods/" SQ "/ai/demon/alpha\"},{\"inherit\":\"mods/" SQ "/ai/demon/beta\"}],"
+                    "\"instances\":[]}") == 0);
+    CHECK(ps_has(&g_last_served, "mods/" SQ "/scripts/lib/beta_graph.lua"));
+    mt_remove_tree(work);
+}
+
 int main(int argc, char **argv)
 {
     const char *mods = NULL, *placed = NULL, *map = NULL, *doom = NULL, *out = NULL;
@@ -1435,6 +1514,7 @@ int main(int argc, char **argv)
     case_two_mods();
     case_look();
     case_kinds();
+    case_pack_scripts();
     if (failures) { fprintf(stderr, "parity_test: %d failure(s)\n", failures); return 1; }
     printf("parity_test: every mode served every placed object the same\n");
     return 0;

@@ -288,6 +288,7 @@ static char *rows_text(const sh_modmanifest_list *rows, size_t *len)
  * the rows themselves, the save observer, the metadata write), then the Save state's callback, then the cloud save's
  * read of the slot. Returns what PublishAfterSave's gate said; the slot's text and the uploaded text are kept. */
 static char g_slot[64 * 1024], g_uploaded[64 * 1024];
+static int g_cloud_skip;   /* the cloud save sends nothing new, so it does not read the slot (the slot's text is in the cloud) */
 static int engine_save(void)
 {
     sh_modmanifest_list rows, copy;
@@ -307,7 +308,7 @@ static int engine_save(void)
     g_slot[0] = g_uploaded[0] = 0;
     if (text && len < sizeof g_slot) { memcpy(g_slot, text, len); g_slot[len] = 0; }
     /* the cloud save reads the slot back to upload it: the published copy */
-    up = pass && text ? sh_modpublish_cloud_text(LOCAL_ID, text, len, &ul) : NULL;
+    up = pass && text && !g_cloud_skip ? sh_modpublish_cloud_text(LOCAL_ID, text, len, &ul) : NULL;
     if (up && ul < sizeof g_uploaded) { memcpy(g_uploaded, up, ul); g_uploaded[ul] = 0; }
     else if (!up && text && len < sizeof g_uploaded) { memcpy(g_uploaded, text, len); g_uploaded[len] = 0; }
     if (up) HeapFree(GetProcessHeap(), 0, up);
@@ -563,12 +564,15 @@ int main(int argc, char **argv)
     printf("-- an object neither here nor in the store, and one moderation removed: said after the publish\n");
     {
         int starts = F.starts;
+        size_t logged = g_log_n;
         g_menu_notice[0] = 0;
         fc_set_unit(UNIT_T, MODCLAIM_ABSENT, 0);
         publish(0);
         CHECK(F.starts == starts + 1);
         CHECK(!strcmp(g_menu_notice, "Players will see this map without the Tyrant from Eternal Demons: its content is "
                                      "not on this computer or in the mod store."));
+        /* R-LV9: the notice queue logs the notice it takes; the publish does not log it a second time */
+        CHECK(strstr(g_log + logged, "MODS: notice:") == NULL);
         CHECK(engine_save() == 1);
         {
             /* R-LB1 F7: the claim names only what the store holds; the absent Tyrant is left out, so it succeeds, nothing
@@ -635,10 +639,45 @@ int main(int argc, char **argv)
         CHECK(F.starts == starts + 1 && g_fc.plans == plans && !sh_modpublish_holding() && !F.toast[0]);
         CHECK(!strcmp(g_menu_notice, "Players will see this map without the Hellguard from Hell Guards: its content is "
                                      "not on this computer or in the mod store."));
-        CHECK(engine_save() == 1);
+        {
+            size_t mark = g_log_n;
+            CHECK(engine_save() == 1);
+            /* R-LV9: a local row is no pin; the published copy's line counts the pinned rows only */
+            CHECK(strstr(g_log + mark, "the published copy carries 0 pinned row(s)") != NULL);
+        }
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc4", "rev1");
         PUMP_UNTIL(idle_all());
         CHECK(g_fc.claims == claims && g_fc.queued == queued);   /* nothing is claimed or queued */
+
+        /* R-LV9: a cloud save that does not read the slot. With no row pinned that is no failure: the published map is
+         * the slot's text, its rows local. */
+        {
+            size_t mark;
+            g_menu_notice[0] = 0;
+            publish(0);
+            g_cloud_skip = 1;
+            CHECK(engine_save() == 1);
+            g_cloud_skip = 0;
+            mark = g_log_n;
+            sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc4", "rev2");
+            PUMP_UNTIL(idle_all());
+            CHECK(strstr(g_log + mark, "no row was pinned, so the published map is the slot's text as it is") != NULL);
+            CHECK(strstr(g_log + mark, "never reached Snapmap+") == NULL);
+            /* with a row pinned the save's text is new: a cloud save that never read it is the failure line */
+            rows_pinned(1);
+            publish(0);
+            g_cloud_skip = 1;
+            CHECK(engine_save() == 1);
+            g_cloud_skip = 0;
+            mark = g_log_n;
+            sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc4", "rev3");
+            PUMP_UNTIL(idle_all());
+            CHECK(strstr(g_log + mark, "the cloud save's read of the slot never reached Snapmap+") != NULL);
+            claims = g_fc.claims;
+            queued = g_fc.queued;
+            starts += 2;   /* the two publishes above */
+            rows_local();
+        }
 
         /* with no unit to claim, no publishing key is needed */
         F.toast[0] = 0;
@@ -882,8 +921,13 @@ int main(int argc, char **argv)
             CHECK(!sh_modpublish_cloud_sum_take(LOCAL_ID, &sum));
             /* another slot's read is left as it is, and forgets a checksum noted for a served copy */
             sh_modpublish_cloud_sum_note(LOCAL_ID, 7);
-            other = sh_modpublish_cloud_text("ANOTHERSLOT", g_slot, strlen(g_slot), &ul);
-            CHECK(other == NULL && !sh_modpublish_cloud_sum_take(LOCAL_ID, &sum));
+            {
+                size_t mark = g_log_n;
+                other = sh_modpublish_cloud_text("ANOTHERSLOT", g_slot, strlen(g_slot), &ul);
+                CHECK(other == NULL && !sh_modpublish_cloud_sum_take(LOCAL_ID, &sum));
+                /* R-LV9: a read of the wrong slot says so */
+                CHECK(strstr(g_log + mark, "the cloud save read slot 'ANOTHERSLOT', not the published slot") != NULL);
+            }
             if (other) HeapFree(GetProcessHeap(), 0, other);
         }
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "eeeeeeeeeeeeeeeeeeeeeee1", "rev1");
