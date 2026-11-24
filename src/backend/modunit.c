@@ -679,69 +679,20 @@ static void uw_literal(uw *w, const char *s, size_t n)
     for (c = 0; c < m; c++) free(cand[c]);
 }
 
-/* Every string literal of a Lua text, each passed to fn: "..." and '...' with their escapes, and long strings;
- * comments are skipped. */
+/* Every string literal of a Lua text, each passed to fn (sh_mb_script_literals: comments are skipped). */
 typedef void (*uw_literal_fn)(uw *w, const char *s, size_t n, void *ctx);
+typedef struct uw_literals_ctx { uw *w; uw_literal_fn fn; void *ctx; } uw_literals_ctx;
+static int uw_literal_each(void *context, const char *s, size_t n)
+{
+    uw_literals_ctx *c = (uw_literals_ctx *)context;
+    c->fn(c->w, s, n, c->ctx);
+    return !c->w->oom;
+}
 static void uw_literal_reach(uw *w, const char *s, size_t n, void *ctx) { (void)ctx; uw_literal(w, s, n); }
 static void uw_lua_literals(uw *w, const char *t, size_t n, uw_literal_fn fn, void *ctx)
 {
-    size_t i = 0;
-    while (i < n && !w->oom) {
-        char ch = t[i];
-        if (ch == '-' && i + 1 < n && t[i + 1] == '-') {
-            size_t lvl = 0, k = i + 2;
-            if (k < n && t[k] == '[') {
-                size_t j = k + 1;
-                while (j < n && t[j] == '=') { lvl++; j++; }
-                if (j < n && t[j] == '[') {
-                    /* a long comment: to its close bracket of the same level */
-                    for (j++; j < n; j++) {
-                        size_t q = j + 1, e = 0;
-                        if (t[j] != ']') continue;
-                        while (q < n && t[q] == '=') { e++; q++; }
-                        if (e == lvl && q < n && t[q] == ']') { j = q; break; }
-                    }
-                    i = j + 1;
-                    continue;
-                }
-            }
-            while (i < n && t[i] != '\n') i++;
-            continue;
-        }
-        if (ch == '"' || ch == '\'') {
-            char *buf = (char *)malloc(n - i + 1);
-            size_t bl = 0;
-            if (!buf) { w->oom = 1; return; }
-            for (i++; i < n && t[i] != ch && t[i] != '\n'; i++) {
-                if (t[i] == '\\' && i + 1 < n) {
-                    char e = t[++i];
-                    buf[bl++] = e == 'n' ? '\n' : e == 't' ? '\t' : e;
-                } else buf[bl++] = t[i];
-            }
-            i++;
-            fn(w, buf, bl, ctx);
-            free(buf);
-            continue;
-        }
-        if (ch == '[') {
-            size_t j = i + 1, lvl = 0;
-            while (j < n && t[j] == '=') { lvl++; j++; }
-            if (j < n && t[j] == '[') {
-                size_t start = j + 1, end = n;
-                for (j = start; j < n; j++) {
-                    size_t q = j + 1, e = 0;
-                    if (t[j] != ']') continue;
-                    while (q < n && t[q] == '=') { e++; q++; }
-                    if (e == lvl && q < n && t[q] == ']') { end = j; j = q; break; }
-                }
-                if (start < n && t[start] == '\n') start++;
-                if (end > start) fn(w, t + start, end - start, ctx);
-                i = j + 1;
-                continue;
-            }
-        }
-        i++;
-    }
+    uw_literals_ctx c = { w, fn, ctx };
+    if (!sh_mb_script_literals(t, n, uw_literal_each, &c)) w->oom = 1;
 }
 
 typedef struct uw_scan_ctx { uw *w; uw_script *s; } uw_scan_ctx;
@@ -810,26 +761,18 @@ static void uw_literal_def(uw *w, const char *s, size_t n, void *ctx)
     for (i = 0; i < m; i++) if (cand[i]) { uw_defs_named(w, cand[i], strlen(cand[i]), (uw_script *)ctx); free(cand[i]); }
 }
 
-/* A literal spelled as a Lua module name is a module the script may require by a name it computes or passes on:
+/* A literal spelled as a name require takes is a module the script may require by a name it computes or passes on:
  * require(spec.attacks), pcall(require, "x"), require(cfg.x or "x") (R-LV2: the Tyrant's unit lacked
  * eternal_attacks.lua, which its brain spec names as attacks = "eternal_attacks", and the brain stopped). It reaches
- * scripts/lib/<name>.lua when the mod has it, as a require would; a module name's dots are folders. */
+ * scripts/lib/<name>.lua when the mod has it, as a require would, by require's own name rule
+ * (sh_mb_script_module_name: a name with a '-' is one, R-UC1). */
 static void uw_literal_module(uw *w, const char *s, size_t n, void *ctx)
 {
-    size_t i;
     char *req, *p;
     (void)ctx;
-    if (!n || n > 200 || s[0] == '.' || s[n - 1] == '.') return;
-    for (i = 0; i < n; i++) {
-        unsigned char ch = (unsigned char)s[i];
-        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' ||
-              ch == '.'))
-            return;
-    }
+    if (n > 200 || !sh_mb_script_module_name(s, n)) return;
     req = sh_textf("mods/%s/scripts/lib/%.*s.lua", w->salt, (int)n, s);
     if (!req) { w->oom = 1; return; }
-    for (p = req + strlen("mods/") + strlen(w->salt) + strlen("/scripts/lib/"); *p && strcmp(p, ".lua"); p++)
-        if (*p == '.') *p = '/';
     for (p = req; *p; p++) *p = (char)uw_lower((unsigned char)*p);
     uw_reach_request(w, req);
     free(req);

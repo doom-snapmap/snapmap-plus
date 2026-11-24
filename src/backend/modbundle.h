@@ -632,6 +632,18 @@ typedef void (*sh_mb_script_call_fn)(void *context, int what, const char *event,
                                      int line);
 void sh_mb_script_scan(const char *text, size_t len, sh_mb_script_call_fn fn, void *context);
 
+/* Every string literal of a script's code, in order, without running it: "..." and '...' with their escapes
+ * decoded, and long strings (a first newline dropped, as Lua does). Comments are skipped: the runtime reads no name
+ * from a comment. `fn` returns 0 to stop. Returns 0 when memory ran out, else 1. Pure. The unit walk reads a script's
+ * names through it (modunit.c), and so does the mode-parity reference (tests/parity_test.c). */
+typedef int (*sh_mb_script_literal_fn)(void *context, const char *s, size_t len);
+int  sh_mb_script_literals(const char *text, size_t len, sh_mb_script_literal_fn fn, void *context);
+
+/* 1 when the `len` bytes at `s` are a name `require` loads: a file scripts\lib\<name>.lua of the mod, <name> of
+ * [A-Za-z0-9_-] (sh_mb_script_request; the runtime's require takes no folder, dot or extension, script_lib_base.c
+ * sb_require). An entry script is never required: it runs for the entity it binds. Pure. */
+int  sh_mb_script_module_name(const char *s, size_t len);
+
 /* Kinds a bundle admits only as stock pointers, never as carried bytes:
  * .sbsp, .ambientsh, .tome and .pages (per-map engine files, never authored
  * by hand and too large to carry for a multiplayer map). 1 when `request` is

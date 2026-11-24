@@ -492,10 +492,13 @@ static void test_scripts(const char *top)
 
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\scripts", top);
     write_pack(folder);
-    mt_write(folder, "scripts\\crate.lua", "api = 1\nlocal crate_lib = require(\"crate_lib\")\nlocal spec = { attacks = \"crate_attacks\" }\nlocal attacks = require(spec.attacks)\nlocal def = \"entities/crate\"\n");
+    mt_write(folder, "scripts\\crate.lua", "api = 1\nlocal crate_lib = require(\"crate_lib\")\nlocal spec = { attacks = \"crate_attacks\", graph = \"crate-graph\" }\nlocal attacks = require(spec.attacks)\nlocal graph = require(spec.graph)\n-- \"crate_notes\" is named only in this comment\nlocal def = \"entities/crate\"\n");
     mt_write(folder, "scripts\\lib\\crate_lib.lua", "local extra = \"materials/crate_extra\"\nreturn extra\n");
-    /* a module the script requires by a name it passes on (R-LV2) */
+    /* a module the script requires by a name it passes on (R-LV2), with any character require takes (R-UC1: a name
+     * of scripts\lib is [A-Za-z0-9_-]) */
     mt_write(folder, "scripts\\lib\\crate_attacks.lua", "return {}\n");
+    mt_write(folder, "scripts\\lib\\crate-graph.lua", "return {}\n");
+    mt_write(folder, "scripts\\lib\\crate_notes.lua", "return {}\n");
     mt_write(folder, "materials\\crate_extra.decl", "{\n}\n");
     if (!build(folder, &b)) return;
     if (unit(&b, folder, "mods/" SALT "/crate", &u)) {
@@ -503,6 +506,8 @@ static void test_scripts(const char *top)
         CHECK(kept(&b, &u, "scripts/lib/crate_lib.lua") == 1);
         CHECK(kept(&b, &u, "materials/crate_extra.decl") == 1);
         CHECK(kept(&b, &u, "scripts/lib/crate_attacks.lua") == 1);
+        CHECK(kept(&b, &u, "scripts/lib/crate-graph.lua") == 1);
+        CHECK(kept(&b, &u, "scripts/lib/crate_notes.lua") == 0);   /* a comment loads nothing */
         sh_unit_free(&u);
     }
     if (unit(&b, folder, "mods/" SALT "/barrel", &u)) {

@@ -4099,7 +4099,9 @@ declare what the editor did. `tests/parity_test.c` holds the rule: it drives a
 map through the editor, Play, a My Maps play, the published map on the author's
 and on a player's machine and both kept copies, and requires every file the
 placed objects reach (found from the served bytes, not the recorded needs) to
-be served with the same bytes in each.
+be served with the same bytes in each. A script reaches what its runtime can
+load: the names its string literals spell, a literal `require` takes reaching
+`scripts\lib\<name>.lua`, and an entry script only through the entity it binds.
 
 Two layers (DESIGN-additive 2.3): while a map is open or played, the bundles
 it declares serve, then the game. The listing is the declared bundles' hashes
@@ -5609,7 +5611,10 @@ The closure follows these rules:
   module's every file below its own name; a model with its mesh and skeleton.
 - Scripts: an entry script comes with the defs it binds or names in a literal;
   every module a kept script requires; every string literal of a kept script is
-  a name of the mod and, ending in `/`, `_`, `-` or `.`, a prefix of names.
+  a name of the mod and, ending in `/`, `_`, `-` or `.`, a prefix of names, and
+  a literal that is a name `require` takes reaches `scripts\lib\<name>.lua` (a
+  module required by a name the script passes on). Comments are not read
+  (`sh_mb_script_literals`, `sh_mb_script_module_name`).
 - Boards: a virtual texture is cut at the square. A material's `landpagefile`
   and `virtualmapping` decide which `_sq<N>.mega2` squares are kept.
 - Pointers: DOOM and product files a kept file reaches, with their SHA-256 and

@@ -1186,6 +1186,66 @@ void sh_mb_script_scan(const char *t, size_t n, sh_mb_script_call_fn fn, void *c
     }
 }
 
+int sh_mb_script_literals(const char *t, size_t n, sh_mb_script_literal_fn fn, void *context)
+{
+    size_t i = 0;
+    if (!t || !fn) return 1;
+    while (i < n) {
+        char ch = t[i];
+        if (ch == '-' && i + 1 < n && t[i + 1] == '-') {
+            int level, line = 0;
+            i += 2;
+            if (i < n && t[i] == '[' && (level = mbs_long_level(t, n, i)) >= 0) i = mbs_skip_long(t, n, i, level, &line);
+            else while (i < n && t[i] != '\n') i++;
+            continue;
+        }
+        if (ch == '"' || ch == '\'') {
+            char *buf = (char *)malloc(n - i + 1);
+            size_t bl = 0;
+            int go;
+            if (!buf) return 0;
+            for (i++; i < n && t[i] != ch && t[i] != '\n'; i++) {
+                if (t[i] == '\\' && i + 1 < n) {
+                    char e = t[++i];
+                    buf[bl++] = e == 'n' ? '\n' : e == 't' ? '\t' : e;
+                } else buf[bl++] = t[i];
+            }
+            i++;
+            go = fn(context, buf, bl);
+            free(buf);
+            if (!go) return 1;
+            continue;
+        }
+        if (ch == '[') {
+            int level = mbs_long_level(t, n, i);
+            if (level >= 0) {
+                size_t start = i + (size_t)level + 2, j, close = n;   /* unclosed: to the end */
+                for (j = start; j < n; j++) {
+                    size_t q = j + 1;
+                    int e = 0;
+                    if (t[j] != ']') continue;
+                    while (q < n && t[q] == '=') { e++; q++; }
+                    if (e == level && q < n && t[q] == ']') { close = j; j = q; break; }
+                }
+                if (start < n && t[start] == '\n') start++;
+                i = j + 1;
+                if (close > start && !fn(context, t + start, close - start)) return 1;
+                continue;
+            }
+        }
+        i++;
+    }
+    return 1;
+}
+
+int sh_mb_script_module_name(const char *s, size_t n)
+{
+    size_t i;
+    if (!s || !n) return 0;
+    for (i = 0; i < n; i++) if (!mb_script_name_char(s[i])) return 0;
+    return 1;
+}
+
 int sh_mb_stock_restore(const char *request, const char *source)
 {
     size_t rn, sn;
