@@ -156,6 +156,25 @@ static void f_notice(void *c, void *editor, const char *text) { (void)c; (void)e
 static char g_menu_notice[512];
 static void f_menu_notice(void *c, const char *text) { (void)c; strcpy_s(g_menu_notice, sizeof g_menu_notice, text); }
 static int f_window_open(void *c) { (void)c; return 1; }
+/* The publish screens' FINISH step: the editor's own dialog over them, their close, their pending result. */
+static struct {
+    int asks, yes_no, answer, closes, clears, refuse_one_button, busy_blocks;
+    char title[64], text[256];
+} FF;
+static int f_finish_can_ask(void *c, void *editor) { (void)c; return editor == EDITOR && !(FF.busy_blocks && F.busy_on); }
+static int f_finish_ask(void *c, void *editor, const char *title, const char *text, int yes_no)
+{
+    (void)c;
+    if (editor != EDITOR || (!yes_no && FF.refuse_one_button)) return 0;
+    FF.asks++;
+    FF.yes_no = yes_no;
+    strcpy_s(FF.title, sizeof FF.title, title ? title : "(publish failed)");
+    strcpy_s(FF.text, sizeof FF.text, text);
+    return 1;
+}
+static int f_finish_poll(void *c, void *editor) { (void)c; return editor == EDITOR ? FF.answer : 2; }
+static void f_finish_close(void *c, void *editor) { (void)c; if (editor == EDITOR) FF.closes++; }
+static void f_finish_clear(void *c, void *editor) { (void)c; if (editor == EDITOR) FF.clears++; }
 static void set_ops(void)
 {
     sh_modpublish_ops ops;
@@ -165,6 +184,8 @@ static void set_ops(void)
     ops.placed_names = f_placed_names; ops.editor_notice = f_notice; ops.log = f_log;
     ops.add_tag = f_add_tag; ops.remove_tag = f_remove_tag; ops.edit_ids = f_edit_ids;
     ops.published_query = f_published_query; ops.notice = f_menu_notice;
+    ops.finish_can_ask = f_finish_can_ask; ops.finish_ask = f_finish_ask; ops.finish_poll = f_finish_poll;
+    ops.finish_close = f_finish_close; ops.finish_clear = f_finish_clear;
     sh_modpublish_test_set_ops(&ops);
 }
 
@@ -567,6 +588,124 @@ int main(int argc, char **argv)
         F.token = 0xED18;
         PUMP_UNTIL(idle_all());
         fc_set_unit(UNIT_M, MODCLAIM_HELD, 0);
+    }
+
+    printf("-- S7 at FINISH: off by default; on, the publish holds with the screens up and asks over them (R-LB1)\n");
+    {
+        int starts = F.starts;
+        size_t mark = g_log_n;
+        CHECK(!sh_modpublish_finish_on());
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 0 && !sh_modpublish_holding());   /* off: the frame goes on */
+        sh_modpublish_finish_set(1);
+        CHECK(sh_modpublish_finish_on());
+        /* a map without mod rows: FINISH goes on as the game's */
+        sh_modmanifest_list_free(&g_rows);
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 0 && !sh_modpublish_holding());
+        rows_pinned(1);
+
+        /* every unit held: no question; the screens close and the publish starts in the editor's frame */
+        memset(&FF, 0, sizeof FF);
+        FF.busy_blocks = 1;
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
+        CHECK(sh_modpublish_holding() && sh_modpublish_test_state() == 1 && F.busy_on && FF.closes == 0);
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);   /* a second PUBLISH waits for it */
+        PUMP_UNTIL(sh_modpublish_test_state() == 5);
+        CHECK(sh_modpublish_test_state() == 5 && F.starts == starts && FF.closes == 0 && F.busy_on);
+        sh_modpublish_editor_tick((void *)(uintptr_t)0x9999);   /* another editor's frame does nothing */
+        CHECK(sh_modpublish_test_state() == 5);
+        sh_modpublish_editor_tick(EDITOR);
+        CHECK(!sh_modpublish_holding() && FF.closes == 1 && F.starts == starts + 1 && F.resumed_pass == 1 &&
+              F.overwrite == 1 && !F.busy_on && FF.asks == 0);
+        CHECK(strstr(g_log + mark, "publish held at FINISH: preparing 1 row(s)") != NULL);
+        CHECK(strstr(g_log + mark, "the publish screens close and the publish starts") != NULL);
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ddddddddddddddddddddddd1", "rev1");
+        PUMP_UNTIL(idle_all());
+
+        /* units the store lacks: asked in the editor's dialog over the screens; No leaves them as they were */
+        fc_set_unit(UNIT_M, MODCLAIM_MISSING, 5ull * 1024 * 1024);
+        memset(&FF, 0, sizeof FF);
+        FF.busy_blocks = 1;
+        FF.answer = 2;
+        F.toast[0] = 0;
+        starts = F.starts;
+        CHECK(sh_modpublish_finish_gate(EDITOR, 0) == 1);
+        PUMP_UNTIL(!sh_modpublish_holding());
+        CHECK(FF.asks == 1 && FF.yes_no == 1 && !strcmp(FF.title, "Mod content to upload"));
+        CHECK(!strcmp(FF.text, "Publishing uploads 5 MB of mod content that the mod store does not have yet. Publish?"));
+        CHECK(F.starts == starts && FF.closes == 0 && FF.clears == 1 && !F.busy_on && F.toast[0] == 0);
+        CHECK(!sh_modpublish_test_pin_armed());
+
+        /* Yes: the upload with progress on the pacifier over the screens, then they close and the publish starts */
+        memset(&FF, 0, sizeof FF);
+        FF.busy_blocks = 1;
+        FF.answer = 1;
+        F.busy_seen[0] = 0;
+        g_fc.upload_delay_ms = 200;
+        {
+            int uploads = g_fc.uploads;
+            CHECK(sh_modpublish_finish_gate(EDITOR, 0) == 1);
+            PUMP_UNTIL(sh_modpublish_test_state() == 5);
+            CHECK(FF.asks == 1 && g_fc.uploads == uploads + 1 && F.starts == starts && FF.closes == 0);
+            CHECK(strstr(F.busy_seen, "Uploading mod content: 0 of 5 MB.\n") != NULL);
+            sh_modpublish_editor_tick(EDITOR);
+            CHECK(!sh_modpublish_holding() && FF.closes == 1 && F.starts == starts + 1 && F.overwrite == 0);
+        }
+        g_fc.upload_delay_ms = 0;
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ddddddddddddddddddddddd1", "rev2");
+        PUMP_UNTIL(idle_all());
+
+        /* a refusal is the editor's one-button dialog over the screens; the toast when that cannot show */
+        fc_set_unit(UNIT_M, MODCLAIM_MISSING, 5ull * 1024 * 1024);
+        memset(&FF, 0, sizeof FF);
+        FF.answer = 1;
+        F.toast[0] = 0;
+        starts = F.starts;
+        g_fc.upload_code = MODNET_E_REFUSED;
+        strcpy_s(g_fc.why, sizeof g_fc.why, "over the size limit");
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
+        PUMP_UNTIL(!sh_modpublish_holding());
+        CHECK(F.starts == starts && FF.closes == 0 && FF.clears == 1 && FF.asks == 2 && FF.yes_no == 0);
+        CHECK(!strcmp(FF.title, "(publish failed)") && !strcmp(FF.text, "The map was not published. Over the size limit."));
+        CHECK(F.toast[0] == 0);
+        memset(&FF, 0, sizeof FF);
+        FF.answer = 1;
+        FF.refuse_one_button = 1;
+        g_fc.upload_code = MODNET_E_REFUSED;
+        strcpy_s(g_fc.why, sizeof g_fc.why, "over the size limit");
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
+        PUMP_UNTIL(!sh_modpublish_holding());
+        CHECK(F.starts == starts && !strcmp(F.toast, "The map was not published. Over the size limit."));
+        g_fc.why[0] = 0;
+
+        /* the editor leaving abandons it, the question open */
+        memset(&FF, 0, sizeof FF);
+        FF.answer = 0;
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
+        PUMP_UNTIL(sh_modpublish_test_state() == 3);
+        CHECK(sh_modpublish_test_state() == 3 && FF.asks == 1);
+        F.token = 0;
+        sh_modpublish_poll();
+        CHECK(!sh_modpublish_holding() && F.starts == starts && FF.closes == 0);
+        F.token = 0xED19;
+        PUMP_UNTIL(idle_all());
+        fc_set_unit(UNIT_M, MODCLAIM_HELD, 0);
+
+        /* no editor frame comes (its hook not installed): the tick closes the screens and starts it itself */
+        memset(&FF, 0, sizeof FF);
+        mark = g_log_n;
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
+        PUMP_UNTIL(!sh_modpublish_holding());
+        CHECK(FF.closes == 1 && F.starts == starts + 1);
+        CHECK(strstr(g_log + mark, "no editor frame came to close the publish screens") != NULL);
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ddddddddddddddddddddddd1", "rev3");
+        PUMP_UNTIL(idle_all());
+
+        /* off again: PublishStart holds and asks as before */
+        sh_modpublish_finish_set(0);
+        CHECK(!sh_modpublish_finish_on() && sh_modpublish_finish_gate(EDITOR, 1) == 0 && !sh_modpublish_holding());
     }
 
     printf("-- PublishAfterSave refuses a text over the service bound and an unreadable mod list\n");

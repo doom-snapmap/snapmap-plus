@@ -22,6 +22,7 @@
 #include "timeline_tile.h"
 #include "budget_table.h"
 #include "editor_zoom.h"
+#include "modpublish.h"   /* a publish held at FINISH resumes in the editor's frame */
 #include "hook.h"
 #include "backend_log.h"
 #include "engine_globals.h"
@@ -391,6 +392,8 @@ static void sh_editor_frame_detour(void *editor, void *arg)
 
     /* A queued fly-to advances one phase per frame; idle costs one read. */
     sh_fly_to_tick(editor);
+    /* A publish held at the publish screens' FINISH closes them and starts (S7 at FINISH); idle, one read. */
+    sh_modpublish_editor_tick(editor);
     /* A staged module prefab installs, then follows its grab, one step per frame. */
     sh_module_prefab_tick(editor);
     /* The Timeline tile's prototype record, and entity rows after list changes. */

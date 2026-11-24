@@ -5473,6 +5473,44 @@ have is absent (S8); one moderation removed is removed.
   A worker busy for about three minutes refuses with "Snapmap+ is busy with the
   mod store. Publish again in a moment."
 
+By the time `PublishStart` runs, the publish screens are already closed: the
+MapProperties frame's PUBLISH case (VK 0x14118FDD0, GL 0x14118EF50) calls the
+game's gate (limits, start module, deprecated entity; `PublishFinishGateCall`,
+VK 0x1190362, GL 0x118F4E2), then the screens' close (the editor's state stack
+pops), then `PublishStart(editor, state+0x21)`. So a question raised there
+draws over the editor, behind the shell's backdrop. The game raises its own
+publish errors earlier, while the screens are still up, in the editor screen's
+own dialog: `[editor+0x21088]+0x8E8`. The show is `EditorGdmShow`; the
+descriptor is title, text, two labels and a kind (+0xC0, 0 for Yes/No and 1
+for one button). It sets `+0xA2C` bit 0. While that bit is set, EditorFrame
+skips the state's frame and runs the dialog's input. The input writes the
+answer to `+0x1DC` (0 for the first button, 1 for the second or Back) under
+the flag `+0x1D8`. EditorFrame clears the bit once the flag is set
+(`EditorGdmAnswerCall`).
+
+`sh_publish_question finish` asks S7 there instead (`sh_publish_question
+start` puts it back; `start` is the default until FINISH is proven live). Only
+while it is on, the gate call is repointed at a near relay (`mov r9,rsi`, the
+state). The gate runs first, and its refusals stay the game's. Then
+`sh_modpublish_finish_gate` holds a map with mod rows and returns 1, so the
+screens stay up. Preparation, the question, the upload and its progress are
+the same as above. The pacifier shows over the screens, as the game's own
+profanity check does. The question is the editor's Yes/No over them, titled
+"Mod content to upload".
+
+- No leaves the author on FINISH. The screens' pending result (`+0xA18` ->
+  `+0x8E0`) is cleared.
+- A refusal is the game's one-button "publish failed" dialog over the screens,
+  or the editor toast when that dialog cannot show.
+- When the content is ready, the EditorFrame detour (`sh_modpublish_editor_tick`,
+  after the engine's frame, where `fly_to.c` also changes state) closes the
+  screens and starts `PublishStart` through its detour, which passes. If no
+  editor frame comes within two seconds, the tick does it.
+
+The bind checks every byte of this in `sh_modpublish_check_finish`
+(`modpub_sites.c`; `tests/modpub_sites_test.c` runs it on both executables).
+When a check fails, S7 stays at `PublishStart`.
+
 When the units are in the store, or the publish goes on queued, the held
 `PublishStart` runs (`mp_resume`, through its own detour, which passes) and
 arms the pin step for 30 seconds. The save the publish makes then writes its

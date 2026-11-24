@@ -66,7 +66,10 @@ static void mp_link_record(const char *item, const char *cloud, const char *loca
 static void mp_link_forget(const char *item);
 
 enum { MP_DIALOG_PENDING = 0, MP_DIALOG_ACCEPTED = 1 };
-enum { HOLD_IDLE = 0, HOLD_PREPARING, HOLD_RAISE, HOLD_ASKING, HOLD_UPLOADING };
+/* HOLD_RESUME: a publish held at FINISH is ready; the EditorFrame detour closes the screens and starts it. */
+enum { HOLD_IDLE = 0, HOLD_PREPARING, HOLD_RAISE, HOLD_ASKING, HOLD_UPLOADING, HOLD_RESUME };
+#define MP_RESUME_TICKS    120     /* no editor frame in two seconds: the tick resumes it itself */
+#define MP_QUESTION_TITLE  "Mod content to upload"
 enum { CTX_NONE = 0, CTX_ROWS, CTX_NO_ROWS, CTX_UNKNOWN };
 enum { JOB_PREPARE = 1, JOB_UPLOAD, JOB_CLAIM, JOB_RELEASE, JOB_LAUNCH, JOB_FETCH };
 
@@ -702,6 +705,7 @@ typedef struct mp_hold {
     mp_job *job;                               /* the prepare job, then the upload job */
     modclaim_plan plan;                        /* what the store lacks, kept from the prepare */
     char *after;                               /* a notice for after the publish (S8, removed, queued), malloc'd */
+    int finish;                                /* held at the publish screens' FINISH, which stay up (R-LB1 S7) */
 } mp_hold;
 
 typedef struct mp_context {
@@ -717,6 +721,9 @@ typedef struct mp_context {
 
 static mp_hold g_hold;
 static mp_context g_ctx;
+static int g_finish_on;                 /* S7 is asked at FINISH (sh_modpublish_finish_set); off: at PublishStart */
+static int (*g_finish_patch)(int on);   /* the engine side's gate-call patch: 1 when it is as asked */
+static int g_editor_ticking;            /* inside sh_modpublish_editor_tick */
 static struct { int armed; ULONGLONG at; } g_pin;   /* the resumed PublishStart's save pins its rows */
 
 static void mp_ctx_clear(void)
@@ -756,15 +763,25 @@ static void mp_abandon(const char *why)
     mp_hold_free();
 }
 
-/* The publish does not start: the pacifier goes, and one sentence says why. Nothing was sent to the map service. */
+/* The publish does not start: the pacifier goes, and one sentence says why. Nothing was sent to the map service. Held
+ * at FINISH, the publish screens stay as they were and the sentence is the editor's own dialog over them, as the
+ * game's own publish errors are (the toast when that dialog cannot show). */
 static void mp_refuse(const char *notice, const char *why)
 {
     void *editor = g_hold.editor;
+    int finish = g_hold.finish;
     if (g_hold.state == HOLD_IDLE) return;
     mp_logf("MODS: publish: not started: %s", why);
     mp_hold_free();
     mp_busy(editor, NULL);
-    if (notice) mp_editor_notice(editor, notice);
+    if (finish && g_ops.finish_clear) g_ops.finish_clear(g_ops.context, editor);
+    if (!notice) return;
+    if (finish && g_ops.finish_ask && (!g_ops.finish_can_ask || g_ops.finish_can_ask(g_ops.context, editor)) &&
+        g_ops.finish_ask(g_ops.context, editor, NULL, notice, 0)) {
+        mp_logf("MODS: publish notice: %s", notice);
+        return;
+    }
+    mp_editor_notice(editor, notice);
 }
 
 int sh_modpublish_holding(void)
@@ -783,28 +800,79 @@ static void mp_resume(void)
     mp_hold *h = &g_hold;
     void *editor = h->editor;
     unsigned char overwrite = h->overwrite;
-    char *after = h->after;
+    int finish = h->finish;
+    char *after;
+    /* Held at FINISH: the screens close where the frame would have closed them, in the editor's frame (the pacifier
+     * stays until then). */
+    if (finish && !g_editor_ticking) {
+        if (h->state != HOLD_RESUME) { h->state = HOLD_RESUME; h->waited = 0; }
+        return;
+    }
+    after = h->after;
     h->after = NULL;
     mp_hold_free();
     mp_busy(editor, NULL);
     g_pin.armed = 1;
     g_pin.at = GetTickCount64();
-    mp_log("MODS: publish: the map's mod content is ready; the publish starts");
+    mp_log(finish ? "MODS: publish: the map's mod content is ready; the publish screens close and the publish starts"
+                  : "MODS: publish: the map's mod content is ready; the publish starts");
+    if (finish && g_ops.finish_close) g_ops.finish_close(g_ops.context, editor);
     InterlockedExchange(&g_resuming, 1);
     if (g_ops.start) g_ops.start(g_ops.context, editor, overwrite);
     InterlockedExchange(&g_resuming, 0);
     if (after) { mp_menu_notice(after); free(after); }
 }
 
+void sh_modpublish_editor_tick(void *editor)
+{
+    if (g_hold.state != HOLD_RESUME || !editor || editor != g_hold.editor || !mp_on_main()) return;
+    if (mp_token(editor) != g_hold.token || !g_hold.token) return;   /* the tick abandons it */
+    g_editor_ticking = 1;
+    mp_resume();
+    g_editor_ticking = 0;
+}
+
+static int mp_hold_begin(void *editor, unsigned char overwrite, int finish);
+
 int sh_modpublish_publish_start(void *editor, unsigned char overwrite)
+{
+    if (!g_ops_set || InterlockedCompareExchange(&g_resuming, 0, 0) || !mp_on_main()) return 1;
+    if (g_hold.state != HOLD_IDLE) return 0;   /* the held publish is still preparing: a second Publish waits for it */
+    return mp_hold_begin(editor, overwrite, 0);
+}
+
+int sh_modpublish_finish_gate(void *editor, unsigned char overwrite)
+{
+    if (!g_ops_set || !g_finish_on || !g_ops.finish_ask || !g_ops.finish_poll || !g_ops.finish_close ||
+        InterlockedCompareExchange(&g_resuming, 0, 0) || !mp_on_main())
+        return 0;
+    if (g_hold.state != HOLD_IDLE) return 1;   /* a held publish is on its way: FINISH waits for it */
+    return mp_hold_begin(editor, overwrite, 1) ? 0 : 1;
+}
+
+void sh_modpublish_finish_set(int on)
+{
+    on = on ? 1 : 0;
+    if (g_finish_patch && !g_finish_patch(on)) {
+        mp_logf("MODS: publish: the FINISH step could not be %s; S7 stays where it was (%s)",
+                on ? "hooked" : "unhooked", g_finish_on ? "at FINISH" : "after the publish screens close");
+        return;
+    }
+    if (g_finish_on != on) mp_logf("MODS: publish: S7 is now asked %s", on ? "at FINISH, over the publish screens"
+                                                                          : "after the publish screens close");
+    g_finish_on = on;
+}
+
+int sh_modpublish_finish_on(void) { return g_finish_on; }
+
+/* A held publish begins (1: nothing to hold, the publish goes on as the engine would). */
+static int mp_hold_begin(void *editor, unsigned char overwrite, int finish)
 {
     mp_hold *h = &g_hold;
     char **names = NULL;
     size_t count = 0;
     sh_modmanifest_list rows;
     int n;
-    if (!g_ops_set || InterlockedCompareExchange(&g_resuming, 0, 0) || !mp_on_main()) return 1;
-    if (h->state != HOLD_IDLE) return 0;   /* the held publish is still preparing: a second Publish waits for it */
     if (g_ops.account_name) {
         /* The name the key's requests present (D31): read from the signed-in game at each publish, never typed. */
         char name[256];
@@ -832,8 +900,9 @@ int sh_modpublish_publish_start(void *editor, unsigned char overwrite)
     h->job->rows = rows;
     h->state = HOLD_PREPARING;
     h->waited = 0;
+    h->finish = finish;
     mp_busy(editor, "Preparing this map's mod content.");
-    mp_logf("MODS: publish held: preparing %d row(s) of mod content", n);
+    mp_logf("MODS: publish held%s: preparing %d row(s) of mod content", finish ? " at FINISH" : "", n);
     return 0;
 }
 
@@ -1552,27 +1621,38 @@ static void mp_poll_hold(void)
         mp_prepared();
         break;
     case HOLD_RAISE:
-        if (!g_ops.can_ask || !g_ops.can_ask(g_ops.context)) {
+        if (h->finish ? g_ops.finish_can_ask && !g_ops.finish_can_ask(g_ops.context, h->editor)
+                      : !g_ops.can_ask || !g_ops.can_ask(g_ops.context)) {
             if (++h->waited > MP_RAISE_TICKS)
                 mp_refuse("The map was not published: its question could not be shown. Publish it again.",
                           "the dialog surface never became idle");
             break;
         }
         sh_modpublish_compose_question(text, sizeof text, h->plan.missing_bytes);
-        h->ticket = g_ops.ask ? g_ops.ask(g_ops.context, MP_GDM_ID, MP_BUTTONS_YES_NO, text) : 0;
-        if (h->ticket <= 0) {
-            h->ticket = 0;
-            mp_refuse("The map was not published: its question could not be shown. Publish it again.",
-                      "the dialog would not raise; nothing is uploaded without an answer");
-            break;
+        if (h->finish) {
+            /* over the publish screens, in the editor's own dialog: the one the game's publish errors use */
+            if (!g_ops.finish_ask(g_ops.context, h->editor, MP_QUESTION_TITLE, text, 1)) {
+                mp_refuse("The map was not published: its question could not be shown. Publish it again.",
+                          "the editor's dialog would not show; nothing is uploaded without an answer");
+                break;
+            }
+        } else {
+            h->ticket = g_ops.ask ? g_ops.ask(g_ops.context, MP_GDM_ID, MP_BUTTONS_YES_NO, text) : 0;
+            if (h->ticket <= 0) {
+                h->ticket = 0;
+                mp_refuse("The map was not published: its question could not be shown. Publish it again.",
+                          "the dialog would not raise; nothing is uploaded without an answer");
+                break;
+            }
         }
         h->state = HOLD_ASKING;
         h->waited = 0;
         break;
     case HOLD_ASKING:
-        answer = g_ops.poll ? g_ops.poll(g_ops.context, h->ticket) : -1;
+        if (h->finish) answer = g_ops.finish_poll(g_ops.context, h->editor);
+        else answer = g_ops.poll ? g_ops.poll(g_ops.context, h->ticket) : -1;
         if (answer == MP_DIALOG_PENDING) break;
-        if (g_ops.release) g_ops.release(g_ops.context, h->ticket);
+        if (!h->finish && g_ops.release) g_ops.release(g_ops.context, h->ticket);
         h->ticket = 0;
         if (answer != MP_DIALOG_ACCEPTED) {
             mp_refuse(NULL, "the author chose not to upload");
@@ -1609,6 +1689,15 @@ static void mp_poll_hold(void)
                 sh_modpublish_progress_text(text, sizeof text, done, h->job->total_bytes);
                 mp_busy(h->editor, text);
             }
+        }
+        break;
+    case HOLD_RESUME:
+        /* the EditorFrame detour resumes it; without an editor frame (its hook not installed) the tick does */
+        if (++h->waited > MP_RESUME_TICKS) {
+            mp_log("MODS: publish: no editor frame came to close the publish screens; the tick closes them");
+            g_editor_ticking = 1;
+            mp_resume();
+            g_editor_ticking = 0;
         }
         break;
     default:
@@ -1721,6 +1810,8 @@ void sh_modpublish_test_set_cache_root(const char *root)
 #ifndef SH_MODPUBLISH_PURE
 #include "signatures.h"
 #include "hook.h"
+#include "patch.h"
+#include "near_page.h"
 #include "backend_log.h"
 #include "engine_globals.h"
 #include "engine_dialog.h"
@@ -1753,6 +1844,21 @@ typedef unsigned (*eng_write_local_fn)(const char *, void *, const char *);
 typedef unsigned char (*eng_grow_fn)(void *);
 typedef void (*eng_assign_fn)(void *, const void *);
 typedef void *(*eng_query_fn)(void *, const char *, const char *, void *, void *);
+typedef unsigned char (*eng_gate_fn)(void *, unsigned char, unsigned char);
+typedef void (*eng_gdm_show_fn)(void *, const void *);
+
+/* The editor screen's own dialog (sh_modpublish_check_finish): the one the game's publish errors use over the
+ * publish screens. */
+#define ENG_SCREEN_DIALOG     0x8E8     /* [editor+0x21088]+0x8E8: the dialog */
+#define ENG_SCREEN_SCREENS    0xA18     /* [editor+0x21088]+0xA18: the publish screens */
+#define ENG_SCREEN_FLAGS      0xA20     /* bit 0x400: the pacifier is up (EditorBusyShow) */
+#define ENG_SCREEN_MODAL      0xA2C     /* bit 0: the dialog is up; EditorFrame clears it at the answer */
+#define ENG_DIALOG_ANSWERED   0x1D8     /* byte: the show clears it, the input sets it */
+#define ENG_DIALOG_ANSWER     0x1DC     /* 0 the first button, 1 the second or Back */
+#define ENG_SCREENS_RESULT    0x8E0     /* the screens' pending result, which the MapProperties frame takes */
+#define ENG_STATE_OVERWRITE   0x21      /* MapProperties state: the byte PublishStart gets */
+#define ENG_DESC_SIZE         0xD0      /* title +0, text +0x30, labels +0x60 and +0x90, kind +0xC0 */
+#define ENG_DESC_KIND         0xC0      /* 0 two buttons, 1 one */
 
 /* The edit's tag list (idList<idStr>: data +0, num +8, size +0xC; idStr
  * elements of 0x30), its saved-map ids, and the published-items answer. */
@@ -1788,6 +1894,15 @@ static struct {
     eng_query_fn published_query;                /* PublishedPrevQuery */
     eng_busy_fn busy_show;                       /* EditorBusyShow(editor, title, body): the pacifier */
     eng_editor_fn busy_clear;                    /* EditorBusyClear(editor) */
+    /* The publish screens' FINISH step (sh_modpublish_check_finish): bound when every byte holds; the gate call is
+     * repointed at the relay only while S7 is asked there. */
+    int finish_bound;
+    sig_result finish_site;                      /* PublishFinishGateCall, for code_patch_call_sig */
+    eng_gate_fn gate;                            /* the gate the call reaches natively */
+    eng_editor_fn screens_close;                 /* the screens' close the frame calls next */
+    eng_gdm_show_fn gdm_show;                    /* the editor dialog's show */
+    uint8_t *finish_relay;                       /* near page: mov r9,rsi (the MapProperties state); jmp detour */
+    sh_patch_handle finish_patch;
     DWORD *main_thread;
     volatile LONG ready;
 } g_eng;
@@ -2178,13 +2293,99 @@ static int eng_window_open(void *c)
     return 0;
 }
 
+/* ------------------------------------------------------------ the FINISH step's dialog */
+
+static uint8_t *eng_screen(void *editor)
+{
+    return editor ? *(uint8_t **)((uint8_t *)editor + ENG_EDITOR_SCREEN) : NULL;
+}
+
+static int eng_finish_can_ask(void *c, void *editor)
+{
+    (void)c;
+    __try {
+        uint8_t *screen = eng_screen(editor);
+        if (!screen || !*(void **)(screen + ENG_SCREEN_DIALOG)) return 0;
+        return !(*(volatile uint32_t *)(screen + ENG_SCREEN_MODAL) & 1u) &&
+               !(*(volatile uint32_t *)(screen + ENG_SCREEN_FLAGS) & 0x400u);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+/* The descriptor the game's own publish errors build (FUN_1411913F0 / FUN_141191470): four idStrs and the kind; the
+ * show reads it and the frame's locals destroy it after. 1 when the dialog shows (the show clears the answered flag
+ * only once its widget resolves) and +0xA2C bit 0 is set, as each of those errors sets it. */
+static int eng_finish_ask(void *c, void *editor, const char *title, const char *text, int yes_no)
+{
+    __declspec(align(16)) uint8_t desc[ENG_DESC_SIZE];
+    int built = 0, shown = 0;
+    (void)c;
+    if (!editor || !text || !g_eng.gdm_show) return 0;
+    memset(desc, 0, sizeof desc);
+    __try {
+        uint8_t *screen = eng_screen(editor), *dialog;
+        if (!screen || !(dialog = *(uint8_t **)(screen + ENG_SCREEN_DIALOG))) return 0;
+        g_eng.idstr_ctor(desc, title ? title : ENG_FAIL_TITLE);
+        g_eng.idstr_ctor(desc + 0x30, text);
+        g_eng.idstr_ctor(desc + 0x60, yes_no ? "#str_online_yes" : "");
+        g_eng.idstr_ctor(desc + 0x90, yes_no ? "#str_online_no" : "");
+        built = 1;
+        *(int *)(desc + ENG_DESC_KIND) = yes_no ? 0 : 1;
+        dialog[ENG_DIALOG_ANSWERED] = 1;
+        g_eng.gdm_show(dialog, desc);
+        if (!dialog[ENG_DIALOG_ANSWERED]) {
+            *(volatile uint32_t *)(screen + ENG_SCREEN_MODAL) |= 1u;
+            shown = 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the editor's dialog faulted"); shown = 0; }
+    if (built) {
+        __try { g_eng.idstr_dtor(desc + 0x90); g_eng.idstr_dtor(desc + 0x60); g_eng.idstr_dtor(desc + 0x30);
+                g_eng.idstr_dtor(desc); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { }
+    }
+    if (!shown) backend_log("MODS: publish: the editor's dialog did not show");
+    return shown;
+}
+
+/* 0 while the dialog is up; then 1 for its first button (Yes), 2 for the second or Back, or when it went unanswered. */
+static int eng_finish_poll(void *c, void *editor)
+{
+    (void)c;
+    __try {
+        uint8_t *screen = eng_screen(editor), *dialog;
+        if (!screen || !(dialog = *(uint8_t **)(screen + ENG_SCREEN_DIALOG))) return 2;
+        if (*(volatile uint32_t *)(screen + ENG_SCREEN_MODAL) & 1u) return MP_DIALOG_PENDING;
+        if (!dialog[ENG_DIALOG_ANSWERED]) return 2;
+        return *(volatile int *)(dialog + ENG_DIALOG_ANSWER) == 0 ? MP_DIALOG_ACCEPTED : 2;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 2; }
+}
+
+static void eng_finish_close(void *c, void *editor)
+{
+    (void)c;
+    if (!editor || !g_eng.screens_close) return;
+    __try { g_eng.screens_close(editor); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the publish screens' close faulted"); }
+}
+
+static void eng_finish_clear(void *c, void *editor)
+{
+    (void)c;
+    __try {
+        uint8_t *screen = eng_screen(editor), *screens;
+        if (screen && (screens = *(uint8_t **)(screen + ENG_SCREEN_SCREENS)) != NULL)
+            *(volatile int *)(screens + ENG_SCREENS_RESULT) = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { }
+}
+
 static const sh_modpublish_ops ENG_OPS = {
     .on_main = eng_on_main, .can_ask = eng_can_ask, .ask = eng_ask, .poll = eng_poll, .release = eng_release,
     .editor_token = eng_editor_token, .publish_fail = eng_publish_fail, .start = eng_start, .busy = eng_busy,
     .placed_names = eng_placed_names, .editor_notice = eng_editor_notice, .log = eng_log, .add_tag = eng_add_tag,
     .edit_ids = eng_edit_ids, .published_query = eng_published_query, .remove_tag = eng_remove_tag,
     .notice = eng_notice, .account_name = eng_account_name, .key_made = eng_key_made,
-    .window_open = eng_window_open
+    .window_open = eng_window_open,
+    .finish_can_ask = eng_finish_can_ask, .finish_ask = eng_finish_ask, .finish_poll = eng_finish_poll,
+    .finish_close = eng_finish_close, .finish_clear = eng_finish_clear
 };
 
 /* ------------------------------------------------------------ detours */
@@ -2273,6 +2474,98 @@ static void eng_publish_start_detour(void *editor, unsigned char overwrite)
         if (!edit || !eng_string(edit + ENG_EDIT_LOCAL_ID, local, sizeof local)) local[0] = 0;
         if (edit) sh_modpublish_publish_started(local);
     } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the publish-start step faulted"); }
+}
+
+/* The MapProperties frame's gate call, while S7 is asked at FINISH: the game's own checks first (their dialogs and the
+ * screens' close are theirs), then the publish is held with the screens up. `state` is the frame's MapProperties state
+ * (rsi at the call), whose +0x21 byte PublishStart would get. */
+static unsigned char eng_finish_gate_detour(void *editor, unsigned char show, unsigned char back, const uint8_t *state)
+{
+    unsigned char blocked = g_eng.gate(editor, show, back);
+    if (blocked || !eng_live() || !state) return blocked;
+    __try {
+        if (sh_modpublish_finish_gate(editor, state[ENG_STATE_OVERWRITE])) return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: publish: the FINISH hold faulted; the publish continues natively");
+    }
+    return 0;
+}
+
+static const void *eng_call_target(const uint8_t *p)
+{
+    int32_t displacement;
+    if (p[0] != 0xe8) return NULL;
+    memcpy(&displacement, p + 1, 4);
+    return (const void *)((uintptr_t)g_eng.finish_site.addr + 5 + (intptr_t)displacement);
+}
+
+/* The relay the gate call reaches (rel32 from the call): mov r9,rsi; jmp [rip+0] -> the detour. */
+static uint8_t *eng_finish_relay(uintptr_t call)
+{
+    uint8_t *relay = (uint8_t *)sh_near_page_alloc(call + 5);
+    void *handler = (void *)eng_finish_gate_detour;
+    DWORD old;
+    if (!relay) return NULL;
+    memcpy(relay, "\x4c\x8b\xce\xff\x25\x00\x00\x00\x00", 9);
+    memcpy(relay + 9, &handler, 8);
+    if (!VirtualProtect(relay, SH_NEAR_PAGE_BYTES, PAGE_EXECUTE_READ, &old)) {
+        VirtualFree(relay, 0, MEM_RELEASE);
+        return NULL;
+    }
+    FlushInstructionCache(GetCurrentProcess(), relay, 17);
+    return relay;
+}
+
+/* sh_modpublish_finish_set's patch: the gate call repointed at the relay (on) or given back (off). */
+static int eng_finish_patch(int on)
+{
+    uint8_t expect[5], patch[5] = { 0xe8 };
+    intptr_t distance;
+    int32_t relative;
+    if (!on) {
+        if (!g_eng.finish_patch.live) return 1;
+        return code_unpatch(&g_eng.finish_patch) == B2_PATCH_OK;
+    }
+    if (g_eng.finish_patch.live) return 1;
+    if (!g_eng.finish_bound) return 0;
+    if (!g_eng.finish_relay && !(g_eng.finish_relay = eng_finish_relay(g_eng.finish_site.addr))) return 0;
+    distance = (intptr_t)g_eng.finish_relay - (intptr_t)(g_eng.finish_site.addr + 5);
+    if (distance < INT32_MIN || distance > INT32_MAX) return 0;
+    relative = (int32_t)distance;
+    memcpy(patch + 1, &relative, 4);
+    __try { memcpy(expect, (const void *)g_eng.finish_site.addr, 5); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    if (eng_call_target(expect) != (const void *)g_eng.gate) return 0;
+    return code_patch_call_sig(&g_eng.finish_site, expect, patch, &g_eng.finish_patch) == B2_PATCH_OK;
+}
+
+/* Bind the FINISH step (optional: without it S7 is asked after the screens close, as before). */
+static void eng_bind_finish(const sig_result *results, size_t count, const uint8_t *base)
+{
+    sh_modpublish_finish_sites s;
+    sh_modpublish_finish_bound b;
+    const char *failed;
+    size_t i;
+    g_eng.finish_bound = 0;
+    s.call = eng_site(results, count, base, "PublishFinishGateCall");
+    s.start = g_eng.site[ENG_PUBLISH_START];
+    s.gdm_show = eng_site(results, count, base, "EditorGdmShow");
+    s.answer = eng_site(results, count, base, "EditorGdmAnswerCall");
+    __try { failed = sh_modpublish_check_finish(&s, &b); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { failed = "a site's bytes could not be read"; }
+    if (failed) {
+        char line[200];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: publish: the FINISH step check '%s' did not hold; S7 is "
+                    "asked after the publish screens close", failed);
+        backend_log(line);
+        return;
+    }
+    for (i = 0; i < count; i++)
+        if (results[i].name && !strcmp(results[i].name, "PublishFinishGateCall")) g_eng.finish_site = results[i];
+    g_eng.gate = (eng_gate_fn)b.gate;
+    g_eng.screens_close = (eng_editor_fn)b.close;
+    g_eng.gdm_show = (eng_gdm_show_fn)s.gdm_show;
+    g_eng.finish_bound = 1;
 }
 
 /* WriteLocalSavedMapText(localId, model, text): the local save writes the
@@ -2463,6 +2756,9 @@ int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t
     sh_cache_set_held(modclaim_held);   /* the sweep keeps what this computer's published maps claim */
     sh_modui_set_key(modclaim_key_action, modclaim_key_status_json);   /* Settings: the key's backup and restore */
    sh_modserve_set_miss_reporter(eng_report_asked);
+    /* S7 at FINISH: bound now, the gate call patched only while it is switched on (sh_publish_question) */
+    eng_bind_finish(results, count, module_base);
+    g_finish_patch = eng_finish_patch;
     InterlockedExchange(&g_eng.ready, 1);
     backend_log("MODS: publish hooks installed (mod content sent before a publish starts, units pinned at its save, "
                 "search tag, claim at the feed post, release at unpublish and at a delete whose item is no longer "

@@ -16,6 +16,8 @@ void sh_module_prefab_tick(void *editor) { (void)editor; }
 void sh_timeline_tile_tick(void *editor) { (void)editor; }
 void sh_budget_table_tick(void *editor) { (void)editor; }
 void sh_editor_zoom_tick(void) {}
+static int publish_ticks;
+void sh_modpublish_editor_tick(void *editor) { (void)editor; ++publish_ticks; }
 uintptr_t glb_resolve(const uint8_t *base, const char *name, glb_status *status)
 { (void)base; (void)name; (void)status; return 0; }
 void *hook_prepare(void *target, void *detour, size_t stolen)
@@ -185,8 +187,10 @@ int main(void)
     sh_editor_frame_detour(editor, NULL);
     CHECK(loads == 1 && done_faulted == 1 && g_reload_faulted && refusals == 1 && !g_borrowed_id);
     ticks = 0;
+    publish_ticks = 0;
     sh_editor_frame_detour(editor, NULL);
     CHECK(ticks == 1);
+    CHECK(publish_ticks == 1);   /* a publish held at FINISH resumes in the editor's frame */
     CHECK(!HO(msg, sh_editor_frame_can_reload(HO_P(0))) && strstr(msg, "restart DOOM"));
     CHECK(HO(msg, sh_editor_frame_request_rawmap_save_to(NULL, HO_P(0))));
     sh_editor_frame_detour(editor, NULL);

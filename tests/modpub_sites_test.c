@@ -101,6 +101,42 @@ static void check_image(const char *path)
             IMG_CHECK(sh_modpublish_check_sites(&hs, &hb) == NULL);
         }
     }
+
+    /* The publish screens' FINISH step (modpublish.c eng_bind_finish, R-LB1 S7). */
+    {
+        sh_modpublish_finish_sites fs;
+        sh_modpublish_finish_bound fb;
+        fs.call = image_site(base, results, n, "PublishFinishGateCall", vk);
+        fs.start = hs.start;
+        fs.gdm_show = image_site(base, results, n, "EditorGdmShow", vk);
+        fs.answer = image_site(base, results, n, "EditorGdmAnswerCall", vk);
+        failed = sh_modpublish_check_finish(&fs, &fb);
+        printf("  the FINISH step's checks: %s\n", failed ? failed : "all hold");
+        IMG_CHECK(failed == NULL);
+        if (!failed) {
+            const uint8_t *gate_expect = base + (vk ? 0x1199CC0u : 0x1198F20u);
+            const uint8_t *close_expect = base + (vk ? 0x1182430u : 0x1181590u);
+            const uint8_t *input_expect = base + (vk ? 0x128DAA0u : 0x128D0F0u);
+            /* the decoded targets are the functions read in Ghidra on this renderer */
+            IMG_CHECK(fb.gate == (const void *)gate_expect && fb.close == (const void *)close_expect &&
+                      fb.input == (const void *)input_expect);
+            {
+                uint8_t *at = (uint8_t *)fs.call + 0x17, keep = *at;   /* the overwrite byte's offset, +0x21 */
+                *at ^= 0x01;
+                failed = sh_modpublish_check_finish(&fs, &fb);
+                IMG_CHECK(failed && strstr(failed, "FINISH gate call +0x15"));
+                *at = keep;
+            }
+            {
+                uint8_t *at = (uint8_t *)fs.answer + 0x0B, keep = *at;   /* the answered flag's offset, +0x1D8 */
+                *at ^= 0x08;
+                failed = sh_modpublish_check_finish(&fs, &fb);
+                IMG_CHECK(failed && strstr(failed, "EditorFrame dialog answer"));
+                *at = keep;
+            }
+            IMG_CHECK(sh_modpublish_check_finish(&fs, &fb) == NULL);
+        }
+    }
     free(results);
     (void)sh_host_test_bind_image(NULL, NULL);
     free(base);
@@ -114,7 +150,8 @@ static int synthetic(void)
     memset(&hs, 0, sizeof hs);
     /* No site, no bind: never a crash or a pass. */
     if (!sh_modpub_check_sites(NULL, NULL) || !sh_modpub_check_sites(&ps, NULL) ||
-        !sh_modpublish_check_sites(NULL, NULL) || !sh_modpublish_check_sites(&hs, NULL)) {
+        !sh_modpublish_check_sites(NULL, NULL) || !sh_modpublish_check_sites(&hs, NULL) ||
+        !sh_modpublish_check_finish(NULL, NULL)) {
         printf("FAIL a missing site passed\n");
         return 1;
     }

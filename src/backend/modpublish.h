@@ -74,6 +74,22 @@ void sh_modpublish_save_seen(const char *text, size_t length);
  * of a held publish), 0 when the publish is held (or a held one is still preparing). Main thread. */
 int  sh_modpublish_publish_start(void *editor, unsigned char overwrite);
 
+/* The publish screens' PUBLISH on FINISH, after the game's own checks passed and before the screens close (the
+ * MapProperties frame's gate call, while the question is asked there: sh_modpublish_finish_set). 1 holds the publish
+ * with the screens up: the hold prepares, asks S7 in the editor's own dialog over them (the one the game's publish
+ * errors use), uploads, then closes the screens and starts the engine's PublishStart itself. 0 lets the frame go on
+ * (a map without mod rows, or the question asked at PublishStart as before). Main thread. */
+int  sh_modpublish_finish_gate(void *editor, unsigned char overwrite);
+
+/* Where S7 is asked: 1 at the FINISH step, 0 at PublishStart after the screens closed (the default until the FINISH
+ * path is proven live). The engine side patches the gate call only while it is on. */
+void sh_modpublish_finish_set(int on);
+int  sh_modpublish_finish_on(void);
+
+/* The EditorFrame detour, after the engine's frame: a publish held at FINISH closes the screens and starts here, where
+ * the product already changes the editor's state (fly_to.c). Idle cost: one read. */
+void sh_modpublish_editor_tick(void *editor);
+
 /* The pin step of a held publish's save (modmanifest.h sh_modmanifest_pin_fn): pins `rows` from the prepared units.
  * Unarmed (no publish resumed in the last 30 s) it returns 0 and the save writes its rows as they are. */
 struct sh_modmanifest_list;
@@ -186,6 +202,14 @@ typedef struct sh_modpublish_ops {
     /* 1 when the Snapmap+ window is showing (it shows the backup offer itself). NULL or 0: the publish's notice says
      * where the offer is (SH_MODPUBLISH_KEY_MADE_TEXT). */
     int  (*window_open)(void *c);
+    /* A publish held at FINISH (sh_modpublish_finish_gate), with the publish screens up. NULL: FINISH never holds. */
+    int  (*finish_can_ask)(void *c, void *editor);   /* 1 when neither the editor's dialog nor its pacifier is up */
+    /* The editor's own dialog over the screens: Yes/No (yes_no 1) or one button; title NULL is the game's "publish
+     * failed" title. 1 when it shows. */
+    int  (*finish_ask)(void *c, void *editor, const char *title, const char *text, int yes_no);
+    int  (*finish_poll)(void *c, void *editor);   /* 0 still up, 1 the first button, 2 the second or Back */
+    void (*finish_close)(void *c, void *editor);  /* the screens close, as the frame closes them before PublishStart */
+    void (*finish_clear)(void *c, void *editor);  /* a screens' result left while the publish was held is forgotten */
 } sh_modpublish_ops;
 
 /* After a publish that made the key while the Snapmap+ window was closed (the editor has no passphrase field). */
@@ -194,7 +218,7 @@ typedef struct sh_modpublish_ops {
 #ifdef SH_MODPUBLISH_TESTING
 void sh_modpublish_test_set_ops(const sh_modpublish_ops *ops);
 void sh_modpublish_test_reset(void);
-/* 0 idle, 1 preparing, 2 raise, 3 asking, 4 uploading */
+/* 0 idle, 1 preparing, 2 raise, 3 asking, 4 uploading, 5 waiting for the editor frame to resume a FINISH hold */
 int  sh_modpublish_test_state(void);
 int  sh_modpublish_test_pin_armed(void);          /* the next save pins its rows */
 /* The rows a publish finds (NULL: the save's own rule, modmanifest.h sh_modmanifest_rows_for). */
@@ -224,6 +248,24 @@ typedef struct sh_modpublish_bound {
  * filled), else the name of the first check that failed, for the log. The bind and tests/modpub_sites_test.c both
  * run this function. */
 const char *sh_modpublish_check_sites(const sh_modpublish_sites *sites, sh_modpublish_bound *out);
+
+/* The FINISH step (VK 0x1190362, GL 0x118F4E2: the MapProperties frame's PUBLISH case): `call` is its gate call
+ * (PublishFinishGateCall), `start` PublishStart, `gdm_show` the editor dialog's show (EditorGdmShow), `answer` the
+ * EditorFrame call of that dialog's input (EditorGdmAnswerCall). */
+typedef struct sh_modpublish_finish_sites {
+    const uint8_t *call, *start, *gdm_show, *answer;
+} sh_modpublish_finish_sites;
+typedef struct sh_modpublish_finish_bound {
+    const void *gate;    /* (editor, show 1, back 1): the game's limits, start-module and deprecated-entity checks */
+    const void *close;   /* (editor): the screens close (the editor's state stack pops) */
+    const void *input;   /* (dialog, input): the dialog's answer, +0x1DC under the flag +0x1D8 */
+} sh_modpublish_finish_bound;
+/* Every byte the FINISH hold relies on, in the functions' own code: the case's arguments (editor rdi, state rsi, the
+ * overwrite byte +0x21), the gate, the screens' close and PublishStart in order, the gate's own dialog on
+ * [editor+0x21088]+0x8E8 with +0xA2C bit 0, the descriptor the show reads, the screens' pending result
+ * [editor+0x21088]+0xA18 -> +0x8E0, and the answer EditorFrame waits for before it clears bit 0. NULL when each
+ * holds, else the first check that failed. The bind and tests/modpub_sites_test.c both run it. */
+const char *sh_modpublish_check_finish(const sh_modpublish_finish_sites *sites, sh_modpublish_finish_bound *out);
 
 #ifndef SH_MODPUBLISH_PURE
 #include "signatures.h"
