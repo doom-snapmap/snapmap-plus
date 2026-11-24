@@ -52,6 +52,15 @@
  * program's own transmap, viewdepthmap and light atlas samplers and its own particleuberparms1..3 and emissive);
  * the vertex SPIR-V unchanged. A liquid stage keeps the game's own blood shading (its material names liquidhighq).
  *
+ * The hair programs, snapmapplus/hair/<base> for hairprez (a hair card's alpha-tested depth pre-pass), hairshadow and
+ * hairblending (its blended edge), are the game's own with the death fade the skin programs have: while the entity's
+ * deathfadeopacity is below 1 a fragment is clipped by it against the magnificationclouds noise, so a hair card
+ * dissolves with the body its demon burns away (programs/shaders/hair.rp). Their closure is derived the same way: the
+ * decl with hr_fade in an hlsl_fp_header section and its call as the hlsl_fp section's last statements; the cooked
+ * program with deathfadeopacity after the fragment stage's material uniforms and magnificationclouds after its
+ * textures; the fragment SPIR-V with hr_fade spliced in and called before main returns; the vertex SPIR-V unchanged.
+ * hairnew, the opaque pass, draws only where the pre-pass left depth and needs no variant.
+ *
  * modstock.c answers for these paths as for an archive entry, in the container SH_MODPROG_CONTAINER: a mod's
  * material that names a multilayer program brings its closure along as pointers, which the builder checks and
  * the server serves like any other installed program, and which an upload never sends.
@@ -65,6 +74,7 @@
 #define SH_MODPROG_CONTAINER "snapmapplus"
 #define SH_MODPROG_PREFIX    "snapmapplus/layered/"
 #define SH_MODPROG_EP_PREFIX "snapmapplus/particles/"
+#define SH_MODPROG_HR_PREFIX "snapmapplus/hair/"
 
 /* The names these two programs had before they stopped naming a source game. Served until 1.0 for mods emitted
  * before the rename: sh_modprog_owns and sh_modprog_read answer a path under either with the bytes of the
@@ -169,6 +179,16 @@ char *sh_modprog_ep_patch_glsl(const char *text, size_t len, unsigned tex_end, u
 uint32_t *sh_modprog_ep_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
                                size_t *out_words, const char **why);
 
+/* The hair programs' building blocks, as the particle ones: the decl with the fade's function in its header section and
+ * its call as the hlsl_fp section's last statements (NULL when the decl has no single hlsl_fp section closing on a line
+ * of its own); the fragment stage text with bindings at or after `tex_end` up by `shift`, deathfadeopacity after the
+ * material uniforms, the noise's sampler before the first input, hr_fade before main and its call at main's end (NULL
+ * when an anchor is missing or the program already samples the noise); the fragment module with hr_fade spliced in. */
+char *sh_modprog_hr_patch_decl(const char *text, size_t len, size_t *out_len);
+char *sh_modprog_hr_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len);
+uint32_t *sh_modprog_hr_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
+                               size_t *out_words, const char **why);
+
 /* The generated module and texts (programs/programs_layered.c). */
 extern const unsigned SH_MODPROG_ML_SPIRV_WORDS;
 extern const unsigned SH_MODPROG_ML_SPIRV[];
@@ -197,5 +217,14 @@ extern const char *const SH_MODPROG_EP_PARMS[];
 extern const unsigned SH_MODPROG_EP_PARM_COUNT;
 extern const char *const SH_MODPROG_EP_TEXTURES[];
 extern const unsigned SH_MODPROG_EP_TEXTURE_COUNT;
+
+/* The hair programs' generated module and texts (programs/programs_hair.c) and the texture they gain. */
+extern const unsigned SH_MODPROG_HR_SPIRV_WORDS;
+extern const unsigned SH_MODPROG_HR_SPIRV[];
+extern const char SH_MODPROG_HR_GLSL[];
+extern const char SH_MODPROG_HR_HEADER[];
+extern const char SH_MODPROG_HR_CALL[];
+extern const char *const SH_MODPROG_HR_TEXTURES[];
+extern const unsigned SH_MODPROG_HR_TEXTURE_COUNT;
 
 #endif /* SNAPMAP_PLUS_MODPROG_H */

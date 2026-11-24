@@ -39,13 +39,13 @@ function glslangPresent() {
 
 test('each .rp header translates and compiles (glslangValidator)', (t) => {
   for (const [name, p] of Object.entries(progs)) {
-    assert.ok(p.glsl.includes('ml_blend(') || p.glsl.includes('ep_shade('), `${name}: the entry function is in the stage text`);
+    assert.ok(p.glsl.includes('ml_blend(') || p.glsl.includes('ep_shade(') || p.glsl.includes('hr_fade('), `${name}: the entry function is in the stage text`);
     assert.ok(!/\$|\bfloat[234]\b|\blerp\b|\bfrac\b|\bsaturate\b|\btex2D/.test(p.glsl), `${name}: the stage text is GLSL`);
   }
   if (!glslangPresent()) { t.skip('glslangValidator is not at hand (set GLSLANG_VALIDATOR)'); return; }
   for (const [name, p] of Object.entries(progs)) {
     const words = gen.compile(p.spirvSource);
-    assert.ok(words.length > 1000, `${name}: SPIR-V words`);
+    assert.ok(words.length > (name === 'hair' ? 200 : 1000), `${name}: SPIR-V words`);
   }
 });
 
@@ -128,6 +128,23 @@ test('the call blocks load what the splice loads, in its order', () => {
   assert.ok(!/\{ Vec\b/.test(decls), 'the product derives no vector render parm decl');
   assert.match(decls, /"layerparms"/);
   assert.match(decls, /"particleemissivemap"/);
+
+  // the hair programs' death fade: V the card's uv, P the render parm the splice appends (the game's own
+  // deathfadeopacity, which no hair program reads)
+  const hr = progs.hair.call;
+  const hrVaryings = table('HR_VARYINGS').map((v) => `fragment.texcoord${/^vofi_TexCoord(\d+)$/.exec(v)[1]}`);
+  const hrV = arrayInit(hr, 'hrV');
+  assert.deepEqual(hrV.items, hrVaryings);
+  const hrP = arrayInit(hr, 'hrP');
+  assert.deepEqual(parmNames(hrP.items), table('HR_BLOCK_PARMS'));
+  assert.deepEqual(table('HR_BLOCK_PARMS'), ['deathfadeopacity']);
+  assert.match(hr.replace(/\s+/g, ' '), /hr_fade\( hrV, hrP \);/);
+  assert.match(progs.hair.header, new RegExp(`float4 V\\[${hrV.size}\\], float4 P\\[${hrP.size}\\]`));
+  // the fade is 2016's own (includes/effects.inc, CALC_DEATH_FADE_CLIP_VAL): the opacity less half the noise, less 0.1
+  const fade = progs.hair.header.replace(/\s+/g, ' ');
+  assert.match(fade, /BRANCH if \( P\[0\]\.x < 1\.0 \)/);
+  assert.match(fade, /clip\( P\[0\]\.x - dither \* 0\.5 - 0\.1 \);/);
+  assert.ok(!/magnificationclouds/.test(decls), 'the noise is the game\'s own render parm, not a product decl');
 });
 
 test('the header reads exactly the program\'s textures', () => {
@@ -142,7 +159,11 @@ test('the header reads exactly the program\'s textures', () => {
   const stock = table('EP_SAMPLER_STOCK').filter(Boolean).map((x) => x.replace(/^samp_/, ''));
   assert.deepEqual([...ep].sort(), [...stock, ...table('SH_MODPROG_EP_TEXTURES')].sort());
   assert.deepEqual(gen.particlesSpec().samplers.map((x) => x[1]), [...stock, ...table('SH_MODPROG_EP_TEXTURES')]);
-  // and neither reads a render parm (the call blocks pass them in)
+  // the hair fade: the noise it adds, and no other texture
+  const hr = used(progs.hair.header);
+  assert.deepEqual([...hr], table('SH_MODPROG_HR_TEXTURES'));
+  assert.deepEqual(gen.hairSpec().samplers.map((x) => x[1]), table('SH_MODPROG_HR_TEXTURES'));
+  // and none reads a render parm (the call blocks pass them in)
   for (const p of Object.values(progs)) assert.ok(!/\$\w+\.\w/.test(p.header), 'a parm read in a header');
 });
 

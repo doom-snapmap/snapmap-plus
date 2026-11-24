@@ -33,7 +33,10 @@ typedef struct mp_family {
     const char *decl_needs;        /* why a decl is refused */
 } mp_family;
 typedef struct mp_base { const char *name; int family; } mp_base;
-static const mp_base MP_BASES[] = { { "skinvmtr", 0 }, { "skinvmtrwounds", 0 }, { "uberparticles", 1 } };
+static const mp_base MP_BASES[] = {
+    { "skinvmtr", 0 }, { "skinvmtrwounds", 0 }, { "uberparticles", 1 },
+    { "hairprez", 2 }, { "hairshadow", 2 }, { "hairblending", 2 },
+};
 #define MP_NBASES (sizeof MP_BASES / sizeof MP_BASES[0])
 
 /* The layered program's 28 vectors, by the material keys they had when each was a render parm: vector k of the
@@ -117,6 +120,19 @@ static const char *const EP_UNIFORMS[] = {
     "hparticleuberparms1", "hparticleuberparms2", "hparticleuberparms3", "hemissive",
 };
 #define EP_NUNIFORMS (sizeof EP_UNIFORMS / sizeof EP_UNIFORMS[0])
+
+/* The hair programs' death fade (programs/shaders/hair.rp): the parameter appended to the fragment stage's material
+ * uniforms (the game's own deathfadeopacity, which the burn-away ramps and no hair program reads), the noise texture
+ * the fade adds (the game's own magnificationclouds, which the skin programs dissolve by; no hair program has it), the
+ * module's sampler for it and the stage input the fade reads. */
+const char *const SH_MODPROG_HR_TEXTURES[] = { "magnificationclouds" };
+const unsigned SH_MODPROG_HR_TEXTURE_COUNT = sizeof SH_MODPROG_HR_TEXTURES / sizeof SH_MODPROG_HR_TEXTURES[0];
+static const char *const HR_BLOCK_PARMS[] = { "deathfadeopacity" };
+#define HR_NBLOCK_PARMS (sizeof HR_BLOCK_PARMS / sizeof HR_BLOCK_PARMS[0])
+static const char *const HR_SAMPLERS[] = { "hr_noise" };
+#define HR_NSAMPLERS (sizeof HR_SAMPLERS / sizeof HR_SAMPLERS[0])
+static const char *const HR_VARYINGS[] = { "vofi_TexCoord0" };
+#define HR_NVARYINGS (sizeof HR_VARYINGS / sizeof HR_VARYINGS[0])
 
 /* The render parm decls the product derives: textures only. No vector render parm is the product's: the layered
  * program reads its numbers from the `layerparms` image and the particle program from keys of the game's own. A
@@ -488,6 +504,88 @@ char *sh_modprog_ep_patch_glsl(const char *text, size_t len, unsigned tex_end, u
     for (k = 0; k < EP_NUNIFORMS; k++)
         mp_printf(&b, "%s%s_fragmentUniforms.%s", k ? ", " : "", EP_UNIFORMS[k][0] == 'h' ? "freqHigh" : "freqLow",
                   EP_UNIFORMS[k] + 1);
+    mp_puts(&b, " ) );\n");
+    mp_put(&b, last, (size_t)(end - last));
+    free(t1);
+    return mp_take(&b, out_len);
+}
+
+/* ------------------------------------------------------------------------------- the hair texts ---- */
+
+char *sh_modprog_hr_patch_decl(const char *text, size_t len, size_t *out_len)
+{
+    static const char key[] = "hlsl_fp {";
+    const char *nl = mp_find(text, len, "\r\n") ? "\r\n" : "\n";
+    const char *fp = mp_find(text, len, key), *ind;
+    mp_buf b = { 0 };
+    char *prefix, *t;
+    size_t close, in, n;
+    if (!fp || mp_find(fp + 1, len - (size_t)(fp + 1 - text), key)) return NULL;
+    close = mp_close_brace(text, len, (size_t)(fp - text) + sizeof key - 2);
+    /* the call as the section's last statements, one tab in from its closing brace (on a line of its own) */
+    if (close >= len || !mp_line_indent(text, text + close, &ind, &in)) return NULL;
+    if (!(prefix = (char *)malloc(in + 2))) return NULL;
+    memcpy(prefix, ind, in);
+    memcpy(prefix + in, "\t", 2);
+    mp_put(&b, text, (size_t)(ind - text));
+    mp_put_lines(&b, SH_MODPROG_HR_CALL, prefix, nl, 0);
+    mp_put(&b, ind, len - (size_t)(ind - text));
+    free(prefix);
+    if (!(t = mp_take(&b, &n))) return NULL;
+    /* the function, in the header section */
+    prefix = mp_add_header(t, n, SH_MODPROG_HR_HEADER, nl, out_len);
+    free(t);
+    return prefix;
+}
+
+char *sh_modprog_hr_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len)
+{
+    static const char bind[] = "layout( binding = ";
+    static const char ubo[] = "uniform freqHigh_fragmentUniforms_ubo {";
+    mp_buf b = { 0 }, s = { 0 };
+    const char *p = text, *end = text + len, *u, *close, *first, *mainp, *last;
+    unsigned k;
+    char *t1;
+    size_t n1;
+    while (p < end) {
+        const char *q = mp_find(p, (size_t)(end - p), bind);
+        if (!q) { mp_put(&s, p, (size_t)(end - p)); break; }
+        q += sizeof bind - 1;
+        mp_put(&s, p, (size_t)(q - p));
+        {
+            unsigned v = 0;
+            const char *d = q;
+            while (d < end && *d >= '0' && *d <= '9') v = v * 10 + (unsigned)(*d++ - '0');
+            if (d == q) { p = q; continue; }
+            mp_printf(&s, "%u", v >= tex_end ? v + shift : v);
+            p = d;
+        }
+    }
+    if (s.oom) { free(s.p); return NULL; }
+    t1 = s.p;
+    n1 = s.n;
+    end = t1 + n1;
+    if (!(u = mp_find(t1, n1, ubo)) || !(close = memchr(u, '}', (size_t)(end - u)))) { free(t1); return NULL; }
+    first = mp_find(t1, n1, "layout( location");
+    mainp = mp_find(t1, n1, "void main() {");
+    /* the end of main: its closing brace, the text's last */
+    last = end;
+    while (last > t1 && (last[-1] == '\n' || last[-1] == '\r' || last[-1] == ' ' || last[-1] == '\t')) last--;
+    if (!first || !mainp || last <= mainp || last[-1] != '}' || first < close || mainp < first ||
+        mp_find(t1, n1, "samp_magnificationclouds")) { free(t1); return NULL; }
+    last--;
+    mp_put(&b, t1, (size_t)(close - t1));
+    for (k = 0; k < HR_NBLOCK_PARMS; k++) mp_printf(&b, "\tvec4 %s;\n", HR_BLOCK_PARMS[k]);
+    mp_put(&b, close, (size_t)(first - close));
+    for (k = 0; k < SH_MODPROG_HR_TEXTURE_COUNT; k++)
+        mp_printf(&b, "layout( binding = %u ) uniform sampler2D samp_%s;\n", tex_end + k, SH_MODPROG_HR_TEXTURES[k]);
+    mp_put(&b, first, (size_t)(mainp - first));
+    mp_puts(&b, SH_MODPROG_HR_GLSL);
+    mp_put(&b, mainp, (size_t)(last - mainp));
+    mp_printf(&b, "\thr_fade( vec4[%u]( ", (unsigned)HR_NVARYINGS);
+    for (k = 0; k < HR_NVARYINGS; k++) mp_printf(&b, "%s%s", k ? ", " : "", HR_VARYINGS[k]);
+    mp_printf(&b, " ), vec4[%u]( ", (unsigned)HR_NBLOCK_PARMS);
+    for (k = 0; k < HR_NBLOCK_PARMS; k++) mp_printf(&b, "%sfreqHigh_fragmentUniforms.%s", k ? ", " : "", HR_BLOCK_PARMS[k]);
     mp_puts(&b, " ) );\n");
     mp_put(&b, last, (size_t)(end - last));
     free(t1);
@@ -1024,15 +1122,17 @@ static int mp_grow_block_in(mp_ctx *c, const char *high, const char *low, const 
     size_t i, k;
     memset(bk, 0, sizeof *bk);
     bk->fh = mp_named(&c->S, high, 0);
-    bk->fl = mp_named(&c->S, low, 0);
-    if (!bk->fh || !bk->fl) { c->why = "the program's fragment module has no single material uniform block"; return 0; }
+    bk->fl = low ? mp_named(&c->S, low, 0) : 0;   /* a splice that reads no view uniform passes no low block */
+    if (!bk->fh || (low && !bk->fl)) { c->why = "the program's fragment module has no single material uniform block"; return 0; }
     {
         const mp_ins *v = mp_def(&c->S, bk->fh), *p;
         if (!v || MP_OP(v) != OpVariable || !(p = mp_def(&c->S, v->w[1]))) { c->why = "the material uniform block is not a variable"; return 0; }
         bk->fh_struct = p->w[3];
-        v = mp_def(&c->S, bk->fl);
-        if (!v || MP_OP(v) != OpVariable || !(p = mp_def(&c->S, v->w[1]))) { c->why = "the view uniform block is not a variable"; return 0; }
-        bk->fl_struct = p->w[3];
+        if (low) {
+            v = mp_def(&c->S, bk->fl);
+            if (!v || MP_OP(v) != OpVariable || !(p = mp_def(&c->S, v->w[1]))) { c->why = "the view uniform block is not a variable"; return 0; }
+            bk->fl_struct = p->w[3];
+        }
     }
     {
         mp_ins *st = NULL;
@@ -1442,9 +1542,74 @@ done:
     return out;
 }
 
+/* ------------------------------------------------------------------------------- the hair splice ---- */
+
+uint32_t *sh_modprog_hr_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
+                               size_t *out_words, const char **why)
+{
+    mp_ctx c;
+    mp_import_spec sp;
+    mp_blocks bk;
+    uint32_t *out = NULL;
+    size_t i, k;
+    uint32_t entry = 0, params[2], temps[2], vals[HR_NVARYINGS > HR_NBLOCK_PARMS ? HR_NVARYINGS : HR_NBLOCK_PARMS];
+    size_t s_main = 0, s_main_end = 0, anchor = 0, var_end = 0;
+    mp_list code = { 0 }, heads = { 0 }, funcs = { 0 };
+    memset(&c, 0, sizeof c);
+    if (out_words) *out_words = 0;
+    if (!mp_parse(&c.S, stock, stock_words)) MP_FAIL(&c, "the program's fragment module is not SPIR-V");
+    if (mp_named(&c.S, "samp_magnificationclouds", 0)) MP_FAIL(&c, "the program already reads the noise the hair fade adds");
+    sp.words = SH_MODPROG_HR_SPIRV; sp.nwords = SH_MODPROG_HR_SPIRV_WORDS; sp.entry = "hr_fade(";
+    sp.samplers = HR_SAMPLERS; sp.stock = NULL; sp.nsamplers = HR_NSAMPLERS; sp.what = "hair";
+    if (!mp_import(&c, &sp, tex_end, &entry, &funcs)) goto done;
+    if (!mp_shift_bindings(&c, tex_end, shift)) goto done;
+    if (!mp_grow_block_in(&c, "freqHigh_fragmentUniforms", NULL, HR_BLOCK_PARMS, HR_NBLOCK_PARMS, &bk)) goto done;
+    if (!mp_main(&c, &s_main, &s_main_end)) MP_FAIL(&c, "the program's fragment module has no main");
+    /* the anchor: the instruction before main's last return (the program has done its own work) */
+    for (i = s_main_end; i > s_main; i--) if (MP_OP(&c.S.ins[i]) == OpReturn) { anchor = i - 1; break; }
+    if (!anchor) MP_FAIL(&c, "the program's main does not end in a return");
+    if (!mp_entry_params(&funcs, entry, params, 2)) MP_FAIL(&c, "hr_fade does not take the parameters the splice passes");
+    if (!mp_temps(&c, s_main, s_main_end, params, temps, 2, &heads, &var_end)) MP_FAIL(&c, "out of memory");
+    {
+        /* V: the stage inputs */
+        for (k = 0; k < HR_NVARYINGS; k++) {
+            uint32_t var = mp_named(&c.S, HR_VARYINGS[k], 0), o[3];
+            const mp_ins *d = var ? mp_def(&c.S, var) : NULL, *p = d ? mp_def(&c.S, d->w[1]) : NULL;
+            if (!d || MP_OP(d) != OpVariable || d->w[3] != 1 || !p || p->w[3] != bk.v4)
+                MP_FAIL(&c, "the program's fragment stage lacks an input the hair fade reads");
+            vals[k] = c.S.bound++;
+            o[0] = bk.v4; o[1] = vals[k]; o[2] = var;
+            if (!mp_emit(&c.S, &code, OpLoad, o, 3)) MP_FAIL(&c, "out of memory");
+        }
+        if (!mp_store_array(&c, &code, params[0], temps[0], vals, HR_NVARYINGS)) MP_FAIL(&c, "hr_fade's input array has no type");
+    }
+    {
+        /* P: the parameter the block grew by */
+        for (k = 0; k < HR_NBLOCK_PARMS; k++)
+            if (!(vals[k] = mp_load_member(&c, &code, bk.fh, bk.v4, (int)(bk.n0 + k)))) MP_FAIL(&c, "out of memory");
+        if (!mp_store_array(&c, &code, params[1], temps[1], vals, HR_NBLOCK_PARMS)) MP_FAIL(&c, "hr_fade's parameter array has no type");
+    }
+    {
+        uint32_t o[5], t_void;
+        { uint32_t ov[1] = { 0 }; t_void = mp_find_or_add(&c, OpTypeVoid, ov, 1, 1); }
+        o[0] = t_void; o[1] = c.S.bound++; o[2] = entry;
+        memcpy(o + 3, temps, sizeof temps);
+        if (!mp_emit(&c.S, &code, OpFunctionCall, o, 5)) MP_FAIL(&c, "out of memory");
+    }
+    if (c.S.oom) MP_FAIL(&c, "out of memory");
+    out = mp_reassemble(&c, var_end, &heads, anchor, &code, &funcs, out_words);
+done:
+    if (why) *why = c.why;
+    free(code.v); free(heads.v); free(funcs.v);
+    mp_ctx_free(&c);
+    if (c.why) { free(out); return NULL; }
+    return out;
+}
+
 /* ---------------------------------------------------------------------------------------------- families ---- */
 
 static const unsigned EP_BIN_PARM_COUNT = sizeof EP_BLOCK_PARMS / sizeof EP_BLOCK_PARMS[0];
+static const unsigned HR_BIN_PARM_COUNT = HR_NBLOCK_PARMS;
 static const mp_family MP_FAMILIES[] = {
     { SH_MODPROG_PREFIX, "layered version", ML_BLOCK_PARMS, &ML_NBLOCK_PARMS, SH_MODPROG_ML_TEXTURES,
       &SH_MODPROG_ML_TEXTURE_COUNT, sh_modprog_patch_decl, sh_modprog_patch_glsl, sh_modprog_splice,
@@ -1452,6 +1617,9 @@ static const mp_family MP_FAMILIES[] = {
     { SH_MODPROG_EP_PREFIX, "particle version", EP_BLOCK_PARMS, &EP_BIN_PARM_COUNT, SH_MODPROG_EP_TEXTURES,
       &SH_MODPROG_EP_TEXTURE_COUNT, sh_modprog_ep_patch_decl, sh_modprog_ep_patch_glsl, sh_modprog_ep_splice,
       "its decl's fragment stage has no single PREMULTIPLY_ALPHA_BLENDED( result ) statement, or no hlsl_fp section for the functions" },
+    { SH_MODPROG_HR_PREFIX, "hair version", HR_BLOCK_PARMS, &HR_BIN_PARM_COUNT, SH_MODPROG_HR_TEXTURES,
+      &SH_MODPROG_HR_TEXTURE_COUNT, sh_modprog_hr_patch_decl, sh_modprog_hr_patch_glsl, sh_modprog_hr_splice,
+      "its decl has no single hlsl_fp section closing on a line of its own" },
 };
 #define MP_NFAMILIES (sizeof MP_FAMILIES / sizeof MP_FAMILIES[0])
 
