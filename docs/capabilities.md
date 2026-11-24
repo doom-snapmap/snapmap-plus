@@ -124,8 +124,8 @@ blend stops writing, so the editor's write alone keeps the floor in view; if
 that write cannot be redirected, the height stays below 32000. Elsewhere the far
 clip is unchanged. The editor environment volume (`snapEdit_environmentFogBounds`,
 built once with the editor render world as a +/-33000 environment area and a
-32768-scaled `_unitCube`) is sized at install for the highest reachable camera,
-134768, so the camera never looks through the cube's thick blue fog and the
+32768-scaled `_unitCube`) is sized at install for the highest reachable camera
+(130684: the ceiling bounds 32671 at scale 4) to a half-size of 134768 (the native 33000:32000 margin), so the camera never looks through the cube's thick blue fog and the
 environment blend keeps running; without that patch the height stays inside the
 native volume. When map bounds change, the Blueprint ground plane (the faint
 grid, a `_unitSquare` scaled to the module bound when the editor is set up) is
