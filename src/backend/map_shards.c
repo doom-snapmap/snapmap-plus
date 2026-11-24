@@ -45,11 +45,7 @@ const char *sh_shard_find(const char *hay, size_t n, const char *needle, size_t 
 int sh_shard_is_ws(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
 int sh_shard_is_digit(char c) { return c >= '0' && c <= '9'; }
 int sh_shard_is_hex(char c) { return sh_shard_is_digit(c) || (c >= 'a' && c <= 'f'); }
-int sh_shard_is_b64(char c)
-{
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || sh_shard_is_digit(c) ||
-           c == '+' || c == '/' || c == '=';
-}
+
 
 /* ==================================================================== */
 /* base64                                                                */
@@ -264,16 +260,6 @@ int sh_shard_doc_innermost(const sh_shard_doc *doc, size_t off)
     return -1;
 }
 
-int sh_shard_doc_array_element(const sh_shard_doc *doc, int idx)
-{
-    int guard = 0;
-    while (idx >= 0 && guard++ < (int)SH_SHARD_MAX_DEPTH) {
-        int p = doc->c[idx].parent;
-        if (doc->c[idx].kind == '{' && p >= 0 && doc->c[p].kind == '[') return idx;
-        idx = p;
-    }
-    return -1;
-}
 
 int sh_shard_doc_member(const char *json, size_t len, const sh_shard_doc *doc,
                         int parent, const char *key)
@@ -312,34 +298,6 @@ int sh_shard_doc_member(const char *json, size_t len, const sh_shard_doc *doc,
     return -1;
 }
 
-int sh_shard_doc_flat_element(const char *json, const sh_shard_doc *doc, int arr,
-                              unsigned index, size_t *from, size_t *to)
-{
-    size_t p, stop;
-    unsigned n = 0;
-    if (arr < 0 || (size_t)arr >= doc->count) return 0;
-    p = doc->c[arr].open + 1;
-    stop = doc->c[arr].close;
-    while (p < stop) {
-        size_t start;
-        while (p < stop && sh_shard_is_ws(json[p])) p++;
-        start = p;
-        while (p < stop && json[p] != ',') {
-            if (json[p] == '{' || json[p] == '[' || json[p] == '"') return 0;
-            p++;
-        }
-        if (n == index) {
-            size_t e = p;
-            while (e > start && sh_shard_is_ws(json[e - 1])) e--;
-            *from = start;
-            *to = e;
-            return 1;
-        }
-        n++;
-        p++;   /* past the comma */
-    }
-    return 0;
-}
 
 unsigned sh_shard_doc_array_count(const char *json, const sh_shard_doc *doc, int arr)
 {

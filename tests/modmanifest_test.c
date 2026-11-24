@@ -1283,7 +1283,7 @@ static void version_rule(void)
     CHECK(sh_modmanifest_current(&cur) == 1 && cur.rows[0].pinned);
     sh_modmanifest_list_free(&cur);
 
-    /* Unbound (the store tool): the rule does nothing, not even a notice. */
+    /* Unbound: the rule does nothing, not even a notice. */
     sh_modmanifest_set_carries(NULL);
     vr_open(VR_MAP2, sizeof VR_MAP2 - 1, 0, 1);
     saved = sh_modmanifest_on_save(VR_MAP2, sizeof VR_MAP2 - 1, &sn);

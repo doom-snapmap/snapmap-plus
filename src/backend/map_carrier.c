@@ -481,8 +481,8 @@ int sh_map_old_shape(const char *json, size_t len)
             if (!hit) break;
             at = (size_t)(hit - json) + 1;
             if (hit > json && hit[-1] == '"' && cr_is_name_value(json, hit - 1)) {
-                /* A variable's name: its info object's snapVarInfo_t follows
-                 * (as the store tool's converter reads it). An entity or an
+                /* A variable's name: its info object's snapVarInfo_t follows.
+                 * An entity or an
                  * object an author named so is not an earlier shape. */
                 const char *q = (const char *)memchr(hit, '"', len - (size_t)(hit - json));
                 size_t w = q ? len - (size_t)(q + 1 - json) : 0;

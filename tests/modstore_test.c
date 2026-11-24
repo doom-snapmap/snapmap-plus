@@ -958,7 +958,7 @@ static void test_named_locks(const char *tmp)
     /* One name for one folder however it is spelled; another folder, another name. */
     CHECK(sh_store_lock_name(L"C:\\Users\\A\\AppData\\Local\\snapmap-plus\\mods", a, 64));
     CHECK(sh_store_lock_name(L"\\\\?\\c:/users/a/appdata/local/snapmap-plus/MODS\\", b, 64));
-    CHECK(!wcscmp(a, b) && !wcsncmp(a, L"Local\\snapmap-plus-store-", 25) && wcslen(a) == 25 + 16);
+    CHECK(!wcscmp(a, b) && !wcsncmp(a, L"Local\\snapmap-plus-mods-", 24) && wcslen(a) == 24 + 16);
     CHECK(sh_store_lock_name(L"C:\\Users\\A\\AppData\\Local\\snapmap-plus\\mods2", b, 64) && wcscmp(a, b) != 0);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\named\\mods", tmp);
     CHECK(sh_ms_set_root(root));
@@ -1532,7 +1532,7 @@ int main(int argc, char **argv)
     sh_ms_set_root(NULL);
     mt_remove_tree(tmp);
     if (failures) { fprintf(stderr, "modstore_test: %d failure(s)\n", failures); return 1; }
-    printf("modstore_test: install, salt, copies, earlier shapes, mods\\maps retired, add to my mods, new mod, lock, removal, leftovers, nested, "
-           "the store tool's half and the boot scan pass\n");
+    printf("modstore_test: install, salt, copies, earlier shapes, mods\\maps retired, add to my mods, new mod, lock, removal, leftovers, nested "
+           "and the boot scan pass\n");
     return 0;
 }

@@ -61,8 +61,7 @@
 
 /* The store lock (recursive per thread): the mods folder's named lock
  * (store_lock.h; the record lock is the same mutex), shared with every other
- * process on the folder (a second game, the store tool, which holds it for
- * its whole run). A thread that finds it held logs one "MODS: store:
+ * process on the folder (a second game). A thread that finds it held logs one "MODS: store:
  * waiting" line and waits. The counts below are this process's. */
 
 void modstore_lock(void);
@@ -82,7 +81,7 @@ int      modstore_lock_busy(unsigned *generation);
 #define SH_MS_RETIRED_PLACES "maps"
 
 /* The store root. NULL or "" restores the default (%LOCALAPPDATA%\snapmap-plus\mods).
- * Tests and the store tool point it elsewhere. Returns 1 when the root is set. */
+ * Tests point it elsewhere. Returns 1 when the root is set. */
 int  sh_ms_set_root(const char *root_utf8);
 /* The current root as UTF-8 (stable for the process), or NULL when
  * %LOCALAPPDATA% cannot be resolved. */
@@ -165,15 +164,13 @@ int  sh_ms_note_build(const char *folder, const sh_mb_bundle *b);
  * becoming "<salt>_<key>", and every "#str_<key>" reference in its own text
  * files (mod.json among them) follows (sh_mb_salt_strings,
  * sh_mb_restr_text; DECISIONS 6), so an author writes plain keys in a new
- * folder. `from` is normally the folder's own name; the store
- * tool passes a converted package's id. The folder keeps its name: the result
+ * folder. `from` is the folder's own name. The folder keeps its name: the result
  * is staged beside it ("<name>.staging-<pid>", unchanged files hard-linked)
  * and swapped in with two renames, the second undone on failure; the old
  * folder goes to the Recycle Bin. A file that cannot be read, a binary file
  * naming mods/<from>/ or one of its strings, files under another mod's mods/<x>/, two files landing
  * on one path, or a refused rename leaves the folder exactly as it was.
- * Works on any folder (the store tool salts a staged folder outside the
- * store); a folder in mods\maps\ is refused. Takes the store lock.
+ * A folder in mods\maps\ is refused. Takes the store lock.
  *
  * Returns 1 with the new salt in salt_out; 0 when the folder already has its
  * salt (salt_out receives it); -1 with the plain reason in *cause (malloc'd;
@@ -182,19 +179,6 @@ int  sh_ms_note_build(const char *folder, const sh_mb_bundle *b);
  * of a store folder is also recorded as its build cause. */
 int  sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SALT_LEN + 1], char **cause);
 
-/* sh_ms_assign_salt with `salt` instead of a new one: the store tool's
- * overrides migration, moving a package again into the folder an earlier
- * pass made of it, keeps that folder's identity. */
-int  sh_ms_assign_salt_as(const char *folder, const char *from, const char *salt, char **cause);
-
-/* The same salting written to a new folder `dest` (it must not exist; files
- * the salting does not rewrite are hard-linked), with `modjson` (a fresh
- * author text: no block, no retired key) in place of the folder's own
- * descriptor; `folder` is never touched. The store tool converts a folder
- * of an earlier shape through it: salted and built in `dest`, swapped in
- * only when the build succeeds. Returns 1 with the salt, -1 with the cause. */
-int  sh_ms_salt_copy(const char *folder, const char *modjson, size_t modjson_len, const char *from, const char *dest,
-                     char salt_out[SH_SALT_LEN + 1], char **cause);
 
 /* Add to my mods (SPEC-distribution 5.15): the folder `staged` (outside the store, its files under `salt`'s
  * namespace) becomes a new mod of the player's own at mods\<sh_ms_title_segment(name)> (" (2)" ... when taken),
@@ -220,7 +204,7 @@ size_t sh_ms_rebank_text(const char *text, size_t len, const sh_ms_bank_rename *
 typedef struct sh_ms_install_stats {
     unsigned copied;            /* files copied into the store (the game files the folder holds too) */
     int in_place;               /* the source folder was inside the store */
-    int replaced;               /* the named target (as_name) was replaced */
+    int replaced;               /* a folder of the install's name was replaced */
     int present;                /* a usable folder already holds this build: nothing was copied */
     int resalted;               /* a copy of a root mod: it was given a new salt */
     unsigned stock_files;       /* stock pointers (borrows); a copy the folder holds is kept */
@@ -238,8 +222,7 @@ typedef struct sh_ms_install_stats {
  *     and its mod.json are copied to mods\<its name> (" (2)" ...),
  *     verified, and, when the root already holds the salt, the arriving copy
  *     gets a new salt (stats->resalted) and is built under it.
- * `as_name` (sh_ms_install_as: the store tool's target) names the folder under
- * mods\ instead; a folder of that name is replaced. `resolver` may be NULL;
+ * `resolver` may be NULL;
  * the store's installed bundles are consulted in addition to it. On success
  * *name_out (optional; malloc'd) holds the folder name under mods\.
  * bundle_out (optional) receives the bundle as installed; release it with
@@ -247,9 +230,6 @@ typedef struct sh_ms_install_stats {
 int  sh_ms_install_from_folder(const char *folder, const sh_mb_resolver *resolver,
                                char **name_out, sh_ms_install_stats *stats,
                                sh_mb_bundle *bundle_out, char **cause);
-int  sh_ms_install_as(const char *folder, const char *as_name, const sh_mb_resolver *resolver,
-                      char **name_out, sh_ms_install_stats *stats,
-                      sh_mb_bundle *bundle_out, char **cause);
 
 /* ------------------------------------------------------------ names ---- */
 

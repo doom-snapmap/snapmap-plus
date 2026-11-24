@@ -63,9 +63,9 @@ static int stock_exists(void *ctx, const char *request)
     return 0;
 }
 
-/* ---- builder entry (modcmd.c in the product) ------------------------------------------------ */
+/* ---- build a folder in place and write its mod.json ------------------------------------------ */
 
-int modbundle_build_folder(const char *folder, char **first_cause)
+static int build_folder(const char *folder, char **first_cause)
 {
     sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
     sh_mb_bundle b;
@@ -282,7 +282,7 @@ static void fresh_mod(const char *fixture, const char *root)
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\alex.r2-imp", mods);
     CreateDirectoryA(mods, NULL);
     CHECK(mt_copy_tree(fixture, folder));
-    CHECK(HO(cause, modbundle_build_folder(folder, HO_P(0))) == 1);
+    CHECK(HO(cause, build_folder(folder, HO_P(0))) == 1);
     _snprintf_s(cause, sizeof cause, _TRUNCATE, "%s\\mod.json", folder);
     CHECK(sh_mb_load(cause, &b) == 1);
 

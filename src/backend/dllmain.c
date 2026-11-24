@@ -218,8 +218,8 @@ static void install_features(const sig_result *results, size_t db)
     /* and its "attachment_tags" likewise (attach_tags.h) */
     sh_mb_set_attach_tags(sh_at_build_registry);
 
-    /* No store migration runs here: the installer's store tool converts
-     * earlier shapes. A folder a crash took away mid-replacement is put back
+    /* Nothing of an earlier shape is converted here (that is the installer's,
+     * and not in this release). A folder a crash took away mid-replacement is put back
      * first, so it serves on this boot, and the work folders a crash left are
      * removed. */
     (void)sh_ms_recover_work();

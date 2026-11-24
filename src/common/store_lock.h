@@ -1,8 +1,8 @@
 /* store_lock.h -- the named lock on a mods folder and its record, shared by
- * every process that writes them (DECISIONS 19): the game DLL and the
- * installer's store tool include this one header.
+ * every process that writes them (DECISIONS 19): each game process takes it
+ * through this one header.
  *
- * Name. "Local\snapmap-plus-store-<16 hex>", where the hex is the 64-bit
+ * Name. "Local\snapmap-plus-mods-<16 hex>", where the hex is the 64-bit
  * FNV-1a (offset 0xcbf29ce484222325, prime 0x100000001b3) over the UTF-16LE
  * code units, two bytes each, low byte first, of the mods folder's path:
  * GetFullPathNameW of it, without a "\\?\" prefix ("\\?\UNC\" read as "\\"),
@@ -15,8 +15,8 @@
  * waits for it; WAIT_ABANDONED also gives it (the last holder ended without
  * releasing, and the store's own work-folder recovery puts its leftovers
  * right). It holds it around one whole store step: the game around each
- * install, download, salting, scan build or record write; the store tool
- * around its whole migrate run. The mutex is recursive within a thread.
+ * install, download, salting, scan build or record write. The mutex is
+ * recursive within a thread.
  * A reader that only lists the folder takes no lock. */
 #ifndef SNAPMAP_PLUS_STORE_LOCK_H
 #define SNAPMAP_PLUS_STORE_LOCK_H
@@ -24,7 +24,7 @@
 #include <windows.h>
 #include <wchar.h>
 
-#define SH_STORE_LOCK_PREFIX L"Local\\snapmap-plus-store-"
+#define SH_STORE_LOCK_PREFIX L"Local\\snapmap-plus-mods-"
 
 /* The lock's name for the mods folder `mods` into `out` (at least 48
  * characters). 1 on success. */

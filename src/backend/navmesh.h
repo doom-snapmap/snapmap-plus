@@ -42,7 +42,7 @@
 #define SH_SMNAV_GEOM_CHARS     16          /* sha256 prefix over the source geometry */
 #define SH_SMNAV_MODULE_CAP     128         /* "category/module" + NUL */
 #define SH_SMNAV_CLASS_CAP      32          /* "monster128" + NUL */
-#define SH_SMNAV_MAX_SHARDS     2048        /* parts per (module, class) (the store tool shares the name) */
+#define SH_SMNAV_MAX_SHARDS     2048        /* parts per (module, class) */
 #define SH_SMNAV_HEADER_CAP     224
 #define SH_SMNAV_RESNAME_CAP    320
 #define SH_SMNAV_REASON_CAP     192

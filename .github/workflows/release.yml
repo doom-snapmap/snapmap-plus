@@ -89,7 +89,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26'
-      - name: Build the DLLs and the store tool (version-stamped)
+      - name: Build the DLLs (version-stamped)
         shell: pwsh
         run: |
           # Scripts throw on failure; cmdlet-only scripts may leave LASTEXITCODE unset.
@@ -124,7 +124,7 @@ jobs:
           Invoke-TrustedSigning -Endpoint $env:SIGNING_ENDPOINT -CodeSigningAccountName $env:SIGNING_ACCOUNT `
             -CertificateProfileName $env:SIGNING_PROFILE -FileDigest SHA256 `
             -TimestampRfc3161 http://timestamp.acs.microsoft.com -TimestampDigest SHA256 `
-            -Files "build\XINPUT1_4.dll,build\webview\snapmap-plus-ui.dll,build\snapmap-plus-store.exe,build\snapmap-plus.exe"
+            -Files "build\XINPUT1_4.dll,build\webview\snapmap-plus-ui.dll,build\snapmap-plus.exe"
 
       - name: Package and check the overlay
         shell: pwsh
@@ -137,10 +137,9 @@ jobs:
       - name: Zip the overlay
         shell: pwsh
         run: |
-          # Bundle the April 2024 pair, the manifest and the store tool; publish the installer
-          # separately.
+          # Bundle the April 2024 pair and the manifest; publish the installer separately.
           Compress-Archive -Force -DestinationPath snapmap-plus-bundle.zip `
-            -Path dist\XINPUT1_4.dll, dist\snapmap-plus, dist\MANIFEST.sha256, dist\snapmap-plus-store.exe, dist\TOOLS.sha256
+            -Path dist\XINPUT1_4.dll, dist\snapmap-plus, dist\MANIFEST.sha256
       - name: Zip the debug symbols (maintainer artifact)
         shell: pwsh
         run: |

@@ -1,12 +1,9 @@
 /* mod_seam_stub.c -- link stand-ins for the serving layer (modserve.c and
- * modserve_engine.c) and the bundle builder entry (modcmd.c), for tests that
- * link the map manifest or the legacy converter without them.
+ * modserve_engine.c), for tests that link the map manifest without them.
  *
- * The serving index reports no bundle as indexed, so every conversion asks
- * for a rescan; g_mod_stub_rescans counts the requests. Define
- * SH_MOD_STUB_NO_BUILDER when the test supplies its own
- * modbundle_build_folder. The rawmap ZIP export (modexport.c) is not linked:
- * a .zip path is recognised and refused. */
+ * The serving index reports no bundle as indexed, so a caller that needs one asks for a
+ * rescan; g_mod_stub_rescans counts the requests. The rawmap ZIP export
+ * (modexport.c) is not linked: a .zip path is recognised and refused. */
 #include <stddef.h>
 #include <string.h>
 
@@ -163,11 +160,3 @@ int modexport_validate_source(const char *path, char **out_msg)
     return 0;
 }
 
-#ifndef SH_MOD_STUB_NO_BUILDER
-int modbundle_build_folder(const char *folder, char **first_cause)
-{
-    (void)folder;
-    if (first_cause) *first_cause = _strdup("the bundle builder is not linked into this test");
-    return 0;
-}
-#endif

@@ -1,6 +1,6 @@
 /* The open map's settings (map_settings.h): read from the map's member at
  * load, written into the member at save, held between. The variables earlier
- * builds wrote are the store tool's (map_old_test). */
+ * builds wrote are not read (map_carrier_test refuses them). */
 #include <windows.h>
 #include <assert.h>
 #include <stdio.h>

@@ -85,23 +85,7 @@ static void test_sha(void)
 
 static void test_names(void)
 {
-    char id[SH_MB_ID_MAX + 1], cause[256], s[SH_MB_ID_MAX + 1];
-    char long_id[80];
-    CHECK(sh_mb_id_normalize("  Alex.R2-Imp \t", 15, id) && !strcmp(id, "alex.r2-imp"));
-    CHECK(sh_mb_id_normalize("a", 1, id));
-    CHECK(sh_mb_id_normalize("a_b.c-d9", 8, id));
-    CHECK(!sh_mb_id_normalize("", 0, id));
-    CHECK(!sh_mb_id_normalize(".a", 2, id));
-    CHECK(!sh_mb_id_normalize("a.", 2, id));
-    CHECK(!sh_mb_id_normalize("-a", 2, id));
-    CHECK(!sh_mb_id_normalize("a..b", 4, id));
-    CHECK(!sh_mb_id_normalize("a b", 3, id));
-    CHECK(!sh_mb_id_normalize("a/b", 3, id));
-    CHECK(!sh_mb_id_normalize("a@b", 3, id));
-    memset(long_id, 'a', 65); long_id[65] = 0;
-    CHECK(!sh_mb_id_normalize(long_id, 65, id));
-    CHECK(sh_mb_id_normalize(long_id, 64, id));
-
+    char cause[256];
     CHECK(HO(cause, sh_mb_check_request("generated/decls/entitydef/mods/a/b.decl", HO_P(0))));
     CHECK(HO(cause, sh_mb_check_request("maps/my room/a.bmodel", HO_P(0))));
     CHECK(!HO(cause, sh_mb_check_request("generated/../x.decl", HO_P(0))) && strstr(cause, "traversal"));

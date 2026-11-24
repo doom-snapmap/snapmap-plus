@@ -1,6 +1,6 @@
 /* script_node_row.c -- the Script node's Toybox row and the names the
  * builder and the serving index ask about (see script_node.h, "the row").
- * No Lua and no engine: the builder, the store tool and the serving index
+ * No Lua and no engine: the builder and the serving index
  * link it without the script runtime. */
 #include <stdarg.h>
 #include <stdio.h>

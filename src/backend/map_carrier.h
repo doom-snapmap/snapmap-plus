@@ -132,7 +132,8 @@ void sh_carrier_describe(const sh_carrier_view *view, char *out, size_t cap);
  * before units) as "mod": "<salt>@<build>". The game reads none of them: one
  * pass answers SH_MAP_OLD_VARIABLES for a variables.string name starting with
  * a family, SH_MAP_OLD_ROWS for such a member row, else
- * SH_MAP_OLD_NONE. The installer's store tool converts them (map_old.h). */
+ * SH_MAP_OLD_NONE. A map in an earlier shape is refused with SH_MAP_OLD_REFUSAL;
+ * converting it is the installer's, and not in this release. */
 enum { SH_MAP_OLD_NONE = 0, SH_MAP_OLD_VARIABLES = 1, SH_MAP_OLD_ROWS = 2 };
 int sh_map_old_shape(const char *json, size_t len);
 #define SH_MAP_OLD_REFUSAL "This map was saved by an earlier Snapmap+; run the Snapmap+ installer to update it."

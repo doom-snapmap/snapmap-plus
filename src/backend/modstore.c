@@ -1,6 +1,5 @@
 /* modstore.c -- see modstore.h. The mods\ folders, the
- * salt, install, verification and the scan. The store tool's half (the
- * retired layouts, the bin sweep) is modstore_upgrade.c. */
+ * salt, install, verification and the scan. */
 #include <windows.h>
 #include <shlobj.h>
 #include <shellapi.h>
@@ -20,13 +19,31 @@
 #include "plain_reason.h"
 #include "text.h"
 
-#include "modstore_internal.h"
+/* The file helpers, defined below and used throughout. */
+static int         ms_cause(char **cause, const char *fmt, ...);
+static const char *ms_why(DWORD err, const char *name, int in_store, unsigned long long bytes);
+static void        ms_log(const char *fmt, ...);
+static wchar_t    *ms_wjoin(const wchar_t *dir, const wchar_t *name);
+static wchar_t    *ms_wjoin_utf8(const wchar_t *dir, const char *rel);
+static wchar_t    *ms_wroot(void);
+static int         ms_mkdirs(const wchar_t *path);
+static int         ms_inside(const wchar_t *path, const wchar_t *dir);
+static int         ms_candidate(const WIN32_FIND_DATAW *fd);
+static int         ms_has_descriptor(const wchar_t *folder);
+static int         ms_delete_file(const wchar_t *path);
+static int         ms_rmtree(const wchar_t *path, const wchar_t *root);
+static int         ms_exists(const wchar_t *path);
+static int         ms_is_dir(const wchar_t *path);
+static int         ms_file_size(const wchar_t *path, unsigned long long *size);
+static int         ms_hash_wfile(const wchar_t *path, unsigned long long *size, char out[SH_MB_HASH_HEX + 1]);
+static char       *ms_read_text(const wchar_t *path, size_t max, size_t *len);
+
 /* ------------------------------------------------------------ lock ----- */
 
 /* The store lock: the mods folder's named lock (store_lock.h, opened and
  * waited for by modbundle.c's sh_mb_store_mutex and sh_mb_store_wait), so
- * every writer of mods\ in this process and in any other (a second game, the
- * store tool) takes turns: installs, downloads, scans, builds, exports. It is
+ * every writer of mods\ in this process and in any other (a second game)
+ * takes turns: installs, downloads, scans, builds, exports. It is
  * recursive on purpose: the install and verification below take it
  * themselves, and their callers (a download) already hold it around a larger
  * step. The counts below are this process's. */
@@ -94,12 +111,12 @@ static int ms_lock_yield(void)
     return 1;
 }
 
-/* The root a test or the store tool set (sh_ms_set_root), or NULL for the
+/* The root a test set (sh_ms_set_root), or NULL for the
  * default. A replaced root is kept, never freed: a reader on another thread
  * may still hold it. */
 static const char *volatile g_ms_root;
 
-int ms_cause(char **cause, const char *fmt, ...)
+static int ms_cause(char **cause, const char *fmt, ...)
 {
     va_list ap;
     char *text;
@@ -117,7 +134,7 @@ int ms_cause(char **cause, const char *fmt, ...)
  * root, which is then prefixed; NULL names the store folder. A full disk
  * names the store's drive and the bytes needed (0: unknown). The text lives
  * in a per-thread buffer: one call per message. */
-const char *ms_why(DWORD err, const char *name, int in_store, unsigned long long bytes)
+static const char *ms_why(DWORD err, const char *name, int in_store, unsigned long long bytes)
 {
     const char *root = sh_ms_root(), *why;
     char *path;
@@ -131,7 +148,7 @@ const char *ms_why(DWORD err, const char *name, int in_store, unsigned long long
     return why;
 }
 
-void ms_log(const char *fmt, ...)
+static void ms_log(const char *fmt, ...)
 {
     char *line;
     va_list ap;
@@ -164,7 +181,7 @@ const char *sh_ms_root(void)
 
 /* ------------------------------------------------------------ paths ---- */
 
-wchar_t *ms_wjoin(const wchar_t *dir, const wchar_t *name)
+static wchar_t *ms_wjoin(const wchar_t *dir, const wchar_t *name)
 {
     size_t a = wcslen(dir), b = wcslen(name);
     wchar_t *p = (wchar_t *)malloc(sizeof(wchar_t) * (a + b + 2));
@@ -176,7 +193,7 @@ wchar_t *ms_wjoin(const wchar_t *dir, const wchar_t *name)
 }
 
 /* dir + "\" + a UTF-8 relative path ('/' or '\'). */
-wchar_t *ms_wjoin_utf8(const wchar_t *dir, const char *rel)
+static wchar_t *ms_wjoin_utf8(const wchar_t *dir, const char *rel)
 {
     int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, rel, -1, NULL, 0);
     wchar_t *w, *out;
@@ -190,14 +207,14 @@ wchar_t *ms_wjoin_utf8(const wchar_t *dir, const char *rel)
     return out;
 }
 
-wchar_t *ms_wroot(void)
+static wchar_t *ms_wroot(void)
 {
     const char *root = sh_ms_root();
     return root ? sh_mb_wpath(root) : NULL;
 }
 
 /* Create every missing folder of a \\?\ path. */
-int ms_mkdirs(const wchar_t *path)
+static int ms_mkdirs(const wchar_t *path)
 {
     size_t n = wcslen(path), i, start = 0;
     wchar_t *copy = (wchar_t *)malloc(sizeof(wchar_t) * (n + 1));
@@ -239,7 +256,7 @@ static int ms_mkdirs_parent(const wchar_t *file)
 }
 
 /* `path` lies strictly inside `dir` (both long form). */
-int ms_inside(const wchar_t *path, const wchar_t *dir)
+static int ms_inside(const wchar_t *path, const wchar_t *dir)
 {
     size_t n = wcslen(dir);
     return _wcsnicmp(path, dir, n) == 0 && path[n] == L'\\' && path[n + 1] != 0;
@@ -284,7 +301,7 @@ static int ms_work_suffix(const wchar_t *name, const wchar_t *tag) { return ms_w
 
 /* Folders of the store that can be mods: not hidden, not a staging or
  * replaced copy. */
-int ms_candidate(const WIN32_FIND_DATAW *fd)
+static int ms_candidate(const WIN32_FIND_DATAW *fd)
 {
     if (!(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return 0;
     if (fd->cFileName[0] == L'.') return 0;
@@ -304,7 +321,7 @@ typedef struct ms_disposition_ex { DWORD Flags; } ms_disposition_ex;
 #define MS_FILE_DISPOSITION_INFO_EX ((FILE_INFO_BY_HANDLE_CLASS)21)
 
 /* Delete one file or link, read-only or not. */
-int ms_delete_file(const wchar_t *path)
+static int ms_delete_file(const wchar_t *path)
 {
     HANDLE h = CreateFileW(path, DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                            OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
@@ -323,7 +340,7 @@ int ms_delete_file(const wchar_t *path)
 
 /* Remove a tree under the store root. Reparse points are removed, never
  * followed. Refuses anything outside the root and the root itself. */
-int ms_rmtree(const wchar_t *path, const wchar_t *root)
+static int ms_rmtree(const wchar_t *path, const wchar_t *root)
 {
     WIN32_FIND_DATAW fd;
     wchar_t *pattern;
@@ -492,7 +509,7 @@ int sh_ms_delete_mod_folder(const char *folder, char **cause)
 }
 /* -------------------------------------------------------- file utils ---- */
 
-int ms_file_size(const wchar_t *path, unsigned long long *size)
+static int ms_file_size(const wchar_t *path, unsigned long long *size)
 {
     WIN32_FILE_ATTRIBUTE_DATA d;
     if (!GetFileAttributesExW(path, GetFileExInfoStandard, &d)) return 0;
@@ -501,27 +518,19 @@ int ms_file_size(const wchar_t *path, unsigned long long *size)
     return 1;
 }
 
-int ms_exists(const wchar_t *path)
+static int ms_exists(const wchar_t *path)
 {
     return path && GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
 }
 
-int ms_is_dir(const wchar_t *path)
+static int ms_is_dir(const wchar_t *path)
 {
     DWORD a = path ? GetFileAttributesW(path) : INVALID_FILE_ATTRIBUTES;
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) && !(a & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 
-/* `leaf` exists in `dir`. */
-int ms_has_file(const wchar_t *dir, const wchar_t *leaf)
-{
-    wchar_t *p = ms_wjoin(dir, leaf);
-    int has = ms_exists(p);
-    free(p);
-    return has;
-}
 
-int ms_hash_wfile(const wchar_t *path, unsigned long long *size, char out[SH_MB_HASH_HEX + 1])
+static int ms_hash_wfile(const wchar_t *path, unsigned long long *size, char out[SH_MB_HASH_HEX + 1])
 {
     char *u = sh_mb_utf8(path);
     int ok;
@@ -556,7 +565,7 @@ int sh_ms_copy_file(const wchar_t *from, const wchar_t *to)
 }
 
 /* Read a small file whole (UTF-8 result is raw bytes, NUL-terminated). */
-char *ms_read_text(const wchar_t *path, size_t max, size_t *len)
+static char *ms_read_text(const wchar_t *path, size_t max, size_t *len)
 {
     char *u = path ? sh_mb_utf8(path) : NULL;
     unsigned char *t = u ? sh_mb_read_file(u, max, len) : NULL;
@@ -675,7 +684,7 @@ int sh_ms_descriptor_unparsable(const char *folder, char **out)
 
 /* ------------------------------------------------------------- walk ---- */
 
-int ms_has_descriptor(const wchar_t *folder)
+static int ms_has_descriptor(const wchar_t *folder)
 {
     wchar_t *dm = ms_wjoin(folder, L"mod.json"), *dp = ms_wjoin(folder, L"package.json");
     int has = ms_exists(dm) || ms_exists(dp);
@@ -1083,15 +1092,6 @@ int sh_ms_enumerate(sh_ms_list *out)
     return 1;
 }
 
-int ms_is_hash(const char *h)
-{
-    size_t i;
-    if (!h) return 0;
-    for (i = 0; i < SH_MB_HASH_HEX; i++)
-        if (!((h[i] >= '0' && h[i] <= '9') || (h[i] >= 'a' && h[i] <= 'f') || (h[i] >= 'A' && h[i] <= 'F'))) return 0;
-    return h[SH_MB_HASH_HEX] == 0;
-}
-
 const sh_ms_entry *sh_ms_resolve(const sh_ms_list *l, const char *hash)
 {
     const sh_ms_entry *first = NULL;
@@ -1200,9 +1200,6 @@ static int ms_new_salt(char out[SH_SALT_LEN + 1], const char *also)
     return ok;
 }
 
-/* sh_ms_assign_salt_as: the salt the next salting takes instead of a new one
- * (under the store lock). */
-static char g_ms_fixed_salt[SH_SALT_LEN + 1];
 
 /* The salting's plan (sh_ms_assign_salt): every file of the folder read and
  * rewritten in memory first, mods/<from>/ to mods/<salt>/ in texts and in the
@@ -1676,8 +1673,8 @@ static void ms_bank_prefix(const char *name, char *out, size_t cap)
  *
  * `keep` (the folder's salt) is a folder already salted: its builder block
  * is kept, binaries are left as they are, and nothing is written when there
- * is nothing to move (returns 0). Otherwise a new salt is drawn (or
- * sh_ms_assign_salt_as's), the block becomes {"format": 2, "salt"} and a
+ * is nothing to move (returns 0). Otherwise a new salt is drawn, the block
+ * becomes {"format": 2, "salt"} and a
  * binary that spells the folder's name refuses the folder. The folder's own
  * mod.json is read unless `given` (a fresh author text) replaces it. With
  * `dest` the result is written there instead (it must not exist) and
@@ -1701,7 +1698,6 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
     if (!src || !(slash = wcsrchr(src, L'\\')) || !(parent = _wcsdup(src))) { ms_cause(cause, "out of memory"); goto done; }
     parent[slash - src] = 0;
     if (keep) strcpy_s(salt, sizeof salt, keep);
-    else if (g_ms_fixed_salt[0]) strcpy_s(salt, sizeof salt, g_ms_fixed_salt);
     else if (!ms_new_salt(salt, from)) {
         ms_cause(cause, "Windows could not supply the random numbers that name a new mod; restart the game and press "
                  "Refresh");
@@ -1934,31 +1930,6 @@ int sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SAL
     return r;
 }
 
-int sh_ms_assign_salt_as(const char *folder, const char *from, const char *salt, char **cause)
-{
-    char got[SH_SALT_LEN + 1];
-    int r;
-    if (!salt || !sh_salt_valid(salt, strlen(salt))) return ms_cause(cause, "no ID given") - 1;
-    modstore_lock();
-    strcpy_s(g_ms_fixed_salt, sizeof g_ms_fixed_salt, salt);
-    r = sh_ms_assign_salt(folder, from, got, cause);
-    g_ms_fixed_salt[0] = 0;
-    modstore_unlock();
-    return r;
-}
-
-int sh_ms_salt_copy(const char *folder, const char *modjson, size_t modjson_len, const char *from, const char *dest,
-                    char salt_out[SH_SALT_LEN + 1], char **cause)
-{
-    int r;
-    if (salt_out) salt_out[0] = 0;
-    if (!folder || !folder[0] || !from || !from[0] || !dest || !dest[0] || !modjson)
-        return ms_cause(cause, "no folder named") - 1;
-    modstore_lock();
-    r = ms_assign_to(folder, modjson, modjson_len, from, 1, NULL, dest, salt_out, cause);
-    modstore_unlock();
-    return r;
-}
 
 static char *ms_free_root_name(const wchar_t *root, const char *leaf);
 
@@ -2774,7 +2745,7 @@ static int ms_swap_in(const wchar_t *staging, const wchar_t *final, const wchar_
  * outside the store (a received build unpacked elsewhere); it keeps its salt
  * at the root, and a root folder of that salt is the install only when it
  * holds this very build. */
-static int ms_install_locked(const char *folder, const char *as_name, int to_root,
+static int ms_install_locked(const char *folder, int to_root,
                              const sh_mb_resolver *resolver, char **name_out,
                              sh_ms_install_stats *st, sh_mb_bundle *bundle_out, char **cause)
 {
@@ -2838,7 +2809,7 @@ static int ms_install_locked(const char *folder, const char *as_name, int to_roo
          * with its references rewritten (the source is only read), built; a
          * refused build leaves nothing installed. */
         char *fu;
-        name = as_name && as_name[0] ? _strdup(as_name) : ms_free_root_name(root, leaf);
+        name = ms_free_root_name(root, leaf);
         if (!name) { ms_cause(cause, "out of memory"); goto done; }
         final = ms_wjoin_utf8(root, name);
         if (!final || !ms_work_names(final, &staging, &old)) { ms_cause(cause, "out of memory"); goto done; }
@@ -2869,8 +2840,7 @@ static int ms_install_locked(const char *folder, const char *as_name, int to_roo
     if (!sh_mb_build(folder, NULL, &chain_resolver, &b)) { ms_cause(cause, "%s", sh_mb_first_cause(&b)); goto done; }
     {
         const sh_ms_entry *here = sh_ms_find_salt(&list, b.id, NULL);
-        if (as_name && as_name[0]) name = _strdup(as_name);
-        else if (to_root && here && !(here->loaded && !_stricmp(here->bundle.hash, b.hash) && sh_ms_entry_usable(here))) {
+        if (to_root && here && !(here->loaded && !_stricmp(here->bundle.hash, b.hash) && sh_ms_entry_usable(here))) {
             /* One build per salt at the root: the player's own folder of this mod stays theirs. */
             ms_cause(cause, "your mods already hold %s in mods\\%s", b.name && b.name[0] ? b.name : b.id, here->name);
             goto done;
@@ -2982,16 +2952,10 @@ done:
 int sh_ms_install_from_folder(const char *folder, const sh_mb_resolver *resolver, char **name_out,
                               sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char **cause)
 {
-    return sh_ms_install_as(folder, NULL, resolver, name_out, stats, bundle_out, cause);
-}
-
-int sh_ms_install_as(const char *folder, const char *as_name, const sh_mb_resolver *resolver, char **name_out,
-                     sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char **cause)
-{
     sh_ms_install_stats local;
     int ok;
     modstore_lock();
-    ok = ms_install_locked(folder, as_name, 0, resolver, name_out, stats ? stats : &local, bundle_out, cause);
+    ok = ms_install_locked(folder, 0, resolver, name_out, stats ? stats : &local, bundle_out, cause);
     modstore_unlock();
     return ok;
 }
@@ -3002,7 +2966,7 @@ int sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, ch
     sh_ms_install_stats local;
     int ok;
     modstore_lock();
-    ok = ms_install_locked(folder, NULL, 1, resolver, name_out, stats ? stats : &local, bundle_out, cause);
+    ok = ms_install_locked(folder, 1, resolver, name_out, stats ? stats : &local, bundle_out, cause);
     modstore_unlock();
     return ok;
 }

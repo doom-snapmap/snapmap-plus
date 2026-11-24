@@ -1,4 +1,4 @@
-# Shared MSVC build helpers for src\backend\build.ps1, src\ui\build.ps1, src\store\build.ps1 and
+# Shared MSVC build helpers for src\backend\build.ps1, src\ui\build.ps1 and
 # tests\run-tests.ps1. Dot-source this file. Sources compile to objects (once, in parallel), and a
 # separate step links them, so a rebuild recompiles only what changed. Keep this script ASCII for
 # PowerShell 5.1.

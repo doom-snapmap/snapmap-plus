@@ -409,10 +409,6 @@ int  sh_mb_load_folder(const char *folder, sh_mb_bundle *out);
  * read. Returns 1 and the hex. */
 int  sh_mb_tree_hash(const char *folder, char out[SH_MB_HASH_HEX + 1]);
 
-/* The store tool's conversion only (src/store/store_old_ids.c): what a
- * bundle serves, independent of its label: SHA-256 over id, requirements,
- * shadows, extra, and every file's request, kind, hash and size. */
-void sh_mb_content_key(const sh_mb_bundle *bundle, char out[SH_MB_HASH_HEX + 1]);
 
 /* ------------------------------------------------- the product record ---- */
 /* <mods_root>\snapmap-plus.json, the product's one file under mods\:
@@ -460,12 +456,6 @@ const char *sh_mb_record_why(void);
 
 void sh_mb_free(sh_mb_bundle *bundle);
 
-/* Build `folder` in place with the game-backed resolver (installed bundles,
- * then the player's game archives) and write its mod.json: the entry the
- * store tool's conversions call. Returns 1 on success; 0 with the first cause
- * in *first_cause (malloc'd; the caller frees it). Defined in modcmd.c,
- * which owns the resolver; logs MODS: lines. */
-int  modbundle_build_folder(const char *folder, char **first_cause);
 
 /* ----------------------------------------------------------- helpers ---- */
 
@@ -532,17 +522,13 @@ void   sh_mb_strkeys_free(sh_mb_strkey *keys, size_t count);
 void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap);
 
 /* For the calling thread only: 1 accepts a binary at a game name in the
- * builds it runs (an install of content the product received, such as a
- * rawmap or prefab import or a store-tool conversion, is never refused on its
- * files); 0 ends it. Every other build refuses such a file
+ * builds it runs (content the product received is never refused on its
+ * files; no product path sets it since imports stopped installing mods, only
+ * the tests do); 0 ends it. Every other build refuses such a file
  * Thread-local, so a worker's import never changes a
  * rescan's rule. */
 void sh_mb_keep_replacements_here(int on);
 
-/* The store tool's conversion only (src/store/store_old_ids.c): an earlier release's mod id, trimmed,
- * lower-cased and checked (1-64 characters of [a-z0-9._-], starting and
- * ending with a letter or digit, no ".."). Returns 1 and writes out. */
-int  sh_mb_id_normalize(const char *in, size_t len, char out[SH_MB_ID_MAX + 1]);
 
 /* Validate one request path (relative, '/', no "." or ".." segment, allowed
  * characters [A-Za-z0-9._-$+@~()] and internal spaces, no segment that
@@ -804,7 +790,7 @@ void sh_mb_scan_needs(const char *decl_type, const unsigned char *text, size_t l
 /* The Graphics SDK's look compiler (modlook.h sh_look_compile_notes), set by the backend before the first build: the
  * build reads each material decl through it (a mistake in a look fails the build with its sentence, a look's images
  * and programs are scanned from the text the engine will read, the notes go to the build report). Unset, a material
- * is scanned as its file holds it (the store tool, the tests that do not link the compiler). */
+ * is scanned as its file holds it (the tests that do not link the compiler). */
 typedef int (*sh_mb_look_fn)(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
                              size_t why_len, char **notes);
 void sh_mb_set_look_compiler(sh_mb_look_fn fn);
@@ -849,11 +835,6 @@ void sh_mb_sha256_hex(const void *data, size_t len, char out[SH_MB_HASH_HEX + 1]
 int  sh_mb_sha256_file(const char *path, unsigned long long *size,
                        char out[SH_MB_HASH_HEX + 1]);
 
-/* The store tool's conversion only (src/store/store_old_ids.c): an earlier release's install state file
- * (.state.json), {"firstCause","installedAt","validated"}. */
-
-int  sh_mb_state_parse(const char *text, size_t len, int *validated,
-                       long long *installed_at, char **cause);   /* *cause malloc'd or NULL */
 
 /* Wide long-path form of a UTF-8 path (\\?\ prefixed when absolute), malloc'd.
  * Exposed for modstore. */
@@ -867,7 +848,7 @@ unsigned char *sh_mb_read_file(const char *path, size_t max, size_t *out_len);
 
 /* The product's user-data folder, %LOCALAPPDATA%\snapmap-plus, in UTF-8
  * (resolved through the wide API: the ANSI code page cannot spell every
- * profile path). Every store, prefab and conversion root derives from it;
+ * profile path). Every store and prefab root derives from it;
  * modstore.h sh_ms_root is its mods\ folder. Resolved once; NULL when
  * Windows does not answer. */
 const char *sh_mb_user_root(void);

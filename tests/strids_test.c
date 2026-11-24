@@ -1,8 +1,8 @@
 /* Tests #str_ injection from the admitted bundles' strings and the baked
  * defaults, with bundle-over-default precedence, cross-bundle conflicts,
  * rearm, retirement and native-table refusal. The user document of earlier
- * releases (strings\strids.json) is not read: the store tool moves it into a
- * mod, which user_doc stands in for. Engine string-pool and list operations and the serving index's
+ * releases (strings\strids.json) is not read; a mod holding those strings,
+ * which user_doc stands in for, is. Engine string-pool and list operations and the serving index's
  * bundle accessor are doubled to inspect appended key/value pairs. */
 #include <stdio.h>
 #include <string.h>
@@ -128,7 +128,7 @@ static void set_bundles(const fake_bundle *list, int n)
 }
 
 /* One installed mod whose strings.en is `pairs`, where earlier releases read
- * the user's strids.json (the store tool moves that document into a mod). */
+ * the user's strids.json. */
 static char g_user_extra[4096];
 static int user_doc(const char *pairs)
 {

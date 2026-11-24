@@ -556,9 +556,8 @@ static char *ms_pkey_heap(const char *type, const char *name)
 /* ------------------------------------------------------------------ files */
 
 /* Bundle trees hold engine paths deep enough to pass MAX_PATH below
- * %LOCALAPPDATA% (a converted first-generation package does), so files are
- * opened through the wide API with the \\?\ prefix, as the legacy converter
- * writes them. `path` is UTF-8, absolute, with '\' separators: every store
+ * %LOCALAPPDATA%, so files are opened through the wide API with the \\?\
+ * prefix. `path` is UTF-8, absolute, with '\' separators: every store
  * path in this file is, from the root sh_ms_root resolves (modstore.c) to
  * the folder names the scan reads, as the store and the record spell them. */
 static wchar_t *ms_wide(const char *path)

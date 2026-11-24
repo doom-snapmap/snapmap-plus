@@ -1215,7 +1215,7 @@ static void mm_pin_one(void *context, const char *salt, const char *slot)
 static int mm_local_absent(const sh_modmanifest_row *r);
 
 /* Whether a pinned row's composition is on disk whole (modcache.h sh_cache_composed), bound by the product; unbound
- * (the store tool, tests that do not bind it) a pinned row counts as whole. */
+ * (tests that do not bind it) a pinned row counts as whole. */
 static int (*g_whole)(const char *build);
 void sh_modmanifest_set_whole(int (*fn)(const char *build)) { g_whole = fn; }
 
@@ -2087,7 +2087,7 @@ static char *mm_object_title(const char *name)
 void sh_modmanifest_set_notice(void (*fn)(const char *text)) { g_notice = fn; }
 
 /* Whether the installed version of a salt carries a placed name (modserve.h sh_modserve_root_carries), bound by the
- * product; without it the version rule never moves a mod (the store tool, tests that do not bind it). */
+ * product; without it the version rule never moves a mod (tests that do not bind it). */
 static int (*g_carries)(const char *salt, const char *name);
 void sh_modmanifest_set_carries(int (*fn)(const char *salt, const char *name)) { g_carries = fn; }
 
@@ -2100,7 +2100,7 @@ void sh_modmanifest_set_carries(int (*fn)(const char *salt, const char *name)) {
 static int mm_save_version(mm_save_ctx *ctx, int say)
 {
     size_t i, j, k;
-    if (!g_carries) return 1;   /* unbound (the store tool, a test): no version rule */
+    if (!g_carries) return 1;   /* unbound (a test): no version rule */
     for (i = 0; i < ctx->list.count; i++) {
         sh_modmanifest_row *p = &ctx->list.rows[i], *l = NULL;
         size_t lat = 0, missing = 0;

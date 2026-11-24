@@ -24,7 +24,7 @@ extern "C" {
 #define SH_WPATH_MAX 32768
 /* The same longest path in UTF-8: at most 3 bytes for each UTF-16 unit
  * (a surrogate pair is 2 units and 4 bytes). */
-#define SH_U8PATH_MAX (32768 * 3)   /* SH_WPATH_MAX * 3; spelled alike in modlegacy.h */
+#define SH_U8PATH_MAX (32768 * 3)   /* SH_WPATH_MAX * 3 */
 
 static const wchar_t SH_WPATH_LONG_PREFIX_[] = L"\\\\?\\";
 static const wchar_t SH_WPATH_UNC_PREFIX_[] = L"\\\\?\\UNC\\";

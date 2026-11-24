@@ -1,6 +1,6 @@
 /* modshadow_test -- the shadow safety rules (modserve.c) measured against a
- * player's real mod store in the one shape (the store tool's conversion of
- * their data, read in place and never written): the serving index resolves
+ * player's real mod store in the one shape (read in place and never
+ * written): the serving index resolves
  * the conflicts between the mods (one provider serves, list decls are
  * composed), and the editor plan and every bundle's gameplay plan run
  * against a registry stand-in that knows exactly the decls the game's
@@ -11,7 +11,7 @@
  * Inputs (the test is skipped without the first two; the tree holds game
  * files, so it is not in the repository):
  *   SH_MODSHADOW_DATA        a data root holding mods\ in the one shape (a copy
- *                            the store tool converted; nothing is written)
+ *                            in the current shape; nothing is written)
  *   SH_MODSHADOW_GAME_NAMES  "type<TAB>name" lines, lower case, one per decl
  *                            and resource of snap_gameresources (the decl
  *                            registry a SnapMap session has)
@@ -111,24 +111,7 @@ static int game_has(const char *type, const char *name)
     return bsearch(&k, g_names, g_nnames, sizeof(char *), name_cmp) != NULL;
 }
 
-/* ---- builder entry (modcmd.c in the product) and the registry stand-in ------------------------ */
-
-/* The game's files, from the install's resource reader (modstock.c), as the
- * store tool's conversion builds against the DOOM folder. */
-static int stock_exists(void *ctx, const char *request) { (void)ctx; return sh_modstock_exists(request); }
-
-int modbundle_build_folder(const char *folder, char **first_cause)
-{
-    sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
-    sh_mb_bundle b;
-    char cause[HO_TEXT];
-    int ok = 0;
-    if (!sh_mb_build(folder, NULL, &r, &b)) ho_set(first_cause, sh_mb_first_cause(&b));
-    else if (!HO(cause, sh_mb_write(&b, folder, HO_P(0)))) ho_set(first_cause, cause);
-    else ok = 1;
-    sh_mb_free(&b);
-    return ok;
-}
+/* ---- the registry stand-in ------------------------------------------------------------------ */
 
 int modserve_activate_bundles(const char *const *bundle_hashes, int n) { (void)bundle_hashes; (void)n; return 0; }
 

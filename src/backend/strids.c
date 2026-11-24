@@ -88,7 +88,7 @@ static void *decode_table_global(const uint8_t *table_lea_fn)
  * hash lowercases keys. First writer wins: admitted bundles in modserve's
  * order, then baked defaults. Duplicate native rows would make hash lookup
  * ambiguous. (The user document of earlier releases, strings\strids.json, is
- * the store tool's to move into the mod My overrides; it is not read here.)
+ * not read.)
  */
 /* Who supplied a row. The baked defaults are not a bundle and never
  * conflict-report: the baked set is only a backstop. A bundle owner is its index in this pass's

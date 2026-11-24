@@ -105,13 +105,7 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   retained text, No, a failed fetch, a bundle that will not install, another
   load or a newer launch abandoning the hold mid-fetch, the joiner's host
   re-check, the warm-cache joiner branch and My Maps play.
-- `modlegacy_test.c` checks the legacy carrier policy: header grammar per era,
-  completeness and digest, stored and deflate ZIP members, the older layout
-  mapping, conversion, cleaning and verdict lines with a builder double, and
-  the serving-index rescan a new conversion requests. Set
-  `SH_MODLEGACY_FIXTURES` to a folder holding the campaign's carrier maps to add
-  an integration pass; it is skipped otherwise. The maps are not in the
-  repository because their packages contain game files.
+
 - `modnet_test.c` covers the store client (base URL and argument rules, a unit's archive request,
   injected failures, cancel and the job helper) against a loopback stub (`mod_store_stub.h`); no real
   network is used.
@@ -132,8 +126,8 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   the answer is released and its link forgotten), the copy gate on both sides
   of the bound, and the launch step settling provisional refs and retrying the
   queue.
-- `mod_seam_stub.c` stands in for the serving layer and the builder entry in
-  tests that link the map manifest or the legacy converter without them.
+- `mod_seam_stub.c` stands in for the serving layer in tests that link the
+  map manifest without it.
 - `modbundle_test.c` builds `fixtures\mods\alex.r2-imp` and pins its bundle
   hash against `alex.r2-imp.canonical.json`; it also checks logical names, the
   needs scan, build numbering and each refusal rule, and the render-program
@@ -179,10 +173,7 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   names; skins decls pass by their mesh path; a cut-content bundle's
   requirements are set before its first registration. `MOD_PIPELINE_ECHO=1`
   prints the log lines.
-- `store_upgrade_test.c` checks the store tool's readers of earlier store
-  layouts: the retired `removed-mods\` bin swept, the second upgrade step over
-  format-1 folders, a Contract 2 folder this release cannot read left as it
-  was, and the reader of earlier `mod.json` shapes (`modbundle_old.h`).
+
 - `modstock_test.c` covers stock pointers end to end over two synthetic
   installs (`mod_stock_fixture.h` writes `gameresources` and
   `snap_gameresources` indexes with `.resources` and `.patch` slices, stored
@@ -309,8 +300,8 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   the executables, that the HUD call decodes to the predicate at an aligned
   rel32 with the widget in RBX.
 - `modshadow_test.c` measures those rules on a player's real mod store in the
-  one shape: `SH_MODSHADOW_DATA` names a data root holding `mods\` (a copy the
-  store tool converted; it is only read), `SH_MODSHADOW_GAME_NAMES` a
+  one shape: `SH_MODSHADOW_DATA` names a data root holding `mods\` (in the
+  current shape; it is only read), `SH_MODSHADOW_GAME_NAMES` a
   `type<TAB>name` list of `snap_gameresources` and `SH_MODSHADOW_DOOM` the
   install (default `D:\SteamLibrary\steamapps\common\DOOM`); the index
   resolves its conflicts, the boss mods' encounters are checked to reach the

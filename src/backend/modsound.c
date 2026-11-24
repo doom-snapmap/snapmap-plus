@@ -817,8 +817,7 @@ static void ms_collect_file(void *context, const char *request, uint64_t size, c
 }
 
 /* Stock-bank needs: the "banks" the builder records in each build's block
- * (every build records them: the game's builder and the store tool's
- * conversion alike). */
+ * (every build records them). */
 static void ms_need_registries(void *context, const char *id, const char *hash, const char *registries)
 {
     sh_modsound_needs *t = (sh_modsound_needs *)context;

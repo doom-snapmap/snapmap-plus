@@ -1,7 +1,6 @@
 /* Text helpers shared by the map's readers: digesting, base64, bounded
  * scanning and container walks over map JSON (the "snapmap-plus" member,
- * map_carrier.h; navigation, navmesh.c and nav_regions.c). The string-variable
- * envelope earlier builds wrote lives with the store tool (map_old.h).
+ * map_carrier.h; navigation, navmesh.c and nav_regions.c).
  */
 #ifndef SNAPMAP_PLUS_MAP_SHARDS_H
 #define SNAPMAP_PLUS_MAP_SHARDS_H
@@ -25,7 +24,6 @@ const char *sh_shard_find(const char *hay, size_t n, const char *needle, size_t 
 int sh_shard_is_ws(char c);
 int sh_shard_is_digit(char c);
 int sh_shard_is_hex(char c);
-int sh_shard_is_b64(char c);
 
 /* The first 16 lowercase hex characters of the payload's sha256 -- the digest
  * that goes in a shard header. */
@@ -79,17 +77,13 @@ void sh_shard_doc_free(sh_shard_doc *doc);
 
 /* The innermost container holding `off`, or -1. */
 int  sh_shard_doc_innermost(const sh_shard_doc *doc, size_t off);
-/* Walk up from `idx` to the object that is a direct element of an array -- the
- * map variable itself. -1 when there is no such ancestor. */
-int  sh_shard_doc_array_element(const sh_shard_doc *doc, int idx);
+
 /* The container that is the value of member `key` DIRECTLY inside `parent`. A
  * map has more than one member called "string"; only the one whose parent is
  * the variables object is the bucket we mean. */
 int  sh_shard_doc_member(const char *json, size_t len, const sh_shard_doc *doc,
                          int parent, const char *key);
-/* Byte span of the `index`-th element of a flat number-only array. */
-int  sh_shard_doc_flat_element(const char *json, const sh_shard_doc *doc, int arr,
-                               unsigned index, size_t *from, size_t *to);
+
 /* Count the direct elements of an array container. */
 unsigned sh_shard_doc_array_count(const char *json, const sh_shard_doc *doc, int arr);
 
