@@ -1,7 +1,5 @@
-/* Relay in-app reports to GitHub Issues using a server-side App credential,
- * with a PAT fallback. Validate inputs, match an open report signature, then
- * append a confirmation or create an issue. GitHub is the only persistent store.
- * See README.md for setup and docs/feedback.md for the client pipeline. */
+/* Relay in-app reports to GitHub Issues with a server-side App credential (PAT fallback): validate, match an
+ * open report signature, then append a confirmation or create an issue. See README.md and docs/feedback.md. */
 
 import { RequestError, readJsonObject } from '../src/workers/request_body.js';
 
@@ -131,18 +129,15 @@ function rendererOf(renderer) {
   return Object.prototype.hasOwnProperty.call(RENDERERS, renderer) ? renderer : null;
 }
 
-/* Known DOOM 2016 builds by Steam build id: the binary name and the first eight
- * hex digits of each renderer's executable SHA-256. A report's game identity
- * ("DOOM 2016 build <id> (<binary>, <renderer>, <hash8>)", produced by the
- * backend) is accepted only when every part matches one of these; 2642713 is the
- * 2018 build that v0.2.1-beta.19 serves. Anything else is dropped, never echoed. */
+/* Known DOOM 2016 builds by Steam build id: binary name and the first eight hex digits of each renderer's
+ * executable SHA-256. A report's build identity is accepted only when every part matches; anything else is
+ * dropped, never echoed. */
 const GAME_BUILDS = {
   '13954591': { binary: '20240321-104810-ginger-fuchsia', hashes: { Vulkan: '3d8b4393', OpenGL: '1bddecaa' } },
   '2642713':  { binary: '20180321-154133-liver-goldenrod', hashes: { Vulkan: '139763e9', OpenGL: 'd46ca967' } },
 };
 const GAME_PATTERN = /^DOOM 2016 build (\d{1,10}) \(([0-9]{8}-[0-9]{6}-[a-z]+-[a-z]+), (Vulkan|OpenGL), ([0-9a-f]{8})\)$/;
-/* -> { build, text } for a known build; null when absent (the backend was not
- * attached); false when present but unrecognized. */
+/* -> { build, text } for a known build; null when absent (no backend attached); false when unrecognized. */
 function gameOf(game) {
   const value = String(game || '').trim();
   if (!value || value === 'not attached') return null;

@@ -1,8 +1,5 @@
-# Build the backend and frontend together from their shared ABI.
-# -BackendOnly skips the frontend; other arguments forward to the backend build.
-# -Version stamps a release tag into every compile as SNAPMAP_PLUS_VERSION (tools/cbuild.ps1), the
-# version the DLLs report; a local build is "dev". release.yml passes the tag.
-# Use -Diag only for local diagnostics. See docs/contributing.md for setup.
+# Build the backend and frontend together from their shared ABI; -BackendOnly skips the frontend.
+# -Version stamps a release tag as SNAPMAP_PLUS_VERSION (tools/cbuild.ps1), "dev" for a local build; -Diag is local only.
 # Keep this script ASCII for PowerShell 5.1.
 param(
     [switch]$BackendOnly,
