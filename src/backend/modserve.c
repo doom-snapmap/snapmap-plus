@@ -6524,6 +6524,18 @@ static char *ms_asker(void)
     return out;
 }
 
+int sh_modserve_standin_name(const char *name)
+{
+    static const char dir[] = SH_MODSERVE_STANDIN_DIR;
+    const size_t dn = sizeof dir - 1;
+    const char *p;
+    for (p = name; p && *p; p++) {
+        if ((p == name || p[-1] == '/' || p[-1] == '\\') && !_strnicmp(p, dir, dn) && (p[dn] == '/' || p[dn] == '\\'))
+            return 1;
+    }
+    return 0;
+}
+
 int sh_modserve_note_miss(const char *request)
 {
     const ms_index *x;
@@ -6533,6 +6545,8 @@ int sh_modserve_note_miss(const char *request)
     sh_modserve_miss_fn fn = g_miss_fn;
     int i, b, fresh = 1;
     if (!request || !ms_request_salt(request, salt)) return 0;
+    /* A stand-in's own name is the product's, never a file a unit lost (R-LB1). */
+    if (sh_modserve_standin_name(request)) return 0;
     /* A board's squares a unit leaves out are left out on purpose: the engine draws a family with absent squares
      * (R-DS2 5.1), and its level-1 quarters (_q<N>) no build carries (R-LV2). A request of a kind no build can carry
      * (an image's source spelling, .tga) is the engine's probe before the cooked name, never a file a unit lost. */
@@ -8807,11 +8821,29 @@ static int ms_gates_ok(const ms_index *x, const ms_file *f)
     return !ms_req_needs(ms_gate_of(x, f)) || ms_gates_live_for(x, f);
 }
 
+/* A stand-in's own name (modserve.h SH_MODSERVE_STANDIN_DIR) once the open map declares a unit composition of its
+ * salt: the real content serves the row now, so nothing asks the engine to read the stand-in again (R-LB1: a read of it
+ * was logged as a file the unit lacked and reported to the store). */
+static int ms_standin_superseded(const ms_index *x, const char *request)
+{
+    char salt[SH_MODSERVE_HASH_HEX + 1];
+    int b;
+    if (!x || !sh_modserve_standin_name(request) || !ms_request_salt(request, salt)) return 0;
+    for (b = 0; b < x->nbundles; ++b) {
+        const ms_bundle *bd = &x->bundles[b];
+        if (bd->admitted && bd->unit && bd->id && !strcmp(bd->id, salt) &&
+            InterlockedCompareExchange((volatile LONG *)&bd->rank, 0, 0) >= 0)
+            return 1;
+    }
+    return 0;
+}
+
 static int ms_refresh_one(const ms_index *x, ms_file *f, int kind, sh_modserve_refresh_fn fn, void *context)
 {
     sh_modserve_refresh_item it;
     int eff = ms_scoped(x, (int)(f - x->files));
     const ms_file *ef = eff >= 0 ? &x->files[eff] : f;   /* the provider serving the path for the open map */
+    if (ms_standin_superseded(x, f->request)) { InterlockedExchange(&f->refresh, 0); return 0; }
     /* A surface holds the game's own bytes: nothing to refresh, ever. */
     if (ms_surface(f) || (eff >= 0 && ms_surface(ef))) { InterlockedExchange(&f->refresh, 0); return 0; }
     /* A name no bundle serves for the open map has no game bytes to go back
@@ -8863,6 +8895,7 @@ int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int 
                 ms_gone *g = (ms_gone *)&x->gone[i];
                 sh_modserve_refresh_item it;
                 if (!InterlockedCompareExchange(&g->pending, 0, 0)) continue;
+                if (ms_standin_superseded(x, g->request)) { InterlockedExchange(&g->pending, 0); continue; }
                 it.type = g->type; it.name = g->name; it.request = g->request;
                 it.bundle_id = g->bundle_id;
                 it.kind = SH_MODSERVE_RF_DECL; it.gone = 1; it.shadow = g->is_shadow; it.gates_live = 1;

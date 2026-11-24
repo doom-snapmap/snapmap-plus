@@ -5446,6 +5446,91 @@ static void test_miss_reporter_skips_probes(void)
     CHECK(sh_modserve_index_build(g_root) >= 6);
 }
 
+/* The refresh's items, as "<name>:gone=<0|1>;". */
+typedef struct sn_seen { char order[4096]; } sn_seen;
+static int sn_visit(void *context, const sh_modserve_refresh_item *it)
+{
+    sn_seen *s = (sn_seen *)context;
+    size_t at = strlen(s->order);
+    _snprintf_s(s->order + at, sizeof s->order - at, _TRUNCATE, "%s:gone=%d;", it->name ? it->name : "", it->gone);
+    return 1;
+}
+
+/* R-LB1 (R-LV9's clean-player run): a pinned row's composition is made with stand-ins while its unit downloads, at the
+ * row's own composition hash, then made again in full at that hash when the unit arrives. The stand-in's own names
+ * are the product's, never the unit's: the rescan's refresh does not ask the engine to read the stand-in's row again
+ * (it was logged as a file the unit lacked and reported to the store), and a read of one is never a miss. */
+static void test_standin_names_after_real(void)
+{
+    char top[MAX_PATH], root[MAX_PATH], served[MAX_PATH], path[MAX_PATH];
+    char *slash;
+    const char *lists[1];
+    sn_seen seen;
+    int was_on = sh_modserve_scope_enabled();
+    static const char CHASH[] = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    static const char STANDIN_REQ[] =
+        "generated/decls/snapeditorentitydef/mods/estand01/" SH_MODSERVE_STANDIN_DIR "/snapmaps/placeable/tyrant.decl";
+    static const fx_file stood[] = {
+        { "generated/decls/snapeditorentitydef/mods/estand01/" SH_MODSERVE_STANDIN_DIR "/snapmaps/placeable/tyrant.decl",
+          "{ standin }", -1, "snapEditorEntityDef", "mods/estand01/" SH_MODSERVE_STANDIN_DIR "/snapmaps/placeable/tyrant",
+          NULL, '7' },
+        { "generated/decls/entitydef/mods/estand01/snapmaps/placeable/tyrant.decl", "{ inherit = \"snapmaps/unknown\"; }",
+          -1, "entityDef", "mods/estand01/snapmaps/placeable/tyrant", NULL, '6' },
+    };
+    static const fx_file real[] = {
+        { "generated/decls/entitydef/mods/estand01/snapmaps/placeable/tyrant.decl", "{ real }", -1, "entityDef",
+          "mods/estand01/snapmaps/placeable/tyrant", NULL, '8' },
+        { "generated/decls/snapeditorentitydef/mods/estand01/snapmaps/placeable/tyrant.decl", "{ real row }", -1,
+          "snapEditorEntityDef", "mods/estand01/snapmaps/placeable/tyrant", NULL, '9' },
+    };
+    printf("-- the stand-ins' own names: not read again once the real composition serves, never a miss\n");
+    CHECK(sh_modserve_standin_name(STANDIN_REQ) && sh_modserve_standin_name("mods/x/" SH_MODSERVE_STANDIN_DIR "/a") &&
+          sh_modserve_standin_name("decls/snapEditorEntityDef/" SH_MODSERVE_STANDIN_DIR "/snapmaps/x.decl") &&
+          !sh_modserve_standin_name(real[0].path) && !sh_modserve_standin_name("mods/x/a" SH_MODSERVE_STANDIN_DIR "/b") &&
+          !sh_modserve_standin_name(NULL));
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\standinmap\\mods", top);
+    _snprintf_s(served, sizeof served, _TRUNCATE, "%s\\.content\\served", root);
+    mkdirs(served);
+    /* The unit is not here yet: the row's composition is its stand-ins, and the engine reads their row. */
+    g_block_edits = "[], \"units_of\": [\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"]";
+    make_bundle(served, CHASH, "estand01", '7', NULL, stood, 2, NULL);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_index_build(root) == 1);
+    lists[0] = CHASH;
+    (void)sh_modserve_scope_set(lists, 1, 1);
+    memset(&seen, 0, sizeof seen);
+    (void)sh_modserve_each_refresh(sn_visit, &seen);
+    {
+        char got[64];
+        CHECK(open_text(STANDIN_REQ, got, sizeof got) == 1);
+        CHECK(open_text(stood[1].path, got, sizeof got) == 1);
+    }
+    /* The unit arrived: the composition is made again in full at its hash, without the stand-ins. */
+    make_bundle(served, CHASH, "estand01", '8', NULL, real, 2, NULL);
+    g_block_edits = NULL;
+    (void)sh_modserve_index_rescan();
+    (void)sh_modserve_scope_set(lists, 1, 1);
+    memset(&seen, 0, sizeof seen);
+    (void)sh_modserve_each_refresh(sn_visit, &seen);
+    printf("   refresh offered: %s\n", seen.order);
+    CHECK(strstr(seen.order, "mods/estand01/snapmaps/placeable/tyrant:gone=0;") != NULL);   /* the real def */
+    CHECK(strstr(seen.order, SH_MODSERVE_STANDIN_DIR) == NULL);
+    sh_modserve_set_miss_reporter(miss_spy);
+    g_miss_calls = 0;
+    CHECK(sh_modserve_note_miss(STANDIN_REQ) == 0 && g_miss_calls == 0);
+    CHECK(sh_modserve_note_miss("generated/decls/snapeditorentitydef/mods/estand01/snapmaps/other.decl") == 1 &&
+          g_miss_calls == 1);   /* a real file the unit lacks is still reported */
+    sh_modserve_set_miss_reporter(NULL);
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(was_on);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\standinmap", top);
+    remove_tree(path);
+    CHECK(sh_modserve_index_build(g_root) >= 6);
+}
+
 static void test_dependency_names(void)
 {
     char top[MAX_PATH], root[MAX_PATH], out[4][SH_MODSERVE_HASH_HEX + 1], ha[65], hc[65];
@@ -6153,6 +6238,7 @@ int main(void)
     test_dependency_names();
     test_static_model_refresh();
     test_miss_reporter_skips_probes();
+    test_standin_names_after_real();
     test_composition_serves_its_map();
     test_composition_overlay();
     test_bank_stems();

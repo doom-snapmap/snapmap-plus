@@ -946,6 +946,12 @@ int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bund
  * (modpublish.c: the store keeps it for the publishers of maps that claim the
  * unit, whose next publish carries the file, SPEC-distribution 3.8). Returns
  * 1 when noted now, 0 otherwise. Any thread. */
+/* The folder the content cache composes a row's stand-ins under (modcache.c, D60): a palette row's stand-in is the
+ * snapEditorEntityDef mods/<salt>/snapmapplus_standin/<placed name>. Its names are the product's, never a unit's. */
+#define SH_MODSERVE_STANDIN_DIR "snapmapplus_standin"
+/* 1 when `name` (an engine request, a decl name or an author path) lies under a stand-in folder: never a file a unit
+ * lost, never asked of the store, never read again once the row's real composition serves (R-LB1). */
+int sh_modserve_standin_name(const char *name);
 typedef void (*sh_modserve_miss_fn)(const char *salt, const char *unit, const char *request, const char *by);
 void sh_modserve_set_miss_reporter(sh_modserve_miss_fn fn);
 int  sh_modserve_note_miss(const char *request);

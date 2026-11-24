@@ -1962,7 +1962,9 @@ static void eng_report_asked(const char *salt, const char *unit, const char *req
 {
     eng_asked *a;
     (void)by;
-    if (!salt || !request || !modnet_valid_hash(unit) || !(a = (eng_asked *)calloc(1, sizeof *a))) return;
+    /* A stand-in's own name is the product's: never asked of the store (R-LB1). */
+    if (!salt || !request || sh_modserve_standin_name(request) || !modnet_valid_hash(unit) ||
+        !(a = (eng_asked *)calloc(1, sizeof *a))) return;
     strcpy_s(a->hash, sizeof a->hash, unit);
     a->path = sh_ma_path(salt, request);
     if (!a->path || !QueueUserWorkItem(eng_asked_send, a, WT_EXECUTEDEFAULT)) {
