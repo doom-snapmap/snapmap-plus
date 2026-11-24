@@ -5427,15 +5427,14 @@ its content is on this computer (a pinned row). It changes nothing.
 
 What is sent: the units the published map's rows name (see [Units](#units)),
 those the store lacks and only those, as a map with mod rows is published. The
-publish is held at its start, not at its save (`modpublish.h` is the
-summary).
+publish is held at the publish screens' FINISH, before the screens close and
+before the engine's `PublishStart` (`modpublish.h` is the summary).
 
-`PublishStart` is detoured (`sh_modpublish_publish_start`). A map whose
-placed names give no mod rows publishes as the engine does. Otherwise the
-call is held (the detour returns without the original; a second Publish while
-one is held waits for it) and a job on the modnet worker prepares the content
-(`mp_prepare`) while the editor's pacifier reads "Preparing this map's mod
-content." The job makes this computer's publishing key when there is none
+A map whose placed names give no mod rows publishes as the engine does.
+Otherwise PUBLISH on FINISH is held with the screens up (the FINISH step,
+below; a second PUBLISH while one is held waits for it), and a job on the
+modnet worker prepares the content (`mp_prepare`) while the editor's pacifier
+reads "Preparing this map's mod content." The job makes this computer's publishing key when there is none
 (`modclaim_signer`; see [The map content cache](#the-map-content-cache)),
 reads the paths players asked of the units this computer's claims name
 (`modclaim_asked`, which seeds the unit walk, see [Units](#units)), computes
@@ -5449,10 +5448,10 @@ have is absent (S8); one moderation removed is removed.
   refuses the publish with one sentence ("The map was not published: Snapmap+
   cannot find the mod <name> on this computer. Build or install it in the Mods
   tab, or remove its objects, then publish again."); no request is made for it.
-- Bytes to send: the game's own Yes/No (GDM 0x29) asks "Publishing uploads 212
-  MB of mod content that the mod store does not have yet. Publish?" (S7,
-  `sh_modpublish_compose_question`). No ends the hold and the publish never
-  starts, with no notice. A question that cannot be shown refuses the publish
+- Bytes to send: the editor's own Yes/No over the screens asks "Publishing
+  uploads 212 MB of mod content that the mod store does not have yet.
+  Publish?" (S7, `sh_modpublish_compose_question`). No ends the hold and leaves
+  the author on FINISH, with no notice. A question that cannot be shown refuses the publish
   with "its question could not be shown", so nothing is uploaded without an
   answer. Nothing to send: no question.
 - Yes: a second job uploads the missing units (`modclaim_upload`, which sends
@@ -5473,12 +5472,12 @@ have is absent (S8); one moderation removed is removed.
   A worker busy for about three minutes refuses with "Snapmap+ is busy with the
   mod store. Publish again in a moment."
 
-By the time `PublishStart` runs, the publish screens are already closed: the
-MapProperties frame's PUBLISH case (VK 0x14118FDD0, GL 0x14118EF50) calls the
+The FINISH step. By the time `PublishStart` runs, the publish screens are
+already closed: the MapProperties frame's PUBLISH case (VK 0x14118FDD0, GL 0x14118EF50) calls the
 game's gate (limits, start module, deprecated entity; `PublishFinishGateCall`,
 VK 0x1190362, GL 0x118F4E2), then the screens' close (the editor's state stack
-pops), then `PublishStart(editor, state+0x21)`. So a question raised there
-draws over the editor, behind the shell's backdrop. The game raises its own
+pops), then `PublishStart(editor, state+0x21)`, so a question raised there
+would draw over the editor, behind the shell's backdrop. The game raises its own
 publish errors earlier, while the screens are still up, in the editor screen's
 own dialog: `[editor+0x21088]+0x8E8`. The show is `EditorGdmShow`; the
 descriptor is title, text, two labels and a kind (+0xC0, 0 for Yes/No and 1
@@ -5488,13 +5487,11 @@ answer to `+0x1DC` (0 for the first button, 1 for the second or Back) under
 the flag `+0x1D8`. EditorFrame clears the bit once the flag is set
 (`EditorGdmAnswerCall`).
 
-`sh_publish_question finish` asks S7 there instead (`sh_publish_question
-start` puts it back; `start` is the default until FINISH is proven live). Only
-while it is on, the gate call is repointed at a near relay (`mov r9,rsi`, the
-state). The gate runs first, and its refusals stay the game's. Then
+S7 is asked there, the only shape (proven live on both renderers, R-LV9). At
+the bind the gate call is repointed at a near relay (`mov r9,rsi`, the state).
+The gate runs first, and its refusals stay the game's. Then
 `sh_modpublish_finish_gate` holds a map with mod rows and returns 1, so the
-screens stay up. Preparation, the question, the upload and its progress are
-the same as above. The pacifier shows over the screens, as the game's own
+screens stay up. The pacifier shows over the screens, as the game's own
 profanity check does. The question is the editor's Yes/No over them, titled
 "Mod content to upload".
 
@@ -5502,6 +5499,10 @@ profanity check does. The question is the editor's Yes/No over them, titled
   `+0x8E0`) is cleared.
 - A refusal is the game's one-button "publish failed" dialog over the screens,
   or the editor toast when that dialog cannot show.
+- A republish of an existing item ends as the native one does: the game's
+  "published" toast, with no share-tag notice. Only a first publish shows the
+  share tag (the publish request's success, VK 0x14119A9E0; an update's
+  success, VK 0x14119A930, is the toast alone).
 - When the content is ready, the EditorFrame detour (`sh_modpublish_editor_tick`,
   after the engine's frame, where `fly_to.c` also changes state) closes the
   screens and starts `PublishStart` through its detour, which passes. It then
@@ -5513,7 +5514,9 @@ profanity check does. The question is the editor's Yes/No over them, titled
 
 The bind checks every byte of this in `sh_modpublish_check_finish`
 (`modpub_sites.c`; `tests/modpub_sites_test.c` runs it on both executables).
-When a check fails, S7 stays at `PublishStart`.
+When a check fails, nothing holds at FINISH, and `sh_modpublish_publish_start`
+refuses a map with mods with one sentence ("Snapmap+ cannot send its mod
+content with this game version"), since its content would never be prepared.
 
 When the units are in the store, or the publish goes on queued, the held
 `PublishStart` runs (`mp_resume`, through its own detour, which passes) and

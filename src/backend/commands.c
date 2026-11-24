@@ -33,7 +33,6 @@
 #include "engine_build.h"
 #include "grid_room_native.h"
 #include "modcmd.h"
-#include "modpublish.h"   /* sh_publish_question */
 #include "vt_harness.h"
 #include "prefab_mods.h"
 #include "script/script_console.h"
@@ -1533,18 +1532,6 @@ static void h_sh_dialogdump(idCmdArgs *a)
 }
 #endif
 
-/* Where a publish asks whether to upload mod content the store lacks (S7): at the publish screens' FINISH, in the
- * editor's own dialog over them, or after they close (the default while FINISH is proven live). */
-static void h_sh_publish_question(idCmdArgs *a)
-{
-    const char *verb = cmd_argc(a) > 1 ? cmd_argv(a, 1) : "";
-    if (verb && !_stricmp(verb, "finish")) sh_modpublish_finish_set(1);
-    else if (verb && !_stricmp(verb, "start")) sh_modpublish_finish_set(0);
-    else if (verb && verb[0]) { sh_printf("sh_publish_question: finish | start\n"); return; }
-    sh_printf("sh_publish_question: the upload question is asked %s.\n",
-              sh_modpublish_finish_on() ? "at FINISH, over the publish screens" : "after the publish screens close");
-}
-
 /* Report served baked navigation and reasons for falling back to shipped data. */
 static void h_sh_navmesh(idCmdArgs *a)
 {
@@ -1741,7 +1728,6 @@ static const cmd_entry CMD_TABLE[] = {
     { "noPlayerKill",        (void *)h_noplayerkill,   "Toggle no-kill (the player cannot be killed) for the local player." },
     { "noTarget",            (void *)h_notarget,       "Toggle notarget (enemies ignore the local player)." },
     { "sh_cheatkeep",        (void *)h_cheatkeep,      "Internal: sets the player cheats turned on again after the player's spawn reset them (queued by Snapmap+ itself)." },
-    { "sh_publish_question", (void *)h_sh_publish_question, "sh_publish_question finish | start -- where a publish asks whether to upload mod content the mod store does not have: at FINISH, over the publish screens, or after they close (the default). No argument says which." },
     { "sh_navmesh",          (void *)h_sh_navmesh,
       "Reports the baked AI navigation the current map is serving -- which modules and nav classes, or why a bake was refused. 'sh_navmesh reads' counts what the editor has cost it; 'sh_navmesh detail' adds the bake's internal state." },
 

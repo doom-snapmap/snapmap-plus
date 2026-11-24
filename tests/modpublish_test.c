@@ -84,16 +84,6 @@ static void *const MODEL = (void *)(uintptr_t)0x2000;
 
 static void f_log(void *c, const char *line) { (void)c; backend_log(line); }
 static int f_on_main(void *c) { (void)c; return 1; }
-static int f_can_ask(void *c) { (void)c; return 1; }
-static int f_ask(void *c, unsigned gdm, unsigned set, const char *text)
-{
-    (void)c; (void)gdm;
-    F.asks++; F.ask_buttons = (int)set;
-    strcpy_s(F.asked, sizeof F.asked, text);
-    return 7;
-}
-static int f_poll(void *c, int ticket) { (void)c; (void)ticket; return F.answer; }
-static void f_release(void *c, int ticket) { (void)c; (void)ticket; }
 static unsigned long long f_token(void *c, void *editor) { (void)c; return editor == EDITOR ? F.token : 0; }
 static void f_fail(void *c, void *editor) { (void)c; if (editor == EDITOR) F.fails++; }
 /* The engine's PublishStart, through its detour: the hold passes it while resuming, then the search tag is armed. */
@@ -175,16 +165,19 @@ static int f_finish_ask(void *c, void *editor, const char *title, const char *te
     FF.yes_no = yes_no;
     strcpy_s(FF.title, sizeof FF.title, title ? title : "(publish failed)");
     strcpy_s(FF.text, sizeof FF.text, text);
+    /* the one question surface: a Yes/No is the S7 question (buttons as the old shell set, 6), one button a refusal */
+    if (yes_no) { F.asks++; F.ask_buttons = 6; strcpy_s(F.asked, sizeof F.asked, text); }
+    else strcpy_s(F.toast, sizeof F.toast, text);
     return 1;
 }
-static int f_finish_poll(void *c, void *editor) { (void)c; return editor == EDITOR ? FF.answer : 2; }
+static int f_finish_poll(void *c, void *editor) { (void)c; return editor == EDITOR ? (FF.answer ? FF.answer : F.answer) : 2; }
 static void f_finish_close(void *c, void *editor) { (void)c; if (editor == EDITOR) { FF.closes++; FF.starts_at_close = F.starts; } }
 static void f_finish_clear(void *c, void *editor) { (void)c; if (editor == EDITOR) FF.clears++; }
 static void set_ops(void)
 {
     sh_modpublish_ops ops;
     memset(&ops, 0, sizeof ops);
-    ops.on_main = f_on_main; ops.can_ask = f_can_ask; ops.ask = f_ask; ops.poll = f_poll; ops.release = f_release;
+    ops.on_main = f_on_main;
     ops.editor_token = f_token; ops.publish_fail = f_fail; ops.start = f_start; ops.busy = f_busy;
     ops.placed_names = f_placed_names; ops.editor_notice = f_notice; ops.log = f_log;
     ops.add_tag = f_add_tag; ops.remove_tag = f_remove_tag; ops.edit_ids = f_edit_ids;
@@ -347,10 +340,23 @@ static int make_sized(const char *path, unsigned long long size)
 /* One publish of the rows in g_rows through the hold, answering `answer` if asked; returns with the hold idle. */
 static void publish(int answer)
 {
+    int i;
     F.answer = answer;
-    CHECK(sh_modpublish_publish_start(EDITOR, 1) == 0);
-    PUMP_UNTIL(!sh_modpublish_holding());
+    CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
+    for (i = 0; i < 3000 && sh_modpublish_holding(); i++) {
+        sh_modpublish_poll();
+        sh_modpublish_editor_tick(EDITOR);   /* the frame after the engine's, where the screens close */
+        Sleep(5);
+    }
 }
+
+/* Tick until the condition holds, the editor's frame running too. */
+#define PUMP_FRAMES_UNTIL(cond) do {                                              \
+    int pump_i_;                                                                  \
+    for (pump_i_ = 0; pump_i_ < 3000 && !(cond); pump_i_++) {                     \
+        sh_modpublish_poll(); sh_modpublish_editor_tick(EDITOR); Sleep(5);        \
+    }                                                                             \
+} while (0)
 
 int main(int argc, char **argv)
 {
@@ -395,6 +401,7 @@ int main(int argc, char **argv)
     printf("-- a map without mod rows publishes as the engine would\n");
     {
         sh_modmanifest_list_free(&g_rows);
+        CHECK(sh_modpublish_finish_gate(EDITOR, 0) == 0);   /* FINISH goes on as the game's */
         CHECK(sh_modpublish_publish_start(EDITOR, 0) == 1);
         CHECK(!sh_modpublish_holding() && F.busy_calls == 0 && g_fc.plans == 0 && !sh_modpublish_test_pin_armed());
         sh_modpublish_save_seen(EMPTY_MAP, strlen(EMPTY_MAP));
@@ -409,11 +416,12 @@ int main(int argc, char **argv)
         size_t mark = g_log_n;
         rows_pinned(1);
         F.busy_seen[0] = 0;
-        CHECK(sh_modpublish_publish_start(EDITOR, 1) == 0);
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
         CHECK(sh_modpublish_holding() && sh_modpublish_test_state() == 1 && F.starts == 0);
         CHECK(F.busy_on && !strcmp(F.busy, "Preparing this map's mod content."));
-        CHECK(sh_modpublish_publish_start(EDITOR, 1) == 0 && F.starts == 0);   /* a second Publish waits */
-        PUMP_UNTIL(!sh_modpublish_holding());
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1 && F.starts == 0);   /* a second PUBLISH waits */
+        CHECK(sh_modpublish_publish_start(EDITOR, 1) == 0 && F.starts == 0);
+        PUMP_FRAMES_UNTIL(!sh_modpublish_holding());
         CHECK(F.starts == 1 && F.resumed_pass == 1 && F.overwrite == 1 && !F.busy_on && F.asks == 0);
         CHECK(g_fc.plans == 1 && g_fc.uploads == 0 && g_fc.signers >= 1);
         CHECK(strstr(g_log + mark, "2 unit(s): 2 held by the store, 0 to upload") != NULL);
@@ -629,7 +637,7 @@ int main(int argc, char **argv)
         int starts = F.starts;
         fc_set_unit(UNIT_M, MODCLAIM_MISSING, 1024 * 1024);
         F.answer = 0;   /* the question stays open */
-        CHECK(sh_modpublish_publish_start(EDITOR, 1) == 0);
+        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1);
         PUMP_UNTIL(sh_modpublish_test_state() == 3);
         F.token = 0;
         sh_modpublish_poll();
@@ -639,14 +647,10 @@ int main(int argc, char **argv)
         fc_set_unit(UNIT_M, MODCLAIM_HELD, 0);
     }
 
-    printf("-- S7 at FINISH: off by default; on, the publish holds with the screens up and asks over them (R-LB1)\n");
+    printf("-- S7 at FINISH: the publish holds with the screens up and asks over them, the only shape (R-LB1)\n");
     {
         int starts = F.starts;
         size_t mark = g_log_n;
-        CHECK(!sh_modpublish_finish_on());
-        CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 0 && !sh_modpublish_holding());   /* off: the frame goes on */
-        sh_modpublish_finish_set(1);
-        CHECK(sh_modpublish_finish_on());
         /* a map without mod rows: FINISH goes on as the game's */
         sh_modmanifest_list_free(&g_rows);
         CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 0 && !sh_modpublish_holding());
@@ -722,7 +726,6 @@ int main(int argc, char **argv)
         PUMP_UNTIL(!sh_modpublish_holding());
         CHECK(F.starts == starts && FF.closes == 0 && FF.clears == 1 && FF.asks == 2 && FF.yes_no == 0);
         CHECK(!strcmp(FF.title, "(publish failed)") && !strcmp(FF.text, "The map was not published. Over the size limit."));
-        CHECK(F.toast[0] == 0);
         memset(&FF, 0, sizeof FF);
         FF.answer = 1;
         FF.refuse_one_button = 1;
@@ -757,9 +760,16 @@ int main(int argc, char **argv)
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ddddddddddddddddddddddd1", "rev3");
         PUMP_UNTIL(idle_all());
 
-        /* off again: PublishStart holds and asks as before */
-        sh_modpublish_finish_set(0);
-        CHECK(!sh_modpublish_finish_on() && sh_modpublish_finish_gate(EDITOR, 1) == 0 && !sh_modpublish_holding());
+        /* one shape: a map with mods that reaches PublishStart without its FINISH hold (FINISH did not bind) is not
+         * published, with one sentence; a vanilla map still is */
+        {
+            int fails = F.fails, plans = g_fc.plans;
+            F.toast[0] = 0;
+            CHECK(sh_modpublish_publish_start(EDITOR, 1) == 0 && !sh_modpublish_holding() && F.fails == fails + 1);
+            CHECK(g_fc.plans == plans && !strcmp(F.toast, "The map was not published: Snapmap+ cannot send its mod "
+                                                          "content with this game version. Use Send feedback in the "
+                                                          "Snapmap+ window."));
+        }
     }
 
     printf("-- the author's own map: the slot keeps its local rows, the published copy is pinned, and a republish after the folder changed claims the new unit (R-LB1 F6)\n");
@@ -892,7 +902,7 @@ int main(int argc, char **argv)
             int plans = g_fc.plans;
             g_cloud_unhooked = 1;
             F.toast[0] = 0;
-            CHECK(sh_modpublish_publish_start(EDITOR, 1) == 0 && !sh_modpublish_holding() && g_fc.plans == plans);
+            CHECK(sh_modpublish_finish_gate(EDITOR, 1) == 1 && !sh_modpublish_holding() && g_fc.plans == plans);
             CHECK(!strcmp(F.toast, "The map was not published: Snapmap+ cannot send its mod content with this game "
                                    "version. Use Send feedback in the Snapmap+ window."));
             g_cloud_unhooked = 0;
@@ -1182,12 +1192,14 @@ int main(int argc, char **argv)
         for (k = 0; k < 2; k++) {
             sh_modpublish_ops ops;
             memset(&ops, 0, sizeof ops);
-            ops.on_main = f_on_main; ops.can_ask = f_can_ask; ops.ask = f_ask; ops.poll = f_poll; ops.release = f_release;
+            ops.on_main = f_on_main;
             ops.editor_token = f_token; ops.publish_fail = f_fail; ops.start = f_start; ops.busy = f_busy;
             ops.placed_names = f_placed_names; ops.editor_notice = f_notice; ops.log = f_log;
             ops.add_tag = f_add_tag; ops.remove_tag = f_remove_tag; ops.edit_ids = f_edit_ids;
             ops.published_query = f_published_query; ops.notice = f_menu_notice;
             ops.window_open = k ? f_window_open : NULL;
+            ops.finish_can_ask = f_finish_can_ask; ops.finish_ask = f_finish_ask; ops.finish_poll = f_finish_poll;
+            ops.finish_close = f_finish_close; ops.finish_clear = f_finish_clear; ops.finish_done = f_finish_done;
             sh_modpublish_test_set_ops(&ops);
             rows_pinned(0);
             fc_set_unit(UNIT_T, MODCLAIM_HELD, 0);

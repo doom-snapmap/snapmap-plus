@@ -2,12 +2,13 @@
  *
  * A map that places mod objects reaches players with its mod content in the mod store, named by units (2.8):
  *
- *   PublishStart  (the editor's Publish) a map with mod rows is held before the engine starts: on the modnet worker the
- *                 units of its local rows are computed (modpin.h), the store says which it holds, and what it lacks is
- *                 sized. Bytes to send: "Publishing uploads 212 MB of mod content that the mod store does not have
- *                 yet. Publish?" (S7); No and the publish never starts. Yes: the units go up with progress on the
- *                 editor's pacifier. Then the engine's PublishStart runs. A row whose mod is not on this computer
- *                 refuses the publish with one sentence; a busy store past two minutes lets it go on, queued (N27).
+ *   FINISH        (PUBLISH on the publish screens) a map with mod rows is held with the screens up: on the modnet
+ *                 worker the units of its local rows are computed (modpin.h), the store says which it holds, and what
+ *                 it lacks is sized. Bytes to send: "Publishing uploads 212 MB of mod content that the mod store does
+ *                 not have yet. Publish?" (S7), in the editor's own dialog over the screens; No leaves the author on
+ *                 FINISH. Yes: the units go up with progress on the editor's pacifier. Then the screens close and the
+ *                 engine's PublishStart runs. A row whose mod is not on this computer refuses the publish with one
+ *                 sentence; a busy store past two minutes lets it go on, queued (N27).
  *   save          the publish's save pins a copy of its rows to the prepared units (sh_modpublish_pin_save, bound
  *                 as modmanifest.h's pin step): the text the engine publishes (the cloud save's read of the slot,
  *                 sh_modpublish_cloud_text) names units only. The open map and its slot keep their own rows. The
@@ -72,20 +73,16 @@ void sh_modpublish_save_seen(const char *text, size_t length);
 /* ------------------------------------------------------------ decisions */
 
 /* PublishStart(editorLocal, overwrite), before the engine's: 1 to call it now (a map without mod rows, or the resume
- * of a held publish), 0 when the publish is held (or a held one is still preparing). Main thread. */
+ * of a FINISH hold), 0 when a hold is on its way, or when a map with mod rows reaches it without its FINISH hold (the
+ * FINISH step did not bind): that publish is refused with one sentence. Main thread. */
 int  sh_modpublish_publish_start(void *editor, unsigned char overwrite);
 
 /* The publish screens' PUBLISH on FINISH, after the game's own checks passed and before the screens close (the
- * MapProperties frame's gate call, while the question is asked there: sh_modpublish_finish_set). 1 holds the publish
- * with the screens up: the hold prepares, asks S7 in the editor's own dialog over them (the one the game's publish
- * errors use), uploads, then closes the screens and starts the engine's PublishStart itself. 0 lets the frame go on
- * (a map without mod rows, or the question asked at PublishStart as before). Main thread. */
+ * MapProperties frame's gate call). 1 holds the publish with the screens up: the hold prepares, asks S7 in the editor's
+ * own dialog over them (the one the game's publish errors use), uploads, then closes the screens and starts the
+ * engine's PublishStart itself, then the frame's success event. 0 lets the frame go on (a map without mod rows).
+ * Main thread. */
 int  sh_modpublish_finish_gate(void *editor, unsigned char overwrite);
-
-/* Where S7 is asked: 1 at the FINISH step, 0 at PublishStart after the screens closed (the default until the FINISH
- * path is proven live). The engine side patches the gate call only while it is on. */
-void sh_modpublish_finish_set(int on);
-int  sh_modpublish_finish_on(void);
 
 /* The EditorFrame detour, after the engine's frame: a publish held at FINISH closes the screens and starts here, where
  * the product already changes the editor's state (fly_to.c). Idle cost: one read. */
@@ -167,10 +164,6 @@ char *sh_modpublish_cache_path(const char *item_id, const char *revision);
 typedef struct sh_modpublish_ops {
     void *context;
     int  (*on_main)(void *c);
-    int  (*can_ask)(void *c);
-    int  (*ask)(void *c, unsigned gdm_id, unsigned button_set, const char *text);
-    int  (*poll)(void *c, int ticket);            /* an sh_engine_dialog_result */
-    void (*release)(void *c, int ticket);
     /* The editor's live edit object (its token) or 0 outside a session. */
     unsigned long long (*editor_token)(void *c, void *editor);
     void (*publish_fail)(void *c, void *editor);   /* the engine's PublishFail */
@@ -208,7 +201,8 @@ typedef struct sh_modpublish_ops {
     /* 1 when the Snapmap+ window is showing (it shows the backup offer itself). NULL or 0: the publish's notice says
      * where the offer is (SH_MODPUBLISH_KEY_MADE_TEXT). */
     int  (*window_open)(void *c);
-    /* A publish held at FINISH (sh_modpublish_finish_gate), with the publish screens up. NULL: FINISH never holds. */
+    /* The publish held at FINISH (sh_modpublish_finish_gate), with the publish screens up. NULL: FINISH never holds,
+     * and a map with mods is not published. */
     int  (*finish_can_ask)(void *c, void *editor);   /* 1 when neither the editor's dialog nor its pacifier is up */
     /* The editor's own dialog over the screens: Yes/No (yes_no 1) or one button; title NULL is the game's "publish
      * failed" title. 1 when it shows. */
@@ -228,7 +222,7 @@ typedef struct sh_modpublish_ops {
 #ifdef SH_MODPUBLISH_TESTING
 void sh_modpublish_test_set_ops(const sh_modpublish_ops *ops);
 void sh_modpublish_test_reset(void);
-/* 0 idle, 1 preparing, 2 raise, 3 asking, 4 uploading, 5 waiting for the editor frame to resume a FINISH hold */
+/* 0 idle, 1 preparing, 2 raise, 3 asking, 4 uploading, 5 waiting for the editor frame to resume the hold */
 int  sh_modpublish_test_state(void);
 int  sh_modpublish_test_pin_armed(void);          /* the next save pins its rows */
 /* The rows a publish finds (NULL: the save's own rule, modmanifest.h sh_modmanifest_rows_for). */

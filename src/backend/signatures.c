@@ -1554,9 +1554,9 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "?? ?? ?? ??"
       , 0x119AD00u, 0x1199F60u },
     /* The publish screens' FINISH step (modpublish.c, R-LB1 S7): the MapProperties frame's PUBLISH case calls the
-     * gate (editor, 1, 1), then the screens' close, then PublishStart(editor, state+0x21). While S7 is asked at FINISH
-     * the gate call is repointed at a near relay; the editor dialog's show and the EditorFrame call of its input are
-     * read, never hooked. Each unique on both build 13954591 executables. */
+     * gate (editor, 1, 1), then the screens' close, then PublishStart(editor, state+0x21). The gate call is repointed
+     * at a near relay, where a map with mods is held; the editor dialog's show and the EditorFrame call of its input
+     * are read, never hooked. Each unique on both build 13954591 executables. */
     { "PublishFinishGateCall",
       "E8 ?? ?? ?? ?? 84 C0 0F 85 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ?? 0F B6 56 21 48 8B CF E8 ?? ?? ?? ??"
       , 0x1190362u, 0x118F4E2u },
