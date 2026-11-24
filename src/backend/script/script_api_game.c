@@ -513,7 +513,14 @@ static int cvar_keep(const char *name, const char *was, const char *set)
     char *now = cvar_dup(set);
     if (!now) return 0;
     for (i = 0; i < g_ncvars; i++)
-        if (!strcmp(g_cvars[i].name, name)) { free(g_cvars[i].set); g_cvars[i].set = now; cvar_journal(); return 1; }
+        if (!strcmp(g_cvars[i].name, name)) {
+            /* the journal is written only when what it holds changes, not at every set of the same value */
+            int changed = strcmp(g_cvars[i].set, now) != 0;
+            free(g_cvars[i].set);
+            g_cvars[i].set = now;
+            if (changed) cvar_journal();
+            return 1;
+        }
     if (g_ncvars == g_ccvars) {
         int cap = g_ccvars ? g_ccvars * 2 : 16;
         cvar_undo *grown = (cvar_undo *)realloc(g_cvars, (size_t)cap * sizeof *grown);
@@ -917,7 +924,8 @@ void sh_script_game_cvar_recover_poll(void)
     char *text;
     DWORD size, got = 0;
     int n;
-    if (InterlockedExchange(&done, 1) || !g_cvar_slot || !g_cvar_set) return;
+    /* Not before the game's cvars are reachable: a frame before the script install would otherwise latch it off. */
+    if (!g_cvar_slot || !g_cvar_set || InterlockedExchange(&done, 1)) return;
     if (!journal_path(path, sizeof path / sizeof path[0])) return;
     f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return;

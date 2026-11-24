@@ -2048,6 +2048,20 @@ static void mm_save_visit(void *context, const char *bundle_id, const char *bund
     }
     row = mm_list_find(&ctx->list, bundle_id, bundle_hash);
     if (!row) {
+        /* The stand-ins of a local row (the composition of no unit of its salt: the folder is not here, or no longer
+         * has some names) are that row, never a second one: their names join the salt's row, which takes the
+         * folder's build when the folder serves the rest (D6a). */
+        char none[SH_MODMANIFEST_HASH_CAP] = "";
+        size_t k;
+        int standins = sh_modmanifest_composition_hash(bundle_id, NULL, 0, none) && !strcmp(none, bundle_hash);
+        for (k = 0; !row && k < ctx->list.count; k++) {
+            sh_modmanifest_row *r = &ctx->list.rows[k];
+            if (strcmp(r->salt, bundle_id) || r->pinned) continue;
+            if (standins) row = r;
+            else if (!strcmp(r->build, none)) { row = r; strcpy_s(r->build, sizeof r->build, bundle_hash); r->size = size; }
+        }
+    }
+    if (!row) {
         sh_modmanifest_row fresh;
         memset(&fresh, 0, sizeof fresh);
         strcpy_s(fresh.salt, sizeof fresh.salt, bundle_id);

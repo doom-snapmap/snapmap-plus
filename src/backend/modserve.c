@@ -240,6 +240,7 @@ static void ms_req_index(ms_index *x, const ms_index *old);
 static int ms_req_conflicts(ms_index *x);
 static int ms_req_same(const char *a, const char *b);
 static int ms_standin_supplement(const ms_index *x, int b);
+static int ms_row_name_resolves_here(const ms_index *x, const char *lower);
 static int ms_salt_in(const ms_index *x, const char *salt, const char *hash, const char *place);
 static int ms_bundle_carries(const ms_index *x, int b, const char *lower);
 static SRWLOCK g_build_lock = SRWLOCK_INIT;
@@ -8178,7 +8179,9 @@ int sh_modserve_root_lacks(const char *salt, const char *name)
     if ((at = ms_salt_in(x, lower_salt, NULL, "")) < 0) return 0;   /* no folder here: the whole row stands in */
     if (!(lower = _strdup(name))) return 0;
     ms_lower(lower);
-    lacks = !ms_bundle_carries(x, at, lower);
+    /* The asset rule's own test (sh_modserve_row_served_for: the folder carries it or the index resolves it), with
+     * the stand-ins of an earlier load left out: they are what a lacking name is given, never what it has. */
+    lacks = !ms_bundle_carries(x, at, lower) && !ms_row_name_resolves_here(x, lower);
     free(lower);
     return lacks;
 }
@@ -8248,6 +8251,23 @@ int sh_modserve_static_model_same(const char *request, const char *list_name)
  * (ms_name_file), or any served file provides it under any type, or it is a
  * served request path itself. Rows written by a save hold placed names; rows
  * read from a mod.json hold every provided name. */
+static int ms_row_name_resolves(const ms_index *x, const char *lower);
+
+/* ms_row_name_resolves without the stand-in compositions (ms_standin_supplement). */
+static int ms_row_name_resolves_here(const ms_index *x, const char *lower)
+{
+    int k, f = ms_name_file(x, lower);
+    if (f >= 0 && !ms_standin_supplement(x, x->files[f].bundle)) return 1;
+    for (k = 0; k < x->nfiles; ++k)
+        if (x->files[k].served && x->files[k].pname && !strcmp(x->files[k].pname, lower) &&
+            !ms_standin_supplement(x, x->files[k].bundle))
+            return 1;
+    if (x->slots && (f = ms_find(x->slots, x->mask, lower)) >= 0 && f < x->nfiles &&
+        !ms_standin_supplement(x, x->files[f].bundle))
+        return 1;
+    return 0;
+}
+
 static int ms_row_name_resolves(const ms_index *x, const char *lower)
 {
     int k;

@@ -612,6 +612,10 @@ int sh_script_reflect_set(lua_State *L, void *object, const char *cls, const cha
     } else ok = 1;
     if (g_at.on) {
         g_at.name = g_ops.resource_name ? g_ops.resource_name(g_ops.ctx, g_at.object) : NULL;
+        /* By name only when the name finds this very object again; else (a type whose name does not round-trip) by
+         * its address, as before. */
+        if (g_at.name && (!g_ops.resource_find || g_ops.resource_find(g_ops.ctx, g_at.cls, g_at.name) != g_at.object))
+            g_at.name = NULL;
         if (!ok) say(err, sizeof err, "there was not enough memory");
     }
     if (ok) ok = sh_script_reflect_store(L, &loc, idx, err, sizeof err);

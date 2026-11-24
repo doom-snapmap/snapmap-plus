@@ -772,7 +772,18 @@ static void one_demon_of_a_pack(const char *tmp, const char *store)
     /* The save writes that row from what is placed; a publish pins it: the Tyrant's unit, no whole-mod unit, and no
      * file of the Marauder. */
     memset(&res, 0, sizeof res);
+    row.labels = _strdup("mods/twodemon/tyrant\tBig Tyrant\n");
     CHECK(sh_modpin_row(&row, NULL, 0, NULL, &res) == SH_MODPIN_PINNED && row.pinned && row.unit_count == 1);
+    {
+        /* The pin keeps the labels, and a published or exported row writes them (DS-WORDS, D6c). */
+        char *label = sh_modmanifest_row_label(&row, "mods/twodemon/tyrant"), *value;
+        size_t vn = 0;
+        CHECK(label && !strcmp(label, "Big Tyrant"));
+        free(label);
+        value = sh_modmanifest_format_value(&row, &vn);
+        CHECK(value && strstr(value, "\"labels\":{\"mods/twodemon/tyrant\":\"Big Tyrant\"}") && strstr(value, "\"objects\""));
+        free(value);
+    }
     for (k = 0; k < row.unit_count; k++) if (!strcmp(row.roots[k], "*")) whole = 1;
     CHECK(!whole && row.unit_count && !strcmp(row.roots[0], "entities/tyrant"));
     manifest = row.unit_count ? sh_cache_manifest(row.units[0], &len) : NULL;
@@ -905,6 +916,31 @@ static void notices_name_objects_as_the_author_sees_them(void)
     sh_modmanifest_reset();
 }
 
+/* DS-WORDS on a pinned row (the case labels exist for): a published map on a machine that has neither the mod nor its
+ * unit names the absent object by the row's label, the unit's root read as the name the map places it by. */
+static void pinned_label_names_the_absent_object(void)
+{
+    static const char MAP_PINNED[] =
+        "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/goneunit/tyrant\",\"name\":\"\"},"
+        "\"uniqueId\":0}],"
+        "\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"goneunit\",\"name\":\"Far Demons\",\"size\":10,"
+        "\"objects\":{\"entities/tyrant\":\"00000000000000000000000000000000000000000000000000000000000000d1\"},"
+        "\"labels\":{\"mods/goneunit/tyrant\":\"Big Tyrant\"}}]}}";
+    char *t;
+    printf("-- a pinned row's absent object is named by its label\n");
+    (void)sh_cache_take_notice();
+    sh_modmanifest_set_content(sh_cache_on_load);
+    sh_cache_set_rescan(sh_modserve_index_rescan);
+    (void)sh_modmanifest_prepare_load(MAP_PINNED, sizeof MAP_PINNED - 1, NULL);
+    t = sh_cache_take_notice();
+    CHECK(t && strstr(t, "This map is playing without the Big Tyrant from Far Demons") == t);
+    if (t) printf("  notice: %s\n", t);
+    free(t);
+    sh_modmanifest_set_content(NULL);
+    sh_cache_set_rescan(NULL);
+    sh_modmanifest_reset();
+}
+
 /* Manager, 2026-11-24, end to end: the author's own map places an object their folder no longer has (removed from the
  * mod). The map is never refused: the folder serves what it has, the object it lacks stands in beside it (the stand-in
  * composition of the salt, declared after the folder's build), and the load's one sentence says so. */
@@ -957,6 +993,35 @@ static void lacking_local_row_stands_in(void)
     CHECK(t && !strcmp(t, "This map is playing without the Gone from test.door, which your folder of the mod no longer has."));
     if (t) printf("  notice: %s\n", t);
     free(t);
+    {
+        /* The save writes one local row of the salt that still lists the lacking name (the stand-ins beside the folder
+         * are not a second row), and a reload stands in again: the stand-ins never count as what the folder has. */
+        sh_modmanifest_list back;
+        size_t n = 0, k;
+        int door = 0, gone = 0;
+        char *saved = sh_modmanifest_on_save(MAP_LACKS, sizeof MAP_LACKS - 1, &n);
+        memset(&back, 0, sizeof back);
+        CHECK(saved && sh_modmanifest_read(saved, n, &back, NULL) == 1 && back.count == 1 && !back.rows[0].pinned &&
+              !strcmp(back.rows[0].salt, "testdoor"));
+        for (k = 0; back.count && k < back.rows[0].name_count; k++) {
+            if (!strcmp(back.rows[0].names[k], "mods/testdoor/door")) door = 1;
+            if (!strcmp(back.rows[0].names[k], "mods/testdoor/gone")) gone = 1;
+        }
+        CHECK(door && gone);
+        sh_modmanifest_list_free(&back);
+        CHECK(sh_modserve_root_lacks("testdoor", "mods/testdoor/gone") == 1);
+        (void)sh_modmanifest_prepare_load(saved ? saved : MAP_LACKS, saved ? n : sizeof MAP_LACKS - 1, NULL);
+        memset(&cur, 0, sizeof cur);
+        CHECK(sh_modmanifest_current(&cur) == 1 && cur.count == 1);
+        listing = NULL;
+        n = (size_t)sh_modmanifest_listing(&cur, placed, 2, &listing);
+        for (k = 0, standins = 0; listing && k < n; k++) if (!strcmp(listing[k], none)) standins = 1;
+        CHECK(standins);
+        free(listing);
+        sh_modmanifest_list_free(&cur);
+        free(sh_cache_take_notice());
+        if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    }
     sh_modmanifest_set_content(NULL);
     sh_cache_set_rescan(NULL);
     sh_modmanifest_reset();
@@ -2184,6 +2249,7 @@ int main(int argc, char **argv)
     one_demon_of_a_pack(tmp, storeA);
     absent_local_row_stands_in();
     lacking_local_row_stands_in();
+    pinned_label_names_the_absent_object();
     notices_name_objects_as_the_author_sees_them();
     published_map_follows_rebuild(tmp, storeA);
     rebuilt_folder_unit_is_here(tmp, storeA);

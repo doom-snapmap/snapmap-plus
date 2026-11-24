@@ -4617,14 +4617,12 @@ Uninstall, in order: the dry run and confirmation (as Remove from map's,
 headed "Undo history is cleared. The folder can be restored from the Recycle
 Bin by hand." with a map open and "The folder can be restored from the Recycle
 Bin by hand." without, plus the Toybox rows, "Moves its folder, <folder>, to
-the Windows Recycle Bin." (the console's line still says "moves the folder
-mods\<folder>"), how many local saves in My Maps carry a row of the
+the Windows Recycle Bin.", how many local saves in My Maps carry a row of the
 mod, "N of your saved maps use it; they will open without its objects until
 you restore it from the Recycle Bin"). The list is computed per key: when another build
 of the key stays installed (`install.keptBuild`), only the Toybox rows no
 staying build adds are listed, and the saved-maps line becomes "Another folder
-of this mod, <folder>, stays installed; maps that use the mod open with it."
-(the console's line names it as `mods\<folder>`); the native delete
+of this mod, <folder>, stays installed; maps that use the mod open with it."; the native delete
 of the mod's entities from the open map, as Remove from map (a refusal, Play
 running, a load or a busy editor, deletes nothing and is reported); the open
 map's undo and redo history cleared so no snapshot older than the delete
