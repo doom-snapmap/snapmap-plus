@@ -13,7 +13,7 @@
  * builder's part, the member "snapmap-plus", is written only by the product:
  *
  *   "snapmap-plus": {
- *     "format": 2, "salt": "<8 characters>", "rules": 15, "built": <unix seconds>,
+ *     "format": 2, "salt": "<8 characters>", "rules": 10, "built": <unix seconds>,
  *     "tree": "<sha256>",              the rebuild rule's tree hash (sh_mb_tree_hash)
  *     "build": "<sha256>",             the build hash; absent while the build fails
  *     "cause": "<first cause>",        only while the build fails (or a verification found one)
@@ -162,7 +162,7 @@ typedef struct sh_mb_file {
     char *stock_source;    /* the installed resource path a stock pointer names */
     int deferred;          /* builder: 1 type not allowed, 2 over 64 MiB, refused unless it is a pointer */
     int absent;            /* a stock pointer with no file in the folder (a closure pointer, or a received build's) */
-    int cls;               /* SH_MB_CLASS_*: what the file is to the game (mb_classify_all) */
+    int cls;               /* SH_MB_CLASS_*: what the file is to the game (sh_mb_classify) */
     char *edit;            /* builder: a decl at a game name, its derived edits element (JSON), or NULL */
     int edited;            /* an edited copy: a REPLACE file the bundle's edits name (built or loaded); never served */
     int closure;           /* builder: campaign-only content a served decl needs, derived by this build ("closure": true) */

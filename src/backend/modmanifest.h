@@ -237,7 +237,7 @@ void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
  * (*why: the gate's sentence, malloc'd, or NULL). `placed` says the map's placed
  * entities name the row's namespace (`mods/<salt>/`): with nothing to serve
  * them, the engine's validator refuses the map, so the editor cannot open it. Bound by modpublished.c, which
- * asks its denial gate (sh_modpub_decide, an editor open). Only a parse
+ * asks its denial gate (sh_modpub_gate_decide, an editor open). Only a parse
  * the engine makes for the editor (sh_modmanifest_set_editor_load 1, set by
  * the parse detour for a read that is not a published map's, which includes
  * a My Maps play's and the hold's own resume) substitutes here. The holds

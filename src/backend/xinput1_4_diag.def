@@ -1,7 +1,6 @@
 ; xinput1_4_diag.def -- the diagnostic build's export source (build.ps1 -Diag): every line
-; of xinput1_4.def after its first, plus sh_diag_status at ordinal 300, the script notes
-; (sh_diag_note 301, sh_diag_note_listening 302) and the demon hold (sh_diag_hold_entity 303)
-; for the development daemon (diag_status.h).
+; of xinput1_4.def after its first, plus sh_diag_status at ordinal 300 and the script notes
+; (sh_diag_note 301, sh_diag_note_listening 302) for the development daemon (diag_status.h).
 ; tests/diag_status_test.c checks that the two agree.
 ;
 ; The backend ships as XINPUT1_4.dll. DOOM 2016 (April 2024 update, Steam build 13954591)
