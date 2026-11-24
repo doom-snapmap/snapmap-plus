@@ -4862,7 +4862,7 @@ static const char *ps_gate(void *ai, int reaction)
     const uint8_t *bdef, *fsm_anim, *table;
     int injured, now = 0;
     const char *why = NULL;
-    uint8_t (*traversal)(void *);
+    uint8_t (*dead)(void *);
     if (a[SH_AI_PS_OFF_REMOTE]) return "this machine does not start the demon's pain";
     if (a[SH_AI_PS_OFF_FORCED_A] && a[SH_AI_PS_OFF_FORCED_B]) return "the demon's pain is forced elsewhere";
     if (*(const int *)(a + SH_AI_PS_OFF_DISABLED)) return "the demon's pain is disabled";
@@ -4871,10 +4871,10 @@ static const char *ps_gate(void *ai, int reaction)
     bdef = *(const uint8_t *const *)(a + SH_AI_PS_OFF_BEHAVIOR);
     if (!bdef || !(bdef[0xD4] & 1)) return "the demon cannot take damage";
     if (bdef[0xD6] & 4) return "the demon's injured state disables pain";
-    traversal = (uint8_t (*)(void *))vfn(ai, SH_AI_PS_VSLOT_TRAVERSAL);
-    if (!traversal || traversal(ai)) return "the demon plays a traversal";
+    dead = (uint8_t (*)(void *))vfn(ai, SH_AI_PS_VSLOT_DEAD);
+    if (!dead || dead(ai)) return "the demon is dead";
     fsm_anim = *(const uint8_t *const *)(a + SH_AI_PS_OFF_ANIMFSM);
-    if (!fsm_anim || fsm_anim[0x199C]) return "the demon is dead";
+    if (!fsm_anim || fsm_anim[0x199C]) return "the demon plays a traversal";
     injured = *(const int *)(a + SH_AI_PS_OFF_INJURED);
     table = *(const uint8_t *const *)(a + SH_AI_PS_OFF_INJURED_TABLE);
     if (injured >= 1 && (!table || !(table[0x44 + (size_t)injured * 0x48] & 2))) return "the demon's injured state takes no pain";

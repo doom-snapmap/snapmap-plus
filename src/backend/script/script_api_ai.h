@@ -1117,8 +1117,8 @@ static const unsigned char k_ai_fsm_request_prologue[SH_AI_FSM_REQUEST_STOLEN] =
 #define SH_AI_PS_OFF_DISABLED       0x2A9E0u  /* int: pain disabled (+0x92) */
 #define SH_AI_PS_OFF_BEHAVIOR       0xC120u   /* the aibehavior decl: +0xD4 bit 0 canTakeDamage, +0xD6 bit 2 the
                                                  injured state disables pain (+0x13C, +0x1EF, +0x21C) */
-#define SH_AI_PS_VSLOT_TRAVERSAL    0x6C8u    /* idAI2 vtable: playing a traversal (+0x259) */
-#define SH_AI_PS_OFF_ANIMFSM        0x23198u  /* the animFSM: +0x199C dead (+0x287, +0x28E) */
+#define SH_AI_PS_VSLOT_DEAD         0x6C8u    /* idAI2 vtable: dead (+0x259; the start says "dead") */
+#define SH_AI_PS_OFF_ANIMFSM        0x23198u  /* the animFSM: +0x199C playing a traversal (+0x287, +0x28E) */
 #define SH_AI_PS_OFF_INJURED        0x8518u   /* int: the injured state's index, its table at +0x4E48, stride 0x48,
                                                  +0x44 bit 1 lets pain start (+0x2BB, +0x2CA) */
 #define SH_AI_PS_OFF_INJURED_TABLE  0x4E48u

@@ -561,7 +561,7 @@ static void check_image(const char *path)
             static const struct { uint32_t at, disp; } reads[] = {
                 { 0x04Au, SH_AI_PS_OFF_REMOTE }, { 0x057u, SH_AI_PS_OFF_FORCED_A }, { 0x060u, SH_AI_PS_OFF_FORCED_B },
                 { 0x092u, SH_AI_PS_OFF_DISABLED }, { 0x13Cu, SH_AI_PS_OFF_BEHAVIOR }, { 0x143u, SH_AI_PS_OFF_DIRS },
-                { 0x177u, 0x5060u }, { 0x1EFu, 0xD4u }, { 0x21Cu, 0xD6u }, { 0x259u, SH_AI_PS_VSLOT_TRAVERSAL },
+                { 0x177u, 0x5060u }, { 0x1EFu, 0xD4u }, { 0x21Cu, 0xD6u }, { 0x259u, SH_AI_PS_VSLOT_DEAD },
                 { 0x287u, SH_AI_PS_OFF_ANIMFSM }, { 0x28Eu, 0x199Cu }, { 0x2BBu, SH_AI_PS_OFF_INJURED },
                 { 0x2CAu, SH_AI_PS_OFF_INJURED_TABLE }, { 0x357u, SH_AI_PS_OFF_CAN_PAIN },
                 { 0x48Fu, SH_AI_PS_OFF_PAIN_STRINGS }, { 0x4AEu, SH_AI_PS_OFF_PAIN_STRINGS + 8u },
