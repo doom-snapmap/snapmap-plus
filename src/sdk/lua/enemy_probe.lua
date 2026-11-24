@@ -1,28 +1,10 @@
--- enemy_probe.lua: measure what a demon's brain actually does, so a port is checked with numbers.
+-- enemy_probe.lua: wraps a brain so each demon logs what it does as "probe pose/tag/shot/frame/fire" lines to the
+-- script log. Positions are in the demon's own frame (forward, left, up in game units).
 --
---   local probe = require("enemy_probe")
---   sdk.bind("ai/demon/tyrant", probe.wrap(require("tyrant_brain").new(), { tags = { "rocket", "fx_blade" } }))
+--   sdk.bind("ai/demon/tyrant", require("enemy_probe").wrap(require("tyrant_brain").new(), { tags = { "rocket" } }))
 --
--- Every line starts with "probe " and goes to the mod's script log (sh_scripts log). Positions are
--- given in the demon's own frame (forward, left, up from its origin, in game units), so a line reads
--- the same wherever the demon stands and whichever way it faces:
---
---   probe pose  t yaw enemy_bearing(deg off the demon's forward) enemy_dist anim fire(the engine's fire state)
---   probe tag   name fwd left up            (each tag in opts.tags, every opts.every seconds)
---   probe shot  decl fwd left up | nearest tag and distance | aim error (deg between the launch
---               direction and the enemy) | enemy_bearing at the launch
---   probe frame command args                (each animation-layer event the brain hears)
---   probe fire  mode anim_mode pulled ready focus muzzle radius precision require
---                                           (the engine's fire control at each shot, read from the
---                                           game: the fire mode the script events set and the one
---                                           the animation events set, whether the trigger is down,
---                                           whether the weapon's wait is over, whether the aim focus
---                                           is valid, the engine's own muzzle test, the muzzle
---                                           sphere's radius and precision, and whether the fire gate
---                                           asks the muzzle test at all)
---
--- A tag the model does not have is reported once as "probe tag <name> MISSING".
--- A shot with a fire state the game cannot be asked for is reported as "probe fire UNAVAILABLE".
+-- A tag the model lacks is reported once as "probe tag <name> MISSING"; a fire state the game cannot be asked for
+-- is "probe fire UNAVAILABLE".
 
 local weapon = require("enemy_weapon")
 
@@ -57,6 +39,8 @@ local function tag_of(e, name)
   if ok and p then return p, f end
 end
 
+-- Returns a brain that logs and delegates to `brain`; opts.tags (tag names), opts.every (seconds, default 0.5),
+-- opts.print (default print).
 function P.wrap(brain, opts)
   opts = opts or {}
   local tags, period = opts.tags or {}, opts.every or 0.5
@@ -81,7 +65,7 @@ function P.wrap(brain, opts)
       e.state.probe_next = t + period
       local en = enemy_of(e)
       local ok, anim = pcall(e.current_animation, e)
-      -- the engine's fire state rides on the pose line, so a state that should fire and does not shows why
+      -- the engine's fire state rides on the pose line
       local fok, fs = pcall(weapon.state, e)
       local fire = "?"
       if fok and fs then

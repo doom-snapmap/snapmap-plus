@@ -1,9 +1,6 @@
--- test_enemy_placement.lua: the Enemy SDK's reading of a placed demon's editor properties, the
--- spawn behaviours a script-driven brain honours and the enemy it is given (enemy_placement.lua,
--- the older name of enemy_snapmap.lua), over a fake map whose social relations stand in for the
--- engine's (ai:relations).
---   lua54 tests/sdk/test_enemy_placement.lua      (run from the repository root; tests/sdk/run.ps1 does)
--- The library under test is src/sdk/lua, or the folder SNAPMAP_SDK_LUA names.
+-- test_enemy_placement.lua: the Enemy SDK's reading of a placed demon's editor properties, the spawn behaviours a
+-- script-driven brain honours and the enemy it is given (enemy_snapmap.lua, required as enemy_placement), over a fake
+-- map whose relations stand in for ai:relations. Run: lua54 tests/sdk/test_enemy_placement.lua from the repository root.
 local here = (arg and arg[0] or ""):match("^(.*)[/\\][^/\\]*$") or "."
 package.path = (os.getenv("SNAPMAP_SDK_LUA") or (here .. "/../../src/sdk/lua")) .. "/?.lua;" .. package.path
 
@@ -13,7 +10,7 @@ local function check(name, ok, detail)
   if ok then print("PASS " .. name) else failed = failed + 1; print("FAIL " .. name .. (detail and (": " .. tostring(detail)) or "")) end
 end
 
--- ---- a fake map ----
+-- A fake map.
 local world = {}
 local function ent(t)
   t.fields = t.fields or {}
@@ -77,7 +74,7 @@ local function placed(P, behavior, team, extra)
   return demon
 end
 
--- ---- what the editor says ----
+-- What the editor says.
 do
   local P = fresh()
   local d = placed(P, "HUNT", "TEAM_TWO")
@@ -91,7 +88,7 @@ do
   check("a demon no placeable spawned is default with modifiers of 1", l.behavior == "default" and l.health_mod == 1 and l.placeable == nil)
 end
 
--- ---- the engine links the placed object after the spawn ----
+-- The engine links the placed object after the spawn.
 do
   local P = fresh()
   local t = 10
@@ -114,7 +111,7 @@ end
 -- A relation row as the engine keeps it: hostile rows carry an emotion of the combat band.
 local function row(x, emotion, awareness) return { entity = x, respect = "minion", emotion = emotion or "destroy", awareness = awareness or "confirmed" } end
 
--- ---- the enemy is 2016's pick from the engine's relations ----
+-- The enemy is 2016's pick from the engine's relations.
 local function scene(behavior, team)
   local P = fresh()
   local A = adapter()
@@ -156,13 +153,13 @@ do
 end
 
 do
-  -- R-LV8, single player, no co-op tracking, a brain library emitted before its adapter had A.relations: a scripted
-  -- demon with the player in view at 800 units whose awareness word is not yet confirmed
+  -- single player, no co-op tracking, an adapter without A.relations: a scripted demon with the player in view at
+  -- 800 units whose awareness word is not yet confirmed
   local P = fresh()
   local A = adapter()
   local d = placed(P, "DEFAULT", "TEAM_NONE")
   local player = ent({ player = true, pos = { x = 800, y = 0, z = 0 }, fields = { team = "TEAM_NONE" } })
-  A.relations = nil                                         -- the old adapter: no A.relations
+  A.relations = nil                                         -- an adapter without A.relations
   function d:relations() return { row(player, "anger", "unaware") } end   -- Snapmap+'s own call answers
   local seen = false
   A.can_see = function(e, t) return seen and t == player end
@@ -224,7 +221,7 @@ do
   check("default: no role", A.encounter_role(d) == "ROLE_NONE")
 end
 
--- ---- a Snapmap+ without the general calls ----
+-- A Snapmap+ without the general calls.
 do
   local P = fresh()
   local A = adapter()

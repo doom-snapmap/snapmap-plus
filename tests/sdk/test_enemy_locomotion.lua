@@ -1,7 +1,6 @@
--- test_enemy_locomotion.lua: the Enemy SDK's locomotion modes (enemy_locomotion.lua) in a box room:
--- floor z = 0, ceiling z = 600, walls at x = +-1000 and y = +-1000.
---   lua54 tests/sdk/test_enemy_locomotion.lua     (run from the repository root; tests/sdk/run.ps1 does)
--- The library under test is src/sdk/lua, or the folder SNAPMAP_SDK_LUA names.
+-- test_enemy_locomotion.lua: the Enemy SDK's locomotion modes (enemy_locomotion.lua) in a box room (floor z = 0,
+-- ceiling z = 600, walls at x = +-1000 and y = +-1000). Run: lua54 tests/sdk/test_enemy_locomotion.lua from the
+-- repository root; the library is src/sdk/lua, or the folder SNAPMAP_SDK_LUA names.
 local here = (arg and arg[0] or ""):match("^(.*)[/\\][^/\\]*$") or "."
 package.path = (os.getenv("SNAPMAP_SDK_LUA") or (here .. "/../../src/sdk/lua")) .. "/?.lua;" .. package.path
 local L = require("enemy_locomotion")
@@ -14,7 +13,7 @@ local function check(name, ok, detail)
 end
 local function near(a, b, eps) return math.abs(a - b) <= (eps or 0.01) end
 
--- ---- the room and the adapter ----
+-- The room and the adapter.
 local PLANES = {
   { n = V.new(0, 0, 1), d = 0 }, { n = V.new(0, 0, -1), d = -600 },
   { n = V.new(1, 0, 0), d = -1000 }, { n = V.new(-1, 0, 0), d = -1000 },
@@ -70,7 +69,7 @@ local function run(loco, e, seconds)
 end
 local function perch_loco(perch) return L.new(adapter(), { modes = { "ground", "perch" }, perch = perch }) end
 
--- ---- surfaces and angles ----
+-- Surfaces and angles.
 check("a normal pointing up is a floor, down a ceiling, sideways a wall",
       L.kind_of(V.new(0, 0, 1)) == "floor" and L.kind_of(V.new(0, 0, -1)) == "ceiling" and L.kind_of(V.new(-1, 0, 0)) == "wall")
 do
@@ -84,7 +83,7 @@ do
   check("facing straight out of the surface still gives angles", a.yaw == a.yaw and a.pitch == a.pitch)
 end
 
--- ---- modes ----
+-- Modes.
 do
   reset()
   local ok = pcall(L.new, adapter(), { modes = { "ground", "swim" } })
@@ -100,7 +99,7 @@ do
   check("ground: grounded", loco:grounded(e))
 end
 
--- ---- finding spots ----
+-- Finding spots.
 do
   reset()
   local loco = perch_loco()
@@ -130,7 +129,7 @@ do
   check("a spot without a clear line to the enemy is left out", not seen_ceiling)
 end
 
--- ---- navigation and blocking volumes decide ----
+-- Navigation and blocking volumes decide.
 do
   reset()
   local loco = perch_loco()
@@ -161,7 +160,7 @@ do
         loco:mode(e) == "ground" and #placed == 0 and loco.claims[dest.id] == nil and loco:find("perch", e, t) == nil)
 end
 
--- ---- a Perch object the map's author placed ----
+-- A Perch object the map's author placed.
 do
   reset()
   local loco = perch_loco()
@@ -172,7 +171,7 @@ do
   check("a placed Perch object is a spot, facing out of its surface", found and found.kind == "wall" and near(found.pos.x, -1000 + 96))
 end
 
--- ---- request 1: the caller's parameters are honoured ----
+-- The caller's parameters are honoured.
 do
   reset()
   local loco = perch_loco()
@@ -228,7 +227,7 @@ do
   demon_boxes = {}
 end
 
--- ---- request 2: all candidates, each with the data a scorer needs ----
+-- All candidates, each with the data a scorer needs.
 do
   reset()
   local loco = perch_loco()
@@ -248,7 +247,7 @@ do
   check("a find_all changes nothing: no claim, no move", next(loco.claims) == nil and move_calls == 0)
 end
 
--- ---- request 3: reserving at choice time ----
+-- Reserving at choice time.
 do
   reset()
   local loco = perch_loco()
@@ -279,7 +278,7 @@ do
   check("forget frees a removed demon's spot", loco:holder(spot) == nil and loco:reservation(e) == nil)
 end
 
--- ---- request 4: the walk target and the arrival test ----
+-- The walk target and the arrival test.
 do
   reset()
   local loco = perch_loco()
@@ -303,7 +302,7 @@ do
   check("at the node again once the demon holds it", loco:at_node(e) == true)
 end
 
--- ---- request 8: the spot's validity ----
+-- The spot's validity.
 do
   reset()
   local loco = perch_loco()
@@ -326,7 +325,7 @@ do
   blockers = {}
 end
 
--- ---- requests 5, 7: mounting from the node with no second walk; the grounded signal ----
+-- Mounting from the node with no second walk; the grounded signal.
 do
   reset()
   local loco = perch_loco({ mount_seconds = 1 })
@@ -361,7 +360,7 @@ do
   check("leaving from the ground answers at once", count == 1)
 end
 
--- ---- request 6: the facing indices ----
+-- The facing indices.
 do
   reset()
   local loco = perch_loco({ mount_seconds = 0.2 })
@@ -397,7 +396,7 @@ do
   check("facing_direction is the unit vector of an index", near(V.len(d), 1, 1e-6) and near(d.y, -1, 1e-6))
 end
 
--- ---- request 9: the library never ends a perch by itself ----
+-- The library never ends a perch by itself.
 do
   reset()
   local loco = perch_loco({ mount_seconds = 0.5 })
@@ -415,7 +414,7 @@ do
   check("the held demon is on the ground again only when told", loco:mode(e) == "perch")
 end
 
--- ---- request 10: one cooldown owner ----
+-- One cooldown owner.
 do
   reset()
   local loco = perch_loco({ mount_seconds = 1, cooldown_seconds = 15 })
@@ -439,7 +438,7 @@ do
   check("a second demon has its own cooldown", loco:cooldown_left(demon(0, 0)) == 0)
 end
 
--- ---- a demon that dies on its spot ----
+-- A demon that dies on its spot.
 do
   reset()
   local loco = perch_loco({ mount_seconds = 0.2 })
@@ -455,7 +454,7 @@ do
   check("and the spot can be taken", loco:reserve(demon(0, 0), spot) == true)
 end
 
--- ---- the whole sequence ----
+-- The whole sequence.
 do
   reset()
   local loco = perch_loco({ mount_seconds = 1, cooldown_seconds = 15 })
@@ -493,7 +492,7 @@ do
   check("then again", #loco:find_all("perch", e, t, parms) > 0)
 end
 
--- ---- the older all-in-one go still works ----
+-- The all-in-one go.
 do
   reset()
   local loco = perch_loco({ mount_seconds = 1 })
@@ -521,7 +520,7 @@ do
   check("go: a spot another demon holds is not walked to", loco:go(g, other) == false and loco:mode(g) == "ground" and moving[g] == nil)
 end
 
--- ---- a new mode is one provider ----
+-- A new mode is one provider.
 do
   reset()
   L.register("fly", { find = function(self, e, target) return { mode = "fly", pos = target.pos } end,

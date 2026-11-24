@@ -1,53 +1,9 @@
--- enemy_weapon.lua: how a demon of the Enemy SDK holds and fires its weapon.
---
---   local W = require("enemy_weapon")
---   W.equip(e, "weapon/ai/tyrant/cannon")      -- by decl name or inventory index; answers the hand
---   W.fire_mode(e, "FIREWHENREADY")            -- the engine's fire control takes it from here
---   W.tick(e, dt)                              -- once a frame: keeps the aim focus on the enemy
---
--- This library keeps no fire state of its own. Every question it answers is read from the game's
--- fire control and every order it gives is one of the game's own events, so a demon built on it
--- fires exactly as a stock demon does. The game's fire control does all of this by itself, once a
--- demon holds a weapon, has an aim focus and is in a firing mode; nothing below is to be written in
--- Lua:
---
---   The pull. In FIREWHENREADY and SPRAYWHENREADY the fire control asks its fire gate (the game's
---   CheckPullTrigger) every frame the trigger is released, and pulls the trigger when the gate
---   passes. The gate checks: an attack token; the weapon's wait since its last burst; that the aim
---   focus has a target the demon is aware of and has seen lately; that the aim point is inside the
---   weapon's maxRange; that the aim tracker has caught up with the target (the barrel points within
---   about 25 degrees of it); and the muzzle test (below). SPRAYWHENREADY is the same with free ammo.
---
---   The muzzle gate. The engine casts a ray from the muzzle (the model's muzzlereference tag; the
---   weapon's own muzzle when the model has none) and asks whether it passes through a sphere at the
---   aim focus point. The sphere is the target's half width (aimFocusTargetRadius) times 3, halved at
---   the pull and one and a half times while a burst runs. With no valid aim focus the test fails,
---   so a demon with no focus never fires; W.focus gives it one.
---
---   The burst. The weapon decl's skillSettings (picked by difficulty) give the burst length (min and
---   max burst duration) and the pause after it (min and max repull interval); the demon's
---   aibehavior weaponUseBehaviorList gives the shortest hold by distance. The engine draws the
---   burst, keeps the trigger down while the gate still passes and the burst runs, then releases it
---   and starts the pause. A burst also ends when the enemy dies or the weapon must reload.
---
---   The shots. While the trigger is down and the weapon is ready the engine test-fires each frame
---   (the muzzle direction against the aim direction) and launches the weapon decl's projectile,
---   with the weapon's firingInterval between shots. Pull and release are the engine's; so is each
---   projectile (on.projectile hears them).
---
---   The aim. The aim tracker turns the barrel (the fkGraph chain and the trackingparms decl) toward
---   the aim focus point within its trackerRange, and the engine's idle turn in place turns the body
---   when the focus leaves that yaw range (W.hold orders it).
---
--- What stays with the decls, not with this file: the weapon decl's skillSettings, firingInterval
--- and maxRange; a weaponUseBehaviorList entry for the weapon; the model's muzzlereference tag; an
--- fkGraph and a trackingParmsList entry for the aim; a turnParms entry for the idle turn type the
--- demon holds with. W.hold says when the last one is missing.
---
--- Fields of the engine's state a script can read by name with e:get when it needs more than this
--- library gives: aiVolatile.fireControl.fireMode_state, .fireMode_anim, .requireMuzzleOnTarget,
--- .weaponStates[n].nextPullTriggerTime / .endBurstTime; aiVolatile.focus.foci[1].finalFocusPoint and
--- .finalFocusPointIsValid, aiVolatile.focus.aimFocusTargetRadius and .muzzleAimPrecision.
+-- enemy_weapon.lua: how a demon of the Enemy SDK holds and fires its weapon: W.equip, W.fire_mode and W.tick(e, dt)
+-- once a frame to keep the aim focus on the enemy. It keeps no fire state: answers are read from the game's fire
+-- control and orders are the game's own events. Once a demon holds a weapon, has an aim focus and is in a firing mode,
+-- the engine pulls the trigger when its fire gate (CheckPullTrigger) passes, draws the burst from the weapon decl's
+-- skillSettings and launches each projectile (on.projectile hears them); the decls supply firingInterval, maxRange,
+-- the muzzle tag, and the aim and turn entries (W.hold says when the turn entry is missing).
 
 local W = {}
 

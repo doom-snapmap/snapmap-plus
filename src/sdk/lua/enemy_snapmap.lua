@@ -1,36 +1,13 @@
--- enemy_snapmap.lua: SnapMap's rules for a demon its own brain drives (the Enemy SDK's generic tier).
+-- enemy_snapmap.lua: SnapMap's rules for a demon its own brain drives (the Enemy SDK's generic tier). The engine
+-- applies the encounter's modifiers, team and teleport-in whatever drives the demon; this module supplies what the
+-- stock AI's state machine does itself: Spawn Behavior, Follow orders and the choice of an enemy.
 --
--- A placed demon is an idPlaceableSnapAIEncounter; the engine spawns the demon through its own encounter path, so
--- the health and damage modifiers, stagger, glory-kill-only, the team and the teleport-in reach the demon whatever
--- drives it, and every action that calls the engine on the demon (heal, hurt, kill, remove, hide, show, set team,
--- show health, teleport) acts on it. What the engine leaves to the stock AI's own state machine, which a
--- script-driven demon does not run, this module does (R-SM1, R-SM2):
---
--- Spawn Behavior (the engine writes it into the stock AI's settings, DOOM 2016 0x140737180): default, ambush (the
--- engine's 768-unit perception radius) and hunt (the engine forces awareness) act through the demon's perception,
--- which the engine runs whatever drives the demon; defend also holds a position within 512 units of where it was
--- placed (the engine's defend radius; its role is ROLE_DEFEND), which this module does.
---
--- Follow orders (SnapMap's Follow action, idSnapMapAction_FollowPath, writes them into the demon's temp memory for
--- the stock FSM's snapmap state, which takes and removes them): e:snapmap_order() takes one the same way. While an
--- order holds, every move the brain asks for goes to the order's goal instead; its attacks stay the brain's own. The
--- tier never starts a move of its own: an animation the brain asks for during a move it did not start would cancel
--- that move (DOOM 2016 restarts the AI off locomotion, TY11), so the demon sets off at the brain's next move. A path
--- or position order ends on arrival (within ORDER_ARRIVE); an entity order holds while the entity lives; a new order
--- replaces it.
---
--- The engine's state is the truth: team and position are read from the engine every think, never kept. A jump of
--- the position no walk covers in one think (SnapMap's Teleport To, or the engine moving the demon) ends the order and
--- the current move, and a defender defends where it now stands.
---
--- Who the demon fights is DOOM 2016's choice (enemy_target.lua): the engine's own social relations, so players, bots,
--- the editor's Team (demons of two teams fight each other, one team never fights itself) and a demon that hurt it
--- all come from the engine. A demon without an enemy, or whose enemy left 2016's combat band (killed, removed, its
--- team changed), takes 2016's pick, a hostile it sees counting as confirmed (enemy_target.FIND); the brain's own
--- conditions re-pick as the fight goes on.
---
--- Every read goes through the script API's general calls (e:get, e:class, entities, e:snapmap_order,
--- e:relations); on a Snapmap+ without them the demon hears no Follow order and finds no enemy.
+-- Spawn Behavior (DOOM 2016 0x140737180): default, ambush (768-unit perception radius) and hunt act through the
+-- engine's perception; defend also holds a position within 512 units of the placement (ROLE_DEFEND), done here.
+-- A Follow order (e:snapmap_order()) redirects every move the brain asks for to the order's goal and never starts a
+-- move itself, because an animation asked for during a move the brain did not start cancels that move. Team and
+-- position are read from the engine every think; a jump no walk covers ends the order and the current move.
+-- Every read goes through the script API's general calls; without them the demon hears no order and finds no enemy.
 
 local target = require("enemy_target")
 

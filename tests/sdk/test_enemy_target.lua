@@ -1,7 +1,6 @@
--- test_enemy_target.lua: DOOM 2016's Shared_SocialRelationAvailable as the Enemy SDK evaluates it on the engine's
--- relation rows (enemy_target.lua): the bands and their defaults, the players filters, the awareness band, the
--- 10,000-unit range, and the pick (the nearest of the most hostile emotion present).
---   lua54 tests/sdk/test_enemy_target.lua      (run from the repository root; tests/sdk/run.ps1 does)
+-- test_enemy_target.lua: DOOM 2016's Shared_SocialRelationAvailable as the Enemy SDK evaluates it (enemy_target.lua):
+-- the bands and defaults, the players filters, the awareness band, the 10,000-unit range, and the pick (the nearest of
+-- the most hostile emotion present). Run: lua54 tests/sdk/test_enemy_target.lua from the repository root.
 local here = (arg and arg[0] or ""):match("^(.*)[/\\][^/\\]*$") or "."
 package.path = (os.getenv("SNAPMAP_SDK_LUA") or (here .. "/../../src/sdk/lua")) .. "/?.lua;" .. package.path
 
@@ -89,9 +88,8 @@ do
   check("holds: nothing held without an enemy", not T.holds(A, me, nil, T.COMBAT))
 end
 
--- an entity at no measurable point (R-LV8 lv8vk18: a ported demon's focus on its pick printed "has an NaN focus
--- point!" every frame): 2016 measures the pick's square in a float against FLT_MAX, so such a row counts as a
--- relation but is never picked, and a bucket holding only such rows gives no pick at all
+-- an entity at no measurable point: 2016 measures the pick's square in a float against FLT_MAX, so such a row
+-- counts as a relation but is never picked, and a bucket holding only such rows gives no pick at all
 do
   local player = ent(800, true)
   for _, where in ipairs({ { "an infinite point", math.huge }, { "a NaN point", 0 / 0 }, { "a point whose square overflows a float", 2e19 } }) do
