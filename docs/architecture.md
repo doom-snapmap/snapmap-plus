@@ -5535,6 +5535,14 @@ is VK 0x1411BE200 / GL 0x1411BD5D0, the read at `CloudSaveSlotReadCall`; there
 is one slot file, not a copy. `editor_frame.c`'s detour of that read hands the
 text to `sh_modpublish_cloud_text` when the read's return address is that call.
 It returns the slot's text with the pinned rows, and that is what is uploaded.
+The request then reads the slot's metadata (`ReadLocalSaveMeta`, at
+`CloudSaveMetaReadCall`) and uploads it with the text. Its `declChecksum`
+(model +0xB8) is the game's hash of the map text (VK 0x1402D6A90 / GL
+0x1402D68F0; the local save and `CreateLocalSavedMapInternal` compute it), so
+that read is relayed and the published copy's checksum is set to the same hash
+of the pinned text. No client recomputes that hash on a download (it has no
+other SnapMap caller on either renderer); `TryCloudSave` compares it to decide
+whether a republish has changes.
 The bound and the claim count the same text (`sh_modpublish_save_seen`). A
 build where that read cannot be reached refuses to publish a map with mods
 ("Snapmap+ cannot send its mod content with this game version"), since players
