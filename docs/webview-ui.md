@@ -635,8 +635,13 @@ them; `pinned` a row the save writes with units), `"vanilla"` and `registryClash
 
 ### Actions
 
-`arg` is a mod's `key` (for a map row that is not installed, its salt). Each is answered with
-`modsActionResult {action, ok, message, data}` and then a fresh `mods` document.
+A request is `{cmd: "modsAction", action, arg}`: the host routes every page message by its `cmd`
+(`mods_message.h`, which the host and `publishing_key_dispatch_test` share) and logs one that names
+no route. `arg` is a mod's `key` (for a map row that is not installed, its salt). Each is answered with
+`modsActionResult {action, ok, message, data}` and then a fresh `mods` document. While another
+action runs, a request is turned away (`ok: false`, no `data`, a "turned away" line in the window's
+log); the Settings page's Not now on the key backup offer is sent again until the answer shows the
+offer answered.
 
 | Action | Meaning |
 |---|---|

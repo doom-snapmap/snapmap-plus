@@ -14,6 +14,15 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   fail; the default continues to run every suite.
 - `*_test.c` and `*_test.cpp` exercise runtime helpers and source contracts.
 - `*_test.js` checks page behavior, browser modules and the feedback relay.
+- `publishing_key_dispatch_test.cpp` drives every publishing key request of
+  the Settings page (status, Not now, backup, restore, a closed picker, a
+  wrong passphrase) end to end: `publishing_key.js` runs in node
+  (`publishing_key_page_driver.js`), each message goes through the host's own
+  routing, file request and answer envelope (`mods_message.h`), the worker's
+  part through the real Mods slot (`modui.c`) to modclaim, and the answer back
+  to the page, with the saved offer and the backup file checked on disk. A
+  page test against a stand-in bridge accepts what the real host drops; this
+  one does not (R-LB1: the page sent its route as `kind`).
 - Bind-time byte checks. Every check an install makes on the game's code
   before it patches or detours (expected bytes at an offset, a call's target,
   a decoded global) is one product function the install calls, and a test

@@ -25,6 +25,7 @@
 #include "snapmap_plus_iface.h"
 #include "mockup_html.h"
 #include "config_message.h"
+#include "mods_message.h"   /* a page request for the Mods slot: its route, action and argument */
 #include "theme_bootstrap.h"
 #include "rawmap_picker.h"
 #include "prefab_host.h"    /* Create's precheck, a prefab's kind by its ~type, the live usage gate */
@@ -3043,18 +3044,14 @@ static DWORD WINAPI ui_mods_thread(LPVOID)
         else job.run_rc = -3;
     }
     if (job.action == SH_MODS_ACT_KEY) {
-        /* "backup\t<passphrase>" or "restore\t<passphrase>" from the page: the file comes from the native picker
-         * here, so the page never names a path ("<op>\t<path>\t<passphrase>" to the backend). */
-        size_t tab = job.arg.find('\t');
-        std::string op = tab == std::string::npos ? job.arg : job.arg.substr(0, tab);
-        if ((op == "backup" || op == "restore") && tab != std::string::npos) {
-            std::wstring picked;
+        /* A backup's or a restore's file comes from the native picker here (mods_message.h key_file_request). */
+        int r = sh_mods_message::key_file_request(job.arg, [](bool save, std::wstring &picked) {
             HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-            bool ok = ui_pick_key_file(op == "backup", picked);
+            bool ok = ui_pick_key_file(save, picked);
             if (SUCCEEDED(init)) CoUninitialize();
-            if (ok) job.arg = op + "\t" + sh_webview_json::to_utf8(picked) + job.arg.substr(tab);
-            else job.run_rc = -3;
-        }
+            return ok;
+        });
+        if (r == -3) job.run_rc = -3;
     }
     if (job.action && job.run_rc != -3 && ui_mods_file_action(job.action)) {
         sh_mods_call call;
@@ -3097,28 +3094,7 @@ static DWORD WINAPI ui_mods_thread(LPVOID)
     return 0;
 }
 
-static const wchar_t *ui_mods_action_name(int action)
-{
-    switch (action) {
-    case SH_MODS_ACT_INSTALL:     return L"install";
-    case SH_MODS_ACT_RESCAN:      return L"rescan";
-    case SH_MODS_ACT_PALETTE:     return L"palette";
-    case SH_MODS_ACT_UNINSTALL:   return L"uninstall";
-    case SH_MODS_ACT_UNINSTALL_PREVIEW:  return L"uninstallPreview";
-    case SH_MODS_ACT_MAP_REMOVE:         return L"mapRemoveMod";
-    case SH_MODS_ACT_MAP_REMOVE_PREVIEW: return L"mapRemoveModPreview";
-    case SH_MODS_ACT_MAP_ADD:            return L"mapAddMod";
-    case SH_MODS_ACT_CHOOSE:             return L"chooseRegistry";
-    case SH_MODS_ACT_FILES:              return L"modFiles";
-    case SH_MODS_ACT_FILE_TEXT:          return L"modFileText";
-    case SH_MODS_ACT_NEW_MOD:            return L"newMod";
-    case SH_MODS_ACT_ADD_MINE:           return L"addToMine";
-    case SH_MODS_ACT_CONTENT:            return L"content";
-    case SH_MODS_ACT_MAP_UPDATE:         return L"mapUpdate";
-    case SH_MODS_ACT_KEY:                return L"publishingKey";
-    default:                      return L"";
-    }
-}
+static const wchar_t *ui_mods_action_name(int action) { return sh_mods_message::action_name(action); }
 
 /* The Files view's reads change nothing, so no fresh document follows them. */
 static bool ui_mods_read_only(int action)
@@ -3127,26 +3103,7 @@ static bool ui_mods_read_only(int action)
            action == SH_MODS_ACT_KEY;
 }
 
-static int ui_mods_action_code(const std::wstring &name)
-{
-    if (name == L"install")    return SH_MODS_ACT_INSTALL;
-    if (name == L"rescan")     return SH_MODS_ACT_RESCAN;
-    if (name == L"palette")    return SH_MODS_ACT_PALETTE;
-    if (name == L"uninstall")  return SH_MODS_ACT_UNINSTALL;
-    if (name == L"uninstallPreview")    return SH_MODS_ACT_UNINSTALL_PREVIEW;
-    if (name == L"mapRemoveMod")        return SH_MODS_ACT_MAP_REMOVE;
-    if (name == L"mapRemoveModPreview") return SH_MODS_ACT_MAP_REMOVE_PREVIEW;
-    if (name == L"mapAddMod")           return SH_MODS_ACT_MAP_ADD;
-    if (name == L"chooseRegistry")      return SH_MODS_ACT_CHOOSE;
-    if (name == L"modFiles")            return SH_MODS_ACT_FILES;
-    if (name == L"modFileText")         return SH_MODS_ACT_FILE_TEXT;
-    if (name == L"newMod")              return SH_MODS_ACT_NEW_MOD;
-    if (name == L"addToMine")           return SH_MODS_ACT_ADD_MINE;
-    if (name == L"content")             return SH_MODS_ACT_CONTENT;
-    if (name == L"mapUpdate")           return SH_MODS_ACT_MAP_UPDATE;
-    if (name == L"publishingKey")       return SH_MODS_ACT_KEY;
-    return 0;
-}
+static int ui_mods_action_code(const std::wstring &name) { return sh_mods_message::action_code(name); }
 
 /* Splice backend JSON (UTF-8) into an envelope. */
 static void ui_mods_post(const std::wstring &head, const std::string &body, const wchar_t *tail)
@@ -3165,16 +3122,7 @@ static void ui_mods_post(const std::wstring &head, const std::string &body, cons
 
 static void ui_mods_post_result(const wchar_t *action, bool ok, const wchar_t *message, const wchar_t *data)
 {
-    std::wstring m = L"{\"kind\":\"modsActionResult\",\"action\":\"";
-    m += action;
-    m += L"\",\"ok\":";
-    m += ok ? L"true" : L"false";
-    m += L",\"message\":\"";
-    m += message;
-    m += L"\",\"data\":";
-    m += data ? data : L"null";
-    m += L"}";
-    ui_post_json(m.c_str());
+    ui_post_json(sh_mods_message::result_message(action, ok, message, data).c_str());
 }
 
 /* Start a job unless one is running. Returns false (and says so) when busy. */
@@ -3183,7 +3131,10 @@ static bool ui_mods_begin(int action, bool pick, const std::string &arg)
     const wchar_t *name = ui_mods_action_name(action);
     if (InterlockedCompareExchange(&g_mods_busy, 1, 0) != 0) {
         /* A running job always ends with a fresh document, so a list request is already answered. */
-        if (action) ui_mods_post_result(name, false, L"Another mods action is still running.", nullptr);
+        if (action) {
+            ui_logp("mods: %ls turned away: another mods action is still running", name);
+            ui_mods_post_result(name, false, L"Another mods action is still running.", nullptr);
+        }
         return false;
     }
     g_mods_job.action = action;
@@ -3229,15 +3180,7 @@ static void ui_mods_finish()
     UiModsJob &job = g_mods_job;
     const wchar_t *name = ui_mods_action_name(job.action);
     if (job.action) {
-        if (job.run_rc == -3)
-            ui_mods_post_result(name, false, L"", L"{\"cancelled\":true}");
-        else if (job.run_rc == 1)
-            ui_mods_post(std::wstring(L"{\"kind\":\"modsActionResult\",\"action\":\"") + name +
-                         (job.apply_pending ? L"\",\"applyPending\":true,\"data\":" : L"\",\"data\":"), job.run_doc, L"}");
-        else if (job.run_rc == -1)
-            ui_mods_post_result(name, false, L"The game did not take the request. Try again with the editor open.", nullptr);
-        else
-            ui_mods_post_result(name, false, L"Snapmap+ could not do that. Try again; if it keeps failing, use Send feedback.", nullptr);
+        ui_post_json(sh_mods_message::finish_message(job.action, job.run_rc, job.apply_pending, job.run_doc).c_str());
         ui_logp("mods: %ls finished (run %d, list %d)", name, job.run_rc, job.list_rc);
     }
     if (job.list_rc == 1) {
@@ -3954,8 +3897,15 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
 
         std::wstring json(jp); CoTaskMemFree(jp);
         if (g_pair_mismatch) return S_OK;   /* the window only shows the reinstall notice */
-        std::wstring cmd;
-        if (sh_webview_json::get_string(json, L"cmd", cmd)) {
+        std::wstring cmd = sh_mods_message::route(json);
+        /* A page message names its route in "cmd"; one that does not is dropped, and said here. */
+        if (cmd.empty()) {
+            std::wstring kind;   /* never the message itself: it may carry a passphrase */
+            sh_webview_json::get_string(json, L"kind", kind);
+            ui_logp("page: a message with no \"cmd\" route was ignored (kind \"%.40ls\", %u characters)", kind.c_str(),
+                    (unsigned)json.size());
+        }
+        if (!cmd.empty()) {
             if (cmd == L"perfList") {
                 int seq = 0, entities = 0, matched = 0, mounted = 0;
                 double render_ms = 0.0, handler_ms = 0.0;
@@ -3997,8 +3947,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 /* Install always asks for its ZIPs or mod folders here, in the native picker: the
                  * page never names a path to install. */
                 std::wstring act, arg;
-                sh_webview_json::get_string(json, L"action", act);
-                sh_webview_json::get_string(json, L"arg", arg);
+                sh_mods_message::parse_action(json, act, arg);
                 if (act == L"openFolder") ui_mods_open_folder(arg);
                 else if (act == L"openFile") ui_mods_open_file(arg);
                 else {

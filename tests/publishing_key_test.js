@@ -88,5 +88,35 @@ check(!ui.state().open && ids.pubKeyPass.value === '', 'Cancel closes and clears
 
 check(pk.checkPassphrase('restore', 'longenough', '') === '', 'a restore needs no second passphrase');
 
+/* Not now while another mods action runs: the host turns it away (no data), so it is sent again until the backend's
+ * answer shows the offer answered; then it stops */
+{
+  const timers = [], sent = [];
+  const ids2 = {};
+  const mk = function (id) { const e = el(id); ids2[id] = e; return e; };
+  ['pubKeyModal', 'pubKeyTitle', 'pubKeyNote', 'pubKeyPassRow', 'pubKeyPass2Row', 'pubKeyPass', 'pubKeyPass2',
+   'pubKeyError', 'pubKeyCancel', 'pubKeyOk', 'menuKeyBackup', 'menuKeyRestore', 'menuKeyNote'].forEach(mk);
+  const ui2 = pk.create({byId: function (id) { return ids2[id] || null; }, post: function (m) { sent.push(m); },
+                         after: function (fn) { timers.push(fn); }});
+  ui2.bind();
+  ui2.onMessage({kind: 'mods', data: {publishingKey: {exists: true, id: '1a2b3c4d5e6f7081', offer: true}}});
+  ids2.pubKeyCancel.fire('click');
+  const laters = function () { return sent.filter(function (m) { return m.arg === 'later'; }).length; };
+  check(laters() === 1 && ui2.state().laterPending, 'Not now is sent');
+  ui2.onMessage({kind: 'modsActionResult', action: 'publishingKey', ok: false,
+                 message: 'Another mods action is still running.', data: null});
+  check(timers.length === 1, 'a turned-away Not now is sent again after a pause');
+  timers.shift()();
+  check(laters() === 2, 'and is sent again');
+  ui2.onMessage({kind: 'modsActionResult', action: 'publishingKey',
+                 data: {ok: true, message: '', key: {exists: true, id: '1a2b3c4d5e6f7081', offer: false}}});
+  check(!ui2.state().laterPending && timers.length === 0, 'the backend answered: no more sends');
+}
+
+/* every request names the host's route as the window reads it ("cmd", mods_message.h): a message routed any other
+ * way is dropped by the host without a word (R-LB1: Not now never reached the backend) */
+check(posts.length > 0 && posts.every(function (m) { return m.cmd === 'modsAction' && !('kind' in m); }),
+      'every request is routed by cmd: modsAction');
+
 if (failures) { console.error('publishing_key_test: ' + failures + ' failure(s)'); process.exit(1); }
 console.log('publishing_key_test: all checks passed');
