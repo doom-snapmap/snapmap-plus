@@ -86,8 +86,7 @@ int sh_modscene_place_take(sh_modscene_place_table *t, const void *node, sh_mods
 }
 
 #ifndef SH_MODSCENE_PLACE_PURE
-/* ------------------------------------------------------------------------- */
-/* Engine half: build 13954591 (SH_RVA yields 0 on any other image).          */
+/* Engine half: build 13954591 (SH_RVA yields 0 on any other image). */
 #include <windows.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -113,15 +112,13 @@ int sh_modscene_place_take(sh_modscene_place_table *t, const void *node, sh_mods
 #define SP_USED_STOLEN     17
 #define SP_REQUEST_STOLEN  14
 #define SP_SYNCSTART_STOLEN 17
-/* The interaction link's sync-start helper (VK 0x1406BC7B0, GL 0x1406BBA80,
- * snaphak-re R312/R320; modscene_sigs.c) spawns the link's sync, places it at
- * the owner's physics pose, starts it and, only when it started, stores it in
- * the idEntityPtr at this + 0x8D0 (spawn ids at +0, the entity at +8). */
+/* The interaction link's sync-start helper (VK 0x1406BC7B0, GL 0x1406BBA80; modscene_sigs.c) spawns the link's sync,
+ * places it at the owner's physics pose, starts it and, only when it started, stores it in the idEntityPtr at
+ * this + 0x8D0 (spawn ids at +0, the entity at +8). */
 #define SP_LINK_SYNC_PTR    0x8D8u
 
-/* idEntity offsets, both renderers (companion_engine.h, R312): entityDef,
- * name, physics, the targets list of 0x20-byte references ({spawn id, cached
- * spawn id, idEntity *}), and the SetOrigin / SetAxis slots. */
+/* idEntity offsets, both renderers (companion_engine.h): entityDef, name, physics, the targets list of 0x20-byte
+ * references ({spawn id, cached spawn id, idEntity *}), and the SetOrigin / SetAxis slots. */
 #define SP_ENT_DECL        0x6D0u
 #define SP_DECL_NAME       0x08u
 #define SP_DECL_INHERIT    0x58u   /* a placed entity's own entityDef inherits its palette row */
@@ -136,13 +133,11 @@ int sh_modscene_place_take(sh_modscene_place_table *t, const void *node, sh_mods
 #define SP_VSLOT_SET_AXIS   0x358u
 #define SP_PSLOT_GET_ORIGIN 0x80u
 #define SP_PSLOT_GET_AXIS   0x88u
-/* Scene spawns (snaphak-re R320). idTarget_Spawn::SpawnSingleEntity (VK
- * 0x140A7A8D0, GL 0x140A79D90) creates the entity through idGameLocal vtable
- * +0x448, writes its idEntity spawnPosition (+0x3A8) and spawnOrientation
- * (+0x3B4, idMat3 rows) before the spawn chain reads them, finishes through
- * +0x458 (register, then CallSpawn) and posts the "show" event. The two slots
- * resolve by signature (modscene_sigs.c) and are checked against the live
- * game's vtable before each spawn. */
+/* Scene spawns: idTarget_Spawn::SpawnSingleEntity (VK 0x140A7A8D0, GL 0x140A79D90) creates the entity through
+ * idGameLocal vtable +0x448, writes its idEntity spawnPosition (+0x3A8) and spawnOrientation (+0x3B4, idMat3 rows)
+ * before the spawn chain reads them, finishes through +0x458 (register, then CallSpawn) and posts the "show" event.
+ * The two slots resolve by signature (modscene_sigs.c) and are checked against the live game's vtable before each
+ * spawn. */
 #define SP_ENT_SPAWN_ORIGIN 0x3A8u
 #define SP_ENT_SPAWN_AXIS   0x3B4u
 #define SP_DECL_STATE       0x2Cu   /* idResource: bit 0 failed (a default stands in), bit 1 unloaded */
@@ -151,7 +146,7 @@ int sh_modscene_place_take(sh_modscene_place_table *t, const void *node, sh_mods
 #define SP_HOMES            64      /* scene nodes whose placed pose is remembered per Play */
 #define SP_INHERIT_DEPTH    8
 
-/* Engine functions (snaphak-re R313, decompiled on both renderers):
+/* Engine functions (both renderers):
  *   idPlayer cast                       VK 0x14AF840  GL 0x14AF8D0
  *   target reference refresh            VK 0x3B8170   GL 0x3B7B60  (DoAction's own call)
  *   ProcessEventArgs(obj,ret,ev,n,...)  VK 0xB47350   GL 0xB46940
@@ -475,8 +470,8 @@ static int sp_entity_pose(void *ent, sh_scene_pose *out)
     return out->yaw == out->yaw;
 }
 
-/* The node's pose when this Play first activated it (its editor placement),
- * recorded now when it is new. A node the backend moved keeps its first pose. */
+/* The node's pose when this Play first activated it (its editor placement), recorded when it is new. A node the
+ * backend moved keeps its first pose. */
 static sh_scene_pose sp_home_of(const void *node, sh_scene_pose now)
 {
     sh_scene_pose home = now;
@@ -669,10 +664,9 @@ static void *sp_link_sync(void *link)
     return link ? sp_read_ptr(link, SP_LINK_SYNC_PTR) : NULL;
 }
 
-/* The interaction link's sync start. A scene node with queued spawns gets them
- * in the same call, right after the engine started its sync, so a demon and
- * the player's track begin on one tick; a sync that did not start (the node
- * was busy, disabled or used up) spawns nothing. */
+/* The interaction link's sync start: a scene node with queued spawns gets them in the same call, right after the
+ * engine started its sync, so a demon and the player's track begin on one tick. A sync that does not start (the node
+ * is busy, disabled or used up) spawns nothing. */
 static void sp_syncstart(void *link, void *owner, void *arg3, void *link_data, void *player)
 {
     sh_scene_pending queued;
@@ -740,8 +734,8 @@ static void sp_used(void *self)
         const sh_scene_entry *e = have ? NULL : sp_scene_of(self);
         if (have) sp_return(&rec);
         else if (e) sp_scene_log("Scene %s: finished; the player stays", e->node);
-        /* A scene node's scene is over: a HUD its scene hid and never showed comes back
-         * (its show row can sit on a frame the sync no longer plays). */
+        /* A scene node's scene is over: a HUD its scene hid and never showed comes back (its show row can sit on a
+         * frame the sync does not play). */
         if ((have || e) && sh_modhud_scene_restore())
             sp_scene_log("scene-place: the HUD was shown again when the scene finished");
     }

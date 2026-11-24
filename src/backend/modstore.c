@@ -40,13 +40,9 @@ static char       *ms_read_text(const wchar_t *path, size_t max, size_t *len);
 
 /* ------------------------------------------------------------ lock ----- */
 
-/* The store lock: the mods folder's named lock (store_lock.h, opened and
- * waited for by modbundle.c's sh_mb_store_mutex and sh_mb_store_wait), so
- * every writer of mods\ in this process and in any other (a second game)
- * takes turns: installs, downloads, scans, builds, exports. It is
- * recursive on purpose: the install and verification below take it
- * themselves, and their callers (a download) already hold it around a larger
- * step. The counts below are this process's. */
+/* The store lock: the mods folder's named lock (store_lock.h, via modbundle.c's sh_mb_store_mutex and
+ * sh_mb_store_wait), so every writer of mods\ in any process takes turns. It is recursive because the install and
+ * verification take it themselves while their callers (a download) hold it around a larger step. */
 static volatile LONG    g_ms_lock_depth;   /* nested holds of this process's owner; read from any thread */
 static volatile LONG    g_ms_lock_gen;     /* outermost holds released so far */
 static __declspec(thread) HANDLE t_ms_held;   /* the mutex this thread holds */
@@ -92,10 +88,9 @@ unsigned modstore_lock_waits(void)
     return sh_mb_store_waits();
 }
 
-/* The boot build's hand-over between folders: when another thread waits for
- * the store and this thread holds it once (not inside a larger step), the
- * hold is released until the waiter has it, then taken again (after the
- * waiter's operation). 1 when it yielded. */
+/* The boot build's hand-over between folders: when another thread waits for the store and this thread holds it
+ * once (not inside a larger step), the hold is released until the waiter has it, then taken again. 1 when it
+ * yielded. */
 static int ms_lock_yield(void)
 {
     int i;
@@ -129,11 +124,9 @@ static int ms_cause(char **cause, const char *fmt, ...)
     return 0;
 }
 
-/* A Win32 failure as a plain reason with the next step (plain_reason.h).
- * `name` is the file or folder; `in_store` names it relative to the store
- * root, which is then prefixed; NULL names the store folder. A full disk
- * names the store's drive and the bytes needed (0: unknown). The text lives
- * in a per-thread buffer: one call per message. */
+/* A Win32 failure as a plain reason with the next step (plain_reason.h). `name` is the file or folder, relative
+ * to the store root (then prefixed) when `in_store`; NULL names the store folder. A full disk names the store's
+ * drive and the bytes needed (0: unknown). The text lives in a per-thread buffer: one call per message. */
 static const char *ms_why(DWORD err, const char *name, int in_store, unsigned long long bytes)
 {
     const char *root = sh_ms_root(), *why;
@@ -380,12 +373,9 @@ static int ms_rmtree(const wchar_t *path, const wchar_t *root)
 #endif
 
 
-/* Move a whole folder, retrying briefly when Windows still holds the old name
- * or the new one: right after a folder is moved aside, an indexer, a virus
- * scanner or the engine's own just-closed handles can refuse the next move
- * with ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION for a few tens of
- * milliseconds (seen live: "cannot place ... (error 5)" that succeeded on an
- * immediate retry). Any other error, or persistence past the budget, fails. */
+/* Move a whole folder, retrying briefly on ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION (an indexer, a virus
+ * scanner or the engine's just-closed handles can hold the old or new name for a few tens of milliseconds). Any
+ * other error, or persistence past the budget, fails. */
 static BOOL ms_move_folder(const wchar_t *from, const wchar_t *to)
 {
     int attempt;
@@ -407,12 +397,10 @@ static volatile LONG g_ms_recycle_refused;
 void sh_ms_recycle_refuse_for_test(int refuse) { InterlockedExchange(&g_ms_recycle_refused, refuse ? 1 : 0); }
 #endif
 
-/* Move a folder of the store (a \\?\ path) to the Windows Recycle Bin
- * through the shell: FO_DELETE with FOF_ALLOWUNDO, no confirmation, progress
- * or error UI, reparse points moved as themselves and never entered. Only a
- * fixed drive's folder is offered: on a network or removable drive the shell
- * would delete it outright without saying so. 1 when the folder went to the
- * bin; else 0 with why the bin could not take it in `why`. */
+/* Move a folder of the store (a \\?\ path) to the Windows Recycle Bin through the shell: FO_DELETE with
+ * FOF_ALLOWUNDO, no UI, reparse points moved as themselves and never entered. Only a fixed drive's folder is
+ * offered, since on a network or removable drive the shell deletes it outright silently. 1 when the folder
+ * went to the bin; else 0 with why the bin could not take it in `why`. */
 static int ms_recycle(const wchar_t *path, char **why)
 {
     const wchar_t *plain = path;
@@ -693,12 +681,9 @@ static int ms_has_descriptor(const wchar_t *folder)
     return has;
 }
 
-/* The mod folders under a directory, at any depth: a candidate folder with
- * mod.json or package.json is a mod and is not entered; one without is an
- * organizing folder and is entered, as deep as it goes (the pending folders
- * are kept on the heap, so depth costs no stack). At the store root the top
- * folder "maps" (SH_MS_RETIRED_PLACES: the downloaded maps' mods of earlier
- * versions) is not entered. `rel` is each folder's path below the root. */
+/* The mod folders under a directory at any depth: a folder with mod.json or package.json is a mod and is not
+ * entered, any other is entered (pending folders are kept on the heap, so depth costs no stack); the store
+ * root's top folder "maps" (SH_MS_RETIRED_PLACES) is skipped. `rel` is each folder's path below the root. */
 typedef struct ms_found { wchar_t *folder, *rel; } ms_found;
 typedef struct ms_found_list { ms_found *items; size_t count, cap; } ms_found_list;
 
@@ -753,7 +738,7 @@ static void ms_find_mods(ms_found_list *l, const wchar_t *top, const wchar_t *to
                 wchar_t *crel = rel[0] ? ms_wjoin(rel, fd.cFileName) : _wcsdup(fd.cFileName);
                 if (!child || !crel) { free(child); free(crel); }
                 else if (root_level && !_wcsicmp(fd.cFileName, L"" SH_MS_RETIRED_PLACES)) {
-                    /* mods\maps\: retired (D4), never read. */
+                    /* mods\maps\ is never read. */
                     free(child);
                     free(crel);
                 } else if (ms_has_descriptor(child)) {
@@ -959,7 +944,7 @@ static mpj *ms_salts_record(void);
 static int ms_keeps_salt(const mpj *rec, const char *salt, const char *a_name, const char *a_folder, const char *b_name,
                          const char *b_folder);
 
-/* The copy rule's order (DECISIONS 15, ms_keeps_salt): 1 when a keeps the salt over b. */
+/* The copy rule's order (ms_keeps_salt): 1 when a keeps the salt over b. */
 static int ms_older(const mpj *rec, const sh_ms_entry *a, const sh_ms_entry *b)
 {
     return ms_keeps_salt(rec, a->salt, a->name, a->folder, b->name, b->folder);
@@ -1124,7 +1109,7 @@ const sh_ms_entry *sh_ms_find_salt(const sh_ms_list *l, const char *salt, const 
 int sh_ms_note_build(const char *folder, const sh_mb_bundle *b)
 {
     if (!folder || !b) return 0;
-    ms_note_cause(folder, NULL);   /* a build succeeded: no earlier failure stands */
+    ms_note_cause(folder, NULL);   /* a build succeeded: the recorded failure is cleared */
     return 1;
 }
 
@@ -1201,12 +1186,10 @@ static int ms_new_salt(char out[SH_SALT_LEN + 1], const char *also)
 }
 
 
-/* The salting's plan (sh_ms_assign_salt): every file of the folder read and
- * rewritten in memory first, mods/<from>/ to mods/<salt>/ in texts and in the
- * folder segments of paths under assets/; a binary file naming mods/<from>/
- * refuses a new folder (from its folder name) and is kept as it is in a copy
- * of a salted mod (D12 maps it at serve). Nothing of a new folder serves before it is salted and
- * built: an entry serves only when its block records a build. */
+/* The salting's plan (sh_ms_assign_salt): every file of the folder is read and rewritten in memory first,
+ * mods/<from>/ to mods/<salt>/ in texts and in the folder segments of paths under assets/. A binary naming
+ * mods/<from>/ refuses a new folder and is kept as it is in a copy of a salted mod (serving maps it); a new
+ * folder serves nothing until its block records a build. */
 #define MS_RK_CHUNK    (4u << 20)   /* a binary is scanned in pieces; a text, of any size, is read whole */
 
 typedef struct ms_rk_file {
@@ -1225,7 +1208,7 @@ typedef struct ms_rk {
     char bank_from[SH_MB_BANK_STEM_MAX + 1];   /* a bank stem prefix that becomes "<salt>_", or "" */
     int keep;                    /* a folder that has its salt: binaries naming mods/<from>/ are left alone */
     int spelled_ok;              /* `from` is the salt a copy carried: a binary naming mods/<from>/ keeps it, and the
-                                    build records it as "spelled", which serving maps to the new salt (D12) */
+                                    build records it as "spelled", which serving maps to the new salt */
     unsigned spelled;            /* such binaries kept */
     unsigned refs, rewritten, moved, srefs, banks;
     int failed;
@@ -1394,10 +1377,9 @@ size_t sh_ms_rebank_text(const char *t, size_t n, const sh_ms_bank_rename *names
     return hits;
 }
 
-/* The banks the plan renames, followed by every text of the folder that
- * names them (mod.json in *modjson among them): Wwise finds a bank by its
- * file name, so a decl or a script still naming the old stem would lose its
- * sound. Texts already rewritten are rewritten again; other texts are read. */
+/* The banks the plan renames, then every text of the folder that names them (mod.json in *modjson among them):
+ * Wwise finds a bank by file name, so a decl or script naming the old stem would lose its sound. Rewritten
+ * texts are rewritten again; other texts are read. */
 static void ms_rk_rebank(ms_rk *r, const wchar_t *src, char **modjson, size_t *mlen)
 {
     sh_ms_bank_rename *names = NULL;
@@ -1556,7 +1538,7 @@ static void ms_rk_entry(ms_rk *r, const wchar_t *dir, const char *rel, const WIN
              * salt keeps its binaries as they are: the build decides. */
             int hit = r->leaf || r->nskeys ? ms_rk_binary_names(path, r) : 0;
             if (hit < 0) ms_rk_fail(r, "%s could not be read (%s); the folder is unchanged", child, ms_why(GetLastError(), child, 0, 0));
-            else if (hit == 1 && r->spelled_ok) r->spelled++;   /* D12: served under the new salt, length for length */
+            else if (hit == 1 && r->spelled_ok) r->spelled++;   /* served under the new salt, length for length */
             else if (hit == 1)
                 ms_rk_fail(r, "%s names mods/%s/ inside a binary file, which Snapmap+ cannot rename; make the mod with "
                            "New mod in the Mods tab first, then export the file under the new mod's folder", child,
@@ -1659,27 +1641,12 @@ static void ms_bank_prefix(const char *name, char *out, size_t cap)
     out[i] = 0;
 }
 
-/* Moving a folder's own content under its salt (rule 1, DECISIONS 20): in
- * memory first, then staged beside it and swapped in under the same name.
- * `from` is the folder's name (from_name 1) or the salt a copy carried. Files
- * under assets\...\mods\<from>\ move to mods\<salt>\, references to
- * mods/<from>/ in every text under assets\ and in mod.json follow, strings
- * keys without the salt's prefix (string edits aside) gain it with their
- * #str_ references, and a bank named for the folder takes the salt's name.
- * A folder name that is the folder's own salt or another folder's salt names
- * that mod, never this folder, so nothing is moved for it; a folder name
- * equal to another folder's name is no question, since each folder moves
- * only its own files.
- *
- * `keep` (the folder's salt) is a folder already salted: its builder block
- * is kept, binaries are left as they are, and nothing is written when there
- * is nothing to move (returns 0). Otherwise a new salt is drawn, the block
- * becomes {"format": 2, "salt"} and a
- * binary that spells the folder's name refuses the folder. The folder's own
- * mod.json is read unless `given` (a fresh author text) replaces it. With
- * `dest` the result is written there instead (it must not exist) and
- * `folder` is left as it is. Returns 1 with the salt, -1 with the cause (the
- * folder untouched). The caller holds the store lock. */
+/* Moves a folder's content under its salt, in memory first, then staged beside it and swapped in under the same
+ * name: files under assets\...\mods\<from>\, mods/<from>/ references (assets\ texts, mod.json), unprefixed
+ * strings keys and a bank named for the folder take the salt; `from` is the folder's name or the salt a copy
+ * carried. `keep` marks a salted folder (block and binaries stay; 0 when nothing moves); else a new salt is
+ * drawn and a binary spelling the folder's name refuses it. `dest` (must not exist) takes the result instead of
+ * `folder`. Returns 1 with the salt, -1 with the cause; the caller holds the store lock. */
 static int ms_assign_to(const char *folder, const char *given, size_t given_len, const char *from, int from_name,
                         const char *keep, const char *dest, char salt_out[SH_SALT_LEN + 1], char **cause)
 {
@@ -1710,9 +1677,8 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
     r.leaf = from;
     r.key = salt;
     r.keep = keep != NULL;
-    /* A copy of a salted mod (`from` the salt it carried): its binaries keep naming that namespace and serving maps it
-     * to the new salt (SPEC-distribution D12, modserve.c ms_respelled); a binary can name a folder name in no way
-     * serving could map, so a new mod's binary naming its folder still refuses it. */
+    /* A copy of a salted mod (`from` the salt it carried): its binaries keep naming that namespace and serving
+     * maps it to the new salt (modserve.c ms_respelled); a new mod's binary naming its folder still refuses it. */
     r.spelled_ok = !from_name && from && sh_salt_valid(from, strlen(from));
     if (from_name && from) ms_bank_prefix(from, r.bank_from, sizeof r.bank_from);
     /* Read and rewrite everything in memory first. */
@@ -1843,8 +1809,8 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
         goto done;
     }
     {
-        /* The folder as it was goes to the Recycle Bin (its files are the
-         * new folder's too, hard-linked); outright when the bin cannot take it. */
+        /* The original folder goes to the Recycle Bin (its files are the new folder's too, hard-linked);
+         * outright when the bin cannot take it. */
         char *why = NULL;
         if (!ms_recycle(old, &why) && !ms_rmtree(old, parent))
             ms_log("MODS: store: %s: the folder as it was before its salt, %ls, could not be removed completely; it is not "
@@ -1879,15 +1845,15 @@ static int ms_assign(const char *folder, const char *from, int from_name, char s
     return ms_assign_to(folder, NULL, 0, from, from_name, NULL, NULL, salt_out, cause);
 }
 
-/* A salted root folder's new content under its name moved under its salt
- * (DECISIONS 20): 1 moved, 0 nothing to move, -1 with the cause. */
+/* A salted root folder's new content under its name moved under its salt: 1 moved, 0 nothing to move, -1 with
+ * the cause. */
 static int ms_rehome(const char *folder, const char *name, const char *salt, char **cause)
 {
     char got[SH_SALT_LEN + 1];
     return ms_assign_to(folder, NULL, 0, name, 1, salt, NULL, got, cause);
 }
 
-/* Whether `folder` lies in mods\maps\ (SH_MS_RETIRED_PLACES), which this version does not read. */
+/* Whether `folder` lies in mods\maps\ (SH_MS_RETIRED_PLACES), which is never read. */
 static int ms_in_retired(const char *folder)
 {
     wchar_t *root = ms_wroot(), *w = folder ? sh_mb_wpath(folder) : NULL;
@@ -2055,12 +2021,9 @@ static char *ms_pl_decode(const char *body)
     return out;
 }
 
-/* DECISIONS 15. The record's "salts" section names, for every salt at the
- * root, the folder (its name under mods\) that held it at the last scan.
- * Of two folders with one salt, the one the record names keeps it; when the
- * record names neither (no scan saw them yet, or the holder was renamed and
- * copied before one), the folder created first keeps it. The build time
- * never decides: an Explorer copy carries the same mod.json. */
+/* The record's "salts" section names the folder (its name under mods\) that held each root salt at the last
+ * scan. Of two folders with one salt the named one keeps it, else the one created first; the build time never
+ * decides, since an Explorer copy carries the same mod.json. */
 #define MS_SALTS_SECTION "salts"
 
 static mpj *ms_salts_record(void)
@@ -2145,20 +2108,11 @@ static int ms_author_folder(const wchar_t *name)
     free(u);
     return r;
 }
-/* New mod's example: a crate that places and plays
- * untouched. Its entityDef is the game's SnapMap crate01 under the mod's salt,
- * its Toybox row is the game's crate01 row (snapeditorentitydef
- * prop/new/crate01: the prop_base parent, its preview, size, arrow and sounds)
- * pointing at it, and mod.json's strings give the row its name, its
- * description and a Toybox category named after the mod. Nothing binary: the
- * model and the preview image are the game's. The row draws the entity's own
- * model as the stock prop rows do; it names no renderInfo.renderModelName,
- * which only rows whose entity has no model of its own carry (pickups,
- * encounters, logic); the earlier example's flooded the editor log with
- * "modelMatrix invert failed on model .../crate01.lwo" every frame.
- * The entityDef is the game's text whole, editorVars included: the editor logged the
- * same line while the Toybox previewed or the crosshair hovered the crate
- * with the block left out. */
+/* New mod's example: a crate that places and plays untouched. Its entityDef is the game's SnapMap crate01 under
+ * the mod's salt and its Toybox row the game's crate01 row (snapeditorentitydef prop/new/crate01) pointing at it,
+ * with mod.json strings for the name, description and a category named after the mod; nothing binary. The row
+ * names no renderInfo.renderModelName (only rows whose entity has no model of its own carry one) and the
+ * entityDef keeps its editorVars, or the editor logs "modelMatrix invert failed on model" every frame. */
 #define MS_EXAMPLE_DECL "example_crate"
 #define MS_EXAMPLE_DEF_DIR "entities\\"
 #define MS_EXAMPLE_ROW_DIR "decls\\snapeditorentitydef\\"
@@ -2279,7 +2233,7 @@ static int ms_new_mod(const char *name, int example, char salt_out[SH_MB_ID_MAX 
     if (example_out) *example_out = NULL;
     while (name && (*name == ' ' || *name == '\t')) name++;
     if (!name || !name[0]) return ms_cause(cause, "a new mod needs a name");
-    /* The name as the author typed it, any length (DECISIONS 26). */
+    /* The name as the author typed it, any length. */
     if (!(esc = ms_json_body(name))) return ms_cause(cause, "out of memory");
     n = strlen(esc);
     while (n && esc[n - 1] == ' ') esc[--n] = 0;
@@ -2532,11 +2486,9 @@ static void ms_chain_init(sh_mb_resolver *out, ms_chain *chain, const sh_mb_reso
     out->stock_context = user ? user->stock_context : NULL;
 }
 
-/* Build a root folder of the store in place and write its block. A new mod
- * gets its salt first (`from`: the name its own references use; NULL: its
- * folder name). A failed build writes the block of a failed build (its
- * cause): the folder serves nothing until fixed (rule 2). A folder in
- * mods\maps\ is never built here. */
+/* Build a root folder of the store in place and write its block. A new mod gets its salt first (`from`: the name
+ * its own references use; NULL: its folder name). A failed build writes its cause into the block and the folder
+ * serves nothing until fixed; a folder in mods\maps\ is never built here. */
 static int ms_build_in_place(const char *folder, const char *from, const sh_mb_resolver *resolver, sh_mb_bundle *b,
                              char **cause)
 {
@@ -2561,8 +2513,7 @@ static int ms_build_in_place(const char *folder, const char *from, const sh_mb_r
         ms_note_cause(folder, one);
         goto refused;
     } else {
-        /* What the author added under the folder's name since moves under
-         * the salt before every build (DECISIONS 20). */
+        /* Files the author put under the folder's name move under the salt before every build. */
         wchar_t *w = sh_mb_wpath(folder);
         salt[0] = 0;
         if (w) ms_block_salt(w, salt);
@@ -2604,9 +2555,8 @@ out:
     return ok;
 }
 
-/* Copy every file and folder below `src` into `dst` (created), real copies,
- * no link followed; everything below assets\ is named in lower case, the game
- * names the builder records (DECISIONS 13). 1 when all of it was copied. */
+/* Copy every file and folder below `src` into `dst` (created), real copies, no link followed; everything below
+ * assets\ is named in lower case, as the game names the builder records. 1 when all of it was copied. */
 typedef struct ms_copy_dir { wchar_t *src, *dst; int lower; } ms_copy_dir;
 
 static int ms_copy_tree(const wchar_t *src_top, const wchar_t *dst_top, char **cause)
@@ -2710,9 +2660,8 @@ static int ms_work_names(const wchar_t *final, wchar_t **staging, wchar_t **old)
     return 1;
 }
 
-/* Swap a staged folder in as `final`, the folder there (if any) moved aside
- * and retired after. 1 on success; on failure the staging is removed and the
- * folder there put back. */
+/* Swap a staged folder in as `final`, the folder there (if any) moved aside and removed after. 1 on success;
+ * on failure the staging is removed and the folder there put back. */
 static int ms_swap_in(const wchar_t *staging, const wchar_t *final, const wchar_t *old, const wchar_t *root, const char *name,
                       int *replaced, char **cause)
 {
@@ -2742,10 +2691,9 @@ static int ms_swap_in(const wchar_t *staging, const wchar_t *final, const wchar_
     return 1;
 }
 
-/* `to_root`: sh_ms_install_to_root. The source is a built folder from
- * outside the store (a received build unpacked elsewhere); it keeps its salt
- * at the root, and a root folder of that salt is the install only when it
- * holds this very build. */
+/* `to_root`: sh_ms_install_to_root. The source is a built folder from outside the store (a received build); it
+ * keeps its salt at the root, and a root folder of that salt is the install only when it holds this very
+ * build. */
 static int ms_install_locked(const char *folder, int to_root,
                              const sh_mb_resolver *resolver, char **name_out,
                              sh_ms_install_stats *st, sh_mb_bundle *bundle_out, char **cause)
@@ -2855,7 +2803,7 @@ static int ms_install_locked(const char *folder, int to_root,
             name = ms_free_root_name(root, leaf);
         }
         if (!name) { ms_cause(cause, "out of memory"); goto done; }
-        /* The arriving folder of a salt the root holds is the newer copy (R9). */
+        /* The arriving folder of a salt the root holds is a copy of it. */
         if (!st->present && here && _stricmp(here->name, name)) copy_of_root = 1;
     }
     if (st->present) {
@@ -2864,9 +2812,8 @@ static int ms_install_locked(const char *folder, int to_root,
         ok = 1;
         goto done;
     }
-    /* DECISIONS 10: every file the folder holds is installed, the game's own
-     * files included (the builder decides what is a borrow); only a pointer
-     * the folder does not carry (the closure's) has nothing to copy. */
+    /* Every file the folder holds is installed, the game's own files included (the builder decides what is a
+     * borrow); only a pointer the folder does not carry (the closure's) has nothing to copy. */
     for (i = 0; i < b.file_count; i++) {
         if (!b.files[i].stock) continue;
         st->stock_files++;
@@ -2918,7 +2865,7 @@ static int ms_install_locked(const char *folder, int to_root,
         char *fu = sh_mb_utf8(final);
         if (fu) ms_note_cause(ms_plain(fu), NULL);
         if (fu && copy_of_root) {
-            /* A second folder of a root salt: it becomes a new mod now. */
+            /* A second folder of a root salt: it becomes a new mod. */
             char salt[SH_SALT_LEN + 1], was[SH_SALT_LEN + 1];
             const sh_ms_entry *here = sh_ms_find_salt(&list, b.id, NULL);
             strcpy_s(was, sizeof was, b.id);
@@ -3081,9 +3028,8 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
         v[i].built = 0;
         v[i].current = 0;
     }
-    /* 2. A salt in two root folders: the folder the record names keeps it,
-     * else the one created first (DECISIONS 15). Keepers are settled before
-     * anything changes, so three copies resolve at once. */
+    /* 2. A salt in two root folders: the folder the record names keeps it, else the one created first.
+     * Keepers are settled before anything changes, so three copies resolve at once. */
     {
         size_t *keep = n ? (size_t *)malloc(n * sizeof *keep) : NULL;
         mpj *rec = ms_salts_record();
@@ -3128,7 +3074,7 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
         ULONGLONG b0;
         if (v[i].state != SH_MB_DESC_BUILT) {
             if (v[i].state && v[i].state != SH_MB_DESC_FRESH) {
-                /* An earlier shape: listed with its reason, nothing written. */
+                /* A folder of another shape: listed with its reason, nothing written. */
                 sh_mb_descriptor_state_why(v[i].folder, &why);
                 sh_ms_descriptor_unparsable(v[i].folder, &cause);
                 st->failed++;
@@ -3277,9 +3223,8 @@ int sh_ms_boot_sync(const sh_mb_resolver *resolver, sh_ms_rescan_fn rescan, int 
     if (resolver) g_boot_resolver = *resolver;
     g_boot_rescan = rescan;
     if (background) {
-        /* The check reads every folder's tree (about 170 ms for 15 converted
-         * folders), so it runs on the thread too, once the startup install
-         * has released the store (sh_ms_boot_release). */
+        /* The check reads every folder's tree, so it runs on the thread too, once the startup install has
+         * released the store (sh_ms_boot_release). */
         (void)ms_boot_release_event();
         h = CreateThread(NULL, 0, ms_boot_thread, NULL, 0, NULL);
         if (!h) { ms_log("MODS: store: boot: the build thread could not start; the Mods tab's rescan builds them"); return -1; }
@@ -3292,9 +3237,8 @@ int sh_ms_boot_sync(const sh_mb_resolver *resolver, sh_ms_rescan_fn rescan, int 
 }
 
 /* ------------------------------------------- crash leftovers ---- */
-/* Installs, downloads and salting assemble a folder as
- * "<name>.staging-<pid>" and move a replaced one aside as "<name>.old-<pid>"
- * before the swap; a session that ends between the steps leaves them. */
+/* Installs, downloads and salting assemble a folder as "<name>.staging-<pid>" and move a replaced one aside as
+ * "<name>.old-<pid>" before the swap; a session that ends between the steps leaves them. */
 
 /* The process that named a work folder is still running (this one included;
  * a process this one may not open is taken as running). */

@@ -1,17 +1,9 @@
 /* modprog_test.c -- the render programs the product derives from the game's own (modprog.c).
  *
- * Without the game, over a stand-in program (tests/fixtures/modprog/lit.frag, compiled into modprog_fixture.c, and a
- * cooked program this test writes around it): the decl, stage-text and SPIR-V transforms, then the whole
- * derivation through a fake reader, every derived file checked as the engine checks it (the cooked program's
- * checksum of its decl, the SPIR-V header's hash of its stage text) and as the splice must leave it (the
- * blend's samplers bound after the program's textures, the later bindings moved, the material uniforms grown,
- * the call right after the store of inputs.normal).
- *
- * With the game installed (doom=<install root>), the same checks on the multilayer variants of skinvmtr and
- * skinvmtrwounds derived from the installed programs through modstock.
- *
- * The particle program the same way: its decl and stage-text transforms and its splice over a stand-in particle
- * stage (tests/fixtures/modprog/particle.frag), and with the game its variant of uberparticles and its permutation.
+ * Over a stand-in program (tests/fixtures/modprog/lit.frag and a cooked program written here): the decl, stage-text
+ * and SPIR-V transforms and the whole derivation through a fake reader, with every derived file checked as the
+ * engine checks it and as the splice must leave it. With doom=<install root> the same checks run on the multilayer
+ * and particle variants derived from the installed programs.
  *
  *   modprog_test.exe [doom=<install root>] */
 #define WIN32_LEAN_AND_MEAN
@@ -80,9 +72,8 @@ static const char PERM_DECL[] =
 static const char VERT[] = "#version 450 core\nvoid main() { gl_Position = vec4(0.0); }\n";
 
 /* A cooked program around the stand-in stage text: one parameter (stagesort, a vector parm given by name), the
- * fragment stage's lists (5 material uniforms, 2 view uniforms, 2 textures and their samplers, a storage
- * buffer), binding tables as the engine's cooker writes them (fragment: material 5, view 6, textures 7..8,
- * storage buffer 9), and `perm` permutations of mask 1. */
+ * fragment stage's lists (5 material uniforms, 2 view uniforms, 2 textures and samplers, a storage buffer), binding
+ * tables as the engine's cooker writes them, and `perm` permutations of mask 1. */
 static void cooked(buf *b, const char *decl, int perm)
 {
     static const char *const fh[] = { "usevirtualmapping", "bloommaskscale", "colorscale", "color", "bloomcolor" };
@@ -459,9 +450,9 @@ static const char EP_DECL[] =
     "\t\tresult.color = float4( 1.0 );\r\n\t\tPREMULTIPLY_ALPHA_BLENDED( result );\r\n\t}\r\n}";
 
 /* The checks one derived particle fragment module must pass against its stock one: the emissive sheet's sampler on
- * the binding after the program's textures, the shading's other samplers the program's own (no texture added), a
- * binding at or after tex_end moved up by one, the material uniforms grown by the three parameters the shading reads
- * (smokebrightness, projectionmatrixz, globalvieworigin), and one call of ep_shade, in main, after the stock colour's last store. */
+ * the binding after the program's textures, the shading's other samplers unchanged, bindings at or after tex_end
+ * moved up by one, the material uniforms grown by the three parameters the shading reads, and one call of ep_shade
+ * in main after the stock colour's last store. */
 static void check_ep_module(const uint32_t *w, size_t n, const uint32_t *stock, size_t sn, unsigned tex_end)
 {
     mod m = { w, n }, s = { stock, sn };
@@ -947,7 +938,7 @@ static void test_registry(void)
     free(img);
 }
 
-/* ------------------------------------------------------------------ old material keys */
+/* ---- old material keys ---- */
 
 static char *g_fixtures;
 static char *read_fixture(const char *name, size_t *n)
@@ -1043,7 +1034,7 @@ static void check_particle(const char *label, const char *text, size_t len, cons
     }
     for (k = 0; k < 5; k++) CHECK(mat_count(out, old[k]) == 0);
     CHECK(sheet ? mat_count(out, "particleemissivemap") == 1 : mat_count(out, "particleemissivemap") == 0);
-    /* nothing else changed: the stage's other keys are as they were, and a second pass finds nothing to do */
+    /* nothing else changed: the stage's other keys stay and a second pass finds nothing to do */
     CHECK(!strcmp(mat_line(out, "transmap"), mat_line(text, "transmap")) &&
           !strcmp(mat_line(out, "texanimdims"), mat_line(text, "texanimdims")) &&
           !strcmp(mat_line(out, "virtualtexturefeedbackfloat"), mat_line(text, "virtualtexturefeedbackfloat")));
@@ -1089,7 +1080,7 @@ static void test_legacy_particle(void)
         free(t);
     }
     /* a lit stage that names only some old keys and has none of the stock ones: defaults fill the rest, the new lines
-     * stand where the old ones stood, in the material's own line ends */
+     * stand in the old keys' place, in the material's own line ends */
     {
         static const char LIT[] = "{\r\n\tstageprogram\t\"snapmapplus/eternal/uberparticles\"\r\n"
             "\teternalparticle\t{ 1, 2.5, 3, 0.75 }\r\n\teternalparticlefade\t{ 5, 6, 7, 1 }\r\n\ttransmap\tx.tga\r\n}\r\n";
@@ -1129,10 +1120,9 @@ static int read_vectors(const char *text, float v[28][4])
     return 1;
 }
 
-/* A layered material's rewrite: the old keys are gone, `layerparms` names a registered image, vector k of the image
- * (within half precision) is the vector the material gave (vector 9's y and z saying where layer 0's height comes
- * from: source y, constant z), and the extra map the height took (if one) holds its image. Prints the largest
- * relative error of each vector. */
+/* A layered material's rewrite: `layerparms` names a registered image, vector k of the image (within half
+ * precision) is the vector the material gave, and the extra map the height took (if one) holds its image. Prints
+ * the largest relative error of each vector. */
 static void check_layered(const char *label, const char *text, size_t len, float src, float cst, const char *extra_key,
                           const char *extra_value)
 {

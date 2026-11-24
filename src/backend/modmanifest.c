@@ -25,10 +25,6 @@ static int mm_ishex(char c) { return mm_isdigit(c) || (c >= 'a' && c <= 'f'); }
 /* A NUL-terminated salt (modsalt.h). */
 static int mm_salt_ok(const char *salt) { return salt && sh_salt_valid(salt, strlen(salt)); }
 
-/* ==================================================================== */
-/* rows                                                                  */
-/* ==================================================================== */
-
 #define MM_ERR(...) do { if (err && err_cap) _snprintf_s(err, err_cap, _TRUNCATE, __VA_ARGS__); } while (0)
 
 void sh_modmanifest_row_free(sh_modmanifest_row *row)
@@ -215,10 +211,6 @@ static sh_modmanifest_row *mm_list_find(sh_modmanifest_list *list, const char *s
     return NULL;
 }
 
-/* ==================================================================== */
-/* grammar                                                               */
-/* ==================================================================== */
-
 int sh_modmanifest_valid_hash(const char *text, size_t length)
 {
     size_t i;
@@ -226,10 +218,6 @@ int sh_modmanifest_valid_hash(const char *text, size_t length)
     for (i = 0; i < length; i++) if (!mm_ishex(text[i])) return 0;
     return 1;
 }
-
-/* ==================================================================== */
-/* small JSON helpers                                                    */
-/* ==================================================================== */
 
 static const char *mm_ws(const char *p, const char *end)
 {
@@ -416,10 +404,6 @@ static void mm_put_quoted(mm_text *t, const char *s)
     if (buf != stack) free(buf);
 }
 
-/* ==================================================================== */
-/* registry choices                                                      */
-/* ==================================================================== */
-
 /* A slot as the manifest stores it: printable, no quote, tab or backslash. */
 static int mm_slot_ok(const char *slot)
 {
@@ -499,16 +483,11 @@ static size_t mm_choice_count(const char *lines)
     return n;
 }
 
-/* ==================================================================== */
-/* row value                                                             */
-/* ==================================================================== */
-
-/* A row object of an earlier Snapmap+ shape: an "id" or "bundle" member (before units existed; it names no unit). */
+/* 1 when a row object is of an earlier shape: an "id" or "bundle" member, or a "mod" of the form "<salt>@<build>". */
 static int mm_earlier_shape(const sh_json_object *object)
 {
     const char *mod;
     if (sh_json_object_get(object, "id") || sh_json_object_get(object, "bundle")) return 1;
-    /* Format 1 (before units): "mod": "<salt>@<build>"; it names no unit either. */
     mod = sh_json_object_get(object, "mod");
     return mod && mod[0] == '"' && strchr(mod, '@') != NULL;
 }
@@ -531,12 +510,12 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
     if (err && err_cap) err[0] = 0;
     if (!out) return 0;
     memset(out, 0, sizeof *out);
-    /* Depth 8: a module record (D-A30) nests its portals' bounds five levels below the row. */
+    /* Depth 8: a module record nests its portals' bounds five levels below the row. */
     if (!json || !length || !sh_native_json_parse_object(json, length, 8, &object)) {
         MM_ERR("row value is not a JSON object");
         return 0;
     }
-    /* An "id" or "bundle" row, or format 1's "<salt>@<build>" (Q4): the installer converts them. */
+    /* An earlier-shape row is refused. */
     if (mm_earlier_shape(&object)) {
         MM_ERR("the map was saved by an earlier Snapmap+; which this version does not read yet");
         goto done;
@@ -547,7 +526,7 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
         if (!mm_member_text(&object, "mod", mod, sizeof mod, 1)) { MM_ERR("row has no valid mod"); goto done; }
         ml = strlen(mod);
         if (ml == SH_MODMANIFEST_SALT_LEN) {
-            /* A local row follows its folder (D6a): the build it was saved from is not part of it. */
+            /* A local row follows its folder: the build it was saved from is not part of it. */
             memcpy(out->salt, mod, SH_MODMANIFEST_SALT_LEN + 1);
             strcpy_s(out->build, sizeof out->build, SH_MODMANIFEST_LOCAL_BUILD);
         } else {
@@ -601,8 +580,7 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
                 free((void *)units);
                 sh_json_object_free(&oo);
                 if (!good) { MM_ERR("row '%s' names its objects' units wrongly", out->salt); goto done; }
-                /* What a module stand-in needs (D-A30): kept as written; one that does not read is dropped and the
-                 * row stays (an absent module is then left out, as before). */
+                /* A module stand-in's record is kept as written; one that does not read is dropped and the row stays. */
                 {
                     const char *modules = sh_json_object_get(&object, "modules");
                     if (modules && *modules == '[') out->modules = sh_text(modules);
@@ -619,7 +597,7 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
     {
         const char *attached = sh_json_object_get(&object, "attached");
         out->attached = attached && !strcmp(attached, "true");
-        /* A pinned row used map-wide names "whole" (SPEC 2.7). */
+        /* A pinned row that names "whole" is map-level. */
         for (size_t u = 0; out->pinned && u < out->unit_count; u++)
             if (!strcmp(out->roots[u], "*")) out->attached = 1;
     }
@@ -687,7 +665,7 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
     if (!row) return NULL;
     if (!mm_salt_ok(row->salt) || !sh_modmanifest_valid_hash(row->build, strlen(row->build)))
         return NULL;
-    /* Format 2 (SPEC-distribution 2.7): the namespace, then a pinned row's units or a local row's placed names. */
+    /* The namespace, then a pinned row's units or a local row's placed names. */
     mm_put(&t, "{\"mod\":\"", 8);
     mm_put(&t, row->salt, strlen(row->salt));
     mm_put(&t, "\",\"name\":", 9);
@@ -749,10 +727,6 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
     if (out_length) *out_length = t.n;
     return t.p;
 }
-
-/* ==================================================================== */
-/* map text                                                              */
-/* ==================================================================== */
 
 /* Add a parsed row to `out`, merging a row of the same salt and build. */
 static int mm_merge_row(sh_modmanifest_list *out, sh_modmanifest_row *row)
@@ -883,10 +857,6 @@ done:
     free(value.p);
     return out;
 }
-
-/* ==================================================================== */
-/* placed names                                                          */
-/* ==================================================================== */
 
 enum { MM_KEY_OTHER = 0, MM_KEY_INHERIT, MM_KEY_MODULE, MM_KEY_EDIT };
 
@@ -1019,10 +989,6 @@ bad:
     return 0;
 }
 
-/* ==================================================================== */
-/* mod.json                                                              */
-/* ==================================================================== */
-
 /* The provides names and sizes of one product-block list into `out`. */
 static int mm_block_list(const char *list, sh_modmanifest_row *out)
 {
@@ -1108,10 +1074,6 @@ done:
     if (!ok) sh_modmanifest_row_free(out);
     return ok;
 }
-
-/* ==================================================================== */
-/* hooks                                                                 */
-/* ==================================================================== */
 
 static SRWLOCK g_current_lock = SRWLOCK_INIT;
 static sh_modmanifest_list g_current;
@@ -1200,7 +1162,7 @@ int sh_modmanifest_current_choose(const char *slot, const char *key)
     int ok = 1;
     if (!mm_slot_ok(slot) || (key && key[0] && !mm_salt_ok(key))) return -1;
     AcquireSRWLockExclusive(&g_current_lock);
-    /* Every other slot as it was, then this one (the order of choosing). */
+    /* Every other slot unchanged, then this one (the order of choosing). */
     for (p = g_choices; ok && mm_choice_next(&p, &one, &k);) {
         if (strcmp(one, slot)) ok = mm_choice_add(&next, one, k);
         free(one);
@@ -1268,7 +1230,7 @@ static int (*g_whole)(const char *build);
 void sh_modmanifest_set_whole(int (*fn)(const char *build)) { g_whole = fn; }
 
 /* 1 when the listing cannot say which types a row's ported demons have: a local row whose folder no local root serves
- * (D6a: it stands in), or a pinned row whose units are not all here (D60). Its recorded pins are then kept. */
+ * (it stands in), or a pinned row whose units are not all here. Its recorded pins are then kept. */
 static int mm_row_cannot_pin(const sh_modmanifest_row *r)
 {
     if (r->pinned) return g_whole && !g_whole(r->build);
@@ -1300,11 +1262,9 @@ static int mm_row_pins(const sh_modmanifest_row *r, const char *encounter)
     return found;
 }
 
-/* At a save: each choice on the row of the salt it names, and every ported demon's type of the listing pinned on
- * its mod's row (the choices' earlier pins give way to the types the map has now). A row whose content is not here
- * keeps the pins it was loaded with, as it keeps its module records (D60a): the listing served its stand-ins, not its
- * demons, so it cannot say their types, and a pin dropped here would give the type to another port on the next load
- * (R-LB1, R-LV8 L-F2..F4). A demon the listing pins wins over the recorded pin. */
+/* At a save: each choice goes on the row of the salt it names, and every ported demon's type the listing gave is pinned
+ * on its mod's row, replacing that row's earlier pins. A row whose content is not here keeps the pins it was loaded
+ * with, since the listing served its stand-ins and cannot say its demons' types; a demon the listing pins wins. */
 static void mm_choices_save(sh_modmanifest_list *rows)
 {
     char *lines, *slot, *key;
@@ -1388,7 +1348,7 @@ size_t sh_modmanifest_current_remove(const char *bundle)
     }
     g_current.count = w;
     ReleaseSRWLockExclusive(&g_current_lock);
-    if (dropped) mm_subst_drop(bundle);   /* the editor no longer serves it through another build */
+    if (dropped) mm_subst_drop(bundle);   /* its substitute goes with the row */
     return dropped;
 }
 
@@ -1655,8 +1615,7 @@ static void mm_subst_load(const sh_modmanifest_list *list, const char *json, siz
             backend_log(line ? line : "MODS: map: an installed build serves a declared one in the editor");
             free(line);
         } else if (why && why[0]) {
-            /* Held until the gate decides: for a published map this
-             * parse was not recognised as, the sentence is not the cause. */
+            /* Held until the gate decides: a gate that takes the parse says its own cause. */
             AcquireSRWLockExclusive(&g_current_lock);
             mm_note_hold(sh_textf("MODS: map: %s: %s", r->salt, why));
             if (placed && !g_refusal) g_refusal = sh_text(why);
@@ -1738,9 +1697,8 @@ static int mm_activate(const sh_modmanifest_list *rows, char (*extra)[SH_MODMANI
     hashes = (const char **)calloc(nrows + (size_t)nextra, sizeof *hashes);
     served = (char (*)[SH_MODMANIFEST_HASH_CAP])calloc(nrows ? nrows : 1, sizeof *served);
     if (!hashes || !served) { free((void *)hashes); free(served); return -1; }
-    /* A row is activated through the build that serves it now
-     * (sh_modserve_row_build), else the one the editor substitutes, else its
-     * own hash. */
+    /* A row is activated through the build that serves it (sh_modserve_row_build), else the one the editor
+     * substitutes, else its own hash. */
     for (i = 0; i < nrows; i++) {
         sh_modserve_bundle_ref ref;
         memset(&ref, 0, sizeof ref);
@@ -1775,9 +1733,8 @@ int sh_modmanifest_activate(const sh_modmanifest_list *rows)
 static sh_modmanifest_listed_fn volatile g_listed;
 void sh_modmanifest_set_listed(sh_modmanifest_listed_fn listed) { g_listed = listed; }
 
-/* A load's activation: its rows and every build its listing declares
- * beyond them, which is the placed names' closure the scope hook just
- * listed (a rawmap opened without rows places mods no row names). A My Maps load of the same map, saved, has a row for each. */
+/* A load's activation: its rows and every build its listing declares beyond them, the placed names' closure the scope
+ * hook just listed (a rawmap opened without rows places mods no row names). */
 static int mm_activate_load(const sh_modmanifest_list *rows)
 {
     sh_modmanifest_listed_fn listed = g_listed;
@@ -1808,10 +1765,8 @@ static int mm_carries_rows(const char *json, size_t length)
     return sh_carrier_part(json, length, "mods", NULL, NULL) == 1;
 }
 
-/* The open map's state that the last load replaced: its rows, registry
- * choices and substitutions. A launch the gate refuses
- * (sh_modmanifest_current_restore_previous) puts it back, so the editor's
- * map keeps its rows when the map whose parse replaced them never ran. */
+/* The open map's state that the last load replaced (rows, registry choices, substitutions); a launch the gate refuses
+ * puts it back (sh_modmanifest_current_restore_previous). */
 static struct {
     int valid;
     sh_modmanifest_list rows;
@@ -1898,8 +1853,8 @@ const char *sh_modmanifest_content_text(size_t *length)
     return t_content_text;
 }
 
-/* 1 when `r` is a local row whose namespace no local folder serves (D6a): nothing at the root serves it (its stand-in
- * composition from an earlier load counts as nothing). */
+/* 1 when `r` is a local row whose namespace no local folder serves: nothing at the root serves it, and a stand-in
+ * composition from an earlier load counts as nothing. */
 static int mm_local_absent(const sh_modmanifest_row *r)
 {
     sh_modserve_bundle_ref ref;
@@ -1911,8 +1866,8 @@ static int mm_local_absent(const sh_modmanifest_row *r)
     return !here;
 }
 
-/* 1 when `r` is a local row whose folder is here and no longer has a name the row lists (manager, 2026-11-24: the
- * map loads with those objects stood in beside the folder, never refused). */
+/* 1 when `r` is a local row whose folder is here but lacks a name the row lists: the map loads with those objects
+ * stood in beside the folder, never refused. */
 static int mm_local_lacks(const sh_modmanifest_row *r)
 {
     size_t k;
@@ -1930,9 +1885,8 @@ void sh_modmanifest_content_for(const char *json, size_t length, const sh_modman
     int failed = 0, lacks = 0;
     char **placed = NULL;
     if (!content || !rows) return;
-    /* The pinned rows, and each local row whose folder is not here, or is here and no longer has a name the row
-     * lists, as a row of no units under the composition hash of none (manager Q8, D6a): the cache composes its
-     * stand-ins (D60) and says the one sentence. */
+    /* The pinned rows, and each local row whose folder is not here or lacks a name the row lists, as a row of no units
+     * under the composition hash of none: the cache composes its stand-ins and says the one sentence. */
     memset(&rows_here, 0, sizeof rows_here);
     for (i = 0; i < rows->count; i++) {
         const sh_modmanifest_row *r = &rows->rows[i];
@@ -1956,7 +1910,7 @@ void sh_modmanifest_content_for(const char *json, size_t length, const sh_modman
     if (!rows_here.count) { sh_modmanifest_list_free(&rows_here); return; }
     placed_count = sh_modmanifest_placed_names(json, length, &placed, &failed);
     if (lacks && !failed) {
-        /* Beside a folder that is here, only what it no longer has stands in: a name it carries is the folder's. */
+        /* Beside a folder that is here, only the names it lacks stand in: a name it carries is the folder's. */
         size_t kept = 0;
         for (k = 0; k < placed_count; k++) {
             int theirs = 0;
@@ -2048,9 +2002,8 @@ static void mm_save_visit(void *context, const char *bundle_id, const char *bund
     }
     row = mm_list_find(&ctx->list, bundle_id, bundle_hash);
     if (!row) {
-        /* The stand-ins of a local row (the composition of no unit of its salt: the folder is not here, or no longer
-         * has some names) are that row, never a second one: their names join the salt's row, which takes the
-         * folder's build when the folder serves the rest (D6a). */
+        /* The stand-ins of a local row (the composition of no unit of its salt) are that row, never a second one: their
+         * names join the salt's row, which takes the folder's build when the folder serves the rest. */
         char none[SH_MODMANIFEST_HASH_CAP] = "";
         size_t k;
         int standins = sh_modmanifest_composition_hash(bundle_id, NULL, 0, none) && !strcmp(none, bundle_hash);
@@ -2135,10 +2088,9 @@ static int mm_save_attached(mm_save_ctx *ctx, const sh_modmanifest_list *attache
     return 1;
 }
 
-/* The rows of the open map that the save's closure did not name although its
- * entities still place names under their salt (the mod failed to build, or
- * its folder is gone): kept as they are, so the next load still declares what
- * the map places. 0 when memory runs out. */
+/* The rows of the open map that the save's closure did not name although its entities still place names under their
+ * salt (the mod failed to build, or its folder is gone): kept as they are, so the next load still declares them.
+ * 0 when memory runs out. */
 static int mm_save_keep_unserved(mm_save_ctx *ctx, char **names, size_t count)
 {
     sh_modmanifest_list cur;
@@ -2162,10 +2114,7 @@ static int mm_save_keep_unserved(mm_save_ctx *ctx, char **names, size_t count)
     return ok;
 }
 
-/* A row the save's closure found served by a composition (its build is the composition hash of one of the open
- * map's pinned rows) keeps that row's units: a downloaded map saved here keeps the units its rows name, and no unit
- * is computed at a save (D-A15). A row served by a local folder is written as a local row. 0 when memory runs out. */
-/* The version rule's notice (S9, D23a), raised by the bound sink (modpublished.c's notice queue). */
+/* The version rule's notice, raised by the bound sink (modpublished.c's notice queue). */
 static void (*g_notice)(const char *text);
 
 /* An object's name for a sentence from its placed name ("mods/<salt>/demons/marauder_boss" -> "Marauder boss"). */
@@ -2185,12 +2134,10 @@ void sh_modmanifest_set_notice(void (*fn)(const char *text)) { g_notice = fn; }
 static int (*g_carries)(const char *salt, const char *name);
 void sh_modmanifest_set_carries(int (*fn)(const char *salt, const char *name)) { g_carries = fn; }
 
-/* D23, the version rule (5.2, 5.10): a map holds one version of each mod. When the save finds a mod both in a pinned
- * row (names its units serve) and in a local row (names only the installed version serves: an object placed from it,
- * which the editor's overlay shows, D26), every placed object of that mod moves to the installed version: the two rows
- * become one local row, with S9. D23a: when the installed version lacks an object the pinned row places, the move does
- * not happen yet and the notice says why (owner question Q9: how the kept object's files travel in a local row). With
- * `say` 0 (a publish asking what a save would write) nothing is said. Returns 0 when memory ran out. */
+/* The version rule: a map holds one version of each mod. When a mod is in both a pinned row (names its units serve)
+ * and a local row (names only the installed version serves), every placed object of it moves to the installed version
+ * and the two rows become one local row, with a notice. When the installed version lacks an object the pinned row
+ * places, nothing moves and the notice says why; with `say` 0 nothing is said. Returns 0 when memory ran out. */
 static int mm_save_version(mm_save_ctx *ctx, int say)
 {
     size_t i, j, k;
@@ -2245,6 +2192,8 @@ static int mm_save_version(mm_save_ctx *ctx, int say)
     return 1;
 }
 
+/* A row served by a composition (its build is the composition hash of one of the open map's pinned rows) keeps that
+ * row's units, so no unit is computed at a save; a row served by a local folder is written as a local row. */
 static int mm_save_pins(mm_save_ctx *ctx)
 {
     sh_modmanifest_list cur;
@@ -2265,7 +2214,7 @@ static int mm_save_pins(mm_save_ctx *ctx)
             ok = sh_modmanifest_row_pin(r, (const char *const *)c->roots, units, c->unit_count);
             free((void *)units);
             if (ok && !sh_modmanifest_row_name(r)[0] && c->name) ok = sh_modmanifest_row_set_name(r, c->name);
-            /* The module records travel with the units (D-A30): a save keeps them as the load read them. */
+            /* The module records travel with the units: a save keeps them as the load read them. */
             if (ok && c->modules && !r->modules) ok = (r->modules = sh_text(c->modules)) != NULL;
             if (ok && c->size) r->size = c->size;
             if (ok && c->attached) r->attached = 1;
@@ -2276,9 +2225,9 @@ static int mm_save_pins(mm_save_ctx *ctx)
     return ok;
 }
 
-/* DS-WORDS: each row carries the name the author sees for every object the map places of its mod (its Toybox row's
- * name), so a notice on any machine names the object as the author named it, never by its unit's root. The installed
- * mods answer (the labeler); a name they do not know keeps the label the row was loaded with. */
+/* Each row carries the name the author sees for every object the map places of its mod (its Toybox row's name), so a
+ * notice on any machine names the object as the author named it. The installed mods answer (the labeler); a name they
+ * do not know keeps the label the row was loaded with. */
 static sh_modmanifest_labeler_fn volatile g_labeler;
 void sh_modmanifest_set_labeler(sh_modmanifest_labeler_fn fn) { g_labeler = fn; }
 
@@ -2314,9 +2263,8 @@ static void mm_save_labels(mm_save_ctx *ctx, char **names, size_t count)
     free(labels);
 }
 
-/* A local row whose folder is not here is served by its stand-ins (D6a), whose bundle's size the closure gave it: it
- * keeps the size and name the open map's row was loaded with, which say what the mod is (D6), as it stays a local
- * row. */
+/* A local row whose folder is not here is served by its stand-ins, whose bundle's size the closure gave it: it keeps
+ * the size and name the open map's row was loaded with, which say what the mod is. */
 static void mm_save_keep_absent(mm_save_ctx *ctx)
 {
     sh_modmanifest_list cur;
@@ -2388,7 +2336,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
         return mm_save_fallback(json, length, out_length, 0, "the saved map's JSON did not read cleanly");
     }
     /* What the map uses of Snapmap+ itself (a resized module, its own navigation) flags it as modded: a game without
-     * Snapmap+ cannot load it (PLATFORM, Vanilla stays vanilla). */
+     * Snapmap+ cannot load it. */
     ctx.list.uses = uses_fn ? uses_fn(json, length, (const char *const *)names, count) : 0;
     if (!stale && !attached.count && !sh_modserve_active() && !ctx.list.uses) {
         sh_modmanifest_names_free(names, count);
@@ -2411,7 +2359,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
         sh_modmanifest_list_free(&ctx.list);
         return mm_save_fallback(json, length, out_length, uses, "the serving layer reported an invalid mod, or memory ran out");
     }
-    /* What the map now lists: placed entities may have been added since the load. */
+    /* What the map lists: placed entities may have been added since the load. */
     if (scope) scope(&ctx.list, NULL, 0, SH_MODSERVE_AT_SAVE);
     if (ctx.list.count == 0 && !ctx.list.uses && !stale) return NULL;
 
@@ -2421,10 +2369,9 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
         if (ctx.list.rows[i].name_count > 1)
             qsort(ctx.list.rows[i].names, ctx.list.rows[i].name_count, sizeof(char *), mm_cstr_cmp);
     {
-        /* A publish's save hands its rows to the pin step (modpin.h, bound by modpublish.c while a publish is armed),
-         * which pins a copy for the published copy alone: the text the cloud save reads back from the slot gets them
-         * there (sh_modpublish_cloud_text). The slot and the open map keep the map's own rows, so the author's map
-         * follows their local folders, published or not, and a reopen of it is local too (owner, R-LB1 F6). */
+        /* A publish's save hands a copy of its rows to the pin step (modpin.h, bound by modpublish.c while a publish is
+         * armed), which pins them for the published copy alone; the slot and the open map keep the map's own rows, so
+         * the author's map follows their local folders. */
         sh_modmanifest_pin_fn pin = g_pin;
         if (pin) {
             sh_modmanifest_list copy;
@@ -2450,16 +2397,13 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     backend_log(line ? line : out ? "MODS: save manifest wrote its rows" : "MODS: save manifest FAILED");
     free(line);
     free(described);
-    /* The open map's record is what it now saves: `sh_mods map`, the Mods tab
-     * and the next listing read these rows, not the ones it was loaded with
-     * (a map opened from a rawmap had none). */
+    /* The open map's record is what it saves: the Mods tab, `sh_mods map` and the next listing read these rows, not the
+     * ones it was loaded with. */
     if (out) mm_set_current(&ctx.list);
     sh_modmanifest_list_free(&ctx.list);
     if (!out) out = mm_save_fallback(json, length, out_length, ctx.list.uses, "the new rows could not be written");
     return out;
 }
-
-/* ------------------------------------------------------------ the rows a save would write */
 
 int sh_modmanifest_rows_for(const char *const *names, size_t count, sh_modmanifest_list *out)
 {
@@ -2509,7 +2453,7 @@ int sh_modmanifest_version_rule(const char *const *names, size_t count)
         size_t j;
         int still = 0;
         if (r->pinned) continue;
-        /* the rule merged this salt only when no pinned row of it is left (D23a keeps both) */
+        /* the rule merged this salt only when no pinned row of it is left */
         for (j = 0; j < ctx.list.count && !still; j++) still = ctx.list.rows[j].pinned && !strcmp(ctx.list.rows[j].salt, r->salt);
         if (still) continue;
         for (k = 0; k < cur.count; k++)
@@ -2523,8 +2467,6 @@ int sh_modmanifest_version_rule(const char *const *names, size_t count)
     sh_modmanifest_list_free(&cur);
     return ctx.failed ? -1 : moved;
 }
-
-/* ------------------------------------------------------------ the listing (one rule for every mode) */
 
 typedef struct mm_listing {
     char (*hashes)[SH_MODMANIFEST_HASH_CAP];
@@ -2574,10 +2516,9 @@ static int mm_row_served_by(const sh_modmanifest_row *row, char out[SH_MODMANIFE
     return other;
 }
 
-/* The build a placed name (or its closure) lists. The closure resolves each name under the listing in force, which at
- * a load is the previous map's, so the build it reports may be one that map declared; the listing instead takes, per
- * salt, what the new map serves: the build its rows declare (already listed), else the build the row resolver names
- * for that salt in the open map's context (the root folder's for the player's own map). */
+/* The build a placed name (or its closure) lists. The closure resolves names under the listing in force, which at a
+ * load is the previous map's, so the listing takes per salt what the new map serves: the build its rows declare, else
+ * the one the row resolver names in the open map's context (the root folder's for the player's own map). */
 static void mm_listing_visit(void *context, const char *bundle_id, const char *bundle_hash, unsigned long long size,
                              const char *name)
 {
@@ -2609,7 +2550,7 @@ int sh_modmanifest_listing(const sh_modmanifest_list *rows, const char *const *n
         if (!_stricmp(r->salt, SH_MODMANIFEST_PRODUCT)) continue;
         if (sh_modmanifest_substituted(r->build, sub, sizeof sub) || mm_row_served_by(r, sub)) mm_listing_push(&l, sub);
         else mm_listing_push(&l, r->build);
-        /* A local row whose folder no longer has some of its names: their stand-ins serve beside the folder's build. */
+        /* A local row whose folder lacks some of its names: their stand-ins serve beside the folder's build. */
         if (mm_local_lacks(r) && sh_modmanifest_composition_hash(r->salt, NULL, 0, sub)) mm_listing_push(&l, sub);
         mm_listing_id(&l, r->salt);
     }

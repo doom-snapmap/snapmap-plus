@@ -1,32 +1,9 @@
-/* modmodule_test -- a multiplayer map served as a SnapMap module from a bundle
- * (lane P8i), over a synthetic install.
+/* modmodule_test -- a multiplayer map served as a SnapMap module from a bundle, over a synthetic install.
  *
- * The install holds what a multiplayer map ships (render model, collision,
- * navigation, sound BSP, light grid, occlusion tome, a light probe, a material
- * only gameresources has and an own-path mega material) plus a loose .pages
- * virtual texture at the install root. Covered:
- *   names: snapModule typing of maps/modules/<path>.decl (and not of a
- *     palette render model), the snapModuleInfo request a module needs, the
- *     pointer-only kinds, the stock restore rule;
- *   the builder: a module bundle of two authored decls and copies of the game
- *     files it reuses builds with 0 errors, each copy a pointer outside the size caps,
- *     restored stock decls outside the namespace without shadows, the loose
- *     .pages pointer hashed, the manifest loads back with the same hash;
- *   refusals: a carried .sbsp/.ambientsh/.tome/.pages that is not installed
- *     content (with and without the stock reader), a module without its
- *     snapModuleInfo, a module outside maps/modules/mods/<salt>/, a malformed
- *     module decl;
- *   serving: the module is served as a snapModule, a map's moduleName finds
- *     its bundle, pointers are answered with installed bytes, and the restored
- *     material decls are planned like shadows (left to the provider when the
- *     engine knows them).
- *
- * With SH_MODMODULE_SOURCE naming a source mod folder and SH_MODMODULE_DOOM
- * the install, the folder is built against the real installed game, its
- * mod.json is written, and the counts are printed.
- * SH_MODMODULE_PREFAB may name a module prefab (the acceptance placement file);
- * it is read with the Prefabs tab's own parser and must name the bundle's module.
- */
+ * Covers module typing and the snapModuleInfo request, the builder (authored decls, copies of game files as pointers,
+ * restored stock decls, the loose .pages pointer), refusals of uninstalled or malformed content, and serving.
+ * SH_MODMODULE_SOURCE and SH_MODMODULE_DOOM name a source mod folder and the install for a real-game build;
+ * SH_MODMODULE_PREFAB may name a module prefab that must name the bundle's module. */
 #include "heap_out.h"
 #include "../src/backend/modauthor.h"
 #include "../src/backend/modbundle.h"
@@ -155,10 +132,8 @@ static const sh_mb_file *find(const sh_mb_bundle *b, const char *request)
     return NULL;
 }
 
-/* A module mod: its two authored decls and copies of the game files it
- * reuses, under its own names (the build turns each identical copy into a
- * borrow) or, for a restore, at the game's own name. There is no author
- * alias for a game file. */
+/* A module mod: its two authored decls and copies of the game files it reuses, under its own names (the build turns
+ * each identical copy into a borrow) or, for a restore, at the game's own name. */
 static void make_module_mod(const char *dir, const char *decl_req, int with_info, const char *module_text)
 {
     mt_write(dir, "mod.json", "{\"name\":\"Arena\",\"snapmap-plus\":{\"format\":2,\"salt\":\"" ID "\"}}");
@@ -416,13 +391,9 @@ static void test_serving(const char *tmp, const char *install)
 
 /* ------------------------------------------------------ acceptance build ---- */
 
-/* The map validator (RepairAndMigrate's entity check, VK 0x14124f0b0 / GL
- * 0x14124e6e0) requires every entity's entityEntRefs and entityVarRefs slot
- * counts to equal its palette row's. Offline the palette is not available, so
- * check that entities with one inherit agree on both counts across the map:
- * a prefab cap written with no slots beside the map's own caps (one EntRef
- * slot each) is what made the first live placement fail with validator 4.
- * Returns the number of disagreeing entities. */
+/* The map validator (RepairAndMigrate's entity check, VK 0x14124f0b0 / GL 0x14124e6e0) requires every entity's
+ * entityEntRefs and entityVarRefs slot counts to equal its palette row's. Offline there is no palette, so this checks
+ * that entities with one inherit agree on both counts across the map. Returns the number of disagreeing entities. */
 typedef struct slot_row { char inherit[160]; long long ent, var; } slot_row;
 /* Collect each entity's inherit and slot counts; -1 when the document does not read. */
 static int slot_rows(const char *json, size_t len, slot_row *rows, int cap)

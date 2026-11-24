@@ -29,13 +29,8 @@
  *   sh_mods import "<path.zip>"    open a map's ZIP as File > Load Rawmap does
  *   sh_mods cancel                 stop the running release or retry
  *
- * release and retry run on a worker thread (modnet.c), one at a time;
- * their result lines print when they finish. build, rebuild and install take
- * the store lock.
- *
- * A folder without a drive or leading backslash is taken relative to the
- * mods folder (%LOCALAPPDATA%\snapmap-plus\mods\). Every step logs one MODS:
- * line to the backend log and the console, naming mods by name or folder.
+ * release and retry run on a worker thread (modnet.c), one at a time; build and install take the store lock.
+ * A folder without a drive or leading backslash is relative to the mods folder (%LOCALAPPDATA%\snapmap-plus\mods\).
  */
 #ifndef SNAPMAP_PLUS_MODCMD_H
 #define SNAPMAP_PLUS_MODCMD_H
@@ -58,7 +53,7 @@
                            "placing anything, 'sh_mods map remove \"<mod folder>\"' prints what removing that mod from the map " \
                            "deletes and '--yes' does it (one undo step), 'sh_mods uninstall \"<mod folder>\"' prints what " \
                            "uninstalling does (the open map cleaned of it, its undo history cleared, its Toybox rows, its " \
-                           "folder moved to the Windows Recycle Bin) and '--yes' does it."   /* Rebuild is retired (decision 23): Refresh */
+                           "folder moved to the Windows Recycle Bin) and '--yes' does it."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP_TAB: authoring. */
 #define SH_MODCMD_HELP_AUTHOR "Authoring: 'sh_mods new \"<name>\"' makes a mod folder named after the mod with a working " \
                               "example, 'sh_mods held [filter]' prints what the game was served under each name this " \

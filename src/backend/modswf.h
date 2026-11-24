@@ -1,56 +1,9 @@
-/* modswf.h -- serve installed mods' cooked Flash movies (.bswf) to the
- * engine's file-resource loader.
- *
- * Why a separate route: a cooked movie is an idFileResource. Its Load (vtable
- * +0x40, signature "FileResourceLoad") opens through the file system's
- * open-by-name slot +0x148, which the override provider answers, only while
- * the map-load lifecycle state is below 2. From 2 on it asks the resource
- * manager's file open (manager vtable +0x68), which reads the mounted
- * containers unless resource_loadLooseAssets is nonzero, and a miss becomes
- * an empty memory file returned as success. Every SnapMap movie is first
- * loaded at state 2 or above, so a bundle's movie never reached the provider.
- *
- * The route: one vtable-slot swap of idFileResource +0x40 (no code is
- * patched, nothing is stolen). For a request under generated/swf/ ending in
- * .bswf that the mod index serves, the replacement does what the engine's own
- * below-2 branch does, at any state: a named idFile_Memory at resource+0x38,
- * then the engine's open-into helper, which opens through +0x148 (the
- * provider, which serves the bundle file) and copies the bytes. Every other
- * request, and a served one whose open fails, goes to the original Load.
- * The engine functions are the ones the resolved Load itself calls (decoded
- * from its rel32 operands); the slot is the only qword in a read-only section
- * equal to the Load's address.
- *
- * Not used: resource_loadLooseAssets 1. It would also work (its loose branch
- * reaches +0x148 through GetTimestamp's forced fallback, GetFileLength and
- * ReadFile), but it is global: four readers on each executable, two of them
- * generic opens, and every file and JSON resource load at state 2 or above
- * would first walk the search paths on disk.
- *
- * When a served movie takes effect: the next Load of that resource. A movie
- * first loaded during a map is a level-1 resource, purged at map unload and
- * loaded again by the next map, so a shadow installed between maps applies
- * at the next map load without a restart. A movie resident since boot
- * (promoted to level 4 by idCommonLocal::Init) is never reloaded; it is
- * served only when the index exists at boot.
- *
- * Logs (backend log):
- *   MODS: swf: FileResource Load slot installed (...)
- *   MODS: swf: served <request> (<salt>) at load state N      first 32
- *   MODS: swf: open of served <request> failed (N); engine load used
- */
-/* The same route serves a SnapMap module's per-map files (verified live on
- * 13954591): BuildSoundWorld (VK 0x141151440 / GL 0x141150640),
- * idUmbraContext::SetTome (0x14181a4b0 / 0x14181b280) and
- * idAmbientLighting::LoadAmbientLighting (0x1418a1f20 / 0x1418983e0) each
- * ResourceMaterialize an idFileResource on the file-resource list at Play
- * (state 2 or above) and read its file's length; a container miss gave an
- * empty file and "file not found". A mod-served .sbsp, .ambientsh, .tome
- * or lightprobes/ .bimage takes the movie path above.
- *   MODS: file: served <request> (<salt>) at load state N      first 128
- *   MODS: file: <request> is not served by an installed bundle; engine load used
- *   MODS: file: open of served <request> failed (N); engine load used
- */
+/* modswf.h -- serves installed mods' cooked Flash movies (.bswf) and a SnapMap module's per-map files to the
+ * engine's file-resource loader. One vtable-slot swap of idFileResource +0x40 ("FileResourceLoad") makes the
+ * override provider answer a served request at any load state (the engine's own path reaches it only below 2). */
+/* BuildSoundWorld (VK 0x141151440 / GL 0x141150640), idUmbraContext::SetTome (0x14181a4b0 / 0x14181b280) and
+ * idAmbientLighting::LoadAmbientLighting (0x1418a1f20 / 0x1418983e0) materialize an idFileResource at Play
+ * (state 2 or above), so a mod-served .sbsp, .ambientsh, .tome or lightprobes/ .bimage takes the movie route. */
 #ifndef SH_MODSWF_H
 #define SH_MODSWF_H
 

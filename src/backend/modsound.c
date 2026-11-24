@@ -18,8 +18,6 @@
 #include "process_heap_scope.h"
 #endif
 
-/* ------------------------------------------------------------------ pure */
-
 int sh_modsound_leaf(const char *request, char *leaf, size_t cap)
 {
     static const char dir[] = "sound/soundbanks/pc/";
@@ -171,8 +169,6 @@ void sh_modsound_fill_desc(sh_modsound_file_desc *d, uint64_t size, void *handle
     d->device_id = device_id;
 }
 
-/* ------------------------------------------------------------------ stock banks: pure */
-
 int sh_modsound_decode_cookie_site(const uint8_t *s, uintptr_t *op_new, uintptr_t *cookie_ctor, uintptr_t *callback,
                                    uintptr_t *load_bank)
 {
@@ -276,8 +272,6 @@ const sh_modsound_need *sh_modsound_needs_find(const sh_modsound_needs *t, const
     return NULL;
 }
 
-/* ------------------------------------------------------------------ core */
-
 typedef int32_t (*open_fn)(void *self, const wchar_t *name, int32_t mode, const void *flags, uint8_t *sync,
                            sh_modsound_file_desc *desc);
 typedef int (*submit_fn)(void *hardware, const char *name);
@@ -293,13 +287,10 @@ static volatile LONG g_gen = 1;       /* LoadBanks generation: bumped after each
 static volatile LONG g_opened, g_open_failed, g_submits, g_pending;
 static int g_live;
 
-/* Process heap 0 around every engine call that allocates Wwise memory.
- * Wwise's allocation hook (VK 0x1419f5b10, GL 0x141a11bc0) is the engine
- * allocator with heap -1, which takes the top of the main thread's heap
- * stack: a LoadBanks run from the console while a map is open (s_loadBanks,
- * s_restart) put the new stream packages' pools in the map heap, the map
- * unload freed them, and the next streamed open walked a freed package
- * (VK 0x141ad832c). */
+/* Process heap 0 around every engine call that allocates Wwise memory. Wwise's allocation hook (VK 0x1419f5b10,
+ * GL 0x141a11bc0) is the engine allocator with heap -1, which takes the top of the main thread's heap stack, so a
+ * LoadBanks run with a map open (s_loadBanks, s_restart) would put the stream packages' pools in the map heap and
+ * the map unload would free them under the next streamed open. */
 #ifdef SH_MODSOUND_PURE
 typedef struct ms_scope { int active; } ms_scope;
 static int (*g_test_enter)(void);
@@ -414,12 +405,9 @@ static int ms_submit_one(void *hw, sh_modsound_bank *b, LONG gen, const char *ph
     if (!ok) { ms_log("%s: submit of %s FAULTED; not retried", phase, b->leaf); InterlockedExchange(&b->submitted_gen, gen); return 0; }
     InterlockedExchange(&b->submitted_gen, gen);
     InterlockedIncrement(&g_submits);
-    /* The wrapper returns AK_Success (1) when the async load was queued; its
-     * callback prints the outcome. */
-    /* The wrapper also answers 1 for a name its listed-bank filter excludes,
-     * having loaded nothing ("audio bank '<name>' excluded based on game mode
-     * SNAP"); the builder refuses such stems for a mod's own bank, so this is
-     * a bank that slipped past it. */
+    /* The wrapper answers AK_Success (1) when the async load was queued (its callback prints the outcome), and also
+     * for a name its listed-bank filter excludes, which loads nothing; the builder refuses such stems for a mod's
+     * own bank. */
     if (r == 1 && !sh_mbi_snapmap_loads(b->leaf))
         ms_log("%s: submit of %s (%s) refused: the engine's listed-bank filter excludes the name in SnapMap (its "
                "success answer loads nothing)", phase, b->leaf, b->bundle);
@@ -428,8 +416,6 @@ static int ms_submit_one(void *hw, sh_modsound_bank *b, LONG gen, const char *ph
                r == 1 ? "queued; expect 'async load success id <id> : <name>'" : "refused (see the WWise line above)");
     return 1;
 }
-
-/* ------------------------------------------------------------------ stock banks: the route */
 
 typedef void *(*ms_opnew_fn)(size_t size);
 typedef void *(*ms_ctor_fn)(void *self, const char *name);
@@ -473,8 +459,8 @@ static double ms_ms(LARGE_INTEGER a, LARGE_INTEGER b)
 static void ms_bank_cb(uint32_t bank_id, const void *in_memory, int32_t result, int32_t pool, void *cookie)
 {
     LONG i, n = InterlockedCompareExchange(&g_nstocks, 0, 0);
-    /* Newest first, and a slot answers once: the engine deletes each cookie,
-     * so a later cookie may reuse an earlier one's address. */
+    /* Newest first, and a slot answers once: the engine deletes each cookie, so a later cookie may reuse a deleted
+     * one's address. */
     for (i = n - 1; i >= 0; i--) {
         ms_stock *s = &g_stocks[i];
         double ms;
@@ -794,7 +780,6 @@ void sh_modsound_test_stock_reset(void)
 }
 #endif
 
-/* ------------------------------------------------------------------ engine */
 #ifndef SH_MODSOUND_PURE
 
 typedef struct ms_collect { sh_modsound_table *t; int banks; } ms_collect;
@@ -855,8 +840,8 @@ static void ms_rebuild_needs(void)
     }
 }
 
-/* The banks the open map serves: each served bank name and the file of the
- * build serving it now (sh_modserve_lookup, in the open map's context). */
+/* The banks the open map serves: each served bank name and the file of the build serving it
+ * (sh_modserve_lookup, in the open map's context). */
 static void ms_rebuild_banks(void)
 {
     sh_modsound_table *t = (sh_modsound_table *)calloc(1, sizeof *t);

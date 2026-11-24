@@ -1,44 +1,7 @@
-/* modpublished.h -- the published-map and offline-play gates of the mod system.
- *
- * A map whose manifest (modmanifest.h) names a mod build nothing on this
- * machine serves (sh_modserve_row_build) is held at the completion that would
- * launch it, its content is fetched into the content cache, and the map
- * either resumes with it activated, or the load is dropped with a notice. A map whose builds are all
- * served, and every map without manifest rows, passes through: the engine
- * sees no difference.
- *
- * Identification. The DeserializeFromJson detour (rawmap.c) reports each
- * parse here with the map object it filled and a classification by return
- * address (PublishedMapRead+0x12A: the offline read of the cache;
- * SnapMapReadSizeLimit+0x5D: the profile reader under PublishedMapComplete).
- * The completion that follows a read receives that same object in the same
- * frame, so a gate uses the record whose map is its map and which was made
- * since the last main-thread tick. The classification is only reported: any
- * other detour on DeserializeFromJson that rewrites the return address (a
- * debugger's or an overlay's) makes every parse look like another kind, and
- * a gate that required it would let every published map through.
- *
- * Hold points (both renderers):
- *   OnSnapPlay completion            (manager, request, metadata, map)
- *   browser published play           (browser, request, metadata, map)
- *   SnapMap feed published read      (feed widget, request, metadata, map);
- *                                    only its play action (3, at *request+8)
- *   PublishedMapCacheReady           (manager, request, metadata, map), joiner
- *   CacheMapForLobby, warm cache     (manager, id idStr*, revision idStr*), joiner
- *   LaunchLocalSnapMapForOfflinePlay (manager, localSavedModel*, map), My Maps
- *
- * The launch boundary (sh_modpub_launch_gate). Every published play ends in
- * PublishedMapLobbyLaunch (manager, flag) or PublishedMapOfflineLaunch
- * (manager, metadata, map). A launch in the frame of a parse whose rows are
- * still missing and that no gate decided (a completion this module does not
- * know) is held at the lobby launch, or refused at the offline launch, which
- * has no object left to resume with. So no launch path hands the engine a
- * published map whose mods are absent.
- *
- * Threads: every entry point except the fetch job runs on DOOM's main thread;
- * network waits run on the modnet worker; the dialog is polled from the
- * main-thread tick (sh_modpublished_poll). Nothing here blocks the engine.
- */
+/* modpublished.h -- the published-map and offline-play gates of the mod system: a map whose manifest names a mod build
+ * nothing here serves is held at the completion that would launch it, its content is fetched into the content
+ * cache, and it resumes activated or is dropped with a notice. A map whose builds are all served, and every map
+ * without manifest rows, passes through unchanged. */
 #ifndef SH_MODPUBLISHED_H
 #define SH_MODPUBLISHED_H
 
@@ -59,18 +22,17 @@ enum sh_modpublished_parse_kind {
     SH_MODPUB_PARSE_PUBLISHED_ONLINE = 2    /* PublishedMapComplete's profile-reader parse */
 };
 
-/* Classify a DeserializeFromJson call by its return address. OTHER until the
- * install has bound both read sites. */
+/* Classify a DeserializeFromJson call by its return address (PublishedMapRead+0x12A: the offline read of the cache;
+ * SnapMapReadSizeLimit+0x5D: the profile reader under PublishedMapComplete); OTHER until the install has bound both
+ * read sites. The result is only reported: another detour that rewrites the return address would make every parse
+ * look like another kind, so a gate matches its record by map object and frame instead. */
 int sh_modpublished_classify(const void *return_address);
 
-/* Called by the DeserializeFromJson detour after the native parse of `text`
- * (the text as the engine handed it, manifest rows included) into `out_map`;
- * `parsed` is the parser's result. The manifest step has already run, so the
- * current manifest (sh_modmanifest_current) is this parse's. Records, beside
- * those rows, the kind of read and, when a named build is missing, a copy of
- * the text for a later resume. A parse while a hold is pending abandons the
- * hold: another load has started. Parses this module issues are ignored. Off
- * the main thread it only invalidates the record. */
+/* Called by the DeserializeFromJson detour after the native parse of `text` (manifest rows included) into `out_map`;
+ * `parsed` is the parser's result and the current manifest (sh_modmanifest_current) is this parse's. Records the kind
+ * of read, those rows and, when a named build is missing, a copy of the text for a later resume. A parse while a
+ * hold is pending abandons the hold; parses this module issues are ignored, and off the main thread it only
+ * invalidates the record. */
 void sh_modpublished_parse_seen(int kind, const char *text, void *out_map, int parsed);
 
 typedef struct sh_modpublished_parse_info {
@@ -91,29 +53,28 @@ int sh_modpublished_last_parse_published(void);
 
 /* ------------------------------------------------------------ the hold */
 
-/* Main-thread tick (called after every native frame): ends the frame a parse
- * record belongs to, raises the pending
- * dialog, polls its answer, follows the fetch and resumes or drops. Idle cost:
- * two reads. */
+/* Main-thread tick (after every native frame): ends the frame a parse record belongs to, raises the pending dialog,
+ * follows the fetch and resumes or drops. Idle cost: two reads. Every other entry point also runs on the main
+ * thread; only the fetch job runs on the modnet worker. */
 void sh_modpublished_poll(void);
 
 /* 1 while a map is held (asking, fetching or resuming). */
 int sh_modpublished_holding(void);
 
-/* A published item serves the builds it was published with, on every
- * player's machine, its author's included, until its author publishes again
- * (the owner, 2026-11-17: an edited map is another map). The author's edits
- * serve in the editor and in a My Maps play of their own map. */
+/* A published item serves the builds it was published with, on every player's machine, its author's included, until
+ * its author publishes again; the author's edits serve in the editor and in a My Maps play of their own map. */
 
-/* The mod system's one notice queue: `text` (under 256 bytes) is raised
- * with a single Accept button by the tick once the dialog surface is idle
- * and no question is up; a later notice replaces one not raised yet. Used
- * by the gates and holds here and by the publish copy gate (modpublish.c).
+/* The mod system's one notice queue: `text` (under 256 bytes) is raised with a single Accept button once the dialog
+ * surface is idle and no question is up; a second notice joins one not raised yet when both fit, else replaces it.
  * Main thread. */
 void sh_modpublished_notice(const char *text);
 
 /* ------------------------------------------------------------ seam */
 
+/* Hold points (both renderers; the completions take manager, request, metadata, map):
+ *   OnSnapPlay completion; browser published play; SnapMap feed published read (play action only: 3, at *request+8);
+ *   PublishedMapCacheReady (joiner); CacheMapForLobby warm cache (manager, id, revision; joiner);
+ *   LaunchLocalSnapMapForOfflinePlay (manager, localSavedModel*, map; My Maps). */
 enum sh_modpub_hook {
     SH_MODPUB_ON_SNAP_PLAY = 0,
     SH_MODPUB_BROWSER_PLAY,
@@ -148,24 +109,15 @@ typedef struct sh_modpub_resume {
 #define SH_MODPUB_ROW_INCOMPLETE 2
 
 /* ------------------------------------------------------------ the hold
- * Every hold (published plays, lobby joins, My Maps, rawmap loads, the open editor map) counts the rows nothing serves
- * (the asset rule: modserve.h). Rows that name units (SPEC-distribution 5.7) are fetched at once
+ * Every hold counts the rows nothing serves (the asset rule: modserve.h). Rows that name units are fetched at once
  * into the content cache with no question, under the game's own progress line; what cannot be had stands in, with one
- * notice after the load (modcache.h, S2-S6). A row that names no unit (a local row, D6a) whose folder this computer
- * does not have plays with its objects stood in and one sentence (manager Q8: the parse's content step composed them),
- * which the gate says when it lets the map through; the load is refused only when no stand-in could be made, or when
- * a folder of the mod is here and does not carry every name the row lists. While the player has turned off "Play
- * maps whose mods include scripts" (sh_modpub_ops scripted_maps_allowed), a map whose units (its pinned rows: content
- * that came from elsewhere) carry scripts is not loaded, with that setting's sentence (modui.h SH_MODUI_SCRIPTS_OFF);
- * the player's own local rows never count. */
+ * notice after the load (modcache.h). A row that names no unit (a local row) whose folder this computer lacks plays
+ * with its objects stood in and one sentence, and is refused only when no stand-in could be made. */
 
-/* The manifest's substitute op (modmanifest.h sh_modmanifest_substitute_fn)
- * for an editor open of a map whose row nothing serves: nothing substitutes
- * (returns 0), and *why (malloc'd) says the mod is not installed on this computer:
- * that the editor opens the map without it, or, when the map's placed
- * entities use it (`placed`), that the editor cannot open the map and what to
- * do, the notice the player gets in place of the engine's damaged-save
- * dialog. */
+/* The manifest's substitute op (modmanifest.h sh_modmanifest_substitute_fn) for an editor open of a map whose row
+ * nothing serves: nothing substitutes (returns 0), and *why (malloc'd) says the mod is not installed on this computer:
+ * that the editor opens the map without it, or, when the map's placed entities use it (`placed`), that it cannot open
+ * the map and what to do, in place of the engine's damaged-save dialog. */
 int  sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed,
                                  char **why);
 
@@ -187,13 +139,11 @@ typedef struct sh_modpub_ops {
     int  (*poll)(void *c, int ticket);          /* an sh_engine_dialog_result */
     void (*release)(void *c, int ticket);
     /* The shell's screen and state as one token (0 unknown), -1 while it is moving to another screen. A notice is raised
-     * only on a settled screen and withdrawn when the game changes screen under it (R-LB1: an S3 notice showed through
-     * the RECOMMEND MAP popup after a published play). NULL: never withdrawn. */
+     * only on a settled screen and withdrawn when the game changes screen under it. NULL: never withdrawn. */
     long long (*screen)(void *c);
-    /* 1 while the editor shows a map (its screen is up over its edit), 0 not, -1 unknown. A parse no gate took is the
-     * editor's open only once the editor shows its map: its notice waits for that, and a read the editor never shows
-     * (the hub reads a map after its play, R-LB1) says nothing once the game has been idle without the editor for a
-     * while. NULL counts as -1 (the editor's at once). */
+    /* 1 while the editor shows a map, 0 not, -1 unknown. An untaken parse is the editor's open only once the editor
+     * shows its map, so its notice waits for that; a read the editor never shows says nothing once the game has been
+     * idle for a while. NULL counts as -1. */
     int  (*editor_open)(void *c);
     /* 1 while a map loads or Play runs (modui.h busy), 0 not. The wait above counts only idle time. NULL: never busy. */
     int  (*busy)(void *c);
@@ -216,10 +166,8 @@ typedef struct sh_modpub_ops {
     void (*log)(void *c, const char *line);
     /* One line on the game console. */
     void (*print)(void *c, const char *line);
-    /* A launch was refused (denied, dropped from its hold, or refused at
-     * once): nothing was launched, so the parse's rows must not stay
-     * declared (modui.h sh_modui_scope_launch_refused). Called after
-     * drop_ui for every hook but a rawmap load. */
+    /* A launch was refused (denied, dropped from its hold, or refused at once): the parse's rows must not stay
+     * declared (modui.h sh_modui_scope_launch_refused). Called after drop_ui for every hook but a rawmap load. */
     void (*launch_refused)(void *c, int hook);
     /* The player's setting "Play maps whose mods include scripts" (modui.h
      * sh_modui_scripted_maps_allowed): 1 on. NULL counts as on. */
@@ -230,15 +178,12 @@ typedef struct sh_modpub_ops {
      * shows while it downloads a published map), its text replaced in place:
      * `text` shows or updates it, NULL hides it. */
     void (*progress)(void *c, int hook, void *owner, const char *text);
-    /* The editor could not open a map because a mod one of its entities uses
-     * is not installed: the map is sound, so the engine's own "damaged" notice
-     * and its offer to replace the map with its published version are
-     * dismissed (recovery.h shield_note_refused_load). NULL counts as none. */
+    /* The editor could not open a map because a mod one of its entities uses is not installed: the engine's own
+     * "damaged" notice and its offer to replace the map are dismissed, as the map is sound (recovery.h
+     * shield_note_refused_load). NULL counts as none. */
     void (*refused_load)(void *c);
-    /* A lobby joiner whose map cannot be confirmed now (declined, refused,
-     * failed, or downloading) leaves the lobby the engine's own way, as its
-     * read-error handler does for a map the service does not have. NULL
-     * counts as none. */
+    /* A lobby joiner whose map cannot be confirmed (declined, refused, failed, or downloading) leaves the lobby the
+     * engine's own way, as its read-error handler does. NULL counts as none. */
     void (*leave_lobby)(void *c, int hook, void *owner);
     /* A joiner's warm cache answer this process never gated: the cold read is
      * started instead (the read toward CacheReady, whose gate checks the
@@ -249,16 +194,14 @@ typedef struct sh_modpub_ops {
      * counts as none. */
     void (*scope_play)(void *c, const char *why);
     /* The content cache (modcache.h), for rows that name units. content_complete: 1 when a pinned row's composition is
-     * on disk with nothing stood in (NULL counts as yes). content_notice: the one sentence of what the loaded map plays
-     * without (S2-S6), once (malloc'd), or NULL. content_pending: 1 while such a sentence waits. content_drop: forget
-     * it (a gate took the load). NULL counts as none. */
+     * on disk with nothing stood in. NULL counts as none, except content_complete (yes). */
     int  (*content_complete)(void *c, const sh_modmanifest_row *row);
     /* Why a pinned row's composition stands in: 1 with *mask the set of its absent units' causes (bit 1 << cause,
      * SH_CACHE_ABSENT_*; 0 when nothing is absent), 0 when no composition is on disk. NULL counts as 0. */
     int  (*content_causes)(void *c, const sh_modmanifest_row *row, unsigned *mask);
-    char *(*content_notice)(void *c);
-    int  (*content_pending)(void *c);
-    void (*content_drop)(void *c);
+    char *(*content_notice)(void *c);   /* the one sentence of what the loaded map plays without, once (malloc'd), or NULL */
+    int  (*content_pending)(void *c);   /* 1 while such a sentence waits */
+    void (*content_drop)(void *c);      /* forget it: a gate took the load */
     /* The open editor map's units arrived after it opened (SH_MODPUB_EDITOR_OPEN): what the open map serves follows
      * the new compositions (the index was rescanned; modserve.h sh_modserve_refresh_after_rescan). 1 the objects show
      * now, 2 they show when the map is opened again, 0 nothing changed, -1 unavailable. NULL counts as -1. */
@@ -273,38 +216,34 @@ typedef struct sh_modpub_ops {
 
 /* A joiner's lobby, as lobby_state answers it. */
 enum sh_modpub_lobby_place {
-    SH_MODPUB_LOBBY_GONE = 0,        /* this machine is in no game lobby now (it left, was kicked, the host left) */
+    SH_MODPUB_LOBBY_GONE = 0,        /* in no game lobby (left, kicked, or the host left) */
     SH_MODPUB_LOBBY_SAME = 1,        /* the lobby still hosts the held map */
-    SH_MODPUB_LOBBY_OTHER_MAP = 2    /* the lobby hosts another map now (the host chose one, or a playlist moved on) */
+    SH_MODPUB_LOBBY_OTHER_MAP = 2    /* the lobby hosts another map */
 };
 
 /* ------------------------------------------------------------ co-op lobbies (modlobby.h)
- * A joiner whose map names units downloads them in the lobby, with no question and no leave: its CacheReady stays held,
- * so it does not answer the host's map check, and the host's start waits for it (modlobby.h). The joiner tells the host
- * its progress, that the content is here, or that it failed. Only a download that cannot succeed (the content is not
- * all to be had, or the fetch failed) leaves the lobby the engine's way, the fallback of SPEC 5.11; so does a start the
- * host sends before the content is here (sh_modpub_joiner_start_held). Leaving the lobby otherwise (the joiner leaves
- * or is kicked, the host cancels or leaves) stops the download: what it fetched stays in the cache's partial files and
- * resumes from there the next time. */
+ * A joiner whose map names units downloads them in the lobby with no question: its CacheReady stays held, so it does
+ * not answer the host's map check and the host's start waits for it. Only a download that cannot succeed, or a start
+ * the host sends before the content is here (sh_modpub_joiner_start_held), leaves the lobby the engine's way; leaving
+ * otherwise stops the download, and what it fetched stays in the cache's partial files. */
 
 /* 1 when the published map `item` at `revision` was seen by a gate of this process with rows of content: a lobby on it
  * is a modded map's lobby, whose start the host holds for its members (modlobby.h). */
 int sh_modpub_lobby_map_modded(const char *item, const char *revision);
 
-/* The host's own content for that map (D-A41 Q2, R-LB1 F5). Every published play is a co-op lobby the player hosts,
- * so this decides a solo play too. Every player must play the same bytes:
+/* The host's own content for that map. Every published play is a co-op lobby the player hosts, so this decides a solo
+ * play too; every player must play the same bytes:
  *   SH_MODPUB_HOST_WHOLE   every pinned row is whole on this computer;
- *   SH_MODPUB_HOST_SHARED  a row stands in only for content no player can get: removed by moderation (S3), never
- *                          uploaded (S5), a DOOM file of another revision (S4b). Every player composes the same
- *                          stand-ins, so the host may start (modlobby.h sh_modlobby_standins_agree checks the joiners);
- *   SH_MODPUB_HOST_REFUSED a row lacks content some player could get (the store not reached S4, not asked S2, no
- *                          disk space, a newer Snapmap+ S6, a cause not known): the start waits, with the cause's
- *                          sentence in `out` (under 256 bytes, the native dialog body), e.g. "This map cannot be hosted
- *                          yet: the mod store could not be reached for Eternal Demons. Try again when it can be."
+ *   SH_MODPUB_HOST_SHARED  a row stands in only for content no player can get (removed by moderation, never uploaded,
+ *                          a DOOM file of another revision): every player composes the same stand-ins, so the host
+ *                          may start (modlobby.h sh_modlobby_standins_agree checks the joiners);
+ *   SH_MODPUB_HOST_REFUSED a row lacks content some player could get (store not reached, not asked, no disk space, a
+ *                          newer Snapmap+, an unknown cause): the start waits, with the cause's sentence in `out`
+ *                          (under 256 bytes, the native dialog body).
  * A map no gate saw answers SH_MODPUB_HOST_WHOLE. Main thread. */
 enum { SH_MODPUB_HOST_REFUSED = 0, SH_MODPUB_HOST_WHOLE = 1, SH_MODPUB_HOST_SHARED = 2 };
 int sh_modpub_lobby_host_content(const char *item, const char *revision, char *out, size_t cap);
-/* 1 when every player gets the same stand-ins for content absent for `cause` (SH_CACHE_ABSENT_*): S3, S5, S4b. */
+/* 1 when every player gets the same stand-ins for content absent for `cause` (SH_CACHE_ABSENT_*). */
 int sh_modpub_standin_shared(int cause);
 
 /* The joiner's lobby asked it to load (its start byte is set): 1 when a joiner's map content is still downloading in
@@ -312,64 +251,45 @@ int sh_modpub_standin_shared(int cause);
  * join again when the content is here. 0 lets the load run. Main thread. */
 int sh_modpub_joiner_start_held(void);
 
-/* The decision a hook detour asks for before calling its original. Returns 1
- * to pass through (call the original now, unchanged) and 0 when the call was
- * held (the detour returns without the original; CacheMapForLobby returns 0,
- * as its own cold branch does while a read is in flight). `id`/`revision` are
- * used by SH_MODPUB_CACHE_LOBBY; completions read them from `metadata`. */
+/* The decision a hook detour asks for before calling its original: 1 to pass through, 0 when the call was held
+ * (CacheMapForLobby then returns 0, as its own cold branch does while a read is in flight). `id`/`revision` serve
+ * SH_MODPUB_CACHE_LOBBY; completions read them from `metadata`. */
 int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, void *extra,
                      const char *id, const char *revision);
 
-/* The launch boundary, asked by the PublishedMapLobbyLaunch
- * (SH_MODPUB_LOBBY_LAUNCH, `map` NULL, `extra` the flag) and
- * PublishedMapOfflineLaunch (SH_MODPUB_OFFLINE_LAUNCH) detours. Returns 1 to
- * launch, 0 when the launch was held (lobby) or refused with the notice. Only a
- * parse of this frame that no gate decided and whose rows are still missing
- * stops a launch; launches without a parse (the lobby's own relaunch) pass. */
+/* The launch boundary, asked by the PublishedMapLobbyLaunch (SH_MODPUB_LOBBY_LAUNCH, `map` NULL, `extra` the flag) and
+ * PublishedMapOfflineLaunch (SH_MODPUB_OFFLINE_LAUNCH) detours. Returns 1 to launch, 0 when held (lobby) or refused
+ * with the notice. A launch in the frame of a parse that no gate decided and whose rows are still missing is held at
+ * the lobby launch or refused at the offline launch (no object left to resume with); launches without a parse pass. */
 int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra);
 
 /* ------------------------------------------------------------ rawmap loads
- * A rawmap (rawmap.c) carries the same manifest rows, and its mods have to be
- * installed before the engine parses it: a placed entity whose mod is absent
- * makes SnapMap's own validator refuse the map as corrupt. The rawmap layer
- * asks which rows are missing before any parse (the asset rule:
- * modserve.h sh_modserve_row_served) and, when some are, never hands the map
- * to the engine. The hold fetches the content of its pinned rows (the hold above,
- * as for every hold) and opens the rawmap again (the resume, hook
- * SH_MODPUB_RAWMAP_LOAD); a row that names no unit refuses it with one sentence.
- * Rows are only counted when the gates are bound (sh_modpub_test_set_ops, or
- * the install); otherwise nothing is missing and the rawmap loads as before. */
+ * A rawmap (rawmap.c) carries the same manifest rows, and its mods must be installed before the engine parses it,
+ * since a placed entity whose mod is absent makes SnapMap's own validator refuse the map as corrupt. The rawmap layer
+ * asks which rows are missing before any parse and never hands the map to the engine while some are; the hold
+ * fetches its pinned rows' content and opens the rawmap again (hook SH_MODPUB_RAWMAP_LOAD). Rows are only counted
+ * when the gates are bound; otherwise nothing is missing. */
 
 /* Read every row of `text` into *rows (cleared first; free with
  * sh_modmanifest_list_free) and return how many rows name a build nothing
  * serves under the asset rule. Changes nothing. */
 size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows);
 
-/* 1 when the rawmap may not open because the player turned off "Play maps
- * whose mods include scripts" and the compositions serving its pinned rows
- * carry scripts: a rawmap whose content came from elsewhere (a ZIP import
- * while the setting was on) follows the setting at every open, as a
- * downloaded map does at every launch. A rawmap of local rows only (the
- * player's own) is never refused. The caller tells the player
- * SH_MODUI_SCRIPTS_OFF. */
+/* 1 when the rawmap may not open because the player turned off "Play maps whose mods include scripts" and the
+ * compositions serving its pinned rows carry scripts. A rawmap of local rows only is never refused; the caller tells
+ * the player SH_MODUI_SCRIPTS_OFF. */
 int sh_modpub_rawmap_scripts_off(const sh_modmanifest_list *rows);
 
-/* Hold a rawmap load whose rows name missing content (as
- * sh_modpub_rawmap_missing gave it; the fetch fills the content cache).
- * `source` is the file name the messages use. Returns 1 held (its content is
- * being fetched), 0 when nothing is missing after all, -1 when it could not be
- * held (off the main thread, no gates, no memory); the -1 case raises the
- * refusal notice itself. Main thread. */
+/* Hold a rawmap load whose rows name missing content (from sh_modpub_rawmap_missing); `source` names the file in
+ * messages. Returns 1 held, 0 when nothing is missing, -1 when it could not be held (off the main thread, no gates,
+ * no memory), which raises the refusal notice itself. Main thread. */
 int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source);
 
-/* The refusal as the one-button notice shows it (shorter than 256 bytes,
- * names that do not fit summarized as "and K more"): `mods` are the mods' names;
- * `unreachable` selects the wording for a store that could not be
- * asked. */
+/* The refusal as the one-button notice shows it (under 256 bytes, names that do not fit summarized as "and K more"):
+ * `mods` are the mods' names, `unreachable` selects the wording for a store that could not be asked. */
 void sh_modpublished_compose_refusal(char *out, size_t cap, const char *const *mods, size_t count, int unreachable);
 
-/* A prefab's placement is not held here: a prefab carries units, and placing one never fetches or installs
- * (prefab_mods.h, D35). */
+/* A prefab's placement is not held here: a prefab carries units, and placing one never fetches or installs. */
 
 /* ------------------------------------------------------------ engine */
 /* The engine functions the published-map gates bind, each at its signature's address in the running image (or in a
@@ -393,11 +313,9 @@ const char *sh_modpub_check_sites(const sh_modpub_sites *sites, sh_modpub_bound 
 
 #ifndef SH_MODPUBLISHED_PURE
 #include "signatures.h"
-/* Bind the read sites, the metadata, map, dialog and lobby helpers and the
- * main-thread identity, then detour the six hold points and the two launch
- * boundary functions (all or none).
- * Install after the DeserializeFromJson detour and the engine dialog. Returns
- * 1 when the gates are armed. */
+/* Bind the read sites, the metadata, map, dialog and lobby helpers and the main-thread identity, then detour the six
+ * hold points and the two launch boundary functions (all or none). Install after the DeserializeFromJson detour and
+ * the engine dialog; returns 1 when the gates are armed. */
 int sh_modpublished_install(const sig_result *results, size_t count, const uint8_t *module_base);
 /* The lobby's progress line (the shell manager's, where a joiner's download shows): `text` shows or replaces it, NULL
  * takes it down. The host's waiting line (modlobby.h). Main thread. */

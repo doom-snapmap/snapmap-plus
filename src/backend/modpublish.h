@@ -1,45 +1,8 @@
-/* modpublish.h -- the publish side of the mod system (SPEC-distribution 5.3-5.5).
- *
- * A map that places mod objects reaches players with its mod content in the mod store, named by units (2.8):
- *
- *   FINISH        (PUBLISH on the publish screens) a map with mod rows is held with the screens up: on the modnet
- *                 worker the units of its local rows are computed (modpin.h), the store says which it holds, and what
- *                 it lacks is sized. Bytes to send: "Publishing uploads 212 MB of mod content that the mod store does
- *                 not have yet. Publish?" (S7), in the editor's own dialog over the screens; No leaves the author on
- *                 FINISH. Yes: the units go up with progress on the editor's pacifier. Then the screens close and the
- *                 engine's PublishStart runs. A row whose mod is not on this computer publishes local, players see
- *                 stand-ins for its objects, and S8 names them; a busy store past two minutes lets it go on, queued
- *                 (N27).
- *   save          the publish's save pins a copy of its rows to the prepared units (sh_modpublish_pin_save, bound
- *                 as modmanifest.h's pin step): the text the engine publishes (the cloud save's read of the slot,
- *                 sh_modpublish_cloud_text) names units, but for a row no folder here serves, which stays local. The open map and its slot keep their own rows. The
- *                 SerializeToJson detour (rawmap.c) reports the final text.
- *   PublishAfterSave  a text over the service bound (10,485,760 bytes) or an unreadable mod list is refused through
- *                 the engine's own PublishFail.
- *   PublishFeedPost   (the item id known) the save's units are claimed for the item (modclaim.h); a republish replaces
- *                 the set, a republish without rows releases it. A claim the store could not take is queued and retried
- *                 at every start. The engine call is never delayed.
- *   unpublish     the MapInfo screen's unpublish completion releases the item's claim (the store only).
- *   copy to My Maps   the two UI entries refuse, before any request, a published map whose cached text is over the
- *                 service bound.
- *   launch        queued claims and releases are retried, and claims whose units the store lost are repaired.
- *
- *   search tag    a publish whose save carries rows writes the search tag "mods" into the saved map's metadata when
- *                 it is absent: a player without Snapmap+ cannot play a map that needs mods. The cloud save re-reads
- *                 the local save's metadata from the profile (ReadLocalSaveMeta) instead of the editor's model, so the
- *                 tag has to be in the model WriteLocalSavedMapText writes: PublishStart arms it for the edit's local
- *                 id, and the next write of that local save, once the save observer has seen its rows, gets the tag.
- *   delete from My Maps   removes the local slot and the cloud-saved item only; a published item stays playable for
- *                 everyone. The delete completion therefore releases a claim only when its item is no longer
- *                 published: the feed post records a link (item -> cloud-saved item id and local id, in the "links"
- *                 section of mods\snapmap-plus.json); at delete, the linked items with a claim are checked against the
- *                 engine's own query of the items published from that cloud-saved item, and only an item missing from
- *                 a successful answer is released. No link, no claim, a link younger than an hour, a full search
- *                 page, a failed or late answer, or no cloud-saved id: nothing is released.
- *
- * Threads: every entry point runs on DOOM's main thread; store work runs on the modnet worker; the dialog and the job
- * results are polled from the main-thread tick (sh_modpublish_poll). Nothing here blocks the engine.
- */
+/* modpublish.h -- the publish side of the mod system. A map with mod rows is held at FINISH while the units of its local
+ * rows are computed and the units the store lacks are uploaded once the author agrees; its save then pins a copy of the
+ * rows and the feed post claims the units for the item. Unpublish and My Maps delete release claims (delete only when
+ * the item is no longer published), and the search tag "mods" is written into a publishing save's metadata. Every entry
+ * point runs on DOOM's main thread; store work runs on the modnet worker and its results are polled from the tick. */
 #ifndef SH_MODPUBLISH_H
 #define SH_MODPUBLISH_H
 
@@ -50,28 +13,22 @@
 extern "C" {
 #endif
 
-/* The published-map text bound the service enforces (the engine refuses its
- * own upload above 0xA00000 only after the item request was sent). */
+/* The published-map text bound the service enforces (the engine refuses its own upload above 0xA00000 only after the
+ * item request was sent). */
 #define SH_MODPUBLISH_TEXT_BOUND  10485760ull
 /* The search tag a publish with mods carries. */
 #define SH_MODPUBLISH_TAG "mods"
 /* Item -> saved-map links written at the feed post, in the store root. */
 #define SH_MODPUBLISH_LINKS_SECTION "links"   /* the section of mods\snapmap-plus.json */
 
-/* 1 when the record's "links" section names `item`: a map saved on this
- * machine was published as that item. */
+/* 1 when the record's "links" section names `item`: a map saved on this machine was published as that item. */
 int  sh_modpublish_item_linked(const char *item);
 /* A delete check waits this long for the engine's published-items answer. */
 #define SH_MODPUBLISH_DELETE_CHECK_MS 60000ull
 
-/* ------------------------------------------------------------ save */
-
-/* The SerializeToJson detour's report of the final saved text (rows
- * included). Main thread; elsewhere it only invalidates the record. A save
- * while a publish is held abandons the hold. */
+/* The SerializeToJson detour's report of the final saved text (rows included). Main thread; elsewhere it only
+ * invalidates the record. A save while a publish is held abandons the hold. */
 void sh_modpublish_save_seen(const char *text, size_t length);
-
-/* ------------------------------------------------------------ decisions */
 
 /* PublishStart(editorLocal, overwrite), before the engine's: 1 to call it now (a map without mod rows, or the resume
  * of a FINISH hold), 0 when a hold is on its way, or when a map with mod rows reaches it without its FINISH hold (the
@@ -79,10 +36,8 @@ void sh_modpublish_save_seen(const char *text, size_t length);
 int  sh_modpublish_publish_start(void *editor, unsigned char overwrite);
 
 /* The publish screens' PUBLISH on FINISH, after the game's own checks passed and before the screens close (the
- * MapProperties frame's gate call). 1 holds the publish with the screens up: the hold prepares, asks S7 in the editor's
- * own dialog over them (the one the game's publish errors use), uploads, then closes the screens and starts the
- * engine's PublishStart itself, then the frame's success event. 0 lets the frame go on (a map without mod rows).
- * Main thread. */
+ * MapProperties frame's gate call). 1 holds the publish with the screens up (prepare, ask in the editor's own dialog,
+ * upload, then close the screens and start PublishStart); 0 lets the frame go on (a map without mod rows). Main thread. */
 int  sh_modpublish_finish_gate(void *editor, unsigned char overwrite);
 
 /* The EditorFrame detour, after the engine's frame: a publish held at FINISH closes the screens and starts here, where
@@ -99,19 +54,15 @@ int  sh_modpublish_pin_save(struct sh_modmanifest_list *rows, const char *json, 
  * write is taken). Main thread. */
 void sh_modpublish_publish_started(const char *local_id);
 
-/* WriteLocalSavedMapText(localId, model, text), before the original, for
- * every local save the observer just reported: the search tag is made to
- * match the save. A save that carries rows gets it (ops.add_tag into `model`,
- * an idLocalSavedMapModel; the result, 1 added or 0 present), one without
- * rows loses it (ops.remove_tag; 2 removed, 0 absent). The model is copied
- * back to the editor after the write, so the edit's own list follows. An
- * armed publish's own write disarms the arm. -1 when the list could not be
- * changed, 0 when nothing was asked (no fresh save, no model). */
+/* WriteLocalSavedMapText(localId, model, text), before the original, for every local save the observer just reported:
+ * makes the search tag match the save (ops.add_tag when it carries rows, 1 added or 0 present; ops.remove_tag when not,
+ * 2 removed or 0 absent). An armed publish's own write disarms it. -1 when the list could not be changed, 0 when
+ * nothing was asked (no fresh save, no model). */
 int  sh_modpublish_save_tag(const char *local_id, void *model);
 
 /* The cloud save's read of a map's slot (ReadLocalSavedMapText, while it uploads a publish): the slot's text with the
  * publish's pinned rows (the published copy, HeapFree), or NULL to upload the slot as it is. The slot itself keeps the
- * map's own rows, so the author's map follows their folders (R-LB1 F6). Main thread. */
+ * map's own rows. Main thread. */
 char *sh_modpublish_cloud_text(const char *local_id, const char *text, size_t length, size_t *out_length);
 
 /* PublishAfterSave(editorLocal): 1 to call the original now, 0 when the
@@ -135,8 +86,7 @@ void sh_modpublish_deleted(const char *local_id, const char *cloud_id);
  * item, or !ok. Any thread; consumed on the main tick. */
 void sh_modpublish_published_result(unsigned ticket, int ok, const char *const *item_ids, int count);
 
-/* Copy to My Maps of (item id, revision): 1 to call the original, 0 when it
- * was refused (a notice is queued). */
+/* Copy to My Maps of (item id, revision): 1 to call the original, 0 when it was refused (a notice is queued). */
 int  sh_modpublish_copy_allowed(const char *item_id, const char *revision);
 
 /* Main-thread tick, after every native frame. Idle cost: a few reads. */
@@ -148,7 +98,8 @@ void sh_modpublish_launch(void);
 /* 1 while a publish is held (preparing, asking or uploading). */
 int  sh_modpublish_holding(void);
 
-/* S7: "Publishing uploads 212 MB of mod content that the mod store does not have yet. Publish?", under 256 bytes. */
+/* The upload question, "Publishing uploads 212 MB of mod content that the mod store does not have yet. Publish?", under 256
+ * bytes. */
 void sh_modpublish_compose_question(char *out, size_t cap, unsigned long long bytes);
 /* The pacifier's line: "Uploading mod content: 84 of 212 MB.", or "Preparing this map's mod content." for total 0. */
 void sh_modpublish_progress_text(char *out, size_t cap, unsigned long long done, unsigned long long total);
@@ -159,8 +110,6 @@ void sh_modpublish_size_text(char *out, size_t cap, unsigned long long bytes);
 /* The cached published text the copy gate measures:
  * <cache root>\<id>_<rev>_map.decl (malloc'd), or NULL. */
 char *sh_modpublish_cache_path(const char *item_id, const char *revision);
-
-/* ------------------------------------------------------------ seam */
 
 typedef struct sh_modpublish_ops {
     void *context;
@@ -197,7 +146,7 @@ typedef struct sh_modpublish_ops {
     /* The signed-in account's name (UTF-8; "" signed out): 1, or 0 when the game's read is not available. Main
      * thread. NULL: no name is read. */
     int  (*account_name)(void *c, char *out, size_t cap);
-    /* This publish made the computer's publishing key: the backup offer is pending (SPEC 4.2). NULL: nothing. */
+    /* This publish made the computer's publishing key: the backup offer is pending. NULL: nothing. */
     void (*key_made)(void *c);
     /* 1 when the Snapmap+ window is showing (it shows the backup offer itself). NULL or 0: the publish's notice says
      * where the offer is (SH_MODPUBLISH_KEY_MADE_TEXT). */
@@ -237,7 +186,6 @@ void sh_modpublish_test_set_link_min_age(long long seconds);        /* default 3
 void sh_modpublish_test_age_tag_arm(unsigned long long ms);         /* make the armed tag older */
 #endif
 
-/* ------------------------------------------------------------ engine */
 /* The engine functions the publish hooks read, each at its signature's address in the running image (or in a mapped
  * executable, for the image test). */
 typedef struct sh_modpublish_sites {
@@ -248,10 +196,9 @@ typedef struct sh_modpublish_bound {
     const void *toast, *screen_shell, *shell_manager, *record, *entry, *browser_state, *hide_progress;
     const void *tags_grow, *idstr_assign;
 } sh_modpublish_bound;
-/* Every byte the publish hooks rely on (PublishFail's toast, the two copy entries' record and model reads,
- * PublishStart's tag append and Save callback), checked in the functions' own code: NULL when each holds (*out
- * filled), else the name of the first check that failed, for the log. The bind and tests/modpub_sites_test.c both
- * run this function. */
+/* Every byte the publish hooks rely on (PublishFail's toast, the two copy entries' record and model reads, PublishStart's
+ * tag append and Save callback), checked in the functions' own code: NULL when each holds (*out filled), else the first
+ * check that failed. The bind and tests/modpub_sites_test.c both run this function. */
 const char *sh_modpublish_check_sites(const sh_modpublish_sites *sites, sh_modpublish_bound *out);
 
 /* The cloud-save request's read of the slot (CloudSaveSlotReadCall, VK 0x11BE407, GL 0x11BD7D7), the read the
@@ -293,19 +240,15 @@ const char *sh_modpublish_check_finish(const sh_modpublish_finish_sites *sites, 
 
 #ifndef SH_MODPUBLISH_PURE
 #include "signatures.h"
-/* Bind PublishAfterSave, PublishFail, PublishFeedPost, PublishStart (held for mod content), the editor's pacifier,
- * WriteLocalSavedMapText, the unpublish and delete completions and the two
- * copy entries (all or none), the tag-list helpers PublishStart uses and the
- * published-items query, register the save
- * observer, and run the launch step. Install after the engine dialog.
- * Returns 1 when the hooks are armed. */
+/* Binds the publish hooks (all or none): PublishAfterSave, PublishFail, PublishFeedPost, PublishStart (held for mod
+ * content), the pacifier, WriteLocalSavedMapText, the unpublish and delete completions, the two copy entries, the
+ * tag-list helpers and the published-items query; registers the save observer and runs the launch step. Install after
+ * the engine dialog. Returns 1 when the hooks are armed. */
 int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t *module_base);
 
-/* The search tag in an open edit's own tags (edit+0x998: the model the next
- * local save writes, which the cloud save copies). remove 0 asks: 1 present,
- * 0 absent, -1 unreadable. remove 1 takes it out: 1 removed, 0 absent, -1
- * failed (the hooks are not installed, or the list could not be written).
- * The Mods tab removes "mods" when a map's last mod is removed. Main thread. */
+/* The search tag in an open edit's own tags (edit+0x998, which the cloud save copies). remove 0 asks (1 present, 0
+ * absent, -1 unreadable); remove 1 takes it out (1 removed, 0 absent, -1 failed). The Mods tab removes "mods" when a
+ * map's last mod is removed. Main thread. */
 int sh_modpublish_edit_tag(void *edit, const char *tag, int remove);
 #endif
 

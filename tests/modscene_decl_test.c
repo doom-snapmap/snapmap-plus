@@ -1,13 +1,7 @@
-/* modscene_decl_test.c -- a mod's "scenes" block (modscene_decl.c, modscene_sigs.c).
- *
- * Offline: the grammar, its defaults and refusals, the namespace rule, the yaw-only pose algebra and where a scene plays (at the
- * node; at the player keeping their feet, with and without the turn toward the
- * anchor), and the queue of spawns that wait for a node's sync to start. With
- * build 13954591 executables as arguments: the two spawn signatures and the
- * sync-start detour's resolve uniquely at their recorded RVAs (its stolen
- * prologue as modscene_place.c counts it), the game's vtable slots +0x448 and
- * +0x458 hold exactly those functions, and the argument-less PostEventMS stub
- * the spawn posts "show" with is where the backend calls it. */
+/* modscene_decl_test.c -- a mod's "scenes" block (modscene_decl.c, modscene_sigs.c): the grammar, defaults and refusals,
+ * the namespace rule, the yaw-only pose algebra, where a scene plays, and the queue of spawns that wait for a node's
+ * sync. With build 13954591 executables as arguments it also checks the spawn signatures, the sync-start detour, the
+ * vtable slots +0x448 and +0x458 and the argument-less PostEventMS stub at their recorded RVAs. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

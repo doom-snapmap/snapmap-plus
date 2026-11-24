@@ -439,7 +439,7 @@ sh_scene_pose sh_scene_play_frame(const sh_scene_entry *e, sh_scene_pose node, s
 {
     sh_scene_pose first = player;
     if (reaimed) *reaimed = 0;
-    if (!e) return player;                       /* R313: the player's feet and view yaw */
+    if (!e) return player;                       /* the player's feet and view yaw */
     if (e->at_node) return sh_scene_node_frame(e, node);
     if (!e->has_player) return player;
     if (e->reaim) {

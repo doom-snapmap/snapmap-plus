@@ -1,17 +1,7 @@
 /* modenv.h -- the Graphics SDK's environments (docs/graphics-sdk.md, "Environment").
- *
- * An env decl whose first key is `type environment` names, in plain words, what it changes in the level's look: fog,
- * bloom, exposure, saturation, tint, brightness, vignette, grain, colour fringes, and how long it blends. It compiles
- * to two things DOOM 2016 draws with its own code:
- *
- *   - the env decl itself (inherit default; a renderParms block of the keys it names), for an area of the map
- *     (an `envarea` entity, idEnvArea, carries one env decl for its volume);
- *   - an fx decl the product derives, one FX_ENV_CHANGE item per 16 values (the view's own parm override, set with
- *     the fade-in and released with the fade-out when the fx stops: VK FUN_1416f0240 / GL FUN_1416f0bc0, case 0xb),
- *     played on the players' views by set_environment and stopped by clear_environment. Its emitter is
- *     sh_modprog_effect_emitter of it; both are the file's needs.
- *
- * Values may change over time (sdkvalues.h): in the env decl they are the parm block's own register program. */
+ * An env decl (first key `type environment`) compiles to the env decl itself (a renderParms block, carried by an
+ * `envarea` entity) and a derived fx decl of FX_ENV_CHANGE items, one per 16 values (VK FUN_1416f0240 / GL
+ * FUN_1416f0bc0, case 0xb), which set_environment plays on the players' views and clear_environment stops. */
 #ifndef SNAPMAP_PLUS_MODENV_H
 #define SNAPMAP_PLUS_MODENV_H
 

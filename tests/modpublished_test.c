@@ -1,28 +1,7 @@
-/* modpublished_test -- the published-map and offline-play gates: return-address
- * classification, pass-through for served builds, the hold, and what it does
- * with the rows a map names. A missing row that names units (pinned) is
- * fetched at the next tick with no question and a progress line ("Getting this
- * map's mod content: ..."), the content step composes it on a worker, and the
- * load activates and resumes with a fresh parse of the retained text; a failed
- * fetch (stopped, or out of memory), a fetched row that will not serve, and a
- * map whose served content carries scripts the player turned off drop the load
- * with one notice. A missing row that names no unit (a format 1 row nothing
- * serves, a format 2 local row) is refused at the next tick with one sentence
- * and nothing is fetched, for a published play, a My Maps play, a joiner and a
- * rawmap load. Also covered: a second load abandoning
- * the hold (also mid-fetch), the same map launched again mid-fetch, the
- * joiner's host re-check and the co-op lobby download, the warm-cache joiner
- * branch and My Maps play; a parse whose classification another detour broke,
- * the SnapMap feed's play and the launch boundary; the scripts gate (a map with a
- * pinned row whose served compositions carry scripts, never the player's own
- * local rows, never a joiner); the rawmap gate (rows counted under the asset
- * rule, pinned rows reaching the content step); the editor's open of a map and
- * its content; and the notice queue.
- *
- * The real map manifest (modmanifest.c) reads the rows; the engine, the content
- * cache and the store worker are doubles behind sh_modpub_ops. The worker
- * double runs the job on a real thread so the main-thread tick is exercised as
- * in the game. */
+/* modpublished_test -- the published-map and offline-play gates: return-address classification, pass-through for
+ * served builds, the hold, and what it does with the rows a map names (fetch, refusal, scripts gate, rawmap gate, editor
+ * open, joiner and lobby, notice queue). The real map manifest reads the rows; the engine, content cache and store worker
+ * are doubles behind sh_modpub_ops, the worker on a real thread so the main-thread tick runs as in the game. */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
 #include <windows.h>
@@ -135,7 +114,7 @@ static int f_served(const sh_modmanifest_row *row)
 
 /* ---- serving-layer doubles the real manifest calls ------------------------------------------ */
 
-/* The manifest's "MODS: map: <salt>: <sentence>" lines (ADD-V5 B5). */
+/* The manifest's "MODS: map: <salt>: <sentence>" lines. */
 static int g_map_notes;
 void backend_log(const char *line)
 {
@@ -524,8 +503,8 @@ static const char PINNED_AND_LOCAL[] =
     "\"objects\":{\"entities/tyrant\":\"" HASH_A "\"}},{\"mod\":\"" SALT_B "\",\"name\":\"Bob Room\",\"size\":42,"
     "\"local\":true}]}}";
 
-/* No guard stops a map from loading (manager, 2026-11-24): a local row that places nothing and whose mod is not here
- * (a mod used map-wide that was never published) goes on without it, with this sentence (pub_hold_local). */
+/* No guard stops a map from loading: a local row that places nothing and whose mod is not here (a mod used map-wide
+ * that was never published) goes on without it, with this sentence (pub_hold_local). */
 #define LOCAL_ONE "This map is playing without alex.pink-imp, which is not on this computer."
 /* A row that places objects whose stand-ins could not be written: the one refusal left. */
 #define NO_STANDINS \
@@ -549,8 +528,6 @@ static void wait_progress_sent(void)
 {
     for (int i = 0; i < 400 && !*(volatile int *)&F.progress_sent; i++) Sleep(5);
 }
-
-/* ---- co-op lobbies (SPEC 5.11, owner 2026-11-19; modlobby.h) ------------------------------------------------- */
 
 /* What the joiner told its host (modlobby.h codes), and where its lobby stands. */
 static struct { unsigned codes[64]; int count; int place; } g_lobby;
@@ -620,7 +597,7 @@ static void classification(void)
 }
 
 
-/* Manager Q8, D6a: a map whose local row's folder is not here loads with its objects stood in; the gate lets it
+/* A map whose local row's folder is not here loads with its objects stood in; the gate lets it
  * through with nothing to fetch, and says the parse's one sentence. A map that passes with nothing stood in says
  * nothing; a stale sentence never reaches the next map. */
 static void a_passing_map_says_its_stand_ins(void)
@@ -644,9 +621,9 @@ static void a_passing_map_says_its_stand_ins(void)
     tick(3);
     CHECK(g_content.said == 0 && F.asks == 0);
 
-    /* R-LB1 check 4: a published map whose row stayed local (its author's mod on no computer, S8) plays the same way
-     * for every player: the row's stand-in composition serves it (modserve.c ms_row_build, D6a), the gate lets it
-     * through with no hold and no store ask, and the stand-ins' one notice is said. */
+    /* A published map whose row stayed local (its author's mod on no computer, S8) plays the same way for every
+     * player: the row's stand-in composition serves it (modserve.c ms_row_build), the gate lets it through with no hold
+     * and no store ask, and the stand-ins' one notice is said. */
     printf("-- a published map whose row stayed local (S8) plays with stand-ins: no hold, no ask, one notice\n");
     reset();
     use_content();
@@ -712,9 +689,8 @@ static void vanilla_and_installed_pass_through(void)
 static void unrecognized_parse_is_still_gated(void)
 {
     printf("-- a parse whose return address another detour changed is still gated by its map object\n");
-    /* Observed live: with a second detour on DeserializeFromJson that rewrites
-     * the return address, every published read classified as OTHER and the
-     * browser completion passed a map whose six mods were missing. */
+    /* A second detour on DeserializeFromJson that rewrites the return address must not make a published read
+     * classify as OTHER and pass a map whose mods are missing. */
     reset();
     use_units();
     parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
@@ -947,7 +923,7 @@ static void one_notice_queue(void)
     tick(200);
     CHECK(F.asks == 1 && !strcmp(F.last_ask, "kept until the surface is free"));
 
-    /* R-LB1: a notice is raised on a settled screen, and withdrawn when the game changes screen under it, so nothing
+    /* A notice is raised on a settled screen, and withdrawn when the game changes screen under it, so nothing
      * of it draws through the game's own screens (the RECOMMEND MAP popup after a published play) */
     reset();
     F.screen = -1;   /* between screens */
@@ -1076,7 +1052,7 @@ static void second_load_abandons(void)
     CHECK(!sh_modpublished_holding());
     WaitForSingleObject(F.worker, 5000);
     CHECK(F.fetch_cancelled == 1 && F.resumes == 0 && F.activations == 0);
-    tick(2);   /* the retired job is freed once the worker returned */
+    tick(2);   /* the cancelled job is freed once the worker returned */
     CloseHandle(F.fetch_gate); F.fetch_gate = NULL;
 
     printf("-- the same map launched again mid-fetch is held with the first; the download goes on\n");
@@ -1157,7 +1133,7 @@ static void warm_cache_joiner(void)
     /* Never seen (cached in an earlier session): read cold, so CacheReady's gate checks it. */
     CHECK(sh_modpub_decide(SH_MODPUB_CACHE_LOBBY, MANAGER, NULL, NULL, NULL, METADATA, "rev1") == 0);
     CHECK(g_cold_reads == 1 && !sh_modpublished_holding());
-    /* With no way to read it again, the old pass (and its log line) stands. */
+    /* With no way to read it again, the pass already made (and its log line) stands. */
     g_cold_ok = 0;
     CHECK(sh_modpub_decide(SH_MODPUB_CACHE_LOBBY, MANAGER, NULL, NULL, NULL, METADATA, "rev1") == 1);
     g_cold_ok = 1;
@@ -1210,8 +1186,7 @@ static void my_maps_play(void)
     tick_until_idle();
     CHECK(F.resumes == 0 && F.activations == 0 && !sh_modpublished_holding());
 
-    /* A map that uses a mod map-wide that was never published and is not here: it goes on without it (manager,
-     * 2026-11-24: no guard stops a map from loading). */
+    /* A map that uses a mod map-wide that was never published and is not here goes on without it. */
     reset();
     parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
@@ -1311,7 +1286,7 @@ static void download_progress(void)
     tick(1);
     /* The progress line comes up at once; no dialog, now or later. */
     CHECK(sh_modpub_test_state() == 2 && F.asks == 0 && F.progress_up && F.progress_hides == 0);
-    /* the screen's one short line; the console's sentence (SPEC 5.7, R-LV9) */
+    /* the screen's one short line; the console's sentence */
     CHECK(!strcmp(F.last_progress, "Eternal Demons: 84 of 212 MB."));
     /* A download still running after two seconds: the line is updated in place, never taken down, and the console
      * says it too. */
@@ -1484,9 +1459,8 @@ static void rawmap_scripts_follow_the_setting(void)
     sh_modmanifest_list_free(&rows);
 }
 
-/* A rawmap's pinned rows reach the content step before its hold (R-LV2): the hold fetches a row's units into the
- * content cache only when the cache knows the row, so a rawmap whose rows were not noted took the retired build
- * route. The step gets the pinned row and the names the map places. */
+/* A rawmap's pinned rows reach the content step before its hold: the hold fetches a row's units into the content
+ * cache only when the cache knows the row. The step gets the pinned row and the names the map places. */
 static struct { int calls; size_t rows, pinned, placed; char first[96]; } g_content_seen;
 static void content_spy(const sh_modmanifest_list *rows, char *const *placed, size_t count)
 {
@@ -1515,7 +1489,7 @@ static void rawmap_pinned_rows_reach_the_content_step(void)
     CHECK(g_content_seen.calls == 1 && g_content_seen.rows == 1 && g_content_seen.pinned == 1);
     CHECK(g_content_seen.placed == 1 && !strcmp(g_content_seen.first, "mods/" SALT_A "/crate"));
     sh_modmanifest_list_free(&rows);
-    /* Local rows whose folders are not here reach the step as rows of no units (D6a, manager Q8): their objects
+    /* Local rows whose folders are not here reach the step as rows of no units: their objects
      * stand in. */
     memset(&g_content_seen, 0, sizeof g_content_seen);
     (void)sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows);
@@ -1524,8 +1498,7 @@ static void rawmap_pinned_rows_reach_the_content_step(void)
     sh_modmanifest_set_content(NULL);
 }
 
-/* R-LV4: a held load said what it played without twice, once at the hold and once at the load. A load says it once,
- * after the load ran, from what the fetch recorded. */
+/* A held load says what it played without once, after the load ran, from what the fetch recorded. */
 static void a_held_load_says_its_notice_once(void)
 {
     sh_modmanifest_list rows;
@@ -1576,7 +1549,7 @@ static void a_held_load_says_its_notice_once(void)
     parse(SH_MODPUB_PARSE_OTHER, PINNED_MAP, MAP);
     tick(2);
     tick_until_idle();
-    CHECK(F.fetch_calls == 1 && g_content.said == 1);   /* R-LV6: it fetched twice and said its notice after the second */
+    CHECK(F.fetch_calls == 1 && g_content.said == 1);   /* it fetches once and says its notice once */
     CHECK(said_notice("This map is playing without the Tyrant", 38));
 }
 
@@ -1588,7 +1561,7 @@ static void coop_lobby_joiner_downloads_in_the_lobby(void)
     F.fetch_gate = CreateEventA(NULL, TRUE, FALSE, NULL);
     join_pinned();
     tick(1);
-    /* D27 left the lobby here; now it stays, says nothing, and the host hears it is downloading. */
+    /* The joiner stays in the lobby, says nothing, and the host hears it is downloading. */
     CHECK(g_leaves == 0 && !sh_modpub_test_notice()[0]);
     CHECK(sent_code(SH_MODLOBBY_CODE_PROGRESS));
     CHECK(F.resumes == 0);                       /* no answer to the host's map check while it downloads */
@@ -1639,7 +1612,7 @@ static void coop_lobby_joiner_cannot_get_it(void)
     tick(2);
     CHECK(F.fetch_calls == 1 && F.resumes == 1 && F.resume_hook == SH_MODPUB_CACHE_READY && g_leaves == 0);
     CHECK(last_code() == SH_MODLOBBY_CODE_STANDS_IN && !sent_code(SH_MODLOBBY_CODE_FAILED));
-    g_content.causes = 1u << SH_CACHE_ABSENT_UNREACHABLE;   /* S4: another player could get it: it leaves, as before */
+    g_content.causes = 1u << SH_CACHE_ABSENT_UNREACHABLE;   /* S4: another player could get it: it leaves */
     reset();
     use_lobby();
     g_content.absent_after_fetch = 1;
@@ -1755,7 +1728,7 @@ static void coop_lobby_map_is_modded(void)
             got = sh_modpub_lobby_host_content(METADATA, "rev1", out, sizeof out);
             CHECK(got == CASES[i].expect);
             CHECK(CASES[i].says ? strstr(out, CASES[i].says) != NULL && strlen(out) < 256 : !out[0]);
-            CHECK(!strstr(out, "Play the map once online"));   /* the old advice, wrong for a removed unit */
+            CHECK(!strstr(out, "Play the map once online"));   /* advice that is wrong for a removed unit */
             if (got != CASES[i].expect || (CASES[i].says && !strstr(out, CASES[i].says)))
                 printf("   cause %d: %d \"%s\"\n", CASES[i].cause, got, out);
         }
@@ -1771,8 +1744,8 @@ static void coop_lobby_map_is_modded(void)
     }
 }
 
-/* D-A36 (R-LV6): a rawmap's units downloaded with "Keep downloading?" raised after two seconds. A map's content
- * downloads with a progress line only. */
+/* A map's units download with a progress line only: no "Keep downloading?" question is raised, even after two
+ * seconds. */
 static void units_download_without_a_question(void)
 {
     sh_modmanifest_list rows;
@@ -1795,8 +1768,8 @@ static void units_download_without_a_question(void)
     CloseHandle(F.fetch_gate); F.fetch_gate = NULL;
 }
 
-/* R-LV4: a map opened from My Maps whose Tyrant could not be had never asked the store again. An editor open that
- * stands in for objects asks the store at once, with no question, and its one notice is the answer. */
+/* An editor open that stands in for objects asks the store at once, with no question, and its one notice is the
+ * answer. */
 static void editor_open_fetches_its_content(void)
 {
     printf("-- an editor open that stands in for objects asks the store, with no question\n");
@@ -2045,10 +2018,9 @@ static void gate_editor_substitutes(void)
     reset();
 }
 
-/* The editor opens a My Maps map whose mod is gone (V13's "V13 crate", live 7491a99): with
- * an entity of the mod placed, the engine refused the map with its damaged-save dialog and
- * the player was not told why. The parse no gate takes now raises one plain notice; a map
- * that only declares the mod opens without it and raises none. */
+/* The editor opens a My Maps map whose mod is gone: with an entity of the mod placed, the engine refuses the map
+ * with its damaged-save dialog, so the parse no gate takes raises one plain notice; a map that only declares the
+ * mod opens without it and raises none. */
 static void editor_open_missing_placed_mod(void)
 {
     static const char PLACED[] =
@@ -2065,7 +2037,7 @@ static void editor_open_missing_placed_mod(void)
     CHECK(!sh_modpub_test_notice()[0]);
     tick(1);
     CHECK(g_map_notes == 1);
-    /* The engine's "damaged" notice for the same failed load is dismissed (R-PG1, R-CR1 live). */
+    /* The engine's "damaged" notice for the same failed load is dismissed. */
     CHECK(g_refused_loads == 1);
     tick(2);
     CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, "This map was not opened: Snapmap+ could not write the "
@@ -2089,10 +2061,8 @@ static void editor_open_missing_placed_mod(void)
     reset();
 }
 
-/* The cause sentence an editor-flagged parse finds for a row nothing serves
- * is said only after the gate: a published play the parse detour did not
- * recognise (the editor flag set) is gated, so it is never said; a parse no
- * gate takes (an editor open) says it once, at the next tick. */
+/* The cause sentence an editor-flagged parse finds for a row nothing serves is said only after the gate: a gated
+ * published play never says it; a parse no gate takes (an editor open) says it once, at the next tick. */
 static void gate_notes_after_the_decision(void)
 {
     printf("-- the gate: a row's cause is logged after the gate's decision, once\n");

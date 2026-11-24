@@ -1,13 +1,5 @@
-/* Module prefab cut and merge over synthetic idSnapMap JSON (no game needed).
- *
- * The source map has three modules:
- *   0: entities 56 (cap), 57 (door), 60 (relay), portals [56, 57], frame 70 on 57
- *   1: entities 58 (cap), 59 (cap), 61 (blocking box ticked for AI Navigation)
- *   2: entity 62 (cap), 63 (listener)
- *   global: 64 (player start)
- * plus wires 60->61, 61->60, 60->63 (crosses), 64->60 (crosses), entity
- * references 61 -> 60 (inside) and 63 -> 64 (outside), variable references
- * from 60 (number 1) and 63 (boolean 0), and frame entity 70 in module 0. */
+/* Module prefab cut and merge over a synthetic three-module idSnapMap JSON (no game needed): entities, portals,
+ * a frame, wires and entity or variable references that stay inside a module or cross it. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

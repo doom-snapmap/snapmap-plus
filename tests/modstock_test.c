@@ -1,41 +1,6 @@
-/* modstock_test -- stock pointers (Contract 1 file kind "stock") end to end
- * over synthetic installs, and a measurement over the real store.
- *
- * Two fake installs are written under a temporary folder: D1 with
- * gameresources (.resources and .patch, one stored slice and one raw-DEFLATE
- * slice), snap_gameresources holding the same path with other bytes, and two
- * loose files (base\ and the install root); D2, a "different game revision",
- * lacks one entry and holds another with other bytes. Covered:
- *   the bridge: match at the file's own path, a renamed copy, the .patch
- *     store, a loose file; identify, verify (OK, MISMATCH, ABSENT) and read;
- *   the builder: carried copies become pointers (no file hash, no size in the
- *     canonical text, not in the size total), a type outside the whitelist
- *     that is installed content becomes a pointer instead of a refusal, the
- *     retired author "stock" object refuses the folder, and the manifest
- *     loads back with the same hash;
- *   the store: no file and no tree entry for a pointer, verification resolves
- *     pointers, and fails with the first cause against D2;
- *   the store client: an upload sends only carried files (loopback stub), a
- *     download fetches only carried files and is refused before any fetch on
- *     D2;
- *   the campaign-only closure: a decl naming content only gameresources holds
- *     gains it as a pointer, transitively (animWeb -> md6Def -> mesh and
- *     skeleton), stable across a rebuild; snap_gameresources names gain
- *     nothing; a name no archive holds still fails; the file cap fails by name;
- *     derived again by every build (a pointer whose need is gone is dropped);
- *     an effect gains its campaign-only
- *     particle, ribbon, their materials and a transparency atlas, an
- *     entityDef its movie and the movie's atlas, and a virtual-textured
- *     material with an installed row no image;
- *   serving: a pointer is answered with the installed bytes, a carried copy of
- *     the same bytes in another bundle is not a conflict, and a pointer D2
- *     cannot answer falls through.
- *
- * Measurement (skipped unless SH_MODSTOCK_DATA names a mods store; the
- * install is SH_MODSTOCK_DOOM): for the Imp, both cyberdemon packs and the
- * doors pack, files total, files that become pointers and bytes not stored,
- * and the cost (index load, bytes hashed, time).
- */
+/* modstock_test -- stock pointers (the "stock" file kind) end to end over synthetic installs: the bridge,
+ * the builder, the store and its client, the campaign-only closure and serving. A measurement over the real
+ * store runs only when SH_MODSTOCK_DATA names a mods store (the install is SH_MODSTOCK_DOOM). */
 #include "heap_out.h"
 #include "../src/backend/modauthor.h"
 #include "../src/backend/modnet.h"
@@ -70,8 +35,6 @@ void backend_log(const char *line)
     size_t n = line ? strlen(line) : 0;
     if (n && g_log_n + n + 2 < sizeof g_log) { memcpy(g_log + g_log_n, line, n); g_log_n += n; g_log[g_log_n++] = '\n'; g_log[g_log_n] = 0; }
 }
-
-/* ------------------------------------------------------------ fixtures ---- */
 
 #define P_DECL  "generated/decls/entitydef/monster/stock_a.decl"
 #define P_IMAGE "generated/image/stock/b.bimage"
@@ -117,8 +80,6 @@ static void make_installs(const char *d1, const char *d2)
         write_container(d2, "gameresources", g, 3);
     }
 }
-
-/* ------------------------------------------------------------- bridge ---- */
 
 static void test_bridge(const char *d1)
 {
@@ -193,8 +154,6 @@ static void test_bridge(const char *d1)
     sh_modstock_set_install(d1);
 }
 
-/* ------------------------------------------------------------- builder ---- */
-
 static int stock_exists(void *ctx, const char *request) { (void)ctx; return sh_modstock_exists(request); }
 static const sh_mb_resolver RESOLVER = { NULL, NULL, stock_exists, NULL };
 
@@ -240,8 +199,6 @@ static void make_mod(const char *dir, const char *extra_json)
     put_req(dir, SALT_STOCK, P_IMAGE, IMG_B, sizeof IMG_B);
     put_req(dir, SALT_STOCK, REQ_COPY, IMG_B, sizeof IMG_B);
     put_req(dir, SALT_STOCK, REQ_OWN, OWN, sizeof OWN);
-    /* The earlier fixture also carried REQ_TOME, a .tome named under the mod's own folder (the game's tome as a
-     * pointer). A mod folder cannot spell that name now: native/ refuses mods/ and no folder takes a .tome. */
 }
 
 static void test_builder(const char *tmp)
@@ -289,14 +246,12 @@ static void test_builder(const char *tmp)
         sh_mb_free(&b);
     }
 
-    /* Refusals. The author's "stock" object is a retired key. */
+    /* Refusals. The author's "stock" object is refused. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod2", tmp);
     make_mod(dir, ",\"stock\":{\"" REQ_OWN "\":{\"source\":\"" P_IMAGE "\"}}");
     CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
     CHECK_CAUSE(b, SH_MB_EARLIER);
     sh_mb_free(&b);
-    /* (A .tome under the mod's own name that is not installed content was refused here; no folder of a mod holds
-     * a .tome now, so the case cannot be written.) */
 
     /* Without a reader nothing becomes a pointer: the files at game names
      * are then carried replacements. */
@@ -309,12 +264,9 @@ static void test_builder(const char *tmp)
     sh_modstock_register();
 }
 
-/* ------------------------------------- renamed copies, names, dead needs ---- */
-/* A third install (D3): 100 rows of one image size and extension before the
- * one a copy equals (more than the 64 candidates the matcher once stopped
- * at), one name both archives hold with other bytes, an md6 collision model
- * shipped only under generated/model/, and a stock md6Def naming a clip no
- * archive holds. */
+/* A third install (D3): 100 rows of one image size and extension before the one a copy equals (more than the
+ * 64 candidates the matcher considers), a name both archives hold with other bytes, an md6 collision model
+ * only under generated/model/, and a stock md6Def naming a clip no archive holds. */
 
 #define D3_MANY      100
 #define D3_LATE      "generated/image/z/late.bimage"
@@ -396,7 +348,7 @@ static void test_renamed_names_dead(const char *tmp)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c1", tmp);
     l1c_mod(dir, "entities\\death.decl",
             "{\r\n\tedit = {\r\n\t\trenderModelInfo = {\r\n\t\t\tmodel = \"md6/m/collision/c.lwo\";\r\n\t\t}\r\n\t}\r\n}\r\n");
-    /* Only the campaign archive holds it here, so it is brought along. */
+    /* Only the campaign archive holds it, so it is brought along. */
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.needs.local == 1 && b.needs.unresolved == 0);
     if (b.errors) fprintf(stderr, "  collision model: %s\n", sh_mb_first_cause(&b));
     f = find(&b, D3_COLLISION);
@@ -437,13 +389,8 @@ static void test_renamed_names_dead(const char *tmp)
     sh_mb_free(&b);
 }
 
-/* ------------------------------------------ campaign-only closure ---- */
-/* A fourth install (D4): an md6Def, its mesh and its skeleton only in
- * gameresources (the campaign archive SnapMap never loads), an image only in
- * snap_gameresources and one both archives hold. A mod's animWeb naming the
- * md6Def brings the chain along as pointers; names SnapMap loads on its own
- * add nothing; a name no archive holds still fails; the file cap fails with
- * the first name past it. */
+/* A fourth install (D4): an md6Def, its mesh and skeleton only in gameresources (the campaign archive SnapMap
+ * never loads), an image only in snap_gameresources and one both archives hold. */
 
 #define K_MD6    "generated/decls/md6def/k/wall.md6.decl"
 #define K_MESH   "generated/basemodel/k/wall.bmd6model"
@@ -518,8 +465,8 @@ static void test_campaign_closure(const char *tmp)
     CHECK(f && f->need_count == 3);
     CHECK(has_note(&b, "3 game files borrowed for completeness") && has_note(&b, "(first " K_MD6 ")"));
     CHECK(b.canonical && strstr(b.canonical, "\"source\":\"" K_SKL "\"") != NULL);
-    /* Campaign content derives the blacklist requirement the author never
-     * writes (DECISIONS 17), and a load of the written block agrees. */
+    /* Campaign content derives the blacklist requirement the author never writes, and a load of the written
+     * block agrees. */
     CHECK(b.requirements && !strcmp(b.requirements, "{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"));
     CHECK(has_note(&b, "derived: the mod brings campaign content"));
     CHECK(HO(cause, sh_mb_write(&b, dir, HO_P(0))));
@@ -572,8 +519,7 @@ static void test_campaign_closure(const char *tmp)
     CHECK_CAUSE(b, "needs md6Def k/none.md6, which resolves to nothing");
     sh_mb_free(&b);
 
-    /* No file cap (DECISIONS 26): 4095 carried images and the animWeb, and
-     * the closure still brings the campaign model along. */
+    /* There is no file cap: 4095 carried images and the animWeb still bring the campaign model along. */
     {
         unsigned n;
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close4", tmp);
@@ -631,12 +577,9 @@ static void test_closure_recomputed(const char *tmp)
     if (text) HeapFree(GetProcessHeap(), 0, text);
 }
 
-/* ------------------------------------- effects, movies and images ---- */
-/* A fifth install (D5), everything in gameresources only unless noted: a
- * particle and a ribbon (a bare name, as the game names its ribbons), the
- * materials they draw with, one naming a transparency atlas; a movie and its
- * atlas; two virtual-textured materials whose source images have standalone
- * rows, one with an installed virtual-texture row; a particle SnapMap holds. */
+/* A fifth install (D5), all in gameresources unless noted: a particle and a ribbon (a bare name), their
+ * materials (one naming a transparency atlas), a movie and its atlas, two virtual-textured materials (one
+ * with an installed virtual-texture row), and a particle SnapMap holds. */
 
 #define E_PRT     "generated/decls/particle/k/eyes.decl"
 #define E_RIB     "generated/decls/ribbon/k_trail.decl"
@@ -705,8 +648,7 @@ static void test_closure_effects(const char *tmp)
     make_install5(d5);
     sh_modstock_set_install(d5);
 
-    /* An effect naming a campaign-only particle and ribbon gains them, the
-     * materials they draw with and the transparency atlas one names; a
+    /* An effect naming a campaign-only particle and ribbon gains them, their materials and the atlas; a
      * particle SnapMap holds adds nothing. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\fx1", tmp);
     mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tfx00000\"},\"name\":\"Effect test\"}");
@@ -726,8 +668,7 @@ static void test_closure_effects(const char *tmp)
     CHECK(!find(&b, E_SNAPPRT) && has_note(&b, "5 game files borrowed for completeness"));
     sh_mb_free(&b);
 
-    /* An entityDef whose guiData names a campaign-only movie gains the cooked
-     * movie and its atlas. */
+    /* An entityDef whose guiData names a campaign-only movie gains the cooked movie and its atlas. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\swf1", tmp);
     mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tfx00000\"},\"name\":\"Movie test\"}");
     mt_write(dir, "entities\\panel.decl",
@@ -760,11 +701,8 @@ static void test_closure_effects(const char *tmp)
     sh_mb_free(&b);
 }
 
-/* ------------------------------------------- whole models, store path ---- */
-/* A sixth install (D6). SnapMap's archive: a mesh whose cooked header names
- * its skeleton, the skeleton and its default clip. The campaign archive: a
- * door model the same way (md6Def naming only the mesh), and the door's
- * animWeb, which a hand-made folder carries as its only file (a surface). */
+/* A sixth install (D6). SnapMap's archive holds a mesh whose cooked header names its skeleton, the skeleton
+ * and its default clip; the campaign archive holds a door model the same way and the door's animWeb. */
 
 #define M6_WEB  "generated/decls/animweb/k6/door_web.decl"
 #define M6_MD6  "generated/decls/md6def/k6/door.md6.decl"
@@ -828,10 +766,8 @@ static int has_need(const sh_mb_file *f, const char *type, const char *name)
     return 0;
 }
 
-/* A model is one unit: an md6Def's needs name its mesh, the skeleton the
- * cooked mesh names, and that skeleton's default clip, whether the mesh is
- * SnapMap's (names only, no pointer), the mod's own or campaign-only (the
- * closure brings all three). */
+/* An md6Def's needs name its mesh, the skeleton the cooked mesh names and that skeleton's default clip,
+ * whether the mesh is SnapMap's (names only), the mod's own or campaign-only (the closure brings all three). */
 static void test_whole_models(const char *tmp)
 {
     char d6[MAX_PATH * 2], dir[MAX_PATH * 2];
@@ -870,8 +806,7 @@ static void test_whole_models(const char *tmp)
     CHECK(b.canonical && strstr(b.canonical, "s6/card.md6skl/_default.md6anim") != NULL);
     sh_mb_free(&b);
 
-    /* A campaign-only md6Def naming only its mesh: the closure brings the
-     * mesh, the skeleton the mesh names and its default clip. */
+    /* A campaign-only md6Def naming only its mesh: the closure brings the mesh, its skeleton and the clip. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\model2", tmp);
     mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tmodel00\"},\"name\":\"Model test\"}");
     mt_write(dir, "decls\\animweb\\door.decl",
@@ -883,13 +818,8 @@ static void test_whole_models(const char *tmp)
     sh_mb_free(&b);
 }
 
-/* The store's own build (the rescan's, in place, with every installed bundle
- * in its resolver) derives the same closure as a bare build: another mod
- * pointing at the same campaign files is served only where a map declares
- * it, so it does not stand in for this one's pointers (V2: the SP doors
- * folder's live rebuild wrote none). A hand-made folder whose only file is a
- * surface (the game's own animWeb) is built by the rescan with its pointers,
- * and an unchanged rebuild, with its own earlier build installed, keeps them. */
+/* The store's own build, with every installed bundle in its resolver, derives the same closure as a bare
+ * build: another mod pointing at the same campaign files does not stand in for this one's pointers. */
 static void test_closure_store_path(const char *tmp)
 {
     char d6[MAX_PATH * 2], store[MAX_PATH * 2], other[MAX_PATH * 2], surf[MAX_PATH * 2], key[HO_TEXT + 1];
@@ -931,16 +861,13 @@ static void test_closure_store_path(const char *tmp)
     }
     memcpy(hash, b.hash, sizeof hash);
     sh_mb_free(&b);
-    /* A second rescan finds it current; a forced rebuild in place, with its
-     * own earlier build installed, derives the same set and hash. */
+    /* A second rescan finds it current; a forced rebuild in place derives the same set and hash. */
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.failed == 0);
     CHECK(HO2(key, cause, sh_ms_install_from_folder(surf, &RESOLVER, HO_P(0), &st, &b, HO_P(1))));
     CHECK(b.stock_count == 5 && !strcmp(b.hash, hash) && find(&b, M6_SKL) && find(&b, M6_SKL)->closure);
     sh_mb_free(&b);
     sh_ms_set_root(NULL);
 }
-
-/* ------------------------------------------------- store, sync, serve ---- */
 
 /* Files below `dir`, recursively. */
 static int count_files(const char *dir)
@@ -984,8 +911,8 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     CHECK(st.stock_files == 2 && st.copied == 3);
     strcpy_s(hash, sizeof hash, b.hash);
     sh_mb_free(&b);
-    /* DECISIONS 10: the store folder keeps every file the folder held, the
-     * game's own copy included; the closure's pointers are in mod.json only. */
+    /* The store folder keeps every file the folder held, the game's own copy included; the closure's pointers
+     * are in mod.json only. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", store, key);
     CHECK(count_files(path) == 4);   /* mod.json and the three files */
     {
@@ -1044,8 +971,6 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     sh_modstock_set_install(d1);
 }
 
-/* --------------------------------------------------------- measurement ---- */
-
 static void measure(const char *data, const char *doom)
 {
     LARGE_INTEGER fq, t0, t1;
@@ -1096,11 +1021,8 @@ static void measure(const char *data, const char *doom)
     sh_modstock_set_install(NULL);
 }
 
-/* --------------------------------------------- render programs (D7) ---- */
-/* A seventh install: a campaign program tw (decl, cooked .bin, SPIR-V and one
- * permutation, all CRLF text and valid headers) and tp, whose permutation
- * lacks its .bin, only in gameresources; a SnapMap program sw and a SnapMap
- * entityDef in snap_gameresources. */
+/* A seventh install (D7): campaign programs tw (decl, cooked .bin, SPIR-V and one permutation, CRLF text)
+ * and tp (permutation without its .bin) in gameresources; a SnapMap program sw and entityDef. */
 
 #define R7_TW_DECL  "generated/decls/renderprog/tw.decl"
 #define R7_TW_BIN   "generated/renderprogs/tw_pc_vulkan.bin"
@@ -1216,11 +1138,8 @@ static void r7_write_bytes(const char *dir, const char *request, const r7_blob *
     put_req(dir, "tident07", request, blob->p, blob->n);
 }
 
-/* Identity of decl-grammar text is textual: a copy at a game name that
- * differs only in line ends is the game's file (a pointer recording the
- * game's hash), permutation decls included; an edited copy of a decl is still
- * an edit; an edited permutation is refused with what to do, never as a
- * binary. */
+/* Decl-grammar identity is textual: a copy differing only in line ends is the game's file (a pointer),
+ * permutation decls included; an edited decl is an edit and an edited permutation is refused. */
 static void test_text_identity(const char *tmp)
 {
     char d7[MAX_PATH * 2], dir[MAX_PATH * 2], sha[65];
@@ -1291,11 +1210,8 @@ static void test_text_identity(const char *tmp)
     sh_mb_free(&b);
 }
 
-/* The closure follows a material's shader: a material naming a campaign-only
- * program brings the program whole (decl, cooked .bin, SPIR-V, the
- * permutation's decl, .bin and SPIR-V), one naming a SnapMap program records
- * the name and brings nothing, and a campaign program whose permutation lacks
- * its .bin fails the build naming that file. */
+/* The closure follows a material's shader: a campaign-only program comes whole (decl, .bin, SPIR-V and the
+ * permutation's), a SnapMap program records only its name, and a missing permutation .bin fails the build. */
 static void test_shader_closure(const char *tmp)
 {
     static const char *const whole[] = { R7_TW_DECL, R7_TW_BIN, R7_TW_VS, R7_TW_FS, R7_TW_PERM, R7_TW_PBIN, R7_TW_PVS,
@@ -1344,8 +1260,7 @@ static void test_shader_closure(const char *tmp)
     CHECK(!has_note(&b, "borrowed for completeness"));
     sh_mb_free(&b);
 
-    /* A campaign program whose permutation has no .bin: the build fails
-     * naming it, so a partial program is never served. */
+    /* A campaign program whose permutation has no .bin fails the build, so a partial program is never served. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\shade3", tmp);
     mt_write(dir, "mod.json", "{\"name\":\"Shader closure\"}");
     r7_write_lf(dir, "generated/decls/material/mods/tident07/broken.decl", "{\nstageprogram\ttp\n}\n", "");

@@ -1,17 +1,5 @@
-/* modzip_test -- the ZIP reader against hostile archives.
- *
- * A valid archive written by the product's writer is read back; then every
- * truncation of it, every single-byte change of its directory and local
- * records, and a set of built hostile archives (an unknown or folder method,
- * an encrypted entry, ZIP64 size markers, a local record or data past the
- * directory, a stored entry whose sizes differ, a NUL in a name, two names
- * that differ only in case, a directory larger than its entries, a huge
- * declared size) are opened and every entry they admit is read. A ZIP64
- * archive as another tool writes it reads back and gets the same truncation,
- * byte and random damage; the writer past 65,535 entries (and, with
- * SH_ZIP_LARGE=1, past 4 GiB) writes ZIP64 records the reader reads. Nothing may
- * crash or hang; every refusal is one sentence, and a refusal of the
- * archive's structure names the next step. */
+/* modzip_test -- the ZIP reader against truncated, damaged and hostile archives, ZIP64 included: nothing
+ * may crash or hang, and every refusal is one sentence that names the next step for a structural fault. */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
 #include <windows.h>
@@ -219,8 +207,6 @@ static void fuzz(void)
     free(z);
 }
 
-/* ---------------------------------------------------------------- ZIP64 */
-
 static unsigned crc32_of(const unsigned char *p, size_t n)
 {
     unsigned c = 0xFFFFFFFFu, k;
@@ -234,10 +220,8 @@ static unsigned crc32_of(const unsigned char *p, size_t n)
 
 static void put64(unsigned char *p, unsigned long long v) { put32(p, (unsigned)v); put32(p + 4, (unsigned)(v >> 32)); }
 
-/* The two entries of the good archive written as another tool writes ZIP64:
- * "a.txt" with its sizes as markers and the values in its local and central
- * ZIP64 extras, "dir/b.txt" with its local record offset as a marker, and the
- * ZIP64 end record and locator ahead of an end record of markers. */
+/* The good archive's two entries written as another tool writes ZIP64: "a.txt" with size markers and the
+ * values in ZIP64 extras, "dir/b.txt" with an offset marker, and a ZIP64 end record and locator. */
 static unsigned char *g_z64;
 static size_t g_z64_len;
 
@@ -338,7 +322,7 @@ static void zip64_reads(void)
         for (i = 0; i + 4 <= g_z64_len; i++)
             if (g_z64[i] == 0x50 && g_z64[i + 1] == 0x4b && g_z64[i + 2] == 1 && g_z64[i + 3] == 2) { cd = i; break; }
         memcpy(z, g_z64, g_z64_len);
-        put16(z + cd + 46 + 5 + 2, 16);   /* a.txt's central extra now leaves the offset out */
+        put16(z + cd + 46 + 5 + 2, 16);   /* a.txt's central extra leaves the offset out */
         CHECK(spit(z, g_z64_len) && !exercise(cause, sizeof cause) && strstr(cause, "file list is damaged"));
         memcpy(z, g_z64, g_z64_len);
         put32(z + cd + 20, 5);            /* a.txt's compressed size is no marker, the extra still holds it */
@@ -385,7 +369,7 @@ static void zip64_many(void)
     CHECK(b && n == 11 && !memcmp(b, "f/69999.txt", 11));
     free(b);
     sh_zip_reader_close(&r);
-    /* A small archive stays the ordinary ZIP it always was. */
+    /* A small archive stays an ordinary (non-ZIP64) ZIP. */
     CHECK(sh_zip_writer_open(&w, wp) && sh_zip_writer_add(&w, "a.txt", "hello", 5) && sh_zip_writer_finish(&w));
     sh_zip_writer_free(&w);
     z = slurp(g_path, &len);

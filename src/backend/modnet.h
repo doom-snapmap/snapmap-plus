@@ -1,32 +1,13 @@
-/* modnet.h -- the backend's HTTP client for the mod store (SPEC-distribution section 10).
- *
- * The store keeps units (the closure of one placed object, named by the SHA-256 of its manifest, modunit.h) and their
- * files (blobs, named by their SHA-256); a published map claims the units its rows name (modclaim.h). Reads are
- * anonymous; every write is signed by the publisher's key (modkey.h). The transport is untrusted: the content cache
- * (modcache.h) checks every manifest and blob against the hash a map names before anything serves (I10).
- *
- * Transport: WinHTTP, one process-wide session. The base URL is the product setting "mods.store" (config.c; default
- * https://api.snapmapplus.com). HTTPS only, TLS 1.2 or newer; plain http is accepted for a loopback host (127.0.0.1,
- * localhost, [::1]) so tests can run a local store. The system's own proxy configuration is used (none for loopback);
- * redirects are never followed. Every request with a body sends Content-Length and the User-Agent
- * "snapmap-plus/<version>". Timeouts: resolve and connect 15 s, send and receive 30 s per operation step. Bodies are
- * never logged; a refusal's short "error" text (sanitised, at most 160 characters) is carried back in the result,
- * with the store's Retry-After and whether the name did not resolve (this computer is offline). A route the store has
- * retired answers 410 (MODNET_E_RETIRED: this client is too old), and X-Snapmap-Plus-Minimum names the oldest version
- * the store serves (modnet_newer_needed).
- *
- * Every call blocks; the caller picks the thread. The engine's main thread must never call these. A cancel flag
- * (modnet_io) is checked between chunks and between requests, so cancelling takes effect within one chunk or one
- * timeout.
- *
- * The job helper at the end runs one network job at a time on a worker thread with a progress callback and a cancel
- * flag.
- */
+/* The backend's HTTP client for the mod store: units, their blobs and map claims, over one process-wide WinHTTP session.
+ * Every call blocks, so the engine's main thread must never call these; the caller picks the thread. */
 #ifndef SNAPMAP_PLUS_MODNET_H
 #define SNAPMAP_PLUS_MODNET_H
 
 #include <stddef.h>
 
+/* Transport: HTTPS only (TLS 1.2 or newer), plain http only for a loopback host; the system proxy, no redirects, bodies
+ * never logged. The store is untrusted: the content cache (modcache.h) checks every manifest and blob against the
+ * hash a map names before anything serves. */
 #define MODNET_HASH_HEX       64
 #define MODNET_DEFAULT_STORE  "https://api.snapmapplus.com"
 #define MODNET_ARCHIVE_TYPE   "application/zip"
@@ -54,10 +35,9 @@ enum {
     MODNET_E_RATE        = -15,   /* 429 */
     MODNET_E_BLOCKED     = -16,   /* 451: on the takedown list */
     MODNET_E_UNAVAILABLE = -17,   /* 5xx */
-    /* Not a store answer: content was obtained, but a pointer in it names game bytes this machine does not hold (a
-     * different game revision, S4b). No request returns it. */
+    /* Not a store answer: fetched content names game bytes this machine does not hold (a different game revision). */
     MODNET_E_GAME        = -18,
-    MODNET_E_RETIRED     = -19,   /* 410: the store no longer serves this version of the product (5.22) */
+    MODNET_E_RETIRED     = -19,   /* 410: the store no longer serves this version of the product */
     MODNET_E_KEY         = -20    /* not a store answer: the publishing key could not be made or used */
 };
 
@@ -86,7 +66,7 @@ typedef struct modnet_result {
 typedef void (*modnet_progress_fn)(void *context, unsigned long long done, unsigned long long total);
 
 typedef struct modnet_io {
-    volatile long *cancel;        /* nonzero cancels; may be NULL */
+    volatile long *cancel;        /* nonzero cancels, checked between chunks and requests; may be NULL */
     modnet_progress_fn progress;  /* may be NULL */
     void *context;
 } modnet_io;
@@ -95,7 +75,7 @@ typedef struct modnet_io {
 const char *modnet_version(void);
 /* a < b: -1, equal 0, a > b: 1, by dot-separated numbers; "dev" is newest. */
 int  modnet_version_cmp(const char *a, const char *b);
-/* 1 once per process when a store answer named a minimum version newer than this product (D41): the caller says
+/* 1 once per process when a store answer named a minimum version newer than this product: the caller says
  * "A newer Snapmap+ is available; run the Snapmap+ installer to update." */
 int  modnet_newer_needed(void);
 #define MODNET_NEWER_SENTENCE "A newer Snapmap+ is available; run the Snapmap+ installer to update."
@@ -124,11 +104,8 @@ int  modnet_valid_hash(const char *text);
  * any length without control characters (MODNET_REF_RULE). */
 int  modnet_valid_ref(const char *ref);
 
-/* ------------------------------------------------------------ units ---- */
-/* The store's unit routes (SPEC-distribution 10.2). A unit is the closure of one placed object, named by the
- * SHA-256 of its manifest (modunit.h); its files are blobs, named by their SHA-256. Reads are anonymous; every
- * write is signed by the publisher's key (modkey.h) through a signer. The bytes are untrusted: the cache
- * (modcache.h) checks every manifest and blob against the hash a map names before anything serves (I10). */
+/* The store's unit routes. A unit is the closure of one placed object, named by the SHA-256 of its manifest
+ * (modunit.h); its files are blobs, named by their SHA-256. Writes are signed (modkey.h) through a signer. */
 
 #define MODNET_UNITS_MAX        4096                          /* units one status request names */
 #define MODNET_ONE_REQUEST_MAX  (95ull * 1024u * 1024u)       /* the largest body one PUT takes */
@@ -150,7 +127,7 @@ int  modnet_unit_status(const char *const *hashes, size_t n, int *states, const 
 int  modnet_get_blob(const char *sha, const char *out_path, unsigned long long have, const modnet_io *io, modnet_result *r);
 /* GET /mods/unit/<hash>/archive (a ZIP of unit.json and every file, or with `mask`, ?want=<base64url>, the files whose
  * bit is set: bit i, byte i >> 3, value 1 << (i & 7), the manifest's file i; `mask_len` bytes, ceil(files / 8)),
- * resumed the same way. A unit arrives in this one request (R-DS6). */
+ * resumed the same way. A unit arrives in this one request. */
 int  modnet_get_unit_archive(const char *hash, const unsigned char *mask, size_t mask_len, const char *out_path,
                              unsigned long long have, const modnet_io *io, modnet_result *r);
 /* POST /mods/unit/<hash>/begin with the manifest: *held 1, or the blobs the store lacks in *missing (malloc'd). */
@@ -166,9 +143,9 @@ int  modnet_put_blob(const char *sha, const char *path, unsigned long long size,
                      const modnet_io *io, modnet_result *r);
 /* POST /mods/unit/<hash>/complete (signed): MODNET_OK when the store holds every file; MODNET_E_CONFLICT. */
 int  modnet_complete_unit(const char *hash, const modnet_signer *signer, const modnet_io *io, modnet_result *r);
-/* POST /mods/map/claim {ref, units, secret, rev} (signed, D33): MODNET_OK with the claim's rev in *rev_out (and, when
- * the store answered 451, the units moderation removed in *removed: the claim holds the rest); MODNET_E_CONFLICT with
- * the stored rev in *rev_out when `rev` was stale, or -1 when a unit is missing. */
+/* POST /mods/map/claim {ref, units, secret, rev} (signed): MODNET_OK with the claim's rev in *rev_out (and, on a 451,
+ * the units moderation removed in *removed: the claim holds the rest); MODNET_E_CONFLICT with the stored rev in
+ * *rev_out when `rev` was stale, or -1 when a unit is missing. */
 int  modnet_map_claim(const char *ref, const char *const *units, size_t n, const char *secret, long long rev,
                       const modnet_signer *signer, long long *rev_out, char (**removed)[MODNET_HASH_HEX + 1],
                       size_t *nremoved, const modnet_io *io, modnet_result *r);
@@ -181,8 +158,6 @@ int  modnet_unit_asked(const char *hash, const char *path, const modnet_io *io, 
 /* POST /mods/asked {claims: [{ref, secret}]} (signed): the answer's text in *json (malloc'd). */
 int  modnet_asked_units(const char *const *refs, const char *const *secrets, size_t n, const modnet_signer *signer,
                         char **json, const modnet_io *io, modnet_result *r);
-
-/* ------------------------------------------------------------ jobs ---- */
 
 /* A job body: runs on the worker thread with the io the helper owns (its
  * cancel flag and the progress callback given to modnet_job_start). Returns

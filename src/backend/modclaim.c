@@ -149,9 +149,8 @@ static void mc_claim_key(const char *ref, char out[17])
     mpj_free(m);
 }
 
-/* The secret of the claim of `ref`, from the key that made the claim (SPEC 4.2: a restore keeps the former key as
- * inactive so its claims' secrets stay derivable). A claim whose key is on no file here is claimed anew with the
- * active key (4.4: a lost key). `key_id` gets the id of the key used. */
+/* The secret of the claim of `ref`, from the key that made the claim (a restore keeps the former key as inactive). A
+ * claim whose key is on no file here is claimed anew with the active key. `key_id` gets the id of the key used. */
 static int mc_secret(const char *ref, char out[MODNET_HASH_HEX + 1], char key_id[17])
 {
     char want[17], have[17];
@@ -191,7 +190,6 @@ static int mc_secret(const char *ref, char out[MODNET_HASH_HEX + 1], char key_id
     return ok;
 }
 
-/* ------------------------------------------------------------ records */
 
 static mpj *mc_section(const char *section)
 {
@@ -228,8 +226,7 @@ static void mc_remove(mpj *obj, const char *key)
     }
 }
 
-/* A ref as a record key: plain tokens only (the engine's item ids are), so nothing needs escaping; any length (no
- * length of the product's own, modnet.h MODNET_REF_RULE). */
+/* A ref as a record key: plain tokens only (the engine's item ids are), so nothing needs escaping; any length. */
 static int mc_ref_ok(const char *ref)
 {
     size_t n = ref ? strlen(ref) : 0;
@@ -404,8 +401,6 @@ size_t modclaim_held(char (**out)[MODNET_HASH_HEX + 1])
     mpj_free(p);
     return n;
 }
-
-/* ------------------------------------------------------------ the store, with its waits */
 
 /* A busy answer (429, 503, unreachable) is retried after its Retry-After while the budget lasts. 1 to retry. */
 static int mc_wait(const modnet_result *r, int code, unsigned attempt, const modnet_io *io)
@@ -592,11 +587,10 @@ int modclaim_claim(const char *ref, const char *const *units, size_t n, char (**
             break;
         }
         free(gone);
-        if (code == MODNET_E_CONFLICT && got >= 0 && stale++ < 2) { rev = got + 1; continue; }   /* this key's earlier rev */
+        if (code == MODNET_E_CONFLICT && got >= 0 && stale++ < 2) { rev = got + 1; continue; }   /* retry with the next rev */
         if (code == MODNET_E_CONFLICT && got < 0 && !uploaded) {
-            /* a unit the store lacks (deleted after the delay, or a queued upload): send what this computer has, and
-             * leave out of the claim what is on no computer and not in the store (R-LB1 F7): no claim of it could
-             * succeed, and no later start could send it */
+            /* a unit the store lacks: send what this computer has, and leave out of the claim what is on no computer
+             * and not in the store, since no claim of it could succeed and no later start could send it */
             modclaim_plan plan;
             uploaded = 1;
             if (modclaim_plan_units(units, n, &plan, io, why) == MODNET_OK) {
@@ -662,7 +656,6 @@ int modclaim_release(const char *ref, const modnet_io *io, char **why)
     return code;
 }
 
-/* ------------------------------------------------------------ the start: the queue, then repair */
 
 static size_t mc_units_of(const mpj *e, const char ***out)
 {
@@ -707,7 +700,7 @@ int modclaim_launch(const modnet_io *io, modclaim_launch_stats *out)
         free((void *)units);
         free(why);
     }
-    /* Repair (5.21): a claim whose units the store lost gets them back from this computer, and is made again. */
+    /* Repair: a claim whose units the store lost gets them back from this computer, and is made again. */
     for (i = 0; c && i < c->n; i++) {
         const char *ref = c->keys[i], **units = NULL;
         char *why = NULL;
@@ -735,7 +728,6 @@ int modclaim_launch(const modnet_io *io, modclaim_launch_stats *out)
     return MODNET_OK;
 }
 
-/* ------------------------------------------------------------ what players asked for (3.8) */
 
 int modclaim_asked(modclaim_asked_fn fn, void *context, const modnet_io *io, char **why)
 {
@@ -784,7 +776,6 @@ int modclaim_asked(modclaim_asked_fn fn, void *context, const modnet_io *io, cha
     return MODNET_OK;
 }
 
-/* ------------------------------------------------------------ the key's own surface (SPEC 4.2, 4.3; DS-K) */
 
 void modclaim_set_account_name(const char *name)
 {

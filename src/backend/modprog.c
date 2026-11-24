@@ -12,8 +12,6 @@
 #include "modbundle.h"
 #include "modstock.h"
 
-/* ------------------------------------------------------------------------------------------- the family ---- */
-
 /* The programs the product derives: each a variant (a family's prefix + the base's name) of one installed base
  * program; a family says what its variant adds (modprog.h). */
 typedef char *(*mp_patch_fn)(const char *text, size_t len, size_t *out_len);
@@ -39,9 +37,8 @@ static const mp_base MP_BASES[] = {
 };
 #define MP_NBASES (sizeof MP_BASES / sizeof MP_BASES[0])
 
-/* The layered program's 28 vectors, by the material keys they had when each was a render parm: vector k of the
- * parameter image (layered.rp), the name the serve filter maps to it. NOT render parms: the product declares none
- * of them, the program reads the image (the `layerparms` texture). */
+/* The layered program's 28 vector keys: vector k of the parameter image (layered.rp), the name the serve filter maps
+ * to it. They are not render parms; the program reads the `layerparms` texture. */
 const char *const SH_MODPROG_ML_PARMS[] = {
     "layerstilingfactor", "multiblendlayerscale", "multiblendheightmapscale", "multiblendsoftness",
     "multiblendalbedoscale", "multiblendnormalscale", "multiblendspecularscale", "multiblendsmoothnessscale",
@@ -52,7 +49,7 @@ const char *const SH_MODPROG_ML_PARMS[] = {
     "multilayerember", "multilayerembertiling", "multilayerembernoise", "multilayeremberhot",
 };
 const unsigned SH_MODPROG_ML_PARM_COUNT = sizeof SH_MODPROG_ML_PARMS / sizeof SH_MODPROG_ML_PARMS[0];
-/* What a vector the material does not set was (the parms' decl defaults), for a material that sets only some. */
+/* Each vector's value when a material sets only some of them. */
 const float SH_MODPROG_ML_DEFAULTS[28][4] = {
     { 1, 1, 1, 1 }, { 1, 1, 1, 1 }, { 1, 1, 1, 1 }, { 0.25f, 0.25f, 0.25f, 0.25f },
     { 1, 1, 1, 1 }, { 1, 1, 1, 1 }, { 1, 1, 1, 1 }, { 1, 1, 1, 1 },
@@ -91,14 +88,9 @@ static const char *const MP_INOUT[] = { "albedo", "specular", "smoothness", "nor
 #define MP_NINOUT 7
 
 /* The particle program (programs/shaders/particles.rp): the parameters appended to the fragment stage's material
- * uniforms (the game's own vector smokebrightness, which no program, fx or engine code names, and two more of the
- * game's own render parms the shading reads), its added texture, the module's samplers (the first three bound to the
- * program's own textures), the stage inputs and the program's own uniforms it reads ('h' the material block, 'l' the
- * view block). The stage's constants live in keys the game's particle program already holds (particleuberparms1..3,
- * emissive) and smokebrightness; no vector render parm is the product's. */
-/* The particle program's old keys, in the order of the shading's former parameter array: NOT render parms (the
- * product declares none of them), the names the serve filter maps to the stock keys (particles.rp lists where each
- * went). */
+ * uniforms, its added texture, the module's samplers (the first three bound to the program's own textures), the stage
+ * inputs and the program's own uniforms it reads ('h' the material block, 'l' the view block). */
+/* The particle program's old constant keys, mapped by the serve filter to the stock keys (particles.rp). */
 const char *const SH_MODPROG_EP_PARMS[] = {
     "eternalparticle", "eternalparticlefade", "eternalparticlecolor", "eternalparticlecolor2",
 };
@@ -121,10 +113,8 @@ static const char *const EP_UNIFORMS[] = {
 };
 #define EP_NUNIFORMS (sizeof EP_UNIFORMS / sizeof EP_UNIFORMS[0])
 
-/* The hair programs' death fade (programs/shaders/hair.rp): the parameter appended to the fragment stage's material
- * uniforms (the game's own deathfadeopacity, which the burn-away ramps and no hair program reads), the noise texture
- * the fade adds (the game's own magnificationclouds, which the skin programs dissolve by; no hair program has it), the
- * module's sampler for it and the stage input the fade reads. */
+/* The hair programs' death fade (programs/shaders/hair.rp): the deathfadeopacity parameter appended to the material
+ * uniforms, the magnificationclouds noise texture it adds, the module's sampler for it and the stage input it reads. */
 const char *const SH_MODPROG_HR_TEXTURES[] = { "magnificationclouds" };
 const unsigned SH_MODPROG_HR_TEXTURE_COUNT = sizeof SH_MODPROG_HR_TEXTURES / sizeof SH_MODPROG_HR_TEXTURES[0];
 static const char *const HR_BLOCK_PARMS[] = { "deathfadeopacity" };
@@ -134,10 +124,7 @@ static const char *const HR_SAMPLERS[] = { "hr_noise" };
 static const char *const HR_VARYINGS[] = { "vofi_TexCoord0" };
 #define HR_NVARYINGS (sizeof HR_VARYINGS / sizeof HR_VARYINGS[0])
 
-/* The render parm decls the product derives: textures only. No vector render parm is the product's: the layered
- * program reads its numbers from the `layerparms` image and the particle program from keys of the game's own. A
- * texture a material does not set gives no layer (no mask, a black parameter image), a flat layer image, and no
- * emissive sheet. */
+/* The render parm decls the product derives (textures only): the defaults a texture a material does not set gives. */
 typedef struct mp_parm { const char *name, *text; } mp_parm;
 static const mp_parm MP_PARM_DECLS[] = {
     /* No mask, no layer: what an image key the material does not set gives. */
@@ -171,8 +158,6 @@ const char *sh_modprog_vector_parm(unsigned i)
     (void)i;
     return NULL;   /* the product's programs declare no vector render parm */
 }
-
-/* --------------------------------------------------------------------------------------------- helpers ---- */
 
 typedef struct mp_buf { char *p; size_t n, cap; int oom; } mp_buf;
 
@@ -281,10 +266,8 @@ static int mp_line_indent(const char *text, const char *at, const char **from, s
     return 1;
 }
 
-/* The decl `text` with the program's functions in its hlsl_fp_header section: a section of their own before its
- * hlsl_fp section, or, when it has one, at the end of that section (which must close on a line of its own). The
- * engine compiles the section before main(), so the functions are real functions. NULL when there is no hlsl_fp
- * section or the base's header cannot be extended. malloc'd. */
+/* The decl `text` with the program's functions in its hlsl_fp_header section (compiled before main()): added before
+ * the hlsl_fp section or at the end of an existing header that closes on its own line. NULL when it cannot; malloc'd. */
 static char *mp_add_header(const char *text, size_t len, const char *header, const char *nl, size_t *out_len)
 {
     const char *h = mp_find(text, len, "hlsl_fp_header"), *ind;
@@ -325,8 +308,6 @@ static char *mp_add_header(const char *text, size_t len, const char *header, con
     return mp_take(&b, out_len);
 }
 
-/* ---------------------------------------------------------------------------------------------- decl ---- */
-
 char *sh_modprog_patch_decl(const char *text, size_t len, size_t *out_len)
 {
     static const char key[] = "#template CUSTOM_TEXTURE_INPUTS( inputs ) {";
@@ -354,8 +335,6 @@ char *sh_modprog_patch_decl(const char *text, size_t len, size_t *out_len)
     free(call);
     return t;
 }
-
-/* ---------------------------------------------------------------------------------------------- GLSL ---- */
 
 char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len)
 {
@@ -420,8 +399,6 @@ char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsi
     free(t1);
     return mp_take(&b, out_len);
 }
-
-/* --------------------------------------------------------------------------- the particle texts ---- */
 
 char *sh_modprog_ep_patch_decl(const char *text, size_t len, size_t *out_len)
 {
@@ -510,8 +487,6 @@ char *sh_modprog_ep_patch_glsl(const char *text, size_t len, unsigned tex_end, u
     return mp_take(&b, out_len);
 }
 
-/* ------------------------------------------------------------------------------- the hair texts ---- */
-
 char *sh_modprog_hr_patch_decl(const char *text, size_t len, size_t *out_len)
 {
     static const char key[] = "hlsl_fp {";
@@ -592,7 +567,6 @@ char *sh_modprog_hr_patch_glsl(const char *text, size_t len, unsigned tex_end, u
     return mp_take(&b, out_len);
 }
 
-/* --------------------------------------------------------------------------------------------- SPIR-V ---- */
 /* A module as a list of instructions; an instruction's words (opcode word first) point into the input or into
  * an owned copy. Only the opcodes glslang emits for programs/shaders/layered.rp need their operand shapes (the
  * multilayer module is renumbered whole); the stock module is only searched and amended. */
@@ -892,11 +866,10 @@ static const mp_ins *mp_def_any(mp_ctx *c, uint32_t id)
 
 #define MP_FAIL(c, text) do { (c)->why = (text); goto done; } while (0)
 
-/* A module's functions brought into the stock module: `entry` (an OpName prefix) and what it calls, the globals
- * they need (types and constants shared with the stock module where they are the same), its samplers (module
- * variables named in `samplers`) either bound to the stock sampler `stock[k]` names (no texture added) or added at
- * bindings tex_end, tex_end + 1, ... in the order of those without a stock name. `what` names the module in the
- * sentences. On success *entry_id is the entry's id in the stock module and the functions are in *funcs. */
+/* Brings a module's functions into the stock module: `entry` (an OpName prefix) and what it calls, with their globals
+ * (types and constants shared with the stock module where equal). Its samplers (variables named in `samplers`) either bind
+ * to the stock sampler `stock[k]` names or are added at bindings tex_end, tex_end + 1, ...; `what` names the module in
+ * failure sentences. On success *entry_id is the entry's id in the stock module and the functions are in *funcs. */
 typedef struct mp_import_spec {
     const uint32_t *words;
     unsigned nwords;
@@ -919,7 +892,7 @@ static int mp_import(mp_ctx *c, const mp_import_spec *sp, unsigned tex_end, uint
         !(fstart = (size_t *)calloc(c->M.n + 1, sizeof *fstart)) || !(keep = (size_t *)calloc(c->M.n + 1, sizeof *keep)))
         MP_FAIL(c, "out of memory");
 
-    /* ---- the module's functions: the entry and what it calls (module order) */
+    /* the module's functions: the entry and what it calls (module order) */
     for (i = 0; i < c->M.n; i++) if (MP_OP(&c->M.ins[i]) == OpFunction) fstart[nf++] = i;
     entry_fn = mp_named(&c->M, sp->entry, 1);
     if (!entry_fn) MP_FAIL(c, "a module of the product's programs has no single entry function");
@@ -976,7 +949,7 @@ static int mp_import(mp_ctx *c, const mp_import_spec *sp, unsigned tex_end, uint
         if (!grew) break;
     }
 
-    /* ---- the module's globals into the stock module */
+    /* the module's globals into the stock module */
     for (i = 0; i < c->M.n; i++) {
         mp_ins *in = &c->M.ins[i];
         uint32_t r = mp_rid(in), op = MP_OP(in), n = MP_N(in), rid_at, pos[64], *w;
@@ -1043,7 +1016,7 @@ static int mp_import(mp_ctx *c, const mp_import_spec *sp, unsigned tex_end, uint
     }
     for (k = 0; k < sp->nsamplers; k++) if (!sampler_ids[k]) MP_FAIL(c, "a module of the product's programs does not read all of its samplers");
 
-    /* ---- the functions, every id renumbered */
+    /* the functions, every id renumbered */
     for (k = 0; k < nkeep; k++)
         for (i = keep[k]; i < c->M.n; i++) {
             uint32_t r = mp_rid(&c->M.ins[i]);
@@ -1065,7 +1038,7 @@ static int mp_import(mp_ctx *c, const mp_import_spec *sp, unsigned tex_end, uint
             if (MP_OP(in) == OpFunctionEnd) break;
         }
 
-    /* ---- names and decorations of what was brought in (an added sampler's binding after the program's own) */
+    /* names and decorations of what was brought in (an added sampler's binding after the program's own) */
     for (i = 0; i < c->M.n; i++) {
         const mp_ins *in = &c->M.ins[i];
         uint32_t t = in->w[1];
@@ -1321,12 +1294,12 @@ uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned 
     if (!mp_shift_bindings(&c, tex_end, shift)) goto done;
     if (!mp_grow_block(&c, ML_BLOCK_PARMS, ML_NBLOCK_PARMS, &bk)) goto done;
 
-    /* ---- helpers' types */
+    /* helpers' types */
     (void)mp_t_int(&c);
     { uint32_t o[2] = { 0, 32 }; t_float = mp_find_or_add(&c, OpTypeFloat, o, 2, 1); }
     { uint32_t o[1] = { 0 }; t_void = mp_find_or_add(&c, OpTypeVoid, o, 1, 1); }
 
-    /* ---- main: the anchor and the inputs */
+    /* main: the anchor and the inputs */
     if (!mp_main(&c, &s_main, &s_main_end)) MP_FAIL(&c, "the program's fragment module has no main");
     for (i = s_main; i < s_main_end; i++)
         if (MP_OP(&c.S.ins[i]) == OpVariable && mp_is_named(&c.S, c.S.ins[i].w[2], "inputs")) {
@@ -1448,8 +1421,6 @@ done:
     return out;
 }
 
-/* --------------------------------------------------------------------------- the particle splice ---- */
-
 uint32_t *sh_modprog_ep_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
                                size_t *out_words, const char **why)
 {
@@ -1542,8 +1513,6 @@ done:
     return out;
 }
 
-/* ------------------------------------------------------------------------------- the hair splice ---- */
-
 uint32_t *sh_modprog_hr_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
                                size_t *out_words, const char **why)
 {
@@ -1606,8 +1575,6 @@ done:
     return out;
 }
 
-/* ---------------------------------------------------------------------------------------------- families ---- */
-
 static const unsigned EP_BIN_PARM_COUNT = sizeof EP_BLOCK_PARMS / sizeof EP_BLOCK_PARMS[0];
 static const unsigned HR_BIN_PARM_COUNT = HR_NBLOCK_PARMS;
 static const mp_family MP_FAMILIES[] = {
@@ -1623,13 +1590,10 @@ static const mp_family MP_FAMILIES[] = {
 };
 #define MP_NFAMILIES (sizeof MP_FAMILIES / sizeof MP_FAMILIES[0])
 
-/* --------------------------------------------------------------------------------------- cooked program ---- */
-/* package_shader's reader, cut at what the variant changes: a parameter block whose vector values are 16 bytes
- * and every other value a string, the stage parameter lists (3 stages x 7 groups: material uniforms, view
- * uniforms, textures, samplers, storage buffers, uniform-buffer arrays, storage images), includes, flags, the
- * permutation mask and list, 192 bytes of state and binding tables (6 words, then each stage's 7 binding starts
- * and 7 counts by category: material uniforms, view uniforms, uniform-buffer arrays, texel buffers, textures,
- * storage buffers, storage images), the three stage texts and a 36-byte trailer. */
+/* package_shader's reader, cut at what the variant changes: the parameter block (vector values 16 bytes, others
+ * strings), the stage parameter lists (3 stages x 7 groups), includes, flags, the permutation mask and list, 192 bytes
+ * of binding tables (6 words, then each stage's 7 binding starts and 7 counts), the three stage texts and a 36-byte
+ * trailer. */
 
 #define MP_MAX_BOUND_TEXTURES 32u   /* ID_VULKAN_MAX_BOUND_TEXTURES (VK 0x141a7bbb0) */
 
@@ -1812,8 +1776,6 @@ static char *mp_bin_encode(const mp_bin *x, unsigned checksum, size_t *out_len)
     mp_put(&o, x->trailer, 36);
     return mp_take(&o, out_len);
 }
-
-/* ------------------------------------------------------------------------------------------- derivation ---- */
 
 typedef struct mp_file { char *path; unsigned char *bytes; size_t len; } mp_file;
 
@@ -2023,10 +1985,8 @@ static int mp_derive(size_t base)
     return ok;
 }
 
-/* ------------------------------------------------------------------------------- the parameter image ---- */
-/* The layered program reads its numbers from an 8 x 4 RGBA16F image (layered.rp): a DOOM 2016 .bimage (the layout
- * the research repository's writer, doomforge/doom2016/image/bimage.py, gives: a 42-byte header, then one record per
- * mip), served from a registry of images the product derives, at a path that is the hash of its bytes. */
+/* The layered program reads its numbers from an 8 x 4 RGBA16F image (layered.rp): a DOOM 2016 .bimage (a 42-byte header,
+ * then one record per mip) served from a registry of derived images, at a path that is the hash of its bytes. */
 
 #define MP_PARAM_W 8u
 #define MP_PARAM_H 4u
@@ -2162,13 +2122,9 @@ static const char *mp_register(const char *tag, unsigned char *b, size_t n)
     return mp_register_path(path, b, n);
 }
 
-/* ------------------------------------------------------------------------------ the SDK's derived decls ---- */
-/* The Graphics SDK's compilers (sdk.h) derive decls an author never writes: a particle decl and its material from an
- * effect's particles, a decal material from a bare image, a curve's table, the fx an environment plays. Each is named
- * by the first 16 hex digits of the SHA-256 of its text, so the build and the server derive the same name from the
- * same file; a table's name has no '/', since a material expression names its table (`name[temp1]`). An effect's
- * emitter, the entityDef the script calls spawn, is named after its fx decl and derived from its path alone, so it is
- * served before anything has compiled the effect. */
+/* The Graphics SDK's compilers (sdk.h) derive decls an author never writes, each named by the first 16 hex digits of the
+ * SHA-256 of its text (a table's name has no '/'). An effect's emitter entityDef is named after its fx decl and derived
+ * from its path alone. */
 
 #define MP_DECL_HEAD      "generated/decls/"
 #define MP_DECL_SDK       "snapmapplus/sdk/"
@@ -2201,7 +2157,7 @@ static char *mp_emitter_fx(const char *path)
 }
 
 /* idEntityFx plays the fx its own field fxEffect names when it spawns (unless startOff), as every stock func/fx child
- * names its effect; fxDecl is the generic entity's condition-driven fx, which only an event starts (R-GS3). */
+ * names its effect; fxDecl is the generic entity's condition-driven fx, which only an event starts. */
 static char *mp_emitter_text(const char *fx, size_t *len)
 {
     char *t = sh_textf("{\n\tinherit = \"func/fx\";\n\tedit = {\n\t\tfxEffect = \"%s\";\n\t}\n}\n", fx);
@@ -2339,9 +2295,8 @@ static int mp_base_of(const char *path)
     return -1;
 }
 
-/* The old program names (SH_MODPROG_OLD_PREFIX, SH_MODPROG_EP_OLD_PREFIX), served until 1.0 for mods emitted before
- * the rename: a path under one of them, after any of the heads, is rewritten to the same path under the new name
- * (a malloc'd copy), so the old name answers with the new name's bytes. NULL when the path names neither. */
+/* The alternate prefixes (SH_MODPROG_OLD_PREFIX, SH_MODPROG_EP_OLD_PREFIX): a path under one of them, after any head, is
+ * rewritten to the same path under the new name (malloc'd). NULL when the path names neither. */
 static char *mp_canonical(const char *path)
 {
     static const char *const OLD[2] = { SH_MODPROG_OLD_PREFIX, SH_MODPROG_EP_OLD_PREFIX };
@@ -2525,11 +2480,8 @@ void sh_modprog_reset(void)
     ReleaseSRWLockExclusive(&g_lock);
 }
 
-/* ------------------------------------------------------------------------------- old material keys ---- */
-/* A material emitted before the numbers moved names the old keys (the 28 layered vectors and blendlayer0heightmap;
- * eternalparticle, eternalparticlefade, eternalparticlecolor, eternalparticlecolor2 and eternalparticleemissivemap).
- * sh_modprog_legacy_material rewrites them into the new storage so that the material draws the same. A material is a
- * braced list of lines, `key<blanks>value`. */
+/* Rewrites the old keys (the 28 layered vectors, blendlayer0heightmap and the eternalparticle* keys) into the current
+ * storage so the material draws the same. A material is a braced list of lines, `key<blanks>value`. */
 
 typedef struct mp_ln {
     const char *a;          /* the line, without its terminator */
@@ -2700,11 +2652,8 @@ static int mp_set_vec(mp_mat *m, size_t before, const char *key, const float v[4
 /* The earliest of two lines (-1 for none). */
 static long mp_first(long a, long b) { return a < 0 ? b : (b < 0 || a < b) ? a : b; }
 
-/* eternalparticle (mode, emissive multiplier, mask multiplier, depth offset scale), eternalparticlefade (near fade
- * begin and end, soft distance, 1 with an emissive sheet), eternalparticlecolor (mask colour or gradient 2),
- * eternalparticlecolor2 (gradient 3; w the lit scale) and eternalparticleemissivemap become the stock keys
- * particles.rp reads (particleuberparms1..3, emissive, smokebrightness) and particleemissivemap. 1 rewritten, 0 no
- * old key, -1 no memory. */
+/* The eternalparticle* keys and eternalparticleemissivemap become the stock keys particles.rp reads (particleuberparms1..3,
+ * emissive, smokebrightness) and particleemissivemap. 1 rewritten, 0 no old key, -1 no memory. */
 static int mp_legacy_particle(mp_mat *m)
 {
     static const char *const old[] = { "eternalparticle", "eternalparticlefade", "eternalparticlecolor",
@@ -2744,8 +2693,8 @@ static int mp_legacy_particle(mp_mat *m)
            mp_set_vec(m, (size_t)first, "smokebrightness", sb) ? 1 : -1;
 }
 
-/* 1 when the image name is a constant colour image (const_<h>_<h>_<h>_<h>, four half floats, as the converters name
- * them: the last component of the path), with its first channel in *value. */
+/* 1 when the image name is a constant colour image (the path's last component const_<h>_<h>_<h>_<h>, four half floats),
+ * with its first channel in *value. */
 static int mp_const_image(const char *v, size_t n, float *value)
 {
     size_t i = n, k, d;
@@ -2771,14 +2720,14 @@ static int mp_const_image(const char *v, size_t n, float *value)
     return 1;
 }
 
-/* The base height's neutral value: half of the 8-bit range, as the converters write a flat height. */
+/* The base height's neutral value: half of the 8-bit range. */
 #define MP_FLAT_HEIGHT 0.498046875f
 
 /* The 1 or 2 an extra-map reference holds (the extra map 0 or 1 it names), else 0. */
 static int mp_extra_use(float v) { return v == 1.0f ? 1 : v == 2.0f ? 2 : 0; }
 
-/* The 28 vectors and blendlayer0heightmap become the `layerparms` image the vectors are written into, vector 9
- * carrying where layer 0's height comes from. 1 rewritten, 0 no old key, -1 no memory. */
+/* The 28 vectors and blendlayer0heightmap become the `layerparms` image, vector 9 saying where layer 0's height comes
+ * from. 1 rewritten, 0 no old key, -1 no memory. */
 static int mp_legacy_layered(mp_mat *m)
 {
     float v[28][4];

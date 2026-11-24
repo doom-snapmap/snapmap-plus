@@ -55,7 +55,7 @@ static void pm_print(const char *line)
     if (line && line[0] && o->print) o->print(line);
 }
 
-/* Set *out (malloc'd, the old one freed) to the sentence, whole. */
+/* Set *out (malloc'd, freed first when set) to the sentence, whole. */
 static void pm_msg(char **out, const char *fmt, ...)
 {
     va_list ap;
@@ -67,10 +67,6 @@ static void pm_msg(char **out, const char *fmt, ...)
     if (text) { free(*out); *out = text; }
 }
 
-/* ==================================================================== */
-/* rows                                                                  */
-/* ==================================================================== */
-
 typedef struct pm_closure { sh_modmanifest_list list; int failed; } pm_closure;
 
 static sh_modmanifest_row *pm_find(sh_modmanifest_list *list, const char *salt, const char *build)
@@ -81,8 +77,8 @@ static sh_modmanifest_row *pm_find(sh_modmanifest_list *list, const char *salt, 
     return NULL;
 }
 
-/* The save step's visitor (modmanifest.c, mm_save_visit): one row per build
- * ("<salt>@<hash>"), the placed names it provides on it. */
+/* The save step's visitor (modmanifest.c, mm_save_visit): one row per build ("<salt>@<hash>") with the
+ * placed names it provides. */
 static void pm_visit(void *context, const char *salt, const char *build, unsigned long long size,
                      const char *name)
 {
@@ -113,8 +109,7 @@ static int pm_row_order(const void *a, const void *b)
     return c ? c : strcmp(x->build, y->build);
 }
 
-/* The display name of each row, from the build that serves it
- * (the closure names salts and builds only). */
+/* The display name of each row, from the build that serves it (the closure names salts and builds only). */
 static void pm_names(sh_modmanifest_list *list)
 {
     size_t i;
@@ -180,8 +175,7 @@ int sh_prefab_mods_view_rows(const char *view, size_t len, sh_modmanifest_list *
     arr = mpj_get(root, SH_PREFAB_MODS_KEY);
     if (!arr) { mpj_free(root); return 0; }
     if (arr->type != MPJ_ARR) { mpj_free(root); return -1; }
-    /* A row in an earlier shape ({"id", "bundle"}) is not read: the prefab is
-     * refused whole, with its plain reason. */
+    /* A row naming "id" or "bundle" is not read: the prefab is refused whole. */
     for (i = 0; i < arr->n; i++) {
         const mpj *r = arr->items[i];
         if (r && r->type == MPJ_OBJ && (mpj_get(r, "id") || mpj_get(r, "bundle"))) {
@@ -309,7 +303,7 @@ static int pm_row_state(const sh_modmanifest_row *row, char **cause)
     return o->row_state ? o->row_state(row, cause) : SH_MODPUB_ROW_MISSING;
 }
 
-/* A pinned row (the units an imported prefab carries, SPEC 5.16) whose every unit is in the content cache with all
+/* A pinned row (the units an imported prefab carries) whose every unit is in the content cache with all
  * its files: placing the prefab composes them. */
 static int pm_pinned_here(const sh_modmanifest_row *row)
 {
@@ -366,10 +360,6 @@ char *sh_prefab_mods_status_json(const sh_modmanifest_list *rows, size_t *missin
     if (missing_out) *missing_out = missing;
     return b.p;
 }
-
-/* ==================================================================== */
-/* files                                                                 */
-/* ==================================================================== */
 
 char *sh_prefab_mods_read_file(const char *path, size_t *len)
 {
@@ -439,10 +429,6 @@ static char *pm_rows_text(const sh_modmanifest_list *rows)
     if (b.bad) { free(b.p); return NULL; }
     return b.p;
 }
-
-/* ==================================================================== */
-/* the block                                                             */
-/* ==================================================================== */
 
 /* The view's members the block keeps outside "summary". */
 static int pm_view_own_key(const char *key)
@@ -548,8 +534,7 @@ char *sh_prefab_mods_view_of(const char *text, size_t len, int tail, const char 
         if (source) *source = SH_PREFAB_META_BLOCK;
         return view;
     }
-    /* A prefab with a <name>.meta.json sidecar and no block was saved by an
-     * earlier version (ONE-SHAPE rule 6): the sidecar is not read. */
+    /* A <name>.meta.json sidecar with no block is reported, never read. */
     if (found != 1 && meta_path && meta_path[0] && pm_exists(meta_path)) {
         if (source) *source = SH_PREFAB_META_EARLIER;
         pm_logf("PREFABS: %s: " SH_PREFAB_EARLIER_TEXT, meta_path);
@@ -670,8 +655,7 @@ int sh_prefab_mods_meta_write(const char *body, size_t len, const char *path, co
     if (!text || !tlen) { free(text); return -1; }
     view = sh_prefab_mods_view_of(text, tlen, 0, meta_path, &source, &vlen);
     if (source == SH_PREFAB_META_EARLIER) {
-        /* Its details live in a sidecar this version does not read: nothing is
-         * written, so they are not lost. */
+        /* Its details live in a sidecar that is not read: nothing is written, so they are not lost. */
         free(text);
         free(view);
         return -1;
@@ -699,10 +683,6 @@ int sh_prefab_mods_meta_write(const char *body, size_t len, const char *path, co
     return ok ? 1 : -1;
 }
 
-/* ==================================================================== */
-/* resolve                                                               */
-/* ==================================================================== */
-
 typedef struct pm_known_ctx { const sh_modmanifest_list *rows; int (*known)(const char *); } pm_known_ctx;
 
 /* The module guard's question with the prefab's rows: a module a row
@@ -714,16 +694,15 @@ static int pm_known(void *ctx, const char *name)
     return k->known ? k->known(name) : -1;
 }
 
-/* Activate the rows' bundles for the open map. A mod whose objects the prefab places gets into the map the way
- * placed objects do: the open map's save writes its row from what is placed, and a publish pins those objects' own
- * units (D1, D35). Only a mod the prefab uses without placing anything of it (a map-level row of the prefab, or a row
- * that names nothing) is attached to the open map as a map-level row, which pins the whole mod. Main thread. */
+/* Activate the rows' bundles for the open map. A mod whose objects the prefab places enters the map as placed
+ * objects do (the save writes its row, a publish pins those units); only a mod the prefab uses without placing
+ * anything of it is attached as a map-level row, which pins the whole mod. Main thread. */
 static void pm_prepare(const sh_modmanifest_list *rows, const char *name)
 {
     const sh_prefab_mods_ops *o = pm_ops();
     size_t i;
     if (!rows || !rows->count) return;
-    /* Each row through the build that serves it now (the asset rule). */
+    /* Each row through the build that serves it (the asset rule). */
     if (o->activate) (void)o->activate(rows);
     for (i = 0; i < rows->count; i++) {
         const sh_modmanifest_row *r = &rows->rows[i];
@@ -746,10 +725,10 @@ static void pm_prepare(const sh_modmanifest_list *rows, const char *name)
     }
 }
 
-int sh_prefab_mods_poll(int seq) { (void)seq; return 0; }   /* nothing is held: a placement never waits (D35) */
+int sh_prefab_mods_poll(int seq) { (void)seq; return 0; }   /* nothing is held: a placement never waits */
 
-/* The refusal of a prefab whose content is not here: console line, toast, the tab's message. Nothing is fetched
- * (D35: a prefab carries its units in its .zip export). */
+/* The refusal of a prefab whose content is not here: console line, toast, the tab's message. Nothing is fetched;
+ * a prefab carries its units in its .zip export. */
 static void pm_refuse_unasked(const char *name, const sh_modmanifest_list *rows, char **msg)
 {
     const sh_prefab_mods_ops *o = pm_ops();
@@ -779,10 +758,8 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
     if (seq) *seq = 0;
     if (msg) *msg = NULL;
     if (!rows || !rows->count) return SH_PREFAB_MODS_PLACE;
-    /* Rows resolve in the open map's own context; a placement never changes
-     * where the map finds its mods. */
-    /* A module prefab: a room no row provides and the palette lacks is DLC
-     * the player does not own. Nothing can install it, so nothing is fetched. */
+    /* Rows resolve in the open map's own context. A module prefab whose room no row provides and the palette
+     * lacks (DLC the player does not own) cannot be installed. */
     if (text && sh_mp_is_module_file(text, len)) {
         sh_mp_summary sum;
         sh_mp_module_check check;
@@ -809,16 +786,15 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
         }
         free(engine);
     }
-    /* Every row is a local folder here, or units the prefab's import put in the content cache; nothing is fetched
-     * or installed (D35). */
+    /* Every row is a local folder here, or units the prefab's import put in the content cache. */
     for (i = 0; i < rows->count; i++) if (!pm_installed(&rows->rows[i])) missing++;
     if (missing) {
         pm_refuse_unasked(name, rows, msg);
         return SH_PREFAB_MODS_REFUSED;
     }
     {
-        /* The pinned rows (an imported prefab's units) join the open map as its pinned rows, composed (SPEC 5.16
-         * step 3); the local rows are activated and attached as before. */
+        /* The pinned rows (an imported prefab's units) join the open map composed; the local rows are activated
+         * and attached. */
         sh_modmanifest_list pinned, local;
         char *why = NULL;
         memset(&pinned, 0, sizeof pinned);
@@ -842,10 +818,6 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
     }
     return SH_PREFAB_MODS_PLACE;
 }
-
-/* ==================================================================== */
-/* export, import                                                        */
-/* ==================================================================== */
 
 int sh_prefab_mods_valid_name(const char *name) { return sh_prefab_block_valid_name(name); }
 
@@ -925,8 +897,7 @@ int sh_prefab_mods_export(const char *prefab_path, const char *meta_path, const 
     x.view_len = vlen;
     x.rewrite = source != SH_PREFAB_META_BLOCK;
     if (n <= 0) {
-        /* Saved before its mods were recorded: the mods installed now that its
-         * entities and modules use. */
+        /* No block: the mods its entities and modules use. */
         sh_modmanifest_list_free(&rows);
         if (sh_prefab_mods_closure(text, len, &rows) < 0) memset(&rows, 0, sizeof rows);
         if (rows.count) x.rewrite = 1;
@@ -941,7 +912,7 @@ int sh_prefab_mods_export(const char *prefab_path, const char *meta_path, const 
                 zip_utf8, st.bundles, st.files, st.entries, st.zip_bytes,
                 x.rewrite ? " (its block written for the export)" : "", st.ms);
     } else {
-        /* A sentence of its own (an earlier shape) follows a full stop. */
+        /* A cause that is a sentence of its own follows a full stop. */
         const char *why = cause ? cause : "out of memory";
         if (why[0] >= 'A' && why[0] <= 'Z') pm_msg(msg, "Prefab %s was not exported. %s", nm, why);
         else pm_msg(msg, "Prefab %s was not exported: %s.", nm, why);
@@ -990,10 +961,8 @@ typedef struct pm_import_ctx {
 
 enum { PM_IMPORT_TAKEN = 1, PM_IMPORT_UNWRITTEN };
 
-/* The importer's rows (the block's; rows in an earlier shape refuse the
- * import, modexport.h: an export in an earlier format), after the prefab is
- * in the library under its name: the .json's, else the source's file name,
- * else a plain one, with " (N)" when another prefab has it. */
+/* The importer's rows (the block's; a sidecar-form prefab refuses the import), after the prefab is in the
+ * library under the .json's name, else the source's file name, else a plain one, with " (N)" when taken. */
 static int pm_import_rows(void *ctx, const char *prefab, size_t len, sh_modmanifest_list *rows)
 {
     pm_import_ctx *c = (pm_import_ctx *)ctx;
@@ -1102,10 +1071,6 @@ int sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char **
     return result;
 }
 
-/* ==================================================================== */
-/* the slot                                                            */
-/* ==================================================================== */
-
 /* The page's answer: the text whole, as owned interface text in call->out. */
 static void pm_out(sh_module_prefab_call *call, const char *text)
 {
@@ -1174,8 +1139,7 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
         int n;
         pm_out(call, "");
         call->seq = 0;
-        /* The block's rows. A prefab saved by an earlier version (a sidecar
-         * and no block, or rows naming "id" and "bundle") is refused. */
+        /* The block's rows. A sidecar-form prefab (or rows naming "id" and "bundle") is refused. */
         n = sh_prefab_mods_rows_of(call->text, call->text_len, call->meta_path, &rows);
         if (n == SH_PREFAB_ROWS_EARLIER) {
             char *line = sh_textf("Prefab %s was not placed: it was saved by an earlier Snapmap+; run the Snapmap+ "
@@ -1185,7 +1149,7 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
             pm_out(call, SH_PREFAB_EARLIER_TEXT);
             return SH_PREFAB_MODS_REFUSED;
         }
-        /* No rows: the placement goes on exactly as before. */
+        /* No rows: the placement goes on without mods. */
         if (n <= 0) { sh_modmanifest_list_free(&rows); return SH_PREFAB_MODS_PLACE; }
         memset(&job, 0, sizeof job);
         job.text = call->text;
@@ -1235,10 +1199,6 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
         return 0;
     }
 }
-
-/* ==================================================================== */
-/* the console                                                           */
-/* ==================================================================== */
 
 static char *g_root;   /* the prefabs folder set by the host (malloc'd), or NULL */
 
@@ -1406,9 +1366,6 @@ void sh_prefab_mods_test_reset(void)
 }
 #endif
 
-/* ==================================================================== */
-/* engine                                                                */
-/* ==================================================================== */
 #ifdef SH_PREFAB_MODS_PURE
 static void pm_bind_defaults(void) { g_ops_bound = 1; }
 static char *pm_default_root(void) { return NULL; }
@@ -1450,9 +1407,8 @@ static int eng_listed(const sh_modmanifest_row *row)
     return listed;
 }
 
-/* The Mods tab's Use in this map, for the build that serves the prefab's
- * row: the Mods tab names a mod by its folder (below the store root) or its
- * salt. */
+/* The Mods tab's Use in this map, for the build that serves the prefab's row; the tab names a mod by its
+ * folder (below the store root) or its salt. */
 static int eng_attach(const sh_modmanifest_row *row, char **note)
 {
     sh_modserve_bundle_ref ref;
@@ -1484,7 +1440,7 @@ static int eng_use_pinned(const sh_modmanifest_list *pinned, char **cause)
             if (!strcmp(cur.rows[c].build, p->build)) same = 1; else other = 1;
         }
         if (other && !same) {
-            /* one version per map (D23): the installed version takes the prefab's objects when it has them all */
+            /* one version per map: the installed version takes the prefab's objects when it has them all */
             int carries = 1;
             for (k = 0; k < p->name_count && carries; k++) carries = sh_modserve_root_carries(p->salt, p->names[k]) == 1;
             if (carries) { pm_logf("PREFABS: %s: the map's own version serves the prefab's objects", sh_prefab_mods_label(p)); continue; }

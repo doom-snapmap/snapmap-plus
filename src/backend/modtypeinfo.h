@@ -1,35 +1,8 @@
-/* modtypeinfo.h -- the editor's entity type-info cache (idSnapTypeInfoCache)
- * and the default trees of the rows installed mods register after the game
- * built it.
- *
- * The game builds the cache once per process, from every snapEditorEntityDef
- * decl registered at that moment: one default property tree per entityDef,
- * keyed by the entityDef's name (the pooled string pointer at resource+8),
- * capacity MAX_ENT_TYPES (1,499; its builder stops the game at 1,500 rows).
- * Every placed entity's property tree starts as a copy of its type's cached
- * tree (idSnapTypeInfoCache::Get). A type the cache lacks gets a tree built
- * from the instance alone, so the editor reads its model scale as zero
- * ("modelMatrix invert failed on model <model>" every frame the entity is
- * drawn on its own) and shows it as hidden. Rows a mod registers after the
- * build are such types, and the game's cache cannot be rebuilt once the
- * registered rows exceed its capacity.
- *
- * The product keeps its own table of default trees for those types. Get and
- * its lookup-only sibling are detoured: a name the game's cache holds is
- * served by the game untouched; a name it lacks is served from the product's
- * table, where the tree is built on first use exactly as the game's builder
- * builds each cache entry (create the type's default entity through the
- * game, write its state to text, destroy it, parse the text into a tree),
- * inside process heap 0 for the life of the process. Get runs on a one-entry
- * view of the table so its own copy-and-apply path produces the result; the
- * lookup returns the tree itself. An entityDef whose served bytes change at a
- * refresh, or that is parsed from another build's bytes, loses its entry and
- * is rebuilt at its next use; the old tree stays allocated for the process,
- * since the engine may keep the pointer the lookup returned.
- *
- * The pure part (the table, the engine cache's search and the view) has no
- * engine dependency and is tested with buffers; the rest binds it to the
- * resolved engine. */
+/* modtypeinfo.h -- default trees for the entity types installed mods register after the game built its
+ * idSnapTypeInfoCache (one tree per entityDef, capacity MAX_ENT_TYPES 1,499). Get and its lookup sibling are
+ * detoured: a name the game's cache holds is served by the game, any other from a product table built on first
+ * use, so the editor does not read a zero model scale ("modelMatrix invert failed") for a mod's entity.
+ * The pure part (table, cache search, view) is tested with buffers; the rest binds it to the engine. */
 #ifndef BACKEND_MODTYPEINFO_H
 #define BACKEND_MODTYPEINFO_H
 
@@ -79,20 +52,17 @@ void *sh_typeinfo_table_remove(sh_typeinfo_table *t, const void *key);
 int sh_typeinfo_table_forget_name(sh_typeinfo_table *t, const char *name);
 void sh_typeinfo_table_free(sh_typeinfo_table *t, void (*destroy)(void *context, void *tree), void *context);
 
-/* 1 when the boot self-check can run now: the game's cache has entries and
- * the game object the product builds a type through is there. While it
- * cannot, the check is not held against the session: it is asked again. Pure. */
+/* 1 when the boot self-check can run: the game's cache has entries and the game object the product builds a
+ * type through exists; otherwise it is asked again. Pure. */
 int sh_typeinfo_check_due(int cache_count, int max_types, int game_ready);
 
 #ifndef SH_MODTYPEINFO_PURE
 struct sig_result;
-/* Resolve the engine and install the two detours. Returns 1 when they are
- * live; else logs one plain line and the editor keeps its own behavior. */
+/* Resolve the engine and install the two detours. Returns 1 when they are live; else logs one plain line and
+ * the editor keeps its own behavior. */
 int sh_modtypeinfo_install(const struct sig_result *results, size_t count, const uint8_t *module_base);
-/* After a palette build, on the main thread: once per boot, check the
- * product's builder against the game's cache on stock types (the detours
- * serve only after that check passes) and log one line with how many mod
- * rows resolve through the product's table. */
+/* After a palette build, on the main thread: once per boot, checks the product's builder against the game's cache
+ * on stock types (the detours serve only after it passes) and logs how many mod rows resolve through the table. */
 void sh_modtypeinfo_after_palette(void *palette);
 /* A decl's served bytes changed at a refresh: forget its tree. */
 void sh_modtypeinfo_decl_changed(const char *type, const char *name);

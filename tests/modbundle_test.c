@@ -1,8 +1,5 @@
-/* modbundle_test.c -- mod bundle builder: hashes, canonical manifest, logical
- * names, decl needs, validation refusals, render-program checks, identity
- * (the salt, the descriptor states, earlier shapes refused), mod.json (the
- * author's part kept byte for byte, the builder block, a failed build's
- * block), the tree hash of the rebuild rule and the product record.
+/* modbundle_test.c -- the mod bundle builder: hashes, canonical manifest, logical names, decl needs, refusals,
+ * render-program checks, identity, mod.json (author part and builder block), the tree hash and the product record.
  *
  *   modbundle_test.exe <tests\fixtures\mods\alexrimp> [--write-golden]
  */
@@ -138,7 +135,6 @@ static void ln(const char *req, const char *type, const char *name)
     }
 }
 
-/* Every row of the Contract 1 table. */
 /* Editor-time content, the model key a placed entity's edit state resolves
  * through, and the editor-only bundle classification. */
 static void test_editor_time(void)
@@ -274,7 +270,7 @@ static void test_scan(void)
     CHECK(!strcmp(got, "image=mods/a/d.tga;image=mods/a/n.tga;renderProg=skinvmtr;image=mods/a/m.tga;"));
     if (strcmp(got, "image=mods/a/d.tga;image=mods/a/n.tga;renderProg=skinvmtr;image=mods/a/m.tga;"))
         fprintf(stderr, "  material scan gave %s\n", got);
-    /* old-key materials write layerparms unquoted; it is a need all the same */
+    /* a material writing layerparms unquoted is a need all the same */
     {
         const char *old = "{ layerparms mods/a/p.tga\n diffusemap \"mods/a/d.tga\" }";
         got[0] = 0;
@@ -458,7 +454,7 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
     CHECK(!sh_mb_build(folder, NULL, &RESOLVER, &again));
     CHECK_CAUSE(again, "This mod folder has not been scanned yet");
     sh_mb_free(&again);
-    /* package.json is an earlier shape. */
+    /* a package.json is refused as an earlier shape */
     mt_delete(folder, "mod.json");
     mt_write(folder, "package.json", "{\"version\":\"1.0.0\",\"name\":\"R2 Imp copy\",\"author\":\"alex\"}");
     CHECK(!sh_mb_build(folder, SALT, &RESOLVER, &again));
@@ -628,7 +624,7 @@ static void test_modjson(const char *fixture, const char *tmp)
     mt_write(folder, "mod.json", author);
     mt_append(folder, "entities\\imp_copy.decl", "\r\n");
     CHECK(sh_mb_tree_hash(folder, tree2) && strcmp(tree1, tree2));
-    /* R-LB1 F8: a file a program still holds open after writing it (an editor) changes the tree hash too: the folder
+    /* A file a program still holds open after writing it (an editor) changes the tree hash too: the folder
      * listing keeps the old size and time until the handle closes, the file's own attributes do not. */
     {
         char held[MAX_PATH], before[65], during[65];
@@ -731,7 +727,7 @@ static void test_identity(const char *fixture, const char *tmp)
         CHECK(out && strstr(out, "\"mods/Hell Guards/title\""));
         free(out);
         CHECK(!sh_mb_salt_modjson(text, sizeof text - 1, NULL, "bad-salt", &n));
-        /* A copy's old salt is a namespace segment like any. */
+        /* A copy's previous salt is a namespace segment like any. */
         static const char copy[] = "{\"name\":\"c\",\"strings\":{\"en\":{\"mods/alexrimp/t\":\"x\"}},"
                                    "\"snapmap-plus\":{\"format\":2,\"salt\":\"alexrimp\",\"build\":\"00\"}}";
         out = sh_mb_salt_modjson(copy, sizeof copy - 1, "alexrimp", "qqqqqqqq", &n);
@@ -815,10 +811,8 @@ static void rec_hold_release(rec_hold *r, HANDLE t)
     CloseHandle(r->release);
 }
 
-/* A read that fails is never followed by a write of what it could not read
- * (lane C, probes P3 and P4): a brief hold is waited for; a long one fails
- * the read with a plain line naming the file, and that section is not
- * written until it reads again. */
+/* A read that fails is never followed by a write of what it could not read: a brief hold is waited for, and a long
+ * one fails the read with a plain line naming the file, so that section is not written until it reads again. */
 static void test_record_read_failure(const char *tmp)
 {
     char root[MAX_PATH], path[MAX_PATH], *text = NULL;
@@ -1033,13 +1027,13 @@ static void m_store_refuses(const char *f)
     mt_write(f, "mod.json", "{\"version\":\"1.0.0\",\"name\":\"R2\\tImp\","
                             "\"displayName\":\"x\",\"$schema\":\"y\",\"tags\":[\"a\"]}");
 }
-/* The same replacement without the retired "shadows" key. */
+/* The same replacement without a "shadows" key. */
 static void m_shadow_undeclared(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
     mt_write(f, "native\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
 }
-/* Retired author keys: the intent keys of DESIGN-additive 2.4 and before. */
+/* An intent key ("replaces") the builder does not read. */
 static void m_replaces_declared(const char *f)
 {
     mt_write(f, "mod.json", DESC(",\"replaces\":[\"generated/decls/entitydef/monster/imp.decl\"]"));
@@ -1152,7 +1146,7 @@ static void test_refusals(const char *fixture, const char *tmp)
 {
     sh_mb_bundle b;
     sh_mb_resolver no_stock = { NULL, NULL, NULL, NULL };
-    /* Earlier shapes and retired author keys: refused with the plain reason. */
+    /* Earlier shapes and intent keys: refused with the plain reason. */
     refused(fixture, tmp, m_bad_id, &RESOLVER, SH_MB_EARLIER);
     refused(fixture, tmp, m_key, &RESOLVER, SH_MB_EARLIER);
     refused(fixture, tmp, m_legacy, &RESOLVER, SH_MB_EARLIER);
@@ -1170,11 +1164,11 @@ static void test_refusals(const char *fixture, const char *tmp)
     accepted(fixture, tmp, m_no_id, &b);
     CHECK(b.errors == 0 && !strcmp(b.id, SALT));
     sh_mb_free(&b);
-    /* Every strings key the author writes is a name of letters, digits and _ (the product puts <salt>_ in front: DECISIONS 5, no '/'). */
+    /* Every strings key the author writes is a name of letters, digits and _ (the product puts <salt>_ in front), never a '/'. */
     refused(fixture, tmp, m_strings_outside, &RESOLVER, "mod.json strings key alexrimp_mods/other/t ");
     refused(fixture, tmp, m_strings_slash, &RESOLVER, "mod.json strings key alexrimp_mods/alexrimp/t ");
     refused(fixture, tmp, m_strings_bare, &RESOLVER, "mod.json strings key alexrimp_has space ");
-    /* DECISIONS 9: keys the game or Snapmap+ defines are string edits, unprefixed. */
+    /* Keys the game or Snapmap+ defines are string edits, unprefixed. */
     accepted(fixture, tmp, m_string_edits, &b);
     CHECK(b.errors == 0 && b.registries &&
           strstr(b.registries, "\"stringEdits\":[\"SnapEntity_Demon_Baron\",\"sh_bv_navigation_desc\"],\"strings\":[\"alexrimp_t\"]") &&
@@ -1216,8 +1210,7 @@ static void test_refusals(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_no_desc, &RESOLVER, "the mod folder has no mod.json");
     refused(fixture, tmp, m_bad_ext, &RESOLVER, "entities/notes.txt: this folder holds .decl files");
     {
-        /* Files beside mod.json are ignored and never carried
-         * (DECISIONS 16), package.json among them. */
+        /* Files beside mod.json are ignored and never carried, package.json among them. */
         sh_mb_bundle ok;
         size_t k;
         /* The registered content check's sentence is the build's cause. */
@@ -1240,7 +1233,7 @@ static void test_refusals(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_bad_type, &RESOLVER, "names no decl type");
     refused(fixture, tmp, m_ill_formed, &RESOLVER, "not a well-formed decl");
     refused(fixture, tmp, m_missing_need, &RESOLVER, "resolves to nothing");
-    /* Additive mods: a native/ file must be at a DOOM path (D14). */
+    /* Additive mods: a native/ file must be at a DOOM path. */
     refused(fixture, tmp, m_shadow_not_stock, &RESOLVER, "native/generated/decls/entitydef/monster/not_stock.decl is not "
             "one of DOOM's files, so it is the mod's own; move it to entities/monster/not_stock.decl.");
     {
@@ -1287,11 +1280,8 @@ static void test_refusals(const char *fixture, const char *tmp)
     sh_mb_free(&b);
     refused(fixture, tmp, m_scenes_missing, &RESOLVER, "needs entityDef mods/alexrimp/gone, which resolves to nothing");
 
-    /* Derived edits (DESIGN-additive 2.4): a decl at a game name is an edited
-     * copy. The builder records its structural diff against the game's text
-     * (the product block's "edits") and the product generates the game file
-     * per map; nothing is declared. The game's texts come from a fake
-     * installed-content reader. */
+    /* A decl at a game name is an edited copy: the builder records its structural diff against the game's text (the
+     * block's "edits"), read here through a fake installed-content reader. */
     sh_mb_set_stock_ops(&g_text_ops);
     accepted(fixture, tmp, m_shadow_ok, &b);
     {
@@ -1331,7 +1321,7 @@ static void test_refusals(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_copy_unparsed, &RESOLVER,
             "imp.decl does not parse as a decl (line 2: expected a key, found '='); the product derives the edits from the "
             "whole edited copy of generated/decls/entitydef/monster/imp.decl");
-    /* A binary at a DOOM path with other bytes is a replacement (SPEC-distribution 3.10), not a refusal. */
+    /* A binary at a DOOM path with other bytes is a replacement, not a refusal. */
     accepted(fixture, tmp, m_binary_replace, &b);
     CHECK(b.errors == 0 && b.shadow_count == 1 && b.classes.replaces == 1 && !b.edits);
     sh_mb_free(&b);
@@ -1425,8 +1415,6 @@ static void test_text_same(void)
     CHECK(!sh_mb_text_same(lf, sizeof lf - 1, (const unsigned char *)"{", 1));
     CHECK(sh_mb_text_same((const unsigned char *)"\r\n", 2, (const unsigned char *)"", 0));
 }
-
-/* ------------------------------------------------------ render programs ---- */
 
 static void test_md5fold(void)
 {
@@ -1660,8 +1648,6 @@ static void test_renderprogs(const char *tmp)
     rp_case(tmp, RP_GLSL, "debug dump of generated GLSL");
 }
 
-/* ------------------------------------------------------ additive mods ---- */
-
 /* A fake installed game for the classification cells: two entries with bytes. */
 typedef struct fake_entry { const char *source; const char *text; } fake_entry;
 static const fake_entry FAKE[] = {
@@ -1755,8 +1741,8 @@ static int has_warning(const sh_mb_bundle *b, const char *needle)
     return 0;
 }
 
-/* SPEC-distribution 3.10 and D12: a native/ copy of DOOM's own bytes warns; a text that writes the mod's engine name
- * warns; the namespace a binary spells is the block's "spelled", read back from mod.json. */
+/* A native/ copy of DOOM's own bytes warns, and so does a text that writes the mod's engine name; the namespace a
+ * binary spells is the block's "spelled", read back from mod.json. */
 static void test_native_and_spelled(const char *tmp)
 {
     static const sh_mb_stock_ops ops = { NULL, fake_match, fake_identify, fake_verify, fake_read, fake_container_snap };
@@ -1801,11 +1787,8 @@ static int count_class(const sh_mb_bundle *b, int cls)
     return n;
 }
 
-/* Every cell of the classification (DESIGN-additive 2.1, 2.4, 2.6): add,
- * borrow, surface, an edited copy at a game name (its edits derived), an
- * editor type under the key (an addition) and at a game name (an editor
- * tweak); the shadows derived; the product block's derived facts written and
- * read back; the player entity and the FSM states as edits. */
+/* Every cell of the classification (add, borrow, surface, edited copy, editor type) with the derived shadows and facts
+ * written and read back, plus the player entity and the FSM states as edits. */
 static void test_classes(const char *fixture, const char *tmp)
 {
     static const sh_mb_stock_ops ops = { NULL, fake_match, fake_identify, fake_verify, fake_read };
@@ -1995,8 +1978,8 @@ static void test_rekey(void)
 }
 
 /* A bare word naming a mod resource with '-' in it: the engine's breakable
- * and material lexers split it at '-' (the spider's smm_damage_gibs line 35
- * and its materials' transmap stages). Quoted, the same name is fine. */
+ * and material lexers split it at '-' (a spider breakable and its materials'
+ * transmap stages). Quoted, the same name is fine. */
 #define BARE_BREAKABLE "decls\\breakable\\breakable\\gibs.decl"
 static const char g_spider_breakable[] =
     "{\r\n\tbouncyness\t\t\t\t0.300000\r\n\tgravity\t\t\t\t\t0.000000 0.000000 -750.000000\r\n"

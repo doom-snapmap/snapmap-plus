@@ -1,21 +1,8 @@
-/* modexport_test -- rawmap and prefab exports in the unit layout (SPEC-distribution 5.16, D35).
+/* modexport_test -- rawmap and prefab exports in the unit layout (<zip name>.json, units/, files/).
  *
- * An author's mods are two folders built at the root of a mods folder (Crates: three props, two of them placed;
- * Paints: one prop placed) and a map whose two rows name them as local rows. The export pins each local row with
- * modpin (each placed object's unit, written into the content cache) and writes one ZIP:
- *   <zip name>.json      the map text, its rows pinned (format 2: "objects" naming units)
- *   units/<hash>.json    each unit's canonical manifest, its SHA-256 the name
- *   files/<sha256>       each carried file once
- * with no mods/ entry and no index, the same bytes on a second write. A row no folder here serves refuses the
- * export with the mod's name, and so does a unit whose manifest, or one of whose files, is not on this computer.
- *
- * Imported into a player's empty mods folder, every unit and file goes into the content cache (each checked against
- * its name), the map text comes back unchanged and nothing is installed: no mod folder appears. A second import
- * finds every unit present. A damaged entry is refused with the export is damaged sentence and its content is not
- * kept; a row whose content the export does not carry is counted as absent. Every earlier shape (whole mod folders
- * under mods/, bundle.canonical.json, an export.json index, a map in an earlier shape) is refused with one sentence
- * and changes nothing. A prefab's export has the same layout, and each importer refuses the other's ZIP. The rawmap
- * hooks return process-heap text. Pure file work: no network. */
+ * Covers pinning each local row with modpin, byte-identical rewrites, refused rows, import into an empty cache
+ * (nothing is installed), damaged or missing entries, and refusal of unsupported layouts and of the other kind's
+ * ZIP. Pure file work: no network. */
 #include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
@@ -440,7 +427,7 @@ static char *prefab_text_for(void *ctx, const sh_modmanifest_list *rows, int mov
     return out;
 }
 
-/* The importer's rows: the block's "mods" of the prefab text; -2 for a row in an earlier shape. */
+/* The importer's rows: the block's "mods" of the prefab text; -2 for a row in an unsupported shape. */
 static int prefab_rows_of(void *ctx, const char *prefab, size_t len, sh_modmanifest_list *rows)
 {
     sh_prefab_block_span span;
@@ -518,7 +505,7 @@ int main(int argc, char **argv)
         zent *m = zset_find(&z, "Pink Arena.json");
         size_t pn = m ? rows_of_text(m ? (const char *)m->data : "", m ? m->len : 0, &pinned) : 0;
         CHECK(pn == 2 && m && !strstr((const char *)m->data, "\"local\":true") && strstr((const char *)m->data, "\"objects\""));
-        CHECK(m && strstr((const char *)m->data, "EXPORT_MARK") != NULL);   /* the map is carried as it was */
+        CHECK(m && strstr((const char *)m->data, "EXPORT_MARK") != NULL);   /* the map is carried unchanged */
         /* every row is pinned to the units of its placed objects, and every unit is an entry of the ZIP */
         for (i = 0; i < pinned.count; i++) {
             const sh_modmanifest_row *r = &pinned.rows[i];
@@ -704,7 +691,7 @@ int main(int argc, char **argv)
     CHECK(st.bundles == 2 && st.bundles_installed == 3 && st.files == 6 && st.bundles_present == 0 && st.bundles_absent == 0);
     cache_counts(p_root, &u, &f);
     CHECK(u == 3 && f == 6);
-    CHECK(mod_folders(p_root) == 0);   /* no mod folder, no maps folder: nothing was installed */
+    CHECK(mod_folders(p_root) == 0);   /* no mod folder, no maps folder: nothing is installed */
     CHECK(back && rows_of_text(back, len, &pinned) == 2 && units_present(&pinned));
     {
         /* each carried file is a blob under its SHA-256 */
@@ -887,7 +874,7 @@ int main(int argc, char **argv)
         _snprintf_s(old, sizeof old, _TRUNCATE, "%s\\old.zip", tmp);
         _snprintf_s(n_root, sizeof n_root, _TRUNCATE, "%s\\nothing", tmp);
         use_root(n_root);
-        /* whole mod folders under mods/, beside the units: the old layout */
+        /* whole mod folders under mods/, beside the units: an unsupported layout */
         CHECK(zset_load(&zs, zip) && zset_add(&zs, "mods/crates/mod.json", "{\"name\":\"Crates\"}", 17));
         CHECK(zset_save(&zs, old));
         CHECK(!HOT(char *, cause, modexport_read(old, &len, &st, HO_P(0))) && !strcmp(cause, MODEXPORT_EARLIER));
@@ -1021,7 +1008,7 @@ int main(int argc, char **argv)
             CHECK(st.bundles_installed == 2 && st.files == 4 && mod_folders(x_root) == 0);
             free(text); free(pname); free(pcause);
             text = pname = pcause = NULL;
-            /* an extracted folder with an old mods/ folder beside is refused as the ZIP is */
+            /* an extracted folder with a mods/ folder beside is refused as the ZIP is */
             {
                 char old_mod[MAX_PATH * 2];
                 _snprintf_s(old_mod, sizeof old_mod, _TRUNCATE, "%s\\mods\\crates", ex);
@@ -1032,7 +1019,7 @@ int main(int argc, char **argv)
                 pcause = NULL;
             }
         }
-        /* a prefab whose rows are in an earlier shape */
+        /* a prefab whose rows are in an unsupported shape */
         {
             static const char OLD_PREFAB[] =
                 "{\"entities\":[],\"~type\":\"idSnapEntityPrefab\",\n\"snapmapPlus\":{\"format\":1,\"mods\":["

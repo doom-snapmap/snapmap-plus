@@ -1,7 +1,5 @@
-/* modclaim_key_test.c -- the publishing key as the publisher's side uses it (modclaim.h, SPEC-distribution 4.2-4.4):
- * the backup offer, the status Settings shows, a backup and a restore through modclaim, and the claims' secrets after
- * a key is lost and after a restore (a claim keeps the secret of the key that made it, an inactive key included).
- * Offline: no store is asked.
+/* modclaim_key_test.c -- the publishing key through modclaim.h: the backup offer, Settings' status, backup and restore,
+ * and which key's secret a claim keeps after a key is lost or restored. Offline: no store is asked.
  *
  *   modclaim_key_test.exe
  */
@@ -80,7 +78,7 @@ int main(void)
     CHECK(modclaim_key_backup(backup, "correct horse battery", &why));
     CHECK(!modclaim_key_offer_pending());   /* a backup answers the offer */
 
-    /* the key is lost: a new one is made active. item1's claim was made by A, which is not on file now: claimed anew */
+    /* the key is lost: a new one is made active. item1's claim was made by A, which is not on file: claimed anew */
     CHECK(sh_key_create(&b, &why) && b);
     sh_key_claim_id(b, idb);
     {
@@ -122,7 +120,7 @@ int main(void)
     modclaim_set_account_name("Doom Slayer");
     modclaim_set_account_name("");
 
-    /* a key that cannot be made or used is its own failure, MODNET_E_KEY, never the store address's (W1) */
+    /* a key that cannot be made or used is its own failure, MODNET_E_KEY, never the store address's */
     {
         char blocker[MAX_PATH * 2], bad[MAX_PATH * 3];
         char hash[MODNET_HASH_HEX + 1];

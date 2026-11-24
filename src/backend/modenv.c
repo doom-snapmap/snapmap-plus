@@ -107,8 +107,6 @@ int sdk_env_parms(const sdk_doc *d, const sdk_group *g, const char *what, const 
     return n;
 }
 
-/* ------------------------------------------------------------------------------------------- the fx ---- */
-
 static void put_num(sdk_buf *b, const char *ind, const char *key, double v)
 {
     char n[32];
@@ -170,8 +168,6 @@ char *sdk_env_fx_text(const sdk_env_parm *p, int n, double blend)
     if (b.oom) { free(b.p); return NULL; }
     return b.p;
 }
-
-/* --------------------------------------------------------------------------------------- the decl ---- */
 
 /* 1 when the doc's first item is `type environment`. */
 static int is_environment(const sdk_doc *d)

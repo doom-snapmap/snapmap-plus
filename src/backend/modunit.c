@@ -13,8 +13,6 @@
 #include "mp_json.h"
 #include "../common/text.h"
 
-/* ------------------------------------------------------------ names ---- */
-
 static int uw_lower(int c) { return c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c; }
 
 /* A character a name in decl text or in a binary is spelled with. */
@@ -86,8 +84,6 @@ int sh_unit_enumerated_type(const char *type)
     for (i = 0; type && types[i]; i++) if (!_stricmp(type, types[i])) return 1;
     return 0;
 }
-
-/* ------------------------------------------------------------ the walk ---- */
 
 typedef struct uw_pair { const char *key; size_t file; } uw_pair;
 typedef struct uw_ptr { char *at, *path, *source; char sha[SH_MB_HASH_HEX + 1]; } uw_ptr;
@@ -240,8 +236,6 @@ static int uw_scan(uw *w, const unsigned char *t, size_t n, const char *ns)
     return found;
 }
 
-/* ------------------------------------------------------------ lists ---- */
-
 static int uw_str_cmp(const void *a, const void *b) { return strcmp(*(const char *const *)a, *(const char *const *)b); }
 
 /* Add a copy of s (n bytes) to the sorted list; 1 when it was not there. */
@@ -283,8 +277,6 @@ static void uw_list_free(uw_list *l)
     memset(l, 0, sizeof *l);
 }
 
-/* ------------------------------------------------------------ files ---- */
-
 static unsigned char *uw_read(const uw *w, const sh_mb_file *f, size_t *len)
 {
     char *path = sh_textf("%s\\%s", w->folder, f->path), *p;
@@ -323,8 +315,6 @@ static void uw_strings(uw *w, const unsigned char *t, size_t n)
         i = k;
     }
 }
-
-/* ----------------------------------------------------------- pointers ---- */
 
 static void uw_pointer(uw *w, const char *at, const char *path, const char *sha, const char *source)
 {
@@ -385,8 +375,6 @@ static void uw_needs(uw *w, const sh_mb_file *f)
         sh_mb_requests_free(req, n);
     }
 }
-
-/* -------------------------------------------------------------- banks ---- */
 
 static void uw_bank_ids(uw *w, size_t i)
 {
@@ -511,8 +499,6 @@ static void uw_banks(uw *w)
         }
 }
 
-/* ----------------------------------------------------- render programs ---- */
-
 /* A kept render program keeps its permutations, its cooked binaries and its SPIR-V: every file under
  * generated/renderprogs/ or generated/spirv/ that is the program's or spells its name. */
 static void uw_program(uw *w, const sh_mb_file *f)
@@ -536,8 +522,6 @@ static void uw_program(uw *w, const sh_mb_file *f)
         if (hit) uw_reach(w, i);
     }
 }
-
-/* -------------------------------------------------------------- boards ---- */
 
 /* The four numbers of `{ a, b, c, d }` after `key` in an engine text. */
 static int uw_vec4(const char *t, const char *key, double v[4])
@@ -606,8 +590,8 @@ static void uw_board(uw *w, const char *engine)
         if (r1 > 3) r1 = 3;
         for (r = r0; r <= r1; r++)
             for (c = c0; c <= c1; c++) want |= 1u << (r * 4 + c);
-        /* Square 1 too, always (D-A29): with no _q members, the family's coarsest page (mip 11) is read from square 1
-         * alone, so a cut without it has no page there (idMegaTexture2's page lookup, R-LV2 section 4). */
+        /* Square 1 too, always: with no _q members the family's coarsest page (mip 11) is read from square 1
+         * alone (idMegaTexture2's page lookup), so a cut without it has no page there. */
         want |= 1u;
     }
     i = uw_lower_bound(w->fams, w->nfams, key);
@@ -619,8 +603,6 @@ static void uw_board(uw *w, const char *engine)
     }
     free(key);
 }
-
-/* ------------------------------------------------------------- scripts ---- */
 
 /* The engine names a script's literal may stand for (each malloc'd, NULL where none): in the author's spelling, in
  * the engine's, mod-relative, and after a decl type's folder. Returns the count; *prefix 1 when the literal ends in
@@ -761,11 +743,9 @@ static void uw_literal_def(uw *w, const char *s, size_t n, void *ctx)
     for (i = 0; i < m; i++) if (cand[i]) { uw_defs_named(w, cand[i], strlen(cand[i]), (uw_script *)ctx); free(cand[i]); }
 }
 
-/* A literal spelled as a name require takes is a module the script may require by a name it computes or passes on:
- * require(spec.attacks), pcall(require, "x"), require(cfg.x or "x") (R-LV2: the Tyrant's unit lacked
- * eternal_attacks.lua, which its brain spec names as attacks = "eternal_attacks", and the brain stopped). It reaches
- * scripts/lib/<name>.lua when the mod has it, as a require would, by require's own name rule
- * (sh_mb_script_module_name: a name with a '-' is one, R-UC1). */
+/* A literal spelled as a name require takes is a module the script may require by a name it computes or passes
+ * on (require(spec.attacks), pcall(require, "x")). It reaches scripts/lib/<name>.lua when the mod has it, by
+ * require's name rule (sh_mb_script_module_name: a name with a '-' is one). */
 static void uw_literal_module(uw *w, const char *s, size_t n, void *ctx)
 {
     char *req, *p;
@@ -802,8 +782,6 @@ static void uw_def(uw *w, size_t i)
         for (k = 0; k < w->enums[s].ndefs; k++)
             if (w->enums[s].defs[k] == i) uw_reach(w, w->enums[s].file);
 }
-
-/* ------------------------------------------------------------- visiting ---- */
 
 static void uw_visit_bytes(uw *w, size_t i);
 
@@ -1075,8 +1053,6 @@ static void uw_drain(uw *w)
     }
 }
 
-/* ------------------------------------------------------------- manifest ---- */
-
 typedef struct ub { char *p; size_t n, cap; int oom; } ub;
 
 static void ub_put(ub *o, const char *s, size_t n)
@@ -1290,7 +1266,7 @@ static void uw_mod_share(uw *w, ub *o)
         } else if (!strcmp(key, "requirements")) {
             kept = mpj_clone(v);   /* mod-wide: whole */
         } else {
-            continue;   /* a key nothing serves ("version", a note): never part of the unit's identity (D-A16) */
+            continue;   /* a key nothing serves ("version", a note): never part of the unit's identity */
         }
         if (!kept) { w->oom = 1; continue; }
         if ((kept->type == MPJ_OBJ || kept->type == MPJ_ARR) && !kept->n && v->n) { mpj_free(kept); continue; }
@@ -1333,7 +1309,7 @@ static void uw_manifest(uw *w, sh_unit *u)
             }
         }
         /* "at": where the mod's folder holds DOOM's bytes (a borrow, a surface, an unchanged native/ file); a pointer
-         * the build derives by itself (the campaign closure) has no file and no "at" */
+         * the build derives by itself has no file and no "at" */
         uw_pointer(w, f->absent ? NULL : f->path, source, f->blob, where);
     }
     if (w->fail || w->oom) return;
@@ -1387,8 +1363,6 @@ static void uw_manifest(uw *w, sh_unit *u)
     sh_mb_sha256_hex(o.p, o.n, u->hash);
 }
 
-/* ---------------------------------------------------------------- proof ---- */
-
 /* Every need a kept file resolves inside the build resolves inside the unit. */
 static void uw_prove(uw *w)
 {
@@ -1419,8 +1393,6 @@ static void uw_prove(uw *w)
         }
     }
 }
-
-/* ---------------------------------------------------------------- entry ---- */
 
 void sh_unit_free(sh_unit *u)
 {
@@ -1503,9 +1475,8 @@ int sh_unit_of(const sh_mb_bundle *b, const char *folder, const char *name, cons
     }
     if (!out->root) { w.oom = 1; goto done; }
     /* What travels wherever the mod is used: the DOOM files it changes, the DOOM files its folder holds unchanged
-     * (a surface: DOOM's bytes at DOOM's name, served where the mod is used, as a pointer), and the enumerated decls
-     * naming none of its defs. A surface the builder derived from a need (no file in the folder) comes with what
-     * needs it. */
+     * (a surface, kept as a pointer), and the enumerated decls naming none of its defs; a surface derived from a
+     * need (no file in the folder) comes with what needs it. */
     for (i = 0; i < b->file_count; i++) {
         const sh_mb_file *f = &b->files[i];
         if (f->absent || f->cls == SH_MB_CLASS_EDITOR) continue;
@@ -1587,8 +1558,6 @@ done:
     return ok;
 }
 
-/* ---------------------------------------------------------- storing ---- */
-
 static int uw_mkdirs(const wchar_t *path)
 {
     wchar_t *p, *copy;
@@ -1632,8 +1601,6 @@ int sh_unit_store(const sh_unit *u, const char *content_root, char **why)
     free(path);
     return ok;
 }
-
-/* --------------------------------------------------------- composing ---- */
 
 static void uw_rmtree(const wchar_t *top)
 {
@@ -1739,8 +1706,8 @@ int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t 
             if (!to) { oom = 1; break; }
             for (char *c = to; *c; c++) if (*c == '/') *c = '\\';
             if (sh_mb_sha256_file(to, &size, have)) {
-                /* One file two units carry. With other bytes (a hand-made or damaged map, or a kept object of an
-                 * earlier build, N32), the first unit in object order keeps the path: one log line, no notice. */
+                /* One file two units carry. With other bytes the first unit in object order keeps the path: one
+                 * log line, no notice. */
                 if (strcmp(have, sha->text)) {
                     char *line = sh_textf("MODS: content: two objects of this mod carry %s with other bytes; the first "
                                           "object's file is kept", p->text);
@@ -1754,8 +1721,8 @@ int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t 
             wf = sh_mb_wpath(from);
             wt = sh_mb_wpath(to);
             if ((slash = wt ? wcsrchr(wt, L'\\') : NULL) != NULL) { *slash = 0; uw_mkdirs(wt); *slash = L'\\'; }
-            /* A hard link costs no bytes (the cache and the mods folder share a volume); a copy where it cannot be
-             * made. Either way the bytes are checked against the unit's SHA-256 (D51). */
+            /* A hard link costs no bytes (the cache and the mods folder share a volume); a copy where it cannot
+             * be made. Either way the bytes are checked against the unit's SHA-256. */
             if (!wf || !wt) sh_text_set(&reason, "%s could not be copied", p->text);
             else if (link && CreateHardLinkW(wt, wf, NULL)) {
                 if (!sh_mb_sha256_file(to, &size, have) || strcmp(have, sha->text))
@@ -1797,7 +1764,7 @@ int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t 
         }
         mpj_free(m);
     }
-    /* Files of no unit (stand-ins, D60): written where no unit put a file. */
+    /* Files of no unit (stand-ins): written where no unit put a file. */
     for (u = 0; u < extra_count && !reason && !oom; u++) {
         char *to, have[SH_MB_HASH_HEX + 1];
         unsigned long long size = 0;

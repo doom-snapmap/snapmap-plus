@@ -1,5 +1,4 @@
-/* modhud.c -- see modhud.h. The weapon ammo-display policy and its call-site
- * relay, fed from the builds the loaded map serves. */
+/* modhud.c -- see modhud.h. The weapon ammo-display policy and its call-site relay. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdarg.h>
@@ -46,8 +45,6 @@ static void hud_log(const char *fmt, ...)
     free(line);
 }
 #endif
-
-/* ------------------------------------------------------------------ policy */
 
 static int hud_name_valid(const char *s)
 {
@@ -188,8 +185,7 @@ void sh_modhud_mark_stale(void) { InterlockedExchange(&g_stale, 1); }
 unsigned char sh_modhud_select(const char *weapon, unsigned char engine_mode)
 {
     unsigned char result = engine_mode;
-    /* The HUD asks on the game thread: after an index change or a Play entry
-     * the table is read again here, from the builds the open map serves. */
+    /* The HUD asks on the game thread: after an index change or a Play entry the table is reread here. */
     if (InterlockedExchange(&g_stale, 0) && g_reload) (void)g_reload();
     if (!weapon) return result;
     AcquireSRWLockShared(&g_lock);
@@ -202,8 +198,6 @@ unsigned char sh_modhud_select(const char *weapon, unsigned char engine_mode)
     ReleaseSRWLockShared(&g_lock);
     return result;
 }
-
-/* ------------------------------------------------------------------ the builds */
 
 typedef struct hud_load {
     int (*serves_now)(const char *);
@@ -273,7 +267,6 @@ int sh_modhud_load(sh_modhud_each_fn each, int (*serves_now)(const char *bundle_
     return (int)sh_modhud_count();
 }
 
-/* ------------------------------------------------------------------ the call */
 #ifndef SH_MODHUD_PURE
 
 typedef unsigned char (*hud_mode_fn)(void *game);
@@ -289,8 +282,7 @@ static unsigned char hud_mode(void *game, const unsigned char *widget)
     unsigned char original = g_original(game), result = original;
     char small[256], *name = NULL;
     size_t n = 0;
-    /* The weapon's decl name, copied out of the engine's memory first (the
-     * select takes a lock), whole whatever its length. */
+    /* The weapon's decl name is copied out of the engine's memory first (the select takes a lock), whole. */
     __try {
         const unsigned char *decl = widget ? *(const unsigned char *const *)(widget + 0x1f8) : NULL;
         const char *source = decl ? *(const char *const *)(decl + 8) : NULL;
@@ -398,7 +390,7 @@ refused:
 }
 
 #ifndef SH_MODHUD_TESTING
-/* The build the open map serves for its salt: its names serve now. */
+/* The build the open map serves for its salt: its names are the ones served. */
 static int hud_serves_now(const char *hash)
 {
     sh_modserve_scope_info info;
@@ -436,7 +428,6 @@ int sh_modhud_install(const sig_result *results, size_t count)
 #else
 void sh_modhud_test_reload_with(int (*load)(void)) { g_reload = load; }
 
-/* ------------------------------------------------------------------ test */
 typedef struct hud_test_runner {
     unsigned char (*call)(void *, void *);
     volatile LONG stop, failed, iterations;
@@ -457,11 +448,8 @@ static DWORD WINAPI hud_test_run(LPVOID parameter)
     return 0;
 }
 
-/* An owned synthetic caller: push rbx; sub rsp,0x20; mov rbx,rdx; call
- * predicate; test al,al; jmp over a dead mov rax,[rbx+0x1f8] (the widget load
- * the route checks for at call +9); add rsp,0x20; pop rbx; ret, and predicate:
- * mov al,[rcx]; ret. The call's rel32 starts at +12, 4-byte aligned. No game
- * image is used. */
+/* Self-test of the relay on a synthetic caller (a call to a predicate that returns [rcx], then a dead widget load
+ * `mov rax,[rbx+0x1f8]` at call +9 that the route checks for); no game image is used. */
 int sh_modhud_test_relay(void)
 {
     unsigned char *code = (unsigned char *)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);

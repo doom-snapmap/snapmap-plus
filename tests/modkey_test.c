@@ -1,9 +1,5 @@
-/* modkey_test.c -- the publishing key (modkey.h, SPEC-distribution 4.2): made, saved and read back under DPAPI; the
- * active key and the inactive ones a restore keeps; the passphrase backup and its restore, with the three refusals
- * (a wrong passphrase, a damaged file, a file whose sealed scalar is another key's).
- *
- *   modkey_test.exe
- */
+/* modkey_test.c -- the publishing key (modkey.h): made, saved and read back under DPAPI, the active and inactive
+ * keys, and the passphrase backup and restore with its three refusals. */
 #include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
@@ -88,7 +84,7 @@ int main(void)
     b = NULL;
     CHECK(sh_key_restore(backup, "correct horse battery", &r, &why) == SH_KEY_RESTORE_OK && r);
     CHECK(r && !strcmp(sh_key_public(r), sh_key_public(a)));
-    CHECK(r && sh_key_claim_secret(r, "item1", s2) && !strcmp(s1, s2));   /* the old claims' secrets again */
+    CHECK(r && sh_key_claim_secret(r, "item1", s2) && !strcmp(s1, s2));   /* the same claim secrets again */
     CHECK(r && sh_key_make_active(r, folder, &why));
     CHECK(sh_key_load_or_create(folder, &b, &why) && b && !strcmp(sh_key_public(b), sh_key_public(a)));
     sh_key_claim_id(c, id);

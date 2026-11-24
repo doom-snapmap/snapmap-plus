@@ -1,14 +1,6 @@
-/* modregistry_test.c -- derived edits applied per map (modregistry.c) and
- * their serving (modserve.c, ms_scope_compute): the conductor's rows and bit
- * rewrite, and generation from a synthetic declared set written to a
- * temporary mods folder whose edited copies' edits are derived as the builder
- * derives them, with the game's texts given by a fake installed-content
- * reader: two boss packs' conductor items (bits assigned without collision,
- * the same whatever the install order, encounters and scores served with the
- * assigned bits), the spider's FSM states (a keyed replace and an add), two
- * bodies merged per clip, the player fields of one bundle, a clash with and
- * without the map's choice, a weapon's field only when declared, map add and
- * remove, rescan marks, gates and a whole copy at a generated name. */
+/* modregistry_test.c -- derived edits applied per map (modregistry.c) and their serving (modserve.c, ms_scope_compute):
+ * the conductor's rows and bit rewrite, the spider's FSM states, merged bodies and bundles, clashes, a weapon's field,
+ * map add and remove, rescan marks, gates and a whole copy at a generated name, from a synthetic declared set. */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
 #include <windows.h>
@@ -165,7 +157,7 @@ static void test_text(void)
           !sh_modregistry_slot_valid("entitydef/player/coop/\"x\""));
 }
 
-/* The body's clip count is structural (V2c: 228 for 227): an alias row's anim
+/* The body's clip count is structural: an alias row's anim
  * reference is not a clip, on one line or written across several. */
 static void test_body_clip_count(void)
 {
@@ -215,13 +207,9 @@ static void put_json_string(char *out, size_t cap, size_t *at, const char *s)
     *at += _snprintf_s(out + *at, cap - *at, _TRUNCATE, "%s", s);
 }
 
-/* <root>\<folder>\mod.json with an author block (`author`: members with a
- * trailing comma), a product block and the files. A file at a game name the
- * fake reader holds is an edited copy: its edits are derived here as the
- * builder derives them (sh_dt_diff) and it is listed in shadows, as the
- * builder writes it; `whole` 1 records no edits, so the copy is a shadow
- * served whole. The block is format 2, keyed by the salt `id`. The bundle
- * hash is 64 x `digit`. */
+/* <root>\<folder>\mod.json with an author block, a product block and the files. A file at a game name the fake reader
+ * holds is an edited copy whose edits are derived here as the builder derives them (sh_dt_diff) and listed in shadows;
+ * `whole` 1 records no edits, so the copy is a shadow served whole. The block is format 2, keyed by the salt `id`. */
 static void make_mod(const char *root, const char *folder, const char *id, char digit, const char *author,
                      const fx *files, int n, int whole)
 {
@@ -701,7 +689,7 @@ static void test_leftovers(void)
     sh_mb_set_stock_ops(NULL);
 }
 
-/* ------------------------------------------------------------------ the SnapMap contract (R-SM2) */
+/* ------------------------------------------------------------------ the SnapMap contract */
 
 #define REQ_E2 "generated/decls/snapaiencounter/e2_imp_pack.decl"
 static const char STOCK_E2[] =
@@ -851,7 +839,7 @@ static void test_contract(void)
     free(eb);
 }
 
-/* ------------------------------------------------------------------ pinned types and the flag picker (R-SM3) */
+/* ------------------------------------------------------------------ pinned types and the flag picker */
 
 static const char STOCK_FLAGS[] =
     "{\n\tedit = {\n\t\tenumType = \"spawnAIType_t\";\n\t\tvalues = {\n\t\t\tnum = 1;\n\t\t\titem[0] = {\n"
@@ -922,7 +910,7 @@ static void test_pins_and_flags(void)
     CHECK(r.nentries == 2 && !r.entries[0].pinned && !r.entries[1].pinned && r.entries[1].bit == (1u << 20));
     sh_modregistry_result_free(&r);
     /* a pin of a demon whose content is not here (its mod's folder absent, its pin kept by the save) keeps its type
-     * from the listed ports while a free one is left (R-LB1): A and B go round it */
+     * from the listed ports while a free one is left: A and B go round it */
     {
         sh_mr_choice absent = { "spawnAIType_t/19/mods/dddddddd/single_d", "dddddddd" };
         sh_mr_choice absent_and_b[2] = { { "spawnAIType_t/19/mods/dddddddd/single_d", "dddddddd" },
@@ -951,7 +939,7 @@ static void test_pins_and_flags(void)
     free(eb);
 }
 
-/* ------------------------------------------------------------------ pins kept while a mod's folder is absent (R-LB1) */
+/* ------------------------------------------------------------------ pins kept while a mod's folder is absent */
 
 #define PIN_HAMMER "\"spawnAIType_t/19/mods/localhel/single_hell_guard_hammer\":\"localhel\""
 #define PIN_STAFF  "\"spawnAIType_t/20/mods/localhel/single_hell_guard_staff\":\"localhel\""
@@ -996,10 +984,9 @@ static void load_map(char *saved, size_t len)
     if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
 }
 
-/* A map with two ports of one mod (the Hell Guard's staff and hammer) and the spider: saved with every folder here,
- * then opened and saved on a machine where the guard's folder is absent while another mod ports a demon, then
- * reopened with the folder back. The pins, and so the types its AI Filters name, are what they were; a present
- * folder's demon that is gone gives its pin up. */
+/* A map with two ports of one mod (the Hell Guard's staff and hammer) and the spider, saved with every folder here,
+ * then opened and saved with the guard's folder absent while another mod ports a demon, then reopened with the folder
+ * back: the pins, and so the types its AI Filters name, stay; a present folder's demon that is gone gives its pin up. */
 static void test_pins_kept_absent(void)
 {
     static const fx spider[] = {

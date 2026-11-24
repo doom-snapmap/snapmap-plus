@@ -1,7 +1,5 @@
-/* modscene_sigs.c -- the private signatures of modscene_place.c's scene spawns
- * and the sync-start detour that times them.
- * Kept apart so the two-image test (tests/modscene_decl_test.c) links the
- * table without the engine side. Order matches modscene_place.c. */
+/* modscene_sigs.c -- the signatures of modscene_place.c's scene spawns and sync-start detour, kept
+ * apart so tests/modscene_decl_test.c links the table without the engine side. */
 #include <stddef.h>
 #include "modscene_decl.h"
 

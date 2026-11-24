@@ -1,14 +1,6 @@
-/* rawmap_paths_test -- where a rawmap save actually goes, driven directly.
- *
- * These tests drive the same functions the console and the File menu call and check the bytes on
- * disk: a destination chosen with Save Rawmap As belongs to the open map and later saves of it go
- * there; opening another map clears it. A ZIP's import and every export run on the transport
- * thread and are taken by the main tick; every path is UTF-8 (the export seam's stand-in refuses a
- * path that is not).
- *
- * No hooks, no engine, no editor -- the rules are decisions about two strings and one file write,
- * and they can be checked without a game running.
- */
+/* rawmap_paths_test -- where a rawmap save goes, driven through the functions the console and the File menu call, with
+ * no hooks, engine or editor. A destination chosen with Save Rawmap As belongs to the open map until another opens; a
+ * ZIP import and every export run on the transport thread and are taken by the main tick, and every path is UTF-8. */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
 #include <windows.h>
@@ -19,14 +11,9 @@
 #include "../src/backend/rawmap.c"
 
 /* ---- STUBS -------------------------------------------------------------------------------------
- * rawmap.c is one translation unit that also holds the hooks, the navmesh embedder and the editor
- * bridge. None of that is reachable from the destination rules -- those are two strings and a file
- * write -- so the collaborators are stubbed rather than linked. A stub that gets called would be a
- * bug in the test, so the ones with a return value return failure, which the caller under test
- * treats as "not available" and reports rather than ignores. The map manifest (modmanifest.c),
- * the member (map_carrier.c) and the text helpers (map_shards.c) are linked for real; the mod
- * builder and serving layer resolve to their built-in defaults.
- */
+ * rawmap.c also holds the hooks, navmesh embedder and editor bridge, which the destination rules never reach, so those
+ * collaborators are stubbed and return failure ("not available"). modmanifest.c, map_carrier.c and map_shards.c are
+ * linked for real; the mod builder and serving layer use their built-in defaults. */
 #include "signatures.h"
 #include "navmesh.h"
 #include "nav_bake.h"
@@ -91,8 +78,8 @@ static int g_checks;
 static const char BODY[] = "{\"entities\":[]}";
 
 /* The interface hands text over as process-heap strings (sh_iface_text_free). HOIF copies a
- * slot's *out into the test's buffer and releases it, as HO does for malloc'd results;
- * HOIFS does the same for a returned string and is 1 when there was one. */
+ * slot's *out into the test's buffer and releases it; HOIFS does the same for a returned string and is 1 when
+ * there was one. */
 static intptr_t hoif_take(char *buf, size_t cap, intptr_t r)
 {
     ho_copy(buf, cap, g_ho[0], "hoif");
@@ -180,7 +167,7 @@ static void a_chosen_file_stays_chosen(void)
     CHECK(!save_is_default());
 
     CHECK(sh_rawmap_test_write(BODY, sizeof BODY - 1) == (sizeof BODY - 1));
-    CHECK(file_exists(picked));                       /* it went where it was aimed */
+    CHECK(file_exists(picked));                       /* the file is at the chosen path */
 
     eff_paths(NULL, 0, save, (int)sizeof save);
     printf("   after the write:  save to: %s\n", save);
@@ -224,7 +211,7 @@ static void opening_a_rawmap_never_aims_saves_at_it(const char *archive)
 
     eff_paths(NULL, 0, save, (int)sizeof save);
     printf("   after opening:    save to: %s\n", save);
-    CHECK(_stricmp(save, archive) != 0);              /* NOT the file that was opened */
+    CHECK(_stricmp(save, archive) != 0);              /* not the opened file */
     CHECK(save_is_default());
 
     clean_state();
@@ -301,7 +288,7 @@ static void picking_the_usual_file_holds_nothing(void)
     clean_state();
 }
 
-/* A file chosen earlier is released when the usual file is picked. */
+/* Picking the usual file releases a chosen one. */
 static void picking_the_usual_file_releases_a_chosen_one(void)
 {
     char dflt[MAX_PATH] = "", picked[MAX_PATH], target[MAX_PATH] = "x";
@@ -335,12 +322,9 @@ static int write_file(const char *name, const char *bytes, char *out, size_t cap
     return 1;
 }
 
-/* WHAT COUNTS AS A RAWMAP, which is what `sh_rawmaps list` has to decide.
- *
- * It listed every *.json it found, and the folders involved are full of JSON that is not a map:
- * config.json, install.json, pinned.json, and a prefabs tree of *.snapmap.json. A prefab is the
- * awkward one -- it has a top-level "entities" array exactly like a map does, so the obvious marker
- * does not separate them. The engine's own top-level "~type" does. */
+/* What `sh_rawmaps list` counts as a rawmap: config.json, install.json, pinned.json and *.snapmap.json prefabs are
+ * JSON but not maps. A prefab has a top-level "entities" array like a map, so the engine's top-level "~type" tells
+ * them apart. */
 static void looks_like_rawmap_tells_them_apart(void)
 {
     char p[MAX_PATH];
@@ -355,8 +339,7 @@ static void looks_like_rawmap_tells_them_apart(void)
     CHECK(sh_rawmap_looks_like_rawmap(p) == 1);
     DeleteFileA(p);
 
-    /* a PREFAB. Same "entities" array, different type. This is the case that made the first
-     * filter wrong. */
+    /* a PREFAB: the same "entities" array, a different type */
     CHECK(write_file("rawmap_sniff_prefab.json",
                      "{\"cameraYaw\":125.5,\"entities\":[],\"grabAxis\":0,"
                      "\"~type\":\"idSnapEntityPrefab\",\"~version\":111}",
@@ -652,8 +635,8 @@ static void large_sources_use_native_lengths(void)
 
 /* ---- maps in an earlier shape are refused ------------------------------------------------- */
 
-/* A map an earlier build saved: its packages ride as "smpkg." string variables beside an
- * ordinary one, and allocCount[4] counts all three. */
+/* A map in the earlier shape: packages ride as "smpkg." string variables beside an ordinary one, and allocCount[4]
+ * counts all three. */
 static const char LEGACY_MAP[] =
     "{\"~type\":\"idSnapMap\",\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,3],"
     "\"string\":["
@@ -674,8 +657,7 @@ static int fixture_deser(const char *json, void *out_map)
     return 1;
 }
 
-/* What a refused parse leaves: the engine parsed nothing, the text is as it was, and the load's
- * refusal is the plain sentence. */
+/* A refused parse leaves the engine with nothing parsed and the load's refusal as the plain sentence. */
 static void refused_plainly(int parses_before, int refusals_before)
 {
     char refusal[256];
@@ -686,10 +668,8 @@ static void refused_plainly(int parses_before, int refusals_before)
     (void)sh_modmanifest_load_notes_flush(0);
 }
 
-/* Every load the parse detour sees (a local save, a published map) refuses a map in an earlier
- * shape before the engine parses it: each retired variable family, and a member whose rows name
- * an "id" or a "bundle". A map in the current shape, and one whose words only look like a
- * family's, parse as before. */
+/* Every load the parse detour sees (a local save, a published map) refuses a map in an earlier shape before the
+ * engine parses it; a map in the current shape, or one whose words only look like a family's, parses. */
 static void earlier_shape_maps_are_refused(void)
 {
     static const char plain[] = "{\"~type\":\"idSnapMap\",\"entities\":[]}";
@@ -843,10 +823,9 @@ static void saves_carry_no_package_payload(void)
 }
 
 /* ---- the mods a rawmap names ------------------------------------------------------------------
- * The engine never parses a rawmap whose mods are missing: the swap falls back to the engine's own
- * map and the rawmap hold (modpublished.c, linked for real) fetches the content of its pinned rows, or
- * refuses a row that names no unit. A map with mods also writes the export beside its JSON. The store, the dialog and
- * the worker are doubles behind sh_modpub_ops; the worker runs its job on the calling thread. */
+ * The engine never parses a rawmap whose mods are missing: the swap falls back to the engine's own map, and the rawmap
+ * hold (modpublished.c, linked for real) fetches its pinned rows' content or refuses a row that names no unit. The
+ * store, dialog and worker are doubles behind sh_modpub_ops; the worker runs its job on the calling thread. */
 #define HASH_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 #define MVAR(name, value) \
     "{\"info\":{\"name\":\"" name "\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"" value "\"," \
@@ -978,7 +957,7 @@ static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
     CHECK(g_prepared == NULL && !g_in_reload && g_parses == 0 && sh_rawmap_swap_count() == swaps);
     CHECK(sh_modpub_test_state() == 1 && R.fetches == 0 && R.asks == 0);   /* held; the next tick lets it go on */
     ticks(4);
-    /* No guard stops a map from loading (manager, 2026-11-24): it opens without the mod, saying so once. */
+    /* No guard stops a map from loading: it opens without the mod, saying so once. */
     CHECK(!sh_modpublished_holding() && R.fetches == 0);
     CHECK(!strcmp(R.print, "This map is playing without test.alpha, which is not on this computer."));
     CHECK(R.asks == 1 && !strcmp(R.ask, R.print));
@@ -1161,8 +1140,7 @@ static void a_rawmap_open_takes_its_own_rows_and_then_its_own_id(void)
     sh_rawmap_set_branch_tag(1);
     strcpy_s(g_fake_edit_id, sizeof g_fake_edit_id, "BORROWED00000000000A");
     CHECK(sh_isbranch_detour(NULL) == 1 && sh_isbranch_detour(NULL) == 1);
-    /* The first save names it: the edit now holds its own id, and the second
-     * Save writes that map (the engine answers; it is no branch). */
+    /* The first save names it: the edit holds its own id, and the second Save writes that map. */
     g_ser_orig = fixture_serialize;
     CHECK(sh_ser_detour((void *)1, str, 1) == 1);
     CHECK(!sh_rawmap_open_unsaved(NULL));
@@ -1200,7 +1178,7 @@ static void a_refused_zip_tells_the_player_why(void)
     mods_begin();
     CHECK(temp_path("shared-map.zip", staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
-    /* A reason longer than the old 320-byte buffer, ending in its next step. */
+    /* A reason longer than 320 bytes, ending in its next step. */
     strcpy_s(cause, sizeof cause, "test.alpha 1.0.0, a mod this map carries, does not install on this computer (");
     for (n = strlen(cause); n < 600; n++) cause[n] = 'x';
     cause[n] = 0;
@@ -1334,7 +1312,7 @@ static void a_save_with_mods_writes_the_zip_beside_the_json(void)
  * there, and its .zip imports and opens. Every path is whole in the report and the status. */
 static void a_long_unicode_path_saves_exports_loads_and_imports(void)
 {
-    /* "Карты-ü-地図" in UTF-8: a folder name outside every ANSI code page. */
+    /* A Cyrillic, Latin and CJK folder name in UTF-8: outside every ANSI code page. */
     static const char folder[] = "\xD0\x9A\xD0\xB0\xD1\x80\xD1\x82\xD1\x8B-\xC3\xBC-\xE5\x9C\xB0\xE5\x9B\xB3";
     wchar_t temp[MAX_PATH + 1];
     char *base, *deep = NULL, *json = NULL, *zip = NULL, *next, why[1280], *status;
@@ -1434,9 +1412,8 @@ static void a_long_unicode_path_saves_exports_loads_and_imports(void)
     mods_end();
 }
 
-/* A load path is a file to open now through the reload, never a replacement for any
- * other parse: a published read, a lobby map, or a map opened from My Maps loads as
- * itself, and nothing waits for a later map. */
+/* A load path is a file to open through the reload, never a replacement for another parse: a published read, a
+ * lobby map or a My Maps map loads as itself. */
 static void a_load_path_never_replaces_another_parse(const char *archive)
 {
     static const char engine[] = "{\"~type\":\"idSnapMap\",\"entities\":[],\"name\":\"ENGINE_MARK\"}";
@@ -1452,7 +1429,7 @@ static void a_load_path_never_replaces_another_parse(const char *archive)
     g_parses = 0;
     CHECK(sh_deser_detour(engine, (void *)1) == 1);
     CHECK(g_parses == 1 && !strcmp(g_parsed, engine) && sh_rawmap_swap_count() == swaps);
-    /* Load Rawmap with no live editor: refused now, the load path unchanged. */
+    /* Load Rawmap with no live editor is refused at once, the load path unchanged. */
     sh_rawmap_swap_set_source(NULL);
     sh_rawmap_get_slots(NULL, &configure, NULL);
     CHECK(!HOIF(message, configure(NULL, archive, NULL, 2, HO_P(0))));

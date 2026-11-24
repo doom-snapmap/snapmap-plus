@@ -1,34 +1,10 @@
-/* modledger.h -- the served-bytes ledger: which bytes the product gave the
- * engine under each name this session.
- *
- * The engine records no byte identity for raw resources and, after a
- * production read, none for decls other than entityDef, so
- * "the engine holds this name, but with which bytes?" is answered here. Every
- * serve through the provider (sh_modserve_open: the +0x148 open the raw
- * loaders and the decl read path both reach) records, per request path, the
- * bundle that served it and the file's identity: the first 64 bits of its
- * recorded SHA-256, or an FNV-1a 64 of the bytes for a composed text or a file
- * without a recorded hash. A map pass may bind the engine object it found
- * holding the name.
- *
- * The refresh decision at a map transition compares the record with what the
- * open map's declared builds serve now (sh_modledger_decide): equal bytes keep
- * the held object as it is, other bytes refresh it in place, and a name the
- * provider never served carries no mod bytes and is never
- * refreshed. A stock path (a shadow) or a withdrawn one is left to the
- * serving index's own marks, since the game's bytes may be what it holds.
- *
- * Readers take no lock: records are published once into a chain of
- * open-address levels and updated under a per-record sequence count. Level 0
- * has SH_MODLEDGER_SLOTS slots and level k twice the slots of level k - 1;
- * only the newest level takes inserts, and only until it is half full, when
- * the next level is allocated. Records never move, so a lookup probes the
- * levels in order. There is no fixed bound on request paths: the chain stops
- * only at SH_MODLEDGER_LEVELS levels (about 67 million paths) or when a level
- * cannot be allocated. A serve that finds no room then is counted, and the
- * ledger reports itself incomplete, so a name with no record is refreshed
- * rather than trusted. The first serve of a path takes a writer lock; every
- * other serve and every read is lock-free. Pure: no engine access. */
+/* modledger.h -- the served-bytes ledger: which bytes the product gave the engine under each name this session.
+ * Every serve through the provider (sh_modserve_open, the +0x148 open) records per request path the serving bundle
+ * and the file's identity (first 64 bits of its SHA-256, else an FNV-1a 64 of the bytes); sh_modledger_decide
+ * compares that with what the open map serves. Records live in a chain of open-address levels (level k has twice
+ * level k - 1's slots) under a per-record sequence count: reads are lock-free, a path's first serve takes a writer
+ * lock, and a serve with no room is counted and marks the ledger incomplete. Pure: no engine access.
+ */
 #ifndef SH_MODLEDGER_H
 #define SH_MODLEDGER_H
 
@@ -69,19 +45,16 @@ typedef struct sh_modledger_stats {
     int complete;            /* every serve this session is recorded */
 } sh_modledger_stats;
 
-/* Identity of served bytes: from `file_hash` (hex SHA-256) when given, else
- * from the bytes. Returns 1 when an identity was formed, 0 when neither is
- * available (kind NONE). Pure. */
+/* Identity of served bytes: from `file_hash` (hex SHA-256) when given, else from the bytes. Returns 1 when formed,
+ * 0 when neither is available (kind NONE). Pure. */
 int sh_modledger_ident_of(const char *bundle_hash, const char *file_hash, const unsigned char *bytes, size_t length,
                           sh_modledger_ident *out);
 
-/* 1 when two identities name the same bytes: the same kind and file identity,
- * and for hashed bytes the same length. The bundle does not matter: identical
- * bytes from another build are the same bytes. Unknown identities never are. */
+/* 1 when two identities name the same bytes (same kind and file identity, and length for hashed bytes), whatever the
+ * bundle. Unknown identities never are. */
 int sh_modledger_same(const sh_modledger_ident *a, const sh_modledger_ident *b);
 
-/* Record a serve. 1 recorded, 0 not recorded (bad arguments, or a new path
- * with no level to hold it, counted as overflow). Any thread. */
+/* Record a serve. 1 recorded, 0 not (bad arguments, or no level to hold a new path: counted as overflow). Any thread. */
 int sh_modledger_record(const char *request, const sh_modledger_ident *id);
 
 /* The record of `request` (any case, either separator). 1 found, 0 none. Lock-free. */
@@ -90,8 +63,7 @@ int sh_modledger_find(const char *request, sh_modledger_rec *out);
 /* Bind the engine object found holding `request`'s name. 1 bound, 0 no record. */
 int sh_modledger_bind(const char *request, void *obj);
 
-/* Whether the ledger saw every serve: the provider served nothing before the
- * listener was bound (sh_modledger_set_complete at bind) and nothing overflowed. */
+/* Whether the ledger saw every serve: nothing was served before the listener was bound (set at bind) and nothing overflowed. */
 void sh_modledger_set_complete(int complete);
 int  sh_modledger_complete(void);
 
@@ -101,25 +73,17 @@ int sh_modledger_each(sh_modledger_fn fn, void *context);
 
 void sh_modledger_get_stats(sh_modledger_stats *out);
 
-/* The refresh decision for one name the engine holds.
- *   rec      its ledger record, or NULL;
- *   now      the identity the open map serves for the path now, or NULL;
- *   stock    1 for a shadow or a withdrawn path (the game's bytes may be held);
- *   complete sh_modledger_complete().
- * KEEP: the held bytes are the bytes served now. REFRESH: refresh in place by
- * the type's mechanism. GAME: no serve recorded under a complete ledger: the
- * engine's object never had mod bytes, so it is not refreshed. */
+/* The refresh decision for one held name: `rec` its record, `now` the identity the open map serves (either may be
+ * NULL), `stock` 1 for a shadow or withdrawn path. KEEP: the bytes match. REFRESH: refresh in place. GAME: no serve
+ * under a complete ledger, so the object never had mod bytes. */
 #define SH_MODLEDGER_KEEP    0
 #define SH_MODLEDGER_REFRESH 1
 #define SH_MODLEDGER_GAME    2
 int sh_modledger_decide(const sh_modledger_rec *rec, const sh_modledger_ident *now, int stock, int complete);
 const char *sh_modledger_decision_name(int decision);
 
-/* A refresh pass's per-type tally for its log lines ("re-parsed N <type>
- * decl(s) (names)"). The type name is copied: callers pass it from a stack
- * buffer (an anim dependent's type comes from its request path), which is gone
- * by the time the pass prints. A full table counts further types in the last
- * row. Pure; one pass's own structure, no lock. */
+/* A refresh pass's per-type tally for its log lines. The type name is copied (callers pass a stack buffer); a full
+ * table counts further types in the last row. Pure; no lock. */
 #define SH_MODLEDGER_TALLY_TYPES 12
 typedef struct sh_modledger_tally_type { char type[48]; int count; char names[160]; } sh_modledger_tally_type;
 typedef struct sh_modledger_tally {
@@ -132,8 +96,7 @@ sh_modledger_tally_type *sh_modledger_tally_add(sh_modledger_tally *t, const cha
 int sh_modledger_tally_truncated(const sh_modledger_tally_type *row);
 
 /* 1 when `needle` occurs in `text` under the product's name folding: ASCII
- * case, '-' as '_' (the engine's binary names spell a '-' as '_') and '\' as '/'. An empty
- * needle matches. `sh_mods held <filter>` uses it. Pure. */
+ * case, '-' as '_' (the engine spells a '-' in binary names as '_') and '\' as '/'. An empty needle matches. Pure. */
 int sh_modledger_name_contains(const char *text, const char *needle);
 
 /* Tests: free every level and reset the counters (not thread-safe). */

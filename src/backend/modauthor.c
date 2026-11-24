@@ -7,8 +7,6 @@
 
 #include "../common/text.h"
 
-/* ------------------------------------------------------------------------------------------- the layout ---- */
-
 /* A folder of the mod and the engine root its files are served under (the salt goes after the root). A row with an
  * extension takes only files of that extension; the first row of a folder that matches wins. */
 typedef struct ma_row { const char *folder; const char *ext; const char *root; } ma_row;
@@ -30,8 +28,7 @@ static const ma_row MA_ROWS[] = {
     { "meshes",                  ".bmodel",    "cooked/model/" },
     { "meshes",                  ".dmodel",    "generated/discreteanimation/" },
     { "meshes",                  ".pmodel",    "generated/" },
-    /* an md6 mesh's collision models, where the engine finds them by the mesh's path (manager, 2026-11-24): the
-     * render model and its collision mesh, as a stock mesh's sit at generated/model/md6/<mesh path>/collision/ */
+    /* an md6 mesh's collision models, found by the mesh's path at generated/model/md6/<mesh path>/collision/ */
     { "collision",               ".bmodel",    "generated/model/md6/" },
     { "collision",               ".bcm",       "generated/cm/md6/" },
     { "animations",              ".bmd6anim",  "cooked/anim/md6/" },
@@ -100,7 +97,7 @@ int sh_ma_folder(const char *name, size_t n)
     return 0;
 }
 
-/* D14 (SPEC-distribution 3.10, the owner's words): the folders, each with one example. */
+/* The folders, each with one example. */
 #define MA_KIND_LIST                                                                                                    \
     "Put each file in the folder for its kind: entities/ for entities (entities/imp.decl), materials/ for materials "  \
     "(materials/imp_skin.decl), images/ for images (images/imp_skin.bimage), meshes/ for models "                      \
@@ -341,8 +338,6 @@ char *sh_ma_path(const char *salt, const char *request)
     return sh_textf(SH_MA_NATIVE "%s", r);
 }
 
-/* ------------------------------------------------------------------------------------------- the names ---- */
-
 /* A name in a text: letters, digits and _ . / $ - + @ ~ (the characters the game's names and paths hold; a name
  * with a space or a parenthesis is not one a text refers to). */
 static int ma_name_char(unsigned char c)
@@ -490,8 +485,6 @@ char *sh_ma_text(const char *salt, const char *text, size_t len, sh_ma_key_fn ow
     if (out_len) *out_len = b.n;
     return b.p;
 }
-
-/* ------------------------------------------------------------------------------------------- mod.json ---- */
 
 /* A walk over JSON text: every string token, whether it is an object key, and whether it is a key of a language
  * object of the top-level "strings" object (depth 3: the root, strings, a language). */
