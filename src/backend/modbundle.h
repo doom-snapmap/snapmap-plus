@@ -184,9 +184,9 @@ typedef struct sh_mb_file {
  *   REPLACE  any other file at a game name. A decl is an edited copy: the
  *            builder records its structural diff against the game's text
  *            (sh_mb_bundle.edits) and the product generates the game file
- *            per map; the copy itself is never served. A binary is refused
- *            (put it under mods/<salt>/), except in a build the product
- *            runs on content it received (sh_mb_keep_replacements_here). */
+ *            per map; the copy itself is never served. A binary is a
+ *            replacement, served only to maps that use the mod
+ *            (SPEC-distribution 3.10). */
 #define SH_MB_CLASS_NONE    0
 #define SH_MB_CLASS_ADD     1
 #define SH_MB_CLASS_BORROW  2
@@ -521,13 +521,6 @@ void   sh_mb_strkeys_free(sh_mb_strkey *keys, size_t count);
 /* The classes counts as one line ("2 adds, 0 borrows, 1 edits, 0 replaces, 0 editor, 0 surfaces"). */
 void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap);
 
-/* For the calling thread only: 1 accepts a binary at a game name in the
- * builds it runs (content the product received is never refused on its
- * files; no product path sets it since imports stopped installing mods, only
- * the tests do); 0 ends it. Every other build refuses such a file
- * Thread-local, so a worker's import never changes a
- * rescan's rule. */
-void sh_mb_keep_replacements_here(int on);
 
 
 /* Validate one request path (relative, '/', no "." or ".." segment, allowed

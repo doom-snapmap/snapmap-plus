@@ -1332,16 +1332,9 @@ static void test_refusals(const char *fixture, const char *tmp)
             "imp.decl does not parse as a decl (line 2: expected a key, found '='); the product derives the edits from the "
             "whole edited copy of generated/decls/entitydef/monster/imp.decl");
     /* A binary at a DOOM path with other bytes is a replacement (SPEC-distribution 3.10), not a refusal. */
-    sh_mb_keep_replacements_here(0);
     accepted(fixture, tmp, m_binary_replace, &b);
     CHECK(b.errors == 0 && b.shadow_count == 1 && b.classes.replaces == 1 && !b.edits);
     sh_mb_free(&b);
-    /* Received content keeps a binary replacement: an import on its own thread. */
-    sh_mb_keep_replacements_here(1);
-    accepted(fixture, tmp, m_binary_replace, &b);
-    CHECK(b.errors == 0 && b.shadow_count == 1 && b.classes.replaces == 1 && !b.edits);
-    sh_mb_free(&b);
-    sh_mb_keep_replacements_here(0);
     /* A copy keeping a stock name the game lacks is reported, not refused;
      * the same dangling name in a mod's own decl still refuses (m_missing_need). */
     accepted(fixture, tmp, m_shadow_dangling, &b);

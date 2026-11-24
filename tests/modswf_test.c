@@ -242,7 +242,6 @@ static void test_builder(void)
     put("mod.json", "{\"version\": \"1.0.0\", \"name\": \"Screens\", "
                     "\"snapmap-plus\": {\"format\": 2, \"salt\": \"screensx\"}}");
     for (i = 0; movies[i]; i++) put(movies[i], "BSW movie bytes");
-    sh_mb_keep_replacements_here(1);   /* an import of received content */
     CHECK(sh_mb_build(g_dir, NULL, &resolver, &b));
     if (b.errors) printf("  build: %s\n", sh_mb_first_cause(&b));
     for (i = 0; i < b.file_count; i++) if (!strcmp(b.files[i].ptype, "swf")) swf++;
@@ -252,7 +251,6 @@ static void test_builder(void)
     put("images/stray.bswf", "x");
     CHECK(!sh_mb_build(g_dir, NULL, &resolver, &b) && strstr(sh_mb_first_cause(&b), "images/stray.bswf: this folder holds .bimage files"));
     sh_mb_free(&b);
-    sh_mb_keep_replacements_here(0);
 
     drop("images/stray.bswf");
     for (i = 0; movies[i]; i++) drop(movies[i]);

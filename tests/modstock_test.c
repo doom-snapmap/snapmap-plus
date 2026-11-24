@@ -298,17 +298,14 @@ static void test_builder(const char *tmp)
     /* (A .tome under the mod's own name that is not installed content was refused here; no folder of a mod holds
      * a .tome now, so the case cannot be written.) */
 
-    /* Without a reader nothing becomes a pointer. The files at game names
-     * are then carried replacements, so this case builds as received content
-     * (sh_mb_keep_replacements_here; the refusal is modbundle_test's). */
+    /* Without a reader nothing becomes a pointer: the files at game names
+     * are then carried replacements. */
     sh_mb_set_stock_ops(NULL);
-    sh_mb_keep_replacements_here(1);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod7", tmp);
     make_mod(dir, NULL);
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.stock_count == 0 && b.total_size == sizeof IMG_B * 2 + sizeof OWN);
     CHECK(b.canonical && !strstr(b.canonical, "\"stock\""));
     sh_mb_free(&b);
-    sh_mb_keep_replacements_here(0);
     sh_modstock_register();
 }
 
@@ -1019,9 +1016,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
         mt_write(other, "mod.json", "{\"name\":\"Other\",\"snapmap-plus\":{\"format\":2,\"salt\":\"tother00\"}}");
         put_req(other, "tother00", P_IMAGE, IMG_B, sizeof IMG_B);
         sh_mb_set_stock_ops(NULL);
-        sh_mb_keep_replacements_here(1);   /* carried at a game name: a replacement */
-        CHECK(HO2(key2, cause, sh_ms_install_from_folder(other, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
-        sh_mb_keep_replacements_here(0);
+        CHECK(HO2(key2, cause, sh_ms_install_from_folder(other, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));   /* carried at a game name: a replacement */
         sh_modstock_register();
         CHECK(st.stock_files == 0 && st.copied == 1);
         CHECK(sh_modserve_index_build(store) == 2);

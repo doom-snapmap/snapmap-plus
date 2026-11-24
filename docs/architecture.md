@@ -936,7 +936,7 @@ The store. A folder is `mod.json` plus folders by kind (above). `mod.json` is fo
 the builder's, the whole built manifest with its salt, rules, built time,
 tree hash, build hash, cause while failing, the derived `classes` counts
 (`adds`, `borrows`, `edits`, `replaces`, `editor`, `surfaces`: an edited copy of a game file
-counts under `edits`, never `replaces`, which is only what a folder the product received replaces;
+counts under `edits`, never `replaces`, which counts binaries at a game name;
 the build and `sh_mods list` lines print them the same way), `editor` (the editor tweaks' request paths), `registries` (banks,
 conductor, strings), `edits` (the derived edits of each decl at a game name), shadows, `files` (path, sha256, size, provides, needs) and
 `stock` (pointers; `"closure": true` on those the campaign-only closure derived).
@@ -4341,15 +4341,9 @@ map's choices).
   `classes.replaces`, the Mods tab's replaced stock files or a doctor conflict). Refused: a copy
   or a game text outside the grammar ("does not parse as a decl (line N: ...);
   the product derives the edits from the whole edited copy"); a game text the
-  reader cannot supply; a binary at a game name with other bytes ("<path>: the
-  game ships this file and a mod cannot replace it with other bytes; delete
-  your copy and the mod borrows the game's, or put your version in
-  the mod's own folder for its kind and point your decls at it"; a binary at a name the game does
-  not ship keeps "the game has no file of that name for it to replace"),
-  except in a folder the product received (a thread that called
-  `sh_mb_keep_replacements_here(1)`, which no product path does today,
-  where it stays a replacement, as does a decl whose game text cannot be read
-  there). A grandfathered bundle keeps its shadows and derives nothing. The
+  reader cannot supply. A binary at a game name with other bytes is a
+  replacement (`classes.replaces`, SPEC-distribution 3.10), served only to
+  maps that use the mod. A grandfathered bundle keeps its shadows and derives nothing. The
   retired author keys `player`, `extends` and `replaces` are ignored with one
   line each and kept out of `extra`; a partial they name (an `extends` value,
   `player.bodyEvents`) is refused: "this is a partial; put the whole edited

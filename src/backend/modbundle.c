@@ -2123,11 +2123,6 @@ void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap)
                 c->borrows, c->edits, c->replaces, c->editor, c->surfaces);
 }
 
-/* A build on this thread accepts a binary at a game name: content the
- * product received (sh_mb_keep_replacements_here). */
-
-static __declspec(thread) int g_mb_keep_here;
-void sh_mb_keep_replacements_here(int on) { g_mb_keep_here = on ? 1 : 0; }
 
 /* The engine's cooked spelling of a name (mb_binary_name): every character
  * outside [A-Za-z0-9$./\] becomes '_', lower-cased (malloc'd). */
@@ -4221,7 +4216,6 @@ static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root, const mb_names
 {
     mb_buf o = {0};
     size_t i;
-    int received = g_mb_keep_here;
     free(b->edits);
     b->edits = NULL;
     b->edit_files = 0;
@@ -4236,7 +4230,7 @@ static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root, const mb_names
         char *json;
         free(f->edit);
         f->edit = NULL;
-        if (f->shadowed && !f->stock && !f->is_decl && !f->is_module && !received && mb_decl_text(f)) {
+        if (f->shadowed && !f->stock && !f->is_decl && !f->is_module && mb_decl_text(f)) {
             /* modserve generates edited game files under generated/decls/
              * only (ms_registry_files): an edit here would build and never
              * apply. */
@@ -4255,23 +4249,15 @@ static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root, const mb_names
         if (!copy) { mb_error(b, "cannot read %s", f->path); continue; }
         if (sh_mb_stock_identify(f->request, sha, &size) != SH_MB_STOCK_OK ||
             sh_mb_stock_read(f->request, sha, &stock, &slen, f->path, NULL) != SH_MB_STOCK_OK) {
-            if (received)
-                mb_note(b, "replaces %s: the game's text cannot be read here, so a folder the product received keeps it "
-                        "as a replacement", f->request);
-            else
-                mb_error(b, "%s: the game's %s cannot be read, so the edits this copy makes cannot be derived", f->path,
-                         f->request);
+            mb_error(b, "%s: the game's %s cannot be read, so the edits this copy makes cannot be derived", f->path,
+                     f->request);
             free(copy);
             continue;
         }
         json = sh_dt_diff(f->request, (const char *)stock, slen, (const char *)copy, clen, &counts, cause, sizeof cause);
         HeapFree(GetProcessHeap(), 0, stock);
         free(copy);
-        if (!json && received) {
-            mb_note(b, "replaces %s: it does not parse as a decl (%s); a folder the product received keeps it as a "
-                    "replacement", f->request, cause);
-            continue;
-        }
+
         if (!json) {
             if (!strncmp(cause, "the game's text", 15))
                 mb_error(b, "%s: %s, so the edits this copy makes cannot be derived", f->path, cause);
@@ -4333,7 +4319,7 @@ static void mb_report(sh_mb_bundle *b)
                     ops == 1 ? "" : "s", c.set, c.remove, c.list, c.list == 1 ? "y" : "ies", c.keyed, c.bag,
                     c.bag == 1 ? "y" : "ies", c.drop, c.drop == 1 ? "y" : "ies");
             declared++;
-        } else if (f->cls == SH_MB_CLASS_REPLACE) mb_note(b, "replaces %s (a folder the product received)", f->request);
+        } else if (f->cls == SH_MB_CLASS_REPLACE) mb_note(b, "replaces %s", f->request);
     }
     if (b->classes.surfaces) mb_note(b, "surfaces %u game file%s", b->classes.surfaces, b->classes.surfaces == 1 ? "" : "s");
     if (b->edit_files)
