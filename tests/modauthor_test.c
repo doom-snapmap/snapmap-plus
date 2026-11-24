@@ -90,6 +90,9 @@ int main(void)
     req("meshes/boss/mesh.bmd6model", "generated/basemodel/md6/mods/abcdefgh/boss/mesh.bmd6model");
     req("meshes/boss/mesh.bmd6skl", "generated/skeleton/md6/mods/abcdefgh/boss/mesh.bmd6skl");
     req("meshes/rock.bmodel", "cooked/model/mods/abcdefgh/rock.bmodel");
+    /* an md6 mesh's collision models at its mesh's path (manager, 2026-11-24) */
+    req("collision/boss/collision/chest.bmodel", "generated/model/md6/mods/abcdefgh/boss/collision/chest.bmodel");
+    req("collision/boss/collision/chest.bcm", "generated/cm/md6/mods/abcdefgh/boss/collision/chest.bcm");
     req("meshes/chunk.dmodel", "generated/discreteanimation/mods/abcdefgh/chunk.dmodel");
     req("meshes/fx/strip.pmodel", "generated/mods/abcdefgh/fx/strip.pmodel");
     req("animations/boss/walk.bmd6anim", "cooked/anim/md6/mods/abcdefgh/boss/walk.bmd6anim");
