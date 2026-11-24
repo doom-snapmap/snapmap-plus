@@ -384,7 +384,7 @@ var SnapmapDecl = (function () {
           if (base !== keyName && table[base]) { var as = table[base]; spec = as[0] === 'A' ? specArg(as) : as; }
         }
         if (!spec) {
-          // engine-attested deserializer aliases (audit-observed in shipped game data) don't warn
+          // deserializer aliases the engine accepts in shipped game data don't warn
           var isAlias = SCHEMA.aliases && SCHEMA.aliases.indexOf(stripIdx(keyName)) !== -1;
           if (!suppressUnknown && !isAlias) sdiag(diags, e.key, 'unknown-field', "'" + keyName + "' is not a known field of " + owner + '.');
           continue;

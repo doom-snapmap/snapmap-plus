@@ -1,8 +1,5 @@
-# Build the WebView2 frontend into build\webview. The root build invokes this
-# alongside the backend; a direct invocation rebuilds only the frontend.
-# Requires MSVC C++ tools. Fetches a pinned WebView2 SDK, embeds the page and
-# scripts, and links the static loader against the system WebView2 runtime.
-# Keep this file ASCII for PowerShell 5.1.
+# Builds the WebView2 frontend into build\webview: fetches the pinned WebView2 SDK, embeds the page and
+# scripts, and links the static loader (needs MSVC C++ tools). Keep this file ASCII for PowerShell 5.1.
 param(
     [string]$Out = "snapmap-plus-ui.dll",
 # SNAPMAPPLUS_VCVARS_VER keeps both DLL builds on the same pinned MSVC toolset.

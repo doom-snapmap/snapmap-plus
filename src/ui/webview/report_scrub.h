@@ -1,12 +1,7 @@
-/* Helpers for report attachments: replace the account, profile-folder and
- * machine names in log text, select bounded log tails, and fit the logs into
- * the relay's payload cap. These helpers do not remove arbitrary personal data.
- *
- * A name can reach a log in several encodings: the backend and window logs are
- * UTF-8, an engine or Windows message may carry the ANSI code page, a wide
- * string may be dumped as UTF-16LE, and paths carry the profile folder's name
- * (which can differ from the account name, and has an 8.3 short form). Each
- * form is kept as its own byte needle, so the scrub works on raw bytes. */
+/* Helpers for report attachments: replace the account, profile-folder and machine names in log text, select
+ * bounded log tails and fit the logs into the relay's payload cap. A name can reach a log as UTF-8, the ANSI code
+ * page, UTF-16LE, or a profile folder name (8.3 short form too), so each form is its own byte needle and the scrub
+ * works on raw bytes. It does not remove arbitrary personal data. */
 #ifndef SNAPMAP_PLUS_REPORT_SCRUB_H
 #define SNAPMAP_PLUS_REPORT_SCRUB_H
 
@@ -138,9 +133,8 @@ static size_t rs_json_escaped_len(unsigned char c)
     return c < 0x20 ? 6 : 1;
 }
 
-/* The offset from which buf[off..len), once JSON-escaped, fits in budget bytes:
- * the newest text is kept, the cut moves forward to the next line start when
- * there is one, and never splits a UTF-8 sequence. len when nothing fits. */
+/* The offset from which buf[off..len), JSON-escaped, fits in budget bytes: keeps the newest text, moves the cut
+ * forward to a line start when there is one, never splits a UTF-8 sequence. len when nothing fits. */
 static size_t rs_fit_escaped_tail(const char *buf, size_t len, size_t budget)
 {
     size_t used = 0, off = len, line;

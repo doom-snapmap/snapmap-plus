@@ -1,7 +1,7 @@
 ; snapmap-plus-ui.def -- the export surface of snapmap-plus-ui.dll, the WebView2 Snapmap+ window.
 ;
-; The backend loads this DLL with LoadLibrary and starts its window thread at sh_ui_init, which it
-; finds by name; the ordinal stays 10, the value the backend has always used. Nothing else is exported.
+; The backend loads this DLL with LoadLibrary and starts its window thread at sh_ui_init (found by name,
+; ordinal 10). Nothing else is exported.
 LIBRARY "snapmap-plus-ui"
 EXPORTS
     sh_ui_init                      @10

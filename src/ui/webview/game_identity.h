@@ -1,12 +1,5 @@
-/* The game identity the backend hands the frontend at startup.
- *
- * The backend produces the one game-identity string (sh_host_game_identity in
- * src/backend/host_image.c) and passes it in the startup argument block as
- * "--game=<identity>". The frontend never recomputes it: an absent or empty
- * argument means the backend did not attach to a supported executable, and
- * reports then say "not attached". The backend's release version arrives the
- * same way, as "--version=<tag>", so the window can check that both of its files
- * come from one release. Header-only so the parser is testable. */
+/* Parses the startup arguments "--game=<identity>" (from sh_host_game_identity in src/backend/host_image.c;
+ * absent or empty means not attached) and "--version=<tag>", the backend's release version. */
 #ifndef SH_UI_GAME_IDENTITY_H
 #define SH_UI_GAME_IDENTITY_H
 

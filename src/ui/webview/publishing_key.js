@@ -1,7 +1,6 @@
-/* publishing_key.js -- Settings: the publishing key (SPEC-distribution 4.2), and its backup offer after the first
- * publish. Backend: the Mods slot's SH_MODS_ACT_KEY ("publishingKey", modclaim.h modclaim_key_action); the native
- * host asks for the file in its own picker, so the page sends only the operation and the passphrase. Never in the
- * Mods tab (2.10). The passphrase is never kept: the fields are cleared when the dialog closes. Node-testable. */
+/* publishing_key.js -- Settings: the publishing key and its backup offer after the first publish. Backend: the
+ * Mods slot's SH_MODS_ACT_KEY ("publishingKey", modclaim.h modclaim_key_action); the host asks for the file in its
+ * own picker, so the page sends only the operation and the passphrase, which is never kept (fields clear on close). */
 var publishingKey = (function () {
   'use strict';
 
@@ -35,7 +34,7 @@ var publishingKey = (function () {
     var byId = env.byId, post = env.post, toast = env.toast || function () {};
     var after = env.after || function (fn, ms) { return setTimeout(fn, ms); };
     var st = {open: false, page: '', busy: false, error: '', key: null, offered: false};
-    /* Not now is sent until the backend's answer shows the offer answered: the host turns a request away while
+    /* Not now is resent until the backend's answer shows the offer answered: the host turns a request away while
      * another mods action runs (a publish's refresh), and the offer must not come back for that. */
     var LATER_RETRY_MS = 1000, LATER_TRIES = 30;
     var later = {pending: false, tries: 0};
@@ -122,7 +121,7 @@ var publishingKey = (function () {
         else if (!d.data && later.tries < LATER_TRIES)                     /* turned away: another action ran */
           after(function () { if (later.pending) sendLater(); }, LATER_RETRY_MS);
       }
-      if (data.cancelled) { st.busy = false; render(); return; }   /* the file picker was closed */
+      if (data.cancelled) { st.busy = false; render(); return; }   /* the picker was closed */
       if (!st.open || (st.page !== 'backup' && st.page !== 'restore')) return;
       st.busy = false;
       if (data.ok) { close(); toast(String(data.message || ''), 'ok'); return; }
@@ -133,7 +132,7 @@ var publishingKey = (function () {
     return {
       bind: function () {
         var on = function (id, ev, fn) { var e = byId(id); if (e) e.addEventListener(ev, fn); };
-        // The key's state: asked once now, and each time the Settings menu opens (it also arms the pushed list,
+        // The key's state is asked on bind and each time the Settings menu opens (which also arms the pushed list,
         // whose next document carries the offer after a first publish).
         post({cmd: 'modsAction', action: 'publishingKey', arg: 'status'});
         if (env.settingsLabel) env.settingsLabel.addEventListener('click', function () {

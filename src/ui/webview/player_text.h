@@ -1,14 +1,7 @@
-/* player_text.h -- the description text a player sees, from the generated
- * entity and event tables (src/ui/sh_entity_desc.h, sh_event_docs.h).
- *
- * The tables were written from the game's declarations and from study of its
- * code, so some sentences talk about that study rather than about the game:
- * function names, addresses and offsets, handlers, vtables and decompiles, the
- * runtime class and the raw field list. Those sentences, and parentheticals
- * that carry them, are left out; an entry left with nothing but its own name
- * ("'aas/obstacle' entity.") has no description, and the window then shows
- * none. Kept free of window state so it is testable
- * (tests/player_text_test.cpp). */
+/* player_text.h -- the description text a player sees, from the generated entity and event tables
+ * (src/ui/sh_entity_desc.h, sh_event_docs.h). Sentences and parentheticals about the game's code (function names,
+ * addresses, offsets, handlers, raw fields) are dropped; an entry left with only its name has no description.
+ * Free of window state; tested by tests/player_text_test.cpp. */
 #ifndef SNAPMAP_PLUS_PLAYER_TEXT_H
 #define SNAPMAP_PLUS_PLAYER_TEXT_H
 

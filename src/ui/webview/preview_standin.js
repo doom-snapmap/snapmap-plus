@@ -1,10 +1,6 @@
-/* The browser preview's stand-in for the WebView2 host and the backend.
- *
- * Loaded only when mockup.html is opened in a browser for development; the
- * window built into snapmap-plus-ui.dll never contains it (src/ui/embed-page.ps1
- * drops its script tag). It installs a window.chrome.webview that answers the
- * page's messages with sample data, so the page runs unchanged. Keep this file
- * ASCII. */
+/* The browser preview's stand-in for the WebView2 host and the backend: loaded only when mockup.html is opened in
+ * a browser (embed-page.ps1 drops its script tag from the DLL's page), it installs a window.chrome.webview that
+ * answers the page's messages with sample data. Keep this file ASCII. */
 /* Settings the host keeps in config.json: kept here for the session (the theme in browser storage). */
 var previewConfig = {};
 try { var previewTheme = localStorage.getItem('sh_theme'); if (previewTheme) previewConfig.theme = JSON.stringify(previewTheme); } catch (e) {}
@@ -561,9 +557,8 @@ function previewHandle(o) {
     previewMods(o).forEach(onMessage);
     return;
   }
-  // The File menu in browser preview: no native picker and no backend, so answer with the default
-  // pair the backend would report. Without this the menu's readout would sit on "Loading..." and
-  // the layout could never be checked outside the game.
+  // The File menu in browser preview: no native picker or backend, so answer with the default pair the backend
+  // would report (otherwise the readout sits on "Loading...").
   if (o.cmd === 'rawmapStatus' || o.cmd === 'rawmapLoadPick' || o.cmd === 'rawmapSavePick' ||
       o.cmd === 'rawmapSaveNow' || o.cmd === 'rawmapKeepHere' || o.cmd === 'rawmapLoadNow') {
     // Ticking pins the path already shown, so the readout does not move on the click.
@@ -811,8 +806,7 @@ function previewHandle(o) {
     onMessage({kind:'desc', inherit: previewDescs[o.inherit] || null, class: previewDescs[o.classname] || null});
   }
   else if (o.cmd === 'enumEvents') {
-    // varied arg kinds on purpose -- exercises every tlClassifyArg branch in the browser demo without
-    // needing the real 1611-event catalog. Every kind is now a real editable widget.
+    // varied arg kinds on purpose: exercises every tlClassifyArg branch without the real 1611-event catalog.
     onMessage({kind:'events', items:[
       {name:'ai/spawn', args:[{name:'origin', type:'vec3'}]},
       {name:'ai/set_target', args:[{name:'target', type:'entity'}]},

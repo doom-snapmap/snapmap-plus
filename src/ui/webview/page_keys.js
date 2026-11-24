@@ -1,11 +1,6 @@
-/* Keyboard ownership, dialogs and menus for the Snapmap+ window.
- *
- * A key pressed in a text field, a list box, a dialog or a menu belongs to that
- * control: page-wide shortcuts (arrow keys moving a list's selection, Delete,
- * Escape clearing a selection) never act on it. Every dialog opens through
- * pageKeys.dialogs: Escape closes the top one, Tab stays inside it, and focus
- * returns to where it was when the dialog opened. Context menus are menus of
- * buttons a keyboard can walk. Keep this file ASCII. */
+/* Keyboard ownership, dialogs and menus: a key pressed in a text field, list, dialog or menu belongs to that control
+ * and never triggers page-wide shortcuts. Every dialog opens through pageKeys.dialogs (Escape closes the top one, Tab
+ * stays inside, focus returns on close). Keep this file ASCII. */
 var pageKeys = (function () {
   'use strict';
 

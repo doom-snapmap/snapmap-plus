@@ -1,8 +1,6 @@
 #include "webview_json.h"
-/* WebView2 frontend host. sh_ui_init (ordinal 10) receives loop state in arg[0]
- * and the backend interface in arg[3]. A single STA thread handles the page,
- * drains UI requests at about 30 Hz, and polls change-gated editor state.
- * Engine mutations use backend interface slots declared in snapmap_plus_iface.h. */
+/* WebView2 frontend host. sh_ui_init (ordinal 10) receives loop state in arg[0] and the backend interface in
+ * arg[3]; one STA thread serves the page, drains UI requests at about 30 Hz and polls change-gated editor state. */
 #include <windows.h>
 #include <lmcons.h>
 #include <dwmapi.h>
@@ -59,7 +57,7 @@ static ComPtr<ICoreWebView2Environment12> g_webview_environment12;
 static ComPtr<ICoreWebView2_17>            g_webview17;
 static bool                     g_webview_ready = false;
 static std::wstring             g_html;
-/* The release this window was built as (root build.ps1 -Version); "dev" for a local build. */
+/* The release this window was built as; "dev" for a local build. */
 #ifndef SNAPMAP_PLUS_VERSION
 #define SNAPMAP_PLUS_VERSION "dev"
 #endif
@@ -88,8 +86,7 @@ static int           g_save_result  = 0;
 
 static volatile bool g_pending_delete = false;
 static std::vector<int> g_delete_eids;
-/* The page announces nothing until it receives this result. NOT_RUN means the
- * main-thread call never started, so the engine was not touched. */
+/* The page announces nothing until it receives this result; NOT_RUN means the main-thread call never started. */
 #define UI_DELETE_NOT_RUN (-1000)
 static int              g_entity_delete_status = UI_DELETE_NOT_RUN;
 static sh_delete_result g_entity_delete_result;
@@ -152,17 +149,14 @@ static std::string   g_mods_wait_name, g_mods_wait_folder;
 static volatile bool g_pending_sound_preview = false;
 static std::string   g_sound_preview_name;
 static int           g_sound_preview_result = 0;
-static std::string   g_sound_preview_reason;        /* why it was refused, '' when it was not */
-/* Preview-mode session, held while the asset browser is on screen. Separate pending flag from the
- * play above so opening the browser and clicking Play in the same frame still arrive in order. */
+static std::string   g_sound_preview_reason;        /* the refusal reason, '' if none */
+/* Preview-mode session, held while the asset browser is on screen; its own pending flag keeps open and Play in order. */
 static volatile bool g_pending_sound_session = false;
 static volatile int  g_sound_session_on = 0;
 static int           g_new_entity_result = -1;
-static int           g_load_result = 0;          /* 1 queued for stage/place; 0/-1 = resolve, read, or queue failure.
-                                                   * Queue acceptance does not confirm placement. */
-/* Module prefabs: Blueprint modules saved with their entities (~type idSnapMap).
- * Load/Place of one routes to the backend's module_prefab slot instead of the
- * entity paste; its result arrives over later frames and is posted when known. */
+static int           g_load_result = 0;          /* 1 queued for stage/place (not placement confirmed); 0/-1 failure */
+/* Module prefabs (~type idSnapMap) route Load/Place to the backend's module_prefab slot instead of the
+ * entity paste; the result arrives over later frames. */
 static volatile bool g_pending_create_module = false;
 static std::string   g_create_module_name;
 static int           g_create_module_result = 0;  /* 1 ok; 0 name exists; -1 failed; -2 not in Blueprint; -3 no module selected */
@@ -174,7 +168,7 @@ static std::string   g_load_message;              /* the backend's text for a re
 static ULONGLONG     g_module_place_deadline = 0;
 static std::string   g_module_place_name, g_module_place_folder;
 static int           g_editor_mode_last = -1;     /* entityMode | blueprint << 1; -1 posts on the next check */
-static int           g_editor_modules_last = -2;  /* modules selected in Blueprint when editorMode was last posted */
+static int           g_editor_modules_last = -2;  /* Blueprint modules selected at the last editorMode post */
 /* An object Load / Place waits for the game thread's decision (prefab_watch's place_seq) before the
  * page is told whether the prefab is in hand or only staged. */
 static bool          g_place_wait = false;
@@ -724,10 +718,8 @@ static void ui_apply_save()
         } else g_save_result = r == 0 ? 0 : -2;
     } __except (EXCEPTION_EXECUTE_HANDLER) { g_save_result = -2; }
 }
-/* Window deletion runs DOOM's own Delete Selection through one backend call
- * (ext 29). A backend without that slot refuses rather than falling back to
- * the old per-ID path, which skipped the engine's hover, selection, undo and
- * eligibility handling. Runs on the main thread inside ui_main_edits. */
+/* Window deletion runs DOOM's own Delete Selection through one backend call (ext 29); a backend without
+ * that slot refuses. Runs on the main thread inside ui_main_edits. */
 static void ui_apply_deletes()
 {
     memset(&g_entity_delete_result, 0, sizeof g_entity_delete_result);
@@ -872,9 +864,8 @@ static void ui_apply_set_display_names()
         else g_set_names_failed++;
     }
 }
-/* Report the backend's delete result. The page changes its selection and
- * announces success only from this message; "timeout" means the request never
- * reached the game thread, so nothing was attempted. */
+/* Report the backend's delete result; the page changes its selection and announces success only from this
+ * message. "timeout" means the request never reached the game thread. */
 static void ui_post_delete_result()
 {
     const sh_delete_result &r = g_entity_delete_result;
@@ -922,7 +913,7 @@ static int ui_hovered_id_seh()
     __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
 }
 /* The Prefabs tab's watch (+0x380): the Blueprint module selection, what is held and the last
- * paste decision. An older backend reads as unknown (modules_selected -1, nothing held). */
+ * paste decision. A backend without the slot reads as unknown (modules_selected -1, nothing held). */
 static int ui_prefab_watch_seh(sh_prefab_watch *w)
 {
     memset(w, 0, sizeof *w);
@@ -950,18 +941,11 @@ static int ui_prefab_grab_status(sh_prefab_grab_info *info)
     __try { return g_iface->vtbl->prefab_grab_status(g_iface, info); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return SH_PREFAB_GRAB_UNCHECKED; }
 }
-/* Save the current selection as prefab JSON. The engine requires the hovered
- * entity to be selected; report that refusal separately from an empty selection.
- * The engine anchors a prefab on the view-centre line, not the cursor; when
- * that line misses the hovered entity the backend rebuilds the frame from it
- * (reported as corrected). Without that guard, a file whose frame missed is
- * refused rather than written with collapsed positions.
- * The selection, hover and serialize run together on DOOM's main thread; the
- * file is written here.
- * Results: 1 = saved, 0 = empty, 2 = nothing hovered, 3 = no usable grab frame,
- * 4 = the hovered entity is not selected, 5 = the copy check refused a selection
- * it was otherwise given, 6 = the file could not be written whole, 7 = the game
- * did not run the request, -1 = the name or its path was refused. */
+/* Save the selection as prefab JSON; selection, hover and serialize run together on DOOM's main thread and the
+ * file is written here. The engine anchors the grab frame on the view-centre line: the backend rebuilds it when
+ * that line misses the hovered entity, and a file whose frame missed is refused without that guard.
+ * Results: 1 saved, 0 empty, 2 nothing hovered, 3 no usable grab frame, 4 hovered entity not selected,
+ * 5 copy check refused, 6 file not written whole, 7 game did not run the request, -1 name or path refused. */
 static bool ui_prefab_meta_path(const std::string &folder, const std::string &name, std::string &out);   /* fwd */
 static int ui_module_prefab_call(sh_module_prefab_call *call, std::string *out = nullptr);   /* fwd */
 struct UiCreateMain {
@@ -1049,8 +1033,8 @@ static void ui_apply_create_prefab()
             return;
         }
     }
-    /* A prefab file is plain JSON: the serializer's comments before each member go
-     * (backend/prefab_block.h); readers still skip them in files earlier builds wrote. */
+    /* A prefab file is plain JSON: the serializer's comments before each member are stripped
+     * (backend/prefab_block.h); readers still skip them in existing files. */
     {
         size_t before = (size_t)n;
         n = (int)sh_prefab_block_strip_comments(&buf[0], before);
@@ -1105,10 +1089,8 @@ static bool ui_prefab_file_path(const std::string &folder, const std::string &na
     out = ui_take(g_iface->vtbl->resolve_prefab_path(g_iface, prefix.c_str(), fname.c_str()));
     return !out.empty();
 }
-/* A prefab is one file: its description, tags, summary and mods live in its snapmapPlus
- * block (backend/prefab_block.h). <name>.meta.json is only the read-only fallback of a
- * prefab saved before the block; it is never written, and it follows its prefab when the
- * prefab is moved, renamed or deleted. The validated path helper handles both filenames. */
+/* A prefab's description, tags, summary and mods live in its snapmapPlus block (backend/prefab_block.h);
+ * <name>.meta.json is a read-only fallback that is never written and follows its prefab on move, rename and delete. */
 static bool ui_prefab_meta_path(const std::string &folder, const std::string &name, std::string &out)
 {
     return ui_prefab_file_path(folder, name + ".meta", out);
@@ -1334,9 +1316,8 @@ static void ui_apply_new_entity()
         ui_log("new-entity: ABORT (iface/slot missing)");
         return;
     }
-    /* Native paste requires no hovered entity and an empty selection. Refuse here
-     * so the page can explain the gate instead of reporting a queued but unplaced
-     * entity. Pasting over a selection can miswire the old-to-new ID mapping. */
+    /* Native paste requires no hovered entity and an empty selection (a selection can miswire the
+     * old-to-new ID mapping); refuse here so the page can explain the gate. */
     if (g_iface->vtbl->hovered_id && g_iface->vtbl->hovered_id(g_iface) >= 0) {
         ui_log("new-entity: REFUSED (hovering an entity -- the engine will not paste there)");
         g_new_entity_result = -2;
@@ -1412,7 +1393,7 @@ static void ui_apply_place_module_prefab(const std::string &body)
     int r = ui_module_prefab_call(&call, &msg);
     ui_log(("load-prefab: module prefab '" + g_load_prefab_name + "' place=" + std::to_string(r) + " seq=" +
             std::to_string(call.seq) + " (" + msg + ")").c_str());
-    if (r == -6) {                  /* needs a module the editor cannot build; nothing was placed */
+    if (r == -6) {                  /* needs a module the editor cannot build */
         g_load_result = -6;
         g_load_message = msg;
         return;
@@ -1428,12 +1409,10 @@ static void ui_apply_place_module_prefab(const std::string &body)
     g_load_result = (r == -1 || r == -4) ? r : 0;
     g_load_message = msg;           /* the page shows it when it is the backend's sentence */
 }
-/* The mods a prefab records come first (backend/prefab_mods.c): the engine never sees a
- * prefab whose mods are missing. Returns true when the placement may go on now; otherwise
- * g_load_result is 3 (held while the download is asked for, followed by ui_poll_prefab_mods),
- * -6 (a module the player cannot get) or -7 (refused), with the message in g_load_message.
- * The rows are the file's block's, else (a prefab saved before the block) its sidecar's; a
- * prefab naming none goes on as before, and the backend answers that without the game. */
+/* The mods a prefab records are resolved first (backend/prefab_mods.c) so the engine never sees a prefab whose
+ * mods are missing. Returns true when placement may go on; otherwise g_load_result is 3 (held for the download,
+ * followed by ui_poll_prefab_mods), -6 (a module the player cannot get) or -7 (refused), with the text in
+ * g_load_message. The rows come from the file's block, else its sidecar. */
 static bool ui_resolve_prefab_mods(const std::string &body)
 {
     std::string meta, msg;
@@ -1477,7 +1456,7 @@ static void ui_poll_prefab_mods()
                 g_mods_wait_seq, r);
     g_mods_wait_seq = 0;
     if (r == 1) {
-        /* Placed through the ordinary Load/Place, which now finds every mod installed. */
+        /* Placed through the ordinary Load/Place, which finds every mod installed. */
         g_load_prefab_name = g_mods_wait_name;
         g_load_prefab_folder = g_mods_wait_folder;
         g_pending_load_prefab = true;
@@ -1530,11 +1509,8 @@ static void ui_apply_load_prefab()
      * rechecks before placement because a pending manipulation may refuse clearing. */
     ui_clear_selection_seh();
 
-    /* kind=2 stages and requests the engine's native paste action on its main thread.
-     * Missing editor prerequisites can leave the prefab staged for manual paste. */
-    /* Staged prefab storage must survive map-heap resets; the backend allocates it
-     * in heap 0. Keep placement on the native action path rather than directly
-     * invoking PasteInstantiate or synthesizing operating-system keystrokes. */
+    /* kind=2 stages the prefab (in heap 0, so it survives map-heap resets) and requests the engine's native paste
+     * action on its main thread; missing editor prerequisites leave it staged for manual paste. */
     sh_apply_item it; it.kind = 2; it.id = 0; it.text = body.c_str();
     sh_prefab_watch watch;
     bool watched = ui_prefab_watch(&watch) >= 0;
@@ -1580,8 +1556,8 @@ static void ui_poll_place_outcome()
     ui_post_json(m.c_str());
     ui_log(("load-prefab: '" + g_place_wait_name + "' " + placed + (decided && !reason.empty() ? ": " + reason : "")).c_str());
 }
-/* Commit the page's refreshed, patched entity JSON with kind=0. Prefer the
- * synchronous applied result; see ui_apply_sync_seh for the older-backend fallback. */
+/* Commit the page's refreshed, patched entity JSON with kind=0, preferring the synchronous applied
+ * result (ui_apply_sync_seh falls back to apply_edit when the slot is missing). */
 static void ui_apply_save_timeline()
 {
     g_save_timeline_result = 0;
@@ -1703,8 +1679,7 @@ static void ui_emit_list(int n, int ready, const char *reason)
     std::wstring json; json.reserve((size_t)(n + g_tl_count) * 96 + 96);
     json += L"{\"kind\":\"list\",\"seq\":"; json += std::to_wstring(seq);
     json += L",\"version\":\""; json += sh_webview_json::escape_wide(g_version.c_str());
-    /* the renderer rides the list message alongside the version, for the same reason: the feedback
-     * dialog composes its own payload in the page and needs both there. */
+    /* the renderer rides the list message beside the version for the page's feedback payload */
     json += L"\",\"renderer\":\""; json += sh_webview_json::escape_wide(sh_host_renderer_name());
     /* and the game identity: '' means the backend is not attached ("- Game: not attached") */
     json += L"\",\"game\":\""; json += sh_webview_json::escape_wide(g_game.c_str());
@@ -1840,28 +1815,19 @@ static void ui_send_desc(const char *inherit, const char *classname)
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-/* The File menu's rawmap I/O: "Load Rawmap" / "Save Rawmap As", the only caller of
- * the +0x328/+0x330 slots. Load opens the picked file in the editor at once, after
- * the page's confirm; nothing is kept for a later map. Paths cross to the backend
- * as UTF-8.
- *
- * The picker runs on its own thread. This handler is dispatched from DispatchMessageW
- * inside ui_think_loop, so a modal Show() here would stop editor polling, selection
- * sync and the queued-work drain for as long as the dialog is open. The result comes
- * back through the same pending-flag handoff every other deferred action uses, so
- * every backend call still happens on the UI thread. */
+/* The File menu's rawmap I/O, the only caller of the +0x328/+0x330 slots; paths cross as UTF-8. The picker runs
+ * on its own thread because a modal Show() in the message dispatch would stop polling and the queued-work drain;
+ * the result returns by pending flag, so every backend call stays on the UI thread. */
 
-/* Run the common item dialog. `save` picks the Save-As variant. Returns false when the person
- * cancelled (the overwhelmingly common non-success case, and not an error worth reporting).
+/* Run the common item dialog; `save` picks the Save-As variant. Returns false when cancelled.
  * Call from the picker thread, never from the message handler. */
 static bool ui_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, std::wstring &out_path,
                                  bool prefab = false, const wchar_t *file_name = nullptr)
 {
     out_path.clear();
 
-    /* The UI thread's apartment is already initialized by the WebView host, so this is a nesting
-     * no-op that we must still balance -- and RPC_E_CHANGED_MODE means someone else set a different
-     * apartment, which is fine for a modal dialog and must NOT be treated as failure. */
+    /* The UI thread's apartment is already initialized, so this is a nesting no-op that must still be balanced;
+     * RPC_E_CHANGED_MODE (a different apartment) is fine for a modal dialog and is not a failure. */
     HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     bool need_uninit = SUCCEEDED(init);
 
@@ -1883,33 +1849,24 @@ static bool ui_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, s
         if (title) dlg->SetTitle(title);
         if (save && (file_name || pick.file_name)) dlg->SetFileName(file_name ? file_name : pick.file_name);
 
-        /* Keep the dialog's own work down. FORCEFILESYSTEM refuses items with no path (nothing we
-         * could open anyway); NOCHANGEDIR keeps it from moving the process's working directory out
-         * from under DOOM; DONTADDTORECENT skips a write to the shell's recent-items store. */
+        /* FORCEFILESYSTEM refuses items with no path; NOCHANGEDIR keeps the dialog from moving DOOM's working
+         * directory; DONTADDTORECENT skips the shell's recent-items write. */
         {
             FILEOPENDIALOGOPTIONS opt = 0;
             if (SUCCEEDED(dlg->GetOptions(&opt)))
                 dlg->SetOptions(opt | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT);
         }
 
-        /* Our own slot for the dialog's persisted state, so what it remembers is OURS and cannot be
-         * inherited from whatever other dialog in this process was shown last. */
+        /* Our own slot for the dialog's persisted state, not shared with other dialogs in this process. */
         {
             static const GUID kRawmapPickerGuid =
                 { 0x7b3a9c41, 0x5e28, 0x4d6b, { 0x9f, 0x14, 0x2c, 0x8a, 0xde, 0x61, 0x3f, 0x70 } };
             dlg->SetClientGuid(kRawmapPickerGuid);
         }
 
-        /* Open on the rawmap folder rather than wherever the shell last was.
-         *
-         * SetFolder, not only SetDefaultFolder: SetDefaultFolder applies only when the dialog has no
-         * remembered location, and otherwise it opens in Quick Access, the slowest starting point
-         * (it enumerates cloud providers and network places).
-         *
-         * SetDefaultFolder is kept too, for the first-ever open and for a path that does not exist
-         * yet; SetFolder wins when both are set. Overriding a remembered location is the intent:
-         * the folder is the one this dialog kind last used, else its default (rawmap_picker.h),
-         * chosen by ui_pick_start_folder on the UI thread. */
+        /* Open on the folder ui_pick_start_folder chose. SetFolder overrides a remembered location (SetDefaultFolder
+         * alone applies only when none is remembered); SetDefaultFolder stays for a first open and a path that does
+         * not exist yet. */
         if (!g_pick_folder.empty()) {
             IShellItem *folder = nullptr;
             if (SUCCEEDED(SHCreateItemFromParsingName(g_pick_folder.c_str(), nullptr, IID_PPV_ARGS(&folder))) && folder) {
@@ -1938,17 +1895,7 @@ static bool ui_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, s
     return !out_path.empty();
 }
 
-/* Report the rawmap paths. The backend hands back a UTF-8 JSON fragment (paths are escaped there --
- * a Windows path is full of backslashes), so this forwards it whole rather than re-encoding field
- * by field.
- *
- * `confirm_file`, when set, asks the page to put the "open it now? unsaved edits are discarded"
- * question up before anything opens. The backend has checked the file and the editor; yes opens it,
- * and no opens nothing. It must arrive already JSON-escaped (escape_wide), like every other path
- * that crosses this boundary. */
-
-/* Tell the page where the navigation view stands. Sent when the View menu opens
- * and again after an update is asked for. */
+/* Tell the page where the navigation view stands, when the View menu opens and after an update is asked for. */
 static void ui_send_navmesh_state()
 {
     if (!g_webview) return;
@@ -1967,7 +1914,8 @@ static void ui_send_navmesh_state()
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-/* `error` marks the note as a refusal: the page shows it as an error toast. */
+/* Report the rawmap paths by forwarding the backend's JSON status whole; `error` marks the note as a refusal
+ * (an error toast). `confirm_file`, when set, asks the page to confirm opening it now, and must be JSON-escaped. */
 static void ui_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_file = nullptr, bool error = false)
 {
     if (!g_webview) return;
@@ -2004,25 +1952,20 @@ static void ui_rawmap_configure(const char *load_path, const char *save_path, in
     char *said = nullptr;
     int ok = g_iface->vtbl->rawmap_configure(g_iface, load_path, save_path, arm, &said);
     std::string msg = ui_take(said);
-    /* The backend's message is the useful one on refusal -- it names WHY the file was rejected
-     * (wrong type, too big, unreadable). On success its "ok" is not worth showing, so the caller's
-     * own sentence wins -- unless the caller passes no sentence, which is how Save Rawmap As asks for
-     * the backend's own: only the backend knows whether it wrote the file there and then or is
-     * waiting for an editor save, and how many bytes went out. */
+    /* On refusal the backend's message says why; on success the caller's sentence wins, and a null sentence
+     * (Save Rawmap As) shows the backend's own, which knows whether the file was written or awaits an editor save. */
     std::wstring note = ok ? (ok_note ? std::wstring(ok_note) : sh_webview_json::escape_wide(msg.c_str()))
                            : sh_webview_json::escape_wide(msg.c_str());
 
-    /* ui_logf carries exactly one unsigned long, so compose the detail line first. The paths are
-     * what makes this log worth having when someone reports "it did not load my file". */
+    /* ui_logf carries one unsigned long, so the detail line is composed first. */
     ui_log(("rawmap configure: ok=" + std::to_string(ok) + " arm=" + std::to_string(arm) + " load=" +
             (load_path ? load_path : "(unchanged)") + " save=" + (save_path ? save_path : "(unchanged)") +
             " msg=" + msg).c_str());
     ui_send_rawmap_status(note.c_str(), nullptr, !ok);
 }
 
-/* The picker thread. Its ONLY job is the modal dialog: it touches no backend slot and posts nothing
- * to the page, because both of those belong on the UI thread. It hands back a path and lets the think
- * loop do the rest. Its own apartment, since a fresh thread has none. */
+/* The picker thread runs only the modal dialog in its own apartment: it touches no backend slot and posts
+ * nothing to the page, and hands the path to the think loop. */
 static DWORD WINAPI ui_pick_thread(LPVOID param)
 {
     const int kind = (int)(intptr_t)param;
@@ -2084,9 +2027,7 @@ static void ui_pick_keep_folder(int kind, const std::wstring &picked)
         ui_logp("dialogs: could not keep the folder for %s", key);
     }
 }
-/* Open a picker, unless one is already open. Returns with the dialog still to come -- the caller has
- * nothing to report yet, which is the point: the message handler returns immediately and the think
- * loop keeps turning. */
+/* Open a picker unless one is open; returns at once with the dialog still to come. */
 static void ui_begin_pick(int kind)
 {
     HANDLE h;
@@ -2180,16 +2121,14 @@ static void ui_finish_prefab_pick(int kind, bool picked, const std::string &zip8
     ui_post_json(m.c_str());
     if (kind == 3 && r == 1) ui_send_prefabs();
 }
-/* Act on a finished picker. Runs on the UI thread from the think loop, so every backend call below
- * is where it has always been. */
+/* Act on a finished picker, on the UI thread from the think loop. */
 static void ui_finish_pick()
 {
     const int  kind   = g_pick_kind;
     const bool picked = g_pick_ok;
     std::string p8    = picked ? sh_webview_json::to_utf8(g_pick_path) : std::string();
 
-    /* Kept before the clear below, for the confirm prompt: the person should see WHICH file they are
-     * about to open, and the full path is too long for a dialog line. */
+    /* The file name, kept before the clear below for the confirm prompt. */
     std::wstring base;
     if (picked) {
         size_t cut = g_pick_path.find_last_of(L"\\/");
@@ -2211,15 +2150,13 @@ static void ui_finish_pick()
     }
 
     if (kind == 1) {
-        /* Naming a destination IS the request to write it -- the configure slot writes the file there
-         * and then from the map's own save on disk, and only falls back to arming one editor save when
-         * the map has never been saved. No note of our own: only the backend knows which happened. */
+        /* Naming a destination is the request to write it: the configure slot writes from the map's save on disk,
+         * or arms one editor save when the map was never saved. */
         ui_rawmap_configure(nullptr, p8.c_str(), -1, nullptr);
         return;
     }
 
-    /* arm = 2: the picked file is the one to open now. The backend checks the file and that the
-     * editor can open it, and refuses at once otherwise; nothing waits for a later map. */
+    /* arm = 2: the picked file is opened now; the backend checks the file and the editor and refuses at once otherwise. */
     {
         char *said = nullptr;
         int accepted = 0;
@@ -2227,14 +2164,12 @@ static void ui_finish_pick()
             accepted = g_iface->vtbl->rawmap_configure(g_iface, p8.c_str(), nullptr, 2, &said);
         std::string msg = ui_take(said);
         if (!accepted) {
-            /* The backend logs the refusal and prints it to the console (rawmap.c); this is the UI
-             * log's line, as the prefab Import's refusal has one. */
+            /* The backend logs and prints the refusal (rawmap.c); this is the UI log's line. */
             ui_log(("rawmap load: refused '" + p8 + "': " + msg).c_str());
             ui_send_rawmap_status(sh_webview_json::escape_wide(msg.c_str()).c_str(), nullptr, true);
         } else {
-            /* Ask before opening: a reload discards whatever is in the editor, and the engine
-             * offers no "has unsaved changes" query. Answering no opens nothing. The page owns
-             * this dialog on purpose -- a native modal here stalls the think loop. */
+            /* Ask before opening, since a reload discards the editor's contents and the engine has no unsaved-changes
+             * query; the page owns the dialog because a native modal would stall the think loop. */
             ui_send_rawmap_status(L"", base.c_str());
         }
     }
@@ -2488,8 +2423,6 @@ static int ui_count_prefab_entities(const std::string &body)
     }
     return entityCount;
 }
-/* Read a single prefab file (resolved via +0xc0) and push its scene plus aggregate entity count.
- * folder="" selects the prefab root. */
 /* Read a whole auxiliary file; return false for a missing, empty or unreadable one. */
 static bool ui_read_small_file(const char *path, std::string &body)
 {
@@ -2577,11 +2510,9 @@ static bool ui_read_prefab_scene(const char *path, std::string &body)
     if (!ok) body.clear();
     return ok;
 }
-/* A prefab's details as the view the page reads (SH_MODULE_PREFAB_META_READ): from the
- * file's snapmapPlus block, else (a prefab saved before the block) its sidecar. `text` is
- * the whole file when the caller has read it; otherwise the file is read from the end, a
- * window at a time and doubling, until the block's start is in it (or the whole file is).
- * Empty when there are none or this backend cannot answer. */
+/* A prefab's details as the view the page reads (SH_MODULE_PREFAB_META_READ), from the file's snapmapPlus
+ * block, else its sidecar. `text` is the whole file when already read; otherwise the file is read from the end
+ * in doubling windows until the block is in it. Empty when there are none or the backend cannot answer. */
 static std::string ui_prefab_view(const char *path, const char *meta_path, const std::string *text)
 {
     std::string tail, out;
@@ -2659,9 +2590,8 @@ static void ui_send_prefab_detail(const std::string &name, const std::string &fo
         const char *path = pathText.c_str(), *mp = mpText.c_str();
         /* The scene is sent only for the selected prefab, without the product's block. */
         bool whole = ui_read_prefab_scene(path, fileBody);
-        /* the view ships as an ESCAPED STRING (the page JSON.parses it with a try/catch), never
-         * spliced raw -- a hand-edited/truncated sidecar must not be able to invalidate this whole
-         * message (PostWebMessageAsJson silently drops a malformed payload). */
+        /* The view ships as an escaped string the page parses under try/catch, never spliced raw, so a damaged
+         * sidecar cannot invalidate the message (PostWebMessageAsJson drops a malformed payload). */
         metaBody = ui_prefab_view(path, mp, whole ? &fileBody : nullptr);
         if (whole) {
             sceneBody = fileBody;
@@ -2697,11 +2627,9 @@ static void ui_send_prefab_detail(const std::string &name, const std::string &fo
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-/* The Prefabs tab's Limits section. The backend builds its budget table on the
- * game thread after each palette build; the page asks for it once (budgetTable)
- * and is sent it again whenever its generation changes, and asks for the map's
- * current usage (budgetUsage) when the tab opens and on each selection; from then
- * on the think loop sends it again whenever it or the held prefab changes. */
+/* The Prefabs tab's Limits section: the backend builds the budget table on the game thread after each palette
+ * build, and the think loop re-sends the table when its generation changes and the map's usage (budgetUsage)
+ * when it or the held prefab changes, once the page has asked. */
 static bool     g_budget_wanted = false;   /* the page has asked for the table */
 static unsigned g_budget_sent_gen = 0;     /* table generation last posted */
 
@@ -2813,17 +2741,11 @@ static void ui_budget_poll()
     if (call.generation && call.generation != g_budget_sent_gen) ui_send_budget_table();
 }
 
-/* The Mods tab (mods_tab.js; backend/modui.c behind the `mods` slot). The page asks for the
- * document when the tab opens and on Refresh (a modsAction rescan; modsList only from the
- * mockup), and for an action (modsAction); the document is never polled (the script log's
- * modsScripts is, by the page, and answered at once: ui_mods_send_scripts). Each job runs on a short-lived worker
- * thread rather than this one. Install, New mod and Refresh do their file work (copies, salts,
- * builds, which can take minutes) on that worker, off DOOM's main thread, with no time limit; only
- * their game part (APPLY) and every other operation run on DOOM's main thread through
- * run_on_main. The worker touches no page state: it reports its phase through g_mods_phase, which
- * the think loop posts as modsProgress, and hands its documents back through g_mods_done, which
- * the think loop posts (ui_mods_finish), the same handoff as the rawmap picker. Each job ends with
- * a fresh document, so the list follows every action without being asked. */
+/* The Mods tab (mods_tab.js; backend/modui.c behind the `mods` slot). Each job runs on a short-lived worker
+ * thread that touches no page state: it reports its phase through g_mods_phase (posted as modsProgress) and
+ * hands its documents back through g_mods_done (ui_mods_finish), as the rawmap picker does. Install, New mod
+ * and Refresh do their file work (minutes at most) on the worker with no time limit; their game part (APPLY)
+ * and every other operation run on DOOM's main thread through run_on_main. Each job ends with a fresh document. */
 #define UI_MODS_START_MS   8000   /* how long a job waits for the game to start a main-thread call */
 
 struct UiModsJob {
@@ -2843,12 +2765,9 @@ static volatile LONG g_mods_done = 0;
 /* The running job's phase for the page: 0 none, 1 the file work, 2 the game's part. */
 static volatile LONG g_mods_phase = 0;
 static LONG          g_mods_phase_posted = 0;
-/* The pushed refresh: once the page has asked for anything (modsList, or any modsAction, which
- * is all the shipped page sends), a change the window did not make
- * (a console verb, `sh_mods map add` or `uninstall`, the undo clear an Uninstall owes) moves the
- * backend's generation past the one of the last document posted, and the think loop posts a fresh
- * one, as each of the page's own actions ends with one. FETCH's size query (any thread, no main-
- * thread call) reads the generation every UI_MODS_PUSH_MS. */
+/* The pushed refresh: once the page has asked for anything, a change the window did not make (a console verb,
+ * `sh_mods map add` or `uninstall`) moves the backend's generation past the last posted document's and the
+ * think loop posts a fresh one. FETCH's size query (any thread, no main-thread call) reads it every UI_MODS_PUSH_MS. */
 #define UI_MODS_PUSH_MS 500
 static bool          g_mods_page_seen = false;
 static unsigned      g_mods_doc_gen = 0;
@@ -2905,10 +2824,9 @@ static bool ui_mods_fetch(std::string &out)
     return ui_mods_slot(&call, &out) == 1;
 }
 
-/* The dialog for Install, on the worker thread (its own apartment): one Open dialog for mod ZIPs (a
- * prefab or map export carries its mods so) and a mod folder's mod.json, which stands for its folder
- * (rawmap_picker.h install_target). Several may be picked; they are joined with newlines, which no
- * path contains, and the backend takes each one as a mod folder or a ZIP of mods. */
+/* The Install dialog, on the worker thread: one Open dialog for mod ZIPs and a mod folder's mod.json, which
+ * stands for its folder (rawmap_picker.h install_target). Several may be picked, joined with newlines, and the
+ * backend takes each as a mod folder or a ZIP of mods. */
 static bool ui_pick_mods(std::wstring &out)
 {
     IFileOpenDialog *dlg = nullptr;
@@ -2969,8 +2887,8 @@ static bool ui_pick_mods(std::wstring &out)
 
 static bool ui_mods_read_only(int action);   /* fwd: below the action names */
 
-/* The publishing key's backup file (SPEC-distribution 4.2): Save a backup writes one, Restore reads one. Opens in
- * Documents; the backup is the player's to keep, never the game's folder. Picker thread only. */
+/* The publishing key's backup file: Save a backup writes one, Restore reads one. Opens in Documents, not the
+ * game's folder. Picker thread only. */
 static bool ui_pick_key_file(bool save, std::wstring &out)
 {
     IFileDialog *dlg = nullptr;
@@ -3159,10 +3077,8 @@ static bool ui_mods_begin(int action, bool pick, const std::string &arg)
     return true;
 }
 
-/* The mod scripts' state and one mod's script log (SH_MODS_SCRIPTS), on the UI thread: the op
- * reads the script runtime on any thread and never touches the job's shared document, so the
- * page may ask while a job runs and while a Play is on. The page asks while the Mods tab shows
- * a mod with scripts. */
+/* The mod scripts' state and one mod's script log (SH_MODS_SCRIPTS), on the UI thread: the op reads the script
+ * runtime on any thread and never touches the job's shared document, so the page may ask while a job runs. */
 static void ui_mods_send_scripts(const std::string &salt)
 {
     std::string doc;
@@ -3215,11 +3131,9 @@ static void ui_mods_progress_tick()
     ui_post_json(m.c_str());
 }
 
-/* The prefabs folder watcher (folder_watch.h). One thread watches the prefabs folder
- * (ReadDirectoryChangesW, subtree: names, writes, sizes) and notes each change in its debounce;
- * the think loop refreshes the Prefabs list 300 ms after the last change. A folder that is not
- * there yet is opened again every few seconds. The mods folder is not watched: the store is
- * scanned at boot, on Refresh, and after an install, a download or New mod. */
+/* The prefabs folder watcher (folder_watch.h): one thread watches the folder subtree with ReadDirectoryChangesW
+ * and notes each change in its debounce, and the think loop refreshes the Prefabs list 300 ms after the last one.
+ * A missing folder is reopened every few seconds. The mods folder is not watched. */
 #define UI_WATCH_FILTER (FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | \
                           FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE)
 #define UI_WATCH_REOPEN_MS 5000
@@ -3304,8 +3218,7 @@ static void ui_watch_start()
     else ui_log("watch: the prefabs folder watcher could not start; the list refreshes only when asked");
 }
 
-/* The pushed refresh (g_mods_doc_gen above), on the UI thread: a document only, as the page's
- * Refresh asks for, while no job of the window runs. */
+/* The pushed refresh (g_mods_doc_gen), on the UI thread: a document only, while no window job runs. */
 static void ui_mods_push_tick()
 {
     ULONGLONG now = GetTickCount64();
@@ -3466,9 +3379,8 @@ static bool ui_view_tags(const std::string &body, std::vector<std::string> &tags
     return true;
 }
 
-/* Enumerate root prefabs and one level of folders. Each prefab's view (its block, read
- * from the end of its file, else its sidecar) gives the list its tags, kinds and mods, so
- * filtering needs no per-prefab reads from the page. The list never sends a scene. */
+/* Enumerate root prefabs and one level of folders. Each prefab's view (its block, else its sidecar) gives the
+ * list its tags, kinds and mods, so filtering needs no per-prefab page reads; the list never sends a scene. */
 static void ui_send_prefabs()
 {
     if (!g_webview) return;
@@ -3575,11 +3487,9 @@ static void ui_send_prefabs()
     ui_post_editor_mode(true);
 }
 
-/* Write a prefab's description and tags into its file's snapmapPlus block (the backend
- * keeps its summary and mods; a prefab saved before the block takes its sidecar's, and the
- * sidecar is left as it was). Runs directly in the message callback like selectPrefab --
- * file I/O only, no engine touch. Posts savePrefabMetaResult, then a fresh prefabs list
- * (the tag map feeds the list filter). */
+/* Write a prefab's description and tags into its file's snapmapPlus block (the backend keeps its summary and
+ * mods). Runs in the message callback with file I/O only, no engine touch; posts savePrefabMetaResult, then a
+ * fresh prefabs list. */
 static void ui_apply_save_prefab_meta(const std::string &name, const std::string &folder, const std::string &body)
 {
     int result = -1;
@@ -3604,12 +3514,9 @@ static void ui_apply_save_prefab_meta(const std::string &name, const std::string
 }
 
 /* Feedback submission. */
-/* Network boundary: Send starts one HTTPS POST to the feedback relay, which
- * creates or updates a public GitHub issue. Payloads contain user-entered text,
- * version, renderer, and optional scrubbed log tails for crash reports.
- * Run the request on a short-lived worker so WinHTTP cannot block the STA UI.
- * The worker owns g_report_* while in flight; the loop posts its result to the page.
- * The relay in feedback/ owns the service contract. */
+/* Network boundary: Send starts one HTTPS POST (user text, version, renderer, optional scrubbed log tails) to the
+ * feedback relay in feedback/, which owns the service contract. A short-lived worker runs it so WinHTTP cannot
+ * block the STA UI; the worker owns g_report_* while in flight and the loop posts its result to the page. */
 static const wchar_t *kReportHost = L"snapmap-plus-feedback.doom-snapmap.workers.dev";   /* the deployed relay (feedback/); unreachable -> red toast, nothing else */
 static const wchar_t *kReportPath = L"/report";
 #define REPORT_PAYLOAD_CAP (64 * 1024)
@@ -3675,16 +3582,14 @@ static DWORD WINAPI report_thread(LPVOID)
 }
 
 /* Crash-record presentation and reporting. */
-/* Poll backend pending records about every two seconds. Terminal/unknown kinds
- * prompt for a report; classB/offthread records receive a notice only if newly
- * observed during this session. These kinds describe handling, not proof of survival.
- * Reports share the feedback relay and may attach scrubbed log tails. Dismissal
- * or successful submission clears pending records; full logs and dumps stay local. */
+/* Backend pending records are polled about every two seconds: terminal and unknown kinds prompt for a report,
+ * classB/offthread records give a notice only when newly observed. Reports share the feedback relay and may attach
+ * scrubbed log tails; dismissal or a successful submission clears pending records, and full logs and dumps stay local. */
 static const char *kCrashDir  = "snapmap-plus\\crash";   /* CWD = the game dir (ui_log's convention) */
 static const char *kCrashGlob = "snapmap-plus\\crash\\pending-*.json";
 #define CRASH_RECORD_READ_CAP  16384                      /* a record is ~2 KB; cap the read anyway */
 #define CRASH_LOG_TAIL_KEEP    (15 * 1024)                /* per-log tail budget (3 logs ~= 45 KB) */
-#define CRASH_RECORDS_KEEP     8                          /* newest records kept; older ones are pruned */
+#define CRASH_RECORDS_KEEP     8                          /* newest records kept; the rest are pruned */
 
 static bool        g_report_is_crash = false;   /* the in-flight relay POST came from the crash dialog */
 static bool        g_page_loaded     = false;   /* NavigationCompleted fired -- the page can receive */
@@ -3714,10 +3619,8 @@ static int crash_scan(std::vector<std::string> &names)
     return (int)names.size();
 }
 
-/* classB/offthread records describe attempted recovery or declined redirection,
- * so they do not establish process death. Other kinds prompt for a crash report.
- * Fatal capture is separate and best-effort; a missing fatal record cannot prove
- * that the process survived. Unknown or unreadable kinds default to prompting. */
+/* classB/offthread records describe attempted recovery or declined redirection, not process death; other kinds,
+ * and unknown or unreadable ones, prompt for a crash report. */
 static bool crash_record_is_terminal(const std::string &rec)
 {
     const char *p = strstr(rec.c_str(), "\"kind\"");
@@ -3815,10 +3718,9 @@ static LRESULT CALLBACK UiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_NCCALCSIZE:
-        /* frameless: consume the non-client area so the client (WebView2) fills the window and the native
-         * title bar is gone. WS_THICKFRAME stays so Aero Snap + maximize work; the default maximize sizing
-         * already respects the taskbar. When MAXIMIZED, Windows adds the resize-frame overhang beyond the
-         * work area, so inset the client by that frame or the top/bottom clip off-screen. */
+        /* Frameless: consume the non-client area so WebView2 fills the window (WS_THICKFRAME stays for Aero Snap and
+         * maximize). When maximized Windows adds a resize-frame overhang beyond the work area, so the client is
+         * inset by that frame or the top and bottom clip off-screen. */
         if (wp) {
             if (IsZoomed(hwnd)) {
                 NCCALCSIZE_PARAMS *p = (NCCALCSIZE_PARAMS *)lp;
@@ -4141,9 +4043,8 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     ui_free_text(g_iface->vtbl->navmesh_view(g_iface, 1));
                 ui_send_navmesh_state();
             } else if (cmd == L"rawmapLoadNow") {
-                /* Open the load path now through the backend's editor-frame hook. The reply is a
-                 * REQUEST result; the reload lands a frame later, and a failure there is told by the
-                 * backend's own toast and console line. */
+                /* Open the load path now through the backend's editor-frame hook; the reply is a request
+                 * result, and a failure on the later reload is reported by the backend's own toast. */
                 {
                     char *said = nullptr;
                     int ok = g_iface->vtbl->rawmap_load_now(g_iface, &said);
@@ -4153,10 +4054,8 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                                               : sh_webview_json::escape_wide(msg.c_str()).c_str(), nullptr, !ok);
                 }
             } else if (cmd == L"rawmapKeepHere") {
-                /* "Keep saving to file". Arm codes rather than a new vtable slot: the two
-                 * DLLs must match slot for slot, and `arm` was already a verb code. Neither
-                 * value writes anything -- 3 pins the path the readout is already showing,
-                 * 4 releases it, so the line under the tick is true either way. */
+                /* "Keep saving to file", sent as arm codes (3 pins the path the readout shows, 4 releases it)
+                 * rather than a new vtable slot, since the two DLLs must match slot for slot. */
                 int on = 0; sh_webview_json::get_int(json, L"on", &on);
                 ui_rawmap_configure(nullptr, nullptr, on ? 3 : 4,
                                      on ? L"Saves keep going to this file until you open another map."
@@ -4249,8 +4148,8 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 sh_webview_json::get_string(json, L"body", bodyw);
                 sh_webview_json::get_string(json, L"contact", contact);
                 sh_webview_json::get_string(json, L"website", hp);
-                /* Prefer the recorded renderer: this session may differ from the one that
-                 * faulted. Use the live renderer only for older records without the field. */
+                /* Prefer the recorded renderer, since this session may differ from the one that faulted;
+                 * the live renderer is used only for records without the field. */
                 sh_webview_json::get_string(json, L"renderer", renderer);
                 /* Same for the game identity recorded at arm time. */
                 sh_webview_json::get_string(json, L"game", game);
@@ -4374,10 +4273,9 @@ static HRESULT on_nav_completed(ICoreWebView2 *,
                  (unsigned long)status);
         return S_OK;
     }
-    /* The hidden native host may be shown only after the fully parsed, pre-themed page can receive
-     * messages. This keeps a blank/light controller from becoming the first visible frame. */
-    /* A newly navigated page starts with an unchecked lock control. Release any old page's lock and
-     * force an initial coordinate publication so native state and the fresh controls cannot diverge. */
+    /* The hidden host is shown only once the parsed, pre-themed page can receive messages, so a blank controller
+     * is never the first visible frame. A navigated page starts with an unchecked lock control: release its
+     * lock and force a coordinate publication so native state and the controls agree. */
     g_cam_lock = false;
     g_cam_write_once = false;
     g_cam_read_published = false;
@@ -4430,11 +4328,8 @@ static HRESULT on_environment_created(HRESULT result, ICoreWebView2Environment *
     return env->CreateCoreWebView2Controller(g_hwnd, Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(on_controller_created).Get());
 }
 #ifdef SH_DIAG
-/* Diagnostic build only (never the release page): a file
- * `%LOCALAPPDATA%\\snapmap-plus\\devtools-port` holding one port number
- * (1024..65535) opens Chromium's remote debugging on 127.0.0.1 at that port for
- * this window, so the development daemon's window step can inspect and drive
- * the page. Absent or malformed, nothing is opened. */
+/* Diagnostic build only: a file `%LOCALAPPDATA%\\snapmap-plus\\devtools-port` holding one port number
+ * (1024..65535) opens Chromium's remote debugging on 127.0.0.1 at that port; absent or malformed, nothing opens. */
 static int ui_devtools_port(const wchar_t *local)
 {
     if (!local || !*local) return 0;
@@ -4466,8 +4361,8 @@ static void ui_start_webview()
     }
     bool have_local = !local.empty();
     if (have_local) {
-        /* %LOCALAPPDATA%\snapmap-plus\cache\webview2; an older snapmap-plus\webview2 folder is renamed into
-         * cache\ once (webview_profile.h). */
+        /* %LOCALAPPDATA%\snapmap-plus\cache\webview2; an existing snapmap-plus\webview2 folder is renamed
+         * into cache\ (webview_profile.h). */
         int how = sh_webview_profile::created; DWORD error = 0;
         udf = sh_webview_profile::choose(local, &how, &error);
         if (how == sh_webview_profile::moved) ui_log("webview2 profile moved into cache\\webview2");
@@ -4727,15 +4622,13 @@ static void ui_think_loop()
             g_report_inflight = false;
         }
 
-        /* Reclassify changes anywhere in the retained inventory so an older or
-         * same-second arrival cannot hide a crash prompt. Nonterminal records show
-         * notices only after startup; retained older records remain diagnostic data. */
+        /* Reclassify changes anywhere in the retained inventory so a same-second arrival cannot hide a crash
+         * prompt; nonterminal records show notices only after startup. */
         if (g_page_loaded && (frame == 1 || frame % 60 == 0)) {
             std::vector<std::string> names;
             int cnt = crash_scan(names);
             if (cnt == 0) {
-                /* cleared (Dismiss, a sent report, or by hand) -- forget what we announced so the
-                 * directory filling up again is treated as new rather than as already-seen. */
+                /* cleared (Dismiss, a sent report, or by hand): forget what was announced so new records count as new */
                 g_crash_last_seen.clear();
                 g_crash_last_sent.clear();
             } else if (g_crash_last_seen.changed(names)) {
