@@ -27,13 +27,15 @@ vanilla or console players, even when their placed entities use stock assets.
 Restoring the original dimensions restores the stock module declaration.
 Map rendering defaults to the game's original module environments, and with
 Unlock View Distance off the map carries no Snapmap+ rendering data: turning
-the setting off removes its variable, so the saved map is byte for byte what
+the setting off removes its key, so the saved map is byte for byte what
 the unmodified game writes. On draws to 200000 with every environment's
-fog kept and stretched by the same factor, in the editor and in Play; it occupies one ordinary map string
-variable that a vanilla client loads and ignores, keeping native distance and
-fog. Older saved View Distance values remain readable: 8192 reads as off and
-is removed, any other distance reads as on; their fog values are ignored and
-the former disabled mode reads as off. Fog is not a map setting.
+fog kept and stretched by the same factor, in the editor and in Play; it is the
+`render` setting (`4;0`) of the map's `snapmap-plus` member, which a vanilla client
+ignores, keeping native distance and fog. The decoder still reads the older
+value formats (`1;`, `2;`, `3;`, and `4;` with a distance: 8192 reads as off, any
+other distance as on, their fog values ignored, the former disabled mode as off),
+but a map that saved them in its `smp.render.v1` variable is refused as an
+earlier shape. Fog is not a map setting.
 
 Entity placement is unrestricted. The unmodified editor refuses a held demon,
 player start, encounter spawner, AI point, item hint or pickup unless a floor

@@ -3683,7 +3683,7 @@ only in its bytes) is outside that rule, and the next one covers it.
 A pass the editor runs while a map is open (an in-editor rawmap reload, Open
 map in the editor, `sh_mods map add`) registers while the previous map's
 level-1 objects are still alive, since the in-editor load runs no purge
-(DoLoadMap, VK 0x1405253e0, calls neither the purge driver nor the purge). A
+(DoLoadMap, VK 0x1411850D0, calls neither the purge driver nor the purge). A
 decl the pass keeps then binds to those objects: they are older than its
 watermark, and no recorded need names them (an entityDef records its own
 md6Def, not its attachments), so the Play purge freed them under the kept
@@ -5699,7 +5699,7 @@ the cache says as S2, never S4, and no wait is made for it. A 410
 run the Snapmap+ installer to update." The `X-Snapmap-Plus-Minimum` header names
 the oldest version the store serves; once per process, when it is newer than
 this one, `modnet_newer_needed` is true and the background publish jobs (claim,
-release, launch retry) say "A newer Snapmap+ is available; run the Snapmap+
+release, launch retry, and a copied map's content fetch) say "A newer Snapmap+ is available; run the Snapmap+
 installer to update." `MODNET_E_GAME` is not a store answer: it names content
 that was obtained but points at game bytes this machine does not hold, and no
 request returns it.
