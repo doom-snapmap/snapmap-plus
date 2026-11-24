@@ -85,13 +85,15 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   rollback of both sites after a partial failure. Rawmap path tests also read
   a file over 64 MiB.
 - `rawmap_paths_test.c` also drives the load and save detours: a local save, a
-  published map and a staged rawmap that carry an unconvertible `smpkg.`
-  package load as plain maps (the variables removed, `allocCount` corrected, one
-  verdict line), lookalike names stay, and a save keeps the engine's own bytes.
-- `modlook_mod_test.c` runs the Graphics SDK look compiler where it is hooked in: a fixture mod folder (`fixtures/mods/looks-good`, and `looks-bad` with one misspelled field) built into a bundle with the look compiler set, then served through the provider's material filter. With `doom=` it also builds Doomforge's `tyrant-pg1-after` folder when present.
-- `modmanifest_test.c` checks the `smpmod1.` manifest rows: grammar, the value
-  round trip, rows appended last and stripped with `allocCount` restored, the
-  per-row budget that keeps them out of the 4 KiB playtest message, placed names,
+  published map and a staged rawmap in an earlier shape (`smpkg.`, `smpbind.`,
+  `smpref.` and the other retired variable families) are refused with the plain
+  sentence and the engine's buffer left as it was, lookalike names stay, and a
+  save keeps the engine's own bytes.
+- `modlook_mod_test.c` runs the Graphics SDK look compiler where it is hooked in: a fixture mod folder (`fixtures/mods/looks-good`, and `looks-bad` with one misspelled field) built into a bundle with the look compiler set, then served through the provider's material filter. With `doom=<install>` and `tyrant=<folder>` it also copies that converted Tyrant folder and builds it (as `tyrant-pg1-after`); without both it says the folder is absent and skips.
+- `modmanifest_test.c` checks the map manifest's rows: grammar, the value
+  round trip, the rows in the map's `snapmap-plus` member (the author's variables
+  and `allocCount` left as the engine wrote them), rows in an earlier shape
+  refused, that a long row keeps every name (there is no row budget), placed names,
   the save closure and the load step against serving-layer doubles, and the
   spawn-type pins a save keeps for a row whose content is not here (a local
   row's stand-ins, a pinned row composed with stand-ins) or gives up when the
@@ -171,8 +173,9 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   together: a built fixture is admitted, saved as one row and activated on the
   next load; a bundle with non-stock shadows builds and registers only its new
   names; skins decls pass by their mesh path; a cut-content bundle's
-  requirements are set before its first registration. `MOD_PIPELINE_ECHO=1`
-  prints the log lines.
+  requirements are set before its first registration. It takes the fixture
+  folder as its argument (the manifest supplies it) and asserts on the captured
+  log lines.
 
 - `modstock_test.c` covers stock pointers end to end over two synthetic
   installs (`mod_stock_fixture.h` writes `gameresources` and
@@ -189,8 +192,8 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   fetches only them and is refused before any fetch on the other revision);
   and serving (installed bytes, a carried copy of the same bytes is not a
   conflict, a pointer the install cannot answer falls through). With
-  `SH_MODSTOCK_DATA` naming a mods store (and `SH_MODSTOCK_DOOM` the install,
-  default the Steam path) it measures the Imp, both cyberdemon packs and the
+  `SH_MODSTOCK_DATA` naming a mods store and `SH_MODSTOCK_DOOM` the install
+  (both are needed) it measures the Imp, both cyberdemon packs and the
   doors pack: files, pointers, bytes not stored, bytes hashed and time;
   skipped otherwise.
 - `parmslots_test.c` covers where a render parm asking for a parm state slot
@@ -285,7 +288,7 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   record 1 are byte-identical with and without boards, and a board served
   again binds its earlier materials again. With the executables, VtSetSource,
   VtForMaterial, VtMaterialBind, VtMaterialRebind, VtViewPageTable,
-  VtViewFeedback and JobsWaitAll resolve at their recorded addresses and the
+  VtViewFeedback, JobsWaitAll and VtFrameCall resolve at their recorded addresses and the
   VT system, its synchronisation, Release, the record table, the binder's
   setters, the rebind's copy, the per-view handle globals and record 1, and the
   job manager decode to the recorded values and cross-check. `MODVT_ECHO=1` prints the log lines.
@@ -328,9 +331,9 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   map modal and its confirmations, the Files view, New mod, the stand-in host,
   and the page, host and interface contract.
 - `startup_dirs_test.c` runs the startup folder creation and settings
-  initialization against a temporary root and checks that only the root,
-  `strings\` and `prefabs\` appear, then scans the backend, frontend and
-  installer sources for any remaining mention of the retired package folders.
+  initialization against a temporary root and checks that only the root and
+  `prefabs\` appear, through a base whose name is outside the ANSI code page and
+  longer than `MAX_PATH`, and again over an existing tree.
 - `strids_test.c` checks user-document precedence over the built-in strings,
   escapes, refusal of invalid documents, rearm after native sorting, retirement
   of removed keys, sort-hook recovery and native table limits.
@@ -341,7 +344,8 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
 From the repository root, run `powershell -NoProfile -ExecutionPolicy Bypass -File tests/run-tests.ps1` with Node 22.13 or newer installed. Objects are cached per set of defines in ignored `build/obj/tests/`; suite executables and their build and run logs go to ignored `tests/obj/`. Suites run in parallel, so a suite must name any temporary folder it creates uniquely (the process id, as `mod_test_util.h` does). A suite that asserts on wall-clock timing is marked `serial = $true` in the manifest and runs alone after the others.
 
 The Worker runtime suite runs the feedback relay under Miniflare against a GitHub mock. Install its pinned
-dependency with `npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock miniflare@4.20260730.0`, then run
+dependency as CI does: copy `tools/worker-tests/package.json` and `package-lock.json` into
+`build/worker-tests/` and run `npm ci --prefix build/worker-tests --no-audit --no-fund`, then run
 `node tests/worker_runtime_test.js build/worker-tests/node_modules/miniflare`.
 
 The long-values flow runs against the mod store Worker itself: after `run-tests.ps1` has built
@@ -350,4 +354,4 @@ serves the website repository's `api/worker.js` under Miniflare and builds, publ
 with a 2,000-character name and author, a 10,000-character homepage and a 60-folder, 5,000-byte path under a long mods folder.
 Tests read a heap result into their own buffers through `heap_out.h`.
 
-Changes to signatures or engine-global anchors require `-Doom <unpacked-image> -DoomAlt <other-renderer-image>`. See [contributing](../docs/contributing.md#7-run-the-tests) for the full requirements. Installer and release-tool tests live with those components. Preserve fixture data unless intentionally changing the case it represents.
+Changes to signatures or engine-global anchors require `-Doom <DOOMx64vk.exe> -DoomAlt <DOOMx64.exe>` (the build 13954591 executables, no unpacking needed). See [contributing](../docs/contributing.md#7-run-the-tests) for the full requirements. Installer and release-tool tests live with those components. Preserve fixture data unless intentionally changing the case it represents.
