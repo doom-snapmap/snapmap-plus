@@ -102,6 +102,23 @@ static void check_image(const char *path)
         }
     }
 
+    /* The cloud-save request's read of the slot: the published copy is made there (R-LB1 F6). */
+    {
+        const uint8_t *call = image_site(base, results, n, "CloudSaveSlotReadCall", vk);
+        const uint8_t *read = image_site(base, results, n, "ReadLocalSavedMapText", vk);
+        failed = sh_modpublish_check_cloud_read(call, read);
+        printf("  the cloud-save read's checks: %s\n", failed ? failed : "all hold");
+        IMG_CHECK(failed == NULL);
+        IMG_CHECK(call == base + (vk ? 0x11BE407u : 0x11BD7D7u));
+        if (!failed) {
+            uint8_t *at = (uint8_t *)call - 1, keep = *at;   /* the model's local id, +0x10 */
+            *at ^= 0x08;
+            failed = sh_modpublish_check_cloud_read(call, read);
+            IMG_CHECK(failed && strstr(failed, "cloud-save read -0x04"));
+            *at = keep;
+        }
+    }
+
     /* The publish screens' FINISH step (modpublish.c eng_bind_finish, R-LB1 S7). */
     {
         sh_modpublish_finish_sites fs;
@@ -120,6 +137,11 @@ static void check_image(const char *path)
             /* the decoded targets are the functions read in Ghidra on this renderer */
             IMG_CHECK(fb.gate == (const void *)gate_expect && fb.close == (const void *)close_expect &&
                       fb.input == (const void *)input_expect);
+            /* the success event the resume writes after PublishStart: idStructuredLogManager::CreateInfoLog */
+            IMG_CHECK(fb.event_owner == (const void *)(base + (vk ? 0x17B2690u : 0x17B3A20u)) &&
+                      fb.event_log == (const void *)(base + (vk ? 0x17B0380u : 0x17B1710u)) &&
+                      !strcmp(fb.event_name, "snapeditor.publish.success"));
+            printf("  the success event: %s, \"%s\"\n", fb.event_name, fb.event_desc);
             {
                 uint8_t *at = (uint8_t *)fs.call + 0x17, keep = *at;   /* the overwrite byte's offset, +0x21 */
                 *at ^= 0x01;

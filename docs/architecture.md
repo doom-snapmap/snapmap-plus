@@ -5504,8 +5504,12 @@ profanity check does. The question is the editor's Yes/No over them, titled
   or the editor toast when that dialog cannot show.
 - When the content is ready, the EditorFrame detour (`sh_modpublish_editor_tick`,
   after the engine's frame, where `fly_to.c` also changes state) closes the
-  screens and starts `PublishStart` through its detour, which passes. If no
-  editor frame comes within two seconds, the tick does it.
+  screens and starts `PublishStart` through its detour, which passes. It then
+  writes the frame's own success event, as the frame does after
+  `PublishStart`: `idStructuredLogManager::CreateInfoLog` with
+  "snapeditor.publish.success", a structured info log (VK 0x1417B0380, GL
+  0x1417B1710; the game's own strings, read from the frame). If no editor
+  frame comes within two seconds, the tick does it.
 
 The bind checks every byte of this in `sh_modpublish_check_finish`
 (`modpub_sites.c`; `tests/modpub_sites_test.c` runs it on both executables).
@@ -5513,21 +5517,33 @@ When a check fails, S7 stays at `PublishStart`.
 
 When the units are in the store, or the publish goes on queued, the held
 `PublishStart` runs (`mp_resume`, through its own detour, which passes) and
-arms the pin step for 30 seconds. The save the publish makes then writes its
-rows pinned: `sh_modpublish_pin_save` is bound as the manifest's pin step
-(`sh_modmanifest_set_pin`) and replaces each local row with a pinned row naming
-the units of the objects the save places, from the walk the preparation did (a
-lookup, not another walk). A row that cannot be pinned is logged, and
+arms the pin step for 30 seconds. The save the publish makes hands its rows to
+the pin step: `sh_modpublish_pin_save`, bound as the manifest's pin step
+(`sh_modmanifest_set_pin`), pins a copy of them, each local row becoming a
+pinned row naming the units of the objects the save places, from the walk the
+preparation did (a lookup, not another walk). That copy is the published copy's
+alone. The open map keeps its own rows, and so does its slot on disk: the
+author's own map follows their local folders, published or not, in the editor
+and in their own Play, and a reopen of it is local too (the owner's ruling,
+R-LB1 F6). Every publish and republish therefore snapshots the folders' current
+builds.
+
+The published copy is made where the game reads the slot back to upload it.
+`PublishAfterSave` calls `idSnapMapEdit::TryCloudSave`, whose request reads the
+slot's text with `ReadLocalSavedMapText` before it packs and uploads it. That
+is VK 0x1411BE200 / GL 0x1411BD5D0, the read at `CloudSaveSlotReadCall`; there
+is one slot file, not a copy. `editor_frame.c`'s detour of that read hands the
+text to `sh_modpublish_cloud_text` when the read's return address is that call.
+It returns the slot's text with the pinned rows, and that is what is uploaded.
+The bound and the claim count the same text (`sh_modpublish_save_seen`). A
+build where that read cannot be reached refuses to publish a map with mods
+("Snapmap+ cannot send its mod content with this game version"), since players
+would otherwise get stand-ins. A row that cannot be pinned is logged, and
 `g_save.local` rows left local are logged at the save ("players get stand-ins
-for them"). The open map then takes the pinned rows that save wrote, composed
-and declared as a load of the saved map composes and declares them
-(`sh_modmanifest_on_save`). A published map is pinned to its units (owner
-ruling 2026-11-18, Q1): its session plays what players play, a reopen changes
-nothing, and the Mods tab offers Update as soon as the folder's build differs.
-Every other save keeps the open map's own rows, so an unpublished map follows
-the author's folders. A publish whose pin step was not reached in 30
-seconds logs that its rows were not pinned. The editor leaving, or a save while
-a publish is held, abandons the hold.
+for them"). Update stays for maps opened pinned: someone else's map, or a kept
+copy, with the mod also installed (D26, D23). A publish whose pin step was not
+reached in 30 seconds logs that its rows were not pinned. The editor leaving,
+or a save while a publish is held, abandons the hold.
 
 The `SerializeToJson` detour reports each save's final text
 (`sh_rawmap_set_save_observer`); `PublishAfterSave`, the Save state's callback

@@ -19,6 +19,7 @@
 #include "../src/backend/modcache.h"
 #include "../src/backend/modpin.h"
 #include "../src/backend/modstore.h"
+#include "../src/backend/modserve.h"
 #include "../src/backend/config.h"
 #include "../src/backend/nav_bake.h"
 #include "../src/backend/script/script_runtime.h"
@@ -159,8 +160,10 @@ static int f_window_open(void *c) { (void)c; return 1; }
 /* The publish screens' FINISH step: the editor's own dialog over them, their close, their pending result. */
 static struct {
     int asks, yes_no, answer, closes, clears, refuse_one_button, busy_blocks;
+    int dones, starts_at_close, starts_at_done;   /* the frame's order: close, PublishStart, the success event */
     char title[64], text[256];
 } FF;
+static void f_finish_done(void *c, void *editor) { (void)c; if (editor == EDITOR) { FF.dones++; FF.starts_at_done = F.starts; } }
 static int f_finish_can_ask(void *c, void *editor) { (void)c; return editor == EDITOR && !(FF.busy_blocks && F.busy_on); }
 static int f_finish_ask(void *c, void *editor, const char *title, const char *text, int yes_no)
 {
@@ -173,7 +176,7 @@ static int f_finish_ask(void *c, void *editor, const char *title, const char *te
     return 1;
 }
 static int f_finish_poll(void *c, void *editor) { (void)c; return editor == EDITOR ? FF.answer : 2; }
-static void f_finish_close(void *c, void *editor) { (void)c; if (editor == EDITOR) FF.closes++; }
+static void f_finish_close(void *c, void *editor) { (void)c; if (editor == EDITOR) { FF.closes++; FF.starts_at_close = F.starts; } }
 static void f_finish_clear(void *c, void *editor) { (void)c; if (editor == EDITOR) FF.clears++; }
 static void set_ops(void)
 {
@@ -185,7 +188,7 @@ static void set_ops(void)
     ops.add_tag = f_add_tag; ops.remove_tag = f_remove_tag; ops.edit_ids = f_edit_ids;
     ops.published_query = f_published_query; ops.notice = f_menu_notice;
     ops.finish_can_ask = f_finish_can_ask; ops.finish_ask = f_finish_ask; ops.finish_poll = f_finish_poll;
-    ops.finish_close = f_finish_close; ops.finish_clear = f_finish_clear;
+    ops.finish_close = f_finish_close; ops.finish_clear = f_finish_clear; ops.finish_done = f_finish_done;
     sh_modpublish_test_set_ops(&ops);
 }
 
@@ -263,6 +266,16 @@ static void rows_local(void)
 }
 
 static char *no_folder(void *context, const struct sh_modmanifest_row *row) { (void)context; (void)row; return NULL; }
+/* The game as the unit walk sees it: nothing of a mod's namespace, every other path a stock file. */
+static int t_game(void *ctx, const char *request, char sha[SH_MB_HASH_HEX + 1], char *source, size_t cap)
+{
+    (void)ctx;
+    if (strstr(request, "mods/")) return 0;
+    memset(sha, 'a', SH_MB_HASH_HEX);
+    sha[SH_MB_HASH_HEX] = 0;
+    strcpy_s(source, cap, "snap_gameresources");
+    return 1;
+}
 
 static const char EMPTY_MAP[] = "{\"name\":\"t\",\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
 
@@ -275,21 +288,33 @@ static char *rows_text(const sh_modmanifest_list *rows, size_t *len)
     return text;
 }
 
-/* The engine after the resume: the Save state's save (the pin step, the save observer, the metadata write), then the
- * Save state's callback. Returns what PublishAfterSave's gate said. */
+/* The engine after the resume: the Save state's save (the pin step on a copy of the rows, the slot's text written from
+ * the rows themselves, the save observer, the metadata write), then the Save state's callback, then the cloud save's
+ * read of the slot. Returns what PublishAfterSave's gate said; the slot's text and the uploaded text are kept. */
+static char g_slot[64 * 1024], g_uploaded[64 * 1024];
 static int engine_save(void)
 {
-    sh_modmanifest_list rows;
-    char *text;
-    size_t len = 0;
+    sh_modmanifest_list rows, copy;
+    char *text, *up;
+    size_t len = 0, ul = 0, i;
     int pass;
     memset(&rows, 0, sizeof rows);
+    memset(&copy, 0, sizeof copy);
     (void)t_rows_for(NULL, 0, &rows);
+    for (i = 0; i < rows.count; i++) (void)sh_modmanifest_list_add(&copy, &rows.rows[i]);
     text = rows_text(&rows, &len);
-    (void)sh_modpublish_pin_save(&rows, text, len);
+    (void)sh_modpublish_pin_save(&copy, text, len);   /* the slot keeps the rows as they are */
+    sh_modmanifest_list_free(&copy);
     sh_modpublish_save_seen(text, len);
     (void)sh_modpublish_save_tag(LOCAL_ID, MODEL);
     pass = sh_modpublish_after_save(EDITOR);
+    g_slot[0] = g_uploaded[0] = 0;
+    if (text && len < sizeof g_slot) { memcpy(g_slot, text, len); g_slot[len] = 0; }
+    /* the cloud save reads the slot back to upload it: the published copy */
+    up = pass && text ? sh_modpublish_cloud_text(LOCAL_ID, text, len, &ul) : NULL;
+    if (up && ul < sizeof g_uploaded) { memcpy(g_uploaded, up, ul); g_uploaded[ul] = 0; }
+    else if (!up && text && len < sizeof g_uploaded) { memcpy(g_uploaded, text, len); g_uploaded[len] = 0; }
+    if (up) HeapFree(GetProcessHeap(), 0, up);
     if (text) HeapFree(GetProcessHeap(), 0, text);
     sh_modmanifest_list_free(&rows);
     return pass;
@@ -616,6 +641,8 @@ int main(int argc, char **argv)
         sh_modpublish_editor_tick(EDITOR);
         CHECK(!sh_modpublish_holding() && FF.closes == 1 && F.starts == starts + 1 && F.resumed_pass == 1 &&
               F.overwrite == 1 && !F.busy_on && FF.asks == 0);
+        /* in the frame's own order: the screens' close, PublishStart, then its success event */
+        CHECK(FF.dones == 1 && FF.starts_at_close == starts && FF.starts_at_done == starts + 1);
         CHECK(strstr(g_log + mark, "publish held at FINISH: preparing 1 row(s)") != NULL);
         CHECK(strstr(g_log + mark, "the publish screens close and the publish starts") != NULL);
         CHECK(engine_save() == 1);
@@ -709,6 +736,90 @@ int main(int argc, char **argv)
         /* off again: PublishStart holds and asks as before */
         sh_modpublish_finish_set(0);
         CHECK(!sh_modpublish_finish_on() && sh_modpublish_finish_gate(EDITOR, 1) == 0 && !sh_modpublish_holding());
+    }
+
+    printf("-- the author's own map: the slot keeps its local rows, the published copy is pinned, and a republish after the folder changed claims the new unit (R-LB1 F6)\n");
+    {
+        static const char V1[] = "{\r\n\tvalue = \"first\";\r\n}";
+        static const char V2[] = "{\r\n\tvalue = \"second\";\r\n}";
+        char src[MAX_PATH * 2], key[HO_TEXT + 1], cause[HO_TEXT], folder[MAX_PATH * 2] = "", first[65] = "", now[65] = "";
+        sh_ms_install_stats st;
+        sh_ms_list l;
+        sh_mb_bundle b;
+        sh_modmanifest_row row;
+        size_t i;
+        int starts = F.starts, claims = g_fc.claims;
+        _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\repub-src", tmp);
+        CreateDirectoryA(src, NULL);
+        mt_write(src, "mod.json", "{\"name\":\"Repub Tyrant\",\"snapmap-plus\":{\"format\":2,\"salt\":\"repubm01\"}}");
+        mt_write(src, "entities\\tyrant.decl", V1);
+        memset(&b, 0, sizeof b);
+        CHECK(HO2(key, cause, sh_ms_install_from_folder(src, NULL, HO_P(0), &st, &b, HO_P(1))));
+        CHECK(sh_modserve_index_build(store) >= 1);
+        sh_cache_set_mods_root(store);      /* the content cache the units go to */
+        sh_modpin_set_folder(NULL, NULL);   /* the folder the serving index names, as the game's publish uses */
+        sh_modpin_set_game(t_game, NULL);
+        /* the author's map: a local row of the installed folder */
+        memset(&row, 0, sizeof row);
+        strcpy_s(row.salt, sizeof row.salt, "repubm01");
+        strcpy_s(row.build, sizeof row.build, b.hash);
+        sh_modmanifest_row_set_name(&row, "Repub Tyrant");
+        sh_modmanifest_row_add_name(&row, "mods/repubm01/tyrant");
+        sh_modmanifest_list_free(&g_rows);
+        CHECK(sh_modmanifest_list_add(&g_rows, &row));
+        sh_modmanifest_row_free(&row);
+        sh_mb_free(&b);
+
+        /* the first publish: the slot keeps the local row, the cloud save's read of it is pinned, and that unit is
+         * claimed */
+        publish(1);
+        CHECK(F.starts == starts + 1);
+        CHECK(engine_save() == 1);
+        CHECK(strstr(g_slot, "\"local\":true") && !strstr(g_slot, "\"objects\""));
+        CHECK(strstr(g_uploaded, "\"objects\"") && !strstr(g_uploaded, "\"local\":true"));
+        {
+            size_t ul = 0;
+            char *other = sh_modpublish_cloud_text("ANOTHERSLOT", g_slot, strlen(g_slot), &ul);
+            CHECK(other == NULL);   /* another slot's read is left as it is */
+            if (other) HeapFree(GetProcessHeap(), 0, other);
+        }
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "eeeeeeeeeeeeeeeeeeeeeee1", "rev1");
+        PUMP_UNTIL(idle_all());
+        CHECK(g_fc.claims == claims + 1 && g_fc.claim_n == 1 && strstr(g_uploaded, g_fc.claim_units[0]));
+        strcpy_s(first, sizeof first, g_fc.claim_units[0]);
+        {
+            /* after the feed post the slot's reads are its own again */
+            size_t ul = 0;
+            char *late = sh_modpublish_cloud_text(LOCAL_ID, g_slot, strlen(g_slot), &ul);
+            CHECK(late == NULL);
+            if (late) HeapFree(GetProcessHeap(), 0, late);
+        }
+
+        /* the author changes the Tyrant in the folder and presses Refresh; the map's row is still local */
+        if (sh_ms_enumerate(&l)) {
+            for (i = 0; i < l.count; i++)
+                if (!_stricmp(l.items[i].salt, "repubm01") && l.items[i].folder) strcpy_s(folder, sizeof folder, l.items[i].folder);
+            sh_ms_list_free(&l);
+        }
+        CHECK(folder[0] != 0);
+        mt_write(folder, "entities\\tyrant.decl", V2);
+        CHECK(sh_ms_sync(NULL, NULL));
+        CHECK(sh_modserve_index_build(store) >= 1);
+
+        /* the republish snapshots the folder's current build: the new unit is uploaded and claimed */
+        claims = g_fc.claims;
+        publish(1);
+        CHECK(F.starts == starts + 2);
+        CHECK(engine_save() == 1);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "eeeeeeeeeeeeeeeeeeeeeee1", "rev2");
+        PUMP_UNTIL(idle_all());
+        CHECK(g_fc.claims == claims + 1 && g_fc.claim_n == 1 && strstr(g_uploaded, g_fc.claim_units[0]));
+        strcpy_s(now, sizeof now, g_fc.claim_units[0]);
+        CHECK(first[0] && now[0] && strcmp(first, now));
+        CHECK(strstr(g_slot, "\"local\":true") && !strstr(g_slot, "\"objects\""));
+        sh_modpin_set_folder(no_folder, NULL);
+        sh_cache_set_mods_root(NULL);
+        rows_pinned(1);
     }
 
     printf("-- PublishAfterSave refuses a text over the service bound and an unreadable mod list\n");

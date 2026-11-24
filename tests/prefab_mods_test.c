@@ -896,11 +896,12 @@ static void folder_of(const char *salt, char *out, size_t cap)
     sh_ms_list_free(&l);
 }
 
-/* R-LB1 F6, owner ruling 2026-11-18 Q1 (a published map is pinned to its units): with the real unit walk, serving index
- * and content cache, a row pinned from a folder compares equal until a file of its object changes and the folder is
- * built again, and then differs, with no reload. A publish's save in the session makes the open map take the pinned
- * rows it wrote, still served, so that comparison (Update) follows the rebuild in the same session; a later plain save
- * keeps them pinned. */
+/* R-LB1 F6, with the real unit walk, serving index, content cache and map scope.
+ *  - The author's own map (the owner's ruling): a publish's save pins a copy of its rows for the published copy alone;
+ *    the slot it writes and the open map keep their local rows, served by the author's folder.
+ *  - A map opened pinned (someone else's, or a kept copy) with the mod installed (D26, D23): its row compares equal to
+ *    the folder until a file of its object changes and the folder is built again, then differs, with no reload, and
+ *    stays served by its composition meanwhile: Update follows the rebuild in the same session. */
 static void published_map_follows_rebuild(const char *tmp, const char *store)
 {
     static const char MAP_PUB[] =
@@ -909,13 +910,13 @@ static void published_map_follows_rebuild(const char *tmp, const char *store)
     static const char TYRANT_V2[] = "{\r\n\tinherit = \"snapmaps/doors/industrial_door_horizontal\";\r\n}";
     char src[MAX_PATH], folder[MAX_PATH * 2], *saved, *loaded, *cause = NULL, err[192];
     sh_modmanifest_row mod, row;
-    sh_modmanifest_list rows, cur, back;
+    sh_modmanifest_list rows, cur;
     sh_modpin_row_result res;
     sh_modserve_bundle_ref ref;
-    size_t n = 0, ln = 0;
-    char *text;
+    size_t n = 0, ln = 0, pl = 0;
+    char *text = NULL, *pinned_text = NULL;
     int scoped;
-    printf("-- a row pinned from a folder differs once the folder is built again; a publish in the session pins the open map (F6)\n");
+    printf("-- the author's map stays local through a publish; a map opened pinned differs once the folder is built again (F6)\n");
     _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\pubtyr-src", tmp);
     CreateDirectoryA(src, NULL);
     CHECK(install_mod(src, "pubtyr01", "Pub Tyrant", "entities\\tyrant.decl", DOOR_DECL, &mod));
@@ -927,8 +928,9 @@ static void published_map_follows_rebuild(const char *tmp, const char *store)
     scoped = sh_modserve_scope_enabled();
     sh_modserve_scope_enable(1);
     sh_modmanifest_set_scope(t_scope, t_scope_armed);
+    memset(&row, 0, sizeof row);
 
-    /* The author's map, unpublished: a local row of the installed build, served by the folder. */
+    /* The author's map: a local row of the installed build. */
     memset(&rows, 0, sizeof rows);
     row = mod;
     row.name = NULL;
@@ -941,77 +943,61 @@ static void published_map_follows_rebuild(const char *tmp, const char *store)
     if (!text) goto done;
     loaded = sh_modmanifest_prepare_load(text, ln, NULL);
     if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
-    memset(&cur, 0, sizeof cur);
-    CHECK(sh_modmanifest_current(&cur) == 1 && !cur.rows[0].pinned);
-    sh_modmanifest_list_free(&cur);
 
-    /* The real comparison: pinned from the folder, it is equal. */
-    memset(&row, 0, sizeof row);
-    row = mod;
-    row.name = NULL;
-    CHECK(sh_modmanifest_row_add_name(&row, "mods/pubtyr01/tyrant"));
-    memset(&res, 0, sizeof res);
-    CHECK(sh_modpin_row(&row, NULL, 0, NULL, &res) == SH_MODPIN_PINNED && row.pinned);
-    free(res.why);
-    CHECK(sh_modpin_row_differs(&row) == 0);
-
-    /* The publish's save: the pinned rows are written and the open map takes them, served by their composition. */
+    /* Its publish's save: the pin step pins a copy; the slot's text and the open map keep the local row. */
     g_publish_pins = 0;
     sh_modmanifest_set_pin(publish_pin);
     saved = sh_modmanifest_on_save(text, ln, &n);
     sh_modmanifest_set_pin(NULL);
-    CHECK(saved && g_publish_pins == 1);
-    memset(&back, 0, sizeof back);
-    CHECK(saved && sh_modmanifest_read(saved, n, &back, NULL) == 1 && back.rows[0].pinned);
+    CHECK(saved && g_publish_pins == 1 && strstr(saved, "\"local\":true") && !strstr(saved, "\"objects\""));
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    memset(&cur, 0, sizeof cur);
+    CHECK(sh_modmanifest_current(&cur) == 1 && !cur.rows[0].pinned);
+    memset(&ref, 0, sizeof ref);
+    CHECK(cur.count && sh_modserve_row_build(&cur.rows[0], &ref) && ref.place && !ref.place[0]);   /* the folder serves it */
+    sh_modserve_bundle_ref_free(&ref);
+    sh_modmanifest_list_free(&cur);
+
+    /* Someone else's map of that mod, pinned from the folder as it is now (its published copy), opened here. */
+    row = mod;
+    row.name = NULL;
+    CHECK(sh_modmanifest_row_set_name(&row, "Pub Tyrant") && sh_modmanifest_row_add_name(&row, "mods/pubtyr01/tyrant"));
+    memset(&res, 0, sizeof res);
+    CHECK(sh_modpin_row(&row, NULL, 0, NULL, &res) == SH_MODPIN_PINNED && row.pinned);
+    free(res.why);
+    CHECK(sh_modpin_row_differs(&row) == 0);
+    memset(&rows, 0, sizeof rows);
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    pinned_text = sh_modmanifest_write(MAP_PUB, sizeof MAP_PUB - 1, &rows, &pl, err, sizeof err);
+    sh_modmanifest_list_free(&rows);
+    CHECK(pinned_text != NULL);
+    if (!pinned_text) goto done;
+    loaded = sh_modmanifest_prepare_load(pinned_text, pl, NULL);
+    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
     memset(&cur, 0, sizeof cur);
     CHECK(sh_modmanifest_current(&cur) == 1 && cur.rows[0].pinned);
-    CHECK(cur.count && back.count && !strcmp(cur.rows[0].build, back.rows[0].build));
-    /* a reopen changes nothing: the open map's row is the saved row, field by field */
-    if (cur.count && back.count) {
-        const sh_modmanifest_row *a = &cur.rows[0], *z = &back.rows[0];
-        size_t q;
-        int same = a->unit_count == z->unit_count && a->name_count == z->name_count && a->size == z->size &&
-                   a->attached == z->attached && !strcmp(a->salt, z->salt) &&
-                   !strcmp(sh_modmanifest_row_name(a), sh_modmanifest_row_name(z)) &&
-                   (!a->modules == !z->modules) && (!a->modules || !strcmp(a->modules, z->modules));
-        for (q = 0; same && q < a->unit_count; q++)
-            same = !strcmp(a->units[q], z->units[q]) && !strcmp(a->roots[q], z->roots[q]);
-        for (q = 0; same && q < a->name_count; q++) same = !strcmp(a->names[q], z->names[q]);
-        CHECK(same);
-    }
     memset(&ref, 0, sizeof ref);
     CHECK(cur.count && sh_modserve_row_build(&cur.rows[0], &ref) && ref.place && !strcmp(ref.place, SH_MODSERVE_CONTENT));
     sh_modserve_bundle_ref_free(&ref);
-    CHECK(cur.count && sh_modserve_row_served_for(&cur.rows[0], NULL, &cause) == SH_MODSERVE_ROW_SERVED);
-    free(cause);
-    cause = NULL;
     CHECK(cur.count && sh_modpin_row_differs(&cur.rows[0]) == 0);
-    sh_modmanifest_list_free(&back);
-    if (saved) HeapFree(GetProcessHeap(), 0, saved);
 
-    /* The author changes the Tyrant in the folder and presses Refresh: the folder is built again. */
+    /* The Tyrant changes in the folder and Refresh builds it again: the open pinned map now differs (Update), with no
+     * reload, and is still served by its composition. */
     mt_write(folder, "entities\\tyrant.decl", TYRANT_V2);
     CHECK(sh_ms_sync(NULL, NULL));
     CHECK(sh_modserve_index_rescan() >= 1);
-    CHECK(sh_modpin_row_differs(&row) == 1);                         /* the real comparison, no reload */
-    CHECK(cur.count && sh_modpin_row_differs(&cur.rows[0]) == 1);    /* the open map's row: Update is offered */
+    CHECK(sh_modpin_row_differs(&row) == 1);
+    CHECK(cur.count && sh_modpin_row_differs(&cur.rows[0]) == 1);
     sh_modmanifest_list_free(&cur);
     memset(&cur, 0, sizeof cur);
     CHECK(sh_modmanifest_current(&cur) == 1 && cur.rows[0].pinned &&
-          sh_modserve_row_served_for(&cur.rows[0], NULL, &cause) == SH_MODSERVE_ROW_SERVED);   /* still served */
+          sh_modserve_row_served_for(&cur.rows[0], NULL, &cause) == SH_MODSERVE_ROW_SERVED);
     free(cause);
     cause = NULL;
-
-    /* A later plain save keeps the pinned row as it is: no pin step runs, the build does not move. */
-    saved = sh_modmanifest_on_save(text, ln, &n);
-    memset(&back, 0, sizeof back);
-    CHECK(saved && sh_modmanifest_read(saved, n, &back, NULL) == 1 && back.rows[0].pinned && cur.count &&
-          !strcmp(back.rows[0].build, cur.rows[0].build) && g_publish_pins == 1);
-    sh_modmanifest_list_free(&back);
     sh_modmanifest_list_free(&cur);
-    if (saved) HeapFree(GetProcessHeap(), 0, saved);
-    HeapFree(GetProcessHeap(), 0, text);
 done:
+    if (text) HeapFree(GetProcessHeap(), 0, text);
+    if (pinned_text) HeapFree(GetProcessHeap(), 0, pinned_text);
     sh_modmanifest_row_free(&row);
     sh_modmanifest_row_free(&mod);
     sh_modmanifest_set_content(NULL);

@@ -191,6 +191,21 @@ const char *sh_modpublish_check_sites(const sh_modpublish_sites *s, sh_modpublis
     return NULL;
 }
 
+/* ------------------------------------------------------------ the cloud save's read of the slot */
+
+/* idSnapMapCloud's cloud-save request (VK 0x1411BE200, GL 0x1411BD5D0) reads the map's slot back,
+ * ReadLocalSavedMapText(model->localId, &text, 0, -1), then packs and uploads what it read: `call` is that call
+ * (CloudSaveSlotReadCall: mov rcx,[r13+0x10] before it; mov r15d,eax; test eax,eax; je after). The other caller of the
+ * read (the editor's open) is not it. */
+const char *sh_modpublish_check_cloud_read(const uint8_t *call, const uint8_t *read_text)
+{
+    if (!call || !read_text) return "a site is missing";
+    if (memcmp(call - 4, "\x49\x8b\x4d\x10", 4)) return "cloud-save read -0x04: the model's local id";
+    if (eng_call(call) != (void *)read_text) return "cloud-save read +0x00: ReadLocalSavedMapText";
+    if (memcmp(call + 5, "\x44\x8b\xf8\x85\xc0\x0f\x84", 7)) return "cloud-save read +0x05: its result";
+    return NULL;
+}
+
 /* ------------------------------------------------------------ the FINISH step (modpublish.c eng_bind_finish) */
 
 /* MapProperties frame (VK 0x14118FDD0, GL 0x14118EF50), its PUBLISH case:
@@ -225,6 +240,15 @@ const char *sh_modpublish_check_finish(const sh_modpublish_finish_sites *s, sh_m
         return "FINISH gate call +0x05: the screens' close";
     if (memcmp(s->call + 0x15, "\x0f\xb6\x56\x21\x48\x8b\xcf", 7) || eng_call(s->call + 0x1C) != (void *)s->start)
         return "FINISH gate call +0x15: PublishStart(editor, overwrite)";
+    /* then the frame's success event: idStructuredLogManager::CreateInfoLog(manager(), "snapeditor.publish.success",
+     * "idSnapEditorState_MapProperties::Frame - snap editor publish success") */
+    if (!(b.event_owner = eng_call(s->call + 0x21)) || memcmp(s->call + 0x26, "\x48\x8b\xc8", 3) ||
+        !(b.event_desc = (const char *)eng_rip(s->call + 0x29, "\x4c\x8d\x05", 3)) ||
+        !(b.event_name = (const char *)eng_rip(s->call + 0x30, "\x48\x8d\x15", 3)) || !(b.event_log = eng_call(s->call + 0x37)))
+        return "FINISH gate call +0x21: the publish success event";
+    if (strcmp(b.event_name, "snapeditor.publish.success") ||
+        strncmp(b.event_desc, "idSnapEditorState_MapProperties::Frame - ", 41))
+        return "FINISH gate call +0x29: the success event's name";
     if (memcmp(b.close, "\x8b\x81\x78\x10\x02\x00", 6)) return "screens' close +0x00: the editor's state stack";
     slot = s->call - 0x3E3;
     if (memcmp(slot, "\x48\x8b\x8f\x88\x10\x02\x00\x48\x8b\x81\x18\x0a\x00\x00\x39\x98\xe0\x08\x00\x00\x74", 21) ||

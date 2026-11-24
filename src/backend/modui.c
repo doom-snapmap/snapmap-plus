@@ -3505,9 +3505,8 @@ static int mu_scope_listed(char (*out)[SH_MODMANIFEST_HASH_CAP], int cap)
 static void mu_scope_hook(const sh_modmanifest_list *rows, const char *const *names, size_t name_count, int when)
 {
     int changed;
-    /* A map was opened, or saved (a publish's save pins the open map's rows, R-LB1 F6): an open Mods tab gets a fresh
-     * document (the window's pushed refresh). */
-    if (when == SH_MODSERVE_AT_LOAD || when == SH_MODSERVE_AT_SAVE) InterlockedIncrement(&g_gen);
+    /* A map was opened: an open Mods tab gets a fresh document (the window's pushed refresh). */
+    if (when == SH_MODSERVE_AT_LOAD) InterlockedIncrement(&g_gen);
     if (!sh_modserve_scope_enabled()) return;
     if (when == SH_MODSERVE_AT_LOAD) InterlockedExchange(&g_scope_editor, 0);
     changed = mu_listing_set(rows, names, name_count, 1);

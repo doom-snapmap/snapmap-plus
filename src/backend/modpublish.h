@@ -8,9 +8,10 @@
  *                 yet. Publish?" (S7); No and the publish never starts. Yes: the units go up with progress on the
  *                 editor's pacifier. Then the engine's PublishStart runs. A row whose mod is not on this computer
  *                 refuses the publish with one sentence; a busy store past two minutes lets it go on, queued (N27).
- *   save          the publish's save writes its rows pinned to the prepared units (sh_modpublish_pin_save, bound as
- *                 modmanifest.h's pin step): the saved text the engine publishes names units only, and the open map
- *                 takes those pinned rows (a published map is pinned). The SerializeToJson detour (rawmap.c) reports the final text.
+ *   save          the publish's save pins a copy of its rows to the prepared units (sh_modpublish_pin_save, bound
+ *                 as modmanifest.h's pin step): the text the engine publishes (the cloud save's read of the slot,
+ *                 sh_modpublish_cloud_text) names units only. The open map and its slot keep their own rows. The
+ *                 SerializeToJson detour (rawmap.c) reports the final text.
  *   PublishAfterSave  a text over the service bound (10,485,760 bytes) or an unreadable mod list is refused through
  *                 the engine's own PublishFail.
  *   PublishFeedPost   (the item id known) the save's units are claimed for the item (modclaim.h); a republish replaces
@@ -109,6 +110,11 @@ void sh_modpublish_publish_started(const char *local_id);
  * armed publish's own write disarms the arm. -1 when the list could not be
  * changed, 0 when nothing was asked (no fresh save, no model). */
 int  sh_modpublish_save_tag(const char *local_id, void *model);
+
+/* The cloud save's read of a map's slot (ReadLocalSavedMapText, while it uploads a publish): the slot's text with the
+ * publish's pinned rows (the published copy, HeapFree), or NULL to upload the slot as it is. The slot itself keeps the
+ * map's own rows, so the author's map follows their folders (R-LB1 F6). Main thread. */
+char *sh_modpublish_cloud_text(const char *local_id, const char *text, size_t length, size_t *out_length);
 
 /* PublishAfterSave(editorLocal): 1 to call the original now, 0 when the
  * publish was held or refused (the detour returns without the original). */
@@ -209,6 +215,10 @@ typedef struct sh_modpublish_ops {
     int  (*finish_ask)(void *c, void *editor, const char *title, const char *text, int yes_no);
     int  (*finish_poll)(void *c, void *editor);   /* 0 still up, 1 the first button, 2 the second or Back */
     void (*finish_close)(void *c, void *editor);  /* the screens close, as the frame closes them before PublishStart */
+    void (*finish_done)(void *c, void *editor);   /* the frame's success event, as it follows PublishStart there */
+    /* 1 when the cloud save's read of the slot reaches sh_modpublish_cloud_text, so the published copy can carry the
+     * pinned rows. NULL: it does (tests). */
+    int  (*cloud_ready)(void *c);
     void (*finish_clear)(void *c, void *editor);  /* a screens' result left while the publish was held is forgotten */
 } sh_modpublish_ops;
 
@@ -249,6 +259,10 @@ typedef struct sh_modpublish_bound {
  * run this function. */
 const char *sh_modpublish_check_sites(const sh_modpublish_sites *sites, sh_modpublish_bound *out);
 
+/* The cloud-save request's read of the slot (CloudSaveSlotReadCall, VK 0x11BE407, GL 0x11BD7D7), the read the
+ * published copy is made at: NULL when its bytes hold, else the first check that failed. */
+const char *sh_modpublish_check_cloud_read(const uint8_t *call, const uint8_t *read_text);
+
 /* The FINISH step (VK 0x1190362, GL 0x118F4E2: the MapProperties frame's PUBLISH case): `call` is its gate call
  * (PublishFinishGateCall), `start` PublishStart, `gdm_show` the editor dialog's show (EditorGdmShow), `answer` the
  * EditorFrame call of that dialog's input (EditorGdmAnswerCall). */
@@ -259,6 +273,9 @@ typedef struct sh_modpublish_finish_bound {
     const void *gate;    /* (editor, show 1, back 1): the game's limits, start-module and deprecated-entity checks */
     const void *close;   /* (editor): the screens close (the editor's state stack pops) */
     const void *input;   /* (dialog, input): the dialog's answer, +0x1DC under the flag +0x1D8 */
+    /* the frame's own success event after PublishStart: event_log(event_owner(), event_name, event_desc) */
+    const void *event_owner, *event_log;
+    const char *event_name, *event_desc;
 } sh_modpublish_finish_bound;
 /* Every byte the FINISH hold relies on, in the functions' own code: the case's arguments (editor rdi, state rsi, the
  * overwrite byte +0x21), the gate, the screens' close and PublishStart in order, the gate's own dialog on

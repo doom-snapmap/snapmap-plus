@@ -1564,6 +1564,10 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 56 57 48 81 EC C0 00 00 00 48 C7 44 24 50 FE FF FF FF 48 89 9C 24 F0 00 00 00 48 8B 05 ?? ?? ?? ?? "
       "48 33 C4 48 89 84 24 B8 00 00 00 48 8B F2 48 8B F9 E8 ?? ?? ?? ?? 84 C0 0F 84"
       , 0x128F0E0u, 0x128E730u },
+    { "CloudSaveSlotReadCall", /* the cloud-save request's ReadLocalSavedMapText(model->localId, ...): the read the
+                                * published copy is made at (modpublish.c eng_cloud_read, R-LB1 F6). Read, never hooked. */
+      "E8 ?? ?? ?? ?? 44 8B F8 85 C0 0F 84 EF 00 00 00"
+      , 0x11BE407u, 0x11BD7D7u },
     { "EditorGdmAnswerCall", /* EditorFrame: the dialog's input, then +0xA2C bit 0 cleared once it is answered */
       "E8 ?? ?? ?? ?? 44 38 BB D8 01 00 00 0F 84 ?? ?? ?? ?? 48 8B 86 88 10 02 00 83 A0 2C 0A 00 00 FE"
       , 0x118301Bu, 0x118217Bu },

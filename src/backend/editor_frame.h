@@ -39,6 +39,13 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
  * opening a rawmap is refused unless this is installed. `assign_cstr_fn` is IdStrAssignCStr. */
 int sh_editor_frame_carrier_install(void *read_text_fn, int status_ok, void *assign_cstr_fn);
 
+/* After every read of a saved map's text that the engine makes through that detour (and that succeeded), `filter`
+ * may replace the text (`text` is the engine's idStr, `caller` the read's return address): the cloud save's read of
+ * a publish's slot gets the published copy (modpublish.c). NULL removes it. */
+void sh_editor_frame_set_read_filter(void (*filter)(const char *id, void *text, const void *caller));
+/* 1 when the detour is installed and a filter is set. */
+int sh_editor_frame_read_filter_live(void);
+
 /* The editor Think entry as resolved, or NULL before install ran or on a build that could not
  * resolve it. Valid whether or not the hook went in, and it is the PRE-hook entry: the install
  * overwrites the prologue, so a later signature scan for this function finds nothing. */

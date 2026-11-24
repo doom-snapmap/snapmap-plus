@@ -9,8 +9,9 @@
  *   ASKING        bytes to upload: "Publishing uploads 212 MB of mod content that the mod store does not have yet.
  *                 Publish?" (S7). No: the publish never starts.
  *   UPLOADING     the missing units go up, with "Uploading mod content: 84 of 212 MB." on the pacifier.
- *   (resume)      the engine's PublishStart runs; its save pins the map's rows (sh_modmanifest_set_pin), so the
- *                 saved text names units only, and the open map takes those pinned rows, as a reopen would.
+ *   (resume)      the engine's PublishStart runs; its save pins a copy of the map's rows (sh_modmanifest_set_pin),
+ *                 which the cloud save's read of the slot gets (sh_modpublish_cloud_text), so the text the engine
+ *                 publishes names units only. The open map and its slot keep their own rows.
  *   PublishAfterSave  the text bound (10 MB) and an unreadable mod list are refused here, as before.
  *   PublishFeedPost   (the item id known) the save's units are claimed for the item on the worker (a republish
  *                 replaces its set); a claim the store could not take is queued and retried at every start.
@@ -220,14 +221,88 @@ static int mp_units_add(char (**units)[MODNET_HASH_HEX + 1], size_t *n, size_t *
     return 1;
 }
 
+/* The published copy's rows (R-LB1 F6, the owner's ruling): a publish's save pins a copy of its rows and the slot
+ * keeps the map's own, so the author's map follows their folders, published or not. The cloud save reads the slot back
+ * to upload it (ReadLocalSavedMapText in the cloud-save request, both renderers) and gets the text with these rows
+ * instead (sh_modpublish_cloud_text); the bound and the claim count them. Armed from the save to the feed post, or
+ * two minutes. */
+#define MP_UPLOAD_MS 120000ull
+static struct { int armed; ULONGLONG at; sh_modmanifest_list rows; char local[MP_ID_CAP]; } g_upload;
+static SRWLOCK g_upload_lock = SRWLOCK_INIT;   /* the cloud save's read may come from a job thread */
+
+static void mp_upload_clear(void)
+{
+    AcquireSRWLockExclusive(&g_upload_lock);
+    sh_modmanifest_list_free(&g_upload.rows);
+    memset(&g_upload, 0, sizeof g_upload);
+    ReleaseSRWLockExclusive(&g_upload_lock);
+}
+
+/* Under the lock (either mode). */
+static int mp_upload_live_locked(void)
+{
+    return g_upload.armed && GetTickCount64() - g_upload.at <= MP_UPLOAD_MS;
+}
+
+static int mp_upload_live(void)
+{
+    int live;
+    AcquireSRWLockShared(&g_upload_lock);
+    live = mp_upload_live_locked();
+    ReleaseSRWLockShared(&g_upload_lock);
+    return live;
+}
+
+/* `text` with the published copy's rows in its snapmap-plus member (HeapFree), or NULL. Under the lock. */
+static char *mp_upload_text_locked(const char *text, size_t length, size_t *out_length)
+{
+    char err[192];
+    char *out = sh_modmanifest_write(text, length, &g_upload.rows, out_length, err, sizeof err);
+    if (!out) mp_logf("MODS: publish: the published copy's rows could not be written (%s)", err);
+    return out;
+}
+
+char *sh_modpublish_cloud_text(const char *local_id, const char *text, size_t length, size_t *out_length)
+{
+    char *out = NULL;
+    size_t n = 0;
+    if (out_length) *out_length = 0;
+    if (!g_ops_set || !text || !length) return NULL;
+    AcquireSRWLockShared(&g_upload_lock);
+    if (mp_upload_live_locked() && (!g_upload.local[0] || (local_id && !_stricmp(local_id, g_upload.local)))) {
+        out = mp_upload_text_locked(text, length, out_length);
+        n = g_upload.rows.count;
+    }
+    ReleaseSRWLockShared(&g_upload_lock);
+    if (out) mp_logf("MODS: publish: the published copy carries %zu pinned row(s); the map's slot keeps its own rows", n);
+    return out;
+}
+
+static void mp_save_seen_text(const char *text, size_t length, unsigned long sequence);
+
 void sh_modpublish_save_seen(const char *text, size_t length)
 {
-    sh_modmanifest_list rows;
     unsigned long sequence = (unsigned long)InterlockedIncrement(&g_save_sequence);
-    unsigned rejected = 0;
-    size_t cap = 0;
+    char *upload = NULL;
+    size_t upload_length = 0;
     if (!g_ops_set || InterlockedCompareExchange(&g_resuming, 0, 0)) return;
     if (!mp_on_main()) { g_save.valid = 0; return; }
+    /* a publish's save: what is published is the slot's text with the pinned rows */
+    if (text && length) {
+        AcquireSRWLockShared(&g_upload_lock);
+        if (mp_upload_live_locked()) upload = mp_upload_text_locked(text, length, &upload_length);
+        ReleaseSRWLockShared(&g_upload_lock);
+    }
+    if (upload) { text = upload; length = upload_length; }
+    mp_save_seen_text(text, length, sequence);
+    if (upload) HeapFree(GetProcessHeap(), 0, upload);
+}
+
+static void mp_save_seen_text(const char *text, size_t length, unsigned long sequence)
+{
+    sh_modmanifest_list rows;
+    unsigned rejected = 0;
+    size_t cap = 0;
     mp_save_clear(&g_save);
     g_save.sequence = sequence;
     g_save.length = length;
@@ -309,6 +384,11 @@ int sh_modpublish_save_tag(const char *local_id, void *model)
 {
     int tagged, armed = 0;
     if (!g_ops_set || !mp_on_main()) return 0;
+    /* the published copy is the cloud save's read of this slot */
+    AcquireSRWLockExclusive(&g_upload_lock);
+    if (mp_upload_live_locked() && !g_upload.local[0] && local_id && strlen(local_id) < sizeof g_upload.local)
+        strcpy_s(g_upload.local, sizeof g_upload.local, local_id);
+    ReleaseSRWLockExclusive(&g_upload_lock);
     if (g_tag.armed) {
         if (GetTickCount64() - g_tag.at > MP_TAG_ARM_MS) g_tag.armed = 0;
         else if (!g_tag.local[0] || (local_id && !strcmp(local_id, g_tag.local))) { armed = 1; g_tag.armed = 0; }
@@ -820,6 +900,8 @@ static void mp_resume(void)
     InterlockedExchange(&g_resuming, 1);
     if (g_ops.start) g_ops.start(g_ops.context, editor, overwrite);
     InterlockedExchange(&g_resuming, 0);
+    /* the frame's own order: the screens' close, PublishStart, then its success event */
+    if (finish && g_ops.finish_done) g_ops.finish_done(g_ops.context, editor);
     if (after) { mp_menu_notice(after); free(after); }
 }
 
@@ -879,6 +961,7 @@ static int mp_hold_begin(void *editor, unsigned char overwrite, int finish)
         if (g_ops.account_name(g_ops.context, name, sizeof name)) modclaim_set_account_name(name);
     }
     if (g_ctx.kind != CTX_NONE) mp_ctx_clear();
+    mp_upload_clear();
     memset(&rows, 0, sizeof rows);
     if (g_ops.placed_names && g_ops.placed_names(g_ops.context, &names, &count) < 0) count = 0;
     n = g_rows_for((const char *const *)names, count, &rows);
@@ -886,6 +969,14 @@ static int mp_hold_begin(void *editor, unsigned char overwrite, int finish)
     if (n <= 0) {
         sh_modmanifest_list_free(&rows);
         return 1;   /* a vanilla map: the engine publishes it as it always has */
+    }
+    if (g_ops.cloud_ready && !g_ops.cloud_ready(g_ops.context)) {
+        /* the published copy could not carry the pinned rows: players would play stand-ins */
+        sh_modmanifest_list_free(&rows);
+        mp_log("MODS: publish: not started: the cloud save's read of the slot is not hooked on this build");
+        mp_editor_notice(editor, "The map was not published: Snapmap+ cannot send its mod content with this game "
+                                 "version. Use Send feedback in the Snapmap+ window.");
+        return 0;
     }
     memset(h, 0, sizeof *h);
     h->editor = editor;
@@ -915,6 +1006,7 @@ int sh_modpublish_pin_save(sh_modmanifest_list *rows, const char *json, size_t l
     if (!g_pin.armed) return 0;
     if (GetTickCount64() - g_pin.at > MP_PIN_ARM_MS) { g_pin.armed = 0; return 0; }
     g_pin.armed = 0;
+    mp_upload_clear();
     for (i = 0; rows && i < rows->count; i++) {
         sh_modpin_row_result r;
         int state;
@@ -925,8 +1017,20 @@ int sh_modpublish_pin_save(sh_modmanifest_list *rows, const char *json, size_t l
         else mp_logf("MODS: publish: a row could not be pinned at the save: %s", r.why ? r.why : "unknown");
         free(r.why);
     }
-    mp_logf("MODS: publish: the save pinned %d row(s) to their units", pinned);
-    return pinned > 0 || (rows && rows->count);
+    mp_logf("MODS: publish: the save pinned %d row(s) to their units for the published copy; the map's slot keeps its "
+            "own rows", pinned);
+    if (rows && rows->count) {
+        size_t k;
+        int ok;
+        AcquireSRWLockExclusive(&g_upload_lock);
+        for (k = 0; k < rows->count && sh_modmanifest_list_add(&g_upload.rows, &rows->rows[k]); k++) {}
+        g_upload.rows.uses = rows->uses;
+        ok = k == rows->count;
+        if (ok) { g_upload.armed = 1; g_upload.at = GetTickCount64(); }
+        ReleaseSRWLockExclusive(&g_upload_lock);
+        if (!ok) { mp_upload_clear(); mp_log("MODS: publish: no memory for the published copy's rows; it carries the slot's"); }
+    }
+    return pinned > 0;
 }
 
 int sh_modpublish_after_save(void *editor)
@@ -1000,6 +1104,7 @@ void sh_modpublish_feed_post(void *edit, const char *item_id, const char *revisi
 {
     mp_job *job;
     if (!g_ops_set || !mp_on_main()) return;
+    mp_upload_clear();   /* the published copy is uploaded */
     if (!item_id || !modnet_valid_ref(item_id)) {
         mp_logf("MODS: publish: the published item id '%s' is not a usable claim ref; no claim change",
                 item_id ? item_id : "");
@@ -1766,6 +1871,7 @@ void sh_modpublish_test_reset(void)
 {
     mp_hold_free();
     mp_ctx_clear();
+    mp_upload_clear();
     (void)modnet_job_wait(30000);
     while (g_orphans) { mp_job *j = g_orphans; g_orphans = j->next; mp_job_free(j); }
     while (g_queue) { mp_job *j = g_queue; g_queue = j->next; mp_job_free(j); }
@@ -1823,6 +1929,7 @@ void sh_modpublish_test_set_cache_root(const char *root)
 #include "modpublished.h"   /* sh_modpublished_notice: the one notice queue */
 #include "rawmap.h"
 #include "modui.h"
+#include "editor_frame.h"   /* the slot read the cloud save makes */
 
 #define ENG_EDITOR_IN_SESSION 0x8       /* byte: nonzero inside an editor session */
 #define ENG_EDITOR_EDIT       0x204C8   /* idSnapMapEdit*: null outside a session */
@@ -1906,6 +2013,10 @@ static struct {
     eng_gate_fn gate;                            /* the gate the call reaches natively */
     eng_editor_fn screens_close;                 /* the screens' close the frame calls next */
     eng_gdm_show_fn gdm_show;                    /* the editor dialog's show */
+    void *(*event_owner)(void);                  /* the structured log manager */
+    void (*event_log)(void *, const char *, const char *);   /* its CreateInfoLog */
+    const char *event_name, *event_desc;         /* the frame's "snapeditor.publish.success" and its description */
+    const void *cloud_read_ret;                  /* the return address of the cloud-save request's slot read */
     uint8_t *finish_relay;                       /* near page: mov r9,rsi (the MapProperties state); jmp detour */
     sh_patch_handle finish_patch;
     DWORD *main_thread;
@@ -2372,6 +2483,16 @@ static void eng_finish_close(void *c, void *editor)
     __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the publish screens' close faulted"); }
 }
 
+/* idStructuredLogManager::CreateInfoLog(manager, "snapeditor.publish.success", its description): the structured info
+ * log ("mp-cloud-gobbler") the frame writes after PublishStart, with the game's own strings. */
+static void eng_finish_done(void *c, void *editor)
+{
+    (void)c; (void)editor;
+    if (!g_eng.event_owner || !g_eng.event_log) return;
+    __try { g_eng.event_log(g_eng.event_owner(), g_eng.event_name, g_eng.event_desc); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the publish success event faulted"); }
+}
+
 static void eng_finish_clear(void *c, void *editor)
 {
     (void)c;
@@ -2382,6 +2503,32 @@ static void eng_finish_clear(void *c, void *editor)
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
 
+/* The cloud save's read of a publish's slot (editor_frame.c's ReadLocalSavedMapText detour, after the read): the text
+ * becomes the published copy, with the pinned rows. VK 0x1411BE200 / GL 0x1411BD5D0 read the slot this way, then
+ * pack and upload what they read. */
+static int eng_live(void);
+
+static void eng_cloud_read(const char *id, void *text, const void *caller)
+{
+    __declspec(align(16)) uint8_t tmp[ENG_IDSTR_SIZE];
+    char *now, *out;
+    size_t length = 0;
+    /* only the cloud-save request's read: the editor opening the map reads its slot as it is */
+    if (!eng_live() || !g_eng.idstr_assign || !g_eng.cloud_read_ret || caller != g_eng.cloud_read_ret) return;
+    if (!(now = eng_string_dup(text))) return;
+    out = sh_modpublish_cloud_text(id, now, strlen(now), &length);
+    free(now);
+    if (!out) return;
+    __try {
+        g_eng.idstr_ctor(tmp, out);
+        g_eng.idstr_assign(text, tmp);
+        g_eng.idstr_dtor(tmp);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the published copy's text could not be set"); }
+    HeapFree(GetProcessHeap(), 0, out);
+}
+
+static int eng_cloud_ready(void *c) { (void)c; return g_eng.cloud_read_ret && sh_editor_frame_read_filter_live(); }
+
 static const sh_modpublish_ops ENG_OPS = {
     .on_main = eng_on_main, .can_ask = eng_can_ask, .ask = eng_ask, .poll = eng_poll, .release = eng_release,
     .editor_token = eng_editor_token, .publish_fail = eng_publish_fail, .start = eng_start, .busy = eng_busy,
@@ -2390,7 +2537,8 @@ static const sh_modpublish_ops ENG_OPS = {
     .notice = eng_notice, .account_name = eng_account_name, .key_made = eng_key_made,
     .window_open = eng_window_open,
     .finish_can_ask = eng_finish_can_ask, .finish_ask = eng_finish_ask, .finish_poll = eng_finish_poll,
-    .finish_close = eng_finish_close, .finish_clear = eng_finish_clear
+    .finish_close = eng_finish_close, .finish_clear = eng_finish_clear, .finish_done = eng_finish_done,
+    .cloud_ready = eng_cloud_ready
 };
 
 /* ------------------------------------------------------------ detours */
@@ -2570,6 +2718,10 @@ static void eng_bind_finish(const sig_result *results, size_t count, const uint8
     g_eng.gate = (eng_gate_fn)b.gate;
     g_eng.screens_close = (eng_editor_fn)b.close;
     g_eng.gdm_show = (eng_gdm_show_fn)s.gdm_show;
+    g_eng.event_owner = (void *(*)(void))b.event_owner;
+    g_eng.event_log = (void (*)(void *, const char *, const char *))b.event_log;
+    g_eng.event_name = b.event_name;
+    g_eng.event_desc = b.event_desc;
     g_eng.finish_bound = 1;
 }
 
@@ -2764,6 +2916,21 @@ int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t
     /* S7 at FINISH: bound now, the gate call patched only while it is switched on (sh_publish_question) */
     eng_bind_finish(results, count, module_base);
     g_finish_patch = eng_finish_patch;
+    {
+        /* the published copy carries the pinned rows: made at the cloud-save request's read of the slot */
+        const uint8_t *call = eng_site(results, count, module_base, "CloudSaveSlotReadCall");
+        const uint8_t *read = eng_site(results, count, module_base, "ReadLocalSavedMapText");
+        const char *why;
+        __try { why = sh_modpublish_check_cloud_read(call, read); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { why = "its bytes could not be read"; }
+        if (why) {
+            char line[200];
+            _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: publish: the cloud-save read check '%s' did not hold; maps "
+                        "with mods are not published on this build", why);
+            backend_log(line);
+        } else g_eng.cloud_read_ret = call + 5;
+        sh_editor_frame_set_read_filter(eng_cloud_read);
+    }
     InterlockedExchange(&g_eng.ready, 1);
     backend_log("MODS: publish hooks installed (mod content sent before a publish starts, units pinned at its save, "
                 "search tag, claim at the feed post, release at unpublish and at a delete whose item is no longer "

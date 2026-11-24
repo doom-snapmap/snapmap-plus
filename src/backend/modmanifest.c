@@ -2288,39 +2288,21 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
         if (ctx.list.rows[i].name_count > 1)
             qsort(ctx.list.rows[i].names, ctx.list.rows[i].name_count, sizeof(char *), mm_cstr_cmp);
     {
-        /* A publish's save writes its rows pinned (modpin.h, bound by modpublish.c while a publish is armed). The open
-         * map then takes the pinned rows it wrote, composed and declared as a load of the saved map composes and
-         * declares them: a published map is pinned to its units (owner ruling 2026-11-18, Q1), so its session plays
-         * what players play, a reopen changes nothing, and Update is offered as soon as the folder's build differs
-         * (R-LB1 F6). Any other save keeps the open map's own rows: an unpublished map follows the author's folders. */
+        /* A publish's save hands its rows to the pin step (modpin.h, bound by modpublish.c while a publish is armed),
+         * which pins a copy for the published copy alone: the text the cloud save reads back from the slot gets them
+         * there (sh_modpublish_cloud_text). The slot and the open map keep the map's own rows, so the author's map
+         * follows their local folders, published or not, and a reopen of it is local too (owner, R-LB1 F6). */
         sh_modmanifest_pin_fn pin = g_pin;
-        sh_modmanifest_list pinned;
-        size_t k;
-        int use_pinned = 0;
-        memset(&pinned, 0, sizeof pinned);
         if (pin) {
-            pinned.uses = ctx.list.uses;
-            for (k = 0; k < ctx.list.count && sh_modmanifest_list_add(&pinned, &ctx.list.rows[k]); k++) {}
-            use_pinned = k == ctx.list.count && pin(&pinned, json, length) > 0;
+            sh_modmanifest_list copy;
+            size_t k;
+            memset(&copy, 0, sizeof copy);
+            copy.uses = ctx.list.uses;
+            for (k = 0; k < ctx.list.count && sh_modmanifest_list_add(&copy, &ctx.list.rows[k]); k++) {}
+            if (k == ctx.list.count) (void)pin(&copy, json, length);
+            sh_modmanifest_list_free(&copy);
         }
-        out = sh_modmanifest_write(json, length, use_pinned ? &pinned : &ctx.list, &written, err, sizeof err);
-        if (out && use_pinned) {
-            /* Exactly what a reopen reads: the rows of the text just written. */
-            sh_modmanifest_list back;
-            memset(&back, 0, sizeof back);
-            if (sh_modmanifest_read(out, written, &back, NULL) == pinned.count) {
-                sh_modmanifest_list_free(&pinned);
-                pinned = back;
-            } else sh_modmanifest_list_free(&back);
-            sh_modmanifest_content_for(json, length, &pinned);
-            if (scope) scope(&pinned, NULL, 0, SH_MODSERVE_AT_SAVE);
-            sh_modmanifest_list_free(&ctx.list);
-            ctx.list = pinned;   /* the open map's record below */
-            memset(&pinned, 0, sizeof pinned);
-            backend_log("MODS: save manifest: the publish's save pinned the rows; the open map plays its pinned units "
-                        "from now on, as a reopen would");
-        }
-        sh_modmanifest_list_free(&pinned);
+        out = sh_modmanifest_write(json, length, &ctx.list, &written, err, sizeof err);
     }
     described = mm_describe(&ctx.list);
     if (out) {
