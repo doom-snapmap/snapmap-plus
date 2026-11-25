@@ -5494,13 +5494,42 @@ static void test_composition_serves_its_map(void)
     mkdirs(served);
     g_bundle_extra = NULL;
     make_bundle(served, CHASH, "dcompos1", 'd', NULL, comp, 1, NULL);
+    {
+        char work[128];
+        snprintf(work, sizeof work, "%s.staging-123-456789", CHASH);
+        make_bundle(served, work, "dcompos1", 'd', NULL, comp, 1, NULL);
+        snprintf(work, sizeof work, "%s.old-456789", CHASH);
+        make_bundle(served, work, "dcompos1", 'd', NULL, comp, 1, NULL);
+    }
     sh_modserve_scope_enable(1);
     CHECK(sh_modserve_index_build(root) == 1);
+    {
+        sh_modserve_stats stats;
+        sh_modserve_get_stats(&stats);
+        CHECK(stats.bundles_seen == 1);
+    }
     list[0] = CHASH;
     (void)sh_modserve_scope_set(list, 1, 1);
     CHECK(open_text("generated/decls/entitydef/mods/dcompos1/x.decl", text, sizeof text) && !strcmp(text, "COMPOSED"));
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0);
     CHECK(open_text("generated/decls/entitydef/mods/dcompos1/x.decl", text, sizeof text) && !strcmp(text, "COMPOSED"));
+    {
+        static const char selected[] = "{\"complete\":true,\"generation\":\"1234567890abcdef1234567890abcdef\"}";
+        static const char invalid[] = "{\"complete\":true,\"generation\":\"../unrelated\"}";
+        fx_file newer = comp[0];
+        char generation[128], side[MAX_PATH * 2];
+        newer.body = "HYDRATED";
+        snprintf(generation, sizeof generation, "%s.g-1234567890abcdef1234567890abcdef", CHASH);
+        make_bundle(served, generation, "dcompos1", 'd', NULL, &newer, 1, NULL);
+        snprintf(side, sizeof side, "%s\\%s.json", served, CHASH);
+        write_file(side, selected, strlen(selected));
+        CHECK(sh_modserve_index_build(root) == 1);
+        CHECK(open_text("generated/decls/entitydef/mods/dcompos1/x.decl", text, sizeof text) && !strcmp(text, "HYDRATED"));
+        write_file(side, invalid, strlen(invalid));
+        CHECK(sh_modserve_index_build(root) == 0);
+        write_file(side, selected, strlen(selected));
+        CHECK(sh_modserve_index_build(root) == 1);
+    }
     /* A map that does not declare it: nothing of it serves. */
     (void)sh_modserve_scope_set(NULL, 0, 1);
     CHECK(!open_text("generated/decls/entitydef/mods/dcompos1/x.decl", text, sizeof text));

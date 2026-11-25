@@ -13,6 +13,7 @@
 #include <ctype.h>
 #include "modserve.h"
 #include "mod_paths.h"
+#include "composition_path.h"
 #include "map_cvars.h"
 #include "modmanifest.h"
 #include "modbundle.h"
@@ -1460,6 +1461,11 @@ static void ms_scan_list_folder(const ms_scan_item *at, ms_scan_list *stack)
     free(wpattern);
     while (h != INVALID_HANDLE_VALUE) {
         char *name = ms_walk_child(&fd, at->rel);
+        if (name && at->place && (strlen(name) != SH_MODSERVE_HASH_HEX ||
+                                  strspn(name, "0123456789abcdef") != SH_MODSERVE_HASH_HEX)) {
+            free(name);
+            name = NULL;
+        }
         if (name) {
             char *sub = sh_textf("%s\\%s", at->dir, name);
             char *subrel = at->rel && at->rel[0] ? sh_textf("%s\\%s", at->rel, name) : _strdup(name);
@@ -1483,6 +1489,22 @@ static void ms_scan_child(ms_index *x, ms_scan_item *at, ms_scan_list *stack)
     char *probe;
     int is_mod, mark_files = x->nfiles, mark_needs = x->nneeds;
     ms_bundle *b;
+    if (at->place) {
+        mpj *side;
+        char *dir;
+        wchar_t *w;
+        DWORD attrs;
+        /* Only a map row can select a content folder. Never walk a prepared or retired generation. */
+        side = sh_composition_side(at->dir);
+        dir = sh_composition_dir(at->dir, side);
+        mpj_free(side);
+        w = dir ? sh_mb_wpath(dir) : NULL;
+        attrs = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
+        free(w);
+        if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) { free(dir); return; }
+        free(at->dir);
+        at->dir = dir;
+    }
     /* The top-level mods\maps\ folder is never read. */
     if (!at->place && at->top && !_stricmp(leaf, SH_MODSERVE_RETIRED_PLACES)) return;
     probe = sh_textf("%s\\mod.json", at->dir);
@@ -1494,6 +1516,7 @@ static void ms_scan_child(ms_index *x, ms_scan_item *at, ms_scan_list *stack)
         free(probe);
     }
     if (!is_mod) {
+        if (at->place) return;
         /* Not a mod folder: an organizing folder, listed next. */
         if (ms_scan_push(stack, at->dir, at->rel, at->place, MS_SCAN_FOLDER, 0)) at->dir = at->rel = NULL;
         return;
@@ -1510,9 +1533,7 @@ static void ms_scan_child(ms_index *x, ms_scan_item *at, ms_scan_list *stack)
     if (!b->cause && b->place && !strcmp(b->place, SH_MODSERVE_CONTENT)) {
         /* A composition (modcache.h) is named by its composition hash, its folder's name: the hash a pinned map row
          * names. */
-        if (strlen(leaf) == SH_MODSERVE_HASH_HEX && strspn(leaf, "0123456789abcdef") == SH_MODSERVE_HASH_HEX)
-            b->hash = ms_strdup(x, leaf);
-        else ms_fail(b, "this map content folder is damaged; Snapmap+ makes it again the next time its map loads");
+        b->hash = ms_strdup(x, leaf);
     }
     if (b->cause) {
         /* Failure isolation: drop this bundle's rows, keep everything else. */
