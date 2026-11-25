@@ -63,7 +63,7 @@
  * squares (the engine's own loader reads its members; modvt moves them in) and
  * its materials, which the material parser left unbound because no record has
  * their name, are bound to it at the next frame (sh_modvt_each_guest, the
- * engine's rebind). 29 records of 16 squares each hold any map's boards; only a
+ * engine's rebind). Records sharing a physical pool need different low four source bits. Only a
  * board that finds neither a record nor squares draws with its plain textures,
  * and the player is told in one sentence.
  */
@@ -146,6 +146,7 @@ typedef struct sh_modvt_ops {
                                                          /* load the board at `path` and place its member square j at
                                                           * square to[j] - 1 of the board record `record` holds: 1 placed,
                                                           * 0 refused (nothing changed), -1 faulted; NULL: no sharing */
+    int (*pool_conflict)(void *context, int record);       /* another record owns the same physical cache key */
 } sh_modvt_ops;
 
 typedef struct sh_modvt_result {
@@ -176,6 +177,9 @@ const char *sh_modvt_record_owner(int k);
 
 /* Boards held now. */
 int sh_modvt_owned_count(void);
+unsigned sh_modvt_source_version(void);
+unsigned sh_modvt_served_squares(int k);
+void *sh_modvt_owned_reader(int record, const void *pool);
 
 /* Forget every board and every remembered material (tests only). */
 void sh_modvt_reset(void);

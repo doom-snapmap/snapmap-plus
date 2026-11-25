@@ -27,6 +27,7 @@
 #include "../src/backend/modbundle.h"
 #include "../src/backend/modserve.h"
 #include "../src/backend/modvt.h"
+#include "../src/backend/modvt_resident.h"
 #include "../src/backend/signatures.h"
 #include "../src/backend/host_image.h"
 #include "mod_test_util.h"
@@ -533,7 +534,7 @@ static void families(void)
     }
     g_nlog = 0;
     CHECK(sync_index(&f, "editor", 0, &res) == 0 && res.full == 1 && f.sets == 0 && f.releases == 0);
-    CHECK(sync_index(&f, "map", 0, &res) == 0 && res.full == 1 && log_count("are all in use") == 1);
+    CHECK(sync_index(&f, "map", 0, &res) == 0 && res.full == 1 && log_count("no independent material-cache slot") == 1);
     CHECK(f.notices == 1 && strstr(f.notice, "no room for another mod texture board") && strstr(f.notice, "vtmod000") &&
           strlen(f.notice) < 256);
     printf("    notice: %s\n", f.notice);
@@ -939,6 +940,149 @@ static const sig_result *find_sig(sig_result *results, size_t total, const char 
     return NULL;
 }
 
+
+
+static int fake_pool_conflict(void *context, int k)
+{
+    fake *f = context;
+    int other = k ^ 16;
+    return f->name[other][0] && get_ptr(f->rec[other] + SH_VT_REC_CACHE) == f->cache_vmtr;
+}
+
+static void records_sharing_a_key(void)
+{
+    fake f; fake_init(&f);
+    sh_modvt_reset();
+    for (int k = 4; k <= SH_MODVT_LAST_USED; ++k) {
+        if (k == 17 || k == 18) continue;
+        _snprintf_s(f.name[k], sizeof f.name[k], _TRUNCATE, "stock/%d", k);
+    }
+    put_ptr(f.rec[2] + SH_VT_REC_CACHE, f.cache_unique_vmtrs);
+    sh_modvt_ops ops = { &f, f_ready, f_find, f_is_free, f_set, f_adopt, f_release, f_record, f_rebind, f_notice,
+                         f_join, fake_pool_conflict };
+    sh_modvt_family boards[] = {{"mods/example/a", "virtualtextures/a.pages", "A", "a", 1},
+                                {"mods/example/b", "virtualtextures/b.pages", "B", "b", 1}};
+    sh_modvt_result res;
+    CHECK(sh_modvt_sync(boards, 2, &ops, "map", 1, &res) == 1 && res.registered == 1 && res.shared == 1);
+    CHECK(f_is_free(&f,17) && f_find(&f,boards[0].name) == 18 && sh_modvt_served_squares(18) == 3);
+    CHECK(sh_modvt_sync(boards+1, 1, &ops, "map", 1, &res) == 1 && sh_modvt_served_squares(18) == 2);
+    /* A later native map assigns its existing record 2 to the material pool. Both boards relocate at a safe frame. */
+    put_ptr(f.rec[2] + SH_VT_REC_CACHE, f.cache_vmtr);
+    f.name[5][0] = 0;
+    CHECK(sh_modvt_sync(boards, 2, &ops, "registration", 0, &res) == 1 && res.pending >= 1 && f.releases == 0);
+    CHECK(sh_modvt_sync(boards, 2, &ops, "frame", 1, &res) == 1 && res.released == 1 && res.registered == 1 &&
+          res.shared == 1 && f_find(&f,boards[0].name) == 5 && sh_modvt_served_squares(5) == 3);
+    CHECK(f_is_free(&f,17) && f_is_free(&f,18) && !strcmp(f.name[1], "_vmtr") && f.name[2][0] && !f.notices);
+    sh_modvt_reset();
+}
+
+static uint64_t request(unsigned record, unsigned level, unsigned x, unsigned y)
+{
+    return (UINT64_C(1) << 56) | ((uint64_t)level << 51) | (UINT64_C(1) << 35) |
+           ((uint64_t)record << 30) | ((uint64_t)level << 26) | ((uint64_t)y << 14) | ((uint64_t)x << 2);
+}
+
+typedef struct cache_fixture {
+    uint8_t pool[0xb0], physical[64 * 16], entries[8 * 16];
+    unsigned short head;
+    int slots;
+} cache_fixture;
+
+static void cache_init(cache_fixture *c)
+{
+    memset(c, 0, sizeof *c);
+    c->head = 65535;
+    put_ptr(c->pool + 8, c->physical);
+    put_ptr(c->pool + 0x30, &c->head);
+    put_ptr(c->pool + 0x38, c->entries);
+    *(int *)(c->pool + 0x80) = 1;
+    *(int *)(c->pool + 0x90) = 1067;
+    *(int *)(c->pool + 0xa8) = 8192;
+}
+
+static void cache_add(cache_fixture *c, unsigned record, unsigned level, unsigned x, unsigned y, int locked)
+{
+    int i = c->slots++;
+    unsigned key = (unsigned)(request(record, level, x, y) >> 2);
+    memcpy(c->entries + i * 8, &key, 4);
+    *(unsigned short *)(c->entries + i * 8 + 4) = 1;
+    memcpy(c->entries + i * 8 + 6, &c->head, 2);
+    c->head = (unsigned short)i;
+    c->physical[i * 64] = (unsigned char)(1 | (locked ? 2 : 0));
+    *(unsigned *)(c->physical + i * 64 + 8) = record;
+    if (locked) ++*(int *)(c->pool + 0x90);
+}
+
+static char consume_feedback(void *context, const uint64_t *list, int *cursor, char flush, char lock_all)
+{
+    CHECK(!flush && !lock_all && list[0] == 4 && list[1] == 17 && list[5] == 42);
+    CHECK(list[6] == 100 && list[7] == 101 && list[8] == 29 && list[9] == 30);
+    *cursor = *(int *)context;
+    return 7;
+}
+
+static void feedback_ownership(void)
+{
+    const uint64_t input[] = {2,17,0,0,0,42,29,30}, prefix[] = {100,101};
+    for (int consumed = 0; consumed <= 4; ++consumed) {
+        int cursor = 0;
+        CHECK(sh_modvt_feedback_with_prefix(consume_feedback, &consumed, input, &cursor, prefix, 2) == 7);
+        CHECK(cursor == (consumed > 2 ? consumed-2 : 0) && input[0] == 2 && input[6] == 29 && input[7] == 30);
+    }
+}
+
+static void coarse_pages(void)
+{
+    CHECK(sh_modvt_served_cell(request(2,11,0,0), 1u << 15) && !sh_modvt_served_cell(request(2,11,0,0), 0));
+    CHECK(sh_modvt_served_cell(request(2,10,1,0), 1u << 3) && !sh_modvt_served_cell(request(2,10,0,0), 1u << 3));
+    CHECK(sh_modvt_served_cell(request(2,6,24,9), 1u << 7) && !sh_modvt_served_cell(request(2,6,24,9), 1u));
+    cache_fixture c;
+    sh_modvt_cells board[32] = {0};
+    uint64_t a[6], b[3], ordered[16], batch[4];
+    uint32_t both = (1u << 2) | (1u << 3);
+    for (int i = 0; i < 6; ++i) a[i] = request(2, 11-i, 0, 0);
+    for (int i = 0; i < 3; ++i) b[i] = request(3, 11-i, 0, 0);
+    board[2].count = 6; board[2].ids = a;
+    board[3].count = 3; board[3].ids = b;
+    int count = sh_modvt_coarse_order(board, ordered, 16);
+    CHECK(count == 9 && ordered[0] == a[0] && ordered[1] == b[0] && ordered[2] == a[1] && ordered[3] == b[1]);
+    CHECK(sh_modvt_coarse_order(board, ordered, 1) == 1 && ordered[0] == a[0]);
+    CHECK(sh_modvt_coarse_order(board, ordered, 16) == 9);
+    CHECK(sh_modvt_lock_budget(8192, 20) == 1638 && sh_modvt_lock_budget(256, 20) == 51);
+    CHECK(sh_modvt_lock_budget(8192, 0) == 0 && sh_modvt_lock_budget(-1, 20) == 0);
+    cache_init(&c);
+    cache_add(&c, 2, 11, 0, 0, 1);
+    /* The captured single Tyrant square had exactly one lock after vt_lockPages and six occupied coarse cells. */
+    int budget = sh_modvt_lock_budget(8192, 20);
+    for (int i = 1; i < 6; ++i) {
+        CHECK(sh_modvt_coarse_batch(c.pool, budget, a, 6, 1u<<2, batch, 4) == 1 && batch[0] == a[i]);
+        cache_add(&c, 2, 11-i, 0, 0, 1);
+    }
+    CHECK(sh_modvt_coarse_batch(c.pool, budget, a, 6, 1u<<2, batch, 4) == 0);
+    CHECK(*(int *)(c.pool + 0x90) == 1067 + 6);
+    /* The same storage after restart, the other independent board, then a new square in a packed host. */
+    cache_init(&c);
+    CHECK(sh_modvt_coarse_batch(c.pool, budget, ordered, count, both, batch, 4) == 2 &&
+          batch[0] == a[0] && batch[1] == b[0]);
+    CHECK(sh_modvt_coarse_batch(c.pool, 1068, ordered, count, both, batch, 4) == 1);
+    CHECK(sh_modvt_coarse_batch(c.pool, 1067, ordered, count, both, batch, 4) == 0);
+    CHECK(sh_modvt_coarse_batch(c.pool, budget, ordered, count, 1u<<3, batch, 4) == 1 && batch[0] == b[0]);
+    cache_add(&c, 2, 11, 0, 0, 1);
+    cache_add(&c, 2, 10, 0, 0, 1);
+    uint64_t packed[] = {a[0], a[1], a[2], request(2,9,1,0)};
+    CHECK(sh_modvt_coarse_batch(c.pool, budget, packed, 4, both, batch, 4) == 2 && batch[0] == packed[2] &&
+          batch[1] == packed[3]);
+    /* The engine compares four record bits in this hash. Neither an existing page nor an aliased parent may be used. */
+    cache_init(&c);
+    cache_add(&c, 1, 11, 0, 0, 0);
+    uint64_t aliased[] = {request(17,11,0,0), request(17,10,0,0)};
+    CHECK(sh_modvt_page_state(c.pool, aliased[0]) == -1);
+    CHECK(sh_modvt_coarse_batch(c.pool, budget, aliased, 2, 1u<<17, batch, 4) == 0 && c.physical[0] == 1);
+    cache_add(&c, 2, 11, 0, 0, 0);
+    CHECK(sh_modvt_page_state(c.pool, a[0]) == 1);
+    CHECK(sh_modvt_coarse_batch(c.pool, budget, a, 6, 1u<<2, batch, 4) == 1 && batch[0] == a[0]);
+}
+
 static void image(const char *path)
 {
     size_t sz = 0, total;
@@ -972,6 +1116,14 @@ static void image(const char *path)
     vb = find_sig(results, total, "VtViewFeedback");
     jw = find_sig(results, total, "JobsWaitAll");
     fc = find_sig(results, total, "VtFrameCall");
+    const sig_result *consume = find_sig(results, total, "VtFrameFeedback"), *cells = find_sig(results, total, "VtCoarseCells");
+    CHECK(consume && cells && consume->rva == (vk ? 0x17E35DDu : 0x17E447Du) &&
+          cells->rva == (vk ? 0x1859850u : 0x185A8B0u));
+    if (consume) {
+        int disp;
+        memcpy(&disp, base + consume->rva + 29, 4);
+        CHECK(base[consume->rva + 28] == 0xe8 && consume->rva + 33 + disp == (vk ? 0x17E5B10u : 0x17E6990u));
+    }
     CHECK(ss && vf && bd && rb && vp && vb && jw && fc);
     if (!ss || !vf || !bd || !rb || !vp || !vb || !jw || !fc) { free(base); return; }
     CHECK(fc->rva == (vk ? 0x1558A79u : 0x1559E29u));
@@ -1074,6 +1226,9 @@ int main(int argc, char **argv)
 {
     int i;
     g_echo_log = GetEnvironmentVariableA("MODVT_ECHO", NULL, 0) != 0;
+    feedback_ownership();
+    records_sharing_a_key();
+    coarse_pages();
     member_rule();
     decode_helpers();
     plain_map();
