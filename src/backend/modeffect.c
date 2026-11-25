@@ -1065,10 +1065,23 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
     /* ---- the stage ---- */
     {
         double lifemax = life1 > life0 ? life1 : life0, speedmax = sp1 > sp0 ? sp1 : sp0;
-        double reach = (from_r[0] > from_r[2] ? from_r[0] : from_r[2]) + speedmax * lifemax + fabs(fall) * lifemax * lifemax + sz_peak + 8;
+        double reach = fmax(fabs(from_r[0]), fmax(fabs(from_r[1]), fabs(from_r[2])))
+                     + speedmax * lifemax + fabs(fall) * lifemax * lifemax + sz_peak + 8;
         double bmin[3] = { -reach, -reach, -reach }, bmax[3] = { reach, reach, reach };
         double mean = (sp0 + sp1) / 2;
+        /* Each CPU stage has 32 KiB of 48-byte vertices. The ordinary frame pool has 65,532 vertices. */
+        const int stage_quads = 32768 / (48 * 4);
+        const int frame_quads = 65532 / 4;
+        int quads, stages;
+        size_t count_offset;
         int q;
+        if (count > frame_quads) {
+            note(c, "particles: the game's CPU vertex pool holds at most %d billboards per frame", frame_quads);
+            count = frame_quads;
+        }
+        quads = (int)floor(count + 0.5);
+        stages = (quads + stage_quads - 1) / stage_quads;
+        if (stages > 1) note(c, "particles: %d billboards drawn on the CPU in %d stages", quads, stages);
         put_open(&s, 4, "bounds");
         put_open(&s, 5, "b");
         put_vec(&s, 6, "b[0]", "xyz", bmin, 3);
@@ -1078,7 +1091,7 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
         put_str(&s, 4, "stageName", "particles");
         put_open(&s, 4, "systemProperties");
         put_str(&s, 5, "material", mtr);
-        put_num(&s, 5, "totalParticles", floor(count + 0.5));
+        count_offset = s.n;
         put_num(&s, 5, "cycles", cycles);
         put_range(&s, 5, "particleLife", life0, life1, NULL);
         put_num(&s, 5, "spawnBunching", burst ? 0 : 1);
@@ -1231,14 +1244,18 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
             }
             put_close(&s, 4);
         }
-        /* GPU stages are the product's choice (SH_EFFECT_GPU_COUNT); the stage is drawn on the CPU */
-        if (count >= SH_EFFECT_GPU_COUNT)
-            note(c, "particles: %g particles drawn on the CPU (the GPU stages are not yet chosen by the product)", count);
         if (s.oom) { free(s.p); c->oom = 1; return 0; }
-        /* the decl */
-        sdk_printf(&decl, "{\n\tedit = {\n\t\tstages = {\n\t\t\tnum = 1;\n\t\t\titem[0] = {\n");
-        sdk_put(&decl, s.p, s.n);
-        sdk_printf(&decl, "\t\t\t}\n\t\t}\n");
+        sdk_printf(&decl, "{\n\tedit = {\n\t\tstages = {\n\t\t\tnum = %d;\n", stages);
+        for (q = 0; q < stages; q++) {
+            sdk_printf(&decl, "\t\t\titem[%d] = {\n", q);
+            sdk_put(&decl, s.p, count_offset);
+            put_num(&decl, 5, "totalParticles", quads / stages + (q < quads % stages));
+            /* Stage diversity seeds the native random stream. Equal seeds draw the same particles twice. */
+            if (q) put_num(&decl, 5, "diversity", (q * 1031) & 0x7fff);
+            sdk_put(&decl, s.p + count_offset, s.n - count_offset);
+            sdk_printf(&decl, "\t\t\t}\n");
+        }
+        sdk_printf(&decl, "\t\t}\n");
         {
             sdk_buf tail = { 0 };
             put_open(&tail, 2, "bounds");
