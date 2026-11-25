@@ -172,6 +172,15 @@ static void put_vec(sdk_buf *b, int ind, const char *key, const char *names, con
     for (k = 0; k < n; k++) { nm[0] = names[k]; put_num(b, ind + 1, nm, v[k]); }
     put_close(b, ind);
 }
+static void put_bounds(sdk_buf *b, int ind, const double lo[3], const double hi[3])
+{
+    put_open(b, ind, "bounds");
+    put_open(b, ind + 1, "b");
+    put_vec(b, ind + 2, "b[0]", "xyz", lo, 3);
+    put_vec(b, ind + 2, "b[1]", "xyz", hi, 3);
+    put_close(b, ind + 1);
+    put_close(b, ind);
+}
 static void put_range(sdk_buf *b, int ind, const char *key, double lo, double hi, const char *calc)
 {
     put_open(b, ind, key);
@@ -1082,12 +1091,7 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
         quads = (int)floor(count + 0.5);
         stages = (quads + stage_quads - 1) / stage_quads;
         if (stages > 1) note(c, "particles: %d billboards drawn on the CPU in %d stages", quads, stages);
-        put_open(&s, 4, "bounds");
-        put_open(&s, 5, "b");
-        put_vec(&s, 6, "b[0]", "xyz", bmin, 3);
-        put_vec(&s, 6, "b[1]", "xyz", bmax, 3);
-        put_close(&s, 5);
-        put_close(&s, 4);
+        put_bounds(&s, 4, bmin, bmax);
         put_str(&s, 4, "stageName", "particles");
         put_open(&s, 4, "systemProperties");
         put_str(&s, 5, "material", mtr);
@@ -1256,18 +1260,9 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
             sdk_printf(&decl, "\t\t\t}\n");
         }
         sdk_printf(&decl, "\t\t}\n");
-        {
-            sdk_buf tail = { 0 };
-            put_open(&tail, 2, "bounds");
-            put_open(&tail, 3, "b");
-            put_vec(&tail, 4, "b[0]", "xyz", bmin, 3);
-            put_vec(&tail, 4, "b[1]", "xyz", bmax, 3);
-            put_close(&tail, 3);
-            put_close(&tail, 2);
-            put_num(&tail, 2, "maxSystemDuration", (lifemax + (burst ? 0 : lifemax)) * 1000 * (cycles ? cycles : 1));
-            if (tail.p) sdk_put(&decl, tail.p, tail.n);
-            free(tail.p);
-        }
+        /* The renderer culls the complete system before it visits any stage. */
+        put_bounds(&decl, 2, bmin, bmax);
+        put_num(&decl, 2, "maxSystemDuration", (lifemax + (burst ? 0 : lifemax)) * 1000 * (cycles ? cycles : 1));
         sdk_printf(&decl, "\t}\n}\n");
         free(s.p);
         if (decl.oom) { free(decl.p); c->oom = 1; return 0; }

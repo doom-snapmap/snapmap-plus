@@ -403,6 +403,10 @@ static void test_particle_bounds_and_counts(void)
             CHECK(sum == capped);
             CHECK(seen == (capped + 169) / 170);
             CHECK(count(particle, "diversity = ") == seen - 1);
+            CHECK(count(particle, "\n\t\t\t\tbounds = {") == seen);
+            CHECK(count(particle, "\n\t\tbounds = {") == 1);
+            CHECK(count(particle, "x = -76;") == seen + 1);
+            CHECK(count(particle, "z = 76;") == seen + 1);
         }
         if (totals[i] > capped) CHECK(x.notes && has(x.notes, "16383 billboards"));
         release(&x);
