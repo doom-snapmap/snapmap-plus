@@ -135,6 +135,7 @@ typedef struct mv_owned {
     char *bundle;
     char bundle_hash[65];
     unsigned squares;     /* the board's own member squares (bit j: slot j) */
+    unsigned served_squares; /* the host and guest squares still served on this map */
 } mv_owned;
 
 /* A board placed in a record another board holds (no record was free). It stays while that record is held: its
@@ -160,6 +161,7 @@ static volatile LONG g_nguests_live;   /* placed and not stale: the detours' idl
  * lock is never held across an engine call. */
 static SRWLOCK g_lock = SRWLOCK_INIT;
 static mv_owned g_owned[SH_MODVT_SLOTS];
+static volatile LONG g_source_version;
 static volatile LONG g_nowned;   /* boards held: the detours' idle test */
 
 /* Materials bound to a board, by board name, so a board registered again
@@ -254,6 +256,7 @@ static void mv_set_used(mv_owned *o, int used, void *rec)
     o->used = used;
     o->rec = used ? rec : NULL;
     ReleaseSRWLockExclusive(&g_lock);
+    InterlockedIncrement(&g_source_version);
     InterlockedExchangeAdd(&g_nowned, used ? 1 : -1);
 }
 
@@ -473,6 +476,7 @@ static int mv_share(const sh_modvt_family *f, const sh_modvt_ops *ops, const cha
         char *name, *bundle;
         int j;
         unsigned squares = 0;
+        if (o->used && ops->pool_conflict && ops->pool_conflict(ops->context, o->record)) continue;
         if (!o->used || !o->rec || !sh_modvt_square_map(mv_record_used(o), f->members, to)) continue;
         r = ops->join(ops->context, o->record, f->path, to);
         if (r != 1) {
@@ -520,6 +524,7 @@ static int mv_share(const sh_modvt_family *f, const sh_modvt_ops *ops, const cha
         mv_log("%s: board '%s' (%s, %d member%s) placed in record %d beside board '%s' (no record was free); its "
                "materials are bound at the next frame", phase, f->name, f->bundle, mv_members(f->members),
                mv_members(f->members) == 1 ? "" : "s", o->record, o->name);
+        InterlockedIncrement(&g_source_version);
         res->shared++;
         return 1;
     }
@@ -561,13 +566,15 @@ int sh_modvt_sync(const sh_modvt_family *wanted, int n, const sh_modvt_ops *ops,
         int w;
         if (!o->used) continue;
         w = mv_wanted_by_name(wanted, n, o->name);
-        if (w >= 0 && !strcmp(wanted[w].bundle_hash, o->bundle_hash)) continue;
+        int alias = ops->pool_conflict && ops->pool_conflict(ops->context, o->record);
+        if (!alias && w >= 0 && !strcmp(wanted[w].bundle_hash, o->bundle_hash)) continue;
         /* No longer served, but boards placed beside it still draw from it: kept. A later build of it is registered
          * anew, and the boards beside it are placed again (their materials are bound again at the next frame). */
-        if (w < 0 && mv_guests_wanted(o->record, wanted, n)) continue;
+        if (!alias && w < 0 && mv_guests_wanted(o->record, wanted, n)) continue;
         if (!release_now) { res.pending++; continue; }
         if (ops->release(ops->context, o->record) == 1) {
             mv_log("%s: released record %d, board '%s' (%s %s)", phase, o->record, o->name, o->bundle,
+                   alias ? "needs another material-cache record" :
                    w < 0 ? "is no longer served here" : "is now served from another build");
             mv_guests_drop(o->record);
             mv_set_used(o, 0, NULL);
@@ -605,15 +612,16 @@ int sh_modvt_sync(const sh_modvt_family *wanted, int n, const sh_modvt_ops *ops,
         }
         idx = mv_free_owned(f->name);
         if (idx >= 0 && g_owned[idx].record >= 1 && g_owned[idx].record <= SH_MODVT_LAST_USED && g_owned[idx].name &&
-            !strcmp(g_owned[idx].name, f->name) && ops->is_free(ops->context, g_owned[idx].record) == 1)
+            !strcmp(g_owned[idx].name, f->name) && ops->is_free(ops->context, g_owned[idx].record) == 1 &&
+            (!ops->pool_conflict || !ops->pool_conflict(ops->context, g_owned[idx].record)))
             slot = g_owned[idx].record;
         for (k = 1; k <= SH_MODVT_LAST_USED && slot < 0; ++k)
-            if (ops->is_free(ops->context, k) == 1) slot = k;
+            if (ops->is_free(ops->context, k) == 1 && (!ops->pool_conflict || !ops->pool_conflict(ops->context, k))) slot = k;
         if (slot < 0 || idx < 0) {
             if (mv_share(f, ops, phase, &res)) continue;
             if (mv_refusal_new(f, MV_FULL)) {
-                mv_log("%s: board '%s' (%s) not registered: records 1 to %d are all in use (the game's own board, the "
-                       "map's own families and other boards; record 31 is the engine's) and no board's record has %d "
+                mv_log("%s: board '%s' (%s) not registered: no independent material-cache slot among records 1 to %d "
+                       "and no board's record has %d "
                        "free square%s; its materials draw with plain textures", phase, f->name, f->bundle,
                        SH_MODVT_LAST_USED, mv_members(f->members), mv_members(f->members) == 1 ? "" : "s");
                 if (ops->notice) {
@@ -678,6 +686,22 @@ int sh_modvt_sync(const sh_modvt_family *wanted, int n, const sh_modvt_ops *ops,
         }
     }
 
+    for (i = 0; i < SH_MODVT_SLOTS; ++i) {
+        mv_owned *o = &g_owned[i];
+        if (!o->used) continue;
+        int w = mv_wanted_by_name(wanted, n, o->name);
+        unsigned active = w >= 0 && !strcmp(wanted[w].bundle_hash, o->bundle_hash) ? o->squares : 0;
+        for (int j = 0; j < g_nguests; ++j) {
+            mv_guest *g = &g_guests[j];
+            if (!g->used || g->stale || g->record != o->record) continue;
+            w = mv_wanted_by_name(wanted, n, g->name);
+            if (w >= 0 && !strcmp(wanted[w].bundle_hash, g->bundle_hash)) active |= g->squares;
+        }
+        if (active != o->served_squares) {
+            o->served_squares = active;
+            InterlockedIncrement(&g_source_version);
+        }
+    }
     if (out) *out = res;
     return sh_modvt_owned_count();
 }
@@ -689,6 +713,15 @@ const char *sh_modvt_record_owner(int k)
         if (g_owned[i].used && g_owned[i].record == k) return g_owned[i].name;
     return NULL;
 }
+
+unsigned sh_modvt_served_squares(int k)
+{
+    for (int i = 0; i < SH_MODVT_SLOTS; ++i)
+        if (g_owned[i].used && g_owned[i].record == k) return g_owned[i].served_squares;
+    return 0;
+}
+
+unsigned sh_modvt_source_version(void) { return (unsigned)InterlockedCompareExchange(&g_source_version, 0, 0); }
 
 int sh_modvt_owned_count(void)
 {
@@ -1040,6 +1073,7 @@ int sh_modvt_loader_body_ok(const uint8_t *code, size_t len)
 #include "hook.h"
 #include "modpublished.h"
 #include "process_heap_scope.h"
+#include "modvt_resident.h"
 
 /* idResource fields (images are resources): +0x28 the lifetime a map purge
  * compares; 4 lives for the session (modserve_engine.c keeps its own the same way). */
@@ -1326,6 +1360,41 @@ static int op_is_free(void *c, int k)
     return mv_cstr_empty(r + SH_VT_REC_PATH) && mv_cstr_empty(r + SH_VT_REC_NAME);
 }
 
+/* Physical hash entries retain four of the feedback word's five source bits. Only records sharing
+ * a physical pool can collide. Record 31 is the engine's scratch record. */
+static int op_pool_conflict(void *c, int k)
+{
+    uint8_t *one = sh_modvt_engine_record(1), *mate = NULL;
+    void *pool = NULL, *other = NULL, *current = NULL;
+    uint8_t *r = sh_modvt_engine_record(k);
+    (void)c;
+    if (!one || !mv_rd_ptr(one + SH_VT_REC_CACHE, &pool) || !pool || !r || !mv_rd_ptr(r + SH_VT_REC_CACHE, &current))
+        return 1;
+    if (!mv_rd_ptr(g_sys + g_table + 8 * (k ^ 16), (void **)&mate) || (mate && !mv_rd_ptr(mate + SH_VT_REC_CACHE, &other)))
+        return 1;
+    if (!mv_cstr_empty(r + SH_VT_REC_NAME) && current != pool) return 1;
+    return mate && other == pool && (!mv_cstr_empty(mate + SH_VT_REC_PATH) || !mv_cstr_empty(mate + SH_VT_REC_NAME));
+}
+
+void *sh_modvt_owned_reader(int k, const void *pool)
+{
+    uint8_t *r = sh_modvt_engine_record(k);
+    void *found = NULL, *cache = NULL, *reader = NULL, *mega = NULL;
+    if (!r || k < 2 || k > SH_MODVT_LAST_USED) return NULL;
+    AcquireSRWLockShared(&g_lock);
+    for (int i = 0; i < SH_MODVT_SLOTS; ++i) {
+        mv_owned *o = &g_owned[i];
+        if (!o->used || o->record != k || o->rec != r) continue;
+        if (mv_rd_ptr(r + SH_VT_REC_CACHE, &cache) && cache == pool && mv_cstr_is(r + SH_VT_REC_NAME, o->name) &&
+            mv_rd_ptr(r + SH_VT_REC_READER, &reader) && reader && mv_rd_ptr(r + SH_VT_REC_MEGA2, &mega) &&
+            reader == mega && !op_pool_conflict(NULL, k))
+            found = reader;
+        break;
+    }
+    ReleaseSRWLockShared(&g_lock);
+    return found;
+}
+
 static int op_set_source(void *c, int k, const char *name, const char *path)
 {
     int result = 0;
@@ -1458,7 +1527,7 @@ static int op_join(void *c, int k, const char *path, const unsigned char to[16])
 }
 
 static const sh_modvt_ops g_ops = { NULL, op_ready, op_find, op_is_free, op_set_source, op_adopt_cache, op_release,
-                                    op_record, op_rebind, op_notice, op_join };
+                                    op_record, op_rebind, op_notice, op_join, op_pool_conflict };
 
 /* The material's vec4 for a renderParm handle (its parm index at +0x68, as the setter reads it). */
 static int mv_get_vec4(void *parms, void *handle, float *out4)
@@ -1582,12 +1651,27 @@ void sh_modvt_before_pass(const char *phase)
  * point the engine changes VT state itself. A queued sync runs first. */
 static void mv_frame_detour(void *sys)
 {
+    static ULONGLONG next_check;
+    ULONGLONG now = GetTickCount64();
+    if (g_bound && sh_modvt_owned_count() && now >= next_check && sh_modvt_engine_on_main() == 1) {
+        next_check = now + 1000;
+        for (int i = 0; i < SH_MODVT_SLOTS; ++i) {
+            mv_owned *o = &g_owned[i];
+            if (!o->used) continue;
+            uint8_t *r = sh_modvt_engine_record(o->record);
+            if (r != o->rec || !r || !mv_cstr_is(r + SH_VT_REC_NAME, o->name) || op_pool_conflict(NULL, o->record)) {
+                InterlockedExchange(&g_pending, 1);
+                break;
+            }
+        }
+    }
     if (g_bound && InterlockedCompareExchange(&g_pending, 0, 0) && sh_modvt_engine_on_main() == 1)
         mv_sync_now("frame", 1);
     if (g_bound && InterlockedCompareExchange(&g_scan, 0, 0) && sh_modvt_engine_on_main() == 1) {
         InterlockedExchange(&g_scan, 0);
         mv_scan_guests("frame");
     }
+    if (g_bound && sh_modvt_engine_on_main() == 1) sh_modvt_resident_frame();
     g_frame_tramp(sys);
 }
 
@@ -1710,6 +1794,7 @@ int sh_modvt_install(const sig_result *results, size_t count, const uint8_t *mod
         return 0;
     }
     g_bound = 1;
+    sh_modvt_resident_install(sig_ok(results, count, "VtFrameFeedback"), sig_ok(results, count, "VtCoarseCells"), module_base);
     mv_log("boards bound on %s: SetSource rva 0x%X, VirtualTextureForMaterial rva 0x%X and binder rva 0x%X (detoured), "
            "rebind rva 0x%X, VT system rva 0x%X, record table sys+0x%X",
            g_vulkan == 1 ? "Vulkan" : g_vulkan == 0 ? "OpenGL" : "an unknown image", s[0]->rva, s[1]->rva, s[2]->rva,

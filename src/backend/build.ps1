@@ -38,7 +38,7 @@ param(
                            # The mod store client (WinHTTP), upload/download, the rawmap ZIP export and the ZIP form.
                            "modnet.c", "modexport.c", "modzip.c",
                            # Mod virtual-texture families, and the sh_vt diagnostic.
-                           "modvt.c", "vt_harness.c",
+                           "modvt.c", "modvt_resident.c", "vt_harness.c",
                            # Owner-bound companions a mod declares for its tiles.
                            "companion.c", "companion_sigs.c", "companion_engine.c",
                            # Mod scripts: the sandboxed Lua runtime and the vendored Lua 5.4 core

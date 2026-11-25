@@ -622,12 +622,11 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   fidelity like the game's own, on Vulkan and on OpenGL with any graphics card; nothing of it goes
   into the game's own board and no game file changes. A board is registered for each mod the loaded
   map uses (in the editor, each mod the Toybox shows) before any of its materials is read, and
-  released once the map no longer uses it; `sh_mods status` shows them. Each board takes one of the
-  game's page-source records while one is free (DOOM has 31; the game's own board, the map's own
-  textures and one the engine keeps for itself use some, so about 26 to 28 are free) and about 14 MB
-  of memory, its pages sharing the game's page pool. Past that, a board is placed in the free squares
-  of another board's record (a record holds 16 squares, and most boards use one), so it draws in full
-  fidelity at no extra memory: 26 to 28 records hold hundreds of boards. Only a map whose boards fill
+  released once the map no longer uses it. `sh_mods status` shows the registered boards.
+  A board uses about 14 MB for its own page-source record. Boards can also share the 16 squares
+  in one record. Snapmap+ assigns those squares automatically when the material cache has no
+  independent record available. DOOM keeps occupied coarse pages resident as its texture
+  budget allows and streams finer detail as the camera moves. Only a map whose boards fill
   every square of every free record is told "DOOM has no room for another mod texture board on this
   map, so <mod> draws with plain textures; a map with fewer mods that carry their own textures avoids
   this." The format a tool must write is in [vt-baker.md](vt-baker.md).

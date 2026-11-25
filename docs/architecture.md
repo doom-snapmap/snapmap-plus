@@ -3530,9 +3530,19 @@ its materials are parsed.
   so the engine has records 1 to 31. Record 1 is the game's own board, record 31
   is reused by the engine on every lookup miss, and each map's own unique
   families (the hub, module palettes) hold some of the rest; the boards take
-  what is free among 2 to 30. Each board with a record of its own costs about
+  an available slot among 2 to 30. The physical pool's hash key retains four source bits. Two
+  records 16 slots apart can coexist when their physical pools differ. When both use the
+  material pool, Snapmap+ assigns a different free slot or shares a mod board's squares.
+  Each board with a record of its own costs about
   14 MB of host memory (11,184,810 bytes of host page table, the reader's index
   and the page-table image); its resident pages share the game's page pool.
+- Coarse residency uses the renderer's existing `vt_minLockedVmtrLOD` and
+  `vt_maxLockedPagesPercent`. At the synchronized frame boundary the native provider lists
+  occupied cells of served squares. The ordinary feedback consumer takes a short private
+  prefix from that list, sharing each mip level across records and accounting for the
+  material pool's current locks. A record's reader and physical page owner must still
+  match. Every retry checks those identities again. Stock pages and finer detail follow
+  the renderer's normal feedback path. Releasing a record releases its native page tree.
 - Shared records: a board that finds no free record is placed in the free
   squares of a record another board holds (`mv_share`, `op_join`). A record's
   page source (`idMegaTexture2`, `SH_VT_M2_*` in `modvt.h`) is a 4 x 4 family

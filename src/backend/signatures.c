@@ -802,6 +802,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                              * modvt.c detours the update it calls. */
       "44 0F B6 C5 FF 90 80 00 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? FF 43 10",
       0x1558A79u, 0x1559E29u },
+    { "VtFrameFeedback",    /* The ordinary feedback pass starts its cursor at zero and reads the completed frame. */
+      "4C 8D 44 24 60 45 33 C9 89 7C 24 60 48 8B CB 40 88 7C 24 20 48 8B 94 D3 ?? ?? ?? ?? E8 ?? ?? ?? ?? 85 ED",
+      0x17E35DDu, 0x17E447Du },
+    { "VtCoarseCells",      /* The lock pass's record provider walks occupied cells from the coarsest mip. */
+      "4C 8B DC 56 41 54 41 55 41 57 48 81 EC 98 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 78 45 33 ED "
+      "89 54 24 40 45 8B E5 41 8B C0 4D 8B F9 89 44 24 48 48 8B F1 4C 39 A1 E8 02 00 00", 0x1859850u, 0x185A8B0u },
     { "PrefabDtor",         /* void(prefab). Destroy temporary storage after selection serialization. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B F9 "
       "48 81 C1 20 01 00 00 E8 ?? ?? ?? ?? 90 48 8D 8F F0 00 00 00",

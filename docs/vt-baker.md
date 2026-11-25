@@ -205,7 +205,8 @@ hold, with no cap of Snapmap+'s own.
   the board's page table and feedback word in that material's parameters, so
   `skinvmtr` and `skinvmtrwounds` read the board as they read the game's own.
 - The game has 31 records; the game's own board, the map's own textures and
-  record 31 use some, and boards take the rest among 2 to 30. A board that
+  record 31 use some, and boards take independent material-cache slots among 2 to 30.
+  A slot shares its physical cache key with the slot 16 positions away. A board that
   finds none is placed in the free squares of a record another board holds:
   its members move into that family's lowest free squares and its materials'
   `virtualmapping` moves with them, so it draws exactly as in its own record.
@@ -215,6 +216,8 @@ hold, with no cap of Snapmap+'s own.
   family of several squares. Only a board that finds neither a record nor
   enough free squares is refused, with one `VT:` log line, and the player is
   told in one sentence.
+- Occupied coarse pages of served squares share the renderer's existing lock budget.
+  The renderer streams finer pages as their materials become visible.
 - A board the loaded map no longer uses is released at the engine's next VT
   frame update; served again, its materials are bound to it again.
 - `vt_reloadMega2Vmtrs` does not reload a served board.
