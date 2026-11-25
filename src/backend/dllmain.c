@@ -69,6 +69,7 @@
 #include "clip_events.h"
 #include "attach_tags.h"
 #include "level_templates.h"
+#include "encounter_spawn.h"
 #include "kill_score.h"
 #include "sync_clock.h"
 #include "typeinfo.h"
@@ -435,7 +436,11 @@ static void install_features(const sig_result *results, size_t db)
     if (overrides_installed) (void)sh_level_templates_install(g_doom_base);
     /* The kill score (kill_score.h): a ported demon's kill scores in the map's Player Score as the stock demon its
      * conductor row says it stands in for. */
-    if (overrides_installed) (void)sh_kill_score_install(g_doom_base);
+    if (overrides_installed) {
+        (void)sh_kill_score_install(g_doom_base);
+        if (!sh_encounter_spawn_install(results, db))
+            backend_log("MODS: exact selection of ported actors sharing a spawn class is unavailable");
+    }
     /* The sync clock (sync_clock.h): the animation re-anchor, detoured at the first Play that serves a mod, so every
      * participant of a mod demon's sync re-anchors as the player does. */
     if (overrides_installed) (void)sh_sync_clock_install(g_doom_base);

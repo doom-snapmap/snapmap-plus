@@ -17,7 +17,7 @@
  * encounter decl name). That number is served as the assigned type wherever the bundle wrote it (its encounters,
  * scores and game-file edits); the stock flags beside it say which demon it stands in for, are never served and feed
  * the kill score (sh_modserve_spawn_type_standin). A further demon past the free types shares the type of the first
- * one standing in for the same stock demon. */
+ * one standing in for the same stock demon. Its single encounter still selects its own actor. */
 #define SH_MR_BIT_FIRST 19   /* above SPAWN_AI_TYPE_ZOMBIE_UNWILLING, 1 << 18 */
 #define SH_MR_BIT_LAST  29   /* below SPAWN_AI_TYPE_ANY, 1 << 30 */
 
@@ -81,6 +81,7 @@ typedef struct sh_mr_entry {
     char *encounter;           /* malloc'd, NULL for none */
 } sh_mr_entry;
 
+typedef struct sh_mr_single { int file; const char *actor; } sh_mr_single;
 typedef struct sh_mr_rewrite { int id; char *text; size_t len; } sh_mr_rewrite;
 
 /* A slot two or more sources set to different values. */
@@ -100,6 +101,7 @@ typedef struct sh_mr_result {
     int body_clips, body_aliases;   /* the player body's totals when it is generated */
     sh_mr_entry *entries; int nentries;
     sh_mr_rewrite *rewrites; int nrewrites;
+    sh_mr_single *singles; int nsingles;  /* exact actors of single encounters sharing a class */
     sh_mr_clash *clashes; int nclashes;
     char **lines; int nlines;  /* what is generated and every clash, one line each */
 } sh_mr_result;

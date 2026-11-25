@@ -1420,6 +1420,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 C8 FE FF FF 48 81 EC 38 02 00 00 48 C7 45 E0 FE FF FF FF 48 8B 05 "
       "?? ?? ?? ?? 48 33 C4 48 89 85 20 01 00 00 4D 8B E1 49 8B F0 4C 8B EA 48 8B D9 48 89 4D D0 4C 8B B5 A0 01 00 00"
       , 0x11C4160u, 0x11C3530u },
+    { "SnapEncounterSpawnMembers",
+      "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 48 FE FF FF 48 81 EC 90 02 00 00 "
+      "48 C7 45 D0 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20", 0x73c670u, 0x73bed0u },
+    { "SnapEncounterChooseActor",
+      "48 8B C4 41 54 41 56 41 57 48 83 EC 40 48 C7 40 C8 FE FF FF FF "
+      "48 89 58 08 48 89 68 10 48 89 70 18 48 89 78 20 44 8B E2 4C 8B F9 33 ED", 0x736ce0u, 0x736530u },
     /* Scene nodes play at the player (modscene_place.c).
      * Unique on both build 13954591 executables. */
     { "SceneInteractionDoAction", /* idSnapMapAction_Interaction::DoAction(this, activator), vtable +0x8E8 (VK vtable 0x142186FD0 / GL 0x1421A0D20): for each target (+0x3F0, count +0x3F8, 0x20-byte references) posts the interaction-action event with the action int at +0xCA8 and the activator, or the target itself when it is NULL. Steal 17. */

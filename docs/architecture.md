@@ -4426,24 +4426,16 @@ map's choices).
   sources set to different values is a clash. Each source's line closes its
   sum: `N edit(s) from X: A applied, M already held, C superseded by <key>'s
   choice` (or `by <key> (row order)`) for the operations that lost a clash.
-- **The conductor.** Each `aiTypeList` item a source added whose `aiType`
-  holds a number that is not a stock `SPAWN_AI_TYPE_*` bit is a ported demon:
-  it gets a spawn type of its own per map, the lowest free above
-  `SPAWN_AI_TYPE_ZOMBIE_UNWILLING` (`1 << 19` up to `1 << 29`, eleven per
-  map), in row order then by the name of the encounter decl whose `memberType`
-  names the author's number, so two packs never claim one bit. The stock flags
-  the item names beside its number (`aiType = "SPAWN_AI_TYPE_BARON 1048576";`)
-  say which stock demon it stands in for: the item is served with its own type
-  alone and the kill score reads the stand-in (below). Every number a bundle
-  wrote is served as its type wherever that bundle wrote it: its own
-  `snapAiEncounter` `memberType`s and `snapAiScore` `aiType`s (the synthetic
-  body mechanism, on the bundle's own file) and every `memberType` or `aiType`
-  its edits of game files set (its `globalAIMods` row; a stock encounter's
-  member it joins), rewritten in its edits before the apply
-  (`sh_modregistry_rewrite_edits`). With every free type taken, a further
-  ported demon shares the type of the first one standing in for the same stock
-  demon, else the first one, with one line naming both (a degrade, never a
-  refusal).
+- **The conductor.** A port's `aiTypeList` registration names its entityDef, a stock stand-in flag and a mod-local
+  number. The registry assigns the map's eleven available class bits (19 through 29) in row order, then by encounter
+  name. It rewrites every corresponding encounter, score and game-file edit, and serves the registration with the
+  assigned bit alone. Extra ports share a class with the first port of the same stand-in, or the first available
+  class. AI filters, modifiers and type-based scores use that class.
+- **Single encounter identity.** When a class is shared, the serving index pairs each single encounter with the
+  actor its source registration names. During that encounter's native spawn request, the product selects that actor's
+  own row from DOOM's spawn manager. The game performs the placement, teleport and activation. Mixed encounters use
+  the native type draw. Installing a port adds its placeable and single-picker entry. The port supplies no director
+  entries, wave recipes or changes to stock encounter members.
 - **A map pins its types.** A save writes each ported demon's type on its
   mod's row as a registry choice, slot `spawnAIType_t/<bit>/<encounter decl
   name>` keyed by the mod's salt (`SH_MR_PIN`, `modmanifest.c`
@@ -4459,12 +4451,9 @@ map's choices).
   content is absent, the conductor keeps those pins' types from the listed
   demons as long as a free type is left, so a port added meanwhile does not
   take a type the map's filters name.
-- **Spawn types compose.** An encounter member's `memberType` is a set of
-  flags: when several sources set one member (or one `memberList` whose
-  statements differ only in `memberType` values), the values compose as the
-  union of their words in row order instead of clashing (`decl_tree.c`
-  `dt_union_types`), so two mods' demons that each join a stock encounter
-  beside their stand-in both do.
+- **Authored game-file edits.** A mod can explicitly change a stock file under the normal declared-map rules.
+  When several such edits add type words to the same encounter member, `dt_union_types` composes those words.
+  Registering a port creates no such edit.
 - **The editor's encounter pickers grow.** The Single Demon Encounter, the
   Encounter List and the Miniboss event's boss list
   (`SH_MR_GROWN_LISTS`) offer every encounter an installed mod's root build

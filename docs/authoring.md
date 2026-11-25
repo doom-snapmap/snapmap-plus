@@ -184,16 +184,13 @@ item[18] = {
 }
 ```
 
-The flag is the stock demon it stands in for; the number is any one that is not a stock flag (`524288`, then `1048576`
-for a second demon of the mod), the same in your demon's encounter (`memberType = "524288";`) and score
-(`aiType = "524288";`). Snapmap+ gives the demon a spawn type of its own in every map that uses it, so the AI Filter and
-the Cached Object tell it from every other demon; its kill scores in the map's Player Score as its stand-in's; the
-Single Demon Encounter, Encounter List and Miniboss pickers offer the encounter your demon's Toybox placeable spawns
-wherever the mod is installed, without the mod changing them; the AI Filter's Include AI offers it in a map that uses
-it; and the waves offer it through encounters of your own: an edited copy of a director table (or of the Group
-Encounter's list) that adds an entry naming your encounter. A mod never replaces a stock demon: leave the game's
-encounters' members as they are. A converter (Doomforge) writes all of this from the source game's data; its author
-writes nothing.
+Use the stock demon's flag and a number unique to your mod for each port. Use that same number in its single encounter
+(`memberType = "524288";`) and, if supplied, its score (`aiType = "524288";`). Doomforge writes these rows for you.
+
+The Toybox, Single Demon Encounter, Encounter List and Miniboss pickers let authors place the demon's own encounter.
+The selected single always spawns its actor. Stock encounters, waves and director tables keep their shipped contents.
+A map's AI Filter offers up to eleven distinct port classes. Additional ports share a class, preferring a port with
+the same stock stand-in. The filter, class modifiers and type-based score then follow the shared class.
 
 ## A mod with nothing to place
 

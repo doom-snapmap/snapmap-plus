@@ -549,6 +549,8 @@ int  sh_modserve_level_hides(const char *name);
  * (modregistry.h): `type` is an AI's spawn type; 0 for a stock type, a type no declared mod was given, and with
  * nothing generated. Lock-free; any thread (the kill score's detour, kill_score.h). */
 unsigned sh_modserve_spawn_type_standin(unsigned type);
+/* The exact actor of a single encounter whose class is shared, malloc'd; NULL for a native type draw. */
+char *sh_modserve_shared_actor(const char *encounter);
 
 /* The ported demons' types the current listing gave, as the map pins them
  * (modregistry.h SH_MR_PIN): fn(salt, slot) per type. Returns the count. */

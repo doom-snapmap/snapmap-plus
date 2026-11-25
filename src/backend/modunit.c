@@ -855,19 +855,26 @@ static void uw_enum_pairs(uw *w, uw_enum *e)
     static const char *const keys[] = { "aiType", "memberType", NULL };
     const sh_mb_file *f = &w->b->files[e->file];
     unsigned char *bytes;
-    char *text, *types[16];
-    size_t len = 0, tl = 0, nt = 0, i, r;
+    char *text;
+    uw_list types = {0};
+    size_t len = 0, tl = 0, r;
     int k;
     if (!(bytes = uw_read(w, f, &len))) { uw_fail(w, "%s could not be read", f->path); return; }
     text = uw_engine_text(w, bytes, len, &tl);
     free(bytes);
     for (k = 0; text && keys[k]; k++)
-        for (const char *p = text; (p = strstr(p, keys[k])) != NULL && nt < 16; p++) {
+        for (const char *p = text; (p = strstr(p, keys[k])) != NULL; p++) {
             char *v = uw_value_at(text, p, keys[k]);
-            if (v) types[nt++] = v;
+            if (v) {
+                char *ctx, *word;
+                uw_list_add(w, &types, v, strlen(v));
+                for (word = strtok_s(v, " \t", &ctx); word; word = strtok_s(NULL, " \t", &ctx))
+                    if (strspn(word, "0123456789") == strlen(word)) uw_list_add(w, &types, word, strlen(word));
+                free(v);
+            }
         }
     free(text);
-    for (r = 0; r < w->b->file_count && nt && !w->oom; r++) {
+    for (r = 0; r < w->b->file_count && types.n && !w->oom; r++) {
         const sh_mb_file *g = &w->b->files[r];
         char *reg;
         size_t rl = 0;
@@ -879,7 +886,12 @@ static void uw_enum_pairs(uw *w, uw_enum *e)
             char *v = uw_value_at(reg, p, "aiType");
             const char *open = p, *close = p;
             int depth = 0, match = 0;
-            for (i = 0; v && i < nt && !match; i++) match = !strcmp(v, types[i]);
+            if (v) {
+                char *ctx, *word;
+                match = uw_list_has(&types, v);
+                for (word = strtok_s(v, " \t", &ctx); word && !match; word = strtok_s(NULL, " \t", &ctx))
+                    if (strspn(word, "0123456789") == strlen(word)) match = uw_list_has(&types, word);
+            }
             free(v);
             if (!match) continue;
             /* the innermost block around it */
@@ -904,7 +916,7 @@ static void uw_enum_pairs(uw *w, uw_enum *e)
         }
         free(reg);
     }
-    for (i = 0; i < nt; i++) free(types[i]);
+    uw_list_free(&types);
 }
 
 /* Index the files: by key (a board square under its family's key instead) and by request; the scripts' binds and
