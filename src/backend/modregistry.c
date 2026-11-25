@@ -769,7 +769,7 @@ static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, const sh_mr_ch
     unsigned taken = 0;
     sh_dt_node *list = sh_dt_at(sh_dt_root(t), "edit/aiTypeList");
     sh_dt_node **items = NULL;
-    int i, s, nitems = 0;
+    int i, nitems = 0;
     if (!list) { mr_line(r, "conductor: the generated text has no edit/aiTypeList; no spawn-type bit is assigned"); return 1; }
     items = (sh_dt_node **)calloc((size_t)(list->nkids + 1), sizeof *items);
     if (!items) return 0;
