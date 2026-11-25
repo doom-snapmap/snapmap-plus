@@ -31,6 +31,7 @@
 #include <string.h>
 #include "../../common/text.h"
 #include "script_api_common.h"
+#include "script_internal.h"
 #include "script_hooks.h"
 #include "script_api_ai.h"   /* a demon's animation goes through its park (sh_script_ai_anim) */
 #include "script_api_tint.h"
@@ -633,7 +634,7 @@ static recolour_rec *recolour_find(sh_script_handle h, int parm, int make)
     return &g_recolour[i];
 }
 
-static int read_colour(lua_State *L, int idx, const char *call, const char *what, float out[4])
+static int read_colour(lua_State *L, int idx, const char *call, const char *what, float out[4], int linear)
 {
     int k, n;
     if (!lua_istable(L, idx)) sh_script_refuse(L, "\"%s\" needs %s as { r, g, b }, got %s", call, what, luaL_typename(L, idx));
@@ -647,7 +648,7 @@ static int read_colour(lua_State *L, int idx, const char *call, const char *what
         x = lua_tonumber(L, -1);
         lua_pop(L, 1);
         if (!(x >= 0.0 && x <= 1.0)) sh_script_refuse(L, "\"%s\" needs %s from 0 to 1, got %g", call, what, x);
-        out[k] = k < 3 ? (float)sdk_srgb_decode(x) : (float)x;
+        out[k] = linear && k < 3 ? (float)sdk_srgb_decode(x) : (float)x;
     }
     return 1;
 }
@@ -699,10 +700,10 @@ static int l_recolour(lua_State *L)
                 sh_script_refuse(L, "\"%s\" needs %s as two colours, { { r, g, b }, { r, g, b } }", call, sdk_word(REGIONS[r].word));
             for (i = 0; i < 2; i++) {
                 lua_rawgeti(L, -1, i + 1);
-                read_colour(L, lua_gettop(L), call, sdk_word(REGIONS[r].word), c[i]);
+                read_colour(L, lua_gettop(L), call, sdk_word(REGIONS[r].word), c[i], 1);
                 lua_pop(L, 1);
             }
-        } else read_colour(L, lua_gettop(L), call, sdk_word(REGIONS[r].word), c[0]);
+        } else read_colour(L, lua_gettop(L), call, sdk_word(REGIONS[r].word), c[0], 1);
         lua_pop(L, 1);
         for (i = 0; i < n; i++) {
             void *decl = e->decl("renderParm", REGIONS[r].parm[i]);
@@ -731,6 +732,141 @@ static int l_recolour(lua_State *L)
  * VK FUN_1416f0240 case 0xb) played by its emitter. clear_environment() releases the values with the same blend; a
  * mod has one environment at a time, and near the entity limit it is skipped with a log line. */
 #define SHS_REG_ENV "sh.sdk.environment"
+
+typedef struct {
+    uint32_t player;
+    char name[48];
+    int active, timer;
+} hud_text;
+
+static void hud_remove(hud_text *h)
+{
+    const sh_script_engine *e = sh_script_api_engine();
+    sh_script_earg arg = sh_script_earg_text('s', h->name);
+    if (h->active && e->resolve)
+        sh_script_api_event(e->resolve(h->player), "destroyHUDElement", &arg, 1, NULL);
+    h->active = 0;
+}
+
+static int hud_close(lua_State *L)
+{
+    hud_remove((hud_text *)lua_touserdata(L, 1));
+    return 0;
+}
+
+static int hud_expire(lua_State *L)
+{
+    hud_text *h = (hud_text *)lua_touserdata(L, lua_upvalueindex(1));
+    h->timer = 0;
+    hud_remove(h);
+    lua_pushnil(L);
+    lua_seti(L, lua_upvalueindex(2), lua_tointeger(L, lua_upvalueindex(3)));
+    return 0;
+}
+
+static float hud_extent(void *player, const char *event)
+{
+    sh_script_earg v;
+    if (!sh_script_api_event(player, event, NULL, 0, &v)) return 0;
+    return v.type == 'f' ? v.f : v.type == 'i' ? (float)v.i : 0;
+}
+
+static int l_show_text(lua_State *L)
+{
+    const char *call = SDK_W(C_SHOW_TEXT);
+    const sh_script_engine *e = sh_script_api_engine();
+    void *player = sh_script_api_entity(L, 1, call, NULL);
+    const char *place = sh_script_api_check_text(L, 2, call, "the place on screen", SH_SCRIPT_TEXT_ANY);
+    const char *text = lua_type(L, 3) == LUA_TSTRING && lua_rawlen(L, 3) == 0 ? "" :
+                       sh_script_api_check_text(L, 3, call, "the text to show", SH_SCRIPT_TEXT_ANY);
+    int slot = !strcmp(place, "top left") ? 0 : !strcmp(place, "top right") ? 1 : !strcmp(place, "bottom") ? 2 : -1;
+    int i, table, entry, ok;
+    lua_Integer key;
+    uint32_t id;
+    double seconds = 0;
+    float width, height, rgba[4] = { 1, 1, 1, 1 };
+    sh_script_earg a[5];
+    hud_text *h;
+
+    if (slot < 0) return sh_script_refuse(L, "\"%s\" takes \"top left\", \"top right\" or \"bottom\" as its place", call);
+    if (!lua_isnoneornil(L, 4)) read_colour(L, 4, call, "the text colour", rgba, 0);
+    if (sh_script_api_opt_number(L, 5, call, "the seconds to show the text", &seconds) &&
+        !(seconds >= 0 && seconds <= 1e9)) return sh_script_refuse(L, "\"%s\" needs a time of 0 to 1000000000 seconds", call);
+    if (player && sh_script_api_kind(player) != SH_SCRIPT_KIND_PLAYER)
+        return sh_script_refuse(L, "\"%s\" needs a player as its first value", call);
+    if (!player || !e->spawn_id || (id = e->spawn_id(player)) == SH_SCRIPT_SPAWN_ID_NONE) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    key = (lua_Integer)id * 3 + slot;
+    luaL_getsubtable(L, LUA_REGISTRYINDEX, "sh.sdk.playerText");
+    table = lua_gettop(L);
+    lua_geti(L, table, key);
+    h = (hud_text *)lua_touserdata(L, -1);
+    if (!text[0]) {
+        if (h) {
+            shs_cancel_timer(L, h->timer);
+            hud_remove(h);
+            lua_pushnil(L);
+            lua_seti(L, table, key);
+        }
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    width = hud_extent(player, "getViewWidth");
+    height = hud_extent(player, "getViewHeight");
+    if (!(width > 0 && height > 0)) { lua_pushboolean(L, 0); return 1; }
+    if (!h) {
+        lua_pop(L, 1);
+        h = (hud_text *)lua_newuserdatauv(L, sizeof *h, 0);
+        memset(h, 0, sizeof *h);
+        h->player = id;
+        snprintf(h->name, sizeof h->name, "smp_%s_text_%d", sh_script_salt(L), slot);
+        if (luaL_newmetatable(L, "sh.sdk.hudText")) {
+            lua_pushcfunction(L, hud_close);
+            lua_setfield(L, -2, "__gc");
+        }
+        lua_setmetatable(L, -2);
+        lua_pushvalue(L, -1);
+        lua_seti(L, table, key);
+    }
+    entry = lua_gettop(L);
+    a[0] = sh_script_earg_text('s', h->name);
+    if (!h->active) h->active = sh_script_api_event(player, "createHUDElement", a, 1, NULL);
+    ok = h->active;
+    if (ok) {
+        a[1] = sh_script_earg_float(width * (slot == 0 ? 0.25f : slot == 1 ? 0.75f : 0.5f));
+        a[2] = sh_script_earg_float(height * (slot == 2 ? 0.85f : 0.1f));
+        a[3] = sh_script_earg_float(width * 0.45f);
+        a[4] = sh_script_earg_float(height * 0.1f);
+        ok = sh_script_api_event(player, "setHUDElementPosition", a, 5, NULL);
+        for (i = 0; i < 4; i++) a[i + 1] = sh_script_earg_float(rgba[i]);
+        ok = ok && sh_script_api_event(player, "setHUDElementColor", a, 5, NULL);
+        a[1] = sh_script_earg_float(0.3f);
+        ok = ok && sh_script_api_event(player, "setHUDElementTextScale", a, 2, NULL);
+        a[1] = sh_script_earg_int(slot);
+        ok = ok && sh_script_api_event(player, "setHUDElementTextAlignment", a, 2, NULL);
+        a[1] = sh_script_earg_text('s', text);
+        ok = ok && sh_script_api_event(player, "setHUDElementText", a, 2, NULL);
+        a[1] = sh_script_earg_int(1);
+        ok = ok && sh_script_api_event(player, "showHUDElement", a, 2, NULL);
+    }
+    shs_cancel_timer(L, h->timer);
+    h->timer = 0;
+    if (!ok) {
+        hud_remove(h);
+        lua_pushnil(L);
+        lua_seti(L, table, key);
+    } else if (seconds > 0) {
+        lua_pushvalue(L, entry);
+        lua_pushvalue(L, table);
+        lua_pushinteger(L, key);
+        lua_pushcclosure(L, hud_expire, 3);
+        h->timer = shs_after(L, seconds, lua_gettop(L));
+    }
+    lua_pushboolean(L, ok);
+    return 1;
+}
 
 static void env_stop(lua_State *L)
 {
@@ -817,4 +953,5 @@ void sh_script_api_entity_register(void)
     sh_script_api_add(SH_SCRIPT_API_METHOD, SDK_W(C_RECOLOUR), l_recolour);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, SDK_W(C_SET_ENVIRONMENT), l_set_environment);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, SDK_W(C_CLEAR_ENVIRONMENT), l_clear_environment);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, SDK_W(C_SHOW_TEXT), l_show_text);
 }
