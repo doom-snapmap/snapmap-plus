@@ -791,6 +791,13 @@ int sh_apply_engine_deshare_bound(void)
     return g_deshare != NULL;
 }
 
+static volatile LONG g_edit_revision;
+
+void sh_apply_engine_note_edit(void)
+{
+    InterlockedIncrement(&g_edit_revision);
+}
+
 /* Deserializes text into a temporary entity, then commits source, class and inherit to the live defsub. */
 static int ae_commit_entity_text(int id, void *defsub, const char *text)
 {
@@ -811,6 +818,7 @@ static int ae_commit_entity_text(int id, void *defsub, const char *text)
             int commit_pushed = ae_push_heap_global();
             __try {
 
+            sh_apply_engine_note_edit();
             g_decl_rebuild(defsub, (const char *)srcPtr, 1);
             /* Empty class/inherit strings from deserialization never blank the live ones. */
             if (clsPtr && *(const char *)clsPtr) g_idstr_assign((uint8_t *)defsub + DEFSUB_CLASS_OFF, (const char *)clsPtr);
@@ -2412,6 +2420,7 @@ static void ae_commit_edit_detour(void *editor, void *label)
     if (ae_read_idstr(label, what, sizeof what) &&
         !strncmp(what, "Delete Entit", 12))
         InterlockedExchange(&g_nav_delete_pending, 1);
+    sh_apply_engine_note_edit();
     if (g_commit_edit_tramp) g_commit_edit_tramp(editor, label);
 }
 
@@ -2428,7 +2437,14 @@ static void ae_apply_tree_detour(void *entity, void *tree)
         ae_nav_mark_dirty(ae_block_uid((const uint8_t *)entity));
         InterlockedExchange(&g_nav_volume_property, 1);
     }
+    sh_apply_engine_note_edit();
     if (g_apply_tree_tramp) g_apply_tree_tramp(entity, tree);
+}
+
+int sh_apply_engine_edit_revision(unsigned long *revision)
+{
+    *revision = (unsigned long)InterlockedCompareExchange(&g_edit_revision, 0, 0);
+    return g_commit_edit_tramp && g_apply_tree_tramp;
 }
 
 /* PrefabGrabFrame(editor, body, frame, grabDistance): VK 0x1412164d0 / GL 0x141215920; the stolen 19 bytes are

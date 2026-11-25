@@ -843,6 +843,7 @@ static void slot_set_inherit(sh_iface *self, int id, const char *cstr)
     void *defsub = defsub_for_id(id);
     if (!defsub) return;
     if (!sh_iface_class_inherit_ok(id, NULL, cstr)) return;
+    sh_apply_engine_note_edit();
     __try { g_idstr_assign((uint8_t *)defsub + DEFSUB_INHERIT_OFF, cstr); }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -891,6 +892,7 @@ static void slot_rebuild_declsource(sh_iface *self, int id, const char *cstr)
     if (!g_decl_rebuild || !cstr) return;
     void *defsub = defsub_for_id(id);
     if (!defsub) return;
+    sh_apply_engine_note_edit();
     __try { g_decl_rebuild(defsub, cstr, 1); }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
     sh_apply_engine_nav_decl_rewritten(id);
@@ -1155,6 +1157,11 @@ static int ie_mods_on_main(void)
     return (DWORD)id == GetCurrentThreadId() ? 1 : 0;
 }
 
+static const void *ie_mods_placement_revision(unsigned long *revision)
+{
+    return sh_apply_engine_edit_revision(revision) ? sh_editor_committed_map(editor_session()) : NULL;
+}
+
 static int ie_mods_placed_names(sh_modui_name_fn emit, void *context)
 {
     return sh_editor_placed_names(editor_session(), emit, context);
@@ -1388,6 +1395,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
         if (module_base) g_mods_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
         mods.on_main_thread = g_mods_main_thread_at ? ie_mods_on_main : NULL;
         mods.placed_names   = ie_mods_placed_names;
+        mods.placement_revision = ie_mods_placement_revision;
         if (module_base) g_mods_load_state_at = (const uint8_t *)glb_resolve(module_base, "load_state", NULL);
         if (module_base) g_mods_load_screen_at = (const uint8_t *)glb_resolve(module_base, "load_screen", NULL);
         mods.map_json        = ie_mods_map_json;

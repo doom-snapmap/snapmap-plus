@@ -10,6 +10,7 @@
 #include "backend_log.h"
 #include "iface_engine.h"
 #include "process_heap_scope.h"
+#include "apply_engine.h"
 #endif
 
 #define EU_MAP_OFF      0x204c8   /* editor -> idSnapMapEdit *, null outside a session */
@@ -147,6 +148,7 @@ int sh_editor_undo_clear(int probe)
         backend_log("MODS: undo clear: the process-heap scope could not be entered; the history was kept");
         return -1;
     }
+    sh_apply_engine_note_edit();
     r = sh_editor_undo_truncate(ed, g_push, &before, &after);
     if (!sh_process_heap_leave(&scope)) {
         InterlockedExchange(&g_faulted, 1);

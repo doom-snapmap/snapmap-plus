@@ -76,6 +76,9 @@ int sh_apply_engine_prefab_grab_status(sh_prefab_grab_result *out);
 /* Detour CommitEdit, the one call every undoable editor action ends in, so
  * navigation geometry is read when the map changes and at no other time. */
 void sh_apply_engine_install_edit_hook(const sig_result *results, size_t n);
+/* Revision of native commits, property edits and direct definition writes. Zero return means a hook is missing. */
+int sh_apply_engine_edit_revision(unsigned long *revision);
+void sh_apply_engine_note_edit(void);
 
 /* Ask for the navigation view to be brought up to date. The read runs on the
  * game's own thread on the next frame, never on the caller's. */

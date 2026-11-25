@@ -192,6 +192,7 @@ void sh_modui_bind(const sh_modui_engine *engine)
     if (engine) {
         if (engine->on_main_thread) g_engine.on_main_thread = engine->on_main_thread;
         if (engine->placed_names) g_engine.placed_names = engine->placed_names;
+        if (engine->placement_revision) g_engine.placement_revision = engine->placement_revision;
         if (engine->rescan) g_engine.rescan = engine->rescan;
         if (engine->refresh) g_engine.refresh = engine->refresh;
         if (engine->palette_rebuild) g_engine.palette_rebuild = engine->palette_rebuild;
@@ -3720,6 +3721,8 @@ int sh_modui_poll_main(void *context)
         /* Native placement, deletion and undo change scope independently of saves and the Mods tab.
          * Only a changed set of mod names needs its manifest closure and engine requirements applied. */
         static ULONGLONG next;
+        static const void *last_snapshot;
+        static unsigned long last_revision;
         static unsigned long long last;
         static int known;
         ULONGLONG now = GetTickCount64();
@@ -3727,7 +3730,10 @@ int sh_modui_poll_main(void *context)
         if (e->placed_names && sh_modserve_active() && now >= next) {
             mu_names nm;
             int r;
+            unsigned long revision = 0;
+            const void *snapshot = e->placement_revision ? e->placement_revision(&revision) : NULL;
             next = now + 1000;
+            if (known && snapshot && snapshot == last_snapshot && revision == last_revision) return 1;
             memset(&nm, 0, sizeof nm);
             r = e->placed_names(mu_names_add, &nm);
             if (r >= 0 && !nm.oom) {
@@ -3747,6 +3753,8 @@ int sh_modui_poll_main(void *context)
                     if (changed > 0) mu_scope_activate("editor placement");
                     InterlockedIncrement(&g_gen);
                 }
+                last_snapshot = snapshot;
+                last_revision = revision;
                 last = sig;
                 known = 1;
             }

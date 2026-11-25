@@ -45,6 +45,8 @@ typedef struct sh_modui_engine {
     /* Emit every committed name of the open editor map (module names, entity inherits and their decl text's string values).
      * Returns the entities read, or -1 when no editor map is open. Main thread only. */
     int (*placed_names)(sh_modui_name_fn emit, void *context);
+    /* Current committed snapshot and edit revision, or NULL when native edit notifications are unavailable. */
+    const void *(*placement_revision)(unsigned long *revision);
     int (*rescan)(void);                /* sh_modserve_index_rescan */
     /* Propagate the rescan's changes into the running game (sh_modserve_refresh_after_rescan): 0 nothing changed,
      * 1 applied, 2 deferred. Main thread, after rescan. */

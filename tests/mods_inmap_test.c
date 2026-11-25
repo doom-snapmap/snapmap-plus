@@ -103,10 +103,21 @@ static int fake_map_json(char **out, size_t *len)
     *out = copy;
     return 1;
 }
+static int placement_walks;
+static int snapshot_slot = -1;
+static unsigned long edit_revision;
+static int snapshots[2];
+static const void *fake_placement_revision(unsigned long *revision)
+{
+    *revision = edit_revision;
+    return snapshot_slot < 0 ? NULL : &snapshots[snapshot_slot];
+}
+
 /* As the engine's walk: the quoted names of every live entity's decl (here, its inherit). */
 static int fake_placed(sh_modui_name_fn emit, void *context)
 {
     int i, n = 0;
+    placement_walks++;
     if (!g_map_on || g_placement_failed) return -1;
     if (g_module) emit(context, g_module);
     for (i = 0; i < g_ent_n; i++) if (g_ents[i].alive) { emit(context, g_ents[i].inherit); n++; }
@@ -211,6 +222,7 @@ static void bind_fakes(void)
     e.print = fake_print;
     e.on_main_thread = fake_on_main;
     e.placed_names = fake_placed;
+    e.placement_revision = fake_placement_revision;
     e.rescan = fake_rescan;
     e.refresh = fake_refresh;
     e.palette_rebuild = fake_palette;
@@ -545,14 +557,35 @@ int main(int argc, char **argv)
     sh_modserve_scope_enable(1);
     (void)sh_modui_poll_main(NULL);
     CHECK(g_image == 1 && g_resource == 1);
+    /* The native cursor still points to the same snapshot during a preview and after Escape. */
+    snapshot_slot = 0;
+    (void)poll_moved();
+    i = placement_walks;
+    CHECK(!poll_moved() && placement_walks == i);
+    CHECK(!poll_moved() && placement_walks == i);
+    /* A native map open can reuse both addresses. The load clears the remembered placement state. */
+    {
+        size_t len;
+        const char *map = map_text(&len);
+        sh_modmanifest_prepare_load(map, len);
+        i = placement_walks;
+        (void)sh_modui_poll_main(NULL);
+        CHECK(placement_walks > i);
+        i = placement_walks;
+        CHECK(!poll_moved() && placement_walks == i);
+    }
+    /* A native commit may allocate its replacement snapshot at the same address. */
+    edit_revision++;
     g_ents[1] = (fake_ent){ 65, "mods/cratebox/crate", 1 };
     g_ent_n = 2;
     CHECK(poll_moved() && g_image == 0 && g_resource == 0);
     i = g_scope_changes;
     g_ents[2] = (fake_ent){ 66, "mods/cratebox/crate", 1 };
     g_ent_n = 3;
+    edit_revision++;
     CHECK(!poll_moved() && g_scope_changes == i);
     g_ents[1].alive = 0;
+    edit_revision++;
     CHECK(!poll_moved() && g_image == 0 && g_resource == 0);
     {
         size_t len, written;
@@ -562,12 +595,21 @@ int main(int argc, char **argv)
         if (saved) HeapFree(GetProcessHeap(), 0, saved);
     }
     g_ents[2].alive = 0;
+    edit_revision++;
     g_placement_failed = 1;
     CHECK(!poll_moved() && g_image == 0 && g_resource == 0);
     g_placement_failed = 0;
     CHECK(poll_moved() && g_image == 1 && g_resource == 1);    /* last saved object deleted */
     g_ents[2].alive = 1;
+    snapshot_slot = 1;
     CHECK(poll_moved() && g_image == 0 && g_resource == 0);    /* native undo */
+    g_ents[2].alive = 0;
+    snapshot_slot = 0;
+    CHECK(poll_moved() && g_image == 1 && g_resource == 1);    /* native redo */
+    g_ents[2].alive = 1;
+    snapshot_slot = 1;
+    CHECK(poll_moved() && g_image == 0 && g_resource == 0);
+    snapshot_slot = -1;    /* Without either hook the same tests keep sampling. */
     free(run_doc(SH_MODS_ACT_MAP_ADD, "crates"));
     g_ents[2].alive = 0;
     CHECK(poll_moved() && g_image == 0 && g_resource == 0);    /* still attached */
