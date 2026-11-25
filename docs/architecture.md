@@ -141,7 +141,8 @@ Load: every parse the `DeserializeFromJson` detour sees (`rawmap.c`
 first asks `sh_map_old_shape` (`map_carrier.c`) whether the text is in an
 earlier shape: a `variables.string` name in one of the families earlier builds
 wrote (`smpkg.`, `smpbind.`, `smpref.`, `smpmod1.`, `smpprod1.`,
-`smp.render.v1`, `smp.bounds.v1`, `smnav1.`), or a member row naming an `id`
+`smp.render.v1`, `smp.bounds.v1`, `smnav1.`), a format-1 member,
+or a member row naming an `id`
 or a `bundle`. Such a map is refused before anything reads it: the engine never
 parses it (the detour answers a failed parse), the open map keeps its settings
 and manifest, the text is not changed, one `CARRIER: map refused:` line is
@@ -149,7 +150,7 @@ logged and the load's refusal note is "This map was saved by an earlier
 Snapmap+; run the Snapmap+ installer to update it." (`sh_modmanifest_load_refuse`), which the player hears
 as the other refusals are. Otherwise each family reads its part from the
 member. The member is stripped last, so the engine never sees it; a member that
-does not read (not an object, a format other than 1, a part of the wrong type,
+does not read (not an object, an unknown format, a part of the wrong type,
 two members) is logged as refused, read as absent and still removed, and the
 map loads. One `CARRIER: map read:` line names the parts a map carries.
 
@@ -160,8 +161,13 @@ parts in the order mods, settings, nav. No step writes a variable or touches
 `variables.allocCount`. A map with nothing to carry has no member and saves as
 exactly the engine's bytes.
 
-A map in an earlier shape is refused before the engine parses it
-(`sh_map_old_shape`, `SH_MAP_OLD_REFUSAL`). Converting the mods, maps and prefabs of earlier releases is not in this release; it will be built into the installer, `snapmap-plus.exe`, with no separate tool.
+The installer updates recognized earlier maps, prefabs, mod folders and exports. It keeps the
+originals under `backups/earlier-data/` before replacing library files. A native DOOM save
+gets a converted copy under `rawmaps/Updated saves/`. DOOM creates the new native slot when
+the player opens the copy with **File > Load Rawmap** and chooses **Save As**.
+An earlier pin requires its exact source build. If the installer cannot verify that build,
+it names the affected file so the player can restore the original build and retry.
+[Installer upgrade details](../installer/README.md#updating-earlier-maps-prefabs-and-mods)
 
 Navigation chunks: the engine's lexer sees the member only where Snapmap+ is
 not installed. Measured live on Vulkan, an undeclared root member holding one
@@ -659,8 +665,7 @@ These backend files share the work:
   no build counter. An earlier shape (`package.json`, a block of an earlier
   format, or a retired author key: `id`, `key`, `shadows`, `stock`, `scope`,
   `player`, `extends`, `replaces`, `legacy`, `composes`, `schema`, a `hud`
-  `schema`) is refused with one sentence, "This mod was made for an earlier
-  version of Snapmap+. This version does not read it yet."
+  `schema`) is refused with one sentence, "Run the Snapmap+ installer to update this mod from an earlier version."
   (`SH_MB_EARLIER`, `sh_mb_descriptor_state`); a format-2 block without a salt
   is damage the sentence names. A file in the engine's layout
   (an `assets\` folder) is refused by name with one of the two sentences of
@@ -676,8 +681,7 @@ These backend files share the work:
   `sh_mb_build` takes the salt from the block, or from its caller for a folder
   not salted yet; `sh_mb_salt_modjson` writes the block a first scan gives a
   folder (`{"format": 2, "salt": ...}`); it rewrites no text, because no
-  text carries the salt. A folder of an earlier shape is refused with
-  `SH_MB_SHAPE` and never read; converting the mods, maps and prefabs of earlier releases is not in this release; it will be built into the installer, `snapmap-plus.exe`, with no separate tool. The Mods
+  text carries the salt. The builder returns `SH_MB_EARLIER` for a recognized earlier descriptor. The Mods
   tab's New mod writes an example that places and plays untouched: an
   entityDef `entities/example_crate` with the game's SnapMap `crate01`
   model, its Toybox row (`snapEditorEntityDef`, nothing binary: the game's
@@ -961,13 +965,8 @@ not parse is listed with its parse error (`sh_ms_descriptor_unparsable`),
 nothing in it is written, and it serves nothing either (its cause is the
 store's, `sh_ms_build_cause`, else the parse error). The serving index reads a
 folder's identity from the block's `salt` only (`ms_parse_bundle`), and
-refuses every earlier shape with one sentence and the next step: a block of
-another format and `package.json` with "This mod was made for an earlier
-version of Snapmap+. This version does not read it yet.", a
-retired author key (`id`, `key`, `shadows`, `stock`, `scope`, `player`,
-`extends`, `replaces`, `legacy`, `composes`, `schema`, `hud.schema`) with the
-builder's sentence (`SH_MB_SHAPE`) naming the key to remove, a block without
-a valid salt as a damaged block. A
+returns the builder's installer prompt for a retired author key, a format-1 descriptor or
+`package.json`. A current descriptor with an invalid salt reports the damaged field. A
 root folder with no block is "not built yet": the store's next scan salts and
 builds it. The
 product preserves the author's bytes and formatting when assigning an identity. Ordinary builds replace only
@@ -1013,10 +1012,8 @@ or New mod; there is no folder watcher. Under the store lock it:
    (`SH_MB_RULES`) differ from the folder's, or whose last build failed
    (`sh_ms_sync_pending` counts them, with the folders of steps 1 and 2).
 
-A folder in an earlier shape (a format-1 block, `package.json`, a retired
-author key) is listed with its plain reason ("This mod folder is not in a shape
-Snapmap+ can build: ...") and nothing in it is written. Converting such a
-folder is not in this release; it will be built into the installer.
+The Mods tab lists a folder with an earlier descriptor and shows the installer prompt.
+Install or update processes recognized folders in the player's library.
 
 The retired `mods\maps\` (`SH_MS_RETIRED_PLACES`). Earlier versions kept the
 builds a downloaded map brought in per-map folders there; a map's content is its
@@ -1182,9 +1179,7 @@ the rawmap or prefab ZIP that carries it to have the objects again. Uninstall al
 tab's map scope](#the-mods-tabs-map-scope)), so Ctrl+Z cannot bring back what
 used the mod.
 
-The retired recycle bin. Earlier builds moved removed folders to
-`removed-mods\` beside `mods\`; the product does not read it, and it stays as an earlier release
-left it. The game converts nothing at boot. Converting the mods, maps and prefabs of earlier releases is not in this release; it will be built into the installer, `snapmap-plus.exe`, with no separate tool.
+Earlier builds kept removed folders in `removed-mods\` beside `mods\`. The game scans installed folders under `mods\`.
 
 Crash leftovers. An install, a download and a salting assemble a
 folder as `<name>.staging-<pid>` and move the folder they replace aside as

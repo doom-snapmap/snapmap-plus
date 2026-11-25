@@ -11,10 +11,7 @@
  * edits or manifest change. */
 #define SH_MB_RULES           15
 
-/* The refusal of a folder in an earlier shape, one sentence; SH_MB_SHAPE is its first part, which readers of a
- * cause match on. */
-#define SH_MB_SHAPE           "This mod was made for an earlier version of Snapmap+. "
-#define SH_MB_EARLIER         SH_MB_SHAPE "This version does not read it yet."
+#define SH_MB_EARLIER "Run the Snapmap+ installer to update this mod from an earlier version."
 #define SH_MB_ID_MAX          64u
 /* A mod has no count or size limit: each file, path and text is heap-sized, bounded only by the platform
  * (Windows paths, wide_path.h; ZIP entry paths, modzip.h). */

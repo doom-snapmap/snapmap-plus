@@ -92,16 +92,11 @@ ours.
 
 ### Mods
 
-The bundle ships no mods. Installed mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`. Converting the
-mods, maps and prefabs of earlier releases is not in this release; it will be built into the installer,
-`snapmap-plus.exe`, with no separate tool, and it is on the release gate. Until then neither DOOM nor
-the installer converts anything. A map, export or prefab saved by an earlier Snapmap+ is refused with
-"... was saved by an earlier Snapmap+; run the Snapmap+ installer to update it.", and a mod folder made
-for an earlier version is listed with "This mod was made for an earlier version of Snapmap+. This
-version does not read it yet." Apart from
-removing an empty `override-backups\`, `package-cache\` or `package-staging\` folder, the installer itself
-never creates, changes or removes `mods\` or the retired package folders. See
-[Mods](capabilities.md#mods) for what each step does and [Mods](architecture.md#mods) for the design.
+Installed mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`. Each current mod contains its
+author settings in `mod.json`, its asset folders, and its generated `.build/manifest.json`.
+Install or update converts recognized earlier mod folders, maps, prefabs and exports. It keeps
+original library files under `backups/earlier-data/` and prints the path to each converted native
+save. [Installer upgrade details](../installer/README.md#updating-earlier-maps-prefabs-and-mods)
 
 The bundle also ships no `config.json`. That file is runtime-owned player data, separate from the
 installer's executable and `install.json` record. The installer never rewrites it and preserves it across

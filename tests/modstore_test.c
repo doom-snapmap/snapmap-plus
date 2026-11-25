@@ -657,13 +657,13 @@ static void test_earlier_shapes(const char *tmp)
 {
     static const struct { const char *leaf, *file, *text, *cause; } cases[] = {
         { "format1", "mod.json", "{\"name\":\"Old\",\"snapmap-plus\":{\"format\":1,\"key\":\"alex.old\",\"build\":3}}",
-          "This version does not read it yet." },
+          SH_MB_EARLIER },
         { "pkg", "package.json", "{\"id\":\"alex.pkg\",\"name\":\"Pkg\"}",
-          "This version does not read it yet." },
-        { "withid", "mod.json", "{\"id\":\"alex.withid\",\"name\":\"With id\"}", "This version does not read it yet." },
-        { "withkey", "mod.json", "{\"key\":\"x\",\"name\":\"With key\"}", "This version does not read it yet." },
-        { "withscope", "mod.json", "{\"scope\":\"map\",\"name\":\"Scope\"}", "This version does not read it yet." },
-        { "hudschema", "mod.json", "{\"name\":\"Hud\",\"hud\":{\"schema\":1}}", "This version does not read it yet." },
+          SH_MB_EARLIER },
+        { "withid", "mod.json", "{\"id\":\"alex.withid\",\"name\":\"With id\"}", SH_MB_EARLIER },
+        { "withkey", "mod.json", "{\"key\":\"x\",\"name\":\"With key\"}", SH_MB_EARLIER },
+        { "withscope", "mod.json", "{\"scope\":\"map\",\"name\":\"Scope\"}", SH_MB_EARLIER },
+        { "hudschema", "mod.json", "{\"name\":\"Hud\",\"hud\":{\"schema\":1}}", SH_MB_EARLIER },
         { "notjson", "mod.json", "{\"name\": oops", "mod.json is not a valid JSON object" },
         { NULL, NULL, NULL, NULL } };
     char root[MAX_PATH], dir[MAX_PATH], *before[16], *after;
@@ -694,7 +694,7 @@ static void test_earlier_shapes(const char *tmp)
     }
     {
         const sh_ms_entry *e = find_entry(&list, "format1");
-        CHECK(e && !strncmp(e->cause, SH_MB_SHAPE, strlen(SH_MB_SHAPE)));
+        CHECK(e && !strcmp(e->cause, SH_MB_EARLIER));
     }
     sh_ms_list_free(&list);
 }

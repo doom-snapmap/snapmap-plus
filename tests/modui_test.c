@@ -1188,10 +1188,10 @@ int main(int argc, char **argv)
         if (cause[0]) printf("    broken: %s\n", cause);
         /* A mod in an older shape gets the one sentence, never advice to edit mod.json by hand. */
         CHECK(row_str(doc, "old_shape", "cause", cause, sizeof cause) &&
-              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
+              !strcmp(cause, "Run the Snapmap+ installer to update this mod from an earlier version."));
         if (cause[0]) printf("    old_shape: %s\n", cause);
         CHECK(row_str(doc, "packaged", "cause", cause, sizeof cause) &&
-              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
+              !strcmp(cause, "Run the Snapmap+ installer to update this mod from an earlier version."));
         {
             /* An older builder part gets the same sentence. */
             char older[MAX_PATH * 2];
@@ -1202,7 +1202,7 @@ int main(int argc, char **argv)
             free(doc);
             doc = list_doc();
             CHECK(row_str(doc, "older_block", "cause", cause, sizeof cause) &&
-                  !strncmp(cause, "This mod was made for an earlier version of Snapmap+.", 53));
+                  !strcmp(cause, "Run the Snapmap+ installer to update this mod from an earlier version."));
             if (cause[0]) printf("    older_block: %s\n", cause);
             mt_remove_tree(older);
         }
