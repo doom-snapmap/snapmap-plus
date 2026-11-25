@@ -17,6 +17,32 @@
 extern "C" {
 #endif
 
+typedef struct sh_text_buf { char *p; size_t n, cap; int oom; } sh_text_buf;
+
+static __inline void sh_text_append(sh_text_buf *b, const char *s, size_t n)
+{
+    if (b->oom) return;
+    if (n >= (size_t)-1 - b->n) { b->oom = 1; return; }
+    size_t need = b->n + n + 1;
+    if (need > b->cap) {
+        size_t cap = b->cap ? b->cap : 256;
+        while (cap < need && cap <= (size_t)-1 / 2) cap *= 2;
+        if (cap < need) cap = need;
+        char *p = (char *)realloc(b->p, cap);
+        if (!p) { b->oom = 1; return; }
+        b->p = p;
+        b->cap = cap;
+    }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n;
+    b->p[b->n] = 0;
+}
+
+static __inline void sh_text_append_str(sh_text_buf *b, const char *s)
+{
+    sh_text_append(b, s, strlen(s));
+}
+
 /* The formatted text, malloc'd (free); NULL when memory runs out. */
 static __inline char *sh_vtextf(const char *fmt, va_list ap)
 {

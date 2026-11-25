@@ -4,6 +4,7 @@
  * and heard, cvars set and put back at map end, decls read and written
  * through the reflection of reflect_fake.h and put back at map end, and each
  * refusal's sentence. */
+#include "map_cvars.h"
 #include "heap_out.h"
 #include <windows.h>
 #include <stddef.h>
@@ -146,17 +147,15 @@ static char *g_cvar_get(const char *name)
         if (!strcmp(g_cvars_fake[i].name, name)) return _strdup(g_cvars_fake[i].value);
     return NULL;
 }
-static char *g_cvar_default(const char *name)
+static int g_cvar_archived(const char *name)
 {
-    size_t i;
-    for (i = 0; i < sizeof g_cvars_fake / sizeof g_cvars_fake[0]; i++)
-        if (!strcmp(g_cvars_fake[i].name, name)) return _strdup(g_cvars_fake[i].def);
-    return NULL;
+    return !strcmp(name, "g_gravity") || !strcmp(name, "ai_name");
 }
-static void g_cvar_journal(const char *json)
+static int g_cvar_journal(const char *json)
 {
     g_journaled++;
     strcpy_s(g_journal, sizeof g_journal, json ? json : "");
+    return 1;
 }
 static void cvar_put(const char *name, const char *value)
 {
@@ -182,7 +181,7 @@ static void *g_decl(const char *type, const char *name)
 }
 static const char *g_decl_class(const char *type) { return !strcmp(type, "snapAIEncounter") ? "idDeclSnapAIEncounter" : NULL; }
 static const sh_script_game_ops k_gops = { g_decl_name_of, g_signal_number, g_signal_fire, g_cvar_get, g_cvar_set, g_decl,
-                                           g_decl_class, g_cvar_default, g_cvar_journal };
+                                           g_decl_class, g_cvar_archived, g_cvar_journal };
 
 static int t_ent(lua_State *L)
 {
@@ -328,6 +327,20 @@ static void test_signals(void)
     refused("api = 1\nent(0):signal('ai_killed', 'me')\n", "\"signal\" needs the activator as an entity, got text");
 }
 
+static int req_set(void *context, const char *name, const char *value)
+{
+    (void)context;
+    return g_cvar_set(name, value);
+}
+
+static void require_value(const char *name, const char *value)
+{
+    char *before = g_cvar_get(name);
+    CHECK(before && sh_map_cvar_hold(SH_CVAR_REQUIREMENT, name, before, value, req_set, NULL) == 1);
+    free(before);
+    sh_map_cvars_flush();
+}
+
 static void test_cvars(void)
 {
     run("api = 1\n"
@@ -354,6 +367,42 @@ static void test_cvars(void)
     CHECK(!strcmp(g_cvars_fake[0].value, "800") && !strcmp(g_cvars_fake[1].value, "doom"));
     CHECK(g_journal[0] == 0);                            /* nothing owed once the map ended */
     cvar_put("g_gravity", "1066");
+
+    /* Quit with both layers present. Either release order may occur at a normal map transition. */
+    require_value("g_gravity", "500");
+    run("api = 1\nconsole_variable('g_gravity', 400)\n");
+    CHECK(strstr(g_journal, "\"was\":\"1066\",\"set\":\"400\""));
+    CHECK(sh_script_game_cvar_recover(g_journal) == 1 && !strcmp(g_cvars_fake[0].value, "1066"));
+    cvar_put("g_gravity", "400");
+    sh_map_cvars_end(SH_CVAR_REQUIREMENT, g_cvar_get, req_set, NULL);
+    CHECK(!strcmp(g_cvars_fake[0].value, "400"));
+    sh_script_map_end();
+    CHECK(!strcmp(g_cvars_fake[0].value, "1066") && !g_journal[0]);
+
+    run("api = 1\nconsole_variable('g_gravity', 400)\n");
+    require_value("g_gravity", "500");
+    sh_script_map_end();
+    CHECK(!strcmp(g_cvars_fake[0].value, "500") && strstr(g_journal, "\"was\":\"1066\",\"set\":\"500\""));
+    cvar_put("g_gravity", "800");
+    CHECK(sh_script_game_cvar_recover(g_journal) == 0);
+    require_value("g_gravity", "500");
+    sh_map_cvars_end(SH_CVAR_REQUIREMENT, g_cvar_get, req_set, NULL);
+    CHECK(!strcmp(g_cvars_fake[0].value, "800") && !g_journal[0]);
+    cvar_put("g_gravity", "1066");
+
+    require_value("ai_name", "quoted}\"value");
+    CHECK(sh_script_game_cvar_recover(g_journal) == 1 && !strcmp(g_cvars_fake[1].value, "doom"));
+    sh_map_cvars_end(SH_CVAR_REQUIREMENT, g_cvar_get, req_set, NULL);
+
+    /* DOOM omits an archived value equal to its default when writing the cfg. */
+    cvar_put("g_gravity", "900");
+    require_value("g_gravity", "1066");
+    CHECK(sh_script_game_cvar_recover(g_journal) == 1 && !strcmp(g_cvars_fake[0].value, "900"));
+    sh_map_cvars_end(SH_CVAR_REQUIREMENT, g_cvar_get, req_set, NULL);
+    cvar_put("g_gravity", "1066");
+    cvar_put("g_scale", "2");
+    CHECK(sh_script_game_cvar_recover("{\"format\":1,\"cvars\":[{\"name\":\"g_scale\",\"was\":\"1\",\"set\":\"2\"}]}") == 0);
+    cvar_put("g_scale", "0.5");
 
     /* a name of any length is the game's to look up (no cap of the product's own) */
     {

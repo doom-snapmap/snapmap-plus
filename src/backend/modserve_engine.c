@@ -48,6 +48,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "modserve.h"
+#include "script/script_api_game.h"
 #include "modhud_scene.h"
 #include "modscene_place.h"
 #include "modbundle.h"
@@ -768,6 +769,7 @@ static const sh_modserve_gate_ops g_lines_ops = { NULL, NULL, NULL, NULL, gate_c
 
 static const sh_modserve_gate_ops *me_gate_ops(void)
 {
+    sh_script_game_cvar_recover_poll();
     return g_cvar_set && g_cvar_slot ? &g_gate_ops : &g_lines_ops;
 }
 

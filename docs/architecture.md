@@ -3171,12 +3171,10 @@ engine.
   finding that decl and field again (`sh_rf_resolve_anchored`,
   `script_api_reflect.c`); a field or cvar changed since by someone else (the
   player, the console, a mod's requirement) no longer holds the script's value
-  and is left as theirs. The cvar restores still owed are kept in
-  `%LOCALAPPDATA%\snapmap-plus\script-cvars.json`; at the next start, once the
-  game has read its settings (`sh_script_game_cvar_recover_poll`), a cvar that
-  still holds the script's value, when that is not the cvar's default (the game
-  saved it at a quit or crash mid-map), gets back the value the script
-  displaced, and the journal is forgotten.
+  and is left as theirs. A script and a map requirement can hold the same cvar.
+  Releasing either gives the remaining owner its value. Their outstanding changes
+  share `%LOCALAPPDATA%\snapmap-plus\script-cvars.json`. On the next start, an
+  archived cvar still at its map value gets its original value back.
 - **`entities()`** lists every entity of the map, players first.
 
 ### Mod scripts: combat calls and the events of damage, death, pain and animation
@@ -3879,9 +3877,8 @@ unless someone else changed it, then the activate lines of bundles that start
 now, appended with `BufferCommandText` and logged as `MODS: requirements: <id>:
 command "<line>"`. A bundle whose cvars are not all live has its steps blocked
 with the cause, and its files first served before then are treated as below.
-The state lives across tables (a rescan replaces the index, not what was set);
-Nothing is restored at DOOM's exit; a cvar the engine archives to its own
-configuration may therefore keep a mod's value into the next session.
+The held cvars survive a rescan. After quitting with the map open, the next
+start restores archived values through the shared map cvar journal.
 A bundle's requirements are accepted only while the map scope has its shadows
 in (below) and the open map declares it; a pass after the
 listing changes therefore runs the stopped bundles' deactivate lines and
