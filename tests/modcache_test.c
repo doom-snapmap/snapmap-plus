@@ -1617,7 +1617,8 @@ static void check_report(report_result *r, int maps, int rows, int kb)
     char summary[64];
     memset(r, 0, sizeof *r);
     CHECK(sh_cache_report(report_line, r) == rows + 1 && r->count == rows + 1);
-    snprintf(summary, sizeof summary, "Map content: %d KB for %d map%s.", kb, maps, maps == 1 ? "" : "s");
+    snprintf(summary, sizeof summary, "Map content: %d %s for %d map%s.", kb, kb ? "KB" : "B",
+             maps, maps == 1 ? "" : "s");
     CHECK(!strcmp(r->lines[r->count-1], summary));
 }
 
@@ -1720,6 +1721,15 @@ static void test_local_content_report(const char *top)
     sh_saved_maps_set_root(saves);
     memset(blob, ' ', sizeof blob);
     memcpy(blob, "-- test script\n", 15);
+    sh_mb_sha256_hex(blob, 181, digest);
+    len = snprintf(manifest, sizeof manifest, "{\"format\":1,\"files\":["
+                   "{\"path\":\"scripts/relay.lua\",\"sha256\":\"%s\",\"size\":181}],\"mod\":{},\"game\":[]}", digest);
+    sh_mb_sha256_hex(manifest, len, unit);
+    CHECK(sh_cache_put_manifest(unit, manifest, len) && sh_cache_import_blob(digest, blob, 181, &damaged));
+    report_map(played, "aaaa_revision1_map.decl", hashes, 1, NULL);
+    memset(&r, 0, sizeof r);
+    CHECK(sh_cache_report(report_line, &r) == 2 && strstr(r.lines[0], "1 object, 181 B.") &&
+          !strcmp(r.lines[1], "Map content: 181 B for 1 map."));
     sh_mb_sha256_hex(blob, sizeof blob, digest);
     len = snprintf(manifest, sizeof manifest, "{\"format\":1,\"files\":["
                    "{\"path\":\"scripts/first.lua\",\"sha256\":\"%s\",\"size\":1024},"

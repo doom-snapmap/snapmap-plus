@@ -2706,7 +2706,8 @@ static void mc_size_text(char *out, size_t cap, unsigned long long bytes)
     double v = (double)bytes;
     if (v >= 1024.0 * 1024.0 * 1024.0) _snprintf_s(out, cap, _TRUNCATE, "%.1f GB", v / (1024.0 * 1024.0 * 1024.0));
     else if (v >= 1024.0 * 1024.0) _snprintf_s(out, cap, _TRUNCATE, "%.1f MB", v / (1024.0 * 1024.0));
-    else _snprintf_s(out, cap, _TRUNCATE, "%.0f KB", v / 1024.0);
+    else if (bytes >= 1024) _snprintf_s(out, cap, _TRUNCATE, "%.0f KB", v / 1024.0);
+    else _snprintf_s(out, cap, _TRUNCATE, "%llu B", bytes);
 }
 
 /* Keep every retained revision's content, once per map and composition. */
