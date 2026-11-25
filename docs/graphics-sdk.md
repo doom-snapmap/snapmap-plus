@@ -235,6 +235,9 @@ An effect is played from a script ([Scripts](#scripts)), or named where the game
 A `particles` item describes particles of its own. The product writes the game's particle decl for it, and its
 material when it names an `image`.
 
+The SDK calculates the visible bounds for the whole effect and for each stage. If you supply
+a native GPU particle in `particles/`, include `edit.bounds` around the full emission volume.
+
 ```
 particles {
 	image		images/fx/ember_sheet.tga
