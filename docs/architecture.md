@@ -5626,8 +5626,8 @@ cannot be listed) may use anything, so that sweep removes nothing and says
 why. A row of an earlier Snapmap+ shape (`id`, `bundle`) is refused but names no
 unit, so it does not count (`sh_modmanifest_list.earlier`). It never touches a local mod's files and never runs on a timer. The Mods tab's
 "Map content on disk" reads the cached manifests and checks which files are present.
-It shows a mod once per map and distinct composition when at least one unit is
-available. Revisions of the same cloud item count as one map. A signed save
+It shows a mod once per map and distinct composition when it finds a complete
+unit or a cached file of the declared size. Revisions of the same cloud item count as one map. A signed save
 supplies its current rows in place of its cloud mirror. An unambiguous local
 publication record connects a saved source to its published item. Each stored blob
 counts once in the total and once in each row that uses it. Both maps report
