@@ -43,6 +43,9 @@ int sh_editor_frame_request_rawmap_save_to(const char *destination, char **msg);
 /* Could the editor open a rawmap right now? Side-effect free; 0 leaves one sentence in *msg (malloc'd). */
 int sh_editor_frame_can_reload(char **msg);
 
+/* Zero while closing, opening or outside a map. */
+int sh_editor_frame_map_context(void);
+
 /* Queue an in-place reload for the next editor frame; 1 = queued, 0 = refused, and either way *msg
  * (malloc'd) is one sentence for the player. The frame re-checks everything and reports a failed open. */
 int sh_editor_frame_request_reload(char **msg);

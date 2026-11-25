@@ -149,7 +149,7 @@ typedef struct sh_prefab_mods_ops {
      * manifest, declared; a salt the map uses at another version is left to it when it carries every object the
      * prefab places, else *cause (malloc'd, a clause after "was not placed: "). 1 used, -1 refused. Main thread. */
     int  (*use_pinned)(const sh_modmanifest_list *pinned, char **cause);
-    unsigned long long (*editor_context)(void);   /* changes on a map parse, or on leaving the editor */
+    int  (*editor_context)(void);   /* editor map identity, zero during a transition */
 } sh_prefab_mods_ops;
 void  sh_prefab_mods_bind(const sh_prefab_mods_ops *ops);
 

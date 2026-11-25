@@ -24,6 +24,7 @@
 #include "feature_health.h"
 #include "module_prefab_map.h"
 #include "rawmap.h"
+#include "editor_frame.h"
 #include "apply_engine.h"
 #include "grid_room_native.h"
 #include "commands.h"
@@ -112,6 +113,7 @@ enum { MP_IDLE = 0, MP_INSTALL, MP_SELECT_WAIT, MP_GRAB_WAIT, MP_GRABBED };
  * IDLE -> INSTALL, which the slot does under the lock. */
 static SRWLOCK         g_lock = SRWLOCK_INIT;
 static volatile LONG   g_phase = MP_IDLE;
+static int g_place_context;
 static int             g_seq;            /* last placement accepted */
 static int             g_done_seq;       /* last placement finished */
 static int             g_status = 0;     /* g_done_seq's outcome */
@@ -456,7 +458,13 @@ void sh_module_prefab_tick(void *editor)
     int state = 0, current = 0;
     if (ed) g_editor = ed;
     phase = InterlockedCompareExchange(&g_phase, 0, 0);
-    if (phase == MP_IDLE || !ed) return;
+    if (phase == MP_IDLE) return;
+    if (!ed || !g_place_context || g_place_context != sh_editor_frame_map_context()) {
+        mp_release_buffers();
+        if (phase != MP_GRABBED) mp_finish(-7, SH_PREFAB_MAP_CHANGED);
+        InterlockedExchange(&g_phase, MP_IDLE);
+        return;
+    }
     if (InterlockedCompareExchange(&g_faulted, 0, 0)) {
         mp_release_buffers();
         mp_finish(0, "Module prefabs are off until DOOM restarts, after an earlier failure.");
@@ -584,7 +592,7 @@ static int mp_module_known(void *ctx, const char *name)
 }
 
 typedef struct mp_capture {
-    int    op;
+    int    op, editor_context;
     int    result;            /* 1 ok or a refusal code */
     const sh_mp_summary *modules;   /* PLACE / CHECK: the prefab's modules, checked on the engine thread */
     const sh_modmanifest_list *rows; /* CHECK: the prefab's mod rows, or NULL */
@@ -626,6 +634,10 @@ static int mp_capture_main(void *ctx)
     int state = 0, i, n = 0;
     c->result = -1;
     if (!ed) return 0;
+    if (c->op == SH_MODULE_PREFAB_PLACE && (!c->editor_context || c->editor_context != sh_editor_frame_map_context())) {
+        c->result = -7;
+        return 1;
+    }
     if (c->op == SH_MODULE_PREFAB_CHECK) {
         c->checked = sh_mp_check_modules(c->modules, mp_module_known, (void *)c->rows, &c->check);
         c->result = 1;
@@ -794,6 +806,7 @@ static int mp_place(sh_module_prefab_call *call)
     c = (mp_capture *)calloc(1, sizeof *c);
     if (!c) { sh_mp_summary_free(&sum); free(engine); return 0; }
     c->op = SH_MODULE_PREFAB_PLACE;
+    c->editor_context = call->editor_context;
     c->modules = &sum;
     if (!mp_capture_run(c)) { sh_mp_summary_free(&sum); free(engine); mp_out(call, "the game did not answer"); free(c); return 0; }
     sh_mp_summary_free(&sum);
@@ -809,8 +822,8 @@ static int mp_place(sh_module_prefab_call *call)
         return -6;
     }
     if (c->result != 1) {
-        int r = c->result == -4 ? -4 : 0;
-        mp_out(call, r == -4 ? "switch to Blueprint mode" : "finish the Blueprint action first");
+        int r = c->result == -7 || c->result == -4 ? c->result : 0;
+        mp_out(call, r == -7 ? SH_PREFAB_MAP_CHANGED : r == -4 ? "switch to Blueprint mode" : "finish the Blueprint action first");
         if (c->json) HeapFree(GetProcessHeap(), 0, c->json);
         free(c);
         free(engine);
@@ -838,6 +851,7 @@ static int mp_place(sh_module_prefab_call *call)
         mp_out(call, "a placement is still in progress");
         return 0;
     }
+    g_place_context = call->editor_context;
     g_merged = merged;
     g_original = c->json;
     g_first = first; g_added = added;
@@ -904,6 +918,7 @@ int sh_module_prefab_slot(struct sh_iface *self, sh_module_prefab_call *call)
         /* The editor's map object: NULL at the hub and once the editor has left the map. */
         if (!sh_read_ptr(ed + ED_MAP_OFF, &map)) map = NULL;
         call->map_open = map != NULL;
+        call->editor_context = sh_editor_frame_map_context();
         return 1;
     }
     case SH_MODULE_PREFAB_SAVE:

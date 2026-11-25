@@ -2471,7 +2471,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     } else if (d.kind === 'editorMode') {
       edMode = {known: true, entityMode: d.entityMode ? 1 : 0, blueprint: d.blueprint ? 1 : 0,
                 modules: typeof d.modules === 'number' ? d.modules : -1,
-                mapOpen: typeof d.mapOpen === 'number' ? d.mapOpen : -1};
+                mapOpen: typeof d.mapOpen === 'number' ? d.mapOpen : -1, context: d.context || 0};
       pfRefreshModeUi(); updateCreateBtn();
     } else if (d.kind === 'createModulePrefabResult') {
       var cmMeta = pendingCreateMeta; pendingCreateMeta = null;
@@ -6603,7 +6603,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // Load / Place from the head or the right-click menu: a module prefab places only in Blueprint.
   function pfLoadPlace(name, folder, kind) {
     if (kind === 'modules' && edMode.known && !edMode.blueprint) { toast('Switch to Blueprint mode (Tab in the editor) to place a module prefab', 'warn'); return; }
-    post({cmd:'loadPrefab', name: name, folder: folder});
+    post({cmd:'loadPrefab', name: name, folder: folder, context: edMode.context || 0});
   }
   if (prefabLoadBtn) prefabLoadBtn.addEventListener('click', function(){
     var name = document.getElementById('pcName').value; if (!name) return;

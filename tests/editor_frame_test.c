@@ -57,6 +57,7 @@ static int load_map(void *ed, void *id)
     const char *name = ((const ef_idstr *)id)->data;
     int got;
     (void)ed;
+    CHECK(!sh_editor_frame_map_context());
     ++loads;
     if (fault_load) RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, NULL);
     got = ef_read_text_detour(name, NULL, NULL, NULL);
@@ -191,6 +192,22 @@ int main(void)
     ++generation;
     sh_editor_frame_detour(editor, NULL);
     CHECK(!loads && tells == 1);
+
+    /* A click names its map across the queue, a same-allocation parse, and a close/reopen. */
+    reset();
+    int first = sh_editor_frame_map_context();
+    CHECK(first && sh_editor_frame_map_context() == first);
+    queue_reload(&map_a);
+    CHECK(!sh_editor_frame_map_context());
+    ++generation;
+    sh_editor_frame_detour(editor, NULL);
+    int next = sh_editor_frame_map_context();
+    CHECK(next && next != first);
+    *(int *)(editor + ED_STATE_OFF) = 0;
+    sh_editor_frame_detour(editor, NULL);
+    CHECK(!sh_editor_frame_map_context());
+    *(int *)(editor + ED_STATE_OFF) = 1;
+    CHECK(sh_editor_frame_map_context() && sh_editor_frame_map_context() != next);
 
     /* Mid-transition the request waits for a live frame. */
     reset();
