@@ -54,7 +54,7 @@ func TestSelfUpdateFirstReplacesAndRelaunches(t *testing.T) {
 	m.publish(goodRelease(t, "v1.0.0-beta.2", true))
 	rec := stubRelaunch(t)
 	out := captureStdout(t, func() {
-		relaunched, code := selfUpdateFirst([]string{"update", "--yes"})
+		relaunched, code, _ := selfUpdateFirst([]string{"update", "--yes"})
 		if !relaunched || code != 7 {
 			t.Fatalf("relaunched=%v code=%d, want true 7", relaunched, code)
 		}
@@ -81,7 +81,7 @@ func TestSelfUpdateFirstStaysPut(t *testing.T) {
 	check := func(name string, args []string) {
 		t.Helper()
 		captureStdout(t, func() {
-			if relaunched, _ := selfUpdateFirst(args); relaunched {
+			if relaunched, _, _ := selfUpdateFirst(args); relaunched {
 				t.Fatalf("%s: relaunched", name)
 			}
 		})
@@ -117,7 +117,7 @@ func TestSelfUpdateFirstWarnsWhenOffline(t *testing.T) {
 	t.Setenv(apiBaseEnv, "http://127.0.0.1:1")
 	rec := stubRelaunch(t)
 	out := captureStderr(t, func() {
-		if relaunched, _ := selfUpdateFirst([]string{"update"}); relaunched {
+		if relaunched, _, _ := selfUpdateFirst([]string{"update"}); relaunched {
 			t.Fatal("relaunched")
 		}
 	})

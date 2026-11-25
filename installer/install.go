@@ -17,14 +17,15 @@ func cmdInstall(f flags) error {
 	}
 	// Identify the DOOM build before downloading anything: the supported build takes the
 	// requested release, the 2018 build takes the final release made for it.
-	build, err := detectDoomBuild(doom)
+	gameExes := scanDoomExes(doom)
+	build, err := gameExes.identify(doom)
 	if err != nil {
 		return err
 	}
 	ui.Section("Detecting DOOM")
 	ui.PathField("Folder", doom)
 	ui.Field("Build", build.label)
-	for _, line := range describeDoomGames(doom) {
+	for _, line := range gameExes.describe() {
 		ui.Field("Game", line)
 	}
 	if f, err = routeRelease(f, build); err != nil {
@@ -54,7 +55,7 @@ func cmdInstall(f flags) error {
 		return err
 	}
 	defer cleanup()
-	if err := checkBundleForBuild(b.files, build); err != nil {
+	if err := checkCurrentBundle(b.files); err != nil {
 		return err
 	}
 	// Only the detected build's pair is installed, whatever else the bundle carries.
@@ -282,9 +283,7 @@ func cmdUpdate(f flags) error {
 	if err := cmdInstall(f); err != nil {
 		return err
 	}
-	// Refresh snapmap-plus.exe itself; best-effort, never fails the overlay update.
-	if !f.noSelf {
-		ui.LazySection("Updating snapmap-plus.exe")
+	if !f.noSelf && f.local == "" {
 		selfUpdate(f, resolveToken(f))
 	}
 	return nil
@@ -382,7 +381,7 @@ func cmdStatus(f flags) error {
 	ui.Field("Installed", rec.InstalledAt)
 	ui.Field("Installed files", fmt.Sprint(len(rec.Files)))
 	ui.Field("Backups", fmt.Sprint(len(rec.Backups)))
-	games := describeDoomGames(rec.DoomPath)
+	games := scanDoomExes(rec.DoomPath).describe()
 	if len(games) == 0 {
 		ui.Field("Game", "no DOOM 2016 executable found")
 	}
@@ -407,7 +406,7 @@ func cmdVersion() {
 	if rec, err := loadRecord(); err == nil {
 		ui.Field("Installed mod", rec.Version)
 		ui.PathField("Folder", rec.DoomPath)
-		for _, line := range describeDoomGames(rec.DoomPath) {
+		for _, line := range scanDoomExes(rec.DoomPath).describe() {
 			ui.Field("Game", line)
 		}
 	}

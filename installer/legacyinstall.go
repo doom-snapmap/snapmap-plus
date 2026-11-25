@@ -30,13 +30,7 @@ func installLegacyRelease(f flags, doom string) error {
 	if err != nil {
 		return err
 	}
-	var asset *ghAsset
-	for i := range rel.Assets {
-		if rel.Assets[i].Name == selfExeAsset {
-			asset = &rel.Assets[i]
-			break
-		}
-	}
+	asset := rel.asset(selfExeAsset)
 	if asset == nil {
 		return fmt.Errorf("release %s has no %s to install the 2018 build with. Nothing was changed", legacyReleaseTag, selfExeAsset)
 	}

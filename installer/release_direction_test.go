@@ -22,7 +22,7 @@ func TestBetaToStableUpdate(t *testing.T) {
 
 		rec := stubRelaunch(t)
 		captureStdout(t, func() {
-			if relaunched, _ := selfUpdateFirst([]string{"update", "--yes"}); !relaunched {
+			if relaunched, _, _ := selfUpdateFirst([]string{"update", "--yes"}); !relaunched {
 				t.Error("the beta installer did not replace itself with the stable one")
 			}
 		})
@@ -62,7 +62,7 @@ func TestUpdateNeverDowngradesWithoutRelease(t *testing.T) {
 	if got := readF(t, r.exe); got != string(installerBytes("v1.1.0-beta.1")) {
 		t.Errorf("the installer replaced itself with an older one: %q", got)
 	}
-	if relaunched, _ := selfUpdateFirst([]string{"update", "--yes"}); relaunched {
+	if relaunched, _, _ := selfUpdateFirst([]string{"update", "--yes"}); relaunched {
 		t.Error("the installer relaunched an older image")
 	}
 

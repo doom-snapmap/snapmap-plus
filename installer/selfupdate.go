@@ -51,15 +51,9 @@ func selfUpdate(f flags, token string) {
 
 // selfUpdateTo replaces the running image with the release's snapmap-plus.exe when the release ships one
 // and the bytes on disk differ. It returns the executable's path and whether it was replaced; every
-// failure is a warning. Both the start-of-run update and the update command's final step use it.
+// failure is a warning.
 func selfUpdateTo(rel *ghRelease, token string) (string, bool) {
-	var asset *ghAsset
-	for i := range rel.Assets {
-		if rel.Assets[i].Name == selfExeAsset {
-			asset = &rel.Assets[i]
-			break
-		}
-	}
+	asset := rel.asset(selfExeAsset)
 	if asset == nil {
 		return "", false // this release doesn't ship a standalone exe
 	}

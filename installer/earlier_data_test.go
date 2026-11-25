@@ -131,7 +131,7 @@ func TestEarlierExport(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeF(t, file, input.String())
-	if err := runCommand(file, nil); err != nil {
+	if err := runCommand(file, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	z, err := zip.OpenReader(file)
@@ -155,7 +155,7 @@ func TestEarlierExport(t *testing.T) {
 	}
 	z.Close()
 	before := readF(t, file)
-	if err := runCommand("convert", []string{file}); err != nil || readF(t, file) != before {
+	if err := runCommand("convert", []string{file}, false); err != nil || readF(t, file) != before {
 		t.Fatalf("retry: %v", err)
 	}
 	backup, _ := filepath.Glob(filepath.Join(appDataDir(), "backups", "earlier-data", "*", "*.zip"))

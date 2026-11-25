@@ -91,7 +91,8 @@ func TestDetectDoomBuildByHash(t *testing.T) {
 		{"", "", "", "no DOOM 2016 executable"},
 	}
 	for i, c := range cases {
-		b, err := detectDoomBuild(doomWith(t, t.TempDir(), c.vk, c.gl))
+		dir := doomWith(t, t.TempDir(), c.vk, c.gl)
+		b, err := scanDoomExes(dir).identify(dir)
 		if c.wantErr != "" {
 			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
 				t.Errorf("case %d: err = %v, want it to mention %q", i, err, c.wantErr)
@@ -233,26 +234,6 @@ func TestKnownBuildsMatchBackendTable(t *testing.T) {
 	}
 }
 
-// install.ps1 must route by the same digests and the same legacy tag.
-func TestBootstrapScriptMatchesRouting(t *testing.T) {
-	script, err := os.ReadFile("install.ps1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := strings.ToLower(string(script))
-	for digest, b := range knownDoomBuilds {
-		if strings.HasPrefix(b.label, "test ") {
-			continue
-		}
-		if !strings.Contains(s, digest) {
-			t.Errorf("install.ps1 lacks the %s digest %s", b.label, digest)
-		}
-	}
-	if !strings.Contains(string(script), legacyReleaseTag) {
-		t.Errorf("install.ps1 lacks the legacy tag %s", legacyReleaseTag)
-	}
-}
-
 // The installer prints the same game identity string the backend and the reports use.
 func TestGameIdentityMatchesBackendFormat(t *testing.T) {
 	vk := knownDoomBuilds["3d8b4393649f80bdae85c19ae2c985c45ec9ac54f74ab04a18816e30ead63c21"]
@@ -278,7 +259,7 @@ func TestGameIdentityMatchesBackendFormat(t *testing.T) {
 
 func TestDescribeDoomGames(t *testing.T) {
 	doom := doomWith(t, t.TempDir(), fakeExe, fakeMod)
-	lines := describeDoomGames(doom)
+	lines := scanDoomExes(doom).describe()
 	if len(lines) != 2 {
 		t.Fatalf("lines = %q", lines)
 	}
@@ -289,7 +270,7 @@ func TestDescribeDoomGames(t *testing.T) {
 	if lines[1] != "DOOMx64.exe: unrecognized executable (SHA-256 "+digestOf(fakeMod)[:8]+")" {
 		t.Errorf("line 1 = %q", lines[1])
 	}
-	if got := describeDoomGames(t.TempDir()); len(got) != 0 {
+	if got := scanDoomExes(t.TempDir()).describe(); len(got) != 0 {
 		t.Errorf("empty folder: %q", got)
 	}
 }
@@ -306,12 +287,12 @@ func TestBootstrapScriptResolvesAndVerifiesReleases(t *testing.T) {
 	if strings.Contains(s, "releases/latest/download") {
 		t.Error("install.ps1 downloads from releases/latest/download, which 404s while only betas are published")
 	}
-	for _, want := range []string{"Get-FileHash", "$asset.digest", "$asset.size", "SNAPMAP_PLUS_API_BASE", "-not $_.prerelease"} {
+	for _, want := range []string{"Get-FileHash", "$asset.digest", "$asset.size", "SNAPMAP_PLUS_API_BASE", "-not $_.prerelease", "SNAPMAP_PLUS_DOOM", "& $exe @installArgs"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("install.ps1 lacks %q", want)
 		}
 	}
-	if n := strings.Count(s, "if ($LASTEXITCODE -ne 0)"); n != 2 {
-		t.Errorf("install.ps1 checks %d installer exit codes, want 2 (the 2018 and the current path)", n)
+	if n := strings.Count(s, "if ($LASTEXITCODE -ne 0)"); n != 1 {
+		t.Errorf("install.ps1 checks %d installer exit codes, want one for the current installer", n)
 	}
 }

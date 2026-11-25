@@ -129,17 +129,16 @@ executables are separate links with no uniform delta between them.
 **v0.2.1-beta.19 is the final release for the 2018 build** (Steam build 2642713, whose
 SteamStub-wrapped executables are `DOOMx64vk.exe` 139763E94F1A75B5310179F9EEEB8A949A1F53C49ACBC722FCFC5DFE7BB6D323
 and `DOOMx64.exe` D46CA967824DA6FFC40F1CE0B6D7F4AFA868FE12B795124D3E31A1BDB646A8E5). The
-installer and `install.ps1` identify that build by those digests and install
-v0.2.1-beta.19 by tag: both download that release's own `snapmap-plus.exe`, check it against the
-size and digest GitHub publishes, and run its `install`, so its own steps (converting `overrides\`
+current installer identifies that build by its digests and downloads v0.2.1-beta.19 by tag.
+It verifies that release's own `snapmap-plus.exe` against the size and digest GitHub publishes
+and runs its `install`, so its own steps (converting `overrides\`
 packages, the `my-overrides` starter) happen as they always did. The Go installer runs it as
 `snapmap-plus-v0.2.1-beta.19.exe` and removes that copy from `%LOCALAPPDATA%\snapmap-plus` afterwards,
 so the current installer stays the one kept there and the 2018 install keeps routing to that release on
 every update and reinstall. That release and its assets (`install.ps1`, `snapmap-plus.exe`,
 `snapmap-plus-bundle.zip`, `snapmap-plus-symbols.zip`) must stay published unchanged.
 `release.yml` must never delete, rebuild or overwrite it; it refuses to run for that tag.
-The tag lives in one constant, `legacyReleaseTag` in `installer/doombuild.go` (mirrored in
-`install.ps1`).
+The release tag lives in `legacyReleaseTag` in `installer/doombuild.go`. The PowerShell bootstrap verifies and launches the current installer for both builds.
 
 A future DOOM update changes these hashes, which means a re-port: re-derive the
 signatures and globals with `tools/signatures`, re-verify every engine offset, and update

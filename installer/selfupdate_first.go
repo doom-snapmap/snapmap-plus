@@ -37,9 +37,12 @@ func selfUpdateSkipsCommand(cmd string) bool {
 // selfUpdateFirst runs before any other work: when the resolved release ships a newer snapmap-plus.exe,
 // the running image is replaced and relaunched with the same arguments. It returns true when the
 // caller must exit with `code`; dev builds, --local, --no-self and release-free commands stay put.
-func selfUpdateFirst(rawArgs []string) (relaunched bool, code int) {
-	if os.Getenv(relaunchEnv) == "1" || version == "" || version == "dev" {
-		return false, 0
+func selfUpdateFirst(rawArgs []string) (relaunched bool, code int, checked bool) {
+	if os.Getenv(relaunchEnv) == "1" {
+		return false, 0, true
+	}
+	if version == "" || version == "dev" {
+		return false, 0, false
 	}
 	args, _ := stripPlain(rawArgs)
 	cmd := ""
@@ -48,25 +51,25 @@ func selfUpdateFirst(rawArgs []string) (relaunched bool, code int) {
 		cmd, rest = args[0], args[1:]
 	}
 	if selfUpdateSkipsCommand(cmd) {
-		return false, 0
+		return false, 0, false
 	}
 	f := parseFlags(rest)
 	if f.local != "" || f.noSelf {
-		return false, 0
+		return false, 0, false
 	}
 	token := resolveToken(f)
 	rel, err := fetchRelease(f, token)
 	if err != nil {
 		ui.Warn("couldn't check for a newer snapmap-plus.exe: %v", err)
-		return false, 0
+		return false, 0, false
 	}
 	noteReleaseChecked(rel.TagName)
 	if !shouldSelfUpdate(version, rel.TagName) {
-		return false, 0
+		return false, 0, true
 	}
 	exe, updated := selfUpdateTo(rel, token)
 	if !updated {
-		return false, 0
+		return false, 0, false
 	}
 	ui.OK("Updated snapmap-plus.exe to %s; starting it.", rel.TagName)
 	ui.Blank()
@@ -75,7 +78,7 @@ func selfUpdateFirst(rawArgs []string) (relaunched bool, code int) {
 	if err != nil {
 		setupOutput(false)
 		ui.Warn("the updated snapmap-plus.exe could not be started (%v); continuing with this one", err)
-		return false, 0
+		return false, 0, false
 	}
-	return true, code
+	return true, code, true
 }

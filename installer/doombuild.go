@@ -10,7 +10,7 @@ import (
 // Snapmap+ supports the April 2024 DOOM 2016 build (Steam build 13954591, executables import
 // XINPUT1_4.dll); the 2018 build (Steam build 2642713) is served by legacyReleaseTag's own installer.
 // The build is identified by the SHA-256 of the installed executables before anything downloads
-// (the same digests as src/backend/host_image.c and installer/install.ps1).
+// (the same digests as src/backend/host_image.c).
 
 // legacyReleaseTag is the final Snapmap+ release for the 2018 DOOM build. It must stay
 // published unchanged: release.yml refuses to rebuild it (see docs/packaging.md).
@@ -84,51 +84,59 @@ func gameIdentity(b doomBuild, sum string) string {
 	return fmt.Sprintf("DOOM 2016 build %s (%s, %s, %s)", b.steam, b.binary, renderer, hash8)
 }
 
-// describeDoomGames returns one line per DOOM executable in dir: its game identity, or why it
-// has none (unrecognized executable, unreadable file). Nothing when no executable is present.
-func describeDoomGames(dir string) []string {
-	var lines []string
-	for _, exe := range doomExes {
-		path := filepath.Join(dir, exe)
-		st, err := os.Stat(path)
-		if err != nil || st.IsDir() {
+type doomExe struct {
+	name  string
+	sum   string
+	build doomBuild
+	known bool
+	err   error
+}
+
+type doomExesOnDisk []doomExe
+
+func scanDoomExes(dir string) doomExesOnDisk {
+	var files doomExesOnDisk
+	for _, name := range doomExes {
+		path := filepath.Join(dir, name)
+		if st, err := os.Stat(path); err != nil || st.IsDir() {
 			continue
 		}
 		sum, err := fileSHA256(path)
-		if err != nil {
-			lines = append(lines, fmt.Sprintf("%s: unreadable (%v)", exe, err))
+		b, known := knownDoomBuilds[strings.ToLower(sum)]
+		files = append(files, doomExe{name, sum, b, known, err})
+	}
+	return files
+}
+
+func (files doomExesOnDisk) describe() []string {
+	var lines []string
+	for _, file := range files {
+		if file.err != nil {
+			lines = append(lines, fmt.Sprintf("%s: unreadable (%v)", file.name, file.err))
 			continue
 		}
-		if b, ok := knownDoomBuilds[strings.ToLower(sum)]; ok {
-			lines = append(lines, fmt.Sprintf("%s: %s", exe, gameIdentity(b, sum)))
+		if file.known {
+			lines = append(lines, fmt.Sprintf("%s: %s", file.name, gameIdentity(file.build, file.sum)))
 		} else {
-			lines = append(lines, fmt.Sprintf("%s: unrecognized executable (SHA-256 %s)", exe, strings.ToLower(sum)[:8]))
+			lines = append(lines, fmt.Sprintf("%s: unrecognized executable (SHA-256 %s)", file.name, strings.ToLower(file.sum)[:8]))
 		}
 	}
 	return lines
 }
 
-// detectDoomBuild hashes every DOOM executable present in dir and returns the build they share.
-// It refuses an unrecognized executable, and two executables from different builds.
-func detectDoomBuild(dir string) (doomBuild, error) {
+func (files doomExesOnDisk) identify(dir string) (doomBuild, error) {
 	var found doomBuild
 	var foundExe string
-	for _, exe := range doomExes {
-		path := filepath.Join(dir, exe)
-		st, err := os.Stat(path)
-		if err != nil || st.IsDir() {
-			continue
+	for _, file := range files {
+		exe, b := file.name, file.build
+		if file.err != nil {
+			return doomBuild{}, fmt.Errorf("couldn't read %s to identify your DOOM version (%v)", exe, file.err)
 		}
-		sum, err := fileSHA256(path)
-		if err != nil {
-			return doomBuild{}, fmt.Errorf("couldn't read %s to identify your DOOM version (%v)", exe, err)
-		}
-		b, ok := knownDoomBuilds[strings.ToLower(sum)]
-		if !ok {
+		if !file.known {
 			return doomBuild{}, fmt.Errorf("%s is not a DOOM 2016 executable Snapmap+ recognizes (SHA-256 %s).\n"+
 				"%s.\nIf a mod loader or patch changed the executable, restore the original (Steam > DOOM > Properties >\n"+
 				"Installed Files > Verify integrity of game files) and run this again. Nothing was changed",
-				exe, sum, supportedMsg)
+				exe, file.sum, supportedMsg)
 		}
 		if foundExe != "" && b.build != found.build {
 			return doomBuild{}, fmt.Errorf("%s is the %s build but %s is the %s build -- the two executables must "+
@@ -171,13 +179,8 @@ func routeRelease(f flags, b doomBuild) (flags, error) {
 	return f, nil
 }
 
-// checkBundleForBuild refuses a bundle that cannot serve the detected build: the supported build
-// needs the XINPUT1_4.dll backend and its frontend at currentUIDll. The 2018 build is installed by
-// the 2018 release's own installer.
-func checkBundleForBuild(files []manifestEntry, b doomBuild) error {
-	if b.build != build2024 {
-		return nil
-	}
+// A current bundle must carry the proxy and frontend for this build.
+func checkCurrentBundle(files []manifestEntry) error {
 	for _, need := range []string{currentProxy, currentUIDll} {
 		found := false
 		for _, e := range files {
