@@ -325,7 +325,7 @@ func translateEarlierMod(src, dst string) (string, error) {
 			text := n.authorText(string(b))
 			b = []byte(text)
 			if strings.HasPrefix(item.author, "materials/") {
-				b, err = upgradeParticleMaterial(b)
+				b, err = upgradeEarlierMaterial(b)
 				if err != nil {
 					return "", fmt.Errorf("%s: %w", item.author, err)
 				}

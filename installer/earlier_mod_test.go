@@ -16,6 +16,7 @@ func TestEarlierModFolder(t *testing.T) {
 	for name, body := range map[string]string{
 		"assets/generated/decls/entitydef/mods/alex.tiny/door.decl": `{ inherit = "mods/alex.tiny/door"; skin = "mods/alex.tiny/thing"; image = "mods/alex.tiny/surface.tga"; model = "materials/native_model"; }`,
 		"assets/generated/decls/skin/mods/alex.tiny/thing.decl":     "{}",
+		"assets/generated/decls/material/mods/alex.tiny/spark.decl": "{\neternalparticle {1,2,1,0}\neternalparticleemissivemap mods/alex.tiny/surface.tga\n}\n",
 		"assets/generated/image/mods/alex.tiny/surface.bimage":      "\x00image\xff",
 		"assets/generated/decls/entitydef/stock/door.decl":          `{ inherit = "mods/alex.tiny/door"; }`,
 		"assets/mods/alex.tiny/scripts/entry.lua":                   "self:pos()\non.anim()\nlocal p=fx('mods/alex.tiny/door')",
@@ -39,6 +40,9 @@ func TestEarlierModFolder(t *testing.T) {
 	}
 	if readF(t, filepath.Join(mod, "images", "surface.bimage")) != "\x00image\xff" || readF(t, filepath.Join(mod, "notes/from-author.txt")) != "keep exactly\n" || exists(filepath.Join(mod, "assets")) {
 		t.Fatal("source files not preserved")
+	}
+	if got := readF(t, filepath.Join(mod, "materials", "spark.decl")); !strings.Contains(got, "type\tparticle") || !strings.Contains(got, `glowmask	"images/surface.tga"`) {
+		t.Fatal(got)
 	}
 	if lua := readF(t, filepath.Join(mod, "scripts/entry.lua")); !strings.Contains(lua, "self:position()") || !strings.Contains(lua, "on.animation()") || !strings.Contains(lua, "play_effect('mods/"+salt+"/door')") {
 		t.Fatal(lua)
