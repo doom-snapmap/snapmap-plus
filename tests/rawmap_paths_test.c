@@ -30,6 +30,7 @@ void backend_log(const char *line)
     if (line && !strncmp(line, "CARRIER: map refused: ", 22)) log_refused++;
 }
 static int render_loaded_calls;
+void sh_cache_published_probe(int on) { (void)on; }
 void sh_map_render_loaded(void *map) { (void)map; render_loaded_calls++; }
 void shield_note_refused_load(void) {}
 char *sh_map_settings_prepare_load(const char *json, size_t len, size_t *out_len)
