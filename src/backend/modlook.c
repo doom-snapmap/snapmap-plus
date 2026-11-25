@@ -247,12 +247,13 @@ static const lk_field LK_L[L_COUNT] = {
 
 /* Particle. */
 enum { P_LIGHTING, P_GLOW, P_GLOWMASK, P_GLOWMASKCOLOUR, P_GLOWMASKSTRENGTH, P_GRADIENT, P_NEARFADE, P_SOFTDISTANCE,
-       P_DEPTHOFFSET, P_LITSCALE, P_COUNT };
+       P_DEPTHOFFSET, P_LITSCALE, P_FARFADE, P_GLOWMASKCOLOUR2, P_COUNT };
 static const lk_field LK_P[P_COUNT] = {
     { "lighting", T_LIGHT, "lit" }, { "glow", T_NUM, "4" }, { "glowmask", T_IMG, "mods/abcdefgh/fx/embers_mask.tga" },
     { "glowmaskcolour", T_V3, "{ 1, 0.4, 0.1 }" }, { "glowmaskstrength", T_NUM, "1" },
     { "gradient", T_V6, "{ 1, 0.5, 0, 1, 0.1, 0 }" }, { "nearfade", T_V2, "{ 40, 8 }" }, { "softdistance", T_NUM, "5" },
     { "depthoffset", T_NUM, "1" }, { "litscale", T_NUM, "1" },
+    { "farfade", T_V2, "{ 128, 256 }" }, { "glowmaskcolour2", T_V3, "{ 1, 0.8, 0.3 }" },
 };
 
 /* Both looks' own field names, for telling a field of the other look. */
@@ -761,7 +762,7 @@ static int lk_particle(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *o
     if (p[P_GLOWMASKCOLOUR].has) memcpy(colour, p[P_GLOWMASKCOLOUR].v.v, sizeof colour);
     if (p[P_GRADIENT].has) memcpy(grad, p[P_GRADIENT].v.v, sizeof grad);
     platform = mode == 4 || p[P_GLOWMASK].has || p[P_GRADIENT].has || p[P_NEARFADE].has || p[P_SOFTDISTANCE].has ||
-               p[P_DEPTHOFFSET].has || (mode == 1 && (strength != 0.0f || lit != 1.0f));
+               p[P_DEPTHOFFSET].has || p[P_FARFADE].has || (mode == 1 && (strength != 0.0f || lit != 1.0f));
     if (!platform) {
         /* the game's own shading: its program, and the brightness in the material's own key */
         lk_key(&gen, eol, "stageprogram", mode == 1 ? "particleshighq" : "transsortblend");
@@ -789,11 +790,19 @@ static int lk_particle(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *o
         } else {
             u2[0] = colour[0]; u2[1] = colour[1]; u2[2] = colour[2];
             u3[0] = u3[1] = u3[2] = 0.0f;
+            if (mode == 1 && p[P_GLOWMASKCOLOUR2].has) {
+                memcpy(u3, p[P_GLOWMASKCOLOUR2].v.v, 3 * sizeof(float));
+                sb[3] = 1;
+            }
         }
         u2[3] = begin;
         u3[3] = glow;
         em[0] = own; em[1] = end; em[2] = soft; em[3] = lit;
         sb[0] = strength;
+        if (p[P_FARFADE].has) {
+            sb[1] = p[P_FARFADE].v.v[0];
+            sb[2] = p[P_FARFADE].v.v[1];
+        }
         lk_key(&gen, eol, "stageprogram", "\"snapmapplus/particles/uberparticles\"");
         lk_key_vec(&gen, eol, "particleuberparms1", u1);
         lk_key_vec(&gen, eol, "particleuberparms2", u2);
