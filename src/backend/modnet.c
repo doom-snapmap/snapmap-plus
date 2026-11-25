@@ -359,6 +359,8 @@ typedef struct mn_req {
     unsigned long long max_response;
     unsigned long long expect_total;   /* download progress total when no Content-Length */
     HANDLE sink;                   /* a 2xx body is written here, not returned */
+    unsigned long long retained;
+    unsigned long long *range_total;
     int head;                      /* HEAD: no body is read */
     unsigned long long *length;    /* the response's declared Content-Length, when it has one */
 } mn_req;
@@ -366,6 +368,36 @@ typedef struct mn_req {
 static int mn_cancelled(const modnet_io *io)
 {
     return io && io->cancel && InterlockedCompareExchange(io->cancel, 0, 0) != 0;
+}
+
+static int mn_range_number(const wchar_t **at, unsigned long long *value)
+{
+    const wchar_t *p = *at;
+    unsigned long long n = 0;
+    if (*p < L'0' || *p > L'9') return 0;
+    do {
+        unsigned digit = (unsigned)(*p++ - L'0');
+        if (n > (~0ull - digit) / 10) return 0;
+        n = n * 10 + digit;
+    } while (*p >= L'0' && *p <= L'9');
+    *at = p;
+    *value = n;
+    return 1;
+}
+
+static int mn_download_range(HINTERNET req, unsigned long long retained, unsigned long long *length,
+                             unsigned long long *total)
+{
+    wchar_t raw[128];
+    const wchar_t *p = raw + 6;
+    DWORD size = sizeof raw;
+    unsigned long long first, last;
+    if (!WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_RANGE, WINHTTP_HEADER_NAME_BY_INDEX,
+                             raw, &size, WINHTTP_NO_HEADER_INDEX) || _wcsnicmp(raw, L"bytes ", 6) ||
+        !mn_range_number(&p, &first) || *p++ != L'-' || !mn_range_number(&p, &last) ||
+        *p++ != L'/' || !mn_range_number(&p, total) || *p || first != retained || first > last || last >= *total) return 0;
+    *length = last - first + 1;
+    return 1;
 }
 
 static SRWLOCK g_min_lock = SRWLOCK_INIT;
@@ -441,7 +473,7 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
     DWORD status = 0, size, policy, features;
     unsigned char *buf = NULL;
     size_t got = 0, cap = 0;
-    unsigned long long declared = 0, cap_bytes;
+    unsigned long long declared = 0, cap_bytes, retained = 0, full = 0;
     int code = MODNET_OK, have_declared = 0;
 
     *resp = NULL;
@@ -573,6 +605,24 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
         if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CUSTOM, L"X-Mod-Scripts", sv, &n, WINHTTP_NO_HEADER_INDEX))
             *q->scripts = (unsigned)wcstoul(sv, NULL, 10);
     }
+    if (q->sink && status == 206) {
+        unsigned long long length;
+        if (!mn_download_range(req, q->retained, &length, &full) || (have_declared && length != declared)) {
+            code = mn_fail(r, MODNET_E_PROTOCOL, "the store sent a different byte range");
+            goto done;
+        }
+        have_declared = 1;
+        declared = length;
+        retained = q->retained;
+        *q->range_total = full;
+        if (io && io->progress) io->progress(io->context, retained, full);
+    } else if (q->sink && status == 200 && q->retained) {
+        LARGE_INTEGER start = {0};
+        if (!SetFilePointerEx(q->sink, start, NULL, FILE_BEGIN) || !SetEndOfFile(q->sink)) {
+            code = mn_fail(r, MODNET_E_ARG, "the download cannot be restarted (error %lu)", GetLastError());
+            goto done;
+        }
+    }
     if (q->head) {
         /* A HEAD answer has no body, whatever its Content-Length says. */
         buf = (unsigned char *)malloc(1);
@@ -589,6 +639,7 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
         code = mn_fail(r, MODNET_E_TOO_LARGE, "the response is larger than %llu bytes", cap_bytes);
         goto done;
     }
+    if (q->sink && have_declared && status < 300) cap_bytes = declared;
     if (q->sink && status < 300) cap = MN_CHUNK + 1;   /* one chunk at a time, written out */
     else cap = (size_t)(have_declared && declared < cap_bytes ? declared : (cap_bytes < 65536 ? cap_bytes : 65536)) + 1;
     buf = (unsigned char *)malloc(cap);
@@ -617,7 +668,7 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
                 got += rd;
                 r->received += rd;
                 left -= rd < left ? rd : left;
-                if (io && io->progress) io->progress(io->context, got, have_declared ? declared : q->expect_total);
+                if (io && io->progress) io->progress(io->context, retained + got, full ? full : declared);
             }
             if (left) break;
             continue;
@@ -913,9 +964,10 @@ static int mn_get_resumed(const char *route, const char *out_path, unsigned long
     HANDLE h;
     mn_req q;
     LARGE_INTEGER at;
-    int code, tries;
+    int code;
     if (!(wpath = sh_mb_wpath(out_path))) return mn_fail(r, MODNET_E_NOMEM, NULL);
-    for (tries = 0; tries < 2; tries++) {
+    for (;;) {
+        unsigned long long full = 0, before = r->received;
         h = CreateFileW(wpath, GENERIC_WRITE, 0, NULL, have ? OPEN_ALWAYS : CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h == INVALID_HANDLE_VALUE) { free(wpath); return mn_fail(r, MODNET_E_ARG, "the download cannot be written (error %lu)", GetLastError()); }
         at.QuadPart = (LONGLONG)have;
@@ -931,15 +983,17 @@ static int mn_get_resumed(const char *route, const char *out_path, unsigned long
         q.route = route;
         q.max_response = ~0ull;
         q.sink = h;
+        q.retained = have;
+        q.range_total = &full;
         q.headers = range;
         code = mn_exchange(&q, &resp, &rlen, io, r);
         if (code == MODNET_OK && !FlushFileBuffers(h)) code = mn_fail(r, MODNET_E_ARG, "the download cannot be written (error %lu)", GetLastError());
         CloseHandle(h);
-        if (code == MODNET_OK && have && r->status == 200) {
-            /* The whole object came: write it again from the start. */
+        if (code == MODNET_OK && r->status == 206 && have + (r->received - before) < full) {
+            /* The store returned only part of the requested suffix. */
             free(resp);
             resp = NULL;
-            have = 0;
+            have += r->received - before;
             continue;
         }
         /* A complete partial may receive 416. Its caller still verifies the file. */

@@ -29,6 +29,7 @@ typedef struct stub_state {
     char last_get[200];           /* the path of the last GET or HEAD */
     char fail_prefix[48];         /* the next request whose "METHOD path" starts with this ... */
     int fail_status;              /* ... gets this status and a JSON error */
+    void (*stream)(SOCKET, const char *);
 } stub_state;
 
 static stub_state g_stub;
@@ -85,7 +86,8 @@ static void stub_serve_one(SOCKET s)
     if (!strcmp(method, "GET") || !strcmp(method, "HEAD")) strncpy_s(g_stub.last_get, sizeof g_stub.last_get, path, _TRUNCATE);
     strcpy_s(g_stub.last_method, sizeof g_stub.last_method, method);
     strncpy_s(g_stub.last_path, sizeof g_stub.last_path, path, _TRUNCATE);
-    stub_route(s, method, path);
+    if (g_stub.stream && !strncmp(path, "/mods/blob/", 11)) g_stub.stream(s, head);
+    else stub_route(s, method, path);
     LeaveCriticalSection(&g_stub.cs);
     free(head);
 }
