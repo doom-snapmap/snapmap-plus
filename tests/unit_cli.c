@@ -6,7 +6,7 @@
  *
  * Each name gets one line "unit <name>\t<hash>\t<kind>\t<files>\t<bytes>\t<pointers>" on stdout and its manifest at
  * <out>\units\<hash>.json; compose=1 composes the unit at <out>\<n>-unit for served_cli. Exit 0, 1 when a unit or a
- * composition failed, 2 on a usage error. Nothing outside `out` is written but the folder's own mod.json. */
+ * composition failed, 2 on a usage error. load=1 uses the folder's existing build without writing it. */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
 #include <windows.h>

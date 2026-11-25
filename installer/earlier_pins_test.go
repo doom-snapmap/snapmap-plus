@@ -47,7 +47,23 @@ func tinyResolver(t *testing.T, data string, z *zip.Reader) *earlierPins {
 }
 func TestEarlierPinExactObjectAndFallback(t *testing.T) {
 	data := t.TempDir()
-	tinyFixture(t, data)
+	src := tinyFixture(t, data)
+	builds := filepath.Join(data, "mods", ".builds")
+	if err := os.Mkdir(builds, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(src, filepath.Join(builds, filepath.Base(src))); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := upgradeModLayout(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archives, err := filepath.Glob(filepath.Join(data, "backups", "earlier-data", "mod-folders", "builds-*", "original"))
+	if err != nil || len(archives) != 1 || exists(builds) {
+		t.Fatalf("unexpected build archives: %v (%v)", archives, err)
+	}
 	p := tinyResolver(t, data, nil)
 	row, e := p.row(tinyPin("mods/alex.tiny/a"))
 	if e != nil {

@@ -23,6 +23,9 @@ func upgradeModLayout(data string) error {
 	mods := filepath.Join(data, "mods")
 	cache := filepath.Join(data, "cache")
 	recovery := &modRecovery{cache: cache}
+	if err := archiveModBuilds(data); err != nil {
+		return err
+	}
 	for _, name := range []string{"content", "served"} {
 		if err := moveModCache(filepath.Join(mods, "."+name), filepath.Join(cache, name), name, recovery); err != nil {
 			return err
@@ -33,6 +36,34 @@ func upgradeModLayout(data string) error {
 	}
 	served := filepath.Join(cache, "content", "served")
 	return splitModFolders(served, served, true, recovery)
+}
+
+// Keep complete snapshots together so the installer can still resolve maps pinned to an earlier build.
+func archiveModBuilds(data string) error {
+	src := filepath.Join(data, "mods", ".builds")
+	info, err := os.Lstat(src)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	records := filepath.Join(data, "backups", "earlier-data", "mod-folders")
+	if !info.IsDir() || !plainPath(src) || !plainPath(records) {
+		return fmt.Errorf("invalid mod build archive path: %s", src)
+	}
+	if err := os.MkdirAll(records, 0o755); err != nil {
+		return err
+	}
+	record, err := os.MkdirTemp(records, "builds-")
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(src, filepath.Join(record, "original")); err != nil {
+		os.Remove(record)
+		return err
+	}
+	return nil
 }
 
 type modRecovery struct {

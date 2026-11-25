@@ -16,9 +16,11 @@ func TestInstallUpgradesModLayout(t *testing.T) {
 	src := filepath.Join(r.data, "mods", "demons", "pack")
 	cache := filepath.Join(r.data, "cache", "content")
 	old := filepath.Join(r.data, "mods", ".content")
+	history := filepath.Join(r.data, "mods", ".builds", "pack@146a9dbac3758deb", "mod.json")
 	pack := filepath.Join(src, "mod.json")
 	author := "\ufeff{\r\n  \"name\" : \"My pack\", \"snapmap-plus\" : %s,\r\n \"unknown\" : [ 3, 2 ]\r\n}\r\n"
 	writeF(t, pack, fmt.Sprintf(author, testModBlock))
+	writeF(t, history, fmt.Sprintf(author, testModBlock))
 	writeF(t, filepath.Join(old, "served", "pin", "mod.json"), fmt.Sprintf(author, testModBlock))
 	blob := filepath.Join(old, "files", "00", "texture")
 	writeF(t, blob, "texture bytes")
@@ -36,7 +38,7 @@ func TestInstallUpgradesModLayout(t *testing.T) {
 	if err := cmdInstall(f); err != nil {
 		t.Fatal(err)
 	}
-	if got := readF(t, pack); got != fmt.Sprintf(author, testModBlock) || exists(cache) {
+	if got := readF(t, pack); got != fmt.Sprintf(author, testModBlock) || exists(cache) || readF(t, history) != got {
 		t.Fatal("a backend without layout support upgraded the mod data")
 	}
 
@@ -58,8 +60,12 @@ func TestInstallUpgradesModLayout(t *testing.T) {
 				t.Fatalf("the generated manifest changed: %q", got)
 			}
 		}
-		if exists(old) || exists(filepath.Join(r.data, "mods", ".served")) {
+		if exists(old) || exists(filepath.Join(r.data, "mods", ".served")) || exists(filepath.Join(r.data, "mods", ".builds")) {
 			t.Fatal("a shared directory remains in the mods folder")
+		}
+		saved, err := filepath.Glob(filepath.Join(r.data, "backups/earlier-data/mod-folders/builds-*/original/pack@146a9dbac3758deb/mod.json"))
+		if err != nil || len(saved) != 1 || readF(t, saved[0]) != fmt.Sprintf(author, testModBlock) {
+			t.Fatal("the installer did not preserve the original build")
 		}
 		if got := readF(t, filepath.Join(r.data, "cache", "served", "banks", "bank.bnk")); got != "sound" {
 			t.Fatal("sound bank did not survive the upgrade")
@@ -97,7 +103,7 @@ func TestUpgradeModLayoutRecoversOverlap(t *testing.T) {
 		writeF(t, filepath.Join(dst, e.rel), e.dest)
 	}
 	author := fmt.Sprintf(`{"name":"editable","snapmap-plus":%s}`, testModBlock)
-	for _, rel := range []string{".builds/old", "maps/old", "mods/pack.old-34", "earlier/inner"} {
+	for _, rel := range []string{"maps/old", "mods/pack.old-34", "earlier/inner"} {
 		writeF(t, filepath.Join(mods, rel, "mod.json"), author)
 	}
 	writeF(t, filepath.Join(mods, "earlier", "package.json"), "{}")
@@ -118,7 +124,7 @@ func TestUpgradeModLayoutRecoversOverlap(t *testing.T) {
 	if err != nil || len(recovered) != 1 || readF(t, recovered[0]) != "old content" {
 		t.Fatal("different old cache file was not kept")
 	}
-	for _, rel := range []string{".builds/old", "maps/old", "mods/pack.old-34", "earlier/inner"} {
+	for _, rel := range []string{"maps/old", "mods/pack.old-34", "earlier/inner"} {
 		if got := readF(t, filepath.Join(mods, rel, "mod.json")); got != author {
 			t.Errorf("unexpected write in %s", rel)
 		}

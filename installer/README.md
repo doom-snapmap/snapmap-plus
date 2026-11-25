@@ -285,10 +285,10 @@ when needed. See [packaging](../docs/packaging.md) for the installed file contra
 ## Updating earlier maps, prefabs and mods
 
 Install or update converts recognized earlier files in the Snapmap+ data folder. The installer
-keeps each original in `backups/earlier-data/`. It converts installed mod folders into the author
-layout and reads an earlier map's exact mod build when turning its objects into units. If the
-original build is missing, the installer names the affected file and keeps it intact. Restore the
-missing build and rerun the same command.
+keeps each original in `backups/earlier-data/`, including the build history from `mods/.builds/`.
+It converts installed mod folders into the author layout and reads an earlier map's exact mod build
+when turning its objects into units. If the original build is missing, the installer names the
+affected file and keeps it intact. Restore the missing build and rerun the same command.
 
 A native DOOM map gets a converted copy in `rawmaps/Updated saves/`. Open the copy with
 **File > Load Rawmap** and use **Save As** in DOOM. For an export outside your profile, drop its
