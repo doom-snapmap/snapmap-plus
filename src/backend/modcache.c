@@ -8,6 +8,7 @@
 #include "mod_paths.h"
 #include "composition_path.h"
 #include "modmanifest.h"
+#include "modpublish.h"
 #include "modunit.h"
 #include "modbundle.h"
 #include "modserve.h"   /* SH_MODSERVE_STANDIN_DIR: the stand-in rows' folder */
@@ -258,14 +259,16 @@ static char *mc_path(const char *fmt, ...)
     return out;
 }
 
-char *sh_cache_blob_path(const char *sha)
+static char *mc_blob_path(const char *sha, unsigned long long *size)
 {
     char *p;
     if (!mc_hex64(sha)) return NULL;
     p = mc_path("files\\%.2s\\%s", sha, sha);
-    if (p && !mc_exists(p, NULL)) { free(p); p = NULL; }
+    if (p && !mc_exists(p, size)) { free(p); p = NULL; }
     return p;
 }
+
+char *sh_cache_blob_path(const char *sha) { return mc_blob_path(sha, NULL); }
 
 int sh_cache_put_blob(const char *from, const char *sha, unsigned long long size)
 {
@@ -528,13 +531,19 @@ static char *mc_source_of(const char *sha, unsigned long long size)
 
 char *sh_cache_file_source(const char *sha, unsigned long long size) { return mc_source_of(sha, size); }
 
-typedef struct mc_file { char *path, *source; char sha[SH_MB_HASH_HEX + 1]; unsigned long long size; } mc_file;
+typedef struct mc_file {
+    char *path, *source;
+    char sha[SH_MB_HASH_HEX + 1];
+    unsigned long long size, cached_size;
+    int cached;
+} mc_file;
 typedef struct mc_unit {
     char hash[SH_MB_HASH_HEX + 1];
     char *bytes; size_t len;          /* the manifest, when here */
     mc_file *files; size_t nfiles;
     char *root, *kind;
     int format;
+    int author_content;
     int state;                        /* 1 present, 0 files missing, -1 no manifest, -2 unknown format */
     int cause;                        /* SH_CACHE_ABSENT_* when not present */
     size_t nmissing;
@@ -561,6 +570,14 @@ static int mc_unit_parse(mc_unit *u)
     int i, ok = 0;
     if (!m || !files || files->type != MPJ_ARR || !fmt || !mpj_is_num(fmt)) goto done;
     u->format = (int)mpj_int(fmt);
+    {
+        const mpj *game = mpj_get(m, "game"), *mod = mpj_get(m, "mod");
+        u->author_content = files->n || (mod && mod->type == MPJ_OBJ && mod->n);
+        for (i = 0; game && game->type == MPJ_ARR && i < game->n; i++) {
+            const mpj *at = mpj_get(game->items[i], "at");
+            if (at && at->type == MPJ_STR && at->text[0]) u->author_content = 1;
+        }
+    }
     if (root && root->type == MPJ_OBJ) {
         const mpj *n = mpj_get(root, "name"), *k = mpj_get(root, "kind");
         if (n && n->type == MPJ_STR) u->root = sh_text(n->text);
@@ -594,7 +611,10 @@ static void mc_unit_load(mc_unit *u, const char *hash)
     u->state = 1;
     for (i = 0; i < u->nfiles; i++) {
         mc_file *f = &u->files[i];
-        f->source = mc_source_of(f->sha, f->size);
+        f->source = mc_blob_path(f->sha, &f->cached_size);
+        f->cached = f->source != NULL;
+        if (f->cached && f->cached_size != f->size) { free(f->source); f->source = NULL; }
+        if (!f->source) f->source = mc_local_find(f->sha, f->size);
         if (!f->source) { u->state = 0; u->nmissing++; u->bytes_missing += f->size; }
     }
 }
@@ -2686,91 +2706,162 @@ static void mc_size_text(char *out, size_t cap, unsigned long long bytes)
     else _snprintf_s(out, cap, _TRUNCATE, "%.0f KB", v / 1024.0);
 }
 
-/* Each kept map's rows: one line per row, and the totals. A local save's cloud copy in saved-maps (its leaf begins
- * with the slot's cloud item id) is the same map and is not reported again. */
+/* Keep every retained revision's content, once per map and composition. */
+typedef struct mc_report_row {
+    char *map, *name;
+    char hash[SH_CACHE_HASH_HEX + 1];
+    const char *kind;
+    size_t objects;
+    unsigned long long bytes, shared;
+    int complete, editable;
+} mc_report_row;
+
+typedef struct mc_blob_use {
+    char sha[SH_CACHE_HASH_HEX + 1];
+    size_t row;
+    unsigned long long bytes;
+} mc_blob_use;
+
 typedef struct mc_report {
-    sh_cache_line_fn fn; void *ctx; mc_set files; unsigned long long total; size_t maps, lines;
-    char **items; size_t nitems;      /* the local saves' cloud item ids */
-    const char *want;                 /* sh_cache_stage_copy: the composition hash looked for */
-    sh_modmanifest_list found;        /* its row, once found */
+    mc_report_row *rows; size_t nrows, maps;
+    mc_blob_use *uses; size_t nuses, cap;
+    mc_unit *units; size_t nunits;
+    char **slot_items; size_t nslots;
+    mpj *links;
+    unsigned long long total;
+    const char *want;
+    sh_modmanifest_list found;
+    int failed;
 } mc_report;
 
-static void mc_report_text(mc_report *rep, const char *text, size_t len, const char *kind)
+static mc_unit *mc_report_unit(mc_report *rep, const char *hash)
 {
-    size_t i, k, f;
-    sh_modmanifest_list rows;
-    int counted = 0;
-    memset(&rows, 0, sizeof rows);
-    if (sh_carrier_part(text, len, "mods", NULL, NULL) == 1) sh_modmanifest_read(text, len, &rows, NULL);
-    for (i = 0; i < rows.count; i++) {
-        const sh_modmanifest_row *row = &rows.rows[i];
-        unsigned long long bytes = 0, shared = 0;
-        size_t objects = 0;
-        char size[32], share[32], *line;
-        if (!row->pinned) continue;
-        if (rep->want) {
-            if (!rep->found.count && !_stricmp(row->build, rep->want)) (void)sh_modmanifest_list_add(&rep->found, row);
-            continue;
-        }
-        if (!counted) { counted = 1; rep->maps++; }
-        for (k = 0; k < row->unit_count; k++) {
-            mc_unit u;
-            mc_unit_load(&u, row->units[k]);
-            if (strcmp(row->roots[k], "*")) objects++;
-            for (f = 0; f < u.nfiles; f++) {
-                bytes += u.files[f].size;
-                if (mc_set_has(&rep->files, u.files[f].sha)) shared += u.files[f].size;
-                else { mc_set_add(&rep->files, u.files[f].sha); rep->total += u.files[f].size; }
-            }
-            mc_unit_free(&u);
-        }
-        mc_size_text(size, sizeof size, bytes);
-        mc_size_text(share, sizeof share, shared);
-        line = shared ? sh_textf("A map you %s: %s, %u object%s, %s (%s of it shared with other maps).", kind, sh_modmanifest_row_name(row)[0] ? row->name : "a mod",
-                                 (unsigned)objects, objects == 1 ? "" : "s", size, share)
-                      : sh_textf("A map you %s: %s, %u object%s, %s.", kind, sh_modmanifest_row_name(row)[0] ? row->name : "a mod",
-                                 (unsigned)objects, objects == 1 ? "" : "s", size);
-        if (line && rep->fn) { rep->fn(rep->ctx, line, row->build); rep->lines++; }
-        free(line);
+    size_t i;
+    mc_unit *grown;
+    for (i = 0; i < rep->nunits; i++)
+        if (!strcmp(rep->units[i].hash, hash)) return &rep->units[i];
+    grown = realloc(rep->units, (i + 1) * sizeof *grown);
+    if (!grown) { rep->failed = 1; return NULL; }
+    rep->units = grown;
+    mc_unit_load(&grown[i], hash);
+    rep->nunits++;
+    return &grown[i];
+}
+
+static void mc_report_blob(mc_report *rep, const mc_file *f)
+{
+    mc_blob_use *use;
+    if (rep->nuses == rep->cap) {
+        size_t cap = rep->cap ? rep->cap * 2 : 128;
+        mc_blob_use *grown = realloc(rep->uses, cap * sizeof *grown);
+        if (!grown) { rep->failed = 1; return; }
+        rep->uses = grown;
+        rep->cap = cap;
     }
+    use = &rep->uses[rep->nuses++];
+    strcpy_s(use->sha, sizeof use->sha, f->sha);
+    use->bytes = f->cached_size;
+    use->row = rep->nrows;
+}
+
+static void mc_report_add(mc_report *rep, const sh_modmanifest_row *row, const char *map, const char *kind)
+{
+    size_t i, k, f, present = 0, start = rep->nuses;
+    int new_map = 1;
+    mc_report_row r = {0}, *grown;
+    if (rep->want) {
+        if (!rep->found.count && !_stricmp(row->build, rep->want)) (void)sh_modmanifest_list_add(&rep->found, row);
+        return;
+    }
+    for (i = 0; i < rep->nrows; i++) {
+        if (_stricmp(map, rep->rows[i].map)) continue;
+        new_map = 0;
+        if (!strcmp(row->build, rep->rows[i].hash)) return;
+    }
+    for (k = 0; k < row->unit_count && !rep->failed; k++) {
+        mc_unit *u = mc_report_unit(rep, row->units[k]);
+        if (!u || u->state < 0) continue;
+        if (u->state == 1) {
+            present++;
+            if (strcmp(row->roots[k], SH_UNIT_WHOLE)) r.objects++;
+            if (u->author_content) r.editable = 1;
+        }
+        for (f = 0; f < u->nfiles && !rep->failed; f++)
+            if (u->files[f].cached) mc_report_blob(rep, &u->files[f]);
+    }
+    if (!present || rep->failed) { rep->nuses = start; return; }
+    grown = realloc(rep->rows, (rep->nrows + 1) * sizeof *grown);
+    if (!grown) { rep->failed = 1; return; }
+    rep->rows = grown;
+    r.map = sh_text(map);
+    r.name = sh_text(sh_modmanifest_row_name(row)[0] ? row->name : "a mod");
+    r.kind = kind;
+    r.complete = present == row->unit_count;
+    strcpy_s(r.hash, sizeof r.hash, row->build);
+    if (!r.map || !r.name) rep->failed = 1;
+    rep->rows[rep->nrows++] = r;
+    if (new_map) rep->maps++;
+}
+
+static void mc_report_text(mc_report *rep, const char *map, const char *text, size_t len, const char *kind)
+{
+    sh_modmanifest_list rows = {0};
+    size_t i;
+    if (sh_carrier_part(text, len, "mods", NULL, NULL) == 1) sh_modmanifest_read(text, len, &rows, NULL);
+    for (i = 0; i < rows.count && !rep->failed; i++)
+        if (rows.rows[i].pinned) mc_report_add(rep, &rows.rows[i], map, kind);
     sh_modmanifest_list_free(&rows);
+}
+
+/* A saved source can identify one published item. Separate publications of that source keep their own identities. */
+static const char *mc_publication(const mc_report *rep, const char *cloud, const char *local, const char *fallback)
+{
+    const char *item = NULL;
+    int i;
+    for (i = 0; rep->links && rep->links->type == MPJ_OBJ && i < rep->links->n; i++) {
+        const mpj *link = rep->links->items[i], *c = mpj_get(link, "cloud"), *l = mpj_get(link, "local");
+        if ((cloud && *cloud && c && c->type == MPJ_STR && !_stricmp(cloud, c->text)) ||
+            (local && *local && l && l->type == MPJ_STR && !_stricmp(local, l->text))) {
+            if (item) return fallback;
+            item = rep->links->keys[i];
+        }
+    }
+    return item ? item : fallback;
 }
 
 static void mc_report_slot(void *context, const char *local_id, const char *item_id, const char *text, size_t len)
 {
-    mc_report *rep = (mc_report *)context;
-    (void)local_id;
-    if (item_id && item_id[0]) {
-        char **g = (char **)realloc(rep->items, (rep->nitems + 1) * sizeof *g);
-        if (g) { rep->items = g; if ((g[rep->nitems] = sh_text(item_id)) != NULL) rep->nitems++; }
-    }
-    mc_report_text(rep, text, len, "kept");
+    mc_report *rep = context;
+    char *key = item_id && item_id[0] ? sh_text(item_id) : sh_textf("slot:%s", local_id);
+    if (!key) { rep->failed = 1; return; }
+    mc_report_text(rep, mc_publication(rep, item_id, local_id, key), text, len, "kept");
+    if (item_id && *item_id) {
+        char **slots = realloc(rep->slot_items, (rep->nslots + 1) * sizeof *slots);
+        if (!slots) { rep->failed = 1; free(key); return; }
+        rep->slot_items = slots;
+        slots[rep->nslots++] = key;
+    } else free(key);
 }
 
-static int mc_report_copy(const mc_report *rep, const char *leaf)
-{
-    size_t i, n;
-    for (i = 0; i < rep->nitems; i++) {
-        n = strlen(rep->items[i]);
-        if (!_strnicmp(leaf, rep->items[i], n) && leaf[n] == '_') return 1;
-    }
-    return 0;
-}
-
-static void mc_report_dir(mc_report *rep, const char *dir, const char *kind, int copies)
+static void mc_report_dir(mc_report *rep, const char *dir, int published)
 {
     char **names;
     size_t n, i;
     if (!dir) return;
     names = mc_list(dir, "*.decl", 0, &n);
-    for (i = 0; names && i < n; i++) {
+    for (i = 0; names && i < n && !rep->failed && !rep->found.count; i++) {
         size_t len = 0;
-        char *path;
+        char *leaf = names[i], *rev = strchr(leaf, '_'), *path = sh_textf("%s\\%s", dir, leaf);
         unsigned char *text;
-        if (copies && mc_report_copy(rep, names[i])) continue;
-        path = sh_textf("%s\\%s", dir, names[i]);
+        size_t slot = 0;
+        if (rev && rev != leaf && strlen(rev) > 10 && !_stricmp(leaf + strlen(leaf) - 9, "_map.decl")) *rev = 0;
+        if (!published) {
+            for (; slot < rep->nslots; slot++) if (!_stricmp(leaf, rep->slot_items[slot])) break;
+            if (slot != rep->nslots) { free(path); continue; }  /* The signed local slot is the current saved map. */
+        }
         text = path ? sh_mb_read_file(path, (size_t)1 << 31, &len) : NULL;
-        if (text) mc_report_text(rep, (const char *)text, len, kind);
+        if (text) mc_report_text(rep, published ? leaf : mc_publication(rep, leaf, NULL, leaf),
+                                 (const char *)text, len, published ? "played" : "kept");
         free(text);
         free(path);
     }
@@ -2779,49 +2870,101 @@ static void mc_report_dir(mc_report *rep, const char *dir, const char *kind, int
 
 static void mc_report_run(mc_report *rep)
 {
-    char *saved, *published;
-    size_t i;
+    char *saved, *published, *root = mc_mods_root(), *links = NULL;
+    if (root && sh_mb_record_get(root, SH_MODPUBLISH_LINKS_SECTION, &links) == 1 && links)
+        rep->links = mpj_parse(links, strlen(links));
+    free(root);
+    free(links);
     AcquireSRWLockShared(&g_lock);
     saved = g_saved_dir ? sh_text(g_saved_dir) : mc_game_maps("saved-maps");
     published = g_published_dir ? sh_text(g_published_dir) : mc_game_maps("published-maps");
     ReleaseSRWLockShared(&g_lock);
     (void)sh_saved_maps_each(mc_report_slot, rep, NULL);
-    mc_report_dir(rep, saved, "kept", 1);
-    mc_report_dir(rep, published, "played", 0);
-    for (i = 0; i < rep->nitems; i++) free(rep->items[i]);
-    free(rep->items);
-    rep->items = NULL;
-    rep->nitems = 0;
+    mc_report_dir(rep, saved, 0);
+    mc_report_dir(rep, published, 1);
     free(saved);
     free(published);
 }
 
+static int mc_use_compare(const void *a, const void *b)
+{
+    const mc_blob_use *x = a, *y = b;
+    int c = strcmp(x->sha, y->sha);
+    return c ? c : x->row < y->row ? -1 : x->row > y->row;
+}
+
+static void mc_report_sizes(mc_report *rep)
+{
+    size_t begin, end, i;
+    if (!rep->nuses) return;
+    qsort(rep->uses, rep->nuses, sizeof *rep->uses, mc_use_compare);
+    for (begin = 0; begin < rep->nuses; begin = end) {
+        const mc_blob_use *first = &rep->uses[begin];
+        int shared = 0;
+        for (end = begin + 1; end < rep->nuses && !strcmp(first->sha, rep->uses[end].sha); end++)
+            if (_stricmp(rep->rows[first->row].map, rep->rows[rep->uses[end].row].map)) shared = 1;
+        rep->total += first->bytes;
+        for (i = begin; i < end; i++) {
+            mc_report_row *row = &rep->rows[rep->uses[i].row];
+            if (i != begin && rep->uses[i].row == rep->uses[i-1].row) continue;
+            row->bytes += first->bytes;
+            if (shared) row->shared += first->bytes;
+        }
+    }
+}
+
+static void mc_report_free(mc_report *rep)
+{
+    size_t i;
+    for (i = 0; i < rep->nrows; i++) { free(rep->rows[i].map); free(rep->rows[i].name); }
+    for (i = 0; i < rep->nunits; i++) mc_unit_free(&rep->units[i]);
+    for (i = 0; i < rep->nslots; i++) free(rep->slot_items[i]);
+    free(rep->slot_items);
+    mpj_free(rep->links);
+    free(rep->rows);
+    free(rep->units);
+    free(rep->uses);
+}
+
+static char *mc_storage_report(sh_cache_line_fn fn, void *context, int *lines)
+{
+    mc_report rep = {0};
+    size_t i;
+    char size[32], share[32], *summary;
+    mc_report_run(&rep);
+    if (rep.failed) { mc_report_free(&rep); return sh_text("Map content could not be read. Refresh to try again."); }
+    mc_report_sizes(&rep);
+    for (i = 0; fn && i < rep.nrows; i++) {
+        mc_report_row *r = &rep.rows[i];
+        const char *after = !r->complete ? " Some content is missing. Play this map online to get it." :
+                            !r->editable ? " This mod has no editable content." : "";
+        char *line;
+        mc_size_text(size, sizeof size, r->bytes);
+        mc_size_text(share, sizeof share, r->shared);
+        line = sh_textf("A map you %s: %s, %zu object%s, %s%s%s%s.%s", r->kind, r->name, r->objects,
+                        r->objects == 1 ? "" : "s", size, r->shared ? " (" : "", r->shared ? share : "",
+                        r->shared ? " of it shared with other maps)" : "", after);
+        if (line) { fn(context, line, r->complete && r->editable ? r->hash : ""); (*lines)++; }
+        free(line);
+    }
+    mc_size_text(size, sizeof size, rep.total);
+    summary = sh_textf("Map content: %s for %zu map%s.", size, rep.maps, rep.maps == 1 ? "" : "s");
+    mc_report_free(&rep);
+    return summary;
+}
+
 char *sh_cache_storage_line(void)
 {
-    mc_report rep;
-    char size[32], *line;
-    memset(&rep, 0, sizeof rep);
-    mc_report_run(&rep);
-    mc_size_text(size, sizeof size, rep.total);
-    line = sh_textf("Map content: %s for %u map%s.", size, (unsigned)rep.maps, rep.maps == 1 ? "" : "s");
-    free(rep.files.v);
-    return line;
+    return mc_storage_report(NULL, NULL, NULL);
 }
 
 int sh_cache_report(sh_cache_line_fn fn, void *context)
 {
-    mc_report rep;
-    char size[32], *line;
-    memset(&rep, 0, sizeof rep);
-    rep.fn = fn;
-    rep.ctx = context;
-    mc_report_run(&rep);
-    mc_size_text(size, sizeof size, rep.total);
-    line = sh_textf("Map content: %s for %u map%s.", size, (unsigned)rep.maps, rep.maps == 1 ? "" : "s");
-    if (line && fn) { fn(context, line, NULL); rep.lines++; }
-    free(line);
-    free(rep.files.v);
-    return (int)rep.lines;
+    int lines = 0;
+    char *summary = mc_storage_report(fn, context, &lines);
+    if (fn && summary) { fn(context, summary, NULL); lines++; }
+    free(summary);
+    return lines;
 }
 
 void sh_cache_copy_free(sh_cache_copy *c)
@@ -2846,7 +2989,7 @@ int sh_cache_stage_copy(const char *chash, sh_cache_copy *out, char **why)
     mc_src src;
     char *reason = NULL, *text = NULL;
     const char *title;
-    int ok = 0;
+    int ok = 0, editable = 0;
     if (why) *why = NULL;
     if (out) memset(out, 0, sizeof *out);
     memset(&built, 0, sizeof built);
@@ -2854,7 +2997,7 @@ int sh_cache_stage_copy(const char *chash, sh_cache_copy *out, char **why)
     memset(&rep, 0, sizeof rep);
     rep.want = chash;
     mc_report_run(&rep);
-    free(rep.files.v);
+    mc_report_free(&rep);
     if (!rep.found.count) {
         if (why) *why = sh_text("No map on this computer uses this mod any more; press Refresh.");
         sh_modmanifest_list_free(&rep.found);
@@ -2866,7 +3009,7 @@ int sh_cache_stage_copy(const char *chash, sh_cache_copy *out, char **why)
     units = n ? (mc_unit *)calloc(n, sizeof *units) : NULL;
     manifests = n ? (const char **)calloc(n, sizeof *manifests) : NULL;
     lens = n ? (size_t *)calloc(n, sizeof *lens) : NULL;
-    if (!n || !units || !manifests || !lens) { reason = sh_textf("%s could not be copied: Snapmap+ ran out of memory.", title); goto done; }
+    if (n && (!units || !manifests || !lens)) { reason = sh_textf("%s could not be copied: Snapmap+ ran out of memory.", title); goto done; }
     for (i = 0; i < n; i++) {
         mc_unit_load(&units[i], row->units[i]);
         if (units[i].state != 1) {
@@ -2878,8 +3021,10 @@ int sh_cache_stage_copy(const char *chash, sh_cache_copy *out, char **why)
          * "spelled", and serving maps that namespace to the copy's salt (modserve.c). */
         manifests[i] = units[i].bytes;
         lens[i] = units[i].len;
+        if (units[i].author_content) editable = 1;
         if (strcmp(row->roots[i], SH_UNIT_WHOLE)) out->objects++;
     }
+    if (!editable) { reason = sh_textf("%s has no editable content to copy.", title); goto done; }
     strcpy_s(out->salt, sizeof out->salt, row->salt);
     out->name = sh_modmanifest_row_name(row)[0] ? sh_textf("%s (my copy)", row->name) : sh_text("My copy of a mod");
     out->dir = mc_path("partial\\copy-%lu-%llu", GetCurrentThreadId(), (unsigned long long)GetTickCount64());

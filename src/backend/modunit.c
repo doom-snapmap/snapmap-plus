@@ -1791,8 +1791,9 @@ int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t 
             size_t blen = 0;
             char *to, *cause = NULL, have[SH_MB_HASH_HEX + 1];
             unsigned long long size = 0;
-            if (!at || at->type != MPJ_STR || !p || p->type != MPJ_STR || !sha || sha->type != MPJ_STR) continue;
-            if (strstr(at->text, "..") || strchr(at->text, '\\') || at->text[0] == '/' || strchr(at->text, ':')) {
+            if (!at) continue;  /* A derived game reference has no file in the author's folder. */
+            if (at->type != MPJ_STR || !p || p->type != MPJ_STR || !sha || sha->type != MPJ_STR ||
+                !at->text[0] || strstr(at->text, "..") || strchr(at->text, '\\') || at->text[0] == '/' || strchr(at->text, ':')) {
                 sh_text_set(&reason, "unit %.16s names a file at no valid path", hash);
                 break;
             }

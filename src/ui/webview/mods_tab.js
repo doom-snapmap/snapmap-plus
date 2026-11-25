@@ -494,10 +494,10 @@ var modsTab = (function () {
      "lines", "" naming the storage line, a token the map mod Add to my mods copies. */
   function normContent(d) {
     d = obj(d) || {};
-    var lines = arr(d.lines).map(str), rows = arr(d.rows).map(str), out = {storage: str(d.storage), rows: [], known: true}, i;
+    var lines = arr(d.lines).map(str), rows = arr(d.rows), out = {storage: str(d.storage), rows: [], known: true}, i;
     for (i = 0; i < lines.length; i++) {
       if (!lines[i]) continue;
-      if (rows[i]) out.rows.push({text: lines[i], token: rows[i]});
+      if (rows[i] === null || str(rows[i])) out.rows.push({text: lines[i], token: str(rows[i])});
       else if (!out.storage) out.storage = lines[i];
     }
     return out;
@@ -971,12 +971,14 @@ var modsTab = (function () {
           row.setAttribute('role', 'listitem');
           row.appendChild(statusIcon(IN_MAP_GLYPH));
           row.appendChild(el('span', 'mods-content-text', r.text));
-          var add = el('button', 'btn mods-content-add', 'Add to my mods');
-          add.type = 'button';
-          add.title = ADD_MINE_TITLE;
-          add.disabled = !!busy;
-          add.addEventListener('click', function () { act('addToMine', r.token); });
-          row.appendChild(add);
+          if (r.token) {
+            var add = el('button', 'btn mods-content-add', 'Add to my mods');
+            add.type = 'button';
+            add.title = ADD_MINE_TITLE;
+            add.disabled = !!busy;
+            add.addEventListener('click', function () { act('addToMine', r.token); });
+            row.appendChild(add);
+          }
           list.appendChild(row);
         });
         if (content.rows.length) body.appendChild(list);

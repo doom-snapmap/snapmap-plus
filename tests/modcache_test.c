@@ -1065,7 +1065,8 @@ static void test_cache(const char *top)
             free(why);
             why = NULL;
             {
-                static const char spelled[] = "{\"files\":[],\"format\":1,\"game\":[],\"mod\":{},\"root\":{\"kind\":\"entity\","
+                static const char spelled[] = "{\"files\":[],\"format\":1,\"game\":[],\"mod\":{\"requirements\":"
+                                              "{\"cvars\":{\"g_useResourceBlackList\":0}}},\"root\":{\"kind\":\"entity\","
                                               "\"name\":\"entities/spelt\"},\"spelled\":\"" SALT "\"}";
                 static const char lacking[] = "{\"files\":[{\"path\":\"entities/gone.decl\",\"sha256\":"
                                               "\"0000000000000000000000000000000000000000000000000000000000000001\",\"size\":7}],"
@@ -1597,6 +1598,131 @@ static void test_key(const char *top)
     free(why);
 }
 
+typedef struct report_result {
+    char lines[8][400], tokens[8][65];
+    int count;
+} report_result;
+
+static void report_line(void *context, const char *line, const char *row)
+{
+    report_result *r = context;
+    CHECK(r->count < 8);
+    if (r->count >= 8) return;
+    strcpy_s(r->lines[r->count], sizeof r->lines[0], line);
+    strcpy_s(r->tokens[r->count++], sizeof r->tokens[0], row ? row : "storage");
+}
+
+static void check_report(report_result *r, int maps, int rows, int kb)
+{
+    char summary[64];
+    memset(r, 0, sizeof *r);
+    CHECK(sh_cache_report(report_line, r) == rows + 1 && r->count == rows + 1);
+    snprintf(summary, sizeof summary, "Map content: %d KB for %d map%s.", kb, maps, maps == 1 ? "" : "s");
+    CHECK(!strcmp(r->lines[r->count-1], summary));
+}
+
+static void report_map(const char *dir, const char *leaf, const char *const *hashes, size_t count, char *token)
+{
+    const char *roots[] = {"entities/alpha", "entities/beta"};
+    const char body[] = "{\"entities\":[]}";
+    char path[MAX_PATH * 3], err[256], *text;
+    size_t len;
+    sh_modmanifest_row row = {0};
+    sh_modmanifest_list list = {0};
+    strcpy_s(row.salt, sizeof row.salt, SALT);
+    CHECK(sh_modmanifest_row_pin(&row, roots, hashes, count));
+    CHECK(sh_modmanifest_row_set_name(&row, "Pack") && sh_modmanifest_list_add(&list, &row));
+    if (token) strcpy_s(token, 65, row.build);
+    text = sh_modmanifest_write(body, strlen(body), &list, &len, err, sizeof err);
+    CHECK(text != NULL);
+    if (text) { snprintf(path, sizeof path, "%s\\%s", dir, leaf); write_file(path, text, len); }
+    sh_modmanifest_row_free(&row);
+    sh_modmanifest_list_free(&list);
+    free(text);
+}
+
+static void test_local_content_report(const char *top)
+{
+    char dir[MAX_PATH*2], mods[MAX_PATH*2], saves[MAX_PATH*2], saved[MAX_PATH*2], played[MAX_PATH*2];
+    char blob[1024], digest[65], manifest[600], unit[65], empty_hash[65], pin[65], *why = NULL;
+    const char nil[] = "{\"format\":1,\"files\":[],\"mod\":{},\"game\":[]}";
+    const char *hashes[2] = {unit, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"};
+    size_t len;
+    int damaged = 0;
+    report_result r;
+    sh_cache_copy copy;
+    snprintf(dir, sizeof dir, "%s\\report", top);
+    snprintf(mods, sizeof mods, "%s\\mods", dir);
+    snprintf(saves, sizeof saves, "%s\\saves", dir);
+    snprintf(saved, sizeof saved, "%s\\kept", dir);
+    snprintf(played, sizeof played, "%s\\played", dir);
+    CreateDirectoryA(dir, NULL); CreateDirectoryA(mods, NULL); CreateDirectoryA(saves, NULL);
+    CreateDirectoryA(saved, NULL); CreateDirectoryA(played, NULL);
+    sh_cache_set_mods_root(mods);
+    sh_cache_set_map_folders(saved, played);
+    sh_saved_maps_set_root(saves);
+    memset(blob, ' ', sizeof blob);
+    memcpy(blob, "-- test script\n", 15);
+    sh_mb_sha256_hex(blob, sizeof blob, digest);
+    len = snprintf(manifest, sizeof manifest, "{\"format\":1,\"files\":["
+                   "{\"path\":\"scripts/first.lua\",\"sha256\":\"%s\",\"size\":1024},"
+                   "{\"path\":\"scripts/second.lua\",\"sha256\":\"%s\",\"size\":1024}],\"mod\":{},\"game\":[]}", digest, digest);
+    sh_mb_sha256_hex(manifest, len, unit);
+    report_map(played, "aaaa_revision1_map.decl", hashes, 1, pin);
+    check_report(&r, 0, 0, 0);
+    CHECK(sh_cache_put_manifest(unit, manifest, len));
+    check_report(&r, 0, 0, 0);
+    CHECK(!sh_cache_stage_copy(pin, &copy, &why) && why && !copy.dir);
+    free(why); why = NULL;
+
+    CHECK(sh_cache_import_blob(digest, blob, sizeof blob, &damaged));
+    report_map(played, "aaaa_revision2_map.decl", hashes, 1, NULL);
+    check_report(&r, 1, 1, 1);
+    CHECK(!strstr(r.lines[0], "shared") && strstr(r.lines[0], "1 object, 1 KB.") && !strcmp(r.tokens[0], pin));
+    CHECK(sh_cache_stage_copy(pin, &copy, &why) && !why && copy.dir);
+    if (copy.dir) {
+        char path[MAX_PATH*3];
+        snprintf(path, sizeof path, "%s\\scripts\\first.lua", copy.dir);
+        CHECK(mt_exists(path) && links_of(path) == 1);
+        snprintf(path, sizeof path, "%s\\scripts\\second.lua", copy.dir);
+        CHECK(mt_exists(path) && links_of(path) == 1);
+    }
+    sh_cache_copy_free(&copy);
+
+    report_map(saved, "aaaa_revision3_map.decl", hashes, 2, pin);
+    check_report(&r, 1, 2, 1);
+    CHECK(!r.tokens[0][0] && strstr(r.lines[0], "Some content is missing") && !strstr(r.lines[0], "shared"));
+    CHECK(!sh_cache_stage_copy(pin, &copy, &why) && why && !copy.dir);
+    free(why); why = NULL;
+
+    report_map(played, "bbbb_revision1_map.decl", hashes, 1, NULL);
+    check_report(&r, 2, 3, 1);
+    for (int i = 0; i < 3; i++) CHECK(strstr(r.lines[i], "1 KB (1 KB of it shared with other maps)"));
+
+    sh_mb_sha256_hex(nil, sizeof nil - 1, empty_hash);
+    CHECK(sh_cache_put_manifest(empty_hash, nil, sizeof nil - 1));
+    hashes[0] = empty_hash;
+    report_map(played, "cccc_revision1_map.decl", hashes, 1, pin);
+    check_report(&r, 3, 4, 1);
+    CHECK(strstr(r.lines[3], "no editable content") && !r.tokens[3][0]);
+    CHECK(!sh_cache_stage_copy(pin, &copy, &why) && why && strstr(why, "no editable content") && !copy.dir);
+    free(why);
+    hashes[0] = unit;
+    report_map(saved, "source_revision1_map.decl", hashes, 1, NULL);
+    check_report(&r, 4, 5, 1);
+    CHECK(sh_mb_record_put(mods, "links", "{\"aaaa\":{\"cloud\":\"source\"}}"));
+    check_report(&r, 3, 4, 1);
+    CHECK(sh_mb_record_put(mods, "links", "{\"aaaa\":{\"cloud\":\"source\"},\"bbbb\":{\"cloud\":\"source\"}}"));
+    check_report(&r, 4, 5, 1);
+    /* The current signed slot has no pinned rows. Its older cloud copy no longer adds a map. */
+    write_slot(saves, "0123456789ABCDEF0123", "source", "{\"entities\":[]}", 15);
+    check_report(&r, 3, 4, 1);
+    sh_saved_maps_set_root(NULL);
+    sh_cache_set_map_folders(NULL, NULL);
+    sh_cache_set_mods_root(NULL);
+}
+
+
 int main(void)
 {
     char top[MAX_PATH];
@@ -1613,6 +1739,7 @@ int main(void)
     test_notices();
     printf("-- the cache: compose, one copy, determinism, stand-ins, local mods, sweep\n");
     test_cache(top);
+    test_local_content_report(top);
     test_product_pointer(top);
     test_sweep_held(top);
     printf("-- a local row whose mod is not here stands in (Q8)\n");

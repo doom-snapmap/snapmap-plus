@@ -886,7 +886,8 @@ These backend files share the work:
   (the resolver modui.c binds). The `content` answer (`mu_content`) reports
   the map content on disk: `lines`, one per kept or played map's mod and then
   the storage line, and `rows` beside them, each line's row for Add to my mods
-  (`addToMine`).
+  (`addToMine`). A copyable row carries its composition hash, a partial or
+  empty row carries JSON null, and the storage line carries an empty string.
   `modmap.c` reads the open map's entities, wires and Timeline references from
   its serialized JSON for it.
 - `modpublished.c` holds a published or My Maps launch whose manifest names a
@@ -5624,8 +5625,14 @@ read (a slot that does not decode, a row that does not parse, a folder that
 cannot be listed) may use anything, so that sweep removes nothing and says
 why. A row of an earlier Snapmap+ shape (`id`, `bundle`) is refused but names no
 unit, so it does not count (`sh_modmanifest_list.earlier`). It never touches a local mod's files and never runs on a timer. The Mods tab's
-"Map content on disk" (the `content` action) reports it from this computer
-alone.
+"Map content on disk" reads the cached manifests and checks which files are present.
+It shows a mod once per map and distinct composition when at least one unit is
+available. Revisions of the same cloud item count as one map. A signed save
+supplies its current rows in place of its cloud mirror. An unambiguous local
+publication record connects a saved source to its published item. Each stored blob
+counts once in the total and once in each row that uses it. Both maps report
+the shared bytes when two different maps use that blob. A complete row with
+editable files or mod settings can be copied.
 
 `sh_cache_publish_unit` uploads a unit the store lacks (begin, archives of at
 most one request, a larger file in parts, complete), whoever authored the mod;

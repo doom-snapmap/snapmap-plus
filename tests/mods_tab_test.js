@@ -1708,6 +1708,14 @@ test('the content answer: lines and a parallel rows array of tokens; "" marks th
   assert.deepEqual(modsTab.normContent({lines: ['only a line']}), {storage: 'only a line', rows: [], known: true}, 'an answer without rows has no rows');
   assert.deepEqual(modsTab.normContent({storage: 7, lines: 'no', rows: {}}), {storage: '7', rows: [], known: true});
 });
+test('an incomplete map row remains visible without an Add button', () => {
+  const h = live(v4, {storage: 'Map content', lines: ['Complete mod', 'Partly downloaded mod'], rows: ['copy', null]});
+  const rows = h.nodes.modsList.children[1].all('mods-content-line');
+  assert.equal(rows.length, 2);
+  assert.equal(rows[1].textContent, 'Partly downloaded mod');
+  assert.equal(rows[1].tags('button').length, 0);
+  assert.equal(rows[0].tags('button').length, 1);
+});
 test('Maps on this computer: the last group of the list, one row per kept map\'s mod, shown only when there is something to show', () => {
   const h = live(v4, KEPT);
   const areas = h.nodes.modsList.children;
