@@ -11,6 +11,7 @@ void sh_modpublish_poll(void) {}
 void sh_modlobby_poll(void) {}
 void sh_script_game_cvar_recover_poll(void) {}
 void sh_rawmap_poll_main(void) {}
+void sh_modui_prefab_finished(void) {}
 int sh_modui_poll_due(void) { return 0; }
 int sh_modui_poll_main(void *context) { (void)context; return 0; }
 

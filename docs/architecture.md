@@ -5164,6 +5164,9 @@ else "an unnamed mod": a player never sees a salt), with its salt and build.
 Load / Place reads the prefab's rows with `MODS_RESOLVE`. A complete composition can join the
 open map immediately. For a new composition, a worker builds and indexes the unit files that came
 with the prefab's ZIP. The tab resumes the placement automatically if the same map is still open.
+The editor can then read the pending prefab's named files. Before native paste, each modded entity's
+inherit must match a live palette prototype. A missing row triggers one palette rebuild. Accepting
+the placement applies its map requirements, and cancelling releases the temporary file access.
 
 - a module prefab naming a module no row provides and the palette lacks (DLC
   the player does not own) is refused with the module guard's toast and

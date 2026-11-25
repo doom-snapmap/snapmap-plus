@@ -2582,23 +2582,48 @@ static int pal_ready(void *context)
 
 /* Linear over the rows (about 1,300 on 13954591): the array is sorted by the
  * synthesized record's inherit name, not by sedef name. */
+static int pal_contains(const char *key, int inherit)
+{
+    const unsigned char *palette = sh_timeline_tile_palette();
+    void *entries = NULL;
+    int count = 0;
+    if (!palette || !key || !sh_read_ptr(palette + PAL_ENTRIES_OFF, &entries) || !entries ||
+        !sh_read_i32(palette + PAL_COUNT_OFF, &count) || count <= 0 || count > PAL_MAX) return 0;
+    for (int i = 0; i < count; i++) {
+        const unsigned char *entry = (const unsigned char *)entries + (size_t)i * PAL_STRIDE;
+        void *record = NULL, *name = NULL;
+        /* The native pasted entity matches the prototype's inherit; registration matches the editor declaration. */
+        if (!sh_read_ptr(entry + (inherit ? 0x150 : 0), &record) || !record ||
+            !sh_read_ptr((const unsigned char *)record + (inherit ? 0x58 : SEDEF_NAME_OFF), &name) || !name) continue;
+        __try { if (!_stricmp(key, name)) return 1; }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    return 0;
+}
+
 static int pal_has(void *context, const char *sedef_name)
 {
-    unsigned char *palette = (unsigned char *)sh_timeline_tile_palette();
-    void *entries = NULL;
-    int count = 0, i, found = 0;
     (void)context;
-    if (!palette || !sedef_name || !sh_read_ptr(palette + PAL_ENTRIES_OFF, &entries) ||
-        !sh_read_i32(palette + PAL_COUNT_OFF, &count) || !entries || count <= 0 || count > PAL_MAX) return 0;
-    for (i = 0; i < count && !found; ++i) {
-        void *sedef = NULL, *name = NULL;
-        const unsigned char *entry = (const unsigned char *)entries + (size_t)i * PAL_STRIDE;
-        if (!sh_read_ptr(entry, &sedef) || !sedef || !sh_read_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &name) || !name)
-            continue;
-        __try { found = !_stricmp((const char *)name, sedef_name); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { found = 0; }
+    return pal_contains(sedef_name, 0);
+}
+
+int sh_modserve_prefab_rows(const char *const *inherits, size_t count, const char **missing)
+{
+    int rebuilt = 0, before = -1, after = -1;
+    if (missing) *missing = NULL;
+    for (size_t i = 0; i < count; i++) {
+        if (pal_contains(inherits[i], 1)) continue;
+        if (!rebuilt && me_on_main() == 1 && g_bound) {
+            rebuilt = 1;
+            int r = sh_timeline_tile_rebuild_palette(&before, &after);
+            if (r == SH_TL_REBUILD_OK && pal_contains(inherits[i], 1)) continue;
+            me_log("prefab: palette %d -> %d; %s is missing (%s)", before, after, inherits[i],
+                   r == SH_TL_REBUILD_OK ? "row not admitted" : me_rebuild_reason(r));
+        }
+        if (missing) *missing = inherits[i];
+        return 0;
     }
-    return found;
+    return 1;
 }
 
 static int pal_rebuild(void *context, int *before, int *after)

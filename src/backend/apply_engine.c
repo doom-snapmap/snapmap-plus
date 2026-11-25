@@ -223,6 +223,7 @@ static volatile LONG        g_place_seq;
 static volatile LONG        g_place_decided;
 static const char *volatile  g_place_reason = "";  /* one of the g_place_why phrases, or "" */
 static const char          *g_place_why;          /* game thread: the staged-only cause */
+static int                  g_paste_finishing;
 static volatile LONG        g_paste_watch;        /* 0 none, 1 queued, 2 held */
 static volatile ULONGLONG   g_paste_queued_at;
 /* A Load/Place armed the native paste. When its boxes arrive and one carries the AI Navigation tick, the same update
@@ -1338,7 +1339,9 @@ static int ae_run_item(int kind, int id, const char *text)
         int pr = ae_mkcmd_instantiate(text);
         g_place_reason = pr == AE_PASTE_ARMED ? "" : (g_place_why ? g_place_why : "");
         InterlockedExchange(&g_place_decided, pr);
+        if (pr != AE_PASTE_ARMED) sh_modui_prefab_finished();
         if (pr == AE_PASTE_ARMED) {
+            g_paste_finishing = 1;
             g_nav_place_tick = GetTickCount64();
             InterlockedExchange(&g_nav_place_pending, 1);
             g_paste_queued_at = GetTickCount64();
@@ -3006,6 +3009,13 @@ void sh_apply_prefab_poll_play(void)
 {
     if (ae_on_main_thread() != 1) return;
     ae_main_call_poll();
+    if (g_paste_finishing) {
+        (void)sh_apply_engine_place_watch(NULL, NULL, NULL);
+        if (!InterlockedCompareExchange(&g_paste_watch, 0, 0)) {
+            g_paste_finishing = 0;
+            sh_modui_prefab_finished();
+        }
+    }
     ae_nav_refresh_poll();
     /* Held published or My Maps launches: the question, its answer, the fetch
      * and the resume. Runs in menus too, where the editor frame does not. */

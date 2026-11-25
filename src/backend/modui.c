@@ -3467,6 +3467,13 @@ static int mu_scope_now_declared(const char *phase)
 
 int sh_modui_scope_refresh(const char *why) { return mu_on_main() ? mu_scope_now_declared(why) : -1; }
 
+void sh_modui_prefab_finished(void)
+{
+    if (!sh_modserve_prefab_pending()) return;
+    (void)sh_modui_scope_refresh("prefab placement");
+    (void)sh_modserve_prefab_files(NULL, 0);
+}
+
 static int mu_scope_armed(void) { return sh_modserve_scope_relevant(); }
 
 /* The listing a load's hook just set, for that load's activation
@@ -3484,6 +3491,7 @@ static void mu_scope_hook(const sh_modmanifest_list *rows, const char *const *na
     int changed;
     /* A map is opened: an open Mods tab gets a fresh document (the window's pushed refresh). */
     if (when == SH_MODSERVE_AT_LOAD) {
+        (void)sh_modserve_prefab_files(NULL, 0);
         InterlockedIncrement(&g_gen);
         InterlockedExchange(&g_placed_reset, 1);
     }

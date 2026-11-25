@@ -515,6 +515,10 @@ int  sh_modserve_scope_enabled(void);
  * requirements. Any thread; serialised with index builds. */
 int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open);
 
+/* Temporary named files of a pending prefab in this editor; its requirements still follow committed placement. */
+int  sh_modserve_prefab_pending(void);
+int  sh_modserve_prefab_files(const char (*hashes)[SH_MODSERVE_HASH_HEX + 1], int count);
+
 /* The row resolver. A pinned row resolves only to the content cache's composition of its units, never a local mod.
  * A local row (the player's own map) names no build: it resolves to the root folder of the salt, else with no folder
  * here to the content cache's stand-in composition of the salt (no units), whose stand-ins keep the map's objects in
@@ -959,6 +963,8 @@ int sh_modserve_is_mod_sedef(const char *name);
  * every parse, main thread only, and n <= 0 returns 0 and logs nothing. It then registers the editor rows the built
  * palette lacks and rebuilds the palette once (sh_modserve_map_rows_sync). Returns the number of ready steps, or -1
  * when refused (not the main thread, registry unavailable). */
+/* Make the named prefab objects available for native paste. Every requested entity must own a live palette row. */
+int sh_modserve_prefab_rows(const char *const *inherits, size_t count, const char **missing);
 int modserve_activate_bundles(const char *const *bundle_hashes, int n);
 /* The listing's declared builds (the last sh_modserve_scope_set), in row order: up to cap copied into out (NULL to
  * count). Returns the count. */

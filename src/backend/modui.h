@@ -195,6 +195,7 @@ void sh_modui_set_key(char *(*action)(const char *arg), char *(*status)(void));
 /* Refresh the listing and register its current declarations and palette rows before a prefab is placed.
  * Main thread: 1 if the listing changed, 0 if it stayed the same, -1 off the main thread. */
 int  sh_modui_scope_refresh(const char *why);
+void sh_modui_prefab_finished(void);
 
 /* The interface slot body (see snapmap_plus_iface.h, `mods`). */
 int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
