@@ -5547,11 +5547,12 @@ editor's Play) and at every save.
 
 `modcache.c` keeps one cache per machine at `cache\content\`: each file once
 in `files\<sha[0:2]>\<sha>` (read-only, checked when it arrives), manifests in
-`units\`, and per pinned row a composition at `served\<composition hash>\`, a
-built mod folder (`sh_unit_compose_ex`) whose files are hard links to the blobs
-or to a local mod's files of the same SHA-256 (D21; a local file is checked
-again whenever its size or time changed, D51), with `served\<hash>.json`
-saying what it holds. The composition hash (`sh_modmanifest_composition_hash`)
+`units\`, and a `served\<composition hash>\` directory for each pinned row. Its
+`served\<hash>.json` sidecar selects a completed `<hash>.g-<generation>` folder.
+Replacing this small file publishes a rebuild while readers continue using
+files from the previous folder. Earlier sidecars with no generation use
+`<hash>\` directly. A composition's files are hard links to blobs or local
+mod files checked by SHA-256 (D21, D51). The composition hash (`sh_modmanifest_composition_hash`)
 is the pinned row's build hash in memory, and the serving index scans
 `cache\content\served\` as an area of its own, so the map scope declares the
 composition as it declares any build and a pinned row resolves to its

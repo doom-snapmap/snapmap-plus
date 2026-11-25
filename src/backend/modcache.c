@@ -6,6 +6,7 @@
 
 #include "modcache.h"
 #include "mod_paths.h"
+#include "composition_path.h"
 #include "modmanifest.h"
 #include "modunit.h"
 #include "modbundle.h"
@@ -157,7 +158,7 @@ static int mc_dir_exists(const char *path)
     wchar_t *w = sh_mb_wpath(path);
     DWORD a = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
     free(w);
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) && !(a & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 
 static int mc_delete(const char *path)
@@ -171,6 +172,7 @@ static int mc_delete(const char *path)
 
 static void mc_rmtree_w(const wchar_t *top)
 {
+    if (GetFileAttributesW(top) & FILE_ATTRIBUTE_REPARSE_POINT) { RemoveDirectoryW(top); return; }
     WIN32_FIND_DATAW fd;
     wchar_t *pattern = sh_wtextf(L"%s\\*", top);
     HANDLE h = pattern ? FindFirstFileW(pattern, &fd) : INVALID_HANDLE_VALUE;
@@ -794,15 +796,24 @@ int sh_cache_row_known(const char *chash)
     return known;
 }
 
+static mpj *mc_composition_info(const char *chash)
+{
+    char *base = mc_hex64(chash) ? mc_path("served\\%s", chash) : NULL;
+    mpj *side = base ? sh_composition_side(base) : NULL;
+    char *dir = side ? sh_composition_dir(base, side) : NULL;
+    const mpj *c = side ? mpj_get(side, "complete") : NULL;
+    if (!dir || !mc_dir_exists(base) || !mc_dir_exists(dir) || !c || c->type != MPJ_BOOL) { mpj_free(side); side = NULL; }
+    free(base);
+    free(dir);
+    return side;
+}
+
 int sh_cache_absent_causes(const char *chash, unsigned *mask)
 {
-    char *dir = mc_hex64(chash) ? mc_path("served\\%s", chash) : NULL, *side = dir ? sh_textf("%s.json", dir) : NULL;
-    int here = dir && mc_dir_exists(dir) && side && mc_exists(side, NULL);
+    mpj *j = mc_composition_info(chash);
+    int here = j != NULL;
     if (mask) *mask = 0;
     if (here && mask) {
-        size_t len = 0;
-        unsigned char *t = sh_mb_read_file(side, 1u << 24, &len);
-        mpj *j = t ? mpj_parse((const char *)t, len) : NULL;
         const mpj *c = j ? mpj_get(j, "complete") : NULL, *a = j ? mpj_get(j, "absent") : NULL;
         int k;
         if (!(c && c->type == MPJ_BOOL && c->b)) {
@@ -813,32 +824,17 @@ int sh_cache_absent_causes(const char *chash, unsigned *mask)
             }
             if (!*mask) *mask = 1u;   /* stood in, no cause recorded */
         }
-        mpj_free(j);
-        free(t);
     }
-    free(dir);
-    free(side);
+    mpj_free(j);
     return here;
 }
 
 int sh_cache_composed(const char *chash, int *complete)
 {
-    char *dir = mc_hex64(chash) ? mc_path("served\\%s", chash) : NULL, *side = dir ? sh_textf("%s.json", dir) : NULL;
-    int here = dir && mc_dir_exists(dir) && side && mc_exists(side, NULL);
-    if (complete) {
-        *complete = 0;
-        if (here) {
-            size_t len = 0;
-            unsigned char *t = sh_mb_read_file(side, 1u << 24, &len);
-            mpj *j = t ? mpj_parse((const char *)t, len) : NULL;
-            const mpj *c = j ? mpj_get(j, "complete") : NULL;
-            *complete = c && c->type == MPJ_BOOL && c->b;
-            mpj_free(j);
-            free(t);
-        }
-    }
-    free(dir);
-    free(side);
+    mpj *side = mc_composition_info(chash);
+    int here = side != NULL;
+    if (complete) *complete = here && mpj_get(side, "complete")->b;
+    mpj_free(side);
     return here;
 }
 
@@ -1507,33 +1503,46 @@ static void mc_module_marks(const mc_unit *units, size_t nunits, const char *sal
 }
 
 /* The sidecar beside a composition: what it holds. */
-static int mc_sidecar(const char *path, const mc_row *r, const mc_unit *units, int complete)
+static int mc_sidecar(const char *path, const mc_row *r, const mc_unit *units, int complete, const char *generation)
 {
-    char *t = sh_textf("{\"complete\":%s,\"salt\":\"%s\",\"units\":[", complete ? "true" : "false", r->salt);
+    sh_text_buf t = {0};
+    char field[200];
     size_t i;
     int first = 1, ok;
-    for (i = 0; t && i < r->n; i++) {
+    snprintf(field, sizeof field, "{\"complete\":%s,\"salt\":\"%s\"", complete ? "true" : "false", r->salt);
+    sh_text_append_str(&t, field);
+    if (generation) {
+        snprintf(field, sizeof field, ",\"generation\":\"%s\"", generation);
+        sh_text_append_str(&t, field);
+    }
+    sh_text_append_str(&t, ",\"units\":[");
+    for (i = 0; i < r->n; i++) {
         if (units[i].state != 1) continue;
-        (void)sh_text_set(&t, "%s%s\"%s\"", t, first ? "" : ",", units[i].hash);
+        snprintf(field, sizeof field, "%s\"%s\"", first ? "" : ",", units[i].hash);
+        sh_text_append_str(&t, field);
         first = 0;
     }
-    (void)sh_text_set(&t, "%s],\"absent\":[", t ? t : "");
+    sh_text_append_str(&t, "],\"absent\":[");
     first = 1;
-    for (i = 0; t && i < r->n; i++) {
+    for (i = 0; i < r->n; i++) {
         if (units[i].state == 1) continue;
-        (void)sh_text_set(&t, "%s%s{\"unit\":\"%s\",\"cause\":%d}", t, first ? "" : ",", units[i].hash, units[i].cause);
+        snprintf(field, sizeof field, "%s{\"unit\":\"%s\",\"cause\":%d}", first ? "" : ",", units[i].hash, units[i].cause);
+        sh_text_append_str(&t, field);
         first = 0;
     }
-    (void)sh_text_set(&t, "%s]", t ? t : "");
+    sh_text_append_str(&t, "]");
     if (!r->n) {
-        /* A row of no units stands in for what the map places: the names it was composed for. */
-        (void)sh_text_set(&t, "%s,\"placed\":[", t ? t : "");
-        for (i = 0; t && i < r->nplaced; i++) (void)sh_text_set(&t, "%s%s\"%s\"", t, i ? "," : "", r->placed[i]);
-        (void)sh_text_set(&t, "%s]", t ? t : "");
+        sh_text_append_str(&t, ",\"placed\":[");
+        for (i = 0; i < r->nplaced; i++) {
+            sh_text_append_str(&t, i ? ",\"" : "\"");
+            sh_text_append_str(&t, r->placed[i]);
+            sh_text_append_str(&t, "\"");
+        }
+        sh_text_append_str(&t, "]");
     }
-    (void)sh_text_set(&t, "%s}", t ? t : "");
-    ok = t && mc_write(path, t, strlen(t));
-    free(t);
+    sh_text_append_str(&t, "}");
+    ok = !t.oom && mc_write(path, t.p, t.n);
+    free(t.p);
     return ok;
 }
 
@@ -1614,7 +1623,9 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
     mc_extras extras = { 0 };
     const char **manifests = NULL;
     size_t *lens = NULL, nm = 0, i, k;
-    char *dest = NULL, *staging = NULL, *side = NULL, *old = NULL, *reason = NULL;
+    char *dest = NULL, *staging = NULL, *side = NULL, *reason = NULL;
+    char generation[33];
+    static volatile LONG serial;
     sh_mb_bundle out;
     sh_mb_resolver resolver, inner;
     int ok = 0, complete = 1, had_complete = 0, here, modules = 0;
@@ -1700,11 +1711,18 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
     if (here && !complete &&
         (snapshot.n ? mc_side_same(chash, units, snapshot.n) : mc_side_same_placed(chash, &snapshot))) {   /* nothing new */
         if (causes) {
-            char *sp = mc_path("served\\%s.json", chash);
+            char *base = mc_path("served\\%s", chash), *sp = base ? sh_textf("%s.json", base) : NULL;
             AcquireSRWLockExclusive(&g_disk);
-            if (sp) (void)mc_sidecar(sp, &snapshot, units, 0);
+            mpj *current = base ? sh_composition_side(base) : NULL;
+            const mpj *gen = current ? mpj_get(current, "generation") : NULL;
+            const mpj *whole = current ? mpj_get(current, "complete") : NULL;
+            if (whole && whole->type == MPJ_BOOL && !whole->b && sp &&
+                (snapshot.n ? mc_side_same(chash, units, snapshot.n) : mc_side_same_placed(chash, &snapshot)))
+                (void)mc_sidecar(sp, &snapshot, units, 0, gen && gen->type == MPJ_STR ? gen->text : NULL);
+            mpj_free(current);
             ReleaseSRWLockExclusive(&g_disk);
             free(sp);
+            free(base);
         }
         ok = 1;
         goto record;
@@ -1746,7 +1764,13 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
 
     dest = mc_path("served\\%s", chash);
     side = mc_path("served\\%s.json", chash);
-    staging = mc_path("served\\%s.staging-%lu-%llu", chash, GetCurrentThreadId(), (unsigned long long)GetTickCount64());
+    {
+        FILETIME now;
+        GetSystemTimeAsFileTime(&now);
+        snprintf(generation, sizeof generation, "%08lx%08lx%08lx%08lx", now.dwHighDateTime, now.dwLowDateTime,
+                 GetCurrentProcessId(), (DWORD)InterlockedIncrement(&serial));
+        staging = dest ? sh_textf("%s.g-%s", dest, generation) : NULL;
+    }
     if (!dest || !side || !staging) { reason = sh_text("out of memory"); goto done; }
     {
         char *served = mc_path("served");
@@ -1757,10 +1781,8 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
     if (!nm && !extras.n) {
         /* Nothing of the row is here and nothing stands in (an absent module): the row serves nothing. */
         complete = 0;
-        ok = mc_sidecar(side, &snapshot, units, 0) && mc_mkdirs(dest);
-        if (!ok) reason = sh_text("the content cache could not be written");
-        if (ok && built) *built = 1;
-        goto record;
+        if (!mc_mkdirs(staging)) { reason = sh_text("the content cache could not be written"); goto done; }
+        goto publish;
     }
     memset(&resolver, 0, sizeof resolver);
     if (g_resolver_set) resolver = g_resolver;
@@ -1777,7 +1799,9 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
         goto done;
     }
     sh_mb_free(&out);
-    /* Keep the previous files until the new files and their sidecar are both in place. */
+publish:
+    /* Windows can refuse to rename a directory while even one descendant is open. Only replace the row's sidecar. */
+    mc_logf("MODS: content: prepared %s.g-%s", chash, generation);
     AcquireSRWLockExclusive(&g_disk);
     if (sh_cache_composed(chash, &had_complete) && had_complete) {
         ReleaseSRWLockExclusive(&g_disk);
@@ -1785,29 +1809,9 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
         complete = ok = 1;
         goto record;
     }
-    if (mc_dir_exists(dest)) {
-        old = sh_textf("%s.old-%llu", dest, (unsigned long long)GetTickCount64());
-        if (!old || !mc_move(dest, old)) {
-            ReleaseSRWLockExclusive(&g_disk);
-            mc_rmtree(staging);
-            reason = sh_text("the earlier composition is in use; it is replaced at the next start");
-            goto done;
-        }
-    }
-    if (!mc_move(staging, dest)) {
-        mc_logf("MODS: content: moving the prepared composition failed (Windows error %lu)", GetLastError());
-    } else if (mc_sidecar(side, &snapshot, units, complete)) {
-        ok = 1;
-    } else {
-        mc_logf("MODS: content: the composition's sidecar could not be replaced");
-        if (!mc_move(dest, staging))
-            mc_logf("MODS: content: moving the uncommitted composition aside failed (Windows error %lu)", GetLastError());
-    }
-    if (!ok && old && !mc_move(old, dest))
-        mc_logf("MODS: content: the earlier composition is retained at '%s' (Windows error %lu)", old, GetLastError());
+    ok = mc_mkdirs(dest) && mc_sidecar(side, &snapshot, units, complete, generation);
     ReleaseSRWLockExclusive(&g_disk);
-    if (!ok) { reason = sh_text("the composition could not be put in place"); goto done; }
-    if (old) mc_rmtree(old);
+    if (!ok) { reason = sh_text("the composition's sidecar could not be put in place"); goto done; }
     mc_logf("MODS: content: %s composed from %zu unit(s)%s%s", snapshot.name, nm, complete ? "" : ", with stand-ins for ",
             complete ? "" : "the objects that are not here");
     if (built) *built = 1;
@@ -1871,7 +1875,6 @@ done:
     free(dest);
     free(side);
     free(staging);
-    free(old);
     mc_row_clear(&snapshot);
     return ok;
 }
@@ -2586,14 +2589,31 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
         char hash[SH_CACHE_HASH_HEX + 1], *path = sh_textf("%s\\%s", sdir, names[i]);
         int stale = strlen(names[i]) != 64;
         if (!stale) { memcpy(hash, names[i], 65); stale = !mc_hex64(hash) || !mc_set_has(&kept.comps, hash); }
-        /* A composition being made or replaced right now (built outside this lock) is left alone; only one nothing
-         * has written for an hour is what a crash left. */
-        else stale = path && mc_untouched_for(path, MC_PARTIAL_IDLE_S);
+        else {
+            stale = path && mc_untouched_for(path, MC_PARTIAL_IDLE_S);
+            if (stale && strlen(names[i]) == 99 && !strncmp(names[i] + 64, ".g-", 3)) {
+                memcpy(hash, names[i], 64);
+                hash[64] = 0;
+                if (mc_hex64(hash) && mc_set_has(&kept.comps, hash)) {
+                    char *base = sh_textf("%s\\%s", sdir, hash);
+                    mpj *current = base ? sh_composition_side(base) : NULL;
+                    const mpj *gen = current ? mpj_get(current, "generation") : NULL;
+                    if (mpj_str_is(gen, names[i] + 67)) stale = 0;
+                    if (!current && base) {
+                        char *side_path = sh_textf("%s.json", base);
+                        if (!side_path || mc_exists(side_path, NULL)) stale = 0;
+                        free(side_path);
+                    }
+                    mpj_free(current);
+                    free(base);
+                }
+            }
+        }
         if (path && stale && mc_rmtree(path)) {
             char *side = strlen(names[i]) == 64 ? sh_textf("%s.json", path) : NULL;
             if (side) mc_delete(side);
             free(side);
-            st.served_removed++;
+            if (strlen(names[i]) == 64) st.served_removed++;
         }
         free(path);
     }

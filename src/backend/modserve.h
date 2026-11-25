@@ -521,8 +521,7 @@ int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
  * place. A bare hash resolves the same way: the root's folder at the hash, else the composition. Any thread. */
 /* The folder mods\maps\: the index never reads it, the store never writes or lists it, and no mod is made there. */
 #define SH_MODSERVE_RETIRED_PLACES "maps"
-/* The content cache's area (modcache.h): <data>\cache\content\served\<composition hash>\, one bundle per pinned map
- * row, named by its composition hash; a pinned row resolves to its composition only. */
+/* The content cache's area (modcache.h). The composition hash identifies the map row and its sidecar selects the files. */
 #define SH_MODSERVE_CONTENT   "content"
 
 /* Set the mode (SH_MODSERVE_MODE_*): the Play entry sets PLAY (sh_modserve_scope_source, SH_MODSERVE_AT_PLAY), a map

@@ -218,7 +218,7 @@ int main(int argc, char **argv)
         memset(&list, 0, sizeof list);
         sh_modmanifest_list_add(&list, &row1);
         sh_cache_on_load(&list, NULL, 0);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s", mt_cache_dir(root_a), row1.build);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s", mt_composition(root_a, row1.build));
         memset(&c, 0, sizeof c);
         step(sh_cache_composed(row1.build, &complete) && complete && sh_mb_load_folder(path, &c), "author: map 1's row composed from the folder", NULL);
         strcpy_s(build_a, sizeof build_a, c.hash);
@@ -245,7 +245,7 @@ int main(int argc, char **argv)
             step(g_archives == 1 && strstr(g_archive_line, want) && strstr(g_archive_line, "every file"),
                  "player: one archive request brought every file of the unit", g_archive_line);
         }
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s", mt_cache_dir(root_b), row1.build);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s", mt_composition(root_b, row1.build));
         memset(&c, 0, sizeof c);
         step(code == 0 && sh_cache_composed(row1.build, &complete) && complete && sh_mb_load_folder(path, &c),
              "player: map 1's unit downloaded into a clean cache and composed", NULL);
@@ -335,7 +335,7 @@ int main(int argc, char **argv)
         sh_modmanifest_list_free(&list);
         code = sh_cache_prepare(row1.build, &io);
         step(code == 0 && sh_cache_composed(row1.build, &complete_c) && !complete_c, "offline player: the map composes with a stand-in", NULL);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\entities\\%s.decl", mt_cache_dir(root_c), row1.build, placed_name);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\entities\\%s.decl", mt_composition(root_c, row1.build), placed_name);
         {
             size_t len = 0;
             unsigned char *text = sh_mb_read_file(path, 1u << 20, &len);
