@@ -3320,6 +3320,7 @@ static int mu_saved_maps_using(const char *salt)
  * that editor is gone). */
 static volatile LONG g_scope_owed;
 static volatile LONG g_scope_editor;
+static volatile LONG g_placed_reset = 1;
 
 /* A hub launch's listing and what the product has seen of its Play, so an idle poll between the gate and the level
  * load is not taken for the end of the Play. NONE -> LAUNCHED (the gate passed; its rows are declared) -> LOADING
@@ -3393,7 +3394,7 @@ static int mu_listing_set(const sh_modmanifest_list *rows, const char *const *na
     if (n < 0 || (n > 0 && !(list = (const char **)malloc((size_t)n * sizeof *list)))) {
         free(hashes);
         mu_log("scope: the map's listing could not be computed (out of memory); the listing in force is kept");
-        return 0;
+        return -1;
     }
     for (i = 0; i < n; i++) list[i] = hashes[i];
     changed = sh_modserve_scope_set(list, n, map_open);
@@ -3402,24 +3403,28 @@ static int mu_listing_set(const sh_modmanifest_list *rows, const char *const *na
     return changed;
 }
 
-/* The listing of the map open in the editor now: its current manifest and
- * its live placed names. Returns the bundles that changed. */
+/* The editor uses the same attached, pinned and placed rows its next save would write. */
+static int mu_listing_placed(const mu_names *placed)
+{
+    const char *const *names = (const char *const *)placed->items;
+    sh_modmanifest_list rows;
+    int changed;
+    if (sh_modmanifest_version_rule(names, placed->count) > 0) InterlockedIncrement(&g_gen);
+    if (sh_modmanifest_rows_for(names, placed->count, &rows) < 0) return -1;
+    changed = mu_listing_set(&rows, NULL, 0, 1);
+    sh_modmanifest_list_free(&rows);
+    return changed;
+}
+
 static int mu_listing_live(void)
 {
     const sh_modui_engine *e = mu_engine();
-    sh_modmanifest_list rows;
-    mu_names placed;
-    int changed;
-    memset(&placed, 0, sizeof placed);
-    if (e->placed_names && e->placed_names(mu_names_add, &placed) < 0) mu_names_free(&placed);
-    /* An object placed from the installed version of a mod the map names by units moves that mod to it. */
-    if (placed.count && sh_modmanifest_version_rule((const char *const *)placed.items, placed.count) > 0)
-        InterlockedIncrement(&g_gen);
-    (void)sh_modmanifest_current(&rows);
-    changed = mu_listing_set(&rows, (const char *const *)placed.items, placed.count, 1);
+    mu_names placed = {0};
+    int changed = 0;
+    if (e->placed_names && e->placed_names(mu_names_add, &placed) >= 0 && !placed.oom)
+        changed = mu_listing_placed(&placed);
     mu_names_free(&placed);
-    sh_modmanifest_list_free(&rows);
-    return changed;
+    return changed > 0 ? changed : 0;
 }
 
 static int mu_scope_apply(const char *phase)
@@ -3427,6 +3432,15 @@ static int mu_scope_apply(const char *phase)
     const sh_modui_engine *e = mu_engine();
     InterlockedExchange(&g_scope_owed, 0);
     return e->scope_apply ? e->scope_apply(phase) : 0;
+}
+
+static void mu_scope_activate(const char *phase)
+{
+    const sh_modui_engine *e = mu_engine();
+    if (e->scope_activate) {
+        InterlockedExchange(&g_scope_owed, 0);
+        (void)e->scope_activate(phase);
+    } else (void)mu_scope_apply(phase);
 }
 
 /* After a Mods tab or console change to the open map: applied at once. */
@@ -3443,14 +3457,11 @@ static int mu_scope_now(const char *phase)
  * registered and its registries served at once, as a load would. */
 static int mu_scope_now_declared(const char *phase)
 {
-    const sh_modui_engine *e = mu_engine();
     int changed;
     if (!sh_modserve_scope_enabled()) return 0;
     changed = mu_listing_live();
     /* A composition can become ready while the map still lists the same bundle. */
-    if (!e->scope_activate) { (void)mu_scope_apply(phase); return changed; }
-    InterlockedExchange(&g_scope_owed, 0);
-    (void)e->scope_activate(phase);
+    mu_scope_activate(phase);
     return changed;
 }
 
@@ -3472,11 +3483,14 @@ static void mu_scope_hook(const sh_modmanifest_list *rows, const char *const *na
 {
     int changed;
     /* A map is opened: an open Mods tab gets a fresh document (the window's pushed refresh). */
-    if (when == SH_MODSERVE_AT_LOAD) InterlockedIncrement(&g_gen);
+    if (when == SH_MODSERVE_AT_LOAD) {
+        InterlockedIncrement(&g_gen);
+        InterlockedExchange(&g_placed_reset, 1);
+    }
     if (!sh_modserve_scope_enabled()) return;
     if (when == SH_MODSERVE_AT_LOAD) InterlockedExchange(&g_scope_editor, 0);
     changed = mu_listing_set(rows, names, name_count, 1);
-    if (!changed) return;
+    if (changed <= 0) return;
     if (when == SH_MODSERVE_AT_LOAD && mu_on_main()) (void)mu_scope_apply("map load");
     else InterlockedExchange(&g_scope_owed, 1);
 }
@@ -3532,6 +3546,7 @@ int sh_modui_scope_launch(const char *why)
     (void)sh_modmanifest_current(&rows);
     /* The rows alone: a launched map declares what it carries rows for. */
     changed = mu_listing_set(&rows, NULL, 0, 1);
+    if (changed < 0) changed = 0;
     moved = sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0;
     mu_log("scope: %s: the launched map declares %zu row(s)%s; they hold until its Play has run and ended", at,
            rows.count, rows.count ? "; nothing else serves in its Play" : "; no mod serves in its Play");
@@ -3624,6 +3639,7 @@ static void mu_scope_tick(int editor_map)
             /* The rows go with the listing: a hub launch or a Play entry must
              * not read the editor map's manifest as its own. */
             InterlockedExchange(&g_scope_editor, 0);
+            InterlockedExchange(&g_placed_reset, 1);
             InterlockedIncrement(&g_gen);
             sh_modmanifest_current_close();
             mu_settings_close();
@@ -3650,7 +3666,7 @@ static void mu_scope_tick(int editor_map)
     if (sh_modserve_scope_mode_get() != SH_MODSERVE_MODE_EDITOR && sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR))
         (void)mu_scope_apply("editor");
     if (!sh_modserve_scope_map_open() && sh_modserve_scope_relevant()) {
-        if (mu_listing_live()) (void)mu_scope_apply("editor");
+        if (mu_listing_live()) mu_scope_activate("editor");
     } else if (InterlockedCompareExchange(&g_scope_owed, 0, 0)) (void)mu_scope_apply("save");
 }
 
@@ -3693,13 +3709,13 @@ int sh_modui_poll_main(void *context)
     mu_undo_tick();
     mu_scope_tick(1);
     {
-        /* What the map places of mods changed (an object placed, deleted, undone, or picked in an inspector): the
-         * document moves, so an open Mods tab shows at once which mods the map now uses. Read once a second, and only
-         * while some mod is installed: the names of the map's objects under a mod's namespace, as a set. */
+        /* Native placement, deletion and undo change scope independently of saves and the Mods tab.
+         * Only a changed set of mod names needs its manifest closure and engine requirements applied. */
         static ULONGLONG next;
         static unsigned long long last;
         static int known;
         ULONGLONG now = GetTickCount64();
+        if (InterlockedExchange(&g_placed_reset, 0)) { known = 0; next = 0; }
         if (e->placed_names && sh_modserve_active() && now >= next) {
             mu_names nm;
             int r;
@@ -3717,7 +3733,12 @@ int sh_modui_poll_main(void *context)
                     n++;
                 }
                 sig ^= n << 48;
-                if (known && sig != last) InterlockedIncrement(&g_gen);
+                if (known ? sig != last : n > 0) {
+                    int changed = sh_modserve_scope_enabled() ? mu_listing_placed(&nm) : 0;
+                    if (changed < 0) { mu_names_free(&nm); return 1; }
+                    if (changed > 0) mu_scope_activate("editor placement");
+                    InterlockedIncrement(&g_gen);
+                }
                 last = sig;
                 known = 1;
             }

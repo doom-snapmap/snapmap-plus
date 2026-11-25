@@ -42,7 +42,7 @@ struct sh_modui_map_info;
 
 typedef struct sh_modui_engine {
     int (*on_main_thread)(void);        /* 1 main, 0 other, negative unknown */
-    /* Emit every placed name of the open editor map (each entity's inherit and its decl text's string values).
+    /* Emit every placed name of the open editor map (module names, entity inherits and their decl text's string values).
      * Returns the entities read, or -1 when no editor map is open. Main thread only. */
     int (*placed_names)(sh_modui_name_fn emit, void *context);
     int (*rescan)(void);                /* sh_modserve_index_rescan */

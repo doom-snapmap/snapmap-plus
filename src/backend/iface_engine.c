@@ -11,6 +11,7 @@
 #include <string.h>
 #include "snapmap_plus_iface.h"
 #include "iface_engine.h"
+#include "editor_placed_names.h"
 #include "edit_pair.h"
 #include "engine_cvar_read.h"
 #include "apply_engine.h"
@@ -63,8 +64,6 @@
 #define SEL_IDS_OFF            0x80         /* selObj+0x80 -> int* selected ids */
 #define SEL_COUNT_OFF          0x88         /* selObj+0x88 -> int selected count */
 #define SEL_HOVERED_OFF        0x2c         /* selObj+0x2c -> looked-at/hovered entity id */
-#define ARR_ENT_ARRAY_OFF      0x6a0        /* arrObj+0x6a0 -> entity-ptr array (8-byte entries) */
-#define ARR_ENT_COUNT_OFF      0x6a8        /* arrObj+0x6a8 -> entity count (u32) */
 /* Manipulation capture moves selected entities to the scratch layer and stores the original layers
  * positionally, so changing the selection makes Escape restore records onto the wrong entities. */
 #define MAP_ENT_LAYER_ARR_OFF  0x6f0        /* mapObj+0x6f0 -> int* per-entity layer/module index */
@@ -74,13 +73,7 @@
 #define LM_ENTPOS_CNT_OFF      0x710        /* loaded-map+0x710 -> placement-position count (u32) */
 #define LM_MODBOUND_ARR_OFF    0x720        /* loaded-map+0x720 -> per-module cumulative-position boundaries (s32, sorted) */
 #define LM_MODBOUND_CNT_OFF    0x728        /* loaded-map+0x728 -> module-boundary count (s32) */
-#define LM_MODTABLE_OFF        0x750        /* loaded-map+0x750 -> module table (stride 0x98) */
-#define MOD_STRIDE             0x98         /* module-table entry stride */
-#define MOD_NAME_OFF           0x48         /* module entry+0x48 -> module name char* */
 #define LM_ENTINST_ARR_OFF     0x6f0        /* per-entity instance index; == module count means no module */
-#define LM_INSTANCES_CNT_OFF   0x758        /* loaded-map+0x758 -> instances(modules) COUNT (== the no-module sentinel) */
-#define ENT_VALID_OFF          0x8          /* entity[id]+8 != 0 => valid (the +0x28 rule) */
-#define ENT_DEFSUB_OFF         0x158        /* entity[id]+0x158 -> def sub-object */
 
 /* Lists hide non-base-layer entities unless the dev-layer cvar (snapEdit_enableDevLayer) is enabled;
  * native picking also intersects a dev-layer mask. */
@@ -94,7 +87,6 @@
 #define DEVL_CVAR_LIST_CAP     100000u      /* stale-cvarSys guard */
 #define DEVL_CVAR_NAME         "snapEdit_enableDevLayer"
 #define ENT_DECL_OFF           0x8          /* *(ent+8) -> the entity's decl object (classname blob root) */
-#define DECL_BLOB_B_OFF        0x38         /* Resolved source text pointer. */
 #define IDSTR_SIZE             0x30         /* sizeof(idStr) for the toast title/text temporaries */
 
 /* Entity-state fields. */
@@ -104,7 +96,6 @@
 #define DEFSUB_SRC_PTR_OFF      0x140      /* defsub+0x140 -> canonical decl-source text data ptr (vt+0x30 get) */
 #define DEFSUB_SRC_LEN_OFF      0x138      /* defsub+0x138 -> canonical decl-source text len (s32) */
 #define DEFSUB_CLASS_OFF        0x60       /* Interned classname pointer slot. */
-#define DEFSUB_INHERIT_OFF      0x58       /* Interned inherit pointer slot. */
 
 /* The display name is a full idStr, assigned through IdStrAssignCStr to keep length, data and SSO/heap
  * ownership; class/inherit are pooled pointer slots and use IdStrAssign instead. Audit RVA only. */
@@ -117,7 +108,6 @@
 #define DECLNODE_COUNT_CAP      (1u << 20)  /* stale-node guard (same cap sh_listres uses) */
 
 #define SEL_MAX_IDS            65536        /* sanity cap on a selection/array count (stale-obj guard) */
-#define ENT_COUNT_CAP         1000000u      /* sanity cap on the entity array count */
 
 /* Engine call signatures. */
 typedef void  (*add_to_sel_fn)(void *selObj, int id);
@@ -638,20 +628,16 @@ static char *ie_owned_bytes(const void *p, size_t n)
 static char *ie_module_of(int id, int *index)
 {
     const uint8_t *ed = editor_session();
-    void *lm = NULL, *modTable = NULL, *modObj = NULL, *np = NULL;
+    void *lm = NULL, *modTable = NULL;
     int modIdx;
     /* Module table stride 0x98 and name +0x48 (build 13954591). */
     if (!ed || !sh_read_ptr(ed + ED_MAP_OBJ_OFF, &lm) || !lm) return NULL;
     __try { modIdx = id_module_index((const uint8_t *)lm, (uint32_t)id); }
     __except (EXCEPTION_EXECUTE_HANDLER) { modIdx = -1; }
     if (modIdx < 0) return NULL;
-    /* Dereference the table entry, then its module-name pointer. */
-    if (!sh_read_ptr((const uint8_t *)lm + LM_MODTABLE_OFF, &modTable) || !modTable ||
-        !sh_read_ptr((const uint8_t *)modTable + (size_t)modIdx * MOD_STRIDE, &modObj) || !modObj ||
-        !sh_read_ptr((const uint8_t *)modObj + MOD_NAME_OFF, &np))
-        return NULL;
+    if (!sh_read_ptr((const uint8_t *)lm + LM_MODTABLE_OFF, &modTable) || !modTable) return NULL;
     *index = modIdx;
-    return ie_owned_cstr((const char *)np);
+    return ie_owned_cstr(sh_editor_module_name((const uint8_t *)modTable, modIdx));
 }
 
 /* Format module_index_module_name/inherit_id. The table entry contains a
@@ -1172,7 +1158,6 @@ static int slot_clear_stack(sh_iface *self, int index)
 /* The Mods tab's placed names (modui.c): every valid entity's inherit and the
  * other quoted string values of its decl text, the names the save-time
  * closure reads from the serialized map. Main thread only (inside run_on_main). */
-#define IE_MODS_DECL_MAX 16384
 static const uint8_t *g_mods_main_thread_at;
 
 static int ie_mods_on_main(void)
@@ -1182,51 +1167,11 @@ static int ie_mods_on_main(void)
     return (DWORD)id == GetCurrentThreadId() ? 1 : 0;
 }
 
-static int ie_mods_copy_text(const void *blob, char *text, int cap)
-{
-    int len = 0;
-    __try {
-        const char *p = (const char *)blob;
-        for (; len < cap - 1 && p[len]; len++) text[len] = p[len];
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
-    text[len] = 0;
-    return len;
-}
-
 static int ie_mods_placed_names(sh_modui_name_fn emit, void *context)
 {
-    void *array = NULL;
-    uint32_t count = 0, id;
-    int read = 0;
-    char *text;
-    if (!emit || !entity_array(&array, &count)) return -1;
-    text = (char *)malloc(IE_MODS_DECL_MAX);
-    if (!text) return -1;
-    for (id = 0; id < count; id++) {
-        void *ent = entity_ptr(array, count, (int)id), *vflag = NULL, *defsub = NULL, *blob = NULL;
-        char name[512];
-        const char *p;
-        if (!ent || !sh_read_ptr((const uint8_t *)ent + ENT_VALID_OFF, &vflag) || !vflag) continue;
-        if (!sh_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || !defsub) continue;
-        if (!sh_read_ptr((const uint8_t *)defsub + DECL_BLOB_B_OFF, &blob) || !blob) continue;
-        if (ie_mods_copy_text(blob, text, IE_MODS_DECL_MAX) < 0) continue;
-        read++;
-        for (p = text; (p = strchr(p, '"')) != NULL;) {
-            const char *q = ++p;
-            size_t len;
-            while (*q && *q != '"') q += (q[0] == '\\' && q[1]) ? 2 : 1;
-            len = (size_t)(q - p);
-            if (len && len < sizeof name) {
-                memcpy(name, p, len);
-                name[len] = 0;
-                emit(context, name);
-            }
-            if (!*q) break;
-            p = q + 1;
-        }
-    }
-    free(text);
-    return read;
+    void *map = NULL;
+    if (!g_editor || !sh_read_ptr(g_editor + ED_MAP_OBJ_OFF, &map)) return -1;
+    return sh_editor_placed_names((const uint8_t *)map, emit, context);
 }
 
 /* The Mods tab's map operations (modui.h). The open edit is editor+0x204c8 (idSnapMapEdit); its saved-map

@@ -68,6 +68,7 @@ static int fake_refresh(sh_modserve_refresh *out) { if (out) memset(out, 0, size
 typedef struct fake_ent { int uid; const char *inherit; int alive; } fake_ent;
 static fake_ent g_ents[16];
 static int g_ent_n, g_map_on;
+static int g_placement_failed;
 static const char *g_module;   /* one module instance's moduleName, or NULL for a stock room */
 
 static char *map_text(size_t *len)
@@ -106,7 +107,8 @@ static int fake_map_json(char **out, size_t *len)
 static int fake_placed(sh_modui_name_fn emit, void *context)
 {
     int i, n = 0;
-    if (!g_map_on) return -1;
+    if (!g_map_on || g_placement_failed) return -1;
+    if (g_module) emit(context, g_module);
     for (i = 0; i < g_ent_n; i++) if (g_ents[i].alive) { emit(context, g_ents[i].inherit); n++; }
     return n;
 }
@@ -128,7 +130,35 @@ static int fake_remove_tag(const char *tag) { (void)tag; return 1; }
 static int fake_busy(char *cause, size_t cap) { (void)cause; (void)cap; return 0; }
 static void fake_toast(const char *title, const char *text) { (void)title; (void)text; }
 static void fake_print(const char *line) { (void)line; }
-static int fake_scope_apply(const char *phase) { (void)phase; return 1; }
+static int g_image = 1, g_resource = 1, g_scope_changes;
+static int *test_cvar(const char *s)
+{
+    if (!_stricmp(s, "g_useImageBlackList")) return &g_image;
+    if (!_stricmp(s, "g_useResourceBlackList")) return &g_resource;
+    return NULL;
+}
+static int cvar_read(void *ctx, const char *s, char **value)
+{
+    int *v = test_cvar(s);
+    (void)ctx;
+    *value = v ? _strdup(*v ? "1" : "0") : NULL;
+    return *value != NULL;
+}
+static int cvar_set(void *ctx, const char *s, const char *value)
+{
+    int *v = test_cvar(s);
+    (void)ctx;
+    if (!v) return 0;
+    *v = atoi(value);
+    return SH_MODSERVE_GATE_SET;
+}
+static int fake_scope_apply(const char *phase)
+{
+    sh_modserve_gate_ops ops = { NULL, cvar_read, cvar_set, NULL, NULL };
+    sh_modserve_gates result;
+    g_scope_changes++;
+    return sh_modserve_requirements_apply(&ops, phase, &result);
+}
 static int fake_map_left(void) { return 1; }
 static int fake_clear_undo(int probe) { (void)probe; return g_map_on ? 1 : 0; }
 static int fake_undo_pending(void) { return 0; }
@@ -496,7 +526,8 @@ int main(int argc, char **argv)
             "{\r\n\tinherit = \"prop/prop_base\";\r\n\tedit = { gridSnap = 8; }\r\n}\r\n");
     CHECK(install(src));
     _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\authoring\\crates", tmp);
-    put_mod(src, "{\"name\":\"Crates\",\"snapmap-plus\":{\"format\":2,\"salt\":\"cratebox\"}}", "entities\\crate.decl",
+    put_mod(src, "{\"name\":\"Crates\",\"requirements\":{\"cvars\":{\"g_useImageBlackList\":\"0\","
+                 "\"g_useResourceBlackList\":\"0\"}},\"snapmap-plus\":{\"format\":2,\"salt\":\"cratebox\"}}", "entities\\crate.decl",
             "{\r\n\tinherit = \"prop/prop_base\";\r\n}\r\n");
     CHECK(install(src));
     free(run_doc(SH_MODS_ACT_RESCAN, NULL));
@@ -512,7 +543,42 @@ int main(int argc, char **argv)
     g_ents[0].uid = 0; g_ents[0].inherit = "player/coop/player_start"; g_ents[0].alive = 1;
     g_ent_n = 1;
     g_map_on = 1;
-    (void)sh_modui_poll_main(NULL);   /* the poll's first look at the map */
+    sh_modserve_scope_enable(1);
+    (void)sh_modui_poll_main(NULL);
+    CHECK(g_image == 1 && g_resource == 1);
+    g_ents[1] = (fake_ent){ 65, "mods/cratebox/crate", 1 };
+    g_ent_n = 2;
+    CHECK(poll_moved() && g_image == 0 && g_resource == 0);
+    i = g_scope_changes;
+    g_ents[2] = (fake_ent){ 66, "mods/cratebox/crate", 1 };
+    g_ent_n = 3;
+    CHECK(!poll_moved() && g_scope_changes == i);
+    g_ents[1].alive = 0;
+    CHECK(!poll_moved() && g_image == 0 && g_resource == 0);
+    {
+        size_t len, written;
+        char *map = map_text(&len);
+        char *saved = sh_modmanifest_on_save(map, len, &written);
+        CHECK(saved != NULL);
+        if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    }
+    g_ents[2].alive = 0;
+    g_placement_failed = 1;
+    CHECK(!poll_moved() && g_image == 0 && g_resource == 0);
+    g_placement_failed = 0;
+    CHECK(poll_moved() && g_image == 1 && g_resource == 1);    /* last saved object deleted */
+    g_ents[2].alive = 1;
+    CHECK(poll_moved() && g_image == 0 && g_resource == 0);    /* native undo */
+    free(run_doc(SH_MODS_ACT_MAP_ADD, "crates"));
+    g_ents[2].alive = 0;
+    CHECK(poll_moved() && g_image == 0 && g_resource == 0);    /* still attached */
+    g_map_on = 0;
+    (void)sh_modui_poll_main(NULL);
+    CHECK(g_image == 1 && g_resource == 1);
+    sh_modserve_scope_enable(0);
+    g_ent_n = 1;
+    g_map_on = 1;
+    (void)sh_modui_poll_main(NULL);
     step("nothing placed");
 
     g_ents[1].uid = 1; g_ents[1].inherit = "mods/alexrimp/imp_copy"; g_ents[1].alive = 1;
