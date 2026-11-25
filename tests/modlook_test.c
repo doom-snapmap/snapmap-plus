@@ -418,6 +418,26 @@ static void test_ribbon_length_fade(void)
     release(&x);
 }
 
+static void test_ribbon_age(void)
+{
+    res x = compile("age.decl", "{\n type ribbon\n colour {1, 0, 0, 0.75}\n deathcolour {0, 0, 1, 0.25}\n lengthfade {0.1, 0.2}\n}\n");
+    size_t bytes = 0;
+    float rgba[4];
+    CHECK(x.r == SH_LOOK_CHANGED && x.out);
+    if (!x.out) return;
+    CHECK(has(value(x.out, "stageprogram", 0), "snapmapplus/ribbons/ribbonblend"));
+    unsigned char *b = image_bytes(unq(value(x.out, "ribbonmask", 0)), &bytes);
+    CHECK(b && bytes == IMG_DATA + 256u * 256 * 8);
+    if (b) {
+        image_texel(b, 255 * 256 + 80, rgba); CHECK(near4(rgba, 1, 0, 0, .75f));
+        image_texel(b, 80, rgba); CHECK(near4(rgba, 0, 0, 1, .25f));
+        image_texel(b, 128 * 256 + 80, rgba); CHECK(near4(rgba, 128/255.f, 0, 127/255.f, .25f + .5f * 128/255.f));
+        image_texel(b, 128 * 256, rgba); CHECK(rgba[3] == 0);
+        HeapFree(GetProcessHeap(), 0, b);
+    }
+    release(&x);
+}
+
 static void test_particle_fields(void)
 {
     static const char T[] =
@@ -650,6 +670,7 @@ int main(int argc, char **argv)
     test_stock_routes();
     test_particle_fields();
     test_ribbon_length_fade();
+    test_ribbon_age();
     test_mistakes();
     test_not_looks();
     if (g_fixtures) test_legacy();

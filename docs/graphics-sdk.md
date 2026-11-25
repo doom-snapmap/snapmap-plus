@@ -323,6 +323,11 @@ A material with `type ribbon` draws with the game's ribbon program. Set `lengthf
 across the first tenth of the trail and fade out across its last fifth. The ribbon declaration supplies the
 length coordinate with `textureTangentStretch = true;`. Its main texture can tile and scroll independently.
 
+For a colour change over a node's life, give the material a `colour` and a `deathcolour`. Each takes four
+linear RGBA channels from 0 to 1. `lifefade { 0.1, 0.3 }` fades the first tenth and last three tenths of the
+node's life. Set the ribbon declaration's `fadeInFraction = 0;` and `fadeOutFraction = 1;` so the material
+receives the node's age. A white ribbon colour uses the material's colours in full.
+
 ## Screen text
 
 Use `show_text(player, place, text, [colour], [seconds])` to put a message on a player's HUD. The places are

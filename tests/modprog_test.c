@@ -771,6 +771,43 @@ out:
     if (f) HeapFree(GetProcessHeap(), 0, f);
 }
 
+static void test_real_ribbon(void)
+{
+    const char *paths[] = {
+        "generated/decls/renderprog/snapmapplus/ribbons/ribbonblend.decl",
+        "generated/renderprogs/snapmapplus/ribbons/ribbonblend_pc_vulkan.bin",
+        "generated/spirv/snapmapplus/ribbons/ribbonblend.vspv",
+        "generated/spirv/snapmapplus/ribbons/ribbonblend.fspv",
+    };
+    unsigned char *files[4] = { 0 }, *stock = NULL;
+    size_t sizes[4] = { 0 }, bytes = 0;
+    char sha[65];
+    unsigned long long size = 0;
+    for (unsigned i = 0; i < 4; i++) {
+        CHECK(sh_modprog_owns(paths[i]));
+        CHECK(sh_modprog_read(paths[i], &files[i], &sizes[i]) == SH_MB_STOCK_OK && files[i]);
+    }
+    if (files[0] && files[1] && files[2] && files[3]) {
+        size_t off[3], len[3];
+        CHECK(strstr((const char *)files[0], "vertex.tangent.x, vertex.color.a") != NULL);
+        if (sh_mb_rp_stages(files[1], sizes[1], off, len) == 1) {
+            CHECK(strstr((const char *)files[1] + off[0], "in_Tangent.x, in_Color.a") != NULL);
+            CHECK(rd_be32(files[2] + 4) == sh_mb_md5fold(files[1] + off[0], len[0]));
+        } else CHECK(0);
+        CHECK(sh_modstock_identify("generated/spirv/ribbonblend.fspv", sha, &size) == SH_MB_STOCK_OK);
+        CHECK(sh_modstock_read("generated/spirv/ribbonblend.fspv", sha, &stock, &bytes) == SH_MB_STOCK_OK);
+        CHECK(stock && bytes == sizes[3] && !memcmp(stock, files[3], bytes));
+        if (g_dump) {
+            char path[MAX_PATH];
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s/ribbon-age.spv", g_dump);
+            FILE *file = fopen(path, "wb");
+            if (file) { fwrite(files[2] + 16, 1, sizes[2] - 16, file); fclose(file); }
+        }
+    }
+    for (unsigned i = 0; i < 4; i++) if (files[i]) HeapFree(GetProcessHeap(), 0, files[i]);
+    if (stock) HeapFree(GetProcessHeap(), 0, stock);
+}
+
 /* The particle program derived from the installed uberparticles and its permutation. */
 static void test_real_ep(const char *prefix)
 {
@@ -1332,6 +1369,7 @@ static void test_real(const char *doom)
     }
     sh_modstock_list("generated/renderprogs/permutations/" SH_MODPROG_PREFIX, count, &s);
     CHECK(s.files == 4);      /* each base's permutation decl and cooked program */
+    test_real_ribbon();
     test_real_ep(SH_MODPROG_EP_PREFIX);
     test_real_ep(SH_MODPROG_EP_EXT_PREFIX);
     s.files = 0;

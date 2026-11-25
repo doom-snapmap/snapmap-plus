@@ -29,11 +29,12 @@ typedef struct mp_family {
     mp_glsl_fn glsl;
     mp_splice_fn splice;
     const char *decl_needs;        /* why a decl is refused */
+    int vertex;
 } mp_family;
 typedef struct mp_base { const char *name; int family; } mp_base;
 static const mp_base MP_BASES[] = {
     { "skinvmtr", 0 }, { "skinvmtrwounds", 0 }, { "uberparticles", 1 },
-    { "hairprez", 2 }, { "hairshadow", 2 }, { "hairblending", 2 }, { "uberparticles", 3 },
+    { "hairprez", 2 }, { "hairshadow", 2 }, { "hairblending", 2 }, { "uberparticles", 3 }, { "ribbonblend", 4 },
 };
 #define MP_NBASES (sizeof MP_BASES / sizeof MP_BASES[0])
 
@@ -1309,6 +1310,7 @@ done:
 }
 
 #include "programs/particles_splice.inc"
+#include "programs/ribbon_splice.inc"
 
 uint32_t *sh_modprog_hr_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
                                size_t *out_words, const char **why)
@@ -1387,6 +1389,8 @@ static const mp_family MP_FAMILIES[] = {
     { SH_MODPROG_EP_EXT_PREFIX, "particle version", EP_BLOCK_PARMS, &EP_BIN_PARM_COUNT, SH_MODPROG_EP_TEXTURES,
       &SH_MODPROG_EP_TEXTURE_COUNT, sh_modprog_ep_patch_decl, sh_modprog_ep_patch_glsl, sh_modprog_ep_splice,
       "its decl's fragment stage has no single PREMULTIPLY_ALPHA_BLENDED( result ) statement, or no hlsl_fp section for the functions" },
+    { "snapmapplus/ribbons/", "ribbon version", NULL, &ML_NBLOCK_PARMS, NULL, &ML_NBLOCK_PARMS,
+      rb_decl, rb_glsl, rb_splice, "its ribbon vertex does not expose colour and mask coordinates", 1 },
 };
 #define MP_NFAMILIES (sizeof MP_FAMILIES / sizeof MP_FAMILIES[0])
 
@@ -1656,6 +1660,9 @@ static int mp_unit(const mp_family *fam, const char *base, const char *mask)
     size_t dn = 0, bn = 0, vn = 0, fn = 0, decl_n = 0, glsl_n = 0, bin_n = 0, mod_n = 0;
     uint32_t *mod = NULL;
     mp_bin x;
+    const unsigned stage = fam->vertex ? 0 : 1;
+    const unsigned char *input;
+    size_t input_size;
     int ok = 0;
     const char *why = NULL;
     memset(&x, 0, sizeof x);
@@ -1691,10 +1698,10 @@ static int mp_unit(const mp_family *fam, const char *base, const char *mask)
         goto out;
     }
     {
-        /* the fragment stage's categories: binding starts at block[13..19], counts at block[34..40] */
-        uint32_t *a = x.block + 6 + 7, *cn = x.block + 27 + 7;
+        /* Each stage owns seven binding starts and seven binding counts. */
+        uint32_t *a = x.block + 6 + 7 * stage, *cn = x.block + 27 + 7 * stage;
         unsigned tex_end = a[4] + cn[4], shift = *fam->ntextures, k;
-        if (a[4] == 0xffffffffu || x.counts[1][2] != cn[4] || x.counts[1][3] != cn[4]) {
+        if ((shift && a[4] == 0xffffffffu) || x.counts[stage][2] != cn[4] || x.counts[stage][3] != cn[4]) {
             why = "its fragment textures do not match its binding table";
             goto out;
         }
@@ -1702,10 +1709,10 @@ static int mp_unit(const mp_family *fam, const char *base, const char *mask)
         cn[4] += shift;
         x.block[5] += shift;
         for (k = 0; k < *fam->nparms; k++)
-            if (!mp_bin_add(&x, 1, 0, fam->parms[k], strlen(fam->parms[k]))) { why = "out of memory"; goto out; }
+            if (!mp_bin_add(&x, stage, 0, fam->parms[k], strlen(fam->parms[k]))) { why = "out of memory"; goto out; }
         for (k = 0; k < *fam->ntextures; k++)
-            if (!mp_bin_add(&x, 1, 2, fam->textures[k], strlen(fam->textures[k])) ||
-                !mp_bin_add(&x, 1, 3, "defaultsampler", 14)) { why = "out of memory"; goto out; }
+            if (!mp_bin_add(&x, stage, 2, fam->textures[k], strlen(fam->textures[k])) ||
+                !mp_bin_add(&x, stage, 3, "defaultsampler", 14)) { why = "out of memory"; goto out; }
         {
             /* a program's textures over all its stages are bounded by the engine (ID_VULKAN_MAX_BOUND_TEXTURES) */
             size_t bound = 0;
@@ -1717,35 +1724,38 @@ static int mp_unit(const mp_family *fam, const char *base, const char *mask)
             why = fam->decl_needs;
             goto out;
         }
-        if (!(glsl = fam->glsl(x.text[1], x.text_n[1], tex_end, shift, &glsl_n))) {
-            why = "its fragment stage text is not the shape Snapmap+ knows";
+        if (!(glsl = fam->glsl(x.text[stage], x.text_n[stage], tex_end, shift, &glsl_n))) {
+            why = "its stage text is not the shape Snapmap+ knows";
             goto out;
         }
-        if (!(mod = fam->splice((const uint32_t *)(f + 16), (fn - 16) / 4, tex_end, shift, &mod_n, &why))) goto out;
+        input = fam->vertex ? v : f;
+        input_size = fam->vertex ? vn : fn;
+        if (!(mod = fam->splice((const uint32_t *)(input + 16), (input_size - 16) / 4, tex_end, shift, &mod_n, &why))) goto out;
     }
-    free(x.text[1]);
-    x.text[1] = glsl;
-    x.text_n[1] = glsl_n;
+    free(x.text[stage]);
+    x.text[stage] = glsl;
+    x.text_n[stage] = glsl_n;
     glsl = NULL;
     if (!(bin_out = mp_bin_encode(&x, mp_decl_checksum(decl, decl_n), &bin_n))) { why = "out of memory"; goto out; }
     {
         mp_buf o = { 0 };
-        char *fo, *vo = (char *)malloc(vn ? vn : 1);
-        size_t fo_n = 0;
-        mp_put_be32(&o, 4);
-        mp_put_be32(&o, sh_mb_md5fold(x.text[1], x.text_n[1]));
-        mp_put(&o, f + 8, 4);
+        const unsigned char *other = fam->vertex ? f : v;
+        size_t other_size = fam->vertex ? fn : vn, result_size = 0;
+        char *result, *unchanged = (char *)malloc(other_size);
+        mp_put(&o, input, 4);
+        mp_put_be32(&o, sh_mb_md5fold(x.text[stage], x.text_n[stage]));
+        mp_put(&o, input + 8, 4);
         mp_put_be32(&o, (uint32_t)(mod_n * 4));
         mp_put(&o, mod, mod_n * 4);
-        fo = mp_take(&o, &fo_n);
-        if (!fo || !vo) { free(fo); free(vo); why = "out of memory"; goto out; }
-        memcpy(vo, v, vn);
+        result = mp_take(&o, &result_size);
+        if (!result || !unchanged) { free(result); free(unchanged); why = "out of memory"; goto out; }
+        memcpy(unchanged, other, other_size);
         ok = mp_keep(vd, decl, decl_n);
         decl = NULL;
         ok = mp_keep(vb, bin_out, bin_n) && ok;
         bin_out = NULL;
-        ok = mp_keep(vv, vo, vn) && ok;
-        ok = mp_keep(vf, fo, fo_n) && ok;
+        ok = mp_keep(fam->vertex ? vf : vv, unchanged, other_size) && ok;
+        ok = mp_keep(fam->vertex ? vv : vf, result, result_size) && ok;
         if (!ok) why = "out of memory";
     }
 out:
@@ -2060,24 +2070,50 @@ const char *sh_modprog_register_const_image(const float rgba[4])
     return mp_register("c", b, n);
 }
 
+static float rb_fade(float t, float in, float out)
+{
+    float alpha = in > 0 && t < in ? t / in : 1;
+    if (out > 0 && 1 - t < out) {
+        float tail = (1 - t) / out;
+        if (tail < alpha) alpha = tail;
+    }
+    return alpha;
+}
+
 const char *sh_modprog_register_ribbon_mask(float fade_in, float fade_out)
 {
     float texel[256][4];
     unsigned char *b = NULL;
     size_t n = 0;
-    int i;
-    for (i = 0; i < 256; i++) {
-        float u = (float)i / 255, opacity = 1;
-        if (fade_in > 0 && u < fade_in) opacity = u / fade_in;
-        if (fade_out > 0 && (1 - u) < fade_out) {
-            float tail = (1 - u) / fade_out;
-            if (tail < opacity) opacity = tail;
-        }
+    for (unsigned i = 0; i < 256; i++) {
         texel[i][0] = texel[i][1] = texel[i][2] = 1;
-        texel[i][3] = opacity;
+        texel[i][3] = rb_fade((float)i / 255, fade_in, fade_out);
     }
     if (!sh_modprog_bimage_rgba16f(256, 1, texel, &b, &n)) return NULL;
     return mp_register("c", b, n);
+}
+
+const char *sh_modprog_register_ribbon_age(const float length[2], const float life[2], const float colours[8])
+{
+    unsigned width = length[0] || length[1] ? 256 : 1;
+    float (*texel)[4] = malloc((size_t)width * 256 * sizeof *texel);
+    unsigned char *b = NULL;
+    size_t n = 0;
+    if (!texel) return NULL;
+    for (unsigned y = 0; y < 256; y++) {
+        float age = 1 - (float)y / 255;
+        float colour[4];
+        for (unsigned c = 0; c < 4; c++) colour[c] = colours[c] + age * (colours[4 + c] - colours[c]);
+        colour[3] *= rb_fade(age, life[0], life[1]);
+        for (unsigned x = 0; x < width; x++) {
+            float *pixel = texel[y * width + x];
+            memcpy(pixel, colour, sizeof colour);
+            pixel[3] *= rb_fade((float)x / 255, length[0], length[1]);
+        }
+    }
+    int ok = sh_modprog_bimage_rgba16f(width, 256, texel, &b, &n);
+    free(texel);
+    return ok ? mp_register("c", b, n) : NULL;
 }
 
 /* The parm decl a path names (index), or -1. */

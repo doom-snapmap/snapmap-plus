@@ -827,30 +827,44 @@ static int lk_ribbon(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *out
 {
     static const char *const drop[] = { "stageprogram" };
     lk_buf gen = { 0 };
-    char *image = NULL;
-    size_t i;
-    for (i = 0; i < d->n; i++) {
+    static const char *const keys[] = { "lengthfade", "lifefade", "colour", "deathcolour" };
+    float length[2] = { 0 }, life[2] = { 0 }, colours[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+    float *dest[] = { length, life, colours, colours + 4 };
+    unsigned seen = 0;
+    for (size_t i = first + 1; i < d->n; i++) {
         lk_ln *line = &d->l[i];
-        lk_val v;
-        const char *path;
-        if (!line->key || !lk_ieq(line->a + line->ks, line->kn, "lengthfade")) continue;
-        if (image || lk_has_key(d, "ribbonmask")) {
-            free(image);
-            lk_fail(c, i, "write one lengthfade or ribbonmask for the trail.");
-            return SH_LOOK_MISTAKE;
+        if (!line->key) continue;
+        for (unsigned k = 0; k < 4; k++) {
+            if (!lk_ieq(line->a + line->ks, line->kn, keys[k])) continue;
+            if ((seen & (1u << k)) || lk_has_key(d, "ribbonmask")) {
+                lk_fail(c, i, "write one %s or ribbonmask for the trail.", keys[k]);
+                return SH_LOOK_MISTAKE;
+            }
+            lk_val v;
+            unsigned count = k < 2 ? 2 : 4;
+            lk_parse(line->a + line->v0, line->vn, &v);
+            int valid = v.kind == K_VEC && (unsigned)v.n == count;
+            for (unsigned j = 0; j < count && valid; j++) valid = v.v[j] >= 0 && v.v[j] <= 1;
+            if (!valid) {
+                lk_fail(c, i, "%s takes %s from 0 to 1.", keys[k], k < 2 ? "two fractions" : "four colour channels");
+                return SH_LOOK_MISTAKE;
+            }
+            memcpy(dest[k], v.v, count * sizeof(float));
+            seen |= 1u << k;
+            line->skip = 1;
         }
-        lk_parse(line->a + line->v0, line->vn, &v);
-        if (v.kind != K_VEC || v.n != 2 || !(v.v[0] >= 0 && v.v[0] <= 1 && v.v[1] >= 0 && v.v[1] <= 1)) {
-            lk_fail(c, i, "lengthfade takes two fractions from 0 to 1, for example { 0.1, 0.2 }.");
-            return SH_LOOK_MISTAKE;
-        }
-        path = sh_modprog_register_ribbon_mask(v.v[0], v.v[1]);
-        if (!path || !(image = lk_image_name(path))) return SH_LOOK_OOM;
-        line->skip = 1;
     }
-    lk_key(&gen, d->eol, "stageprogram", "ribbonblend");
-    if (image) lk_key(&gen, d->eol, "ribbonmask", image);
-    free(image);
+    int age = (seen & ~1u) != 0;
+    lk_key(&gen, d->eol, "stageprogram", age ? "snapmapplus/ribbons/ribbonblend" : "ribbonblend");
+    if (seen) {
+        if (!(seen & (1u << 3))) memcpy(colours + 4, colours, 4 * sizeof(float));
+        const char *path = age ? sh_modprog_register_ribbon_age(length, life, colours)
+                               : sh_modprog_register_ribbon_mask(length[0], length[1]);
+        char *image = path ? lk_image_name(path) : NULL;
+        if (!image) { free(gen.p); return SH_LOOK_OOM; }
+        lk_key(&gen, d->eol, "ribbonmask", image);
+        free(image);
+    }
     if (!gen.oom) *out = lk_assemble(d, first, gen.p, drop, 1, out_len);
     free(gen.p);
     return *out ? SH_LOOK_CHANGED : SH_LOOK_OOM;
