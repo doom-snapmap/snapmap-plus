@@ -1616,7 +1616,8 @@ static void mc_side_causes(const char *chash, mc_unit *units, size_t n)
 static int mc_product_ok(const mc_unit *u);
 enum mc_compose_mode { MC_LOAD, MC_PREFAB, MC_PUBLISHED_PROBE };
 
-static int mc_compose(const char *chash, const int *causes, int cause, char **why, int *built, enum mc_compose_mode mode)
+static int mc_compose_once(const char *chash, const int *causes, int cause, char **why, int *built,
+                           enum mc_compose_mode mode, int *changed)
 {
     mc_row snapshot;
     mc_unit *units = NULL;
@@ -1626,6 +1627,7 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
     char *dest = NULL, *staging = NULL, *side = NULL, *reason = NULL;
     char generation[33];
     static volatile LONG serial;
+    mpj *initial = NULL, *current = NULL;
     sh_mb_bundle out;
     sh_mb_resolver resolver, inner;
     int ok = 0, complete = 1, had_complete = 0, here, modules = 0;
@@ -1668,7 +1670,9 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
     if (!snapshot.chash[0]) { if (why) *why = sh_text("the map's row is not known"); return 0; }
     if (snapshot.n && (!snapshot.units || !snapshot.roots)) { reason = sh_text("out of memory"); goto done; }
 
-    here = sh_cache_composed(chash, &had_complete);
+    initial = mc_composition_info(chash);
+    here = initial != NULL;
+    had_complete = here && mpj_get(initial, "complete")->b;
     int check_modules = snapshot.modules && strcmp(snapshot.modules, "[]");
     if (here && had_complete && !check_modules) { ok = 1; goto record; }
     if (here && !had_complete && mode == MC_PUBLISHED_PROBE) { ok = 1; goto done; }
@@ -1713,13 +1717,12 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
         if (causes) {
             char *base = mc_path("served\\%s", chash), *sp = base ? sh_textf("%s.json", base) : NULL;
             AcquireSRWLockExclusive(&g_disk);
-            mpj *current = base ? sh_composition_side(base) : NULL;
+            current = base ? sh_composition_side(base) : NULL;
             const mpj *gen = current ? mpj_get(current, "generation") : NULL;
             const mpj *whole = current ? mpj_get(current, "complete") : NULL;
             if (whole && whole->type == MPJ_BOOL && !whole->b && sp &&
                 (snapshot.n ? mc_side_same(chash, units, snapshot.n) : mc_side_same_placed(chash, &snapshot)))
                 (void)mc_sidecar(sp, &snapshot, units, 0, gen && gen->type == MPJ_STR ? gen->text : NULL);
-            mpj_free(current);
             ReleaseSRWLockExclusive(&g_disk);
             free(sp);
             free(base);
@@ -1803,11 +1806,23 @@ publish:
     /* Windows can refuse to rename a directory while even one descendant is open. Only replace the row's sidecar. */
     mc_logf("MODS: content: prepared %s.g-%s", chash, generation);
     AcquireSRWLockExclusive(&g_disk);
-    if (sh_cache_composed(chash, &had_complete) && had_complete) {
+    current = mc_composition_info(chash);
+    if (current && (mpj_get(current, "complete")->b || mode == MC_PUBLISHED_PROBE)) {
         ReleaseSRWLockExclusive(&g_disk);
         mc_rmtree(staging);
-        complete = ok = 1;
+        ok = 1;
+        if (mode == MC_PUBLISHED_PROBE) goto done;
+        complete = 1;
         goto record;
+    }
+    if (current && !complete) {
+        const mpj *gen = mpj_get(current, "generation");
+        if (!initial || (gen && !mpj_str_is(mpj_get(initial, "generation"), gen->text))) {
+            /* Another writer published while we built these stand-ins. Read the available units again. */
+            ReleaseSRWLockExclusive(&g_disk);
+            *changed = 1;
+            goto done;
+        }
     }
     ok = mc_mkdirs(dest) && mc_sidecar(side, &snapshot, units, complete, generation);
     ReleaseSRWLockExclusive(&g_disk);
@@ -1875,7 +1890,19 @@ done:
     free(dest);
     free(side);
     free(staging);
+    mpj_free(current);
+    mpj_free(initial);
     mc_row_clear(&snapshot);
+    return ok;
+}
+
+static int mc_compose(const char *chash, const int *causes, int cause, char **why, int *built, enum mc_compose_mode mode)
+{
+    int changed, ok;
+    do {
+        changed = 0;
+        ok = mc_compose_once(chash, causes, cause, why, built, mode, &changed);
+    } while (changed);
     return ok;
 }
 
