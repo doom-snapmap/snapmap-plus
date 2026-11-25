@@ -325,6 +325,19 @@ environment. The game blends according to the current view and gives smaller ove
 The area lasts until the script ends, or until you call `area:remove()`. The call returns nil when the box
 is already occupied or the game's area list is full.
 
+## A sky opening
+
+A model surface using a sky material shows a cubemap through its silhouette. The sky stays aligned with the viewing direction as the player moves past the opening. Props and walls in front of the opening hide it in the usual way.
+
+```
+{
+    type  sky
+    image env/snapmaps/hell_px$bc7
+}
+```
+
+Use a stock cubemap as above, or a cubemap of your own in `images/`. Apply the material to a surface on your model, such as a window or the inside of a dome.
+
 ## A recolourable surface
 
 Add `type recolourable` to a skinned material to paint parts of a model independently. Keep the base surface and
