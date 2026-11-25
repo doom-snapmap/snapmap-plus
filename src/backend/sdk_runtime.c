@@ -89,7 +89,7 @@ static sdk_area_list *area_list(void **world, void **scene, sdk_add_area *add)
     if (!*world) return NULL;
     *add = *(sdk_add_area *)(*(unsigned char **)*world + 0x38);
     if ((uintptr_t)*add != base + expected) return NULL;
-    *scene = *(void **)((unsigned char *)*world + 0x852c0);
+    *scene = *(void **)((unsigned char *)*world + SH_RVA(0x852c0, 0x85280));
     if (!*scene) return NULL;
     sdk_area_list *list = (sdk_area_list *)((unsigned char *)*scene + 0xc550);
     return list->count >= 0 && list->count <= 128 && (!list->count || list->areas) ? list : NULL;
@@ -115,15 +115,28 @@ static int add_environment_area(const char *name, sh_script_env_area *area)
     if (!text) return -1;
     HeapFree(GetProcessHeap(), 0, text);
     area->decl = e && e->decl ? e->decl("env", name) : NULL;
-    if (!area->decl) return 0;
+    if (!area->decl) {
+        backend_log("Environment area: could not resolve the selected environment.");
+        return 0;
+    }
     __try {
         sdk_add_area add;
         static const float origin[3] = { 0, 0, 0 };
         sdk_area_list *list = area_list(&area->world, &area->scene, &add);
-        if (!list || list->count == 128 || area_index(list, area->bounds, NULL) >= 0) return 0;
+        if (!list) {
+            backend_log("Environment area: the active render world's environment list is unavailable.");
+            return 0;
+        }
+        if (list->count == 128 || area_index(list, area->bounds, NULL) >= 0) {
+            backend_log("Environment area: the environment list is full or these bounds are occupied.");
+            return 0;
+        }
         add(area->world, area->bounds, area->decl, NULL, 0, 0, origin, -1);
-        return area_index(list, area->bounds, area->decl) >= 0;
+        if (area_index(list, area->bounds, area->decl) >= 0) return 1;
+        backend_log("Environment area: the renderer did not retain the selected environment.");
+        return 0;
     } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        backend_log("Environment area: the renderer could not access the environment list.");
         return 0;
     }
 }
