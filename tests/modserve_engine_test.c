@@ -57,6 +57,7 @@ void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *modu
 { (void)results; (void)n; (void)module_base; return NULL; }
 static unsigned char fe_palette[32], fe_palette_rows[2 * PAL_STRIDE];
 static unsigned char fe_new_sedef[SEDEF_NAME_OFF + sizeof(void *)];
+static unsigned char fe_record[0x58 + sizeof(void *)];
 static int fe_has_palette, fe_rebuilds;
 
 int sh_timeline_tile_rebuild_palette(int *before, int *after)
@@ -64,6 +65,7 @@ int sh_timeline_tile_rebuild_palette(int *before, int *after)
     if (!fe_has_palette) return 0;
     *before = *(int *)(fe_palette + PAL_COUNT_OFF);
     *(void **)(fe_palette_rows + PAL_STRIDE) = fe_new_sedef;
+    *(void **)(fe_palette_rows + PAL_STRIDE + 0x150) = fe_record;
     *after = *(int *)(fe_palette + PAL_COUNT_OFF) = 2;
     fe_rebuilds++;
     return SH_TL_REBUILD_OK;
@@ -364,6 +366,15 @@ static void test_prefab_adds_a_row_to_the_open_palette(void)
     CHECK(sh_modserve_scope_activate("prefab") >= 0);
     CHECK(fe_rebuilds == 1 && pal_has(NULL, "mods/abcdefgh/placed"));
     CHECK(sh_modserve_scope_activate("prefab") >= 0 && fe_rebuilds == 1);
+    sh_modserve_scope_set(NULL, 0, 1);
+    *(int *)(fe_palette + PAL_COUNT_OFF) = 1;
+    const char *inherit = "mods/abcdefgh/placedEntity", *missing = NULL;
+    *(const char **)(fe_record + 0x58) = inherit;
+    CHECK(sh_modserve_prefab_rows(&inherit, 1, &missing) && !missing && fe_rebuilds == 2);
+    CHECK(sh_modserve_prefab_rows(&inherit, 1, &missing) && fe_rebuilds == 2);
+    inherit = "mods/abcdefgh/absent";
+    CHECK(!sh_modserve_prefab_rows(&inherit, 1, &missing) && missing == inherit);
+
     CHECK(!strstr(g_log, "FAULTED") && !strstr(g_log, "NOT READY"));
     fe_has_palette = 0;
     sh_modserve_scope_set(NULL, 0, 0);

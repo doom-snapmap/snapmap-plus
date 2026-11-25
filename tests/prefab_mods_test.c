@@ -67,6 +67,21 @@ void backend_log(const char *line)
 static int g_activations;
 static int g_scope_refreshes;
 
+static const char *g_expected_inherit;
+static int g_palette_checks, g_palette_rejected;
+
+int sh_modserve_prefab_rows(const char *const *inherits, size_t count, const char **missing)
+{
+    if (missing) *missing = NULL;
+    g_palette_checks++;
+    if (g_expected_inherit) {
+        CHECK(count == 1 && !_stricmp(inherits[0], g_expected_inherit));
+        CHECK(sh_modserve_prefab_pending());
+    }
+    if (g_palette_rejected && count) { *missing = inherits[0]; return 0; }
+    return 1;
+}
+
 int sh_modui_scope_refresh(const char *phase)
 {
     CHECK(!strcmp(phase, "prefab"));
@@ -1940,7 +1955,16 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
             resume.editor_context = fixture_generation;
             fixture_generation++;
             CHECK(pm_slot(&resume, m2, sizeof m2) == SH_PREFAB_MODS_REFUSED && strstr(m2, "map changed"));
+            g_expected_inherit = "mods/testdoor/door";
+            g_palette_rejected = 1;
+            int before = g_palette_checks;
+            CHECK(HO(m2, sh_prefab_mods_resolve_main(text, len, &rows, "Door", &seq2, HO_P(0))) == SH_PREFAB_MODS_REFUSED);
+            CHECK(strstr(m2, "palette row") && g_palette_checks == before + 1 && !sh_modserve_prefab_pending());
+            g_palette_rejected = 0;
             CHECK(HO(m2, sh_prefab_mods_resolve_main(text, len, &rows, "Door", &seq2, HO_P(0))) == SH_PREFAB_MODS_PLACE && !seq2);
+            CHECK(g_palette_checks == before + 2 && sh_modserve_prefab_pending());
+            g_expected_inherit = NULL;
+            sh_modserve_prefab_files(NULL, 0);
             sh_cache_set_rescan(NULL);
             sh_modmanifest_prepare_load("{}", 2);
             sh_prefab_mods_bind(&PM_OPS);

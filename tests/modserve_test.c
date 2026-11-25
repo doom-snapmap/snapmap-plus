@@ -4627,6 +4627,20 @@ static void test_additive_same_key(void)
     CHECK(strstr(g_report, "scope: Fork (3 names, 0 shadows, 0 surfaces): not declared (no map is "
                            "open): its names serve for the Toybox") != NULL);
 
+    /* A clean player's pending prefab serves its named objects, without declaring the map's requirements. */
+    {
+        char preview[1][SH_MODSERVE_HASH_HEX + 1];
+        sh_modserve_scope_set(NULL, 0, 1);
+        strcpy_s(preview[0], sizeof preview[0], h1);
+        CHECK(sh_modserve_prefab_files(preview, 1) == 1);
+        CHECK(sh_modserve_bundle_scope(h1, &si) && !si.listed && si.names_live && !si.requirements_live);
+        CHECK(sh_modserve_lookup(AD_OLD, NULL) && !strcmp(ad_served(AD_THING), "entityDef thing { one }"));
+        CHECK(!sh_modserve_scope_hashes(NULL, 0));
+        CHECK(sh_modserve_prefab_files(NULL, 0) == 1);
+        CHECK(!sh_modserve_lookup(AD_OLD, NULL) && !strcmp(ad_served(AD_THING), "entityDef thing { two }"));
+        sh_modserve_scope_set(NULL, 0, 0);
+    }
+
     /* Map A pins the composition's build: its bytes, its own names; the other build is inert. */
     list[0] = h1;
     CHECK(sh_modserve_scope_set(list, 1, 1) == 2);

@@ -2943,6 +2943,8 @@ static void ms_diff(ms_index *x, const ms_index *old)
 static SRWLOCK g_scope_lock = SRWLOCK_INIT;
 static char (*g_scope_hashes)[SH_MODSERVE_HASH_HEX + 1];
 static int g_scope_n, g_scope_cap;
+static char (*g_prefab_hashes)[SH_MODSERVE_HASH_HEX + 1];
+static volatile LONG g_prefab_count;
 static volatile LONG g_scope_open;
 static volatile LONG g_scope_play;     /* SH_MODSERVE_MODE_PLAY: Play, or a map launched outside the editor */
 static sh_modserve_scope_source_fn volatile g_scope_source;
@@ -2970,6 +2972,14 @@ static const char *const g_why_text[] = {
 /* Editor-time content: a bundle whose shadows include the editor's own decls or movies. Those editor tweaks
  * serve in every map the editor opens; the rest of the bundle obeys the declared rule like any bundle's. */
 static int ms_scope_always(const ms_bundle *b) { return b->scope_editor != NULL; }
+
+static int ms_prefab_build(const ms_bundle *b)
+{
+    if (!b->place || strcmp(b->place, SH_MODSERVE_CONTENT)) return 0;
+    for (int i = 0; i < g_prefab_count; i++)
+        if (!_stricmp(g_prefab_hashes[i], b->hash)) return 1;
+    return 0;
+}
 
 /* The file class a bundle's serve flags admit. */
 static int ms_sv_class(const ms_file *f)
@@ -3785,6 +3795,7 @@ static int ms_scope_compute(ms_index *x, int mark)
             if (!on || rank[i] >= 0) sv = MS_SV_ALL;
             else if (overlay) sv = (ms_scope_always(b) ? MS_SV_EDITOR : 0) | MS_SV_NEW;
             else if (inert) sv = 0;
+            else if (!play && g_scope_open && ms_prefab_build(b)) sv = MS_SV_NEW;
             else if (play || !b->root_build) sv = ms_scope_always(b) ? MS_SV_EDITOR : 0;
             else sv = (ms_scope_always(b) ? MS_SV_EDITOR : 0) | MS_SV_NEW | MS_SV_RESTORE;
             /* Only a declared bundle's requirements apply: an undeclared mod's Toybox rows register without
@@ -3902,6 +3913,10 @@ static int ms_scope_compute(ms_index *x, int mark)
                     }
                 }
             } else {
+                if (!play && nc > 1 && g_prefab_count)
+                    for (k = 0; k < nc && best < 0; ++k)
+                        if (ms_sv_allows(x, cand[k]) && ms_prefab_build(&x->bundles[x->files[cand[k]].bundle]))
+                            best = cand[k];
                 for (k = 0; k < nc && best < 0; ++k) if (ms_sv_allows(x, cand[k])) best = cand[k];
                 if (best >= 0)
                     why = ms_scope_always(&x->bundles[x->files[best].bundle]) ? MS_WHY_ALWAYS :
@@ -4030,6 +4045,30 @@ int sh_modserve_scope_hashes(char (*out)[SH_MODSERVE_HASH_HEX + 1], int cap)
     for (i = 0; out && i < n && i < cap; ++i) strcpy_s(out[i], SH_MODSERVE_HASH_HEX + 1, g_scope_hashes[i]);
     ReleaseSRWLockShared(&g_scope_lock);
     return n;
+}
+
+/* A prefab's own named files can populate its editor rows before its first object is committed. */
+int sh_modserve_prefab_pending(void) { return InterlockedCompareExchange(&g_prefab_count, 0, 0) > 0; }
+
+int sh_modserve_prefab_files(const char (*hashes)[SH_MODSERVE_HASH_HEX + 1], int count)
+{
+    char (*copy)[SH_MODSERVE_HASH_HEX + 1] = NULL;
+    if (count < 0 || (count && !hashes)) return -1;
+    if (!count && !sh_modserve_prefab_pending()) return 0;
+    if (count) {
+        copy = malloc((size_t)count * sizeof *copy);
+        if (!copy) return -1;
+        memcpy(copy, hashes, (size_t)count * sizeof *copy);
+    }
+    AcquireSRWLockExclusive(&g_build_lock);
+    AcquireSRWLockExclusive(&g_scope_lock);
+    free(g_prefab_hashes);
+    g_prefab_hashes = copy;
+    InterlockedExchange(&g_prefab_count, count);
+    (void)ms_scope_compute((ms_index *)g_index, 1);
+    ReleaseSRWLockExclusive(&g_scope_lock);
+    ReleaseSRWLockExclusive(&g_build_lock);
+    return 1;
 }
 
 int sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)

@@ -18,6 +18,7 @@
 #include "modstore.h"
 #include "module_prefab_map.h"
 #include "mp_json.h"
+#include "config_json.h"
 #include "backend_log.h"
 #include "../common/snapmap_plus_iface.h"
 #include "../common/text.h"
@@ -876,7 +877,44 @@ static void pm_refuse_unasked(const char *name, const sh_modmanifest_list *rows,
     if (o->toast && msg && *msg) o->toast(*msg);
 }
 
-static int pm_join_pinned(const sh_modmanifest_list *pinned, int editor, int *seq, char **cause)
+/* Only a placed entity's inherit is a palette key. Module names and strings in its editable properties are not. */
+static int pm_palette(const char *text, size_t len, const sh_modmanifest_list *rows, char **cause)
+{
+    mpj *doc = text ? mpj_parse(text, len) : NULL;
+    const mpj *entities = mpj_get(doc, "entities");
+    const char **names = NULL, *missing = NULL;
+    char (*hashes)[SH_MODMANIFEST_HASH_CAP] = NULL;
+    int n = sh_modmanifest_listing(rows, NULL, 0, &hashes), count = 0, ok = 0;
+    if (!doc || !entities || entities->type != MPJ_ARR || n < 0 ||
+        (entities->n && !(names = calloc((size_t)entities->n, sizeof *names)))) goto done;
+    for (int i = 0; entities && i < entities->n; i++) {
+        const mpj *key = mpj_get(mpj_get(entities->items[i], "entityDef"), "inherit");
+        if (!key || key->type != MPJ_STR) continue;
+        if (strchr(key->text, '\\')) {
+            size_t quoted_len;
+            char *quoted = mpj_dump(key, &quoted_len);
+            int decoded = quoted && sh_native_json_decode_string(quoted, quoted_len, key->text, strlen(key->text) + 1, NULL);
+            free(quoted);
+            if (!decoded) goto done;
+        }
+        if (!_strnicmp(key->text, "mods/", 5) || sh_prefab_mods_row_provides(rows, key->text))
+            names[count++] = key->text;
+    }
+    if (sh_modserve_prefab_files(hashes, n) < 0) goto done;
+    ok = sh_modserve_prefab_rows(names, (size_t)count, &missing);
+    if (!ok) {
+        pm_msg(cause, "the editor could not load the palette row for %s", missing ? missing : "a mod object");
+        (void)sh_modserve_prefab_files(NULL, 0);
+    }
+done:
+    if (!ok && cause && !*cause) pm_msg(cause, "Snapmap+ could not prepare the prefab's editor rows");
+    free(hashes);
+    free(names);
+    mpj_free(doc);
+    return ok;
+}
+
+static int pm_join_pinned(const char *text, size_t len, const sh_modmanifest_list *pinned, int editor, int *seq, char **cause)
 {
     sh_modmanifest_list cur, use;
     char **names = NULL;
@@ -924,11 +962,15 @@ static int pm_join_pinned(const sh_modmanifest_list *pinned, int editor, int *se
             goto done;
         }
         sh_cache_on_load(&use, names, n);
+        if (!pm_palette(text, len, &use, cause)) { r = -1; goto done; }
         for (i = 0; i < use.count && r > 0; i++) if (sh_modmanifest_current_add_row(&use.rows[i]) < 0) r = -1;
         if (r > 0) {
             (void)sh_modui_scope_refresh("prefab");
             pm_logf("PREFABS: %u row(s) of the prefab's own content joined the map", (unsigned)use.count);
-        } else pm_msg(cause, "Snapmap+ ran out of memory");
+        } else {
+            (void)sh_modserve_prefab_files(NULL, 0);
+            pm_msg(cause, "Snapmap+ ran out of memory");
+        }
     }
 done:
     free(names);
@@ -993,7 +1035,7 @@ static int pm_resolve_in_map(const char *text, size_t len, const sh_modmanifest_
         memset(&local, 0, sizeof local);
         for (i = 0; i < rows->count; i++)
             (void)sh_modmanifest_list_add(rows->rows[i].pinned ? &pinned : &local, &rows->rows[i]);
-        r = !pinned.count ? 1 : o->use_pinned ? o->use_pinned(&pinned, &why) : pm_join_pinned(&pinned, editor, seq, &why);
+        r = !pinned.count ? 1 : o->use_pinned ? o->use_pinned(&pinned, &why) : pm_join_pinned(text, len, &pinned, editor, seq, &why);
         if (r == SH_PREFAB_MODS_HELD) {
             pm_msg(msg, "Preparing mod content for %s.", name && name[0] ? name : "the prefab");
             sh_modmanifest_list_free(&pinned);

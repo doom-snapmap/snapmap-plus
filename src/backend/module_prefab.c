@@ -32,6 +32,7 @@
 #include "backend_log.h"
 #include "process_heap_scope.h"
 #include "prefab_mods.h"
+#include "modui.h"
 
 
 /* editor */
@@ -331,6 +332,7 @@ out:
 
 static void mp_finish(int status, const char *msg)
 {
+    if (status < 1) sh_modui_prefab_finished();
     char *kept = _strdup(msg ? msg : ""), *old;
     AcquireSRWLockExclusive(&g_lock);
     g_status = status;
@@ -447,6 +449,7 @@ static void mp_keep_unmoved(unsigned char *ed, const char *why)
     mp_logf("MODPREFAB: placement kept where it landed (%d module(s)); navigation update requested", g_added);
     sh_apply_engine_nav_request_update();
     mp_finish(1, why);
+    sh_modui_prefab_finished();
     InterlockedExchange(&g_phase, MP_IDLE);
 }
 
@@ -557,6 +560,7 @@ void sh_module_prefab_tick(void *editor)
         } else {
             mp_logf("MODPREFAB: placement cancelled; the placed modules were removed");
         }
+        sh_modui_prefab_finished();
         InterlockedExchange(&g_phase, MP_IDLE);
     }
 }
