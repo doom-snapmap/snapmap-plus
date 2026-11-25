@@ -35,6 +35,7 @@ typedef struct mp_base { const char *name; int family; } mp_base;
 static const mp_base MP_BASES[] = {
     { "skinvmtr", 0 }, { "skinvmtrwounds", 0 }, { "uberparticles", 1 },
     { "hairprez", 2 }, { "hairshadow", 2 }, { "hairblending", 2 }, { "uberparticles", 3 }, { "ribbonblend", 4 },
+    { "skinvmtr_custom", 5 },
 };
 #define MP_NBASES (sizeof MP_BASES / sizeof MP_BASES[0])
 
@@ -102,6 +103,7 @@ static const char *const HR_VARYINGS[] = { "vofi_TexCoord0" };
 /* The render parm decls the product derives (textures only): the defaults a texture a material does not set gives. */
 typedef struct mp_parm { const char *name, *text; } mp_parm;
 static const mp_parm MP_PARM_DECLS[] = {
+    { "recolourmask",              "{ Tex2D textures/system/constant_color/black }" },
     /* No mask, no layer: what an image key the material does not set gives. */
     { "layerblendmask",            "{ Tex2D textures/system/constant_color/black }" },
     { "layerparms",                "{ Tex2D textures/system/constant_color/black }" },
@@ -311,17 +313,11 @@ char *sh_modprog_patch_decl(const char *text, size_t len, size_t *out_len)
     return t;
 }
 
-char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len)
+static char *mp_glsl_bindings(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len)
 {
     static const char bind[] = "layout( binding = ";
-    static const char ubo[] = "uniform freqHigh_fragmentUniforms_ubo {";
-    static const char anchor[] = "inputs.normal = sampleNormal.wyz;\n";
-    mp_buf b = { 0 }, s = { 0 };
-    const char *p = text, *end = text + len, *u, *close, *first, *mainp, *a, *ls, *ind;
-    unsigned k;
-    char *t1;
-    size_t n1;
-    /* 1. bindings at or after tex_end move up */
+    const char *p = text, *end = text + len;
+    mp_buf s = { 0 };
     while (p < end) {
         const char *q = mp_find(p, (size_t)(end - p), bind);
         if (!q) { mp_put(&s, p, (size_t)(end - p)); break; }
@@ -336,9 +332,19 @@ char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsi
             p = d;
         }
     }
-    if (s.oom) { free(s.p); return NULL; }
-    t1 = s.p;
-    n1 = s.n;
+    return mp_take(&s, out_len);
+}
+
+char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len)
+{
+    static const char ubo[] = "uniform freqHigh_fragmentUniforms_ubo {";
+    static const char anchor[] = "inputs.normal = sampleNormal.wyz;\n";
+    mp_buf b = { 0 };
+    const char *end, *u, *close, *first, *mainp, *a, *ls, *ind;
+    unsigned k;
+    char *t1;
+    size_t n1;
+    if (!(t1 = mp_glsl_bindings(text, len, tex_end, shift, &n1))) return NULL;
     end = t1 + n1;
     /* 2. the material uniform block (the layered program adds no parameter to it) */
     if (!(u = mp_find(t1, n1, ubo)) || !(close = memchr(u, '}', (size_t)(end - u)))) { free(t1); return NULL; }
@@ -403,30 +409,13 @@ char *sh_modprog_hr_patch_decl(const char *text, size_t len, size_t *out_len)
 
 char *sh_modprog_hr_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len)
 {
-    static const char bind[] = "layout( binding = ";
     static const char ubo[] = "uniform freqHigh_fragmentUniforms_ubo {";
-    mp_buf b = { 0 }, s = { 0 };
-    const char *p = text, *end = text + len, *u, *close, *first, *mainp, *last;
+    mp_buf b = { 0 };
+    const char *end, *u, *close, *first, *mainp, *last;
     unsigned k;
     char *t1;
     size_t n1;
-    while (p < end) {
-        const char *q = mp_find(p, (size_t)(end - p), bind);
-        if (!q) { mp_put(&s, p, (size_t)(end - p)); break; }
-        q += sizeof bind - 1;
-        mp_put(&s, p, (size_t)(q - p));
-        {
-            unsigned v = 0;
-            const char *d = q;
-            while (d < end && *d >= '0' && *d <= '9') v = v * 10 + (unsigned)(*d++ - '0');
-            if (d == q) { p = q; continue; }
-            mp_printf(&s, "%u", v >= tex_end ? v + shift : v);
-            p = d;
-        }
-    }
-    if (s.oom) { free(s.p); return NULL; }
-    t1 = s.p;
-    n1 = s.n;
+    if (!(t1 = mp_glsl_bindings(text, len, tex_end, shift, &n1))) return NULL;
     end = t1 + n1;
     if (!(u = mp_find(t1, n1, ubo)) || !(close = memchr(u, '}', (size_t)(end - u)))) { free(t1); return NULL; }
     first = mp_find(t1, n1, "layout( location");
@@ -1311,6 +1300,7 @@ done:
 
 #include "programs/particles_splice.inc"
 #include "programs/ribbon_splice.inc"
+#include "programs/recolour_mask.inc"
 
 uint32_t *sh_modprog_hr_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
                                size_t *out_words, const char **why)
@@ -1391,6 +1381,8 @@ static const mp_family MP_FAMILIES[] = {
       "its decl's fragment stage has no single PREMULTIPLY_ALPHA_BLENDED( result ) statement, or no hlsl_fp section for the functions" },
     { "snapmapplus/ribbons/", "ribbon version", NULL, &ML_NBLOCK_PARMS, NULL, &ML_NBLOCK_PARMS,
       rb_decl, rb_glsl, rb_splice, "its ribbon vertex does not expose colour and mask coordinates", 1 },
+    { "snapmapplus/recolourable/", "recolourable version", NULL, &ML_NBLOCK_PARMS, RC_TEXTURES, &RC_TEXTURE_COUNT,
+      rc_decl, rc_glsl, rc_splice, "its material has no customization mask input" },
 };
 #define MP_NFAMILIES (sizeof MP_FAMILIES / sizeof MP_FAMILIES[0])
 

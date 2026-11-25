@@ -1,17 +1,16 @@
 # The Graphics SDK
 
 A mod describes how its things look in plain terms; Snapmap+ turns the description into DOOM 2016's own material
-and effect data. Where one of the game's own render programs draws the picture, the game's program is used. Where
-none can, one of Snapmap+'s two general programs is used, the layered surface or the particle shading. An author
+and effect data. Snapmap+ uses the game's own render programs and adapts them when an effect needs additional
+texture or shading inputs. An author
 never names a program, a render parm, a texture slot or a renderer, and a material never fails to load because of a
 limit: the product packs and budgets it, and reports only a mistake in the description, in one sentence that says
 what to write instead.
 
 The SDK has these parts:
 
-- **Material types in data**: a material file whose first key is `type`. This guide covers the two types that need more than
-  the game's own material keys: `type layered` (a surface built from tiled layers) and `type particle` (a particle
-  stage's shading). Any other material is written with the game's own keys, as before.
+- **Material types in data** use `type` as the first key. Use `layered` for tiled surfaces, `particle` for particle
+  shading, `ribbon` for trails and `recolourable` for a model whose colours can change in Play.
 - **Effects in data**: an effect (`effects/x.decl`) whose first key is `type effect` names what plays in plain
   items: a light, a decal, a shake, a flash, a screen image, a blur, a focus change, a flare, a trail, a model, a
   sound, a glow, an environment change, wind and particles ([Effects](#effects), [Particles](#particles)). The
@@ -319,6 +318,32 @@ An environment is a file in the mod's `environments/` folder (`environments/<nam
 blends back to the level's own. An effect's `environment` item does the same for as long as the item plays. Each is
 undone when the map ends. A value that changes over time is held at its middle by `set_environment` (the build log
 says so); the environment itself, used for an area, draws it changing.
+
+## A recolourable surface
+
+Add `type recolourable` to a skinned material to paint parts of a model independently. Keep the base surface and
+its virtual-texture mapping. Supply a region mask as an ordinary linear image in the model's UVs, or omit
+`regions` on a material whose baked virtual texture already carries a DOOM 2016 customization mask.
+
+```
+{
+    type       recolourable
+    regions    images/armour_mask.tga
+    primary    { 0.2, 0.45, 0.8 }
+    secondary  { 0.9, 0.6, 0.15 }
+    shine      0.4
+}
+```
+
+Paint the red and blue channels around a neutral value of 128. Above 130, red selects the primary colour
+and blue selects the secondary colour. Below 125, red selects glow and blue selects pattern. The strength
+reaches full at the channel endpoints. The green channel controls wear, with high values for scratches and
+low values for dirt.
+
+Use `pattern` for a tiling image and `patterncolours { r, g, b, r, g, b }` for its two colours. Optional
+`scratches`, `dirt` and `glow` each take an RGB colour. Use `detail` for a shared tiling normal image and
+`shine` for coating smoothness from 0 to 1. Colours range from 0 to 1. In script, call
+`e:recolour{ primary = {1, 0, 0}, secondary = {0, 0, 1} }` on an owned entity to change its copy.
 
 ## Ribbon materials
 

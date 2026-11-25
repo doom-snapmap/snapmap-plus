@@ -555,7 +555,7 @@ static void test_mistakes(void)
         }
     }
     mistake("{\n\tdiffusemap d.tga\n\ttype layered\n}\n", "body.decl line 3: 'type' must be the first key of the material; move it to the top.");
-    mistake("{\n\ttype glossy\n}\n", "body.decl line 2: 'type' is 'glossy'; write layered, particle or ribbon.");
+    mistake("{\n\ttype glossy\n}\n", "body.decl line 2: 'type' is 'glossy'; write layered, particle, ribbon or recolourable.");
     /* the first mistake is the one reported, by its line; a comment or a quoted value does not hide a field */
     mistake("{\n\ttype layered\n\t// layer5 is not here\n\tlayer1repeat 2 // fine\n\tlayer9 a.tga\n\tlayer1scroll 2\n}\n",
             "body.decl line 5: 'layer9' is not a field of a layered material; a surface has layers 1 to 4.");
@@ -656,6 +656,30 @@ static void test_determinism(void)
     release(&a);
 }
 
+static void test_recolourable(void)
+{
+    res x = compile("paint.decl", "{\ntype recolourable\nregions mask.tga\nprimary {0,1,0}\nsecondary {0,0,1}\n"
+                    "shine 0.25\npattern stripes.tga\npatterncolours {1,0,0,0,1,1}\ndetail normal.tga\n"
+                    "scratches {0.2,0.3,0.4}\nglow {0,1,0}\nlandpagefile \"mods/abcdefgh/board\"\n}\n");
+    CHECK(x.r == SH_LOOK_CHANGED && x.out);
+    if (x.out) {
+        CHECK(!strcmp(value(x.out, "ambientprogram", 0), "snapmapplus/recolourable/skinvmtr_custom"));
+        CHECK(!strcmp(unq(value(x.out, "recolourmask", 0)), "mask.tga"));
+        CHECK(!strcmp(value(x.out, "customprimaryalbedo", 0), "{ 0, 1, 0, 0.25 }"));
+        CHECK(!strcmp(value(x.out, "custompatternalbedo1", 0), "{ 0, 1, 1, 0.25 }"));
+        CHECK(!strcmp(unq(value(x.out, "tilingnormalmap2", 0)), "normal.tga"));
+        CHECK(!strcmp(unq(value(x.out, "tilingpatternmap", 0)), "stripes.tga"));
+        CHECK(has(x.out, "utilitarian_dirtscratches.tga") && has(x.out, "mods/abcdefgh/board"));
+    }
+    release(&x);
+    x = compile("baked.decl", "{\ntype recolourable\ncustombloomalbedo 1\n}\n");
+    CHECK(x.r == SH_LOOK_CHANGED && x.out && !strcmp(value(x.out, "ambientprogram", 0), "skinvmtr_custom") && !has(x.out, "recolourmask"));
+    if (x.out) CHECK(count_key(x.out, "custombloomalbedo") == 1 && !strcmp(value(x.out, "custombloomalbedo", 0),"1"));
+    release(&x);
+    mistake("{\ntype recolourable\nregions {1,0,1}\n}\n", "body.decl line 3: 'regions' needs an image path.");
+    mistake("{\ntype recolourable\nprimary {0,1,2}\n}\n", "body.decl line 3: 'primary' needs colour channels from 0 to 1.");
+}
+
 int main(int argc, char **argv)
 {
     int i;
@@ -670,6 +694,7 @@ int main(int argc, char **argv)
     test_stock_routes();
     test_particle_fields();
     test_ribbon_length_fade();
+    test_recolourable();
     test_ribbon_age();
     test_mistakes();
     test_not_looks();

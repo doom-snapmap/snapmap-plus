@@ -52,30 +52,13 @@ static char *ep_patch_decl(const char *text, size_t len, size_t *out_len, const 
 
 static char *ep_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len, const char *glsl)
 {
-    static const char bind[] = "layout( binding = ";
     static const char ubo[] = "uniform freqHigh_fragmentUniforms_ubo {";
-    mp_buf b = { 0 }, s = { 0 };
-    const char *p = text, *end = text + len, *u, *close, *first, *mainp, *last;
+    mp_buf b = { 0 };
+    const char *end, *u, *close, *first, *mainp, *last;
     unsigned k;
     char *t1;
     size_t n1;
-    while (p < end) {
-        const char *q = mp_find(p, (size_t)(end - p), bind);
-        if (!q) { mp_put(&s, p, (size_t)(end - p)); break; }
-        q += sizeof bind - 1;
-        mp_put(&s, p, (size_t)(q - p));
-        {
-            unsigned v = 0;
-            const char *d = q;
-            while (d < end && *d >= '0' && *d <= '9') v = v * 10 + (unsigned)(*d++ - '0');
-            if (d == q) { p = q; continue; }
-            mp_printf(&s, "%u", v >= tex_end ? v + shift : v);
-            p = d;
-        }
-    }
-    if (s.oom) { free(s.p); return NULL; }
-    t1 = s.p;
-    n1 = s.n;
+    if (!(t1 = mp_glsl_bindings(text, len, tex_end, shift, &n1))) return NULL;
     end = t1 + n1;
     if (!(u = mp_find(t1, n1, ubo)) || !(close = memchr(u, '}', (size_t)(end - u)))) { free(t1); return NULL; }
     first = mp_find(t1, n1, "layout( location");

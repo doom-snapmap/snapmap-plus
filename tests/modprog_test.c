@@ -771,6 +771,40 @@ out:
     if (f) HeapFree(GetProcessHeap(), 0, f);
 }
 
+static void test_real_recolourable(void)
+{
+    const char *base = "skinvmtr_custom";
+    const char *masks[] = { NULL, "0000000000000001" };
+    for (unsigned i = 0; i < 2; i++) {
+        const char *prefix = "snapmapplus/recolourable/";
+        char *decl = i ? sh_textf("generated/renderprogs/permutations/%s%s_%s.decl", prefix, base, masks[i])
+                       : sh_textf("generated/decls/renderprog/%s%s.decl", prefix, base);
+        char *bin = i ? sh_textf("generated/renderprogs/permutations/%s%s_%s_pc_vulkan.bin", prefix, base, masks[i])
+                      : sh_textf("generated/renderprogs/%s%s_pc_vulkan.bin", prefix, base);
+        char *frag = i ? sh_mb_spirv_request(decl, ".fspv") : sh_textf("generated/spirv/%s%s.fspv", prefix, base);
+        unsigned char *d = NULL, *b = NULL, *f = NULL;
+        size_t dn = 0, bn = 0, fn = 0, off[3], len[3];
+        CHECK(sh_modprog_read(decl, &d, &dn) == SH_MB_STOCK_OK && d);
+        CHECK(sh_modprog_read(bin, &b, &bn) == SH_MB_STOCK_OK && b);
+        CHECK(sh_modprog_read(frag, &f, &fn) == SH_MB_STOCK_OK && f);
+        if (d && b && f && fn > 16 && sh_mb_rp_stages(b, bn, off, len) == 1) {
+            CHECK(strstr((char *)d, "tex2D( $recolourMask, fragment.texcoord0.xy )") != NULL);
+            CHECK(strstr((char *)b + off[1], "texture( samp_recolourmask, vofi_TexCoord0.xy )") != NULL);
+            CHECK(rd_be32(f + 4) == sh_mb_md5fold(b + off[1], len[1]));
+            if (g_dump) {
+                char path[MAX_PATH];
+                snprintf(path, sizeof path, "%s/recolourable-%u.spv", g_dump, i);
+                FILE *file = fopen(path, "wb");
+                if (file) { fwrite(f + 16, 1, fn - 16, file); fclose(file); }
+            }
+        }
+        if (d) HeapFree(GetProcessHeap(), 0, d);
+        if (b) HeapFree(GetProcessHeap(), 0, b);
+        if (f) HeapFree(GetProcessHeap(), 0, f);
+        free(decl); free(bin); free(frag);
+    }
+}
+
 static void test_real_ribbon(void)
 {
     const char *paths[] = {
@@ -1370,6 +1404,7 @@ static void test_real(const char *doom)
     sh_modstock_list("generated/renderprogs/permutations/" SH_MODPROG_PREFIX, count, &s);
     CHECK(s.files == 4);      /* each base's permutation decl and cooked program */
     test_real_ribbon();
+    test_real_recolourable();
     test_real_ep(SH_MODPROG_EP_PREFIX);
     test_real_ep(SH_MODPROG_EP_EXT_PREFIX);
     s.files = 0;
