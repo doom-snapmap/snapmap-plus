@@ -5959,6 +5959,7 @@ int sh_modserve_error_names_decl(const char *text, const char *type, const char 
 #define MS_RL_TYPE    0x08
 #define MS_RES_LEVEL  0x28
 #define MS_RES_NAME   0x08
+#define MS_RES_LIST   0x10
 #define MS_RES_STATE  0x2c
 #define MS_RES_FAILED  0x01   /* +0x2c bit 0: the load failed */
 #define MS_RES_DEFAULT 0x04   /* +0x2c bit 2: the engine made a default (a failed read, GenericLoad) */
@@ -6097,14 +6098,21 @@ static void ms_aset_del(ms_aset *s, uintptr_t key)
     }
 }
 
-/* The keepability rule (modserve.h): 1 when `resource` may be kept; 0
- * (counted and named for the next left_to_map) when its last load ran with a
- * map's heap selected. */
+/* Both renderers destroy and rebuild decal atlas entries when resetting the atlas. */
+static int ms_atlas_entry(const void *resource)
+{
+    const unsigned char *res = (const unsigned char *)resource;
+    const unsigned char *list = *(const unsigned char *const *)(res + MS_RES_LIST);
+    const char *type = list ? *(const char *const *)(list + MS_RL_TYPE) : NULL;
+    return type && !strcmp(type, "decalatlas");
+}
+
 int sh_modserve_keepable(const void *resource)
 {
     const unsigned char *res = (const unsigned char *)resource;
     const char *name;
     size_t at;
+    if (!res || ms_atlas_entry(res)) return 0;
     if (!ms_aset_has(&g_mapheap, (uintptr_t)res)) return 1;
     g_left_n++;
     name = *(const char *const *)(res + MS_RES_NAME);
@@ -6114,16 +6122,23 @@ int sh_modserve_keepable(const void *resource)
     return 0;
 }
 
+static void ms_mark_kept(const void *resource)
+{
+    if (ms_aset_add(&g_kept, (uintptr_t)resource, MS_KEPT_MAX) < 0) g_attrib_full = 1;
+}
+
 /* Every write that keeps a resource for the session goes through here. */
 int sh_modserve_keep(void *resource)
 {
     unsigned char *res = (unsigned char *)resource;
     if (!res) return 0;
-    if (*(unsigned *)(res + MS_RES_LEVEL) != 4) {
+    if (*(unsigned *)(res + MS_RES_LEVEL) == 4) {
+        if (ms_atlas_entry(res)) return 0;
+    } else {
         if (!sh_modserve_keepable(res)) return 0;
         *(unsigned *)(res + MS_RES_LEVEL) = 4;
     }
-    sh_modserve_kept_add(res);
+    ms_mark_kept(res);
     return 1;
 }
 
@@ -6396,7 +6411,7 @@ static int ms_pair_add(uintptr_t parent, uintptr_t child)
 
 void sh_modserve_kept_add(const void *resource)
 {
-    if (ms_aset_add(&g_kept, (uintptr_t)resource, MS_KEPT_MAX) < 0) g_attrib_full = 1;
+    if (resource && !ms_atlas_entry(resource)) ms_mark_kept(resource);
 }
 
 int sh_modserve_kept_has(const void *resource)
@@ -6414,10 +6429,10 @@ int sh_modserve_kept_load_moves(const void *resource, int heap)
 int sh_modserve_attrib_note(const void *parent, const void *child)
 {
     uintptr_t p = (uintptr_t)parent, c = (uintptr_t)child;
-    if (!p || !c || p == c) return 0;
+    if (!p || !c || p == c || ms_atlas_entry(parent) || ms_atlas_entry(child)) return 0;
     if (!g_attrib_full && ms_pair_add(p, c) < 0) g_attrib_full = 1;
     if (!ms_aset_has(&g_kept, p)) return 0;
-    sh_modserve_kept_add(child);
+    ms_mark_kept(child);
     return ms_aset_has(&g_kept, c);
 }
 

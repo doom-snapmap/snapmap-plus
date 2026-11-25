@@ -2432,7 +2432,7 @@ static void test_watermark(void)
 
 /* The engine's lists with their type at +0x08 (the class at +0x10); a
  * resource holds its name at +0x08 and its level at +0x28. */
-typedef struct kh_res { unsigned char pad[8]; const char *name; unsigned char pad2[0x18]; unsigned level; unsigned state; } kh_res;
+typedef struct kh_res { unsigned char pad[8]; const char *name; struct kh_list *list; unsigned char pad2[0x10]; unsigned level; unsigned state; } kh_res;
 typedef struct kh_list {
     unsigned char pad[8];
     const char *type, *cls;
@@ -6336,9 +6336,11 @@ static void test_load_attribution(void)
 
     /* Bounds: past a million pairs recording stops and the close says so;
      * the close then starts afresh. */
-    for (i = 0; i < (1 << 20) + 8; ++i)
-        (void)sh_modserve_attrib_note((const void *)(uintptr_t)(0x100000000ull + (uint64_t)i * 64),
-                                      (const void *)(uintptr_t)(0x900000000ull + (uint64_t)i * 64));
+    {
+        static kh_res parents[1025], children[1024];
+        for (i = 0; i < (1 << 20) + 8; ++i)
+            (void)sh_modserve_attrib_note(&parents[i / 1024], &children[i % 1024]);
+    }
     CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && out.overflow && out.pairs == (1u << 20));
     CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && !out.overflow && out.pairs == 0);
 
@@ -6349,6 +6351,41 @@ static void test_load_attribution(void)
     sh_modserve_kept_add(&outside);
     CHECK(sh_modserve_attrib_close(&head, 0, &out) == 0 && outside.level == 1);
     limg.next = NULL;
+    sh_modserve_attrib_reset();
+}
+
+static void test_decal_atlas_lifetime(void)
+{
+    kh_list atlas = {0}, images = {0};
+    kh_res decal = {0}, image = {0}, parent = {0};
+    kh_res *decals[] = {&decal}, *textures[] = {&image};
+    kh_list *head = &atlas;
+    sh_modserve_watermark mark;
+    sh_modserve_raised raised;
+    sh_modserve_attrib attrib;
+    int kept, depth;
+
+    sh_modserve_attrib_reset();
+    atlas.type = "decalatlas"; atlas.cls = "idLightAtlasResource"; atlas.entries = decals; atlas.next = &images;
+    images.type = "image"; images.cls = "idImage"; images.entries = textures;
+    decal.list = &atlas; decal.name = "mods/testatlas/blood"; decal.level = 1;
+    image.list = &images; image.name = "mods/testatlas/blood"; image.level = 1;
+    parent.level = 4;
+    CHECK(sh_modserve_watermark_take(&head, &mark) == 1);
+    atlas.count = images.count = 1;
+    CHECK(sh_modserve_watermark_raise(&head, &mark, &raised) == 1 && raised.created == 2 && raised.raised == 1);
+    CHECK(decal.level == 1 && image.level == 4 && !sh_modserve_kept_has(&decal));
+    sh_modserve_watermark_free(&mark);
+
+    sh_modserve_kept_add(&parent);
+    depth = sh_modserve_attrib_enter(&parent, 0, &kept);
+    sh_modserve_attrib_found(&decal);
+    sh_modserve_attrib_leave(depth);
+    CHECK(sh_modserve_attrib_close(&head, 0, &attrib) == 1 && attrib.pairs == 0);
+    CHECK(!sh_modserve_keepable(&decal) && !sh_modserve_keep(&decal) && decal.level == 1);
+    decal.level = 4;
+    sh_modserve_kept_add(&decal);
+    CHECK(!sh_modserve_keep(&decal) && !sh_modserve_kept_has(&decal) && decal.level == 4);
     sh_modserve_attrib_reset();
 }
 
@@ -6388,6 +6425,7 @@ int main(void)
     test_held_models();
     test_pass_lookups();
     test_load_attribution();
+    test_decal_atlas_lifetime();
     test_editor_closure();
     test_renderparm_first();
     test_surfaces_never_parsed();
