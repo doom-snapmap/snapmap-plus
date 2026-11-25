@@ -35,8 +35,11 @@ try {
         versioninfo.json
     if ($LASTEXITCODE -ne 0) { throw "goversioninfo failed" }
 
-    # Remove local paths and debug symbols; stamp the CLI version.
-    go build -trimpath -ldflags "-s -w -X main.version=$Version" -o $Out .
+    # Keep the offline slicer and the runtime on the same build and closure rules.
+    & (Join-Path $here "..\tests\run-tests.ps1") -Only unit_cli
+    if ($LASTEXITCODE -ne 0) { throw "mod unit helper build failed" }
+    Copy-Item -LiteralPath (Join-Path $here "..\tests\obj\unit_cli.exe") -Destination (Join-Path $here "earlier-units.exe") -Force
+    go build -tags earlier_units -trimpath -ldflags "-s -w -X main.version=$Version" -o $Out .
     if ($LASTEXITCODE -ne 0) { throw "installer build failed" }
 
     Write-Host "built: installer\$Out (version $Version)"

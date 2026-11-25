@@ -462,6 +462,9 @@ void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap);
  * characters [A-Za-z0-9._-$+@~()] and internal spaces, no segment that
  * starts with a space or ends in '.' or a space; any length). 1 when valid,
  * else 0 with the cause in *cause (malloc'd; the caller frees it). */
+#ifdef SH_MB_EARLIER_ASSETS
+int sh_mb_verify_earlier_assets_text(const char *text, size_t len, const char *hash);
+#endif
 int  sh_mb_check_request(const char *request, char **cause);
 
 /* Extension whitelist. A .bswf movie is admitted only under

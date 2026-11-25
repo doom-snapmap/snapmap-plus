@@ -10,8 +10,7 @@
 # folders and SNAPMAP_PLUS_API_BASE at the fake API. Your real DOOM and data folders are never
 # written. Exit code 0 means every step of every scenario met the contract.
 #
-# Converting earlier releases' data is not in this release: scenario b checks the earlier release's
-# folders are left as they are.
+# Scenario b checks the restored author folders and the inactive mod after an earlier-release update.
 #
 # Keep this script ASCII for PowerShell 5.1.
 param(
@@ -217,8 +216,7 @@ try {
     # b) v0.2.1-beta.19's 2018 pair in this April 2024 folder, overrides\ packages -> update, then uninstall.
     $s = New-Scenario "b-beta19" $binB
     Seed $s "beta19"
-    $keepB = @("config.json", "overrides\tinypack\package.json")
-    # The update converts nothing and leaves the earlier release's mods, overrides\ and removed-mods\ as they are.
+    $keepB = @("config.json", "mods\tinypack\mod.json", "mods\alex.tiny@1.0.0+1\mod.json")
     $keepB += @("removed-mods")
     Step $s "update" @("update", "--yes", "--plain") "installed" $pair $keepB @("the other DOOM build's files") @("Converting mods")
     Step $s "uninstall" @("uninstall", "--yes", "--plain") "uninstalled" @() $keepB @()

@@ -298,22 +298,19 @@ and uninstall cycle.
 The installer checks for WebView2 and offers Microsoft's runtime bootstrapper
 when needed. See [packaging](../docs/packaging.md) for the installed file contract.
 
-## Mods and retired package folders
+## Updating earlier maps, prefabs and mods
 
-Converting the mods, maps and prefabs of earlier releases is not in this release;
-it will be built into the installer, `snapmap-plus.exe`, with no separate tool.
-Until then the installer leaves what an earlier release left exactly as it is:
-mod folders in an earlier shape, the retired `overrides\`, `strings\` and
-`removed-mods\` folders, and maps saved in an earlier shape. The game converts
-nothing either. A map, export or prefab saved by an earlier Snapmap+ is refused
-with "... was saved by an earlier Snapmap+; run the Snapmap+ installer to update
-it.", and a mod folder made for an earlier version is listed with "This mod was
-made for an earlier version of Snapmap+. This version does not read it yet."
-The installer's conversion is on the release gate.
+Install or update converts recognized earlier files in the Snapmap+ data folder. The installer
+keeps each original in `backups/earlier-data/`. It converts installed mod folders into the author
+layout and reads an earlier map's exact mod build when turning its objects into units. If the
+original build is missing, the installer names the affected file and keeps it intact. Restore the
+missing build and rerun the same command.
 
-Apart from removing empty retired folders, the installer itself never creates,
-changes or removes `mods\` or the retired package folders (see
-[Mods](../docs/capabilities.md#mods)).
+A native DOOM map gets a converted copy in `rawmaps/Updated saves/`. Open the copy with
+**File > Load Rawmap** and use **Save As** in DOOM. For an export outside your profile, drop its
+JSON or ZIP file onto `snapmap-plus.exe`, or run `snapmap-plus convert "<file>"`. Keep a prefab's
+earlier metadata file beside its JSON. The installer folds its description, tags, scripts and
+other author data into the updated prefab.
 
 ## Simulation harness
 
@@ -338,7 +335,7 @@ folders under `-Scratch` (default `%TEMP%\snapmap-plus-sim`), with
 | Scenario | Layout before | Steps |
 |---|---|---|
 | a | the original SnapHak in DOOM, prefabs, strings and a rawmap under `%USERPROFILE%\snaphak`, another tool's `dinput8.dll.doomforge.rollback` | install, uninstall |
-| b | v0.2.1-beta.19's 2018 pair in the April 2024 folder, its record and `installer-files.json`, `tests/fixtures/store-retired` as the data folder (`overrides\`, the retired `mods\` layout, `removed-mods\`) | update (the earlier release's folders stay as they are), uninstall |
+| b | v0.2.1-beta.19's 2018 pair in the April 2024 folder, its record and `installer-files.json`, `tests/fixtures/store-retired` as the data folder (`overrides\`, the retired `mods\` layout, `removed-mods\`) | update (the earlier installed mod and override become author folders), uninstall |
 | c | v0.2.1-beta.20: both pairs, three backups of our DLLs, another tool's file, `installer-files.json`, `installer-versions.json`, `snapmap-plus.exe.updates.json`, `snapmap-plus.exe.old`, an empty `override-backups\` | update, uninstall |
 | d | none: `v0.3.0-sim.1` installs, then `v0.3.0-sim.2` is published | install, update (the installer updates itself first and relaunches), uninstall |
 
