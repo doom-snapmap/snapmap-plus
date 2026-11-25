@@ -1641,6 +1641,63 @@ static void report_map(const char *dir, const char *leaf, const char *const *has
     free(text);
 }
 
+static void test_partly_cached_unit(const char *mods, const char *played, const char *first_sha)
+{
+    char second[2049], sha[65], hash[65], pin[65], manifest[600];
+    char local[MAX_PATH*2], output[MAX_PATH*3], copy_sha[65], *blob_path, *why = NULL;
+    unsigned long long size = 0;
+    const char *units[] = {hash};
+    int damaged = 0;
+    size_t len;
+    report_result r;
+    sh_mb_bundle built;
+    sh_cache_copy copy;
+
+    memset(second, ' ', sizeof second - 1);
+    memcpy(second, "-- second script\n", 17);
+    second[sizeof second - 1] = '\0';
+    sh_mb_sha256_hex(second, sizeof second - 1, sha);
+    len = snprintf(manifest, sizeof manifest, "{\"format\":1,\"files\":["
+                   "{\"path\":\"scripts/first.lua\",\"sha256\":\"%s\",\"size\":1024},"
+                   "{\"path\":\"scripts/second.lua\",\"sha256\":\"%s\",\"size\":2048}],\"mod\":{},\"game\":[]}", first_sha, sha);
+    sh_mb_sha256_hex(manifest, len, hash);
+    CHECK(sh_cache_put_manifest(hash, manifest, len));
+    report_map(played, "aaaa_revision1_map.decl", units, 1, pin);
+    check_report(&r, 1, 1, 1);
+    CHECK(!r.tokens[0][0] && strstr(r.lines[0], "Some content is missing"));
+    CHECK(!sh_cache_stage_copy(pin, &copy, &why) && why && !copy.dir);
+    free(why); why = NULL;
+
+    CHECK(sh_cache_import_blob(sha, second, sizeof second - 1, &damaged));
+    check_report(&r, 1, 1, 3);
+    CHECK(!strcmp(r.tokens[0], pin));
+    blob_path = sh_cache_blob_path(sha);
+    CHECK(blob_path != NULL);
+    if (!blob_path) return;
+    SetFileAttributesA(blob_path, FILE_ATTRIBUTE_NORMAL);
+    write_file(blob_path, second, 768);
+    free(blob_path);
+    check_report(&r, 1, 1, 1);
+    CHECK(!r.tokens[0][0] && strstr(r.lines[0], "Some content is missing"));
+
+    snprintf(local, sizeof local, "%s\\local-copy", mods);
+    mt_write(local, "mod.json", "{\"name\":\"Local copy\"}");
+    mt_write(local, "scripts\\second.lua", second);
+    if (build(local, &built)) CHECK(sh_mb_write(&built, local, &why));
+    sh_mb_free(&built);
+    free(why); why = NULL;
+    sh_cache_local_changed();
+    check_report(&r, 1, 1, 1);
+    CHECK(!strcmp(r.tokens[0], pin));
+    CHECK(sh_cache_stage_copy(pin, &copy, &why) && !why && copy.dir);
+    if (copy.dir) {
+        snprintf(output, sizeof output, "%s\\scripts\\second.lua", copy.dir);
+        CHECK(sh_mb_sha256_file(output, &size, copy_sha) && size == sizeof second - 1 && !strcmp(copy_sha, sha));
+    }
+    sh_cache_copy_free(&copy);
+    free(why);
+}
+
 static void test_local_content_report(const char *top)
 {
     char dir[MAX_PATH*2], mods[MAX_PATH*2], saves[MAX_PATH*2], saved[MAX_PATH*2], played[MAX_PATH*2];
@@ -1676,6 +1733,8 @@ static void test_local_content_report(const char *top)
     free(why); why = NULL;
 
     CHECK(sh_cache_import_blob(digest, blob, sizeof blob, &damaged));
+    test_partly_cached_unit(mods, played, digest);
+    report_map(played, "aaaa_revision1_map.decl", hashes, 1, pin);
     report_map(played, "aaaa_revision2_map.decl", hashes, 1, NULL);
     check_report(&r, 1, 1, 1);
     CHECK(!strstr(r.lines[0], "shared") && strstr(r.lines[0], "1 object, 1 KB.") && !strcmp(r.tokens[0], pin));

@@ -534,7 +534,7 @@ char *sh_cache_file_source(const char *sha, unsigned long long size) { return mc
 typedef struct mc_file {
     char *path, *source;
     char sha[SH_MB_HASH_HEX + 1];
-    unsigned long long size, cached_size;
+    unsigned long long size;
     int cached;
 } mc_file;
 typedef struct mc_unit {
@@ -611,10 +611,13 @@ static void mc_unit_load(mc_unit *u, const char *hash)
     u->state = 1;
     for (i = 0; i < u->nfiles; i++) {
         mc_file *f = &u->files[i];
-        f->source = mc_blob_path(f->sha, &f->cached_size);
-        f->cached = f->source != NULL;
-        if (f->cached && f->cached_size != f->size) { free(f->source); f->source = NULL; }
-        if (!f->source) f->source = mc_local_find(f->sha, f->size);
+        unsigned long long disk_size = 0;
+        f->source = mc_blob_path(f->sha, &disk_size);
+        f->cached = f->source && disk_size == f->size;
+        if (!f->cached) {
+            free(f->source);
+            f->source = mc_local_find(f->sha, f->size);
+        }
         if (!f->source) { u->state = 0; u->nmissing++; u->bytes_missing += f->size; }
     }
 }
@@ -2760,7 +2763,7 @@ static void mc_report_blob(mc_report *rep, const mc_file *f)
     }
     use = &rep->uses[rep->nuses++];
     strcpy_s(use->sha, sizeof use->sha, f->sha);
-    use->bytes = f->cached_size;
+    use->bytes = f->size;
     use->row = rep->nrows;
 }
 
@@ -2789,7 +2792,7 @@ static void mc_report_add(mc_report *rep, const sh_modmanifest_row *row, const c
         for (f = 0; f < u->nfiles && !rep->failed; f++)
             if (u->files[f].cached) mc_report_blob(rep, &u->files[f]);
     }
-    if (!present || rep->failed) { rep->nuses = start; return; }
+    if ((!present && rep->nuses == start) || rep->failed) { rep->nuses = start; return; }
     grown = realloc(rep->rows, (rep->nrows + 1) * sizeof *grown);
     if (!grown) { rep->failed = 1; return; }
     rep->rows = grown;
