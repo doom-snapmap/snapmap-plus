@@ -779,7 +779,7 @@ int sh_rawmap_prepare_reload(char **why)
     }
     if (missing) {
         char *sentence;
-        line = sh_textf("RAWMAP: open held -- %s names %u mod(s) that are not installed; the engine never sees it",
+        line = sh_textf("RAWMAP: open held -- %s names %u mod(s) that are not installed",
                         path, (unsigned)missing);
         backend_log(line ? line : "RAWMAP: open held -- the map names mods that are not installed");
         free(line);
@@ -790,7 +790,7 @@ int sh_rawmap_prepare_reload(char **why)
         else HeapFree(GetProcessHeap(), 0, text);
         sentence = sh_textf(held > 0 ? "%s needs %u mod(s) you do not have; the game is checking whether it can download them"
                                      : "%s needs %u mod(s) you do not have, so it was not opened", name, (unsigned)missing);
-        RAWMAP_DIAG(0, "refused", path, 0, rawmap_s(sentence), len, (int)missing);
+        RAWMAP_DIAG(0, held > 0 ? "held" : "refused", path, 0, rawmap_s(sentence), len, (int)missing);
         free(path);
         if (why) *why = sentence;
         else free(sentence);
@@ -829,8 +829,8 @@ int sh_rawmap_reopen_after_mods(char **note)
     held_mark_ready(path);   /* the reload below parses the bytes the hold checked */
     g_held_fetched = 1;
     if (sh_editor_frame_request_reload(&msg)) {
-        line = sh_textf("RAWMAP: %s opens again now that its mods are installed", rawmap_s(path));
-        backend_log(line ? line : "RAWMAP: the rawmap opens again now that its mods are installed");
+        line = sh_textf("RAWMAP: resuming the held open of %s", rawmap_s(path));
+        backend_log(line ? line : "RAWMAP: resuming the held rawmap");
         free(line);
         free(msg);
         free(path);
