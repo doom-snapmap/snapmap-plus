@@ -115,20 +115,16 @@ Mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`. Authors make, install and
 refresh them in the window's Mods tab or with the `sh_mods` console command; a
 saved map names the mods it uses, and the next load activates them. A map that
 names a mod you do not have gets that content from the mod store, with no
-question and verified by hash, into Snapmap+'s content cache (`mods\.content\`);
+question and verified by hash, into Snapmap+'s content cache (`cache\content\`);
 nothing is installed in your mods folder, and what cannot be had stands in for
 the objects that need it. A mod may carry
 Lua scripts that run during Play, sandboxed, on the host only.
 
-Converting the mods, maps and prefabs of earlier releases is not in this
-release; it will be built into the installer, `snapmap-plus.exe`, with no
-separate tool to manage. Until then what an earlier release left stays as it
-is. A map, export or prefab saved by an earlier Snapmap+ is refused with "...
-was saved by an earlier Snapmap+; run the Snapmap+ installer to update it.",
-and a mod folder made for an earlier version is listed with "This mod was made
-for an earlier version of Snapmap+. This version does not read it yet." The
-installer's conversion is on the release gate. See
-[Mods](docs/capabilities.md#mods).
+Run the Snapmap+ installer to update earlier mods, maps and prefabs in your library.
+For a native SnapMap save, the installer prints the path to a copy in `rawmaps/Updated saves/`.
+Open it with **File > Load Rawmap** and use **Save As** in DOOM. For a JSON or ZIP export
+stored elsewhere, drop the file onto `snapmap-plus.exe`.
+[Updating earlier maps, prefabs and mods](installer/README.md#updating-earlier-maps-prefabs-and-mods)
 
 ## Credits
 

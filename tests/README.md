@@ -50,9 +50,9 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   repeated requests, cancellation, and rollback after a partial installation.
   `nav_bake_test.c` collects background builds without preview drawing.
   `apply_dispatch_test.c` checks Start-menu scheduling and worker completion.
-- Installer onboarding tests cover original SnapHak profile relocation, exact
-  copies and idempotency, and check that retired package folders are neither
-  copied nor created.
+- Installer tests cover earlier mod folders, rawmaps, prefabs, ZIP exports and converted native
+  saves. They check exact pinned content, preservation of originals, and recovery after interruption.
+  The installer simulator exercises install, update and uninstall on isolated profiles.
 - `parity_test.c` drives one map through every mode (the editor, Play, a My
   Maps play, the published map on the author's and on a player's machine, both
   kept copies) through the product's own listing, save, pin and composition,

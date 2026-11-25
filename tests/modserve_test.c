@@ -5126,10 +5126,10 @@ static void test_salt_and_root(void)
     CHECK(sh_modserve_index_build(root) == 2);
     CHECK(log_has("bundle 'My doors (copy)' skipped: it is a copy of your folder My doors (work); Refresh "
                   "in the Mods tab makes it a new mod") && !log_has("the same salt"));
-    CHECK(log_has("bundle 'format-one' skipped: " "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
+    CHECK(log_has("bundle 'format-one' skipped: " "Run the Snapmap+ installer to update this mod from an earlier version."));
     CHECK(log_has("bundle 'retired-id' skipped: " SH_MB_EARLIER));
     CHECK(log_has("bundle 'hud-schema' skipped: " SH_MB_EARLIER));
-    CHECK(log_has("bundle 'package-only' skipped: " "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
+    CHECK(log_has("bundle 'package-only' skipped: " "Run the Snapmap+ installer to update this mod from an earlier version."));
     CHECK(log_has("bundle 'bad-salt' skipped: The part of mod.json Snapmap+ writes is damaged. Delete the \"snapmap-plus\" "
                   "block and press Refresh to build the mod again."));
     CHECK(log_has("bundle 'salted-only' skipped: not built yet (Refresh in the Mods tab builds it)"));

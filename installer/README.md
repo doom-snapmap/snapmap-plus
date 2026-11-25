@@ -167,9 +167,9 @@ After any install, update or migration:
 - **The data folder**, `%LOCALAPPDATA%\snapmap-plus`, holds `snapmap-plus.exe`,
   `install.json` and the player's own data (`config.json`,
   `prefabs\`, `mods\`, `rawmap.json`, `test-maps\`, `cache\`, and the
-  `pinned.json` file when present), and the saved GitHub `token` when present. The retired `overrides\`,
-  `strings\` and `removed-mods\` folders of a release that had them stay as they
-  are (see [Mods and retired package folders](#mods-and-retired-package-folders)).
+  `pinned.json` file when present), and the saved GitHub `token` when present.
+  Recognized earlier `overrides\` packages become mod folders during install or update.
+  [Updating earlier maps, prefabs and mods](#updating-earlier-maps-prefabs-and-mods)
   Empty `override-backups\`, `package-cache\` and `package-staging\` folders are
   removed; one that holds files is kept and listed.
 - **Uninstall** removes every file of ours from DOOM, restores any backup from
@@ -252,8 +252,7 @@ step that has something to report.
    lists the removed files. Player files stay in the original profile.
 2. **From v0.2.1-beta.19** (its 2018 pair in an April 2024 folder, recorded or not,
    and packages under `overrides\`). "Cleaning the DOOM folder" removes the 2018
-   pair, the April 2024 pair is installed, and the `overrides\` packages stay where
-   they are. On the
+   pair. The installer places the April 2024 pair and updates recognized override packages. On the
    2018 build itself v0.2.1-beta.19's own installer runs, and the 2018 pair stays.
 3. **From v0.2.1-beta.20** (both pairs, backups of our own DLLs in DOOM,
    `installer-files.json`, `installer-versions.json`, `snapmap-plus.exe.updates.json`,
