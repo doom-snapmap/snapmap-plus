@@ -74,7 +74,9 @@ A sound decl is named for the Wwise event it plays: `sounds/hit.decl` plays the 
 own name that event `play_hit`. Snapmap+ keeps your mod's events apart from DOOM's and from every other mod's; you never
 write anything for that, in the decl, the bank, a text (`sounds/hit`) or a script (`sound(self, "hit")`). To play one
 of DOOM's own events, name it by its event name (`soundShader = "play_arcade_ui_17";`): every DOOM event is a sound of
-that name.
+that name. To change how that event sounds for one tile, put its settings in `decls/sound/titan_beam_2.decl` and
+refer to `decls/sound/titan_beam_2` on that tile. The leaf chooses the stock event `play_titan_beam_2`.
+Other uses of the stock event keep their own settings.
 
 ## A small mod from an empty folder
 

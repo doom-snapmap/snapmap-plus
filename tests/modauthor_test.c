@@ -81,6 +81,8 @@ int main(void)
     req("environments/hell_red.decl", "generated/decls/env/mods/abcdefgh/hell_red.decl");
     req("particles/sparks.decl", "generated/decls/particle/mods/abcdefgh/sparks.decl");
     req("entities/boss.decl", "generated/decls/entitydef/mods/abcdefgh/boss.decl");
+    req("decls/sound/machines/titan_beam_2.decl", "generated/decls/sound/mods/abcdefgh/machines/titan_beam_2.decl");
+    name("decls/sound/machines/titan_beam_2", "mods/abcdefgh/machines/titan_beam_2");
     req("sounds/play_roar.decl", "generated/decls/sound/mods/abcdefgh/abcdefgh_play_roar.decl");
     req("sounds/imp/play_roar.decl", "generated/decls/sound/mods/abcdefgh/imp/abcdefgh_play_roar.decl");
     req("sounds/boss.bnk", "sound/soundbanks/pc/abcdefgh_boss.bnk");
@@ -127,6 +129,7 @@ int main(void)
     refused("material/body.decl", "is not one of a mod's folders");
     refused("assets/generated/decls/material/x.decl", "is not one of a mod's folders");
     refused("materials/body.txt", "holds .decl files");
+    refused("decls/sound/abcdefgh_hit.decl", "own sound event belongs in sounds/");
     refused("sounds/music/boss.bnk", "goes in sounds/ itself");
     refused("native/generated/decls/material/mods/abcdefgh/x.decl", "native/ holds DOOM's own files the mod changes");
     /* a closure pointer to one of the product's own decls that names a mod (an SDK effect's emitter) is not a mod's */

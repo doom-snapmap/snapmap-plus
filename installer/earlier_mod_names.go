@@ -25,8 +25,24 @@ func earlierSalt(id string) string {
 
 var earlierDecls = map[string]string{"material": "materials", "fx": "effects", "env": "environments", "particle": "particles", "entitydef": "entities", "sound": "sounds", "md6def": "meshes", "renderprog": "programs"}
 
+// Only this mod's namespace is rewritten. The engine folded hyphens in cooked asset paths.
+func earlierOwnSpelling(id, name string) string {
+	if !strings.Contains(id, "-") {
+		return name
+	}
+	cooked := "mods/" + strings.ReplaceAll(id, "-", "_") + "/"
+	raw := "mods/" + id + "/"
+	if strings.HasPrefix(name, cooked) {
+		return raw + name[len(cooked):]
+	}
+	if before, rest, found := strings.Cut(name, "/"+cooked); found {
+		return before + "/" + raw + rest
+	}
+	return name
+}
+
 func earlierAuthorPath(id, request string) (string, error) {
-	r := strings.ToLower(request)
+	r := earlierOwnSpelling(id, strings.ToLower(request))
 	own := "mods/" + strings.ToLower(id) + "/"
 	for _, prefix := range []string{"generated/maps/modules/", "maps/modules/"} {
 		if rest, ok := strings.CutPrefix(r, prefix+own); ok {
@@ -56,7 +72,7 @@ func earlierAuthorPath(id, request string) (string, error) {
 				dir, leaf := path.Split(inner)
 				stem, ok := strings.CutPrefix(leaf, id+"_")
 				if !ok {
-					return "", fmt.Errorf("sound %s has no matching event namespace", request)
+					return "decls/sound/" + inner, nil
 				}
 				inner = dir + stem
 			}
@@ -68,13 +84,19 @@ func earlierAuthorPath(id, request string) (string, error) {
 			return kind.folder + "/" + rest, nil
 		}
 	}
+	// Earlier image recipes could put the namespace after the texture directory.
+	if image, ok := strings.CutPrefix(r, "generated/image/"); ok && path.Ext(image) == ".bimage" {
+		if prefix, rest, found := strings.Cut(image, "/"+own); found {
+			return "images/" + prefix + "/" + rest, nil
+		}
+	}
 	if strings.Contains(r, "/mods/") || strings.HasPrefix(r, "mods/") {
 		return "", fmt.Errorf("unrecognized mod asset path %s", request)
 	}
 	return "native/" + r, nil
 }
 
-var earlierNameToken = regexp.MustCompile(`#str_[A-Za-z0-9_]+|(?:native:)?[A-Za-z0-9_.$/+@~-]+`)
+var earlierNameToken = regexp.MustCompile(`(?:#str_|native:)?[A-Za-z0-9_.$/+@~-]+`)
 var earlierKey = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 var earlierAuthorPrefix = regexp.MustCompile(`^(?:materials|effects|environments|particles|entities|images|animations|collision|movies|scripts|map-modules|virtual-textures|programs|meshes|sounds)/.+|^decls/[^/]+/.+`)
 var earlierLookKey = regexp.MustCompile(`(?i)^(\s*\{\s*)look(\s+(?:layered|particle)\b)`)
@@ -84,9 +106,13 @@ type earlierModNames struct {
 	files    map[string]string
 	sounds   map[string]string
 	keys     map[string]string
+	images   map[string]string
 }
 
-func (n earlierModNames) add(author string) {
+func (n earlierModNames) add(request, author string) {
+	if image, ok := strings.CutPrefix(earlierOwnSpelling(n.id, strings.ToLower(request)), "generated/image/"); ok && strings.HasPrefix(author, "images/") {
+		n.images[strings.TrimSuffix(image, ".bimage")] = strings.TrimSuffix(author, ".bimage")
+	}
 	top, stem, _ := strings.Cut(author, "/")
 	if top == "decls" {
 		kind, inner, _ := strings.Cut(stem, "/")
@@ -94,6 +120,11 @@ func (n earlierModNames) add(author string) {
 		stem = inner
 	}
 	ext := path.Ext(stem)
+	if top == "decls/sound" && ext == ".decl" {
+		leaf := strings.TrimSuffix(stem, ext)
+		n.sounds[leaf] = top + "/" + leaf
+		return
+	}
 	if top == "sounds" && ext == ".decl" {
 		stem = strings.TrimSuffix(stem, ext)
 		dir, leaf := path.Split(stem)
@@ -122,11 +153,6 @@ func (n earlierModNames) add(author string) {
 }
 
 func (n earlierModNames) authorText(text string) string {
-	for original, key := range n.keys {
-		if original != key && !earlierKey.MatchString(original) {
-			text = strings.ReplaceAll(text, "#str_"+original+"\"", "#str_"+key+"\"")
-		}
-	}
 	own := "mods/" + n.id + "/"
 	return earlierNameToken.ReplaceAllStringFunc(text, func(token string) string {
 		if strings.HasPrefix(token, "#str_") {
@@ -135,7 +161,10 @@ func (n earlierModNames) authorText(text string) string {
 			}
 			return token
 		}
-		low := strings.ToLower(token)
+		low := earlierOwnSpelling(n.id, strings.ToLower(token))
+		if image := n.images[strings.TrimSuffix(low, path.Ext(low))]; image != "" {
+			return image + path.Ext(low)
+		}
 		for _, r := range []struct{ prefix, author string }{{"md6/" + own, "animations/"}, {"swf/" + own, "movies/"}, {"maps/modules/" + own, "map-modules/"}, {own + "scripts/", "scripts/"}} {
 			if strings.HasPrefix(low, r.prefix) {
 				rest := token[len(r.prefix):]
