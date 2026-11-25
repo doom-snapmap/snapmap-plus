@@ -25,9 +25,8 @@ def published_tags():
 
 
 def current_body(tag):
-    return gh("release", "view", tag, "--json", "body").stdout and json.loads(
-        gh("release", "view", tag, "--json", "body").stdout
-    )["body"]
+    response = gh("release", "view", tag, "--json", "body").stdout
+    return json.loads(response)["body"] if response else ""
 
 
 def main(argv=None):

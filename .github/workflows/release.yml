@@ -99,26 +99,6 @@ jobs:
           .\build.ps1 -Version $env:TAG -Out ..\build\snapmap-plus.exe
           if ($LASTEXITCODE -ne 0) { throw "installer build failed" }
 
-      # Code signing is disabled until a signing account exists. It runs after compilation and before package.ps1
-      # hashes the DLLs, so every published hash covers the signed bytes; keep its file list in step with package.ps1.
-      - name: Sign the binaries (disabled)
-        if: false
-        shell: pwsh
-        env:
-          SIGNING_ENDPOINT: ${{ vars.SIGNING_ENDPOINT }}             # e.g. https://<region>.codesigning.azure.net
-          SIGNING_ACCOUNT: ${{ vars.SIGNING_ACCOUNT }}               # the signing account name
-          SIGNING_PROFILE: ${{ vars.SIGNING_PROFILE }}               # the certificate profile name
-          AZURE_TENANT_ID: ${{ secrets.SIGNING_AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.SIGNING_AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.SIGNING_AZURE_CLIENT_SECRET }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Install-Module -Name TrustedSigning -Scope CurrentUser -Force
-          Invoke-TrustedSigning -Endpoint $env:SIGNING_ENDPOINT -CodeSigningAccountName $env:SIGNING_ACCOUNT `
-            -CertificateProfileName $env:SIGNING_PROFILE -FileDigest SHA256 `
-            -TimestampRfc3161 http://timestamp.acs.microsoft.com -TimestampDigest SHA256 `
-            -Files "build\XINPUT1_4.dll,build\webview\snapmap-plus-ui.dll,build\snapmap-plus.exe"
-
       - name: Package and check the overlay
         shell: pwsh
         run: |
