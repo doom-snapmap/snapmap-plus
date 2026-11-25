@@ -925,6 +925,11 @@ static void map_level(void)
 
     /* The save keeps the map-level row (nothing places it), renamed to the
      * build that serves; the closure's row is written as before. */
+    {
+        const char *placed[] = {"mods/alexpink/imp"};
+        CHECK(sh_modmanifest_rows_for(placed, 1, &rows) == 2 && !strcmp(rows.rows[0].salt, "alexpink"));
+        sh_modmanifest_list_free(&rows);
+    }
     saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
     CHECK(saved && strstr(saved, "alexpink") && strstr(saved, "alexhand") && !strstr(saved, "\"build\":") &&
           strstr(saved, "\"name\":\"Bare Hands\"") && strstr(saved, "\"name\":\"Pink Imp\""));
@@ -936,6 +941,8 @@ static void map_level(void)
         /* Reloaded, the row is map-level again. */
         size_t again_len = 0;
         char *again = sh_modmanifest_prepare_load(saved, slen, &again_len);
+        CHECK(sh_modmanifest_current(&rows) == 2 && !strcmp(rows.rows[0].salt, "alexpink"));
+        sh_modmanifest_list_free(&rows);
         CHECK(sh_modmanifest_current_attached(&rows) == 1 && rows.rows[0].attached);
         sh_modmanifest_list_free(&rows);
         if (again) HeapFree(GetProcessHeap(), 0, again);

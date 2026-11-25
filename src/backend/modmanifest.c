@@ -2042,6 +2042,31 @@ static int mm_cstr_cmp(const void *a, const void *b)
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
+/* Existing rows keep their map priority. Newly placed mods follow in a deterministic order. */
+static void mm_save_order(sh_modmanifest_list *rows)
+{
+    size_t i, j, next = 0;
+    if (rows->count < 2) return;
+    qsort(rows->rows, rows->count, sizeof *rows->rows, mm_row_order);
+    AcquireSRWLockShared(&g_current_lock);
+    for (i = 0; i < g_current.count && next < rows->count; i++) {
+        const sh_modmanifest_row *old = &g_current.rows[i];
+        size_t match = rows->count;
+        for (j = next; j < rows->count; j++) {
+            const sh_modmanifest_row *r = &rows->rows[j];
+            if (strcmp(r->salt, old->salt)) continue;
+            if (!strcmp(r->build, old->build)) { match = j; break; }
+            if (match == rows->count && !old->pinned && !r->pinned) match = j;
+        }
+        if (match < rows->count) {
+            sh_modmanifest_row kept = rows->rows[match];
+            memmove(&rows->rows[next + 1], &rows->rows[next], (match - next) * sizeof kept);
+            rows->rows[next++] = kept;
+        }
+    }
+    ReleaseSRWLockShared(&g_current_lock);
+}
+
 /* The placed closure's rows take their display name from the
  * build that serves them, which the closure visit does not give. */
 static void mm_save_names(mm_save_ctx *ctx)
@@ -2363,10 +2388,10 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
         return mm_save_fallback(json, length, out_length, uses, "the serving layer reported an invalid mod, or memory ran out");
     }
     /* What the map lists: placed entities may have been added since the load. */
+    mm_save_order(&ctx.list);
     if (scope) scope(&ctx.list, NULL, 0, SH_MODSERVE_AT_SAVE);
     if (ctx.list.count == 0 && !ctx.list.uses && !stale) return NULL;
 
-    qsort(ctx.list.rows, ctx.list.count, sizeof *ctx.list.rows, mm_row_order);
     mm_choices_save(&ctx.list);
     for (i = 0; i < ctx.list.count; i++)
         if (ctx.list.rows[i].name_count > 1)
@@ -2429,7 +2454,7 @@ int sh_modmanifest_rows_for(const char *const *names, size_t count, sh_modmanife
     for (i = 0; i < ctx.list.count; i++)
         if (ctx.list.rows[i].name_count > 1)
             qsort(ctx.list.rows[i].names, ctx.list.rows[i].name_count, sizeof(char *), mm_cstr_cmp);
-    qsort(ctx.list.rows, ctx.list.count, sizeof *ctx.list.rows, mm_row_order);
+    mm_save_order(&ctx.list);
     *out = ctx.list;
     return (int)out->count;
 }
