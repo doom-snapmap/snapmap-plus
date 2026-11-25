@@ -121,9 +121,11 @@ itself (its image, colours, fades, flipbook and motion) stays in the particle de
 | `glow` | value | 1 | how bright the particle is |
 | `glowmask` | image (a sheet like the particle's image) | none | where the particle glows on its own |
 | `glowmaskcolour` | `{ r, g, b }` | `{ 1, 1, 1 }` | the glow's colour (`lit`) |
+| `glowmaskcolour2` | `{ r, g, b }` | none | for lit particles, the second colour of the glow mask. Its red channel blends from the first colour to this one and controls glow strength |
 | `glowmaskstrength` | value | 0 | the glow's strength (`lit`) |
 | `gradient` | `{ r, g, b, r, g, b }` | white to white | the fire's colours along the glow mask (`explosion`) |
 | `nearfade` | `{ begin, end }` | none | fades the particle out between two distances from the viewer (units) |
+| `farfade` | `{ begin, end }` | none | fades the particle out from the first camera depth to the second, in game units |
 | `softdistance` | value | none | fades the particle where it meets a surface, over this many units |
 | `depthoffset` | value | 0 | pushes the soft edge into thin parts of the image |
 | `litscale` | value | 1 | scales the light a `lit` particle takes |

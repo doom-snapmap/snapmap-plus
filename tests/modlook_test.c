@@ -417,6 +417,13 @@ static void test_particle_fields(void)
     CHECK(!strcmp(unq(value(x.out, "transmap", 0)), "mods/abcdefgh/fx/embers.tga") || !strcmp(value(x.out, "transmap", 0), "mods/abcdefgh/fx/embers.tga"));
     CHECK(count_key(x.out, "type") == 0 && count_key(x.out, "glow") == 0 && count_key(x.out, "lighting") == 0);
     release(&x);
+    x = compile("far.decl", "{\n\ttype particle\n\tlighting lit\n\tglowmaskcolour2 { 0.2, 0.5, 0.8 }\n\tfarfade { 128, 256 }\n}\n");
+    CHECK(x.r == SH_LOOK_CHANGED && x.out);
+    if (x.out) {
+        CHECK(vec_is(x.out, "particleuberparms3", 0.2f, 0.5f, 0.8f, 1));
+        CHECK(vec_is(x.out, "smokebrightness", 0, 128, 256, 1));
+    }
+    release(&x);
     /* the explosion: the gradient's colours, mode 4; unlit and defaults */
     x = compile("e.decl", "{\n\ttype particle\n\tlighting explosion\n\tgradient { 1, 0.1, 0, 0.5, 0.2, 0.1 }\n\tglow 10\n}\n");
     CHECK(x.r == SH_LOOK_CHANGED && x.out);
