@@ -1756,16 +1756,16 @@ test('Maps on this computer: the last group of the list, one row per kept map\'s
   assert.equal(h.nodes.modsList.children.length, 1, 'the attention filter hides the group');
   h.nodes.modsAttnBtn.click();
   assert.equal(h.nodes.modsList.children.length, 2);
-  /* the storage line alone is enough; nothing at all is no group; an empty list of mods keeps its empty card alone */
+  /* A storage line alone is enough to show the group. */
   const only = live(v4, {storage: 'Map content: 0 B for 0 maps.', lines: [], rows: []});
   assert.equal(only.nodes.modsList.children.length, 2);
   assert.equal(only.nodes.modsList.children[1].all('pf-fcount')[0].textContent, '0');
   assert.equal(only.nodes.modsList.children[1].all('mods-content-line').length, 0);
   assert.equal(live(v4, {storage: '', lines: [], rows: []}).nodes.modsList.children.length, 1, 'no content, no group');
   assert.equal(live(v4).nodes.modsList.children.length, 1, 'an empty answer from the host: no group');
-  const none = live(Object.assign(clone(v4), {mods: []}), KEPT);
+  const none = live(Object.assign(clone(v4), {mods: []}));
   assert.equal(none.nodes.modsList.all('mods-empty').length, 1);
-  assert.equal(none.nodes.modsList.all('mods-content').length, 0, 'no mods: the empty card alone');
+  assert.equal(none.nodes.modsList.all('mods-content').length, 0);
   /* the group follows the content answer that arrives after the list, and shows after the first answer only */
   const late = harness();
   late.ui.onMessage({kind: 'mods', data: v4});
@@ -1774,6 +1774,22 @@ test('Maps on this computer: the last group of the list, one row per kept map\'s
   assert.equal(late.nodes.modsList.children.length, 2);
   late.ui.onMessage({kind: 'modsActionResult', action: 'content', ok: false, message: 'No.', data: {}});
   assert.equal(late.nodes.modsList.children.length, 2, 'a failed read leaves what was known');
+});
+test('a player with no author mods can keep content from a played map', () => {
+  const list = {kind: 'mods', data: Object.assign(clone(v4), {mods: []})};
+  const content = {kind: 'modsActionResult', action: 'content', ok: true, data: KEPT};
+  for (const messages of [[list, content], [content, list]]) {
+    const h = harness();
+    messages.forEach(m => h.ui.onMessage(m));
+    assert.equal(h.nodes.modsList.all('mods-empty').length, 1);
+    const rows = h.nodes.modsList.all('mods-content-line');
+    assert.equal(rows.length, KEPT.rows.length);
+    const add = rows[1].tags('button')[0];
+    assert.equal(add.disabled, false);
+    add.click();
+    assert.deepEqual(h.sent.filter(m => m.action === 'addToMine'),
+                     [{cmd: 'modsAction', action: 'addToMine', arg: KEPT.rows[1]}]);
+  }
 });
 test('Maps on this computer: Add to my mods posts the token; the copy is selected in your mods', () => {
   const h = live(v4, KEPT);

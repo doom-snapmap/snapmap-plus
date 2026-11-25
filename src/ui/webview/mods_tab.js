@@ -1067,9 +1067,7 @@ var modsTab = (function () {
         card.appendChild(el('div', '', REFRESH_TEXT));
         card.appendChild(newModButton());
         box.appendChild(card);
-        return;
-      }
-      if (!shown.length) {
+      } else if (!shown.length) {
         box.appendChild(el('div', 'list-empty', attnOnly ? 'No mod that needs attention matches the filter.' : 'No mod matches the filter.'));
         return;
       }
