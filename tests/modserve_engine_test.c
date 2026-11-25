@@ -1,6 +1,7 @@
 /* modserve_engine_test.c -- checks modserve_engine.c against a faked engine table (decl registry, DeclFind,
  * generic load, heap stack and resources are plain memory), so resource levels and the kept set need no game. */
 #include "../src/backend/modserve_engine.c"
+#include "mod_test_util.h"
 
 static int g_failed;
 #define CHECK(expr) do {                                                        \
@@ -54,8 +55,20 @@ void sh_printf(const char *fmt, ...)
 }
 void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *module_base)
 { (void)results; (void)n; (void)module_base; return NULL; }
-int sh_timeline_tile_rebuild_palette(int *before, int *after) { (void)before; (void)after; return 0; }
-void *sh_timeline_tile_palette(void) { return NULL; }
+static unsigned char fe_palette[32], fe_palette_rows[2 * PAL_STRIDE];
+static unsigned char fe_new_sedef[SEDEF_NAME_OFF + sizeof(void *)];
+static int fe_has_palette, fe_rebuilds;
+
+int sh_timeline_tile_rebuild_palette(int *before, int *after)
+{
+    if (!fe_has_palette) return 0;
+    *before = *(int *)(fe_palette + PAL_COUNT_OFF);
+    *(void **)(fe_palette_rows + PAL_STRIDE) = fe_new_sedef;
+    *after = *(int *)(fe_palette + PAL_COUNT_OFF) = 2;
+    fe_rebuilds++;
+    return SH_TL_REBUILD_OK;
+}
+void *sh_timeline_tile_palette(void) { return fe_has_palette ? fe_palette : NULL; }
 void sh_timeline_tile_sorts(int *sorts, int *unscoped, int *guarded) { (void)sorts; (void)unscoped; (void)guarded; }
 const char *sh_apply_engine_block_heap_name(const void *p) { (void)p; return ""; }
 void sh_apply_engine_get_run_on_main(sh_run_on_main_fn *run_on_main) { if (run_on_main) *run_on_main = NULL; }
@@ -113,6 +126,7 @@ static uint32_t g_main_id;
 static unsigned char g_memlocal[0x100];    /* idMemLocal: heap ids at +0x44, depth at +0xc4 */
 
 static void *fe_type(void *registry, const char *type) { (void)registry; (void)type; return g_manager; }
+static void *fe_source(void *manager, const char *name) { (void)name; return manager; }
 static unsigned char fe_register(void *registry, const void *path, void *x) { (void)registry; (void)path; (void)x; return 1; }
 
 static fe_res *fe_find(const char *name)
@@ -323,6 +337,42 @@ static void test_raw_names_grow(void)
     free(r.names);
 }
 
+static void test_prefab_adds_a_row_to_the_open_palette(void)
+{
+    char root[MAX_PATH], mod[MAX_PATH], *why = NULL;
+    sh_mb_bundle bundle;
+    const char *hash;
+    fe_reset();
+    CHECK(mt_temp_dir("prefabrow", root, sizeof root));
+    g_source = fe_source;
+    snprintf(mod, sizeof mod, "%s\\pack", root);
+    mt_write(mod, "mod.json", "{\"name\":\"Test\",\"snapmap-plus\":{\"format\":2,\"salt\":\"abcdefgh\"}}");
+    mt_write(mod, "entities\\placed.decl", "{ edit = { } }");
+    mt_write(mod, "decls\\snapeditorentitydef\\placed.decl", "{ edit = { entityDef = \"entities/placed\"; } }");
+    CHECK(sh_mb_build(mod, NULL, NULL, &bundle));
+    CHECK(bundle.file_count == 2);
+    CHECK(sh_mb_write(&bundle, mod, &why));
+    CHECK(sh_modserve_index_build(root) == 1);
+    sh_modserve_scope_enable(1);
+    hash = bundle.hash;
+    sh_modserve_scope_set(&hash, 1, 1);
+    *(void **)(fe_palette + PAL_ENTRIES_OFF) = fe_palette_rows;
+    *(int *)(fe_palette + PAL_COUNT_OFF) = 1;
+    *(const char **)(fe_new_sedef + SEDEF_NAME_OFF) = "mods/abcdefgh/placed";
+    fe_has_palette = 1;
+    CHECK(!pal_has(NULL, "mods/abcdefgh/placed"));
+    CHECK(sh_modserve_scope_activate("prefab") >= 0);
+    CHECK(fe_rebuilds == 1 && pal_has(NULL, "mods/abcdefgh/placed"));
+    CHECK(sh_modserve_scope_activate("prefab") >= 0 && fe_rebuilds == 1);
+    CHECK(!strstr(g_log, "FAULTED") && !strstr(g_log, "NOT READY"));
+    fe_has_palette = 0;
+    sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(0);
+    sh_mb_free(&bundle);
+    free(why);
+    mt_remove_tree(root);
+}
+
 int main(void)
 {
     test_raw_names_grow();
@@ -331,6 +381,7 @@ int main(void)
     test_keep_ref_map_heap();
     test_held_model_kept();
     test_static_model_kind();
+    test_prefab_adds_a_row_to_the_open_palette();
     if (g_failed) {
         fprintf(stderr, "modserve_engine_test: %d check(s) failed\n--- log ---\n%s", g_failed, g_log);
         return 1;
