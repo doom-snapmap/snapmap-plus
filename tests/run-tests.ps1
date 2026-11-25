@@ -53,6 +53,7 @@ $tests = @(
     @{ name = "script_hud_text_test"; src = 'script_hud_text_test.c ..\src\backend\script\script_hud_text.c'; arg = "" }
     @{ name = "modscene_place_test"; src = 'modscene_place_test.c ..\src\backend\modscene_place.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING /DSH_MODSCENE_PLACE_PURE'; arg = "" }
     @{ name = "apply_dispatch_test"; serial = $true; src = 'apply_dispatch_test.c ..\src\backend\prefab_grab.c ..\src\backend\perf.c ..\src\backend\nav_snapshot.c ..\src\backend\nav_entitydef.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\sha256.c ..\src\common\snapmap_plus_iface.c'; defs = '/Gy'; arg = "" }
+    @{ name = "editor_placed_names_test"; src = 'editor_placed_names_test.c ..\src\backend\editor_placed_names.c'; arg = "" }
     @{ name = "snapstack_pair_test"; src = 'snapstack_pair_test.c'; defs = '/Gy'; arg = "" }
     @{ name = "crash_report_test"; src = 'crash_report_test.c ..\src\fault_shield\crash_record_format.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "recovery_dialog_test"; src = 'recovery_dialog_test.c'; defs = '/Gy'; arg = "" }
