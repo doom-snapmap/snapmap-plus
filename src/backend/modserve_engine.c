@@ -1435,7 +1435,7 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
          * its parse empty (its nodes freed first, nothing rebuilt): the
          * game's own web stays. */
         if (!_stricmp(type, "animWeb") && sh_modserve_animweb_check(request, &g_ops, &model) == 1) {
-            why = sh_textf("it names the model %s, which SnapMap cannot load, so the game's own animation is used",
+            why = sh_textf("it names the model %s, which SnapMap cannot load",
                            model ? model : "");
             (void)sh_modserve_withdraw(request, type, name, why ? why : "it names a model SnapMap cannot load");
             free(why);
@@ -1465,11 +1465,10 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
                     /* The engine's first line of its refusal, whole. */
                     const char *src = refused ? g_refusal : "";
                     size_t fl = strcspn(src, "\r\n");
-                    why = sh_textf("the game could not read it%s%.*s, so the game's own version is used",
+                    why = sh_textf("the game could not read it%s%.*s",
                                    fl ? ": " : "", (int)fl, src);
                 }
-                if (sh_modserve_withdraw(request, type, name, why ? why : "the game could not read it, so the game's "
-                                                                          "own version is used")) {
+                if (sh_modserve_withdraw(request, type, name, why ? why : "the game could not read it") == 2) {
                     me_load_in_place(d, "restore", type, name);
                     r->restored++;
                 }

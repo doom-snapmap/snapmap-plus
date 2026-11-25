@@ -1,6 +1,6 @@
 /* modcache.h -- the map content cache (SPEC-distribution 2.11, 5.7-5.9, 5.17, D21-D26, D50-D52, D60).
  *
- * One cache per machine, <mods>\.content\ (a dot folder the mods scan never reads):
+ * One cache per machine, <data>\cache\content\:
  *   files\<sha[0:2]>\<sha256>      blobs, read-only, each stored once by its SHA-256, checked when it arrives
  *   units\<unit hash>.json         unit manifests, their exact bytes (modunit.h), checked against the hash
  *   served\<composition hash>\     a composition: one map row's units under its namespace, built (modbundle.h),
@@ -38,7 +38,6 @@
 struct sh_modmanifest_row;
 struct sh_modmanifest_list;
 
-#define SH_CACHE_DIR        ".content"
 #define SH_CACHE_HASH_HEX   64
 
 /* Why an object of a map is absent: the notice causes of SPEC section 8, in the order the most actionable comes first
@@ -53,12 +52,13 @@ enum {
     SH_CACHE_ABSENT_DISK,            /* N15: not enough free disk space */
     SH_CACHE_ABSENT_LOCAL,           /* D6a: a local row whose mod folder is not on this computer (manager Q8) */
     SH_CACHE_ABSENT_BROKEN,          /* D6a: a local row whose mod folder is here but cannot be used (its build failed) */
-    SH_CACHE_ABSENT_LACKED           /* D6a: a name a local row lists that its mod folder, here, no longer has */
+    SH_CACHE_ABSENT_LACKED,          /* D6a: a name a local row lists that its mod folder, here, no longer has */
+    SH_CACHE_ABSENT_REFUSED          /* a required decl failed to parse */
 };
 
-/* The cache's folder: <mods root>\.content (modstore.h sh_ms_root), or the folder tests set. malloc'd. */
+/* The cache's folder: <data>\cache\content, resolved from the selected mods root. malloc'd. */
 char *sh_cache_root(void);
-/* Tests and tools: use `mods_root`'s .content (NULL: the product's). Also the mods root local mods are found in. */
+/* Tests and tools resolve the cache and local mods from this root. NULL restores the product's root. */
 void  sh_cache_set_mods_root(const char *mods_root);
 
 /* Bound at install (dllmain.c): the mods root (modstore.h sh_ms_root), the builder's resolver a composition builds
@@ -83,6 +83,8 @@ int   sh_cache_composition_hash(const char *salt, const char *const *units, size
 char *sh_cache_blob_path(const char *sha);
 /* Move the file at `from` into files\ when its SHA-256 and size are `sha` and `size` (deleted otherwise). 1 held. */
 int   sh_cache_put_blob(const char *from, const char *sha, unsigned long long size);
+/* Verify and keep a file read from a map or prefab export. */
+int   sh_cache_import_blob(const char *sha, const void *bytes, size_t len);
 /* Where a file with this SHA-256 and size is on this computer: its blob, else a local mod's file with those bytes (D21);
  * malloc'd, NULL when neither. An export reads a unit's files from it (SPEC 5.16). */
 char *sh_cache_file_source(const char *sha, unsigned long long size);

@@ -260,12 +260,12 @@ static void test_install(const char *fixture, const char *tmp)
     _snprintf_s(path, sizeof path, _TRUNCATE,
                 "%s\\alex.r2-imp\\meshes\\imp_copy\\assets\\mesh\\imp_copy.bmd6model", root);
     { FILE *f = NULL; if (fopen_s(&f, path, "r+b") == 0 && f) { fputc('X', f); fclose(f); } }
-    CHECK(!HO(cause, sh_ms_verify("alex.r2-imp", &vs, HO_P(0))) && strstr(cause, "imp_copy.bmd6model does not match mod.json"));
+    CHECK(!HO(cause, sh_ms_verify("alex.r2-imp", &vs, HO_P(0))) && strstr(cause, "imp_copy.bmd6model does not match its build"));
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "alex.r2-imp");
     CHECK(e && e->loaded && e->sizes_ok && !e->validated && !sh_ms_entry_usable(e) && strstr(e->cause, "does not match"));
     sh_ms_list_free(&list);
-    { char *t = slurp(root, "alex.r2-imp\\mod.json", NULL); CHECK(t && strstr(t, "\"cause\": \"meshes/")); free(t); }
+    { char *t = slurp(root, "alex.r2-imp\\" SH_MB_BUILD_MANIFEST, NULL); CHECK(t && strstr(t, "\"cause\": \"meshes/")); free(t); }
     /* A missing file shows at enumeration without hashing. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp\\images\\imp_icon.bimage", root);
     DeleteFileA(path);
@@ -314,6 +314,21 @@ static void test_fresh_folder_salted(const char *tmp)
         CHECK(entry_of("cyberprobe", s2, h2, &usable) && usable && !strcmp(s2, salt) && strcmp(h2, hash));
         strcpy_s(hash, sizeof hash, h2);
     }
+    /* Discarding or mixing the local build cache never changes the source's identity. */
+    {
+        char s2[SH_SALT_LEN + 1], h2[65];
+        char *source = slurp(dir, "mod.json", NULL), *again;
+        mt_delete(dir, SH_MB_BUILD_MANIFEST);
+        CHECK(sh_ms_sync_pending() == 1 && sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.salted == 0);
+        CHECK(entry_of("cyberprobe", s2, h2, &usable) && usable && !strcmp(s2, salt) && !strcmp(h2, hash));
+        mt_write(dir, SH_MB_BUILD_MANIFEST, "{\"format\":2,\"salt\":\"othermod\",\"build\":\"invalid\"}");
+        CHECK(sh_ms_sync_pending() == 1 && sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.salted == 0);
+        again = slurp(dir, "mod.json", NULL);
+        CHECK(same_text(source, again) && entry_of("cyberprobe", s2, h2, &usable) && usable &&
+              !strcmp(s2, salt) && !strcmp(h2, hash));
+        free(source);
+        free(again);
+    }
     /* Renaming the folder changes nothing: same salt, same build. */
     {
         char moved[MAX_PATH], h2[65], s2[SH_SALT_LEN + 1];
@@ -330,7 +345,7 @@ static void test_fresh_folder_salted(const char *tmp)
         g_logged = 0;
         CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1 && ss.rebuilt == 0);
         CHECK(entry_of("cyberprobe", NULL, NULL, &usable) && !usable);
-        mj = slurp(dir, "mod.json", NULL);
+        mj = slurp(dir, SH_MB_BUILD_MANIFEST, NULL);
         CHECK(mj && strstr(mj, "\"cause\"") && !strstr(mj, "\"build\"") && strstr(mj, salt));
         free(mj);
         CHECK(sh_ms_sync_pending() == 1);   /* tried again at every scan */
@@ -426,7 +441,7 @@ static void test_fresh_folder_strings(const char *tmp)
     }
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
     t = slurp(dir, "mod.json", NULL);
-    CHECK(t && strstr(t, "\"late_key\": \"Late\"") && strstr(t, "\"build\""));
+    CHECK(t && strstr(t, "\"late_key\": \"Late\"") && !strstr(t, "\"build\""));
     free(t);
 }
 
@@ -1083,7 +1098,7 @@ static void test_boot_sync(const char *fixture, const char *tmp)
     CHECK(sh_ms_boot_sync(&RESOLVER, boot_rescan, 0) == 2 && g_boot_rescans == 1);
     CHECK(log_has("MODS: store: boot: 2 folder(s) not built yet") && log_has("MODS: store: boot: 2 of 2 folder(s) built (0 refused)"));
     if (!log_has("2 of 2 folder(s) built")) log_dump("boot");
-    mj = slurp(a, "mod.json", NULL);
+    mj = slurp(a, SH_MB_BUILD_MANIFEST, NULL);
     CHECK(mj && strstr(mj, "\"build\""));
     CHECK(sh_ms_enumerate(&list));
     CHECK(sh_ms_entry_usable(find_entry(&list, "alex.r2-imp")) && sh_ms_entry_usable(find_entry(&list, "campaign\\alexboot")));
@@ -1347,7 +1362,7 @@ static void test_rehome(const char *tmp)
     CHECK(t && strstr(t, "\"images/b\"") && strstr(t, "\"#str_imp_title\""));
     free(t);
     t = slurp(dir, "mod.json", NULL);
-    CHECK(t && strstr(t, "\"imp_title\": \"Imp\"") && strstr(t, "\"build\""));   /* the author's key stays; the build names it <salt>_imp_title */
+    CHECK(t && strstr(t, "\"imp_title\": \"Imp\"") && !strstr(t, "\"build\""));   /* the author's key stays; the build names it <salt>_imp_title */
     free(t);
     CHECK(entry_of("imp", s2, NULL, &usable) && usable && !strcmp(s2, salt));
     /* Renamed: same salt; new content under the new name builds, and a bank in sounds/ carries the id of its
@@ -1419,9 +1434,12 @@ static void test_install_to_root(const char *tmp)
     _snprintf_s(place, sizeof place, _TRUNCATE, "%s\\toroot\\outside\\crate", tmp);
     mt_mkdirs_for(place);
     CHECK(MoveFileA(dir, place));
+    mt_delete(place, SH_MB_BUILD_MANIFEST);
+    CHECK(!mt_has(place, SH_MB_BUILD_MANIFEST));
     CHECK(HO2(name, cause, sh_ms_install_to_root(place, NULL, HO_P(0), &st, NULL, HO_P(1))) && !st.present);
     if (cause[0]) printf("   %s\n", cause);
-    CHECK(!strcmp(name, "crate") && mt_has(place, "mod.json"));
+    CHECK(!strcmp(name, "crate") && mt_has(place, "mod.json") && !mt_has(place, SH_MB_BUILD_MANIFEST));
+    CHECK(mt_has(dir, SH_MB_BUILD_MANIFEST));
     CHECK(entry_of("crate", s2, h2, &usable) && usable && !strcmp(s2, salt) && !strcmp(h2, hash));
     /* Again: the root folder at this build is the install. */
     CHECK(HO2(name, cause, sh_ms_install_to_root(place, NULL, HO_P(0), &st, NULL, HO_P(1))) && st.present &&

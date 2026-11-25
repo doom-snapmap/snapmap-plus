@@ -92,6 +92,7 @@ int    sh_dt_texts_equal(const char *a, size_t alen, const char *b, size_t blen)
 sh_dt_node *sh_dt_at(sh_dt_node *n, const char *path);
 /* The member of `n` with key word `key` (any case), when exactly one. */
 sh_dt_node *sh_dt_child(sh_dt_node *n, const char *key);
+void sh_dt_remove_child(sh_dt_node *parent, int index);
 /* Replace a scalar's value token (copied into the tree's arena). 1 on success. */
 int    sh_dt_set_value(sh_dt *t, sh_dt_node *n, const char *val, size_t len);
 

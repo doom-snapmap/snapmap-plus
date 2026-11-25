@@ -7,6 +7,7 @@
  * restart, and the ledger's record of a serve matches what the index serves
  * until another build is declared. */
 #define WIN32_LEAN_AND_MEAN
+#include "cache_paths.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -14,6 +15,7 @@
 #include <string.h>
 
 #include "../src/backend/modauthor.h"
+#include "../src/backend/modbundle.h"
 #include "../src/backend/modledger.h"
 #include "../src/backend/modserve.h"
 
@@ -323,10 +325,12 @@ static void make_bundle(const char *root, const char *folder, const char *id, ch
     int i;
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", root, folder);
     mkdirs(dir);
-    at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                      "{\n  \"name\": \"%s\",\n"
-                      "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\", \"rules\": 8, \"build\": \"%s\", \"built\": %d,\n"
-                      "    \"shadows\": [],\n    \"files\": [\n", id, id, hash64(hash_digit, h), built);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
+    _snprintf_s(json, sizeof json, _TRUNCATE, "{\"name\":\"%s\",\"snapmap-plus\":{\"format\":2,\"salt\":\"%s\"}}", id, id);
+    write_file(path, json, strlen(json));
+    at += _snprintf_s(json, sizeof json, _TRUNCATE,
+                      "{\"format\":2,\"salt\":\"%s\",\"rules\":8,\"build\":\"%s\",\"built\":%d,"
+                      "\"shadows\":[],\"files\":[\n", id, hash64(hash_digit, h), built);
     for (i = 0; i < n; ++i) {
         char *p, *ap = sh_ma_path(id, files[i].path);   /* the mod folder holds each file at its author path */
         at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
@@ -339,8 +343,8 @@ static void make_bundle(const char *root, const char *folder, const char *id, ch
         for (p = path; *p; ++p) if (*p == '/') *p = '\\';
         write_file(path, files[i].body, strlen(files[i].body));
     }
-    at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, "    ]\n  }\n}\n");
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
+    at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, "]}\n");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" SH_MB_BUILD_MANIFEST, dir);
     write_file(path, json, at);
 }
 
@@ -418,7 +422,7 @@ static void test_anim_kind(const char *top)
     printf("-- refresh: the anim kind, one salt at two hashes (a composition and the root)\n");
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\anims\\mods", top);
     mkdirs(root);
-    make_bundle(root, ".content\\served\\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "kanim000", 'a', 100, b1, 4);
+    make_bundle(mt_cache_dir(root), "content\\served\\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "kanim000", 'a', 100, b1, 4);
     make_bundle(root, "anim-b", "kanim000", 'b', 200, b2, 4);
     hash64('a', h1);
     hash64('b', h2);

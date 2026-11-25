@@ -30,7 +30,7 @@
  * argv[1] is unused; -v echoes the backend log. */
 #define WIN32_LEAN_AND_MEAN
 #include "../src/common/text.h"
-#include "heap_out.h"
+#include "cache_paths.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -675,9 +675,9 @@ static size_t count_files(const char *dir)
 static void cache_counts(const char *root, size_t *units, size_t *files)
 {
     char dir[MAX_PATH * 2];
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.content\\units", root);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\content\\units", mt_cache_dir(root));
     *units = count_files(dir);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.content\\files", root);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\content\\files", mt_cache_dir(root));
     *files = count_files(dir);
 }
 
@@ -1923,7 +1923,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     {
         char content[MAX_PATH * 2];
         size_t cu, cf;
-        _snprintf_s(content, sizeof content, _TRUNCATE, "%s\\.content", storeB);
+        _snprintf_s(content, sizeof content, _TRUNCATE, "%s\\content", mt_cache_dir(storeB));
         mt_remove_tree(content);
         use_store(storeB);
         cache_counts(storeB, &cu, &cf);
@@ -1997,7 +1997,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
                 use_store(storeB);
                 {
                     char content[MAX_PATH * 2];
-                    _snprintf_s(content, sizeof content, _TRUNCATE, "%s\\.content", storeB);
+                    _snprintf_s(content, sizeof content, _TRUNCATE, "%s\\content", mt_cache_dir(storeB));
                     mt_remove_tree(content);
                     use_store(storeB);
                 }
@@ -2046,7 +2046,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
             char libG[MAX_PATH * 2], storeG[MAX_PATH * 2];
             _snprintf_s(libG, sizeof libG, _TRUNCATE, "%s\\libG", tmp);
             _snprintf_s(storeG, sizeof storeG, _TRUNCATE, "%s\\storeG", tmp);
-            CHECK(put_file(storeG, "not a folder"));   /* the mods folder is a file: no content cache can be made */
+            CHECK(put_file(mt_cache_dir(storeG), "not a folder"));
             sh_cache_set_mods_root(storeG);
             sh_cache_local_changed();
             CHECK(HO2(name, msg, sh_prefab_mods_import(zipA, libG, HO_P(0), HO_P(1))) == -1);

@@ -19,6 +19,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "modserve.h"
+#include "mod_paths.h"
 #include "modmanifest.h"
 #include "modbundle.h"
 #include "modsalt.h"
@@ -64,7 +65,14 @@ typedef struct ms_file {
     volatile LONG opens, fail_logged, shadow_logged;
     volatile LONG reg_state;              /* 0 none, 1 ready, -1 failed (main thread) */
     volatile LONG plan_seen;              /* a plan run settled it ready (registered, or left to the game) */
-    volatile LONG withdrawn;              /* a shadow taken back by a registration pass: lookups miss it */
+    volatile LONG withdrawn;              /* 1 unavailable, 2 stock, 3 a placed encounter's stand-in */
+    int encounter_need;                   /* one plus the encounter or single demon this file uses */
+    int placeable_encounter;
+    int refused;                          /* the game refused this source's own bytes */
+    const unsigned char *refused_body;    /* composed bytes, if any, when the parse failed */
+    size_t refused_len;
+    int refusal_cause;                    /* one plus the refused file, during the dependency walk */
+    int stock_fallback;                   /* verified stock file at this request: 1 yes, -1 no */
     volatile LONG reparse_tried;          /* the early-decl pass re-parsed it (main thread) */
     int settled;                          /* an earlier table served these bytes and the engine read them */
     volatile LONG opened_ungated;         /* first served while its bundle's cvar requirements were not live */
@@ -179,7 +187,7 @@ static const char *ms_label(const ms_bundle *b)
 typedef struct ms_slot { uint64_t h; const char *key; int file; } ms_slot;
 
 /* A cause naming a damaged builder block: %s is the file, or "its file list". */
-#define MS_DAMAGED "The part of mod.json Snapmap+ writes is damaged (%s). Press Refresh to build the mod again."
+#define MS_DAMAGED "The mod's build data is damaged (%s). Press Refresh to build the mod again."
 
 typedef struct ms_chunk { struct ms_chunk *next; size_t used, cap; char data[1]; } ms_chunk;
 
@@ -193,6 +201,7 @@ typedef struct ms_gone {
 
 typedef struct ms_index {
     char *root;                           /* the mods folder read (malloc'd) */
+    char *cache;                          /* the profile cache beside the mods folder */
     ms_chunk *arena;
     ms_bundle *bundles; int nbundles, cbundles;
     ms_file *files; int nfiles, cfiles;
@@ -202,6 +211,8 @@ typedef struct ms_index {
     ms_conflict *conflict_list; int nconflict_list, cconflict_list;   /* sorted by request */
     int *alts; int nalts, calts;          /* shadow paths' other providers (ms_file.alt_first) */
     int admitted, served_files, conflicts, composed, shadows;
+    unsigned refusals, refusal_revision;
+    uint64_t refused_entities;
     double build_ms;
     struct ms_index *prev;                /* the table this one replaced (sh_modserve_index_retire frees it later) */
     const char **reg_ids; int nreg_ids;   /* salts a registration pass registered a decl of, this session */
@@ -347,6 +358,7 @@ static void ms_index_free(ms_index *x)
         free(x->bundles[i].cause);
     }
     free(x->root);
+    free(x->cache);
     free(x->bundles); free(x->files); free(x->needs); free(x->slots); free(x->pslots); free(x->conflict_list);
     free(x->gone); free(x->alts); free((void *)x->reg_ids);
     free(x);
@@ -992,19 +1004,13 @@ static char *ms_trim(char *s)
 static const char *const g_ms_retired[] = { "id", "key", "shadows", "stock", "scope", "player", "extends", "replaces",
                                             "legacy", "composes", "schema", NULL };
 
-/* Parse <dir>\mod.json into the index; leaves b->cause set on failure. The
- * author block gives the name, the requirements and "extra"
- * (every key the product does not read itself: strings, hud, description,
- * ...); the builder block ("snapmap-plus", format 2) gives the salt, the
- * build hash, the files and the shadows. A folder in an earlier shape, one
- * the store has not built, and one whose build failed serve nothing; the
- * cause says which (ONE-SHAPE rules 2 and 6). Sizes only: hashes were
- * verified when it was built. */
+/* Index the author document and its matching build manifest. The build already verified file hashes. */
 static void ms_parse_bundle(ms_index *x, ms_bundle *b)
 {
     char *path, key[64];
     unsigned char *text;
-    size_t len = 0;
+    char *manifest = NULL, *manifest_salt = NULL;
+    size_t len = 0, manifest_len = 0;
     sh_json_kind kind;
     sh_json_error err = { 0, NULL };
     ms_json c;
@@ -1012,10 +1018,10 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     const char *block_v = NULL, *block_e = NULL, *shadows_v = NULL, *shadows_e = NULL, *retired = NULL;
     char **shadows = NULL, *salt = NULL, *name = NULL, *state_cause = NULL;
     int nshadows = 0, cshadows = 0, i, k, members = 0, block_object = 0, script_node = 0;
-    double format = -1, built = 0;
+    double format = -1, manifest_format = -1, built = 0;
     ms_text extra = { NULL, 0, 0, 0 };
     if (!(path = sh_textf("%s\\mod.json", b->dir))) { ms_fail(b, "out of memory"); return; }
-    text = ms_read_whole(path, MS_ANY_SIZE, &len);
+    text = sh_mb_read_file(path, MS_ANY_SIZE, &len);
     if (!text) {
         char *pkg = sh_textf("%s\\package.json", b->dir);
         if (ms_file_size(path) >= 0)
@@ -1035,7 +1041,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         else ms_fail(b, "mod.json has a mistake near character %zu (%s). Fix it and press Refresh.", err.offset,
                      err.reason ? err.reason : "it is not an object");
         free(last);
-        HeapFree(GetProcessHeap(), 0, text);
+        free(text);
         return;
     }
     c.p = (const char *)text;
@@ -1074,6 +1080,20 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
                 if (!ms_jmember(&o, key, sizeof key, &v, &ve)) break;
                 if (!strcmp(key, "format")) { if (!ms_jnum(v, ve, &format)) format = -1; }
                 else if (!strcmp(key, "salt")) salt = ms_jstr(x, v, ve, 32);
+            }
+        }
+    }
+    if (format == SH_MB_FORMAT && salt && sh_salt_valid(salt, strlen(salt)))
+        manifest = sh_mb_read_manifest_file(b->dir, &manifest_len);
+    if (manifest) {
+        ms_json o = { manifest, manifest + manifest_len };
+        if (!sh_json_validate_ex(manifest, manifest_len, MS_JSON_DEPTH, &kind, &err) || kind != SH_JSON_OBJECT) {
+            ms_fail(b, "The mod's build data is damaged. Press Refresh to build it again.");
+        } else if (ms_jenter(&o, '{')) {
+            while (ms_jnext(&o, '}')) {
+                if (!ms_jmember(&o, key, sizeof key, &v, &ve)) break;
+                if (!strcmp(key, "format")) { if (!ms_jnum(v, ve, &manifest_format)) manifest_format = -1; }
+                else if (!strcmp(key, "salt")) manifest_salt = ms_jstr(x, v, ve, 32);
                 else if (!strcmp(key, "build")) b->hash = ms_jstr(x, v, ve, 64);
                 else if (!strcmp(key, "files")) { files_v = v; files_e = ve; }
                 else if (!strcmp(key, "stock")) { stock_v = v; stock_e = ve; }
@@ -1082,7 +1102,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
                     /* Any cause stops the build serving. */
                     state_cause = ms_jstr(x, v, ve, MS_ANY_SIZE);
                     if (!state_cause)
-                        state_cause = (char *)"The part of mod.json Snapmap+ writes is damaged. Press Refresh to build "
+                        state_cause = (char *)"The mod's build data is damaged. Press Refresh to build "
                                               "the mod again.";
                 }
                 else if (!strcmp(key, "built")) { if (!ms_jnum(v, ve, &built)) built = 0; }
@@ -1109,6 +1129,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
             }
         }
     }
+    if (manifest && (!manifest_salt || !salt || strcmp(salt, manifest_salt) || manifest_format != SH_MB_FORMAT))
+        ms_fail(b, "The mod's build data does not match this mod. Press Refresh to build it again.");
     if (members) {
         ms_text_put(&extra, "}", 1);
         if (!extra.oom) b->extra = ms_strndup(x, extra.p, extra.n);
@@ -1146,7 +1168,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     else if (state_cause && state_cause[0]) ms_fail(b, "not built: %s", state_cause);
     else if (!b->hash || !ms_valid_hash((char *)b->hash)) ms_fail(b, "not built yet (Refresh in the Mods tab builds it)");
     if (!b->id) b->id = "";
-    if (!b->cause && !files_v && !stock_v) ms_fail(b, "mod.json lists no files");
+    if (!b->cause && !files_v && !stock_v) ms_fail(b, "The mod's build lists no files. Press Refresh to build it again.");
     if (shadows_v && !b->cause) {
         ms_json a = { shadows_v, shadows_e };
         if (ms_jenter(&a, '[')) while (ms_jnext(&a, ']')) {
@@ -1187,7 +1209,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         }
     }
     free(shadows);
-    HeapFree(GetProcessHeap(), 0, text);
+    free(manifest);
+    free(text);
     /* Sizes only; hashes were verified at the build and install. */
     for (i = b->first_file; !b->cause && i < b->first_file + b->file_count; ++i) {
         ms_file *f = &x->files[i];
@@ -1198,7 +1221,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         if (got < 0)
             ms_fail(b, "%s is missing from the folder. Put it back, or press Refresh to build the mod without it.",
                     f->path ? f->path : f->request);
-        else ms_fail(b, "size mismatch: '%s' is %lld bytes, mod.json says %llu", f->request, got,
+        else ms_fail(b, "size mismatch: '%s' is %lld bytes, its build records %llu", f->request, got,
                      (unsigned long long)f->size);
     }
     if (script_node && !b->cause) ms_script_node_row(x, b);
@@ -1322,7 +1345,7 @@ static void ms_extra_add_strings(ms_index *x, ms_bundle *b, const sh_script_node
 }
 
 /* One generated decl of the row as a served file of the bundle: its bytes
- * written once under mods\.served\files\ by their own hash, as rewritten
+ * written once under cache\served\files\ by their own hash, as rewritten
  * files are (ms_serve_rewritten), so every reader opens it from disk. */
 static int ms_add_generated(ms_index *x, ms_bundle *b, const char *request, const char *text, const char *need_type,
                             const char *need_name)
@@ -1334,7 +1357,7 @@ static int ms_add_generated(ms_index *x, ms_bundle *b, const char *request, cons
     ms_file *f;
     if (strncmp(request, "generated/decls/", 16) || !slash || n < 6) return 0;
     sh_mb_sha256_hex(text, len, blob);
-    if (!(path = sh_textf("%s\\.served\\files\\%.16s.decl", x->root, blob))) return 0;
+    if (!(path = sh_textf("%s\\served\\files\\%.16s.decl", x->cache, blob))) return 0;
     for (p = path; *p; ++p) if (*p == '/') *p = '\\';
     if (!ms_write_served(path, (const unsigned char *)text, len) ||
         !ms_grow((void **)&x->files, &x->cfiles, x->nfiles + 1, sizeof(ms_file))) {
@@ -1395,7 +1418,7 @@ static void ms_script_node_row(ms_index *x, ms_bundle *b)
         !ms_add_generated(x, b, row.row_path, row.row_text, "entityDef", def_name)) {
         x->nfiles = before;
         x->nneeds = needs_before;
-        ms_log("bundle '%s': its Script node could not be served (the mods folder's .served folder could not be "
+        ms_log("bundle '%s': its Script node could not be served (the serving cache could not be "
                "written)", b->id);
     } else {
         b->file_count = x->nfiles - b->first_file;
@@ -1563,14 +1586,14 @@ static void ms_scan_folder(ms_index *x, const char *top)
     ms_scan_list_folder(&root, &stack);
     free(root.dir);
     free(root.rel);
-    /* The content cache's compositions (modcache.h): each folder of .content\served is one map row's units, a
+    /* The content cache's compositions (modcache.h): each folder of cache\content\served is one map row's units, a
      * bundle of the content area, served only for a map that declares it. */
     {
         ms_scan_item served;
         const char *area = ms_strdup(x, SH_MODSERVE_CONTENT);
         size_t first = stack.n, i;
-        served.dir = sh_textf("%s\\%s\\served", top, SH_MODSERVE_CONTENT);
-        served.rel = sh_textf("%s\\served", SH_MODSERVE_CONTENT);
+        served.dir = sh_textf("%s\\content\\served", x->cache);
+        served.rel = sh_text("served");
         served.place = area;
         served.kind = MS_SCAN_FOLDER;
         served.top = 0;
@@ -2406,7 +2429,7 @@ static int ms_resolve(ms_index *x)
             for (k = i + 1; k < j; ++k)
                 if (x->files[keys[k].file].bundle == x->files[keys[k - 1].file].bundle) {
                     ms_bundle *b = &x->bundles[x->files[keys[k].file].bundle];
-                    ms_fail(b, "The part of mod.json Snapmap+ writes is damaged (a file is listed twice). Press Refresh "
+                    ms_fail(b, "The mod's build data is damaged (a file is listed twice). Press Refresh "
                             "to build the mod again.");
                     b->admitted = 0;
                     ms_log("bundle '%s' skipped: %s", b->folder, b->cause);
@@ -2710,7 +2733,7 @@ static const ms_file *ms_serving_file(const ms_index *x, int f)
 /* The composed text a file serves instead of its own bytes, or NULL: the
  * listing's composition from the declared providers with map scope on, the
  * static composition from every provider with it off. */
-static const unsigned char *ms_body_of(const ms_file *f, size_t *len)
+static const unsigned char *ms_original_body(const ms_file *f, size_t *len)
 {
     if (InterlockedCompareExchange((volatile LONG *)&g_scope_on, 0, 0)) {
         const ms_body *b = (const ms_body *)InterlockedCompareExchangePointer((PVOID volatile *)&f->scope_body, NULL, NULL);
@@ -2721,6 +2744,13 @@ static const unsigned char *ms_body_of(const ms_file *f, size_t *len)
     return f->body;
 }
 
+static const unsigned char *ms_body_of(const ms_file *f, size_t *len)
+{
+    static const unsigned char standin[] = SH_MODSERVE_STANDIN_CLASS("idPlaceableSnapAIEncounter");
+    if (f->withdrawn == 3) { *len = sizeof standin - 1; return standin; }
+    return ms_original_body(f, len);
+}
+
 /* Two files of successive tables that serve the same bytes. */
 static int ms_same_bytes(const ms_file *a, const ms_file *b)
 {
@@ -2728,6 +2758,86 @@ static int ms_same_bytes(const ms_file *a, const ms_file *b)
     const unsigned char *ba = ms_body_of(a, &la), *bb = ms_body_of(b, &lb);
     if (ba || bb) return ba && bb && la == lb && !memcmp(ba, bb, la);
     return a->blob && b->blob && !strcmp(a->blob, b->blob);
+}
+
+static int ms_is_type(const char *t, const char *want) { return t && !_stricmp(t, want); }
+
+static int ms_refusal_stock(ms_file *f)
+{
+    char sha[SH_MB_HASH_HEX + 1];
+    unsigned long long size;
+    if (!f->is_shadow && !f->is_restore) return 0;
+    if (!f->stock_fallback)
+        f->stock_fallback = sh_mb_stock_identify(f->request, sha, &size) == SH_MB_STOCK_OK ? 1 : -1;
+    return f->stock_fallback == 1;
+}
+
+/* An inactive build still describes its own object. The local map's content check precedes selecting its scope. */
+static int ms_refusal_provider(const ms_index *x, const ms_file *consumer, int winner)
+{
+    const ms_file *w = &x->files[winner];
+    int pick = ms_scoped(x, winner), i;
+    if (pick >= 0 && x->files[pick].bundle == consumer->bundle) return pick;
+    if (w->bundle == consumer->bundle) return winner;
+    for (i = 0; i < w->alt_count; ++i) {
+        int a = x->alts[w->alt_first + i];
+        if (x->files[a].bundle == consumer->bundle) return a;
+    }
+    return pick;
+}
+
+/* Each edge points from a consumer to its selected provider. A refused override can still satisfy
+ * the edge with verified game bytes. Consumers with no such fallback carry the failure onward. */
+static int ms_refusal_closure(ms_index *x)
+{
+    int i, changed, published = 0;
+    uint64_t entities = 0;
+    if (!x->refusals) return 0;
+    for (i = 0; i < x->nfiles; ++i) {
+        ms_file *f = &x->files[i];
+        size_t len;
+        const unsigned char *body;
+        f->refusal_cause = 0;
+        if (!f->refused) continue;
+        body = ms_original_body(f, &len);
+        if ((!body && !f->refused_body) || (body && f->refused_body && len == f->refused_len &&
+            !memcmp(body, f->refused_body, len))) f->refusal_cause = i + 1;
+    }
+    do {
+        changed = 0;
+        for (i = 0; i < x->nfiles; ++i) {
+            ms_file *f = &x->files[i];
+            int k;
+            if (!f->is_decl || f->refusal_cause || (!f->served && f->alt_of < 0)) continue;
+            for (k = f->encounter_need ? -1 : 0; k < f->need_count; ++k) {
+                int p = k < 0 ? f->encounter_need - 1 : x->needs[f->need_first + k].file;
+                if (p < 0 || (p = ms_refusal_provider(x, f, p)) < 0 || !x->files[p].refusal_cause ||
+                    x->files[p].placeable_encounter || ms_refusal_stock(&x->files[p])) continue;
+                f->refusal_cause = x->files[p].refusal_cause;
+                changed = 1;
+                break;
+            }
+        }
+    } while (changed);
+    for (i = 0; i < x->nfiles; ++i) {
+        ms_file *f = &x->files[i];
+        LONG next = f->refusal_cause ? (ms_refusal_stock(f) ? 2 : 1) : 0;
+        if (next == 1 && f->placeable_encounter && !f->refused) next = 3;
+        LONG was = InterlockedExchange(&f->withdrawn, next);
+        if (next == was) continue;
+        published = 1;
+        InterlockedExchange(&f->reg_state, 0);
+        InterlockedExchange(&f->plan_seen, 0);
+    }
+    for (i = 0; i < x->nfiles; ++i) {
+        int pick;
+        if (x->files[i].served && ms_is_type(x->files[i].ptype, "entityDef") &&
+            (pick = ms_scoped(x, i)) >= 0 && x->files[pick].withdrawn == 1)
+            entities = (entities ^ (uint64_t)(i + 1)) * 1099511628211ull;
+    }
+    if (entities != x->refused_entities) { x->refused_entities = entities; published = 1; }
+    if (published) x->refusal_revision++;
+    return published;
 }
 
 /* Refresh: what the engine may hold from the replaced table. */
@@ -3127,7 +3237,6 @@ static int ms_live(const ms_index *x, const ms_file *f)
     return ((f->served && x->bundles[f->bundle].admitted) || f->registry_keyed) && !f->edit;
 }
 
-static int ms_is_type(const char *t, const char *want) { return t && !_stricmp(t, want); }
 
 typedef struct ms_req_list { char **reqs; int n, cap; int oom; } ms_req_list;
 
@@ -3191,13 +3300,13 @@ static int ms_registry_grown(ms_index *x)
     x->ngrown = 0;
     for (i = 0; i < x->nbundles; ++i) {
         const ms_bundle *b = &x->bundles[i];
-        if (!b->admitted || b->place) continue;
+        if (!b->admitted) continue;
         for (k = b->first_file; k < b->first_file + b->file_count; ++k) {
-            const ms_file *f = &x->files[k];
+            ms_file *f = &x->files[k];
             size_t len = 0;
             char *t, spawn[512];
             int q;
-            if (!f->served || f->edit || f->is_shadow || !ms_is_type(f->ptype, "entityDef") || !f->pname) continue;
+            if ((!f->served && f->alt_of < 0) || f->edit || f->is_shadow || !ms_is_type(f->ptype, "entityDef") || !f->pname) continue;
             if (!(t = ms_reg_text(f, &len))) continue;
             q = sh_modregistry_placeable_encounter(t, len, spawn, sizeof spawn);
             HeapFree(GetProcessHeap(), 0, t);
@@ -3205,8 +3314,11 @@ static int ms_registry_grown(ms_index *x)
             for (q = b->first_file; q < b->first_file + b->file_count; ++q) {
                 const ms_file *e = &x->files[q];
                 int d, held = 0;
-                if (!e->served || e->edit || e->is_shadow || !ms_is_type(e->ptype, "snapAiEncounter") || !e->pname ||
+                if ((!e->served && e->alt_of < 0) || e->edit || e->is_shadow || !ms_is_type(e->ptype, "snapAiEncounter") || !e->pname ||
                     _stricmp(e->pname, spawn)) continue;
+                f->placeable_encounter = 1;
+                f->encounter_need = (e->served ? q : e->alt_of) + 1;
+                if (b->place || !e->served || !f->served) break;
                 for (d = 0; d < n && !held; ++d) held = !_stricmp(names[d], e->pname);
                 if (held) break;
                 if (!ms_grow((void **)&names, &cap, n + 1, sizeof(char *))) { free(names); return 0; }
@@ -3393,6 +3505,20 @@ static int ms_reg_own(char ***owned, int *n, int *cap, char *text)
 }
 
 /* Generate the registry files for the bundles in `set` (serving order). */
+static int ms_entity_unavailable(void *context, const char *name)
+{
+    const ms_index *x = (const ms_index *)context;
+    int f = ms_provider(x, "entityDef", name);
+    return f >= 0 && (f = ms_scoped(x, f)) >= 0 && x->files[f].withdrawn == 1;
+}
+
+static void ms_single_actor(void *context, int encounter, const char *actor)
+{
+    ms_index *x = (ms_index *)context;
+    int f = ms_provider(x, "entityDef", actor);
+    if (f >= 0 && encounter >= 0 && encounter < x->nfiles) x->files[encounter].encounter_need = f + 1;
+}
+
 static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, uint64_t sig, int grow)
 {
     sh_mr_source *src = (sh_mr_source *)calloc((size_t)(n ? n : 1), sizeof *src);
@@ -3419,6 +3545,11 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
         int nd = 0, want_decls = b->edits && strstr(b->edits, SH_MB_REGISTRY_CONDUCTOR) != NULL;
         s->key = b->id;
         s->who = ms_strdup(x, ms_label(b));
+        if (x->refusals) {
+            s->entity_unavailable = ms_entity_unavailable;
+            s->single_actor = ms_single_actor;
+            s->context = x;
+        }
         s->edits = b->edits;
         s->edits_len = b->edits_len;
         /* A shadow at a registry's name: its diff against the
@@ -3641,7 +3772,7 @@ static int ms_registry_compute(ms_index *x, int on)
      * a list naming its encounters would name decls nothing serves; the game's lists serve there. */
     int grow = x->ngrown > 0 && !(InterlockedCompareExchange(&g_scope_open, 0, 0) &&
                                   InterlockedCompareExchange(&g_scope_play, 0, 0));
-    uint64_t sig = 1469598103934665603ull ^ (uint64_t)grow;
+    uint64_t sig = (1469598103934665603ull ^ x->refusal_revision) * 1099511628211ull ^ (uint64_t)grow;
     if (!x->reg_count) {
         for (i = 0; i < 32; ++i) InterlockedExchange(&g_spawn_standin[i], 0);
         return 0;
@@ -3948,6 +4079,8 @@ static int ms_scope_compute(ms_index *x, int mark)
     }
     if (av_built) free(av.keys);
     if (marked) InterlockedExchange(&x->expanded, 0);
+    /* A new selection can break or restore a dependency. Recompose any affected registry entries. */
+    if (ms_refusal_closure(x)) changed += ms_scope_compute(x, mark);
     return changed;
 }
 
@@ -4560,11 +4693,11 @@ static int ms_write_served(const char *path, const unsigned char *bytes, size_t 
     return ok;
 }
 
-/* Delete every file under <root>\.served\<sub> that no file of `x` is served
+/* Delete every file under cache\served\<sub> that no file of `x` is served
  * from. Returns the count. */
 static int ms_prune_served_dir(const ms_index *x, const char *sub)
 {
-    char *dir = sh_textf("%s\\.served\\%s", x->root, sub), *pattern = dir ? sh_textf("%s\\*", dir) : NULL;
+    char *dir = sh_textf("%s\\served\\%s", x->cache, sub), *pattern = dir ? sh_textf("%s\\*", dir) : NULL;
     wchar_t *wide = pattern ? ms_wide(pattern) : NULL;
     WIN32_FIND_DATAW fd;
     HANDLE h = wide ? FindFirstFileW(wide, &fd) : INVALID_HANDLE_VALUE;
@@ -4617,14 +4750,14 @@ int sh_modserve_served_prune(void)
         }
     }
     free(wroot);
-    if (other) ms_log("index: another game instance uses this mods folder; mods\\.served is left as it is");
+    if (other) ms_log("index: another game instance uses this mods folder; cache\\served is left as it is");
     else if (x) removed = ms_prune_served_dir(x, "banks") + ms_prune_served_dir(x, "files");
     ReleaseSRWLockShared(&g_build_lock);
-    if (removed) ms_log("index: %d file(s) no mod uses any more removed from mods\\.served", removed);
+    if (removed) ms_log("index: %d file(s) no mod uses any more removed from cache\\served", removed);
     return removed;
 }
 
-/* Serve `f` from rewritten bytes, written under mods\.served\ by their own
+/* Serve `f` from rewritten bytes, written under cache\served\ by their own
  * hash (ONE-SHAPE rule 4: no folder is named by a build): a bank as
  * banks\<renamed stem>.bnk (its stem already carries the bank's hash), any
  * other file as files\<sha16>.<extension>. Size and blob follow. */
@@ -4633,8 +4766,8 @@ static int ms_serve_rewritten(ms_index *x, ms_file *f, const unsigned char *byte
     char *path, blob[SH_MB_HASH_HEX + 1], *p;
     const char *dot = strrchr(f->request, '.'), *slash = strrchr(f->request, '/');
     sh_mb_sha256_hex(bytes, len, blob);
-    if (bank_stem) path = sh_textf("%s\\.served\\banks\\%s.bnk", x->root, bank_stem);
-    else path = sh_textf("%s\\.served\\files\\%.16s%s", x->root, blob, dot && (!slash || dot > slash) ? dot : "");
+    if (bank_stem) path = sh_textf("%s\\served\\banks\\%s.bnk", x->cache, bank_stem);
+    else path = sh_textf("%s\\served\\files\\%.16s%s", x->cache, blob, dot && (!slash || dot > slash) ? dot : "");
     if (!path) return 0;
     for (p = path; *p; ++p) if (*p == '/') *p = '\\';
     if (!ms_write_served(path, bytes, len)) { free(path); return 0; }
@@ -4668,7 +4801,7 @@ static int ms_own_keys(const ms_bundle *b, sh_ma_keys *out)
 }
 
 /* Every decl a mod carries (its own and its edits of the game's), served as the engine names its names
- * (modauthor.h): the rewritten bytes go under mods\.served\files\ by their hash, as a renamed bank's decls do, so
+ * (modauthor.h): the rewritten bytes go under cache\served\files\ by their hash, as a renamed bank's decls do, so
  * every open, the ledger and the bank rename after this see the engine's text. A stock pointer is the game's own. */
 static void ms_engine_names(ms_index *x)
 {
@@ -4691,7 +4824,7 @@ static void ms_engine_names(ms_index *x)
             HeapFree(GetProcessHeap(), 0, bytes);
             if (!text) continue;
             if (ms_serve_rewritten(x, f, (const unsigned char *)text, tl, NULL)) changed++;
-            else ms_log("bundle '%s': %s could not be written under .served; it is served as written", b->id, f->request);
+            else ms_log("bundle '%s': %s could not be written to the serving cache; it is served as written", b->id, f->request);
             free(text);
         }
         if (changed) ms_log("bundle '%s': %d decl(s) served with the mod's names as the engine names them", b->id, changed);
@@ -4714,7 +4847,7 @@ size_t sh_modserve_respell(unsigned char *bytes, size_t len, const char *from, c
 }
 
 /* A mod whose binaries spell another namespace than its salt (a copy given a new salt; SPEC-distribution D12): every
- * file it serves, binary or text, has that namespace mapped to the salt, length for length, under mods\.served\. */
+ * file it serves, binary or text, has that namespace mapped to the salt, length for length, under cache\served\. */
 static void ms_respelled(ms_index *x)
 {
     int bi, i;
@@ -4733,7 +4866,7 @@ static void ms_respelled(ms_index *x)
             if (!bytes) continue;
             if (sh_modserve_respell(bytes, len, b->spelled, b->id)) {
                 if (ms_serve_rewritten(x, f, bytes, len, NULL)) changed++;
-                else ms_log("bundle '%s': %s could not be written under .served; it is served as written", b->id, f->request);
+                else ms_log("bundle '%s': %s could not be written to the serving cache; it is served as written", b->id, f->request);
             }
             HeapFree(GetProcessHeap(), 0, bytes);
         }
@@ -4794,7 +4927,7 @@ static void ms_bank_stems(ms_index *x)
             _snprintf_s(req, sizeof req, _TRUNCATE, "sound/soundbanks/pc/%s.bnk", renamed[n]);
             if (!ms_serve_rewritten(x, f, bytes, len, renamed[n])) {
                 HeapFree(GetProcessHeap(), 0, bytes);
-                ms_log("bundle '%s': %s could not be written under .served; it keeps its name", b->id, f->request);
+                ms_log("bundle '%s': %s could not be written to the serving cache; it keeps its name", b->id, f->request);
                 continue;
             }
             HeapFree(GetProcessHeap(), 0, bytes);
@@ -4846,9 +4979,12 @@ int sh_modserve_index_build(const char *mods_root)
     if (!mods_root) return -1;
     AcquireSRWLockExclusive(&g_build_lock);
     x = (ms_index *)calloc(1, sizeof *x);
-    if (x) x->root = _strdup(mods_root);
-    if (!x || !x->root) {
-        free(x);
+    if (x) {
+        x->root = _strdup(mods_root);
+        x->cache = sh_mod_cache_dir(mods_root);
+    }
+    if (!x || !x->root || !x->cache) {
+        ms_index_free(x);
         ReleaseSRWLockExclusive(&g_build_lock);
         ms_log("index refused: out of memory");
         return -1;
@@ -4887,17 +5023,35 @@ int sh_modserve_index_build(const char *mods_root)
     if (old) {
         for (i = 0; i < x->nfiles; ++i) {
             ms_file *f = &x->files[i];
-            int o;
-            if (!f->is_decl || !f->served) continue;
+            int o, k, w;
+            if (!f->is_decl || (!f->served && f->alt_of < 0)) continue;
             o = ms_find(old->slots, old->mask, f->request);
-            if (o >= 0 && old->files[o].reg_state) f->reg_state = old->files[o].reg_state;
-            if (o >= 0) f->plan_seen = old->files[o].plan_seen;
-            /* A shadow a registration pass withdrew stays withdrawn while the
-             * same bytes serve the path (the pass that withdrew it marked it
-             * done and does not look at it again). */
-            if (o >= 0 && old->files[o].withdrawn && f->blob && old->files[o].blob && !strcmp(f->blob, old->files[o].blob) &&
-                !old->files[o].body && !f->body)
-                f->withdrawn = 1;
+            if (o < 0) continue;
+            w = o;
+            for (k = -1; k < old->files[w].alt_count; ++k) {
+                const ms_bundle *b = &x->bundles[f->bundle], *ob;
+                o = k < 0 ? w : old->alts[old->files[w].alt_first + k];
+                ob = &old->bundles[old->files[o].bundle];
+                if (!strcmp(b->id, ob->id) && ms_same_area(b, ob) &&
+                    (!b->place || !strcmp(b->hash, ob->hash))) break;
+            }
+            if (k == old->files[w].alt_count) continue;
+            if (!old->files[o].withdrawn && (old->files[o].reg_state == 1 || ms_same_bytes(f, &old->files[o]))) {
+                f->reg_state = old->files[o].reg_state;
+                f->plan_seen = old->files[o].plan_seen;
+            }
+            if (old->files[o].refused && f->blob && old->files[o].blob && !strcmp(f->blob, old->files[o].blob)) {
+                if (old->files[o].refused_body) {
+                    size_t len = old->files[o].refused_len;
+                    unsigned char *copy = (unsigned char *)ms_alloc(x, len ? len : 1);
+                    if (!copy) continue;
+                    memcpy(copy, old->files[o].refused_body, len);
+                    f->refused_body = copy;
+                    f->refused_len = len;
+                }
+                f->refused = 1;
+                x->refusals++;
+            }
             /* The engine holds what an earlier table served: a shadow whose
              * bytes did not change is not offered to the early-decl pass again. */
             if (o >= 0 && ms_same_bytes(f, &old->files[o])) {
@@ -5009,12 +5163,13 @@ static const ms_file *ms_lookup_file_ex(const ms_index **out_index, const char *
     if (!x || !x->nkeys || !request) return NULL;
     __try { f = ms_find(x->slots, x->mask, request); }
     __except (EXCEPTION_EXECUTE_HANDLER) { f = -1; }
-    if (f < 0 || x->files[f].withdrawn) return NULL;
+    if (f < 0) return NULL;
     /* A registry's synthetic file has bytes only for a listing. */
     if (x->files[f].registry && (!scoped || !InterlockedCompareExchange(&g_scope_on, 0, 0))) return NULL;
     /* Map scope: a shadow path whose providers the current map does not list
      * is withdrawn; one it lists serves when the winner's bundle is not. */
     if (scoped && (f = ms_scoped(x, f)) < 0) return NULL;
+    if (x->files[f].withdrawn == 1 || x->files[f].withdrawn == 2) return NULL;
     if (out_index) *out_index = x;
     return &x->files[f];
 }
@@ -5916,6 +6071,51 @@ int sh_modserve_animweb_check(const char *request, const sh_modserve_engine_ops 
     return ms_animweb_unresolved(x, f, ops, 1, model);
 }
 
+static void ms_refuse_file(ms_index *x, ms_file *f)
+{
+    AcquireSRWLockExclusive(&g_build_lock);
+    AcquireSRWLockShared(&g_scope_lock);
+    f->refused_body = ms_original_body(f, &f->refused_len);
+    if (!f->refused) x->refusals++;
+    f->refused = 1;
+    if (ms_refusal_closure(x)) (void)ms_scope_compute(x, 1);
+    ReleaseSRWLockShared(&g_scope_lock);
+    ReleaseSRWLockExclusive(&g_build_lock);
+}
+
+/* Prefer the directly affected entity's name over the model or animation file in the player notice. */
+static int ms_refusal_notice(const ms_index *x, const ms_file *f)
+{
+    const ms_file *entity = NULL;
+    const char *leaf;
+    char *title;
+    int i, k, cause = (int)(f - x->files) + 1, direct = 0;
+    for (i = 0; i < x->nfiles && !direct; ++i) {
+        const ms_file *g = &x->files[i];
+        if (g->refusal_cause != cause || g->stock_fallback == 1 || !ms_is_type(g->ptype, "entityDef") ||
+            !g->pname || (!g->served && g->alt_of < 0) || g->edit) continue;
+        if (!entity) entity = g;
+        if (g == f) { entity = g; break; }
+        for (k = 0; k < g->need_count; ++k) {
+            int p = x->needs[g->need_first + k].file;
+            if (p >= 0 && ms_refusal_provider(x, g, p) == cause - 1) { entity = g; direct = 1; break; }
+        }
+    }
+    if (!entity) return 0;
+    leaf = strrchr(entity->pname, '/');
+    leaf = leaf ? leaf + 1 : entity->pname;
+    title = sh_textn(leaf, strlen(leaf));
+    if (!title) return 0;
+    for (i = 0; title[i]; ++i) {
+        if (title[i] == '_') title[i] = ' ';
+        else if (!i || title[i - 1] == ' ') title[i] = (char)toupper((unsigned char)title[i]);
+    }
+    ms_console("%s in %s could not load. Fix %s in %s and press Refresh.", title,
+               ms_label(&x->bundles[entity->bundle]), f->path ? f->path : f->request, ms_label(&x->bundles[f->bundle]));
+    free(title);
+    return 1;
+}
+
 int sh_modserve_withdraw(const char *request, const char *type, const char *name, const char *why)
 {
     const ms_index *x = NULL;
@@ -5923,11 +6123,11 @@ int sh_modserve_withdraw(const char *request, const char *type, const char *name
     const char *bundle;
     if (!f) return 0;
     bundle = x->bundles[f->bundle].id;
-    InterlockedExchange(&f->withdrawn, 1);
+    ms_refuse_file((ms_index *)x, f);
     ms_log("withdrawn: %s '%s' (%s): %s", type ? type : "?", name ? name : request, bundle, why ? why : "");
-    ms_console("%s: %s was not loaded: %s. Fix the file and press Refresh in the Mods tab.",
+    if (!ms_refusal_notice(x, f)) ms_console("%s: %s was not loaded: %s. Fix the file and press Refresh in the Mods tab.",
                ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, why ? why : "the game could not use it");
-    return 1;
+    return (int)f->withdrawn;
 }
 
 int sh_modserve_error_names_decl(const char *text, const char *type, const char *name)
@@ -7191,15 +7391,15 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
     /* 1: publish every source, so a parse that names another mod decl finds it. */
     for (i = 0; i < plan->count; ++i) {
         sh_modserve_step *s = &plan->steps[i];
-        ms_file *f = &x->files[s->file];
+        ms_file *f = (ms_file *)ms_serving_file(x, s->file);
         s->ready = 0;
         if (s->blocked) {
             failed[i] = 1;
             ms_log("%s: %s '%s' (%s) BLOCKED: %s", phase, s->type, s->name, s->bundle_id, s->blocked);
             continue;
         }
-        if (f->reg_state == 1) continue;
-        if (InterlockedCompareExchange(&f->withdrawn, 0, 0)) {
+        if (f->withdrawn == 2) { stock[i] = 2; continue; }
+        if (f->withdrawn == 1) {
             /* Withdrawn by an earlier pass (a model SnapMap cannot load, or a
              * parse the engine refused): its bytes are not parsed again. */
             failed[i] = 1;
@@ -7208,6 +7408,7 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
                    s->bundle_id);
             continue;
         }
+        if (f->reg_state == 1) continue;
         {
             int known = ops->source_registered(ops->context, s->type, s->name) == 1;
             char *model = NULL;
@@ -7216,8 +7417,8 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
              * is withdrawn from serving: a stock decl it shadowed serves
              * again, and a new name is never registered. */
             if (!_stricmp(s->type, "animWeb") && ms_animweb_unresolved(x, f, ops, !known, &model)) {
-                InterlockedExchange(&f->withdrawn, 1);
-                if (known && s->shadow) {
+                ms_refuse_file(x, f);
+                if (f->withdrawn == 2) {
                     InterlockedExchange(&f->reg_state, 1);
                     stock[i] = 2;
                     ms_log("%s: animWeb '%s' (%s) shadow WITHDRAWN: it names model '%s', which neither a bundle nor "
@@ -7231,7 +7432,7 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
                     ms_log("%s: animWeb '%s' (%s) NOT READY: it names model '%s', which neither a bundle nor the game "
                            "provides; withdrawn and not registered (the engine would refuse it)", phase, s->name,
                            s->bundle_id, model);
-                    ms_console("%s: %s was not loaded because it names the model %s, which SnapMap cannot "
+                    if (!ms_refusal_notice(x, f)) ms_console("%s: %s was not loaded because it names the model %s, which SnapMap cannot "
                                "load (it is campaign-only or missing). Name a model SnapMap has, then press Refresh.",
                                ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, model);
                 }
@@ -7271,10 +7472,17 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
     /* 2: load in dependency order; a step whose needed decl failed is skipped. */
     for (i = 0; i < plan->count; ++i) {
         sh_modserve_step *s = &plan->steps[i];
-        ms_file *f = &x->files[s->file];
+        ms_file *f = (ms_file *)ms_serving_file(x, s->file);
         unsigned state = 0, lifetime = 0;
         int dep_failed = -1, loaded;
-        if (failed[i]) { s->ready = -1; continue; }
+        if (f->withdrawn == 2) { s->ready = 1; ready++; continue; }
+        if (failed[i] || f->withdrawn == 1) {
+            if (f->withdrawn == 1 && !failed[i])
+                ms_log("%s: %s '%s' (%s) NOT READY: a needed decl was withdrawn", phase, s->type, s->name, s->bundle_id);
+            failed[i] = 1;
+            s->ready = -1;
+            continue;
+        }
         if (f->reg_state == 1) { s->ready = 1; ready++; continue; }
         if (stock[i] == 2) { s->ready = 1; ready++; continue; }   /* withdrawn: the stock decl serves */
         if (stock[i] == 3) {
@@ -7293,7 +7501,7 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
                    s->bundle_id);
             continue;
         }
-        for (k = 0; k < i && dep_failed < 0; ++k) {
+        for (k = 0; f->withdrawn != 3 && k < i && dep_failed < 0; ++k) {
             int n;
             if (!failed[k]) continue;
             for (n = 0; n < f->need_count; ++n)
@@ -7324,16 +7532,16 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
             char why[300];
             why[0] = 0;
             if (ops->refusal) ops->refusal(ops->context, why, sizeof why);
-            failed[i] = 1;
-            s->ready = -1;
-            InterlockedExchange(&f->reg_state, -1);
-            InterlockedExchange(&f->withdrawn, 1);
+            ms_refuse_file(x, f);
+            failed[i] = f->withdrawn != 2;
+            s->ready = failed[i] ? -1 : 1;
+            if (!failed[i]) ready++;
             ms_log("%s: %s '%s' (%s) NOT READY: the engine refused its parse%s%s; withdrawn, not loaded again", phase,
                    s->type, s->name, s->bundle_id, why[0] ? ": " : "", why);
             {
                 char *nl = strpbrk(why, "\r\n");
                 if (nl) *nl = 0;
-                ms_console("%s: the game could not read %s%s%s. Fix the file and press Refresh.",
+                if (!ms_refusal_notice(x, f)) ms_console("%s: the game could not read %s%s%s. Fix the file and press Refresh.",
                            ms_label(&x->bundles[f->bundle]), f->path ? f->path : f->request, why[0] ? ": " : "", why);
             }
         } else if (loaded) {
@@ -7353,7 +7561,8 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
     /* What this run settled ready is not visited again by a later pass of
      * the same steps (sh_modserve_plan_unvisited). */
     for (i = 0; i < plan->count; ++i)
-        if (plan->steps[i].ready == 1) InterlockedExchange(&x->files[plan->steps[i].file].plan_seen, 1);
+        if (plan->steps[i].ready == 1)
+            InterlockedExchange((volatile LONG *)&ms_serving_file(x, plan->steps[i].file)->plan_seen, 1);
     free(failed);
     free(stock);
     return ready;
@@ -7367,9 +7576,9 @@ int sh_modserve_plan_unvisited(const sh_modserve_plan *plan)
     for (i = 0; i < plan->count; ++i) {
         const ms_file *f;
         if (plan->steps[i].file < 0 || plan->steps[i].file >= x->nfiles) continue;
-        f = &x->files[plan->steps[i].file];
+        f = ms_serving_file(x, plan->steps[i].file);
         if (InterlockedCompareExchange((volatile LONG *)&f->reg_state, 0, 0) == -1 ||
-            InterlockedCompareExchange((volatile LONG *)&f->withdrawn, 0, 0))
+            (f->withdrawn && f->withdrawn != 3))
             continue;   /* failed or withdrawn: no pass parses it again */
         if (!InterlockedCompareExchange((volatile LONG *)&f->plan_seen, 0, 0)) n++;
     }
@@ -8040,7 +8249,7 @@ int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates
         if (ms_req_needs(b) && !InterlockedCompareExchange((volatile LONG *)&b->req_lost_to, 0, 0) &&
             !InterlockedCompareExchange((volatile LONG *)&b->req_off, 0, 0) &&
             !InterlockedCompareExchange((volatile LONG *)&b->req_live, 0, 0) && !s->blocked &&
-            x->files[s->file].reg_state != 1) {
+            ms_serving_file(x, s->file)->reg_state != 1) {
             s->blocked = b->req_cause && b->req_cause[0] ? b->req_cause : "requirements are not live";
             plan->blocked++;
             n++;
@@ -8182,6 +8391,24 @@ int sh_modserve_root_lacks(const char *salt, const char *name)
     /* The asset rule's own test (sh_modserve_row_served_for: the folder carries it or the index resolves it), with
      * the stand-ins of an earlier load left out: they are what a lacking name is given, never what it has. */
     lacks = !ms_bundle_carries(x, at, lower) && !ms_row_name_resolves_here(x, lower);
+    if (!lacks && x->refusals) {
+        const ms_bundle *b = &x->bundles[at];
+        int i;
+        for (i = b->first_file; i < b->first_file + b->file_count; ++i) {
+            const ms_file *f = &x->files[i];
+            if (f->placeable_encounter && f->withdrawn && f->pname && !_stricmp(f->pname, lower)) {
+                lacks = SH_MODMANIFEST_LOCAL_REFUSED;
+                break;
+            }
+            if (f->is_sedef && f->withdrawn == 1) {
+                size_t len = 0;
+                char def[512], *t = ms_reg_text(f, &len);
+                int match = t && sh_modregistry_decl_string(t, len, "entityDef", def, sizeof def) && !_stricmp(def, lower);
+                if (t) HeapFree(GetProcessHeap(), 0, t);
+                if (match) { lacks = SH_MODMANIFEST_LOCAL_REFUSED; break; }
+            }
+        }
+    }
     free(lower);
     return lacks;
 }
@@ -9152,7 +9379,7 @@ int sh_modserve_refresh_pending_anims(void)
 static int ms_split_keeps(const ms_index *x, const sh_modserve_step *s)
 {
     if (!s->persist && s->rank != SH_MODSERVE_RANK_RENDERPARM) return 0;
-    return !(x && s->file >= 0 && s->file < x->nfiles && x->files[s->file].reg_state == 1);
+    return !(x && s->file >= 0 && s->file < x->nfiles && ms_serving_file(x, s->file)->reg_state == 1);
 }
 
 int sh_modserve_plan_split(const sh_modserve_plan *plan, sh_modserve_plan *kept, sh_modserve_plan *rest)
@@ -9199,10 +9426,11 @@ int sh_modserve_plan_block_failed_needs(sh_modserve_plan *plan)
         sh_modserve_step *s = &plan->steps[i];
         const ms_file *f;
         if (s->blocked || s->file < 0 || s->file >= x->nfiles) continue;
-        f = &x->files[s->file];
+        f = ms_serving_file(x, s->file);
         for (k = 0; k < f->need_count; ++k) {
             const ms_need *nd = &x->needs[f->need_first + k];
-            if (nd->file >= 0 && nd->file != s->file && x->files[nd->file].reg_state == -1) {
+            if (nd->file >= 0 && nd->file != s->file && (ms_serving_file(x, nd->file)->reg_state == -1 ||
+                ms_serving_file(x, nd->file)->withdrawn == 1)) {
                 s->blocked = "needs a decl an editor row keeps, which failed";
                 plan->blocked++;
                 n++;
@@ -9220,7 +9448,10 @@ void sh_modserve_plan_mark_registered(sh_modserve_plan *plan)
     if (!plan || !x) return;
     for (i = 0; i < plan->count; ++i) {
         sh_modserve_step *s = &plan->steps[i];
-        s->ready = s->file >= 0 && s->file < x->nfiles && x->files[s->file].reg_state == 1 ? 1 : 0;
+        if (s->file >= 0 && s->file < x->nfiles) {
+            const ms_file *f = ms_serving_file(x, s->file);
+            s->ready = f->withdrawn == 1 ? -1 : f->reg_state == 1 || f->withdrawn == 2;
+        } else s->ready = 0;
     }
 }
 
@@ -9306,6 +9537,7 @@ char *sh_modserve_bundle_label(const char *bundle_hash)
     for (i = 0; x && bundle_hash && i < x->nbundles; ++i) {
         const ms_bundle *b = &x->bundles[i];
         if (!b->hash || _stricmp(b->hash, bundle_hash)) continue;
+        if (b->place) return sh_text(b->name && b->name[0] ? b->name : "map content");
         if (b->name && b->name[0] && b->folder && b->folder[0]) return sh_textf("%s (mods\\%s)", b->name, b->folder);
         return sh_textf("mods\\%s", b->folder && b->folder[0] ? b->folder : "?");
     }

@@ -1,66 +1,6 @@
-/* modbundle.h -- build, validate and read mod bundles (mod.json).
- *
- * A mod is a folder holding mod.json and an assets/ tree at exact engine
- * request paths. Building it hashes every file, names what each file
- * provides, scans decl text for what it needs, checks the namespace and
- * structural rules, and produces the canonical manifest whose SHA-256 is the
- * build hash.
- *
- * mod.json, format 2, is one JSON object with two parts. The author's part is
- * every top-level key except "snapmap-plus": name (required),
- * description, author, homepage, requirements, strings, hud, companions and
- * any other key, which is kept and becomes the manifest's "extra". The
- * builder's part, the member "snapmap-plus", is written only by the product:
- *
- *   "snapmap-plus": {
- *     "format": 2, "salt": "<8 characters>", "rules": 10, "built": <unix seconds>,
- *     "tree": "<sha256>",              the rebuild rule's tree hash (sh_mb_tree_hash)
- *     "build": "<sha256>",             the build hash; absent while the build fails
- *     "cause": "<first cause>",        only while the build fails (or a verification found one)
- *     "warnings": [...],               every warning of the build, when any
- *     "classes": {"adds", "borrows", "edits", "replaces", "editor", "surfaces"},
- *     "editor": ["<request>", ...],    files classified as editor tweaks
- *     "registries": {"attachmentTags": [...], "banks": [...], "clipEvents": [...], "conductor": [...], "strings": [...]},
- *     "edits": [{"file", "stock", "counts", "ops"}, ...],   derived edits of decls at game names
- *     "scripts": {"files", "entities": [{"name", "events"}], "inputs", "outputs", "node", "dynamic"},
- *                                      what the mod's scripts bind, read without running them
- *                                      (sh_mb_script_scan); only when the mod carries scripts.
- *                                      "node": true when a script registers an input
- *                                      (sh_script_node_registers_input): the serving index then
- *                                      serves the mod's Script node row (script_node.h)
- *     "spelled": "<salt>",             the namespace the carried binaries spell (sh_mb_bundle.spelled), when any
- *     "units_of": ["<unit hash>", ...], a composition's units (modunit.h), kept by every later build
- *     "shadows": ["<request>", ...],
- *     "files": [{"path", "sha256", "size", "provides": {"type", "name"}, "needs": [...]}],
- *     "stock": [{"path", "sha256", "source", "provides", "needs", "closure": true?}]
- *   }
- *
- * Identity is the salt (modsalt.h), nothing else: the namespace mods/<salt>/,
- * the canonical "id", and the prefix of every strings key (`<salt>_<name>`,
- * referenced `#str_<salt>_<name>`; no '/' in a string key). A folder's name is the
- * author's and never read. A folder in an earlier shape (package.json, a block
- * without a salt, an author id, key, shadows, stock, scope, player, extends,
- * replaces, legacy, composes or schema key, a hud schema) is refused with
- * SH_MB_EARLIER, one sentence (sh_mb_descriptor_state).
- *
- * Additive mods. The builder classifies every file from its path and bytes
- * (SH_MB_CLASS_*); "shadows" is derived from the classification (every
- * replacement and every editor tweak at a game name). "classes", "editor",
- * "registries" and "edits" are derived facts outside the canonical text. A
- * stock pointer is derived from a carried file whose bytes are the game's,
- * or ("closure": true) by the campaign-only closure, which every build
- * derives again; a closure pointer has no file under assets/.
- *
- * Writing the block never touches the author's part: the file is spliced. The
- * old block member is cut out (from the end of the member before it to the
- * end of its value), and the new one is inserted after the last author member
- * as ",\n\n  \"snapmap-plus\": {...}" (CRLF when the file uses CRLF). Cutting
- * the block out of any written file therefore gives back the author's bytes
- * exactly (sh_mb_author_bytes). A file without an author text (a manifest
- * written out) gets a synthesized author part.
- *
- * The canonical manifest (below) is derived in memory, never stored: it is
- * the input of the build hash.
+/* Build, validate and read mods. The author supplies mod.json and assets in folders by kind.
+ * mod.json carries the portable format and salt. .build/manifest.json holds the generated
+ * file inventory, hashes, dependencies, derived engine settings and build status.
  *
  * Canonical manifest: UTF-8 JSON, object keys sorted by their UTF-8 bytes, no
  * whitespace, files sorted by path, "bundle" omitted. "format" is 2 and "id"
@@ -135,9 +75,8 @@
  * 65,535 bytes), and the sentences that name them are heap text too
  * (text.h). */
 #define SH_MB_HASH_HEX        64u
-/* mod.json "requirements" (sh_mb_requirements_canonical): any cvar, any
- * console line, as many and as long as the author writes (DECISIONS 26). */
-#define SH_MB_BLOCK_KEY       "snapmap-plus"   /* mod.json's builder block */
+#define SH_MB_BUILD_MANIFEST  ".build\\manifest.json"
+#define SH_MB_BLOCK_KEY       "snapmap-plus"   /* the source descriptor's identity */
 
 typedef struct sh_mb_need {
     char *type;            /* engine spelling: md6Def, baseModel, anim, material, ... */
@@ -365,20 +304,13 @@ const char *sh_mb_state_cause(const sh_mb_bundle *bundle);
 int  sh_mb_set_first_cause(sh_mb_bundle *bundle, const char *text);
 int  sh_mb_set_state_cause(sh_mb_bundle *bundle, const char *text);
 
-/* Write `<folder>\mod.json`: the author's part (the folder's mod.json without
- * its block, else a synthesized one) and the builder block from `bundle`,
- * including its cause when not validated. Write-through temporary and rename.
- * Refuses a bundle with errors. Returns 1 on success. */
+/* Atomically write .build/manifest.json, creating the source identity when this is the first build. */
 int  sh_mb_write(const sh_mb_bundle *bundle, const char *folder, char **cause);
 
-/* Write the block of a failed build into `<folder>\mod.json`: format, salt,
- * rules, built (when it had one), tree and cause (bundle->first_cause) only,
- * so the folder serves nothing until fixed. bundle->id must be a salt.
- * Returns 1 on success. */
+/* Replace the manifest with the failed build's cause. */
 int  sh_mb_write_failed(const sh_mb_bundle *bundle, const char *folder, char **why);
 
-/* Record a verification result in `<folder>\mod.json`'s block (a cause, or
- * none) without changing anything else. Returns 1 on success. */
+/* Persist the verification result in the build manifest. */
 int  sh_mb_set_state(const char *folder, int validated, const char *cause, char **why);
 
 /* The complete mod.json text for `bundle` (malloc'd), splicing the builder
@@ -390,6 +322,9 @@ char *sh_mb_modjson_text(const sh_mb_bundle *bundle, const char *author_text, si
  * member (malloc'd). *had_block (optional) says whether there was one.
  * NULL when the text is not a JSON object. */
 char *sh_mb_author_bytes(const char *text, size_t len, size_t *out_len, int *had_block);
+
+/* Read .build/manifest.json as written. Callers check its salt against the source identity. */
+char *sh_mb_read_manifest_file(const char *folder, size_t *len);
 
 /* Read and check a built mod.json: the author's part, the builder block,
  * structure, salt, paths, logical names and the build hash

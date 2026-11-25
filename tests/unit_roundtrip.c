@@ -11,7 +11,7 @@
  *                  placed=<the entity map 1 places, below the namespace>
  *
  * The pack is built in place (its mod.json block) as unit_cli does. Prints one line per step and a JSON summary. */
-#include "heap_out.h"
+#include "cache_paths.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -223,7 +223,7 @@ int main(int argc, char **argv)
         memset(&list, 0, sizeof list);
         sh_modmanifest_list_add(&list, &row1);
         sh_cache_on_load(&list, NULL, 0);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s", root_a, row1.build);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s", mt_cache_dir(root_a), row1.build);
         memset(&c, 0, sizeof c);
         step(sh_cache_composed(row1.build, &complete) && complete && sh_mb_load_folder(path, &c), "author: map 1's row composed from the folder", NULL);
         strcpy_s(build_a, sizeof build_a, c.hash);
@@ -250,7 +250,7 @@ int main(int argc, char **argv)
             step(g_archives == 1 && strstr(g_archive_line, want) && strstr(g_archive_line, "every file"),
                  "player: one archive request brought every file of the unit", g_archive_line);
         }
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s", root_b, row1.build);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s", mt_cache_dir(root_b), row1.build);
         memset(&c, 0, sizeof c);
         step(code == 0 && sh_cache_composed(row1.build, &complete) && complete && sh_mb_load_folder(path, &c),
              "player: map 1's unit downloaded into a clean cache and composed", NULL);
@@ -280,13 +280,13 @@ int main(int argc, char **argv)
         for (i = 0; i < g_pack.file_count; i++) {
             const sh_mb_file *f = &g_pack.files[i];
             if (!ua.keep[i] || f->stock || f->absent) continue;
-            _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\.content\\files\\%.2s\\%s", root_b, f->blob, f->blob);
+            _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\content\\files\\%.2s\\%s", mt_cache_dir(root_b), f->blob, f->blob);
             if (skipped < 3 && f->size > 100000) {
                 if (skipped == 0) {
                     /* half of it, as a broken-off download leaves it */
                     HANDLE src = CreateFileA(from, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL), dst;
-                    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.content\\partial", root_d);
-                    { char c[MAX_PATH * 2]; _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\.content", root_d); CreateDirectoryA(c, NULL); }
+                    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\content\\partial", mt_cache_dir(root_d));
+                    { char c[MAX_PATH * 2]; _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\content", mt_cache_dir(root_d)); CreateDirectoryA(c, NULL); }
                     CreateDirectoryA(dir, NULL);
                     _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\%s.part", dir, f->blob);
                     dst = CreateFileA(to, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
@@ -302,9 +302,9 @@ int main(int argc, char **argv)
                 skipped++;
                 continue;
             }
-            _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.content\\files\\%.2s", root_d, f->blob);
-            { char c[MAX_PATH * 2]; _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\.content", root_d); CreateDirectoryA(c, NULL);
-              _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\.content\\files", root_d); CreateDirectoryA(c, NULL); }
+            _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\content\\files\\%.2s", mt_cache_dir(root_d), f->blob);
+            { char c[MAX_PATH * 2]; _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\content", mt_cache_dir(root_d)); CreateDirectoryA(c, NULL);
+              _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\content\\files", mt_cache_dir(root_d)); CreateDirectoryA(c, NULL); }
             CreateDirectoryA(dir, NULL);
             _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\%s", dir, f->blob);
             if (CopyFileA(from, to, FALSE)) kept++;
@@ -341,7 +341,7 @@ int main(int argc, char **argv)
         sh_modmanifest_list_free(&list);
         code = sh_cache_prepare(row1.build, &io);
         step(code == 0 && sh_cache_composed(row1.build, &complete_c) && !complete_c, "offline player: the map composes with a stand-in", NULL);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\%s.decl", root_c, row1.build, placed_name);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\entities\\%s.decl", mt_cache_dir(root_c), row1.build, placed_name);
         {
             size_t len = 0;
             unsigned char *text = sh_mb_read_file(path, 1u << 20, &len);

@@ -64,7 +64,7 @@ typedef struct sh_modpin_result {
 void sh_modpin_result_free(sh_modpin_result *r);
 
 /* Pin every local row of `rows` in place (see above). `map_json` is the map text the rows belong to (for the module
- * records). `content_root` is where the manifests go (the mods root's .content; NULL: the cache's own,
+ * records). `content_root` is where the manifests go (the profile's cache/content folder; NULL: the cache's own,
  * modcache.h sh_cache_root). Returns the rows pinned (whole included), -1 when memory ran out or a manifest could not be
  * written (nothing is half-pinned: the rows are as they were). `out` (optional) says what happened per row. */
 int  sh_modpin_rows(struct sh_modmanifest_list *rows, const char *map_json, size_t len, const char *content_root,

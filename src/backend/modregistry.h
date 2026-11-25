@@ -97,6 +97,9 @@ typedef struct sh_mr_source {
     size_t edits_len;
     const sh_mr_decl *decls;   /* its encounters and scores (the conductor's bit rewrite) */
     int ndecls;
+    int (*entity_unavailable)(void *context, const char *name);
+    void (*single_actor)(void *context, int encounter, const char *actor);
+    void *context;
 } sh_mr_source;
 
 /* One game file the sources edit, with the game's text (NULL when it cannot

@@ -2403,11 +2403,10 @@ static void eng_print(void *c, const char *line) { (void)c; if (line) sh_printf(
 
 static int eng_scripted_maps_allowed(void *c) { (void)c; return sh_modui_scripted_maps_allowed(); }
 
-/* The script files of the compositions serving the pinned rows (the content that came from elsewhere), from each
- * composition's mod.json. Asked only while scripts are turned off. */
+/* Count the scripts in the pinned compositions when scripts are turned off. */
 static unsigned eng_served_scripts(void *c, const sh_modmanifest_list *rows)
 {
-    const char *root = sh_ms_root();
+    char *root = sh_cache_root();
     unsigned n = 0;
     (void)c;
     if (!root) return 0;
@@ -2428,6 +2427,7 @@ static unsigned eng_served_scripts(void *c, const sh_modmanifest_list *rows)
         sh_mb_free(&b);
         free(folder);
     }
+    free(root);
     return n;
 }
 /* The gate refused a launch: the map scope declares nothing of it. */

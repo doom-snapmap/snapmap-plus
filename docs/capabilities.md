@@ -172,9 +172,8 @@ brings the shader's whole program along from the player's install (its decl, com
 permutations), so a mod of just that material works. Mods you download or import are never refused
 on their files. A map whose mods need Snapmap+ features records the version it needs.
 
-- `mod.json` is yours except for one member, `"snapmap-plus"`, which the product writes: the salt
-  when it first sees the folder, then at every build the files, their hashes and the build hash, or
-  the cause while the build fails (the folder then serves nothing until fixed). Everything else in
+- `mod.json` holds your settings and a permanent ID that Snapmap+ assigns on first scan. Each build records
+  file hashes, dependencies and its result under `.build/manifest.json`. Everything else in
   the file (name, description, author, homepage, strings, requirements, hud, companions,
   animation_events, attachment_tags, any key of your own) is never reformatted or reordered. A mod has no version: a `version` you write is kept
   like any key of your own and means nothing to Snapmap+. A folder in a shape this version does not
@@ -184,8 +183,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   releases' mods is the installer's job and this release's installer does not do it yet; its migration must, and it is on the release gate). Files beside `mod.json` (a README,
   notes, `desktop.ini`) are ignored and never carried. A mistake in `scenes` or `hud` fails the
   build with a sentence naming the block. A mod that brings campaign content gets the requirement
-  `g_useResourceBlackList` 0 and `g_useImageBlackList` 0 without writing it. Everything about mods is in `mods\`: the folders and one product file,
-  `snapmap-plus.json` (publish claims, links and the salts of root folders).
+  `g_useResourceBlackList` 0 and `g_useImageBlackList` 0 without writing it. The mods folder holds your mod folders and `snapmap-plus.json` (publish claims, links and mod IDs). Shared map downloads and engine-ready files live beside it under `cache/`.
 - A mod's identity is its salt: eight characters the product writes once into `mod.json`. The
   folder name is yours; rename a folder any time and it stays the same mod. A folder you drop into
   `mods\` with a `mod.json` of your own (no `snapmap-plus` part) is a new mod: at the next Refresh
@@ -371,7 +369,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
 - A mod is its salt, eight characters in its `mod.json`, never its folder name, which you may
   rename at any time. Your own folders sit at the root of the mods folder, one build per mod; the
   content of a map that came from elsewhere (a published map, a map or prefab ZIP) does not: its
-  units are kept in the content cache (`mods\.content\`), which the map reads and the Mods tab
+  units are kept in the content cache (`cache\content\`), which the map reads and the Mods tab
   reports as "Map content on disk". Nothing reads or writes `mods\maps\`, where earlier versions
   kept the mods of downloaded maps; "maps" stays a reserved name at the top of `mods\`, and a mod
   folder given by hand inside it is refused with "This folder is in the "maps" folder of your mods, where earlier

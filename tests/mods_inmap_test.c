@@ -23,7 +23,7 @@
  *
  *   mods_inmap_test.exe <tests\fixtures\mods\alex.r2-imp> <tests\fixtures\mods_inmap_cases.json> <out.json>
  */
-#include "heap_out.h"
+#include "cache_paths.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -422,7 +422,7 @@ static void load_as_content(const char *salt)
     memset(&pr, 0, sizeof pr);
     if (saved) (void)sh_modmanifest_read(saved, sl, &rows, &rej);
     for (i = 0; i < rows.count; i++) if (!_stricmp(rows.rows[i].salt, salt)) CHECK(sh_modmanifest_list_add(&pin, &rows.rows[i]));
-    _snprintf_s(content, sizeof content, _TRUNCATE, "%s\\.content", g_root);
+    _snprintf_s(content, sizeof content, _TRUNCATE, "%s\\content", mt_cache_dir(g_root));
     CHECK(sh_modpin_rows(&pin, saved ? saved : json, saved ? sl : jl, content, &pr) >= 0);
     for (i = 0; i < pin.count; i++) pinned += pin.rows[i].pinned != 0;
     CHECK(pin.count == 1 && pinned == 1);

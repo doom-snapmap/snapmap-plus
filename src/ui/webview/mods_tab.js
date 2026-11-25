@@ -1934,7 +1934,7 @@ var modsTab = (function () {
       else if (!tx || tx.loading) pane.appendChild(el('div', 'mf-binary', 'Reading the file...'));
       else if (tx.error) pane.appendChild(el('div', 'mf-binary mods-error', tx.error));
       else {
-        if (tx.productBlock) pane.appendChild(el('div', 'mf-hint', 'Snapmap+ writes the rest of mod.json itself; that part is not shown.'));
+        if (tx.productBlock) pane.appendChild(el('div', 'mf-hint', "Snapmap+ manages the mod's ID."));
         pane.appendChild(codeEditor(tx.text, 'Text of ' + fileLeaf(f.path), isScript(f.path)));
       }
       problemStrip(pane, (tx && tx.cause) || f.cause);

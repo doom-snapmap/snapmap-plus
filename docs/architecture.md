@@ -569,7 +569,7 @@ A text may still spell an engine name (`mods/<salt>/x`): it is served as written
 The builder reads every decl through the rewrite (`mb_engine_text`: the needs scan, the look compile, the closure,
 the stock comparison of a `native/` copy and the derived edits all see the engine's text), and the file's identity
 (its SHA-256 in the block) stays the author's bytes. The serving index serves the rewritten text: `ms_engine_names`
-writes each changed decl under `mods\.served\files\<sha16>.decl` and points the file there, before the bank rename,
+writes each changed decl under `cache\served\files\<sha16>.decl` and points the file there, before the bank rename,
 so every open, the look filter and the ledger read the engine's bytes, as for a renamed bank. Salting a folder
 writes only its block: nothing on disk carries the salt, a copy needs no move, and a text that does spell
 `mods/<old salt>/` is rekeyed in every mod folder (`ms_rk_entry`). Install lower-cases the names of every author
@@ -584,7 +584,7 @@ These backend files share the work:
   structural rules, and the canonical manifest whose SHA-256 is the build hash.
   It reads and writes `mod.json` and the product record (below). A mod's
   identity is its salt (`modsalt.c`): eight characters `[a-z][a-z0-9]{7}`
-  given once, recorded in the builder block, never read from the folder's
+  given once, recorded in the source descriptor, never read from the folder's
   name, which is the author's to change at any time. The engine's names for
   the mod's things live under `mods/<salt>/` (a salt has one spelling in
   engine requests) and every strings key reaches the engine as `<salt>_<name>`
@@ -644,7 +644,7 @@ These backend files share the work:
   `mod.json` format 2: the author's part is every member but `snapmap-plus`
   (`name`, `description`, `author`, `homepage`, `requirements`,
   `strings`, `hud`, `scenes`, `companions`, `animation_events`, `attachment_tags`; any other key is kept in the manifest's
-  `extra`); the builder block holds `format` 2, `salt`, `rules`, `built`
+  `extra`); the generated `.build/manifest.json` holds `format` 2, `salt`, `rules`, `built`
   (the first successful build of that salt in that folder), `tree` (the
   rebuild rule's tree hash, `sh_mb_tree_hash`), `build` (the build hash),
   `cause` (while a build fails or a verification found one), `warnings`, the
@@ -652,7 +652,7 @@ These backend files share the work:
   scripts bind, when it carries scripts), `spelled` (when its binaries spell a
   namespace), `units_of` (a composition's units), `shadows`, and the
   `files` and `stock` lists (a pointer the campaign-only closure derived is
-  marked `"closure": true`). A failed build writes the block with `format`,
+  marked `"closure": true`). A failed build writes the manifest with `format`,
   `salt`, `rules`, `built`, `tree` and `cause` only (`sh_mb_write_failed`):
   the folder serves nothing until fixed and the load says "not built:
   <cause>". The canonical manifest has `format` 2 and `id` the salt; there is
@@ -944,8 +944,8 @@ These backend files share the work:
   [Publishing a map with mods](#publishing-a-map-with-mods).
 
 The store. A folder is `mod.json` plus folders by kind (above). `mod.json` is format 2
-(above): every key but `snapmap-plus` is the author's, and `snapmap-plus` is
-the builder's, the whole built manifest with its salt, rules, built time,
+(above): the author controls every key except `snapmap-plus`, which holds the format and permanent salt.
+Each build writes `.build/manifest.json` with its salt, rules, first build time,
 tree hash, build hash, cause while failing, the derived `classes` counts
 (`adds`, `borrows`, `edits`, `replaces`, `editor`, `surfaces`: an edited copy of a game file
 counts under `edits`, never `replaces`, which counts binaries at a game name;
@@ -953,7 +953,7 @@ the build and `sh_mods list` lines print them the same way), `editor` (the edito
 clip events, conductor, strings), `edits` (the derived edits of each decl at a game name), shadows, `files` (path, sha256, size, provides, needs) and
 `stock` (pointers; `"closure": true` on those the campaign-only closure derived).
 There is no last good build (ONE-SHAPE rule 2): a build that fails writes the
-block of a failed build (`sh_mb_write_failed`: format, salt, rules, built, tree
+manifest of a failed build (`sh_mb_write_failed`: format, salt, rules, built, tree
 and the cause), the folder serves nothing until it is fixed, and the Mods tab
 and `sh_mods list` show the cause; the serving index skips such a folder with
 `MODS: bundle '<folder>' skipped: not built: <cause>`. A `mod.json` that does
@@ -970,12 +970,9 @@ builder's sentence (`SH_MB_SHAPE`) naming the key to remove, a block without
 a valid salt as a damaged block. A
 root folder with no block is "not built yet": the store's next scan salts and
 builds it. The
-product writes the block by splicing: the old member is cut from the end of
-the member before it, the new one appended after the author's last member, so
-the author's bytes, order and formatting never change. The canonical manifest
-is derived from both blocks in memory, for the hash. There is no
-blob store and there are no hard links: a mod's files live in its own
-folders only.
+product preserves the author's bytes and formatting when assigning an identity. Ordinary builds replace only
+`.build/manifest.json`. Removing it triggers a rebuild at the next scan with the same identity. Local assets
+live in the author's folders. The shared map cache can reuse their verified bytes.
 
 Identity is the salt (`modsalt.h`), never the folder name: an author may
 rename any folder at any time and the next scan reads the same salt. A folder
@@ -1011,7 +1008,7 @@ or New mod; there is no folder watcher. Under the store lock it:
    copy carries the same `built`); every other one is salted anew with `from` the old salt, one
    line each ("mods\<b> is a copy of mods\<a>; it is a new mod now");
    until then the listing shows the copy refused with that reason;
-3. builds every root folder whose block's tree hash (`sh_mb_tree_hash`: the
+3. builds every root folder whose build manifest is missing, or whose recorded tree hash (`sh_mb_tree_hash`: the
    author's bytes and the size and time of every file in the mod's folders) or rules
    (`SH_MB_RULES`) differ from the folder's, or whose last build failed
    (`sh_ms_sync_pending` counts them, with the folders of steps 1 and 2).
@@ -1288,7 +1285,7 @@ played (see [Map scope](#map-scope)); a new name applies once it is registered: 
 gameplay decls when a map that names their bundle loads. The serving index
 holds one build per salt per area (ONE-SHAPE rule 4, `ms_one_per_area`): the
 root of `mods\` (everything but `mods\maps\`, which it never reads) and the
-content cache's compositions (`.content\served\`, one per map row). Of two
+content cache's compositions (`cache\content\served\`, one per map row). Of two
 folders of one salt at the root the one built first keeps it (`built`, then
 folder path); the other is skipped ("it is a copy of your folder <folder>; Refresh in the Mods tab
 makes it a new mod") until the store's
@@ -1423,7 +1420,7 @@ serves every carried bank as `sound/soundbanks/pc/<stem>.<sha16>.bnk`,
 `<sha16>` the first 16 hex characters of the bank file's SHA-256, with its
 BKHD bank id rewritten to that stem's FNV-1, and rewrites every quoted
 `"<stem>"`, `"<stem>.bnk"` or `".../<stem>.bnk"` in the bundle's served decl
-texts to match; the rewritten bytes are written once under `mods\.served\`
+texts to match; the rewritten bytes are written once under `cache\served\`
 (a dot folder the scanners skip), keyed by their own hash
 (`banks\<stem>.<sha16>.bnk`, `files\<sha16>.<extension>`; no folder is named
 by a build), and served from there, with their own size and hash. Each
@@ -2908,7 +2905,7 @@ is touched, and a removed demon answers nil.
   breakable entityDef of the mod with what its DOOM Eternal destructible decl
   says. DOOM Eternal sets each piece's velocity at the activation
   (OnActivation 0x140AF8020): the preset's direction (spherical, angel wings,
-  random; cone and thru-square are refused) at a speed drawn from [min, max],
+  random or cone) at a speed drawn from [min, max],
   plus the decl's force in the owner's axes; the spin is the same direction at
   a second draw plus the force direction at its angular speed; a decl flagged
   DESTRUCT_FLAG_IGNORE_EXTERNAL_FORCE takes nothing from the hit. DOOM 2016
@@ -3347,7 +3344,7 @@ damage comes from the world entity, as a trigger's does.
   mod row, and a build without the mod refuses the map in the usual way.
   The serving index serves it (`ms_script_node_row` in `modserve.c`): when a
   bundle's block has `node`, the two decls are added to that bundle's files
-  with their bytes written once under `mods\.served\files\` by their own hash
+  with their bytes written once under `cache\served\files\` by their own hash
   (as rewritten files are), the row needs the entityDef, and the strings join
   the bundle's `strings.en` for the string layer unless the author wrote that
   key. They are not in the manifest or the build hash, and archives never
@@ -4805,7 +4802,7 @@ rule does not serve as missing; one job on the modnet worker
 (`pub_job_main`) then runs `sh_cache_prepare` for each, one row after another
 (`eng_fetch_for`; a row the content cache has not noted is skipped, so its
 load stands in for it; the content goes into
-`.content\`, see [The map content cache](#the-map-content-cache)). Whatever the
+`cache\content\`, see [The map content cache](#the-map-content-cache)). Whatever the
 store cannot supply stands in, so a fetch fails the hold only when it was
 cancelled or memory ran out ("The mod content of <name> could not be prepared:
 <reason>. The map was not loaded."). Why an object is absent is the cache's
@@ -4960,7 +4957,7 @@ How a download in the lobby ends:
 | The joiner left, was kicked, or the host cancelled or left the lobby | the download stops: "You are no longer in the lobby, so this map's mod content stopped downloading. It continues from where it stopped the next time you join." | nothing waits |
 | The host chose another map, or a playlist moved on | the old download stops without a word; the new map's request brings its own | asks every peer again (verify 1) and waits for the new map |
 | The lobby started anyway | leaves, keeps downloading, "The host started the match before this map's mod content was here, so you left the lobby. It keeps downloading (<N> MB); join the lobby again when it is done." | (a host without the product) |
-| The game closed or crashed | the partial files stay in `.content\partial\` and the next download resumes from them by Range | the peer drops |
+| The game closed or crashed | the partial files stay in `cache\content\partial\` and the next download resumes from them by Range | the peer drops |
 
 A partial download is never served: a file reaches `files\` only whole and
 checked. The cache sweep removes partial files of content no kept map names
@@ -5526,7 +5523,7 @@ line; a row whose folder is not here stays local. Publish calls it twice (the
 preparation computes the units to upload, `mp_prepare`, and the save's pin step
 writes them into the rows, `sh_modpublish_pin_save`; see [Publishing a map with
 mods](#publishing-a-map-with-mods)); an export pins every local row the same way (`modexport_write`). `sh_unit_store` writes a manifest
-at `<mods>\.content\units\<hash>.json`. A unit's share of `mod.json` holds only
+at `cache\content\units\<hash>.json`. A unit's share of `mod.json` holds only
 the keys the player's build reads (requirements, strings, hud, companions,
 scenes, animation_events, attachment_tags), so a `version` or a note never
 moves its hash.
@@ -5559,7 +5556,7 @@ placement, so the rule runs wherever the open map's placed names are read live
 (`sh_modmanifest_version_rule` from `mu_listing_live`: a Mods tab change, the
 editor's Play) and at every save.
 
-`modcache.c` keeps one cache per machine at `<mods>\.content\`: each file once
+`modcache.c` keeps one cache per machine at `cache\content\`: each file once
 in `files\<sha[0:2]>\<sha>` (read-only, checked when it arrives), manifests in
 `units\`, and per pinned row a composition at `served\<composition hash>\`, a
 built mod folder (`sh_unit_compose_ex`) whose files are hard links to the blobs
@@ -5567,7 +5564,7 @@ or to a local mod's files of the same SHA-256 (D21; a local file is checked
 again whenever its size or time changed, D51), with `served\<hash>.json`
 saying what it holds. The composition hash (`sh_modmanifest_composition_hash`)
 is the pinned row's build hash in memory, and the serving index scans
-`.content\served\` as an area of its own, so the map scope declares the
+`cache\content\served\` as an area of its own, so the map scope declares the
 composition as it declares any build and a pinned row resolves to its
 composition only.
 

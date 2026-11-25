@@ -484,12 +484,12 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
         static const char pkg[] = "{\"name\":\"R2 Imp copy\",\"author\":\"alex\","
                                   "\"strings\":{\"english\":{\"mod_alex_r2_imp\":\"Imp copy\"}}}";
         CHECK(own && blen_unused == sizeof pkg - 1 && !memcmp(own, pkg, sizeof pkg - 1));
-        CHECK(text && strstr((const char *)text, "\"snapmap-plus\": {\n    \"format\": 2,\n    \"salt\": \"" SALT "\",\n"));
+        CHECK(text && strstr((const char *)text, "\"salt\": \"" SALT "\"") && !strstr((const char *)text, "\"build\""));
+        free(text);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" SH_MB_BUILD_MANIFEST, folder);
+        text = sh_mb_read_file(path, 1 << 20, &len);
         CHECK(text && strstr((const char *)text, "\"build\": \"") && strstr((const char *)text, "\"tree\": \"") &&
-              strstr((const char *)text, "\"sha256\": \""));
-        CHECK(text && !strstr((const char *)text, "\"validated\"") && !strstr((const char *)text, "\"origin\"") &&
-              !strstr((const char *)text, "\"key\"") && !strstr((const char *)text, "\"bundle\"") &&
-              !strstr((const char *)text, "inAssets"));
+              strstr((const char *)text, "\"sha256\": \"") && !strstr((const char *)text, "\"snapmap-plus\""));
         free(own);
     }
     free(text);
@@ -502,7 +502,8 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
         CHECK(at != NULL);
         if (at) {
             at[9] = '2';
-            CHECK(!sh_mb_load_text((const char *)mod, mlen, &again));
+            mt_write(folder, SH_MB_BUILD_MANIFEST, (const char *)mod);
+            CHECK(!sh_mb_load_folder(folder, &again));
             CHECK_CAUSE(again, "was edited after its last build");
             sh_mb_free(&again);
         }
@@ -547,7 +548,7 @@ static void test_built_and_failed(const char *fixture, const char *tmp)
     sh_mb_free(&b);
     {
         size_t n = 0;
-        char *t = (char *)sh_mb_read_file(path, 1 << 20, &n);
+        char *t = sh_mb_read_manifest_file(folder, &n);
         CHECK(t && strstr(t, "\"salt\": \"" SALT "\"") && strstr(t, "\"cause\": \"") && strstr(t, "\"tree\": \"") &&
               !strstr(t, "\"build\"") && !strstr(t, "\"files\""));
         free(t);
@@ -615,7 +616,8 @@ static void test_modjson(const char *fixture, const char *tmp)
     second = sh_mb_read_file(path, 1 << 20, &n2);
     own = second ? sh_mb_author_bytes((const char *)second, n2, &own_len, NULL) : NULL;
     CHECK(own && own_len == sizeof author - 1 && !memcmp(own, author, sizeof author - 1));
-    CHECK(second && strstr((const char *)second, "\"cause\": \"a file was edited\""));
+    CHECK(second && n1 == n2 && !memcmp(first, second, n1));
+    CHECK(!strstr((const char *)second, "\"cause\""));
     free(own);
     free(second);
     CHECK(HO(cause, sh_mb_set_state(folder, 1, "", HO_P(0))));
@@ -1856,7 +1858,7 @@ static void test_classes(const char *fixture, const char *tmp)
     /* The builder block carries the derived facts; loading reads the salt and
      * recomputes the classes from the same files. */
     CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" SH_MB_BUILD_MANIFEST, folder);
     text = sh_mb_read_file(path, 1 << 20, NULL);
     CHECK(text && strstr((const char *)text, "\"salt\": \"alexrimp\"") &&
           !strstr((const char *)text, "\"origin\"") && !strstr((const char *)text, "\"key\"") &&

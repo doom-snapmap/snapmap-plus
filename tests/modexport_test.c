@@ -16,7 +16,7 @@
  * under mods/, bundle.canonical.json, an export.json index, a map in an earlier shape) is refused with one sentence
  * and changes nothing. A prefab's export has the same layout, and each importer refuses the other's ZIP. The rawmap
  * hooks return process-heap text. Pure file work: no network. */
-#include "heap_out.h"
+#include "cache_paths.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -351,9 +351,9 @@ static size_t mod_folders(const char *root)
 static void cache_counts(const char *root, size_t *units, size_t *files)
 {
     char dir[MAX_PATH * 2];
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.content\\units", root);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\content\\units", mt_cache_dir(root));
     *units = count_files(dir);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.content\\files", root);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\content\\files", mt_cache_dir(root));
     *files = count_files(dir);
 }
 
@@ -686,6 +686,7 @@ int main(int argc, char **argv)
 
     printf("-- import into a player's empty mods folder: every unit and file into the cache, nothing installed\n");
     use_root(p_root);   /* what the export check above wrote is the import's work; start from empty */
+    mt_remove_tree(mt_cache_dir(p_root));
     mt_remove_tree(p_root);
     use_root(p_root);
     CHECK(cache_empty(p_root));
@@ -739,7 +740,7 @@ int main(int argc, char **argv)
         CHECK(zset_load(&zs, zip));
         for (i = 0; i < zs.n && strncmp(zs.e[i].name, "units/", 6); i++) {}
         CHECK(i < zs.n);
-        _snprintf_s(victim, sizeof victim, _TRUNCATE, "%s\\.content\\units\\%s", p_root, zs.e[i < zs.n ? i : 0].name + 6);
+        _snprintf_s(victim, sizeof victim, _TRUNCATE, "%s\\content\\units\\%s", mt_cache_dir(p_root), zs.e[i < zs.n ? i : 0].name + 6);
         SetFileAttributesA(victim, FILE_ATTRIBUTE_NORMAL);
         CHECK(DeleteFileA(victim));
         back = HOT(char *, cause, modexport_read(zip, &len, &st, HO_P(0)));
@@ -778,6 +779,7 @@ int main(int argc, char **argv)
         }
         zset_free(&zs);
         /* a unit: its manifest changed, its name kept */
+        mt_remove_tree(mt_cache_dir(d_root));
         mt_remove_tree(d_root);
         use_root(d_root);
         CHECK(zset_load(&zs, zip));
@@ -799,6 +801,7 @@ int main(int argc, char **argv)
         CHECK(cu <= 2);   /* at most the units it had checked before the damaged one */
         zset_free(&zs);
         /* a name that is no hash is not one of the export's files */
+        mt_remove_tree(mt_cache_dir(d_root));
         mt_remove_tree(d_root);
         use_root(d_root);
         CHECK(zset_load(&zs, zip) && zset_add(&zs, "files/notahash", "x", 1) && zset_save(&zs, bad));
@@ -866,6 +869,7 @@ int main(int argc, char **argv)
             if (file) { strcpy_s(gone, sizeof gone, file->name); zset_drop(&zs, gone); }
         }
         CHECK(zset_save(&zs, only_a));
+        mt_remove_tree(mt_cache_dir(f_root));
         mt_remove_tree(f_root);
         use_root(f_root);
         back = HOT(char *, cause, modexport_read(only_a, &len, &st, HO_P(0)));

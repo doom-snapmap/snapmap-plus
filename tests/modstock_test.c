@@ -544,11 +544,11 @@ static void test_campaign_closure(const char *tmp)
         size_t len = 0;
         unsigned char *text;
         char path[MAX_PATH * 2];
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" SH_MB_BUILD_MANIFEST, dir);
         text = sh_mb_read_file(path, 1 << 20, &len);
         CHECK(text && strstr((const char *)text, "\"source\": \"" K_MESH "\"") && strstr((const char *)text, "\"closure\": true") &&
               !strstr((const char *)text, "inAssets"));
-        if (text) HeapFree(GetProcessHeap(), 0, text);
+        free(text);
     }
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0 && !strcmp(b.hash, hash) && b.stock_count == 3);
     CHECK(has_note(&b, "3 game files borrowed for completeness"));
@@ -602,7 +602,7 @@ static void test_closure_recomputed(const char *tmp)
     _snprintf_s(d4, sizeof d4, _TRUNCATE, "%s\\d4", tmp);
     sh_modstock_set_install(d4);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close5", tmp);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" SH_MB_BUILD_MANIFEST, dir);
     mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}");
     mt_write(dir, K_WEB, K_WEB_TEXT);
     mt_write(dir, "materials\\m.decl", "{\r\n\tdiffusemap = \"k/snap\";\r\n}\r\n");
@@ -613,7 +613,7 @@ static void test_closure_recomputed(const char *tmp)
     /* The product block marks the derived pointers. */
     text = sh_mb_read_file(path, 1 << 20, &len);
     CHECK(text && strstr((const char *)text, "\"closure\": true") && strstr((const char *)text, K_MD6));
-    if (text) HeapFree(GetProcessHeap(), 0, text);
+    free(text);
     /* An unchanged rebuild derives the same set: same hash. */
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 3 && !strcmp(b.hash, hash));
     CHECK(has_note(&b, "3 game files borrowed for completeness"));
@@ -628,7 +628,7 @@ static void test_closure_recomputed(const char *tmp)
     sh_mb_free(&b);
     text = sh_mb_read_file(path, 1 << 20, &len);
     CHECK(text && !strstr((const char *)text, K_MD6) && !strstr((const char *)text, "\"closure\""));
-    if (text) HeapFree(GetProcessHeap(), 0, text);
+    free(text);
 }
 
 /* ------------------------------------- effects, movies and images ---- */
@@ -984,13 +984,12 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     CHECK(st.stock_files == 2 && st.copied == 3);
     strcpy_s(hash, sizeof hash, b.hash);
     sh_mb_free(&b);
-    /* DECISIONS 10: the store folder keeps every file the folder held, the
-     * game's own copy included; the closure's pointers are in mod.json only. */
+    /* The install carries all three source files. Derived stock pointers occupy only manifest entries. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", store, key);
-    CHECK(count_files(path) == 4);   /* mod.json and the three files */
+    CHECK(count_files(path) == 5);   /* source descriptor, build manifest and three files */
     {
         char *text;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", store, key);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\" SH_MB_BUILD_MANIFEST, store, key);
         text = (char *)sh_mb_read_file(path, 1u << 20, NULL);
         CHECK(text && strstr(text, "\"source\": \"" P_IMAGE "\"") && !strstr(text, "inAssets"));
         free(text);

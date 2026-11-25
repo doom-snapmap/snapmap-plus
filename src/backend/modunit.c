@@ -1846,7 +1846,7 @@ int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t 
         if (!(out->units_of[out->units_of_count] = sh_text(hash))) { oom = 1; goto done; }
         out->units_of_count++;
     }
-    if (!sh_mb_write(out, dest, &one)) { sh_text_set(&reason, "its mod.json could not be written: %s", one ? one : ""); goto done; }
+    if (!sh_mb_write(out, dest, &one)) { sh_text_set(&reason, "its build could not be saved: %s", one ? one : ""); goto done; }
     ok = 1;
 done:
     if (!ok) {

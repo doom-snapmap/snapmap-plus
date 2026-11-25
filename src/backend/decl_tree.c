@@ -78,7 +78,7 @@ static int dt_add_kid(sh_dt *t, sh_dt_node *parent, sh_dt_node *kid)
     return 1;
 }
 
-static void dt_remove_kid(sh_dt_node *parent, int i)
+void sh_dt_remove_child(sh_dt_node *parent, int i)
 {
     if (i < 0 || i >= parent->nkids) return;
     memmove(parent->kids + i, parent->kids + i + 1, sizeof(sh_dt_node *) * (size_t)(parent->nkids - i - 1));
@@ -1507,7 +1507,7 @@ static int dt_apply_op(sh_dt *t, const dt_op *op, int s, const char **why)
         i = dt_find_seg(box, op->path[op->npath - 1]);
         if (i == -2) { *why = "the field appears several times"; return -1; }
         if (i < 0) return 0;
-        dt_remove_kid(box, i);
+        sh_dt_remove_child(box, i);
         return 1;
     case OP_LIST:
     case OP_UNLIST: {
@@ -1525,7 +1525,7 @@ static int dt_apply_op(sh_dt *t, const dt_op *op, int s, const char **why)
         free(et);
         if (op->kind == OP_UNLIST) {
             if (hit < 0) return 0;
-            dt_remove_kid(box, hit);
+            sh_dt_remove_child(box, hit);
             return 1;
         }
         if (hit >= 0) return 0;
@@ -1544,7 +1544,7 @@ static int dt_apply_op(sh_dt *t, const dt_op *op, int s, const char **why)
         if (hits > 1) { *why = "several entries have that name"; return -1; }
         if (op->kind == OP_UNKEY) {
             if (hit < 0) return 0;
-            dt_remove_kid(box, hit);
+            sh_dt_remove_child(box, hit);
             return 1;
         }
         e = dt_entry_stmt(t, op->entry);
@@ -1584,7 +1584,7 @@ static int dt_apply_op(sh_dt *t, const dt_op *op, int s, const char **why)
         free(et);
         if (op->kind == OP_UNBAG) {
             if (hit < 0) return 0;
-            dt_remove_kid(box, hit);
+            sh_dt_remove_child(box, hit);
             return 1;
         }
         if (hit >= 0) return 0;

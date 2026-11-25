@@ -79,6 +79,7 @@ typedef struct sh_modmanifest_row {
 } sh_modmanifest_row;
 
 #define SH_MODMANIFEST_LOCAL_LACKS 2
+#define SH_MODMANIFEST_LOCAL_REFUSED 3
 
 /* The name the author sees for the object the map places as `placed` (the row's "labels"; malloc'd), or NULL. */
 char *sh_modmanifest_row_label(const sh_modmanifest_row *row, const char *placed);

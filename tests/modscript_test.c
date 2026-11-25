@@ -25,7 +25,7 @@
  * (tests\fixtures\scripts) build without errors or warnings.
  *
  *   modscript_test.exe <tests\fixtures\scripts> */
-#include "heap_out.h"
+#include "cache_paths.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -447,9 +447,9 @@ static size_t count_files(const char *dir)
 static void cache_counts(const char *root, size_t *units, size_t *files)
 {
     char dir[MAX_PATH * 2];
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.content\\units", root);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\content\\units", mt_cache_dir(root));
     *units = count_files(dir);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.content\\files", root);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\content\\files", mt_cache_dir(root));
     *files = count_files(dir);
 }
 
@@ -782,12 +782,17 @@ static void test_scripts_setting_at_open(void)
     memset(&b, 0, sizeof b);
     CHECK(HO2(name, cause, sh_ms_install_from_folder(src, NULL, HO_P(0), &st, &b, HO_P(1))));
     /* the same content as a composition of the content cache (a pinned row's), under a build of its own */
-    _snprintf_s(comp, sizeof comp, _TRUNCATE, "%s\\.content\\served\\%s", root, COMP);
+    _snprintf_s(comp, sizeof comp, _TRUNCATE, "%s\\content\\served\\%s", mt_cache_dir(root), COMP);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", root, name);
+    json = (char *)sh_mb_read_file(path, 1u << 20, &len);
+    CHECK(json != NULL);
+    if (json) mt_write(comp, "mod.json", json);
+    free(json);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\" SH_MB_BUILD_MANIFEST, root, name);
     json = (char *)sh_mb_read_file(path, 1u << 20, &len);
     CHECK(json != NULL && strstr(json, b.hash) != NULL);
     if (json && (at = strstr(json, b.hash)) != NULL) memcpy(at, COMP, 64);
-    if (json) mt_write(comp, "mod.json", json);
+    if (json) mt_write(comp, SH_MB_BUILD_MANIFEST, json);
     free(json);
     mt_write(comp, DEF, "{\r\n}");
     mt_write(comp, ENTRY, GOOD_ENTRY);

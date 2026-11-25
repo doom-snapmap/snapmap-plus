@@ -7,7 +7,7 @@
  * registration plan's dependency order and blocking, plan runs through fake
  * engine operations, the save-time bundle closure and a rescan. */
 #define WIN32_LEAN_AND_MEAN
-#include "heap_out.h"
+#include "cache_paths.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -176,10 +176,7 @@ static int fx_is_restore(const char *path)
     for (r = g_fx_restores; r && *r; ++r) if (!strcmp(*r, path)) return 1;
     return 0;
 }
-/* Write <root>\<folder>\mod.json (an author block and its format-2 builder
- * block, keyed by the salt `id`) and its files. A folder under
- * <root>\.content\served\<hash>\ is a composition of the content cache. `state` is the old
- * .state.json shape, mapped to the block's cause and built. */
+/* Write the source descriptor, generated manifest and files the serving index reads. */
 static const char *g_bundle_hash;   /* a whole build hash in place of hash_digit's, when set */
 static const char *g_fx_sha;        /* a whole file SHA-256 in place of the files' blob digits, when set */
 static void make_bundle(const char *parent, const char *folder, const char *id, char hash_digit,
@@ -192,10 +189,12 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
     const char *extra = g_bundle_extra ? g_bundle_extra : "";
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", parent, folder);
     mkdirs(dir);
-    at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                      "{\n  \"name\": \"%s\",\n  %s\n"
-                      "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\", \"rules\": 8, \"build\": \"%s\"",
-                      g_bundle_name ? g_bundle_name : id, extra, id, g_bundle_hash ? g_bundle_hash : hash64(hash_digit, h));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
+    _snprintf_s(json, sizeof json, _TRUNCATE, "{\"name\":\"%s\",%s \"snapmap-plus\":{\"format\":2,\"salt\":\"%s\"}}",
+                g_bundle_name ? g_bundle_name : id, extra, id);
+    write_file(path, json, strlen(json));
+    at += _snprintf_s(json, sizeof json, _TRUNCATE, "{\"format\":2,\"salt\":\"%s\",\"rules\":8,\"build\":\"%s\"",
+                      id, g_bundle_hash ? g_bundle_hash : hash64(hash_digit, h));
     if (state) {
         const char *c = strstr(state, "\"firstCause\": \""), *t = strstr(state, "\"installedAt\": ");
         if (c) {
@@ -232,8 +231,8 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
             write_file(path, f->body, strlen(f->body));
         }
     }
-    at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, "    ]\n  }\n}\n");
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
+    at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, "]}\n");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" SH_MB_BUILD_MANIFEST, dir);
     write_file(path, json, at);
 }
 
@@ -292,7 +291,7 @@ static void build_fixture(void)
         static const fx_file a2[] = {
             { A_FIRE, "entityDef fireball { v2 }", -1, "entityDef", "mods/alexpink/fireball", NULL, 'b' },
         };
-        make_bundle(g_root, ".content\\served\\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "alexpink", 'b', NULL, a2, 1,
+        make_bundle(mt_cache_dir(g_root), "content\\served\\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "alexpink", 'b', NULL, a2, 1,
                     "{\"validated\": true, \"installedAt\": 200}");
         hash64('b', g_hash_a2);
     }
@@ -513,7 +512,7 @@ static void test_index_and_isolation(void)
     CHECK(st.bundles_seen == 11);
     CHECK(st.bundles_admitted == 6);
     CHECK(st.conflicts == 1);
-    CHECK(log_has("bundle 'carolbro' skipped: size mismatch: '" C_ONLY "' is 17 bytes, mod.json says 999"));
+    CHECK(log_has("bundle 'carolbro' skipped: size mismatch: '" C_ONLY "' is 17 bytes, its build records 999"));
     CHECK(log_has("bundle 'davex000' skipped: not built: md6Def mesh missing"));
     CHECK(log_has("bundle 'erinns00' skipped: 'generated/decls/entitydef/monster/sneaky.decl' is outside this mod's own files and is not a game file it changes"));
     CHECK(log_has("bundle 'unbuilt' skipped: not built yet"));
@@ -2210,7 +2209,7 @@ static void test_conflicts(void)
         make_bundle(root, "local cyber", "localcyb", '1',
                     "\"" CYB_AW "\", \"" CONDUCTOR "\", \"" WHITELIST "\"", cy, 3, "{\"validated\": true, \"installedAt\": 10}");
         /* (two files: the whitelist's native path under a composition's folder overflows MAX_PATH here) */
-        make_bundle(root, ".content\\served\\2222222222222222222222222222222222222222222222222222222222222222", "localcyb", '2',
+        make_bundle(mt_cache_dir(root), "content\\served\\2222222222222222222222222222222222222222222222222222222222222222", "localcyb", '2',
                     "\"" CYB_AW "\", \"" CONDUCTOR "\"", cy, 2, "{\"validated\": true, \"installedAt\": 11}");
         make_bundle(root, "cyberdem", "cyberdem", '3',
                     "\"" CYB_AW "\", \"" CONDUCTOR "\"", dl, 2, "{\"validated\": true, \"installedAt\": 99}");
@@ -3558,6 +3557,125 @@ static void test_refusals(void)
     sh_modserve_set_console(NULL);
 }
 
+static int isolation_load(void *c, const char *type, const char *name, int persist, unsigned *state, unsigned *lifetime)
+{
+    unsigned char *bytes = NULL;
+    size_t len = 0;
+    int refused;
+    (void)c; (void)persist;
+    call_log("L", type, name);
+    *state = 0; *lifetime = 1;
+    if (_stricmp(type, "md6Def")) return 1;
+    if (sh_modserve_open("generated/decls/md6def/mods/isolated/body.md6.decl", &bytes, &len) != 1) return 0;
+    refused = len == 3 && !memcmp(bytes, "bad", 3);
+    HeapFree(GetProcessHeap(), 0, bytes);
+    return refused ? SH_MODSERVE_LOAD_REFUSED : 1;
+}
+
+static int cs_identify(void *c, const char *source, char sha[SH_MB_HASH_HEX + 1], unsigned long long *size);
+static int cs_read(void *c, const char *source, const char *sha, unsigned char **bytes, size_t *len);
+
+static void test_refused_dependency(void)
+{
+    char root[MAX_PATH], content[MAX_PATH], top[MAX_PATH], hash[65], other[65], pinned[65];
+    const char *rows[] = { hash, other };
+    char text[4096], edits[4096], cause[256], *one;
+    static const char base[] = CONDUCTOR_HEAD "num = 2;" CONDUCTOR_STOCK_ITEMS CONDUCTOR_TAIL;
+    static const char copy[] = CONDUCTOR_HEAD "num = 4;" CONDUCTOR_STOCK_ITEMS
+        "item[2] = { aiType = \"SPAWN_AI_TYPE_IMP 1048576\"; entityDef = \"mods/isolated/arachnotron\"; }"
+        "item[3] = { aiType = \"SPAWN_AI_TYPE_BARON 524288\"; entityDef = \"mods/isolated/tyrant\"; }" CONDUCTOR_TAIL;
+    sh_mb_stock_ops stock_ops = { 0 };
+    sh_modserve_plan p;
+    int unknown, scope = sh_modserve_scope_enabled();
+    static const sh_modserve_engine_ops ops = { NULL, rf_source, fake_register, isolation_load };
+    fx_file mod[] = {
+        { "generated/decls/md6def/mods/isolated/body.md6.decl", "bad", -1, "md6Def", "mods/isolated/body.md6", NULL, '1' },
+        { "generated/decls/material2/mods/isolated/skin.decl", "{}", -1, "material2", "mods/isolated/skin", NULL, '2' },
+        { "generated/decls/entitydef/mods/isolated/arachnotron.decl", "{}", -1, "entityDef", "mods/isolated/arachnotron",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/isolated/body.md6\"},{\"type\":\"material2\",\"name\":\"mods/isolated/skin\"}]", '3' },
+        { "generated/decls/snapeditorentitydef/mods/isolated/spawner.decl", "{ edit = { entityDef = \"mods/isolated/placed\"; } }", -1, "snapEditorEntityDef", "mods/isolated/spawner",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/isolated/arachnotron\"}]", '4' },
+        { "generated/decls/entitydef/mods/isolated/tyrant.decl", "{}", -1, "entityDef", "mods/isolated/tyrant",
+          "[{\"type\":\"material2\",\"name\":\"mods/isolated/skin\"}]", '5' },
+        { "generated/decls/snapaiencounter/mods/isolated/single.decl", "{ edit = { memberList = { num = 1; item[0] = { memberType = \"1048576\"; } } } }",
+          -1, "snapAIEncounter", "mods/isolated/single", NULL, '9' },
+        { "generated/decls/entitydef/mods/isolated/placed.decl",
+          "{ class = \"idPlaceableSnapAIEncounter\"; edit = { encounterToSpawn = \"mods/isolated/single\"; } }",
+          -1, "entityDef", "mods/isolated/placed", NULL, 'a' }
+    };
+    static const fx_file neighbor[] = {
+        { "generated/decls/entitydef/mods/neighbor/healthy.decl", "{}", -1, "entityDef", "mods/neighbor/healthy", NULL, '6' },
+        { "generated/decls/entitydef/mods/neighbor/wave.decl", "{}", -1, "entityDef", "mods/neighbor/wave",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/isolated/arachnotron\"}]", '7' }
+    };
+    strcpy_s(top, sizeof top, g_root);
+    *strrchr(top, '\\') = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\isolation\\mods", top);
+    _snprintf_s(content, sizeof content, _TRUNCATE, "%s\\content\\served", mt_cache_dir(root));
+    mkdirs(root);
+    hash64('a', hash); hash64('b', other); hash64('c', pinned);
+    make_bundle(root, "neighbor", "neighbor", 'b', NULL, neighbor, 2, NULL);
+    one = sh_dt_diff(CONDUCTOR, base, strlen(base), copy, strlen(copy), NULL, cause, sizeof cause);
+    CHECK(one != NULL);
+    _snprintf_s(edits, sizeof edits, _TRUNCATE, "[%s]", one ? one : "");
+    free(one);
+    stock_ops.identify = cs_identify; stock_ops.read = cs_read;
+    sh_mb_set_stock_ops(&stock_ops);
+    g_block_edits = edits;
+    make_bundle(root, "mixed pack", "isolated", 'a', NULL, mod, 7, NULL);
+    mod[0].body = "good"; mod[0].blob = '8';
+    make_bundle(content, pinned, "isolated", 'c', NULL, mod, 7, NULL);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_index_build(root) == 3);
+    (void)sh_modserve_scope_set(rows, 2, 1);
+    sh_modserve_set_console(rf_console);
+    g_console_seen[0] = 0;
+    g_calls[0] = 0;
+    CHECK(sh_modserve_plan_bundles(rows, 2, &p, &unknown) >= 6 && !unknown);
+    (void)sh_modserve_plan_run(&p, &ops, "isolation");
+    sh_modserve_plan_free(&p);
+    CHECK(!strstr(g_calls, "L:entityDef:mods/isolated/arachnotron;") && strstr(g_calls, "L:entityDef:mods/isolated/tyrant;"));
+    if (log_count_in(g_console_seen, "Snapmap+ mods:") != 1 || !strstr(g_console_seen, "Arachnotron in isolated"))
+        fprintf(stderr, "%s", g_console_seen);
+    CHECK(log_count_in(g_console_seen, "Snapmap+ mods:") == 1 && strstr(g_console_seen, "Arachnotron in isolated") &&
+          strstr(g_console_seen, "press Refresh"));
+    CHECK(!sh_modserve_lookup(mod[0].path, NULL) && !sh_modserve_probe_claims(mod[2].path) &&
+          !sh_modserve_lookup(mod[3].path, NULL) && !sh_modserve_lookup(neighbor[1].path, NULL));
+    CHECK(sh_modserve_lookup(mod[1].path, NULL) && sh_modserve_lookup(mod[4].path, NULL) &&
+          sh_modserve_lookup(neighbor[0].path, NULL));
+    CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "mods/isolated/tyrant") && !strstr(text, "mods/isolated/arachnotron"));
+    CHECK(!sh_modserve_lookup(mod[5].path, NULL) && open_text(mod[6].path, text, sizeof text) == 1 &&
+          strstr(text, "snapmaps/unknown") && strstr(text, "idPlaceableSnapAIEncounter") && !strstr(text, "encounterToSpawn"));
+    CHECK(sh_modserve_root_lacks("isolated", mod[6].pname) == SH_MODMANIFEST_LOCAL_REFUSED);
+    CHECK(!sh_modserve_root_lacks("isolated", mod[4].pname));
+    CHECK(sh_modserve_index_build(root) == 3);
+    CHECK(!sh_modserve_probe_claims(mod[2].path));
+    rows[0] = pinned;
+    (void)sh_modserve_scope_set(rows, 2, 1);
+    CHECK(sh_modserve_lookup(mod[0].path, NULL) && sh_modserve_lookup(mod[2].path, NULL) && sh_modserve_lookup(neighbor[1].path, NULL));
+    rows[0] = hash;
+    (void)sh_modserve_scope_set(rows, 2, 1);
+    CHECK(!sh_modserve_probe_claims(mod[2].path));
+    make_bundle(root, "mixed pack", "isolated", 'd', NULL, mod, 7, NULL);
+    g_block_edits = NULL;
+    hash64('d', hash);
+    CHECK(sh_modserve_index_build(root) == 3);
+    (void)sh_modserve_scope_set(rows, 2, 1);
+    g_calls[0] = 0;
+    CHECK(sh_modserve_plan_bundles(rows, 2, &p, &unknown) >= 6 && !unknown);
+    CHECK(sh_modserve_plan_unvisited(&p) > 0 && sh_modserve_plan_run(&p, &ops, "repair") == p.count);
+    CHECK(strstr(g_calls, "L:md6Def:mods/isolated/body.md6;") && strstr(g_calls, "L:entityDef:mods/isolated/arachnotron;"));
+    CHECK(sh_modserve_lookup(mod[3].path, NULL) && sh_modserve_lookup(neighbor[1].path, NULL));
+    CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "mods/isolated/arachnotron"));
+    CHECK(open_text(mod[6].path, text, sizeof text) == 1 && strstr(text, "encounterToSpawn"));
+    CHECK(!sh_modserve_root_lacks("isolated", mod[6].pname));
+    sh_modserve_plan_free(&p);
+    sh_modserve_set_console(NULL);
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(scope);
+    sh_mb_set_stock_ops(NULL);
+}
+
 /* ------------------------------------------------------------------ first parse of a permanent decl (lane P52) */
 
 /* The engine side of the P52 crash: the menu collectibles' unlockModel
@@ -3922,11 +4040,11 @@ static void test_bundle_extra(void)
     g_bundle_extra = "\"strings\": {\"en\": {\"abe_name\": \"Abe 2\"}},";
     make_bundle(mods, "abemod00", "abemod00", '8', NULL, a2, 1, NULL);
     g_bundle_extra = "\"hud\": {}, \"strings\": {\"en\": {\"abe_name\": \"Abe 1\"}},";
-    make_bundle(mods, ".content\\served\\9999999999999999999999999999999999999999999999999999999999999999", "abemod00", '9', NULL, a1, 1, NULL);
+    make_bundle(mt_cache_dir(mods), "content\\served\\9999999999999999999999999999999999999999999999999999999999999999", "abemod00", '9', NULL, a1, 1, NULL);
     g_bundle_extra = "\"strings\": {\"en\": {\"bad_name\": \"Bad\"}},";
     make_bundle(mods, "badsize0", "badsize0", '0', NULL, bad, 1, NULL);
     g_bundle_extra = "\"strings\": {\"en\": {\"old_name\": \"Old\"}},";
-    make_bundle(mods, ".content\\served\\ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "aaaold00", 'f', NULL, old, 1, NULL);
+    make_bundle(mt_cache_dir(mods), "content\\served\\ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "aaaold00", 'f', NULL, old, 1, NULL);
     g_bundle_extra = NULL;
     make_bundle(mods, "plainmod", "plainmod", 'e', NULL, plain, 1, NULL);
     CHECK(sh_modserve_index_build(mods) == 5);
@@ -4513,7 +4631,7 @@ static void test_additive_same_key(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\samekey\\mods", top);
     mkdirs(root);
     g_bundle_name = "Fork";
-    make_bundle(root, ".content\\served\\6666666666666666666666666666666666666666666666666666666666666666", "kfork000", '6', NULL, b1, 3, "{\"installedAt\": 100}");
+    make_bundle(mt_cache_dir(root), "content\\served\\6666666666666666666666666666666666666666666666666666666666666666", "kfork000", '6', NULL, b1, 3, "{\"installedAt\": 100}");
     make_bundle(root, "fork-b", "kfork000", '7', NULL, b2, 3, "{\"installedAt\": 200}");
     g_bundle_name = NULL;
     hash64('6', h1); hash64('7', h2); hash64('8', h3);
@@ -4521,7 +4639,7 @@ static void test_additive_same_key(void)
     sh_modserve_scope_enable(0);
     log_clear();
     CHECK(sh_modserve_index_build(root) == 2);
-    CHECK(log_has("MODS: mod kfork000: builds 6666666666666666 (.content\\served\\6666666666666666666666666666666666666666666666666666666666666666) and 7777777777777777 (fork-b) both "
+    CHECK(log_has("MODS: mod kfork000: builds 6666666666666666 (served\\6666666666666666666666666666666666666666666666666666666666666666) and 7777777777777777 (fork-b) both "
                   "provide paths"));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
@@ -4656,7 +4774,7 @@ static void test_serving_build_needs(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\servingbuild\\mods", top);
     mkdirs(root);
     make_bundle(root, "c3 mod", "c3mod000", '6', NULL, root_files, 2, "{\"installedAt\": 200}");
-    make_bundle(root, ".content\\served\\7777777777777777777777777777777777777777777777777777777777777777", "c3mod000", '7', NULL, comp_files, 3, "{\"installedAt\": 100}");
+    make_bundle(mt_cache_dir(root), "content\\served\\7777777777777777777777777777777777777777777777777777777777777777", "c3mod000", '7', NULL, comp_files, 3, "{\"installedAt\": 100}");
     hash64('6', hroot); hash64('7', hplace);
     sh_modserve_scope_enable(0);
     CHECK(sh_modserve_index_build(root) == 2);
@@ -4729,7 +4847,7 @@ static void test_two_builds_requirements(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\twobuilds\\mods", top);
     mkdirs(root);
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\", \"g_useImageBlackList\": \"0\"}},\n  ";
-    make_bundle(root, ".content\\served\\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "twobuild", 'a', NULL, b_old, 4, "{\"installedAt\": 100}");
+    make_bundle(mt_cache_dir(root), "content\\served\\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "twobuild", 'a', NULL, b_old, 4, "{\"installedAt\": 100}");
     make_bundle(root, "b-beside", "twobuild", 'b', NULL, b_new, 4, "{\"installedAt\": 200}");
     g_bundle_extra = NULL;
     hash64('a', h_old); hash64('b', h_new); hash64('c', h_other);
@@ -5022,7 +5140,7 @@ static void test_salt_and_root(void)
      * pinned, as a composition of the content cache. */
     g_bundle_name = "Doors Pack";
     make_bundle(root, "My doors (work)", "kown0000", 'a', NULL, mine, 1, "{\"installedAt\": 100}");
-    make_bundle(root, ".content\\served\\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "kown0000", 'b', NULL, theirs, 1, "{\"installedAt\": 900}");
+    make_bundle(mt_cache_dir(root), "content\\served\\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "kown0000", 'b', NULL, theirs, 1, "{\"installedAt\": 900}");
     /* A copy of the author's folder (same salt, built later): one build per salt at the root. */
     make_bundle(root, "My doors (copy)", "kown0000", 'e', NULL, stray, 1, "{\"installedAt\": 300}");
     g_bundle_name = NULL;
@@ -5035,8 +5153,13 @@ static void test_salt_and_root(void)
     write_file(path, "{}", 2);
     sp_modjson(root, "bad-salt", "{\"name\": \"Bad\", \"snapmap-plus\": {\"format\": 2, \"salt\": \"1abcdefg\"}}");
     sp_modjson(root, "salted-only", "{\"name\": \"Salted\", \"snapmap-plus\": {\"format\": 2, \"salt\": \"saltonly\"}}");
-    sp_modjson(root, "failed", "{\"name\": \"Failed\", \"snapmap-plus\": {\"format\": 2, \"salt\": \"failedmd\", "
-               "\"rules\": 8, \"cause\": \"generated/decls/entitydef/mods/failedmd/a.decl: parse error\"}}");
+    sp_modjson(root, "failed", "{\"name\":\"Failed\",\"snapmap-plus\":{\"format\":2,\"salt\":\"failedmd\"}}");
+    {
+        const char *failure = "{\"format\":2,\"salt\":\"failedmd\",\"rules\":8,"
+                              "\"cause\":\"generated/decls/entitydef/mods/failedmd/a.decl: parse error\"}";
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\failed\\" SH_MB_BUILD_MANIFEST, root);
+        write_file(path, failure, strlen(failure));
+    }
     sp_modjson(root, "fresh", "{\"name\": \"Fresh\"}");
     {
         /* A build whose files sit under another salt's namespace. */
@@ -5060,7 +5183,7 @@ static void test_salt_and_root(void)
     CHECK(log_has("bundle 'failed' skipped: not built: generated/decls/entitydef/mods/failedmd/a.decl: parse error"));
     CHECK(log_has("bundle 'fresh' skipped: not built yet (Refresh in the Mods tab builds it)"));
     /* The mod folder cannot name another salt's file: it would be a native/ path under mods/. */
-    CHECK(log_has("bundle 'elsewhere' skipped: The part of mod.json Snapmap+ writes is damaged (native/" SP_THING "). "
+    CHECK(log_has("bundle 'elsewhere' skipped: The mod's build data is damaged (native/" SP_THING "). "
                   "Press Refresh to build the mod again."));
     CHECK(!log_has("repair"));
     sh_modserve_scope_enable(1);
@@ -5088,7 +5211,7 @@ static void test_salt_and_root(void)
     row.pinned = 1;
     strcpy_s(row.build, sizeof row.build, hd);
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hd) && !strcmp(ref.place, SH_MODSERVE_CONTENT) &&
-          !strcmp(ref.folder, ".content\\served\\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+          !strcmp(ref.folder, "served\\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
     strcpy_s(row.build, sizeof row.build, hm);
     CHECK(!sh_modserve_row_build(&row, &ref));
     strcpy_s(row.build, sizeof row.build, hx);
@@ -5100,7 +5223,7 @@ static void test_salt_and_root(void)
     list[0] = hd;
     CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
     CHECK(!strcmp(ad_served(SP_THING), "entityDef thing { downloaded }"));
-    CHECK(sh_modserve_lookup(SP_THING, &hit) && strstr(hit.disk_path, "\\.content\\served\\" ));
+    CHECK(sh_modserve_lookup(SP_THING, &hit) && strstr(hit.disk_path, "\\content\\served\\" ));
     CHECK(sh_modserve_bundle_scope(hm, &si) && si.inert);
     /* A salt whose only folder is skipped: the folder's cause. */
     memset(&row, 0, sizeof row);
@@ -5190,8 +5313,8 @@ static void test_local_row_standin(void)
     mkdirs(root);
     n = (size_t)_snprintf_s((char *)text, sizeof text, _TRUNCATE, "snapmap-plus/composition/1\n1\n%s\n", "lstand00");
     sh_mb_sha256_hex(text, n, none);
-    _snprintf_s(folder, sizeof folder, _TRUNCATE, ".content\\served\\%s", none);
-    make_bundle(root, folder, "lstand00", '3', NULL, stood, 1, NULL);
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "content\\served\\%s", none);
+    make_bundle(mt_cache_dir(root), folder, "lstand00", '3', NULL, stood, 1, NULL);
     sh_modserve_scope_enable(0);
     CHECK(sh_modserve_index_build(root) == 1);
     memset(&row, 0, sizeof row);
@@ -5402,7 +5525,7 @@ static void dep_visit(void *context, const char *id, const char *hash, unsigned 
     (void)id;
 }
 
-/* A composition of the content cache (.content\served\<composition hash>) serves a map that declares it by that
+/* A composition of the content cache (cache\content\served\<composition hash>) serves a map that declares it by that
  * hash, in the editor and in Play, and nothing else (R-LV2: the scope found a declared build at the root and in the
  * map's place only, so a pinned row's composition resolved but never served). */
 static void test_composition_serves_its_map(void)
@@ -5420,7 +5543,7 @@ static void test_composition_serves_its_map(void)
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\compmap\\mods", top);
-    _snprintf_s(served, sizeof served, _TRUNCATE, "%s\\.content\\served", root);
+    _snprintf_s(served, sizeof served, _TRUNCATE, "%s\\content\\served", mt_cache_dir(root));
     mkdirs(served);
     g_bundle_extra = NULL;
     make_bundle(served, CHASH, "dcompos1", 'd', NULL, comp, 1, NULL);
@@ -5464,7 +5587,7 @@ static void test_composition_overlay(void)
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\overlaymap\\mods", top);
-    _snprintf_s(served, sizeof served, _TRUNCATE, "%s\\.content\\served", root);
+    _snprintf_s(served, sizeof served, _TRUNCATE, "%s\\content\\served", mt_cache_dir(root));
     mkdirs(served);
     g_bundle_extra = NULL;
     make_bundle(served, CHASH, "dcompos1", 'd', NULL, comp, 1, NULL);
@@ -5519,7 +5642,7 @@ static void test_miss_reporter_skips_probes(void)
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\missmap\\mods", top);
-    _snprintf_s(served, sizeof served, _TRUNCATE, "%s\\.content\\served", root);
+    _snprintf_s(served, sizeof served, _TRUNCATE, "%s\\content\\served", mt_cache_dir(root));
     mkdirs(served);
     /* the block's "units_of" makes it a unit composition (the reporter arms for it) */
     g_block_edits = "[], \"units_of\": [\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"]";
@@ -5608,7 +5731,7 @@ static void test_standin_names_after_real(void)
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\standinmap\\mods", top);
-    _snprintf_s(served, sizeof served, _TRUNCATE, "%s\\.content\\served", root);
+    _snprintf_s(served, sizeof served, _TRUNCATE, "%s\\content\\served", mt_cache_dir(root));
     mkdirs(served);
     /* The unit is not here yet: the row's composition is its stand-ins, and the engine reads their row. */
     g_block_edits = "[], \"units_of\": [\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"]";
@@ -5808,7 +5931,7 @@ static void test_bank_stems(void)
         CHECK(!sh_modserve_lookup("sound/soundbanks/pc/bbank000_sfx.bnk", NULL));
         {
             sh_modserve_hit hit;
-            CHECK(sh_modserve_lookup(req, &hit) && hit.disk_path && strstr(hit.disk_path, "\\.served\\banks\\bbank000_sfx.1111111111111111.bnk") && hit.size == 24);
+            CHECK(sh_modserve_lookup(req, &hit) && hit.disk_path && strstr(hit.disk_path, "\\cache\\served\\banks\\bbank000_sfx.1111111111111111.bnk") && hit.size == 24);
         }
         CHECK(log_has("bank bbank000_sfx.bnk served as bbank000_sfx."));
         CHECK(sh_modserve_open(req, &bytes, &len) == 1 && len == 24 && !memcmp(bytes, "BKHD", 4));
@@ -5831,7 +5954,7 @@ static void test_bank_stems(void)
         sh_modserve_hit hit;
         CHECK(sh_modserve_lookup(req, &hit) && hit.disk_path);
         strcpy_s(live, sizeof live, hit.disk_path);
-        _snprintf_s(stray, sizeof stray, _TRUNCATE, "%s%s", root, "/.served/files/0123456789abcdef.decl");
+        _snprintf_s(stray, sizeof stray, _TRUNCATE, "%s\\served\\files\\0123456789abcdef.decl", mt_cache_dir(root));
         _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.77.tmp", live);
         for (t = stray; *t; ++t) if (*t == '/') *t = '\\';
         write_file(stray, "old", 3);
@@ -5985,7 +6108,7 @@ static void test_store_root_utf8(void)
     free(accent);
     mkdirs(root);
     make_bundle(root, "plain", "uplain00", '7', NULL, plain, 1, NULL);
-    make_bundle(root, ".content\\served\\8888888888888888888888888888888888888888888888888888888888888888", "usnap000", '8', NULL, placed, 1, NULL);
+    make_bundle(mt_cache_dir(root), "content\\served\\8888888888888888888888888888888888888888888888888888888888888888", "usnap000", '8', NULL, placed, 1, NULL);
     hash64('8', h8);
 
     /* The boot resolves the store's root, as the product's boot does. */
@@ -6336,6 +6459,7 @@ int main(void)
     test_product_decls_planned();
     test_launch_preload();
     test_refusals();
+    test_refused_dependency();
     test_permanent_first_parse();
     test_registration_reparse_of_held_permanent();
     test_bundle_extra();

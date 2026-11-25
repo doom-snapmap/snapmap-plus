@@ -8,7 +8,7 @@
  *
  *   modcache_test.exe
  */
-#include "heap_out.h"
+#include "cache_paths.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,8 +41,15 @@ void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref) { (void)ref; }
 /* A local row's folder that is here but cannot be used (modserve.h): none here. */
 static int g_salt_installed;
 int sh_modserve_salt_installed(const char *salt) { (void)salt; return g_salt_installed; }
-int sh_modserve_root_lacks(const char *salt, const char *name) { (void)salt; (void)name; return 0; }
-int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out) { (void)row; if (out) memset(out, 0, sizeof *out); return 0; }
+static const char *g_refused_placed;
+int sh_modserve_root_lacks(const char *salt, const char *name)
+{ (void)salt; return g_refused_placed && !strcmp(name, g_refused_placed) ? SH_MODMANIFEST_LOCAL_REFUSED : 0; }
+int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
+{
+    (void)row;
+    if (out) { memset(out, 0, sizeof *out); if (g_refused_placed) out->place = ""; }
+    return g_refused_placed != NULL;
+}
 size_t modserve_bundles_for_names_visit(const char *const *names, size_t count, sh_modserve_closure_fn visit, void *context)
 { (void)names; (void)count; (void)visit; (void)context; return 0; }
 int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
@@ -485,19 +492,23 @@ static void test_cache(const char *top)
     download(&crate, &b, pack, 1);
     download(&barrel, &b, pack, 1);
     CHECK(sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\player\\cache\\content\\units\\%s.json", top, crate.hash);
+    CHECK(mt_exists(path));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content", mods);
+    CHECK(GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES);
     row_of(&rows[0], SALT, both, 2);
     strcpy_s(chash, sizeof chash, rows[0].build);
     load_rows(rows, 1, placed, 2);
     CHECK(sh_cache_composed(chash, &complete) && complete);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\mod.json", mods, chash);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\mod.json", mt_cache_dir(mods), chash);
     CHECK(mt_exists(path));
     /* Every file of the composition is a link to its blob: no second copy on disk. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\images\\crate_d.bimage", mods, chash);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\images\\crate_d.bimage", mt_cache_dir(mods), chash);
     CHECK(links_of(path) >= 2);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\files", mods);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\files", mt_cache_dir(mods));
     blobs = count_files(path);
     CHECK(blobs > 0);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s", mods, chash);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s", mt_cache_dir(mods), chash);
     memset(&back1, 0, sizeof back1);
     CHECK(sh_mb_load_folder(path, &back1) && back1.validated && back1.units_of_count == 2);
 
@@ -509,9 +520,9 @@ static void test_cache(const char *top)
         CHECK(strcmp(chash, chash2) != 0);
         for (k = 0; k < 10; k++) load_rows(rows, 2, placed, 2);
         CHECK(sh_cache_composed(chash2, &complete) && complete);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\files", mods);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\files", mt_cache_dir(mods));
         CHECK(count_files(path) == blobs);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\images\\crate_d.bimage", mods, chash2);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\images\\crate_d.bimage", mt_cache_dir(mods), chash2);
         CHECK(links_of(path) >= 3);   /* the blob and both compositions */
     }
 
@@ -521,7 +532,7 @@ static void test_cache(const char *top)
     download(&crate, &b, pack, 1);
     download(&barrel, &b, pack, 1);
     load_rows(rows, 1, placed, 2);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s", mods2, chash);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s", mt_cache_dir(mods2), chash);
     memset(&back2, 0, sizeof back2);
     CHECK(sh_mb_load_folder(path, &back2) && !strcmp(back1.hash, back2.hash));
     sh_mb_free(&back1);
@@ -544,7 +555,7 @@ static void test_cache(const char *top)
             CHECK(!sh_cache_absent_causes("0000000000000000000000000000000000000000000000000000000000000000", &mask) &&
                   !mask);
         }
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\barrel.decl", mods3, chash);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\entities\\barrel.decl", mt_cache_dir(mods3), chash);
         t = read_text(path);
         CHECK(t && strstr(t, "snapmaps/unknown"));
         free(t);
@@ -625,46 +636,46 @@ static void test_cache(const char *top)
         CHECK(sh_cache_composed(chash, &complete) && !complete);
         CHECK(!sh_modmanifest_content_text(NULL));   /* only inside the step */
 
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\barrel.decl", mods5, chash);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\entities\\barrel.decl", mt_cache_dir(mods5), chash);
         t = read_text(path);
         CHECK(t && strstr(t, "inherit = \"snapmaps/unknown\";") && strstr(t, "class = \"idInteractable\";"));
         free(t);
         _snprintf_s(path, sizeof path, _TRUNCATE,
-                    "%s\\.content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\barrel.decl", mods5, chash);
+                    "%s\\content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\barrel.decl", mt_cache_dir(mods5), chash);
         t = read_text(path);
         CHECK(t && strstr(t, "inherit = \"interactives/tripod_panel\";") && strstr(t, "entityDef = \"entities/barrel\";") &&
               strstr(t, "placeable = false;") && strstr(t, "isMoveable = true;") && !strstr(t, "entRefs"));
         free(t);
 
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\demons\\lamp.decl", mods5, chash);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\entities\\demons\\lamp.decl", mt_cache_dir(mods5), chash);
         t = read_text(path);
         CHECK(t && strstr(t, "class = \"idPlaceableSnapAIEncounter\";"));
         free(t);
         _snprintf_s(path, sizeof path, _TRUNCATE,
-                    "%s\\.content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\demons\\lamp.decl", mods5, chash);
+                    "%s\\content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\demons\\lamp.decl", mt_cache_dir(mods5), chash);
         t = read_text(path);
         CHECK(t && strstr(t, "inherit = \"demons/demon_base\";") && strstr(t, "entityDef = \"entities/demons/lamp\";") &&
               !strstr(t, "entRefs"));
         free(t);
         /* Counts DOOM gives no row of the class: the class's row, with the map's counts written over it. */
         _snprintf_s(path, sizeof path, _TRUNCATE,
-                    "%s\\.content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\demons\\lamp2.decl", mods5, chash);
+                    "%s\\content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\demons\\lamp2.decl", mt_cache_dir(mods5), chash);
         t = read_text(path);
         CHECK(t && strstr(t, "inherit = \"demons/demon_base\";") && strstr(t, "entRefs = {\n\t\t\tnum = 2;") &&
               strstr(t, "varRefs = {\n\t\t\tnum = 0;"));
         free(t);
         /* idEntity: the bare stock stand-in; a class the decl text cannot carry: the same. */
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\plain.decl", mods5, chash);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\entities\\plain.decl", mt_cache_dir(mods5), chash);
         t = read_text(path);
         CHECK(t && strstr(t, "snapmaps/unknown") && !strstr(t, "class ="));
         free(t);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\odd.decl", mods5, chash);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\entities\\odd.decl", mt_cache_dir(mods5), chash);
         t = read_text(path);
         CHECK(t && strstr(t, "snapmaps/unknown") && !strstr(t, "class ="));
         free(t);
         /* The present crate is served from its unit, not stood in for. */
         _snprintf_s(path, sizeof path, _TRUNCATE,
-                    "%s\\.content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\crate.decl", mods5, chash);
+                    "%s\\content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\crate.decl", mt_cache_dir(mods5), chash);
         CHECK(!mt_exists(path));
         t = sh_cache_take_notice();
         CHECK(t != NULL);
@@ -674,7 +685,7 @@ static void test_cache(const char *top)
             sh_mb_bundle sb;
             size_t r;
             int rows_found = 0;
-            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s", mods5, chash);
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s", mt_cache_dir(mods5), chash);
             memset(&sb, 0, sizeof sb);
             CHECK(sh_mb_load_folder(path, &sb) && sb.validated);
             for (r = 0; r < sb.file_count; r++)
@@ -757,11 +768,11 @@ static void test_cache(const char *top)
         (void)sh_cache_take_notice();
         load_rows(rows, 1, placed, 2);
         CHECK(sh_cache_composed(chash, &complete) && !complete);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\map-modules\\rooms\\hall.decl", mods6, chash);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\map-modules\\rooms\\hall.decl", mt_cache_dir(mods6), chash);
         t = read_text(path);
         CHECK(t && strstr(t, "smpgrid/v1/m/1024_1024_432.decl") && strstr(t, "PORTAL_DIR_POS_X"));
         free(t);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\decls\\snapmoduleinfo\\rooms\\hall.decl", mods6, chash);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\decls\\snapmoduleinfo\\rooms\\hall.decl", mt_cache_dir(mods6), chash);
         t = read_text(path);
         CHECK(t && strstr(t, "inherit = \"ind_dlc/ind_totally_blank_room_4x\";"));
         free(t);
@@ -781,7 +792,7 @@ static void test_cache(const char *top)
             sh_mb_bundle mb;
             size_t r;
             int module_found = 0;
-            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s", mods6, chash);
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s", mt_cache_dir(mods6), chash);
             memset(&mb, 0, sizeof mb);
             CHECK(sh_mb_load_folder(path, &mb) && mb.validated);
             for (r = 0; r < mb.file_count; r++)
@@ -992,7 +1003,7 @@ static void test_cache(const char *top)
             FILETIME old_time;
             SYSTEMTIME sys = { 2020, 1, 3, 1, 0, 0, 0, 0 };
             HANDLE h;
-            _snprintf_s(pdir, sizeof pdir, _TRUNCATE, "%s\\.content\\partial", mods);
+            _snprintf_s(pdir, sizeof pdir, _TRUNCATE, "%s\\content\\partial", mt_cache_dir(mods));
             CreateDirectoryA(pdir, NULL);
             _snprintf_s(kept_part, sizeof kept_part, _TRUNCATE, "%s\\%s.zip.part", pdir, crate.hash);
             write_file(kept_part, "x", 1);
@@ -1016,9 +1027,9 @@ static void test_cache(const char *top)
         CHECK(sh_cache_sweep(1, NULL, 0, &st));      /* Remove content of maps you only played */
         CHECK(st.units_removed == 1 && st.served_removed == 1 && sh_cache_unit_state(barrel.hash, NULL, NULL, NULL) == -1);
         CHECK(sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\files", mods);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\files", mt_cache_dir(mods));
         CHECK(count_files(path) < blobs);            /* the barrel's own files went; the shared one stayed */
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\files\\%.2s", mods, crate.hash);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\files\\%.2s", mt_cache_dir(mods), crate.hash);
         /* An upload in progress keeps its unit (held). */
         {
             const char *held[1] = { barrel.hash };
@@ -1158,7 +1169,7 @@ static void n13_variant(const char *top, int variant, const char *pointer, int e
     (void)sh_cache_take_notice();
     load_rows(&row, 1, placed, 1);
     CHECK(sh_cache_composed(row.build, &complete) && !!complete == !!expect_complete);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\crate.decl", mods, row.build);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\entities\\crate.decl", mt_cache_dir(mods), row.build);
     t = read_text(path);
     CHECK(t && (strstr(t, "snapmaps/unknown") != NULL) == !expect_complete);   /* the object stands in, or is whole */
     free(t);
@@ -1252,8 +1263,8 @@ static void test_sweep_held(const char *top)
     CHECK(sh_cache_sweep_kept(1, &st) && st.units_removed == 0 && sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);
 
     /* A fresh staging folder (a composition being built) survives; one nothing wrote for an hour goes. */
-    _snprintf_s(fresh, sizeof fresh, _TRUNCATE, "%s\\.content\\served\\%s.staging-1-2", mods, HASH);
-    _snprintf_s(aged, sizeof aged, _TRUNCATE, "%s\\.content\\served\\%s.staging-3-4", mods, HASH);
+    _snprintf_s(fresh, sizeof fresh, _TRUNCATE, "%s\\content\\served\\%s.staging-1-2", mt_cache_dir(mods), HASH);
+    _snprintf_s(aged, sizeof aged, _TRUNCATE, "%s\\content\\served\\%s.staging-3-4", mt_cache_dir(mods), HASH);
     mt_mkdirs_for(fresh);
     CreateDirectoryA(fresh, NULL);
     CreateDirectoryA(aged, NULL);
@@ -1312,11 +1323,11 @@ static void test_local_standins(const char *top)
     CHECK(sh_modmanifest_row_set_name(&row, "Crates and barrels"));
     load_rows(&row, 1, placed2, 2);
     CHECK(sh_cache_composed(none, &complete) && !complete);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\crate.decl", mods, none);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\entities\\crate.decl", mt_cache_dir(mods), none);
     t = read_text(path);
     CHECK(t && strstr(t, "snapmaps/unknown"));
     free(t);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\barrel.decl", mods, none);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\entities\\barrel.decl", mt_cache_dir(mods), none);
     CHECK(mt_exists(path));
     t = sh_cache_take_notice();
     CHECK(t && !strcmp(t, "This map is playing without 2 objects from Crates and barrels (the Crate and the Barrel), which "
@@ -1324,7 +1335,7 @@ static void test_local_standins(const char *top)
     free(t);
     /* Another map of the same mod places other objects: composed again for it, one sentence for its one object. */
     load_rows(&row, 1, placed1, 1);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\entities\\barrel.decl", mods, none);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\entities\\barrel.decl", mt_cache_dir(mods), none);
     CHECK(!mt_exists(path));
     t = sh_cache_take_notice();
     CHECK(t && !strcmp(t, "This map is playing without the Crate from Crates and barrels, which is not on this computer."));
@@ -1332,7 +1343,7 @@ static void test_local_standins(const char *top)
     sh_modmanifest_row_free(&row);
 
     /* The load's content step: the map's local row, nothing at the root serving it, reaches the cache so. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s", mods, none);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s", mt_cache_dir(mods), none);
     mt_remove_tree(path);
     memset(&list, 0, sizeof list);
     CHECK(sh_modmanifest_read(map, sizeof map - 1, &list, NULL) == 1 && list.count == 1 && !list.rows[0].pinned);
@@ -1342,7 +1353,7 @@ static void test_local_standins(const char *top)
     sh_modmanifest_list_free(&list);
     CHECK(sh_cache_composed(none, &complete) && !complete);
     _snprintf_s(path, sizeof path, _TRUNCATE,
-                "%s\\.content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\crate.decl", mods, none);
+                "%s\\content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\crate.decl", mt_cache_dir(mods), none);
     t = read_text(path);
     CHECK(t && strstr(t, "entityDef = \"entities/crate\";"));
     free(t);
@@ -1350,13 +1361,45 @@ static void test_local_standins(const char *top)
     CHECK(t && !strcmp(t, "This map is playing without the Crate from Crates and barrels, which is not on this computer."));
     free(t);
 
+    {
+        static const char affected[] = "{\"entities\":[{\"entityDef\":{\"className\":\"idPlaceableSnapAIEncounter\","
+            "\"inherit\":\"mods/" SALT "/arachnotron\"},\"uniqueId\":0},{\"entityDef\":{\"className\":\"idPlaceableSnapAIEncounter\","
+            "\"inherit\":\"mods/" SALT "/tyrant\"},\"uniqueId\":1}],\"references\":{\"entityEntRefs\":{\"keyValues\":[0,2,2],"
+            "\"values\":[1,1]}},\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"" SALT "\",\"name\":\"Eternal Demons\","
+            "\"local\":true,\"size\":0,\"names\":[\"mods/" SALT "/arachnotron\",\"mods/" SALT "/tyrant\"]}]}}";
+        g_refused_placed = "mods/" SALT "/arachnotron";
+        memset(&list, 0, sizeof list);
+        CHECK(sh_modmanifest_read(affected, sizeof affected - 1, &list, NULL) == 1);
+        sh_modmanifest_set_content(sh_cache_on_load);
+        sh_modmanifest_content_for(affected, sizeof affected - 1, &list);
+        sh_modmanifest_set_content(NULL);
+        sh_modmanifest_list_free(&list);
+        g_refused_placed = NULL;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\arachnotron.decl", mt_cache_dir(mods), none);
+        t = read_text(path);
+        CHECK(t && strstr(t, "entities/arachnotron") && strstr(t, "entRefs = {\n\t\t\tnum = 2;"));
+        free(t);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\entities\\tyrant.decl", mt_cache_dir(mods), none);
+        CHECK(!mt_exists(path));
+        t = sh_cache_take_notice();
+        CHECK(t && strstr(t, "Arachnotron from Eternal Demons") && strstr(t, "could not load") && !strstr(t, "Tyrant"));
+        free(t);
+        memset(&list, 0, sizeof list);
+        CHECK(sh_modmanifest_read(map, sizeof map - 1, &list, NULL) == 1);
+        sh_modmanifest_set_content(sh_cache_on_load);
+        sh_modmanifest_content_for(map, sizeof map - 1, &list);
+        sh_modmanifest_set_content(NULL);
+        sh_modmanifest_list_free(&list);
+        free(sh_cache_take_notice());
+    }
+
     /* Loaded again with the same objects: the composition stays as it is (a marker in it survives), one sentence. */
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, SALT);
     strcpy_s(row.build, sizeof row.build, none);
     row.pinned = 1;
     CHECK(sh_modmanifest_row_set_name(&row, "Crates and barrels"));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.content\\served\\%s\\marker.txt", mods, none);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s\\marker.txt", mt_cache_dir(mods), none);
     write_file(path, "x", 1);
     load_rows(&row, 1, placed1, 1);
     CHECK(mt_exists(path));

@@ -27,6 +27,9 @@ its identity and keeps its names apart from the game's and from every other mod'
 | `decls/<kind>/` | every other kind of decl, in a folder named as the game names the kind: `decls/damage/`, `decls/snapeditorentitydef/` (Toybox rows), `decls/breakable/` | |
 | `native/` | DOOM's own files your mod changes, at DOOM's own path: `native/generated/decls/entitydef/ai/conductor.decl` | |
 
+Snapmap+ keeps the permanent ID in `mod.json` and writes build information to `.build/manifest.json`.
+You can leave `.build/` out of source control and ZIPs. Refresh recreates it from the mod’s files.
+
 A file beside `mod.json` (a README, notes) and a folder whose name starts with `.` are not part of the mod. A file in
 any other top-level folder (`assets/` and `game/` included) is a mistake the build names, file by file.
 
@@ -89,7 +92,7 @@ so the mod carries no binary file.
      scripts\crate.lua
    ```
 
-2. `mod.json`, the mod's own part (Snapmap+ adds its own part, `"snapmap-plus"`, the first time it scans the folder):
+2. `mod.json`, the mod's own part (Snapmap+ adds its ID under `"snapmap-plus"`, the first time it scans the folder):
 
    ```json
    {

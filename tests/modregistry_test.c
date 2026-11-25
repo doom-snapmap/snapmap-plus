@@ -248,11 +248,14 @@ static void make_mod(const char *root, const char *folder, const char *id, char 
     if (ea) put_json_string(edits, sizeof edits, &ea, "]");
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", root, folder);
     mkdirs(dir);
-    at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                      "{\n  \"name\": \"%s\",\n  %s\n"
-                      "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\", \"rules\": 8, \"build\": \"%s\", \"built\": %d%s%s,\n"
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
+    _snprintf_s(json, sizeof json, _TRUNCATE, "{\"name\":\"%s\",%s \"snapmap-plus\":{\"format\":2,\"salt\":\"%s\"}}",
+                id, author ? author : "", id);
+    write_file(path, json);
+    at += _snprintf_s(json, sizeof json, _TRUNCATE,
+                      "{\"format\": 2, \"salt\": \"%s\", \"rules\": 8, \"build\": \"%s\", \"built\": %d%s%s,\n"
                       "    \"shadows\": [%s],\n    \"files\": [\n",
-                      id, author ? author : "", id, h, 100 + digit, ea ? ", \"edits\": " : "", ea ? edits : "", shadows);
+                      id, h, 100 + digit, ea ? ", \"edits\": " : "", ea ? edits : "", shadows);
     for (i = 0; i < n; ++i) {
         char sha[65], *ap = sh_ma_path(id, files[i].request);   /* the mod folder holds each file at its author path */
         sh_mb_sha256_hex((const unsigned char *)files[i].body, strlen(files[i].body), sha);
@@ -265,8 +268,8 @@ static void make_mod(const char *root, const char *folder, const char *id, char 
         for (p = path; *p; ++p) if (*p == '/') *p = '\\';
         write_file(path, files[i].body);
     }
-    at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, "    ]\n  }\n}\n");
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
+    at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, "]}\n");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" SH_MB_BUILD_MANIFEST, dir);
     write_file(path, json);
 }
 
@@ -738,6 +741,11 @@ static char *port_edits(unsigned authored, const char *standin, const char *def)
     return out;
 }
 
+static int refused_entity(void *context, const char *name)
+{
+    return !_stricmp((const char *)context, name);
+}
+
 static void test_contract(void)
 {
     static const char ENC[] = "{ edit = { memberList = { num = 1; item[0] = { memberType = \"2097152\"; numToSpawn = 1; } } } }";
@@ -811,6 +819,13 @@ static void test_contract(void)
                  (r.rewrites[i].id == 201 && strstr(r.rewrites[i].text, "memberType = \"1048576\"") != NULL);
     CHECK(ok_rw == 3);
     sh_modregistry_result_free(&r);
+    src[1].entity_unavailable = refused_entity;
+    src[1].context = "mods/bbbbbbbb/ai/demon/arachnotron";
+    CHECK(sh_modregistry_generate(src, 2, tg, 3, NULL, 0, grown, 1, &r));
+    CHECK(r.nentries == 1 && r.text[0] && strstr(r.text[0], "mods/aaaaaaaa/ai/demon/tyrant") &&
+          !strstr(r.text[0], "mods/bbbbbbbb/ai/demon/arachnotron"));
+    sh_modregistry_result_free(&r);
+    src[1].entity_unavailable = NULL;
     /* A twelfth port: no free type, so it shares the type of the first port standing in for the same demon. */
     {
         sh_mr_source many[12];

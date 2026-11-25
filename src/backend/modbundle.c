@@ -6022,8 +6022,7 @@ static int mb_only_keys(const mbj *o, const char *const *keys)
 
 /* ------------------------------------------------------------ mod.json ---- */
 
-#define MB_BLOCK_EDITED "The part of mod.json that Snapmap+ writes was changed by hand; press Refresh in the " \
-                        "Mods tab to build the mod again"
+#define MB_BLOCK_EDITED "This mod's saved build is damaged; press Refresh in the Mods tab to build it again"
 
 static long long mb_now(void)
 {
@@ -6145,10 +6144,6 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
     return 1;
 }
 
-/* A built mod.json: the author block, then the builder block (format 2).
- * A block without "build" is a failed build (its "cause") or a folder given
- * its salt and not built yet: the load fails with that, after reading the
- * salt, "built", "rules" and "tree" so the store still knows the folder. */
 /* The block's "units_of" (a composition's unit hashes) into the bundle; 1, or 0 when it is not a list of hashes
  * (or memory runs out). */
 static int mb_units_of_read(sh_mb_bundle *out, const mbj *block)
@@ -6170,15 +6165,72 @@ static int mb_units_of_read(sh_mb_bundle *out, const mbj *block)
     return 1;
 }
 
-static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
+static const char *mb_identity(const mbj *block)
+{
+    const mbj *format = mbj_get(block, "format"), *salt = mbj_get(block, "salt");
+    if (!format || format->t != MBJ_NUM || strcmp(format->s, "2") || !salt || salt->t != MBJ_STR ||
+        !sh_salt_valid(salt->s, salt->n)) return NULL;
+    return salt->s;
+}
+
+/* Read a mod's own build directory without following links out of its folder. */
+static wchar_t *mb_manifest_path(const wchar_t *folder, int create)
+{
+    wchar_t *dir = mb_wjoin(folder, L".build"), *path = NULL;
+    DWORD attr;
+    if (!dir) return NULL;
+    if (create && !CreateDirectoryW(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) goto done;
+    attr = GetFileAttributesW(dir);
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY) || (attr & FILE_ATTRIBUTE_REPARSE_POINT))
+        goto done;
+    path = mb_wjoin(dir, L"manifest.json");
+    attr = path ? GetFileAttributesW(path) : INVALID_FILE_ATTRIBUTES;
+    if (attr != INVALID_FILE_ATTRIBUTES && (attr & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))) {
+        free(path);
+        path = NULL;
+    }
+done:
+    free(dir);
+    return path;
+}
+
+static char *mb_manifest_bytes(const wchar_t *root, size_t *len)
+{
+    wchar_t *path = root ? mb_manifest_path(root, 0) : NULL;
+    char *text = path ? (char *)mb_read_wfile(path, MB_ANY_SIZE, len) : NULL;
+    free(path);
+    return text;
+}
+
+char *sh_mb_read_manifest_file(const char *folder, size_t *len)
+{
+    wchar_t *root = folder ? sh_mb_wpath(folder) : NULL;
+    char *text;
+    if (len) *len = 0;
+    text = mb_manifest_bytes(root, len);
+    free(root);
+    return text;
+}
+
+static mbj *mb_read_manifest(const wchar_t *root, const char *salt)
+{
+    size_t len = 0;
+    char *text = salt ? mb_manifest_bytes(root, &len) : NULL;
+    mbj *doc = text ? mbj_parse(text, len, NULL) : NULL;
+    const char *id = mb_identity(doc);
+    free(text);
+    if (!id || strcmp(id, salt)) { mbj_free(doc); return NULL; }
+    return doc;
+}
+
+static int mb_load_root(sh_mb_bundle *out, const mbj *root, const mbj *block, int unbuilt)
 {
     static const char *const bkeys[] = { "build", "built", "cause", "classes", "edits", "editor", "files", "format",
                                          "registries", "rules", "salt", "scripts", "shadows", "spelled", "stock", "tree",
                                          "units_of", "warnings", NULL };
-    const mbj *block, *v, *files, *stock, *bundle, *sh;
+    const mbj *v, *files, *stock, *bundle, *sh;
     size_t i;
     if (root->t != MBJ_OBJ) { mb_error(out, MB_BLOCK_EDITED); return 0; }
-    block = mbj_get(root, SH_MB_BLOCK_KEY);
     if (!block || block->t != MBJ_OBJ) {
         mb_error(out, "This mod has not been built yet; press Refresh in the Mods tab");
         return 0;
@@ -6188,7 +6240,6 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
         mb_error(out, SH_MB_EARLIER);
         return 0;
     }
-    if (!mb_only_keys(block, bkeys)) { mb_error(out, MB_BLOCK_EDITED); return 0; }
     v = mbj_get(block, "salt");
     if (!v || v->t != MBJ_STR || !sh_salt_valid(v->s, v->n)) {
         mb_error(out, "The part of mod.json that Snapmap+ writes (\"" SH_MB_BLOCK_KEY "\") is damaged, so this mod cannot be told apart; put back mod.json from a backup, or make the mod again with New mod");
@@ -6196,6 +6247,8 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     }
     memcpy(out->id, v->s, SH_SALT_LEN);
     out->id[SH_SALT_LEN] = 0;
+    if (unbuilt) { mb_error(out, "not built yet"); return 0; }
+    if (!mb_only_keys(block, bkeys)) { mb_error(out, MB_BLOCK_EDITED); return 0; }
     v = mbj_get(block, "built");
     if (v && (v->t != MBJ_NUM || !mb_plain_integer(v->s, v->n) || v->s[0] == '-')) {
         mb_error(out, MB_BLOCK_EDITED);
@@ -6295,13 +6348,12 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     mb_mark_edited(out);
     mb_derive_requirements(out, 0);
     mb_finish(out);
-    if (!check) memcpy(out->prev_hash, bundle->s, SH_MB_HASH_HEX + 1);   /* the hash its block records */
-    if (!out->errors && check && strcmp(out->hash, bundle->s) != 0)
+    if (!out->errors && strcmp(out->hash, bundle->s) != 0)
         mb_error(out, "mod.json was edited after its last build; press Refresh in the Mods tab to build it again");
     return out->errors == 0;
 }
 
-static int mb_load_modjson(const char *text, size_t len, sh_mb_bundle *out, int check)
+static int mb_load_modjson(const char *text, size_t len, sh_mb_bundle *out, const wchar_t *folder)
 {
     char *cause = NULL;
     mbj *root;
@@ -6330,34 +6382,41 @@ static int mb_load_modjson(const char *text, size_t len, sh_mb_bundle *out, int 
             free(engine);
         }
     }
-    ok = mb_load_root(out, root, check);
+    {
+        const mbj *identity = mbj_get(root, SH_MB_BLOCK_KEY);
+        mbj *manifest = folder ? mb_read_manifest(folder, mb_identity(identity)) : NULL;
+        ok = mb_load_root(out, root, manifest ? manifest : identity, folder && !manifest);
+        mbj_free(manifest);
+    }
     mbj_free(root);
     return ok;
 }
 
 int sh_mb_load_text(const char *text, size_t len, sh_mb_bundle *out)
 {
-    return mb_load_modjson(text, len, out, 1);
+    return mb_load_modjson(text, len, out, NULL);
 }
 
 int sh_mb_load(const char *path, sh_mb_bundle *out)
 {
     size_t len = 0;
-    unsigned char *text = sh_mb_read_file(path, MB_ANY_SIZE, &len);
-    int ok = mb_load_modjson((const char *)text, len, out, 1);
+    wchar_t *full = path ? sh_mb_wpath(path) : NULL, *leaf = full ? wcsrchr(full, L'\\') : NULL;
+    char *text = full ? (char *)mb_read_wfile(full, MB_ANY_SIZE, &len) : NULL;
+    int source = leaf && !_wcsicmp(leaf + 1, L"mod.json"), ok;
+    if (source) {
+        if (leaf > full && leaf[-1] == L':') leaf[1] = 0;
+        else *leaf = 0;
+    }
+    ok = mb_load_modjson(text, len, out, source ? full : NULL);
     free(text);
+    free(full);
     return ok;
 }
 
 int sh_mb_load_folder(const char *folder, sh_mb_bundle *out)
 {
-    char *path = sh_textf("%s\\mod.json", folder ? folder : "");
-    int ok;
-    if (!path) {
-        if (out) { memset(out, 0, sizeof *out); mb_error(out, "out of memory"); }
-        return 0;
-    }
-    ok = sh_mb_load(path, out);
+    char *path = folder ? sh_textf("%s\\mod.json", folder) : NULL;
+    int ok = sh_mb_load(path, out);
     free(path);
     return ok;
 }
@@ -6870,7 +6929,7 @@ static void mb_put_needs(mb_buf *o, const sh_mb_file *f)
     mb_put(o, "]", 1);
 }
 
-/* The builder block, pretty-printed (modbundle.h, mod.json format 2). */
+/* The generated manifest stored under .build/. */
 static char *mb_block_text(const sh_mb_bundle *b)
 {
     mb_buf o = {0};
@@ -7035,44 +7094,61 @@ char *sh_mb_modjson_text(const sh_mb_bundle *b, const char *author_text, size_t 
     return mb_modjson(b, author_text, author_len, out_len);
 }
 
+static int mb_write_manifest(const sh_mb_bundle *b, const char *folder, const char *block, char **cause)
+{
+    wchar_t *root = folder ? sh_mb_wpath(folder) : NULL, *path = NULL, *manifest = NULL;
+    char *existing = NULL, *synth = NULL, *source = NULL;
+    size_t size = 0, length = 0;
+    mbj *doc = NULL;
+    const mbj *identity;
+    const char *salt;
+    int ok = 0;
+    if (!block || !root || !(path = mb_wjoin(root, L"mod.json"))) { mb_cause(cause, "out of memory"); goto done; }
+    existing = (char *)mb_read_wfile(path, MB_ANY_SIZE, &size);
+    if (!existing && GetLastError() != ERROR_FILE_NOT_FOUND) { mb_cause(cause, "cannot read mod.json"); goto done; }
+    if (!existing) synth = mb_author_synth(b, &size);
+    if ((!existing && !synth) || !(doc = mbj_parse(existing ? existing : synth, size, NULL)) || doc->t != MBJ_OBJ) {
+        mb_cause(cause, "mod.json is missing or is not a JSON object");
+        goto done;
+    }
+    identity = mbj_get(doc, SH_MB_BLOCK_KEY);
+    salt = mb_identity(identity);
+    if (identity && (!salt || strcmp(salt, b->id))) { mb_cause(cause, "The mod's identity changed; press Refresh."); goto done; }
+    if (!identity || identity->count > 2) {
+        source = sh_mb_salt_modjson(existing ? existing : synth, size, NULL, b->id, &length);
+        if (!source || !mb_write_wfile(path, source, length)) { mb_cause(cause, "cannot save the mod's identity"); goto done; }
+    }
+    manifest = mb_manifest_path(root, 1);
+    ok = manifest && mb_write_wfile(manifest, block, strlen(block));
+    if (!ok) mb_cause(cause, "cannot save the mod's build: %s", sh_reason_win32(GetLastError(), ".build", strlen(block)));
+done:
+    mbj_free(doc);
+    free(existing);
+    free(synth);
+    free(source);
+    free(manifest);
+    free(path);
+    free(root);
+    return ok;
+}
+
 int sh_mb_write(const sh_mb_bundle *b, const char *folder, char **cause)
 {
-    wchar_t *root, *mod_path = NULL;
-    unsigned char *existing = NULL;
-    char *text = NULL;
-    size_t elen = 0, len = 0;
+    char *block;
     int ok;
-    if (!b || b->errors || !b->canonical) return mb_cause(cause, "the mod has errors, so its mod.json is not written");
-    root = folder ? sh_mb_wpath(folder) : NULL;
-    if (root) mod_path = mb_wjoin(root, L"mod.json");
-    if (!mod_path) { free(root); return mb_cause(cause, "out of memory"); }
-    existing = mb_read_wfile(mod_path, MB_ANY_SIZE, &elen);
-    text = mb_modjson(b, (const char *)existing, elen, &len);
-    ok = text && mb_write_wfile(mod_path, text, len);
-    if (!ok && text) mb_cause(cause, "cannot write mod.json: %s", sh_reason_win32(GetLastError(), "mod.json", len));
-    else if (!ok) mb_cause(cause, "mod.json could not be composed (is it a JSON object?)");
-    free(text);
-    free(existing);
-    free(root);
-    free(mod_path);
+    if (!b || b->errors || !b->canonical) return mb_cause(cause, "the mod has errors, so its build cannot be saved");
+    block = mb_block_text(b);
+    ok = mb_write_manifest(b, folder, block, cause);
+    free(block);
     return ok;
 }
 
 int sh_mb_write_failed(const sh_mb_bundle *b, const char *folder, char **why)
 {
-    wchar_t *root, *mod_path = NULL;
-    unsigned char *existing = NULL;
-    char *own = NULL, *block = NULL, *text = NULL, num[32];
-    size_t elen = 0, own_len = 0, len = 0;
+    char *block, num[32];
     mb_buf o = {0};
-    int ok = 0;
+    int ok;
     if (!b || !sh_salt_valid(b->id, strlen(b->id))) return mb_cause(why, "This mod folder has not been scanned yet; press Refresh in the Mods tab");
-    root = folder ? sh_mb_wpath(folder) : NULL;
-    if (root) mod_path = mb_wjoin(root, L"mod.json");
-    if (!mod_path) { free(root); return mb_cause(why, "out of memory"); }
-    existing = mb_read_wfile(mod_path, MB_ANY_SIZE, &elen);
-    own = existing ? sh_mb_author_bytes((const char *)existing, elen, &own_len, NULL) : NULL;
-    if (!own) { mb_cause(why, "mod.json is missing or is not a JSON object"); goto done; }
     mb_puts(&o, "{\"format\":2,\"salt\":");
     mb_put_jcstr(&o, b->id);
     _snprintf_s(num, sizeof num, _TRUNCATE, ",\"rules\":%d", SH_MB_RULES);
@@ -7086,18 +7162,9 @@ int sh_mb_write_failed(const sh_mb_bundle *b, const char *folder, char **why)
     mb_put_jcstr(&o, b->first_cause && b->first_cause[0] ? b->first_cause : "the build failed");
     mb_puts(&o, "}");
     block = o.oom ? NULL : mb_pretty(o.p, o.n);
-    text = block ? mb_splice(own, own_len, block, &len) : NULL;
-    ok = text && mb_write_wfile(mod_path, text, len);
-    if (!ok && text) mb_cause(why, "cannot write mod.json: %s", sh_reason_win32(GetLastError(), "mod.json", len));
-    else if (!ok) mb_cause(why, "out of memory");
-done:
+    ok = mb_write_manifest(b, folder, block, why);
     free(o.p);
     free(block);
-    free(text);
-    free(own);
-    free(existing);
-    free(root);
-    free(mod_path);
     return ok;
 }
 
@@ -7233,14 +7300,14 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
                     free(engine);
                 } else if (en == (size_t)-1) mb_error(out, "out of memory");
                 if (mb_descriptor_root(out, rootj, block, 1) && block) {
-                    /* "built": the first successful build of this salt in this folder. */
-                    pt = mbj_get(block, "built");
+                    mbj *previous = mb_read_manifest(root, out->id);
+                    pt = mbj_get(previous, "built");
                     if (pt && pt->t == MBJ_NUM && mb_plain_integer(pt->s, pt->n) && pt->s[0] != '-')
                         prev_built = _strtoi64(pt->s, NULL, 10);
-                    pt = mbj_get(block, "build");
+                    pt = mbj_get(previous, "build");
                     if (mb_is_hex64(pt)) memcpy(out->prev_hash, pt->s, SH_MB_HASH_HEX + 1);
-                    /* a composition stays one through every build of its folder */
-                    if (!mb_units_of_read(out, block)) mb_error(out, "out of memory");
+                    if (!mb_units_of_read(out, previous)) mb_error(out, "the stored unit list is invalid");
+                    mbj_free(previous);
                 }
             }
         }

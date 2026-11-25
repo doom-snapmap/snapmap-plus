@@ -49,7 +49,7 @@
  * file spells, PARITY_REG=1 the registries and scope per mode, PARITY_DUMP=<part of a request> writes that file's served
  * bytes per mode beside the work folder, PARITY_LOG=1 prints the product's log.
  */
-#include "heap_out.h"
+#include "cache_paths.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -847,7 +847,7 @@ static size_t run_parity(const char *label, const char *author_root, const char 
     memset(&pr, 0, sizeof pr);
     {
         char content[MAX_PATH * 2];
-        _snprintf_s(content, sizeof content, _TRUNCATE, "%s\\.content", author_root);
+        _snprintf_s(content, sizeof content, _TRUNCATE, "%s\\content", mt_cache_dir(author_root));
         CHECK(sh_modpin_rows(&pinned, saved ? saved : json, saved ? saved_len : json_len, content, &pr) >= 0);
     }
     for (k = 0; k < pr.count; k++) {

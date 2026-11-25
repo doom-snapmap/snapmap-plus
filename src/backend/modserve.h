@@ -2,15 +2,10 @@
  * the resource provider, decl registration for editor rows and per-map
  * gameplay activation.
  *
- * Layout read (ONE-SHAPE rules 1 to 4, written by the builder and the store,
- * never here):
- *   <data>\mods\<folder>\mod.json       the author block and the builder block
- *                                       ("snapmap-plus": format 2, salt, build, files, shadows)
- *   <data>\mods\<folder>\assets\...     the files at engine paths
- *   <data>\mods\.content\served\<hash>\ a pinned map row's composition (modcache.h): the
- *                                       units a map, a rawmap or a prefab carries, served for it
- * A mod's identity is its salt (its "id" everywhere below): eight characters
- * in the builder block, never the folder name, which is the author's. The
+ * A local mod has a stable identity in mod.json, its authored files, and
+ * .build\manifest.json describing the build. A map row's pinned units are
+ * assembled under <data>\cache\content\served\<hash>\ (modcache.h).
+ * A mod's identity is its eight-character salt. The
  * root of mods\ holds one build per salt. mods\maps\, where earlier
  * versions put the builds a downloaded map brought, is never read (D4). A
  * folder in an earlier shape, one not built yet
@@ -81,7 +76,7 @@ int sh_modserve_index_rescan(void);
  * freed and logs "MODS: index: N earlier table(s) freed". */
 int sh_modserve_index_retire(void);
 
-/* Remove from the mods folder's served copies (banks renamed for their hash,
+/* Remove from the serving cache (banks renamed for their hash,
  * rewritten texts) every file the published table does not serve from, and
  * any temporary a crashed write left. Each copy is written beside its name
  * and replaces it whole. Run once at boot (sh_modserve_index_boot); skipped,
@@ -120,7 +115,7 @@ typedef struct sh_modserve_hit {
  * bank id rewritten to the FNV-1 of that stem, and every quoted "<stem>",
  * "<stem>.bnk" or ".../<stem>.bnk" in the bundle's served decl texts is
  * rewritten to match. The rewritten bytes are written once under
- * <mods>\.served\, keyed by their own hash (banks\<stem>.<sha16>.bnk,
+ * <data>\cache\served\, keyed by their own hash (banks\<stem>.<sha16>.bnk,
  * files\<sha16>.<extension>), and served from there. So a changed bank is a
  * new bank to Wwise, two builds carrying one bank's bytes share it, and the
  * ledger and refresh see a new name. */
@@ -303,7 +298,7 @@ int sh_modserve_animweb_check(const char *request, const sh_modserve_engine_ops 
 
 /* Withdraw the file serving `request` (lookups and the probe miss it, a
  * rescan keeps it withdrawn while its bytes are unchanged), logging `why` and
- * printing one console line. 1 when a served file was withdrawn. */
+ * printing one console line. Returns 1 when unavailable, 2 when verified stock can serve, or 0 for no change. */
 int sh_modserve_withdraw(const char *request, const char *type, const char *name, const char *why);
 
 /* 1 when the engine error text `text` names the decl file of `type`/`name`
@@ -768,9 +763,9 @@ int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
 /* mods\maps\: where earlier versions put the builds a downloaded map brought (places, retired with D4). The index
  * never reads it; the store never writes or lists it, and refuses to make a mod there. */
 #define SH_MODSERVE_RETIRED_PLACES "maps"
-/* The content cache's area (modcache.h): <store root>\.content\served\<composition hash>\, one bundle per pinned map
+/* The content cache's area (modcache.h): <data>\cache\content\served\<composition hash>\, one bundle per pinned map
  * row, named by its composition hash; a pinned row resolves to its composition only. */
-#define SH_MODSERVE_CONTENT   ".content"
+#define SH_MODSERVE_CONTENT   "content"
 
 /* Set the mode (SH_MODSERVE_MODE_*): the Play entry sets PLAY
  * (sh_modserve_scope_source with SH_MODSERVE_AT_PLAY), a map load sets PLAY
@@ -931,7 +926,7 @@ int sh_modserve_row_served_for(const struct sh_modmanifest_row *row, const char 
 typedef struct sh_modserve_bundle_ref {
     char id[96], hash[SH_MODSERVE_HASH_HEX + 1];
     char *name;                        /* the author's name, "" when none (malloc'd) */
-    char *folder;                      /* its folder below the store root (malloc'd) */
+    char *folder;                      /* its folder below the mods root, or below cache/content for a composition (malloc'd) */
     char *place;                       /* SH_MODSERVE_CONTENT for a composition, "" at the root (malloc'd) */
     unsigned long long size;           /* carried bytes, as a manifest row's size */
 } sh_modserve_bundle_ref;
@@ -959,6 +954,7 @@ int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bund
 /* The folder the content cache composes a row's stand-ins under (modcache.c, D60): a palette row's stand-in is the
  * snapEditorEntityDef mods/<salt>/snapmapplus_standin/<placed name>. Its names are the product's, never a unit's. */
 #define SH_MODSERVE_STANDIN_DIR "snapmapplus_standin"
+#define SH_MODSERVE_STANDIN_CLASS(cls) "{\n\tinherit = \"snapmaps/unknown\";\n\tclass = \"" cls "\";\n}\n"
 /* 1 when `name` (an engine request, a decl name or an author path) lies under a stand-in folder: never a file a unit
  * lost, never asked of the store, never read again once the row's real composition serves (R-LB1). */
 int sh_modserve_standin_name(const char *name);

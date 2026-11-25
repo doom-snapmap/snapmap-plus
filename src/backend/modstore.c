@@ -174,7 +174,13 @@ const char *sh_ms_root(void)
     char *made;
     if (set) return set;
     if (fallback) return fallback;
-    if (!(base = sh_mb_user_root()) || !(made = sh_textf("%s\\mods", base))) return NULL;
+    if (!(base = sh_mb_user_root())) return NULL;
+#ifdef SH_BENCH_MODS
+    made = sh_textf("%s\\bench\\mods", base);
+#else
+    made = sh_textf("%s\\mods", base);
+#endif
+    if (!made) return NULL;
     if (InterlockedCompareExchangePointer((void *volatile *)&fallback, made, NULL) != NULL) free(made);
     return fallback;
 }
@@ -941,7 +947,7 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *r
         free(p);
         if (!present || size != e->bundle.files[i].size) {
             char *text = sh_textf("%s is %s", e->bundle.files[i].path,
-                                  present ? "not the size mod.json records" : "missing");
+                                  present ? "not the size its build records" : "missing");
             e->sizes_ok = 0;
             if (text) { free(e->cause); e->cause = text; }
             break;
@@ -1472,6 +1478,7 @@ static void ms_rk_entry(ms_rk *r, const wchar_t *dir, const char *rel, const WIN
         free(child);
         return;
     }
+    if (!rel[0] && !_stricmp(child, ".build")) { free(child); return; }
     /* The descriptor is rewritten on its own (sh_mb_salt_modjson). */
     if (!rel[0] && !(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
         (!_stricmp(child, "mod.json") || !_stricmp(child, "package.json"))) {
@@ -2452,7 +2459,7 @@ static int ms_verify_folder(const wchar_t *folder, const sh_mb_bundle *b, sh_ms_
             ms_cause(&first, "%s is missing or unreadable", f->path);
         } else if (size != f->size || strcmp(hex, f->blob) != 0) {
             ok = 0;
-            ms_cause(&first, "%s does not match mod.json (damaged or edited)", f->path);
+            ms_cause(&first, "%s does not match its build (damaged or edited)", f->path);
         }
         if (ok) { bytes += f->size; if (st) st->files++; }
         free(p);
@@ -2494,7 +2501,7 @@ int sh_ms_verify(const char *spec, sh_ms_verify_stats *st, char **cause)
             ok = 0;
         }
         if (!sh_mb_set_state(e->folder, passed, passed ? "" : (one ? one : ""), &why))
-            ms_log("MODS: verify %s: the result could not be recorded in mod.json: %s", e->name, why ? why : "");
+            ms_log("MODS: verify %s: the result could not be recorded in the build manifest: %s", e->name, why ? why : "");
         free(folder);
         free(one);
         free(why);
@@ -2580,15 +2587,15 @@ static int ms_build_in_place(const char *folder, const char *from, const sh_mb_r
         /* The cause goes into the block: the Mods tab shows it, and the folder
          * serves nothing until it builds again. */
         if (sh_salt_valid(b->id, strlen(b->id)) && !sh_mb_write_failed(b, folder, &one))
-            ms_log("MODS: store: %s: the failed build could not be recorded in mod.json: %s", ms_rel(folder), one ? one : "");
+            ms_log("MODS: store: %s: the failed build could not be recorded in the build manifest: %s", ms_rel(folder), one ? one : "");
         ms_note_cause(folder, sh_mb_first_cause(b));
         ms_cause(cause, "%s", sh_mb_first_cause(b));
         goto out;
     }
     sh_ms_list_free(&list);
     if (!sh_mb_write(b, folder, &one)) {
-        ms_note_cause(folder, one ? one : "mod.json could not be written");
-        ms_cause(cause, "%s", one ? one : "mod.json could not be written");
+        ms_note_cause(folder, one ? one : "the build could not be saved");
+        ms_cause(cause, "%s", one ? one : "the build could not be saved");
         goto out;
     }
     sh_ms_note_build(folder, b);
@@ -2631,7 +2638,7 @@ static int ms_copy_tree(const wchar_t *src_top, const wchar_t *dst_top, char **c
             if (h == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_NOT_FOUND) ok = ms_cause(cause, "cannot list the folder");
         }
         while (ok && h != INVALID_HANDLE_VALUE) {
-            if (wcscmp(fd.cFileName, L".") && wcscmp(fd.cFileName, L"..")) {
+            if (wcscmp(fd.cFileName, L".") && wcscmp(fd.cFileName, L"..") && !(top && !_wcsicmp(fd.cFileName, L".build"))) {
                 if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
                     ok = ms_cause(cause, "a symbolic link or junction is not allowed in a mod folder");
                 } else {
@@ -2757,8 +2764,8 @@ static int ms_install_locked(const char *folder, int to_root,
     wchar_t *root = NULL, *src = NULL, *final = NULL, *staging = NULL, *old = NULL;
     const char *rootu;
     char *name = NULL, *one = NULL, *why = NULL, *leaf = NULL;
-    char *author = NULL, *text = NULL;
-    size_t i, author_len = 0, text_len = 0;
+    char *author = NULL;
+    size_t i, author_len = 0;
     int ok = 0, state, copy_of_root = 0, replaced = 0;
 
     memset(st, 0, sizeof *st);
@@ -2898,12 +2905,17 @@ static int ms_install_locked(const char *folder, int to_root,
         author = ms_read_text(mj, (size_t)-1, &author_len);
         free(mj);
     }
-    text = sh_mb_modjson_text(&b, author, author_len, &text_len);
     {
         wchar_t *mj = ms_wjoin(staging, L"mod.json");
-        int wrote = mj && text && ms_write_text(mj, text, text_len);
+        char *stage = sh_mb_utf8(staging);
+        int wrote = mj && author && ms_write_text(mj, author, author_len) && stage && sh_mb_write(&b, ms_plain(stage), cause);
+        free(stage);
         free(mj);
-        if (!wrote) { ms_rmtree(staging, root); ms_cause(cause, "cannot write the mod.json of %s", name); goto done; }
+        if (!wrote) {
+            ms_rmtree(staging, root);
+            if (!cause || !*cause) ms_cause(cause, "cannot save the mod %s", name);
+            goto done;
+        }
     }
     /* The copy is what serves: hash it (the source may have changed since the build). */
     if (!ms_verify_folder(staging, &b, NULL, &one)) {
@@ -2945,7 +2957,6 @@ done:
     sh_mb_free(&b);
     sh_ms_list_free(&list);
     free(author);
-    free(text);
     free(name); free(one); free(why); free(leaf);
     free(root); free(src); free(final); free(staging); free(old);
     return ok;

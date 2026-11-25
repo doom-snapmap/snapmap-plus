@@ -18,7 +18,7 @@
  * decodes from them matches the recorded addresses and the signatures it is
  * checked against. */
 #define WIN32_LEAN_AND_MEAN
-#include "heap_out.h"
+#include "cache_paths.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1072,7 +1072,7 @@ static void families_follow_the_map(void)
     CHECK(mt_temp_dir("modvt_place", root, sizeof root));
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
     _snprintf_s(own, sizeof own, _TRUNCATE, "%s\\vtplace0", mods);
-    _snprintf_s(placed, sizeof placed, _TRUNCATE, "%s\\.content\\served\\%s", mods, COMP);
+    _snprintf_s(placed, sizeof placed, _TRUNCATE, "%s\\content\\served\\%s", mt_cache_dir(mods), COMP);
     CreateDirectoryA(mods, NULL);
     put_mod(own, "vtplace0");
     mt_write(own, "virtual-textures\\fam_sq1.mega2", "root one");

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "modcache.h"
+#include "mod_paths.h"
 #include "modmanifest.h"
 #include "modunit.h"
 #include "modbundle.h"
@@ -69,8 +70,10 @@ static char *mc_mods_root(void)
 
 char *sh_cache_root(void)
 {
-    char *m = mc_mods_root(), *out = m ? sh_textf("%s\\" SH_CACHE_DIR, m) : NULL;
-    free(m);
+    char *mods = mc_mods_root(), *cache = sh_mod_cache_dir(mods);
+    char *out = cache ? sh_textf("%s\\content", cache) : NULL;
+    free(mods);
+    free(cache);
     return out;
 }
 
@@ -275,6 +278,20 @@ int sh_cache_put_blob(const char *from, const char *sha, unsigned long long size
     return ok;
 }
 
+int sh_cache_import_blob(const char *sha, const void *bytes, size_t len)
+{
+    char *dir, *path;
+    int ok;
+    if (!mc_hex64(sha)) return 0;
+    dir = mc_path("partial");
+    path = dir ? sh_textf("%s\\%s.import-%lu.part", dir, sha, GetCurrentThreadId()) : NULL;
+    ok = path && mc_mkdirs(dir) && mc_write(path, bytes, len) && sh_cache_put_blob(path, sha, len);
+    if (!ok && path) mc_delete(path);
+    free(dir);
+    free(path);
+    return ok;
+}
+
 int sh_cache_put_manifest(const char *hash, const void *bytes, size_t len)
 {
     char have[SH_MB_HASH_HEX + 1], *dir, *path;
@@ -408,8 +425,7 @@ static int mc_local_verified(mc_local *l)
     return l->checked > 0;
 }
 
-/* 1 when a mod folder's mod.json (which every build writes) is as new as the list or newer: a build made since the list
- * was read (R-LB1 F9). Lock held exclusively. */
+/* A new build manifest can make more local files available by hash. Lock held exclusively. */
 static int mc_local_stale_locked(void)
 {
     char *root = g_mods_root ? sh_text(g_mods_root) : (g_store_root && g_store_root() ? sh_text(g_store_root()) : NULL);
@@ -420,7 +436,7 @@ static int mc_local_stale_locked(void)
     int stale = 0;
     while (h != INVALID_HANDLE_VALUE && !stale) {
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != L'.' && _wcsicmp(fd.cFileName, L"maps")) {
-            char *leaf = sh_mb_utf8(fd.cFileName), *json = leaf ? sh_textf("%s\\%s\\mod.json", root, leaf) : NULL;
+            char *leaf = sh_mb_utf8(fd.cFileName), *json = leaf ? sh_textf("%s\\%s\\" SH_MB_BUILD_MANIFEST, root, leaf) : NULL;
             wchar_t *wj = json ? sh_mb_wpath(json) : NULL;
             WIN32_FILE_ATTRIBUTE_DATA a;
             if (wj && GetFileAttributesExW(wj, GetFileExInfoStandard, &a) &&
@@ -867,6 +883,7 @@ static int mc_cause_rank(int cause)
     case SH_CACHE_ABSENT_BROKEN: return 7;
     case SH_CACHE_ABSENT_LOCAL: return 8;
     case SH_CACHE_ABSENT_LACKED: return 9;
+    case SH_CACHE_ABSENT_REFUSED: return 10;
     default: return 10;
     }
 }
@@ -953,6 +970,9 @@ static char *mc_notice_sentence(const char *subject, int cause, int plural)
         break;
     case SH_CACHE_ABSENT_LACKED:
         out = sh_textf("This map is playing without %s, which your folder of the mod no longer has.", subject);
+        break;
+    case SH_CACHE_ABSENT_REFUSED:
+        out = sh_textf("This map is playing without %s because the game could not load it. Fix the file in the Mods tab and press Refresh.", subject);
         break;
     default:
         out = sh_textf("This map is playing without %s.", subject);
@@ -1070,7 +1090,7 @@ static int mc_class_name(const char *cls)
 char *sh_cache_standin_def_text(const char *cls)
 {
     if (!mc_class_name(cls) || !strcmp(cls, "idEntity")) return sh_text(MC_ENTITY_STANDIN);
-    return sh_textf("{\n\tinherit = \"snapmaps/unknown\";\n\tclass = \"%s\";\n}\n", cls);
+    return sh_textf(SH_MODSERVE_STANDIN_CLASS("%s"), cls);
 }
 
 /* The stock row a stand-in row inherits for (cls, entrefs, varrefs): exactly that key, else the class's row with
@@ -1779,7 +1799,8 @@ record:
                     if (read && !snapshot.pinfo[i].known) continue;
                     r->absent[r->nabsent].object = mc_object_label(&snapshot, snapshot.placed[i], 0);
                     r->absent[r->nabsent].mod = sh_text(mc_mod_label(snapshot.name, snapshot.salt));
-                    r->absent[r->nabsent].cause = snapshot.broken == SH_MODMANIFEST_LOCAL_LACKS ? SH_CACHE_ABSENT_LACKED
+                    r->absent[r->nabsent].cause = snapshot.broken == SH_MODMANIFEST_LOCAL_REFUSED ? SH_CACHE_ABSENT_REFUSED :
+                                                  snapshot.broken == SH_MODMANIFEST_LOCAL_LACKS ? SH_CACHE_ABSENT_LACKED
                                                   : snapshot.broken ? SH_CACHE_ABSENT_BROKEN : SH_CACHE_ABSENT_LOCAL;
                     r->nabsent++;
                 }

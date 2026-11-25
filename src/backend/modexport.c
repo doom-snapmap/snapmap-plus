@@ -540,10 +540,7 @@ static int me_open(sh_zip_reader *zr, const char *path, int want, char **text, s
  * the cache is not written again. */
 static int me_take(sh_zip_reader *zr, int kind, modexport_stats *st, char **cause)
 {
-    char *root = sh_cache_root();
     size_t i;
-    unsigned serial = 0;
-    if (!root) return me_cause(cause, "the mods folder cannot be read. Check that it exists, then press Refresh in the Mods tab");
     /* The player turned off "Play maps whose mods include scripts": an export whose units carry scripts brings
      * nothing in, and the sentence says what to turn on and where (modui.h). */
     if (!sh_modui_scripted_maps_allowed())
@@ -554,7 +551,7 @@ static int me_take(sh_zip_reader *zr, int kind, modexport_stats *st, char **caus
             const mpj *files;
             int k, scripts = 0;
             if (_strnicmp(zr->e[i].name, "units/", 6)) continue;
-            if (!(bytes = sh_zip_reader_read(zr, (long)i, (size_t)-1, &blen, cause))) { free(root); return 0; }
+            if (!(bytes = sh_zip_reader_read(zr, (long)i, (size_t)-1, &blen, cause))) return 0;
             m = mpj_parse((const char *)bytes, blen);
             free(bytes);
             files = m ? mpj_get(m, "files") : NULL;
@@ -565,11 +562,9 @@ static int me_take(sh_zip_reader *zr, int kind, modexport_stats *st, char **caus
             mpj_free(m);
             if (scripts) {
                 me_log("MODS: import: %s carries scripts and the player turned scripts off", zr->e[i].name);
-                free(root);
                 return me_cause(cause, "%s", kind == ME_KIND_PREFAB ? SH_MODUI_SCRIPTS_OFF_PREFAB : SH_MODUI_SCRIPTS_OFF);
             }
         }
-    CreateDirectoryA(root, NULL);
     for (i = 0; i < zr->n; i++) {
         const char *name = zr->e[i].name;
         size_t n = strlen(name), blen = 0;
@@ -579,7 +574,6 @@ static int me_take(sh_zip_reader *zr, int kind, modexport_stats *st, char **caus
         if (!unit && !file) continue;
         if ((unit && !(n == 6 + SH_MB_HASH_HEX + 5 && me_hex64(name + 6, SH_MB_HASH_HEX) && !_stricmp(name + n - 5, ".json"))) ||
             (file && !me_hex64(name + 6, n - 6))) {
-            free(root);
             return me_cause(cause, "the export is damaged: one of its mod files is not what it says; export it again");
         }
         if (unit) {
@@ -592,41 +586,27 @@ static int me_take(sh_zip_reader *zr, int kind, modexport_stats *st, char **caus
             if (have) { free(have); continue; }
         }
         bytes = sh_zip_reader_read(zr, (long)i, (size_t)-1, &blen, cause);
-        if (!bytes) { free(root); return 0; }
+        if (!bytes) return 0;
         sh_mb_sha256_hex(bytes, blen, actual);
         if (unit ? _strnicmp(actual, name + 6, SH_MB_HASH_HEX) : _stricmp(actual, name + 6)) {
             free(bytes);
-            free(root);
             return me_cause(cause, "the export is damaged: one of its mod files is not what it says; export it again");
         }
         if (unit) {
             char hash[SH_MB_HASH_HEX + 1];
             memcpy(hash, name + 6, SH_MB_HASH_HEX);
             hash[SH_MB_HASH_HEX] = 0;
-            if (!sh_cache_put_manifest(hash, bytes, blen)) { free(bytes); free(root); return me_cause(cause, "the map's mod content could not be saved on this computer"); }
+            if (!sh_cache_put_manifest(hash, bytes, blen)) { free(bytes); return me_cause(cause, "the map's mod content could not be saved on this computer"); }
             st->bundles_installed++;
         } else {
-            char *tmp = sh_textf("%s\\import-%lu-%u.tmp", root, GetCurrentProcessId(), serial++);
-            wchar_t *wt = tmp ? sh_mb_wpath(tmp) : NULL;
-            HANDLE h = wt ? CreateFileW(wt, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
-            DWORD put = 0;
-            int wrote = h != INVALID_HANDLE_VALUE && WriteFile(h, bytes, (DWORD)blen, &put, NULL) && put == blen;
-            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-            if (!wrote || !sh_cache_put_blob(tmp, name + 6, (unsigned long long)blen)) {
-                if (wt) DeleteFileW(wt);
-                free(wt);
-                free(tmp);
+            if (!sh_cache_import_blob(name + 6, bytes, blen)) {
                 free(bytes);
-                free(root);
                 return me_cause(cause, "the map's mod content could not be saved on this computer");
             }
-            free(wt);
-            free(tmp);
             st->files++;
         }
         free(bytes);
     }
-    free(root);
     return 1;
 }
 

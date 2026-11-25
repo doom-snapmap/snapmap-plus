@@ -1,57 +1,6 @@
-/* modstore.h -- the local mod store, %LOCALAPPDATA%\snapmap-plus\mods\.
- *
- *   <folder>\mod.json            the author's part and the builder block (modbundle.h)
- *   <folder>\assets\...          the mod's files, real files only (no links, no blob store)
- *   .content\                    the content cache of maps' units (modcache.h), not a mod
- *   snapmap-plus.json            the product record (modbundle.h): claims, links,
- *                                which folder holds each salt
- *
- * Identity is the salt (modsalt.h, ONE-SHAPE rule 1): eight characters in the
- * builder block, given once. A folder name is the author's and never carries
- * identity, so any folder may be renamed at any time and the next scan reads
- * the same salt. A folder is a mod when it holds mod.json (package.json is an
- * earlier shape and is refused with its reason).
- *
- * Areas (rule 4). The root is everything under mods\ except mods\maps\:
- * the player's own mods, with organizing folders to any depth.
- * One salt has one folder at the root. mods\maps\ held the builds a
- * downloaded map brought in earlier versions (places, retired with D4: a
- * map's content is its units in the content cache now); nothing reads,
- * lists, builds or writes there, and "maps" stays a reserved name at the top
- * of mods\.
- *
- * The scan (sh_ms_sync: boot, Refresh, and after an install, a download or
- * New mod; no folder watcher, rule 3). Under the store lock:
- *   1. a root folder with no builder block is a new mod: it gets its salt
- *      (sh_ms_assign_salt) and keeps its folder name;
- *   2. two root folders carrying one salt (a copied folder): the folder the
- *      record's "salts" section names (the one that held it at the last
- *      scan) keeps it, else the one created first; every other one gets a
- *      new salt with its own references rewritten. The scan then records
- *      each salt's folder;
- *   3. a root folder whose tree hash (sh_mb_tree_hash) or builder rules
- *      differ from its block's, or whose last build failed, is built again;
- *      a failed build records its cause in the block and the folder serves
- *      nothing until fixed (rule 2: no snapshots, no last good build).
- * Before a root folder is built (1 and 3), what the author wrote under its
- * folder name moves under the salt (DECISIONS 20): files under
- * assets\...\mods\<folder name>\, references to mods/<folder name>/ in
- * mod.json and every text under assets\ (scripts among them), strings keys
- * without the "<salt>_" prefix that are not string edits with their #str_
- * references, and a sound bank "<folder name>_x.bnk" (renamed
- * "<salt>_x.bnk", its id following the name). A folder name equal to a salt
- * of the store names that mod and is never moved. Renaming a folder changes
- * nothing already moved. Files beside mod.json and assets\ are left alone.
-
- * A folder in an earlier shape is listed with its plain reason and nothing in
- * it is written. Enumeration only reads.
- *
- * File work only, on the calling thread; no engine calls. Every writer of the
- * store serialises on modstore_lock: the install, verification and sync take
- * it themselves, and longer steps (a download install, `sh_mods install`, an
- * export) hold it around their whole step. A second writer waits for the
- * first, it never fails because of it.
- */
+/* Local mod folders hold their assets and mod.json. Snapmap+ writes build results in each
+ * mod's .build directory and keeps folder identities and publishing records in snapmap-plus.json.
+ * Store writes share a cross-process lock; boot, Refresh and install rescan changed mods. */
 #ifndef SNAPMAP_PLUS_MODSTORE_H
 #define SNAPMAP_PLUS_MODSTORE_H
 

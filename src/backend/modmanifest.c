@@ -1917,8 +1917,10 @@ static int mm_local_lacks(const sh_modmanifest_row *r)
 {
     size_t k;
     if (r->pinned || !strcmp(r->salt, SH_MODMANIFEST_PRODUCT)) return 0;
-    for (k = 0; k < r->name_count; k++)
-        if (r->names && r->names[k] && sh_modserve_root_lacks(r->salt, r->names[k])) return 1;
+    for (k = 0; k < r->name_count; k++) {
+        int why = r->names && r->names[k] ? sh_modserve_root_lacks(r->salt, r->names[k]) : 0;
+        if (why) return why;
+    }
     return 0;
 }
 
@@ -1949,7 +1951,8 @@ void sh_modmanifest_content_for(const char *json, size_t length, const sh_modman
             none.labels = r->labels;
             none.size = r->size;
             none.pinned = 1;
-            none.local_broken = lacking ? SH_MODMANIFEST_LOCAL_LACKS : sh_modserve_salt_installed(r->salt);
+            none.local_broken = lacking == SH_MODMANIFEST_LOCAL_REFUSED ? SH_MODMANIFEST_LOCAL_REFUSED :
+                                lacking ? SH_MODMANIFEST_LOCAL_LACKS : sh_modserve_salt_installed(r->salt);
             (void)sh_modmanifest_list_add(&rows_here, &none);
         }
     }
@@ -1963,7 +1966,7 @@ void sh_modmanifest_content_for(const char *json, size_t length, const sh_modman
             for (i = 0; i < rows_here.count && !theirs; i++) {
                 const sh_modmanifest_row *r = &rows_here.rows[i];
                 size_t sl = strlen(r->salt);
-                theirs = r->local_broken == SH_MODMANIFEST_LOCAL_LACKS && !_strnicmp(placed[k], "mods/", 5) &&
+                theirs = r->local_broken >= SH_MODMANIFEST_LOCAL_LACKS && !_strnicmp(placed[k], "mods/", 5) &&
                          !_strnicmp(placed[k] + 5, r->salt, sl) && placed[k][5 + sl] == '/' &&
                          !sh_modserve_root_lacks(r->salt, placed[k]);
             }

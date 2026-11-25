@@ -718,6 +718,55 @@ static unsigned mr_pin(const sh_mr_choice *choices, int nchoices, const char *ke
     return 0;
 }
 
+/* Every member of this encounter requests exactly this custom type. Mixed encounters retain their other members. */
+static int mr_only_member(const sh_mr_decl *d, unsigned bit)
+{
+    size_t pos = 0;
+    mr_tok prev = { MT_END, 0, 0 }, field = prev;
+    int seen = 0;
+    char value[16];
+    int len = _snprintf_s(value, sizeof value, _TRUNCATE, "%u", bit);
+    for (;;) {
+        mr_tok t = mr_next(d->text, d->len, &pos);
+        if (t.kind == MT_END) return seen;
+        if (t.kind == MT_STR && prev.kind == MT_EQ && mr_word_is(d->text, &field, "memberType")) {
+            if (t.n != (size_t)len + 2 || memcmp(d->text + t.at + 1, value, (size_t)len)) return 0;
+            seen = 1;
+        }
+        field = prev; prev = t;
+    }
+}
+
+/* Keep native registrations and remove only added entries whose selected entity cannot load. */
+static void mr_drop_unavailable(sh_dt *t, const sh_mr_source *src, int n, int authored)
+{
+    sh_dt_node *list = sh_dt_at(sh_dt_root(t), "edit/aiTypeList");
+    int i;
+    if (!list) return;
+    for (i = list->nkids - 1; i >= 0; --i) {
+        sh_dt_node *it = list->kids[i];
+        char *name;
+        if (!it->block || it->src < 0 || it->src >= n || !src[it->src].entity_unavailable) continue;
+        name = mr_unquote(sh_dt_child(it, "entityDef"));
+        if (name && src[it->src].entity_unavailable(src[it->src].context, name)) {
+            const sh_mr_source *s = &src[it->src];
+            if (authored && s->single_actor) {
+                char *a = mr_unquote(sh_dt_child(it, "aiType"));
+                unsigned bit = 0, like = 0;
+                if (a && sh_modregistry_type_words(a, strlen(a), &bit, &like) && bit) {
+                    int k;
+                    for (k = 0; k < s->ndecls; ++k)
+                        if (!s->decls[k].score && mr_only_member(&s->decls[k], bit))
+                            s->single_actor(s->context, s->decls[k].id, name);
+                }
+                free(a);
+            }
+            sh_dt_remove_child(list, i);
+        }
+        free(name);
+    }
+}
+
 static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, const sh_mr_choice *choices, int nchoices,
                         sh_mr_result *r)
 {
@@ -999,6 +1048,7 @@ int sh_modregistry_generate(const sh_mr_source *src, int n, const sh_mr_target *
         sh_dt *t;
         if (!targets[k].text || _stricmp(targets[k].request, SH_MB_REGISTRY_CONDUCTOR)) continue;
         t = sh_dt_apply(targets[k].request, targets[k].text, targets[k].len, ds, n, dc, nchoices, NULL);
+        if (t) mr_drop_unavailable(t, src, n, 1);
         if (t && !mr_conductor(t, src, n, choices, nchoices, out)) { sh_dt_free(t); goto oom; }
         sh_dt_free(t);
     }
@@ -1038,7 +1088,10 @@ int sh_modregistry_generate(const sh_mr_source *src, int n, const sh_mr_target *
         rep.context = &ctx;
         rep.used = out->used[k];
         t = sh_dt_apply(targets[k].request, targets[k].text, targets[k].len, ds, n, dc, nchoices, &rep);
-        if (t && !_stricmp(targets[k].request, SH_MB_REGISTRY_CONDUCTOR) && !mr_conductor_serve(t)) { sh_dt_free(t); goto oom; }
+        if (t && !_stricmp(targets[k].request, SH_MB_REGISTRY_CONDUCTOR)) {
+            mr_drop_unavailable(t, src, n, 0);
+            if (!mr_conductor_serve(t)) { sh_dt_free(t); goto oom; }
+        }
         if (t) {
             out->text[k] = sh_dt_text(t, &out->len[k]);
             sh_dt_free(t);

@@ -118,7 +118,7 @@ int  sh_unit_of(const sh_mb_bundle *b, const char *folder, const char *name, con
 void sh_unit_free(sh_unit *u);
 
 /* Write the unit's manifest at <content root>\units\<hash>.json (a file already there with those bytes is kept).
- * The content root is the mods folder's .content (SPEC-distribution 2.11). 1 on success; 0 with *why. */
+ * The content root is the profile's cache/content folder (SPEC-distribution 2.11). 1 on success; 0 with *why. */
 int  sh_unit_store(const sh_unit *u, const char *content_root, char **why);
 
 /* The kept files' bytes for a composition: the local path of the unit file at `path` (the mod's own path), malloc'd,

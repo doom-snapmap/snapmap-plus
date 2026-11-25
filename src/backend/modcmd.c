@@ -117,8 +117,7 @@ static char *mc_resolve_folder(const char *arg)
     return sh_textf("%s\\%s", root, arg);
 }
 
-/* The serving index reads mod.json at boot and on rescan only, so a bundle
- * written or installed now is invisible until the table is rebuilt. */
+/* Rebuild the serving index after changing an installed mod. */
 static void mc_rescan(const char *why)
 {
     int n = sh_modserve_index_rescan();
@@ -221,7 +220,7 @@ static void mc_build(const char *folder_in)
     if (!mc_assign_salt("build", folder)) return;
     listed = sh_ms_enumerate(&list);
     if (!listed) memset(&list, 0, sizeof list);
-    mc_line("MODS: build %s: reading the descriptor and assets/ (%zu installed bundle(s) consulted)", folder, list.count);
+    mc_line("MODS: build %s: reading the mod folder (%zu installed bundle(s) consulted)", folder, list.count);
     r.installed = sh_ms_request_exists;
     r.installed_context = &list;
     r.stock = mc_stock_exists;
@@ -237,7 +236,13 @@ static void mc_build(const char *folder_in)
         /* A folder that fails to build serves nothing until it is fixed. */
         mc_line("MODS: build %s: does not build (%u error(s)), first: %s; the folder serves nothing until it builds",
                 folder, b.errors, sh_mb_first_cause(&b));
-        if (mc_in_store(folder)) sh_ms_note_build_failure(folder, sh_mb_first_cause(&b));
+        if (b.id[0] && !sh_mb_write_failed(&b, folder, &cause))
+            mc_line("MODS: build %s: the failure could not be saved: %s", folder, cause ? cause : "out of memory");
+        free(cause);
+        if (mc_in_store(folder)) {
+            sh_ms_note_build_failure(folder, sh_mb_first_cause(&b));
+            mc_rescan("build");
+        }
         sh_mb_free(&b);
         sh_ms_list_free(&list);
         return;
@@ -250,7 +255,7 @@ static void mc_build(const char *folder_in)
     if (!sh_mb_write(&b, folder, &cause))
         mc_line("MODS: build %s: valid but not written: %s", folder, cause ? cause : "out of memory");
     else {
-        mc_line("MODS: build %s: the build is written to mod.json's \"snapmap-plus\" block", folder);
+        mc_line("MODS: build %s: build saved", folder);
         if (mc_in_store(folder)) {
             sh_ms_note_build(folder, &b);
             mc_rescan("build");
@@ -276,8 +281,8 @@ static void mc_install_one(const char *folder, int rescan)
     r.stock_context = &stock;
     ok = sh_ms_install_from_folder(folder, &r, &name, &st, &b, &cause);
     if (b.id[0]) {
-        mc_line("MODS: install %s: %s, %zu file(s), %llu byte(s)%s", folder, mc_name(&b, folder), b.file_count,
-                b.total_size, b.errors ? "" : ", mod.json written");
+        mc_line("MODS: install %s: %s, %zu file(s), %llu byte(s)", folder, mc_name(&b, folder), b.file_count,
+                b.total_size);
         mc_needs_line("install", folder, &b);
     }
     if (b.id[0]) mc_stock_line("install", folder, &b);

@@ -4,7 +4,7 @@
  *   sh_mods rescan | refresh       build every mod folder whose files changed (modstore.h, the
  *                                  rebuild rule), then reread the mods folder into the serving index
  *   sh_mods palette rebuild        add Toybox rows of mods indexed after the first palette build
- *   sh_mods build "<folder>"       build a mod and write its mod.json's "snapmap-plus" block
+ *   sh_mods build "<folder>"       build a mod from its author files
  *   sh_mods install "<folder>"     build, copy into the mods folder under its own name, verify, rescan
  *   sh_mods list                   the mod folders and their state (a folder that does not build:
  *                                  its cause; it serves nothing until fixed)
@@ -47,7 +47,7 @@
                        "'sh_mods refresh') rebuilds changed mod folders, rereads the mods folder and applies what " \
                        "changed to the running game (what needs a map reload or a restart is listed), 'sh_mods palette " \
                        "rebuild' adds new mod rows to the open editor, 'sh_mods build \"<folder>\"' checks a mod and " \
-                       "writes its build into its mod.json, 'sh_mods install \"<folder>\"' adds it to the mods folder, " \
+                       "saves its build, 'sh_mods install \"<folder>\"' adds it to the mods folder, " \
                        "'sh_mods list' shows the mod folders, 'sh_mods doctor [verify]' explains every folder's state, " \
                        "clashes and shadows, 'sh_mods verify \"<folder>\"' rehashes one, 'sh_mods copystock \"<engine " \
                        "path>\" \"<file>\"' writes an installed game file's bytes to a file. 'sh_mods help' lists the Mods " \
