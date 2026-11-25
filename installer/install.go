@@ -153,6 +153,11 @@ func cmdInstall(f flags) error {
 	if err := saveInstall(b.version, doom, build.build, rec); err != nil {
 		return fmt.Errorf("installed the files, but couldn't write the install record (%v) -- run: snapmap-plus update", err)
 	}
+	if carriesMarker(filepath.Join(doom, currentProxy), []byte(modBuildManifest)) {
+		if err := upgradeModLayout(appDataDir()); err != nil {
+			return fmt.Errorf("Snapmap+ is installed, but updating your mod data could not finish (%w). Run the same install or update command again", err)
+		}
+	}
 	migrateLegacyLogs(doom) // runtime logs live in snapmap-plus\logs\ -- fold older locations (snaphak_logs\, snaphak\logs\) in (best-effort)
 	ui.Blank()
 	ui.OK("Snapmap+ %s installed.", b.version)

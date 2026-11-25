@@ -30,10 +30,8 @@ func retiredContent(rel string) bool {
 	return false
 }
 
-// regenerableContent reports whether a path relative to a content root is regenerable cache: the
-// cache folder (the companion window's WebView2 profile lives in cache\webview2) and the webview2
-// folder earlier releases kept at the top level. The game rebuilds it, so it is never backed up,
-// copied or required at a destination.
+// These folders in the original home-root profile only held regenerable data.
+// The current app-data cache also holds offline map content.
 func regenerableContent(rel string) bool {
 	first := strings.ToLower(strings.SplitN(filepath.ToSlash(rel), "/", 2)[0])
 	return first == "cache" || first == "webview2"

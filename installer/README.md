@@ -23,6 +23,8 @@ The runtime uses only Go's standard library.
 | `build.ps1`, `versioninfo.json`, `snapmap-plus.manifest` | Windows build metadata. |
 | `install.ps1` | Download-and-launch bootstrap script. |
 
+On install or update to a backend with per-mod build manifests, the installer preserves existing mod IDs and moves each generated build record to `.build/manifest.json`. Shared map content moves to `cache/content/` and engine-ready files to `cache/served/` beside `mods/`. The move preserves offline maps and interrupted downloads and can resume after an interrupted update.
+
 ## Working here
 
 From this directory:

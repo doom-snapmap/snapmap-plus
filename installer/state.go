@@ -141,6 +141,10 @@ func saveJSONFile(path string, value any) error {
 	if err != nil {
 		return err
 	}
+	return writeAtomicFile(path, data)
+}
+
+func writeAtomicFile(path string, data []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".install-json-*")
 	if err != nil {
 		return err

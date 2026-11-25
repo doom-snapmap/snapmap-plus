@@ -43,13 +43,17 @@ var ourMarker = []byte("snapmap-plus")
 
 // carriesOurMarker reports whether the file's bytes hold ourMarker, as ASCII or UTF-16.
 func carriesOurMarker(path string) bool {
+	return carriesMarker(path, ourMarker)
+}
+
+func carriesMarker(path string, marker []byte) bool {
 	f, err := os.Open(path)
 	if err != nil {
 		return false
 	}
 	defer f.Close()
-	wide := make([]byte, 0, 2*len(ourMarker))
-	for _, c := range ourMarker {
+	wide := make([]byte, 0, 2*len(marker))
+	for _, c := range marker {
 		wide = append(wide, c, 0)
 	}
 	// The whole file, a window at a time; each window keeps the previous one's last bytes so a
@@ -60,7 +64,7 @@ func carriesOurMarker(path string) bool {
 	for {
 		n, err := f.Read(chunk)
 		buf = append(buf, chunk[:n]...)
-		if bytes.Contains(buf, ourMarker) || bytes.Contains(buf, wide) {
+		if bytes.Contains(buf, marker) || bytes.Contains(buf, wide) {
 			return true
 		}
 		if len(buf) > keep {

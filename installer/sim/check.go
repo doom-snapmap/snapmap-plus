@@ -32,7 +32,7 @@ var pairNames = lowerSet([]string{"XINPUT1_4.dll", pair2024UI, "XINPUT1_3.dll", 
 // labelled in the listing.
 var playerData = map[string]string{
 	"config.json": "player data", "prefabs": "player data", "strings": "player data", "mods": "player data",
-	"rawmap.json": "player data", "test-maps": "player data", "cache": "regenerable cache", "token": "player data",
+	"rawmap.json": "player data", "test-maps": "player data", "cache": "map content and runtime cache", "token": "player data",
 	"pinned.json": "player data",
 	// Folders of earlier releases stay as they are: converting earlier releases' data is not in this release.
 	"overrides":    "player data (an earlier release's retired package folder; kept as it is)",
