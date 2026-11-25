@@ -7,6 +7,15 @@
 #include "../src/backend/map_settings.h"
 #include "../src/backend/map_shards.h"
 
+#include "map_carrier.h"
+
+static void prepare_map_settings(const char *json, size_t len)
+{
+    sh_carrier_view view;
+    sh_carrier_view_read(json, len, &view);
+    sh_map_settings_prepare_load(view.settings.present ? json + view.settings.from : NULL, view.settings.to - view.settings.from);
+}
+
 static int logs;
 void backend_log(const char *s) { (void)s; logs++; }
 
@@ -46,12 +55,11 @@ static char *put(const char *json, const sh_map_settings *s, sh_map_settings_rep
     return out;
 }
 
-/* take() never changes the text: the member goes with the parse detour's last step. */
-static void take(const char *json, sh_map_settings *s, sh_map_settings_report *r)
+static void read_settings(const char *json, sh_map_settings *s, sh_map_settings_report *r)
 {
-    size_t n = 7;
-    char *out = sh_map_settings_take(json, strlen(json), s, &n, r);
-    assert(!out && n == 0);
+    sh_carrier_view view;
+    sh_carrier_view_read(json, strlen(json), &view);
+    sh_map_settings_read(view.settings.present ? json + view.settings.from : NULL, view.settings.to - view.settings.from, s, r);
 }
 
 int main(void)
@@ -70,7 +78,7 @@ int main(void)
         b = put(bare, &on, &r);
         assert(b && !strcmp(b, member) && r.written == 2 && !r.failed);
         HeapFree(GetProcessHeap(), 0, b);
-        take(member, &s, &r);
+        read_settings(member, &s, &r);
         assert(r.member && !r.refused && !r.failed);
         assert(sh_map_render_unlocked(&s.render) && sh_map_bounds_overrides(&s.bounds) && s.bounds.limit == SH_BOUNDS_CEILING);
         /* Putting what the member already says changes nothing. */
@@ -91,15 +99,15 @@ int main(void)
     /* The member's values: one that does not read is off; a member without a
      * settings part, or a malformed one, is both off. */
     {
-        take(MAPM("0", "", SET("\"render\":\"garbage\",\"bounds\":\"1;20000\"")), &s, &r);
+        read_settings(MAPM("0", "", SET("\"render\":\"garbage\",\"bounds\":\"1;20000\"")), &s, &r);
         assert(r.member && r.refused == 2 && !sh_map_render_unlocked(&s.render) && s.bounds.limit == 0);
-        take(MAPM("0", "", ",\"snapmap-plus\":{\"format\":2,\"mods\":[]}"), &s, &r);
+        read_settings(MAPM("0", "", ",\"snapmap-plus\":{\"format\":2,\"mods\":[]}"), &s, &r);
         assert(!r.member && !sh_map_render_unlocked(&s.render) && !sh_map_bounds_overrides(&s.bounds));
-        take(MAPM("0", "", ",\"snapmap-plus\":{\"format\":2,\"settings\":[]}"), &s, &r);
+        read_settings(MAPM("0", "", ",\"snapmap-plus\":{\"format\":2,\"settings\":[]}"), &s, &r);
         assert(!r.member && !sh_map_render_unlocked(&s.render));
         /* A variable named like a setting is the author's text here: nothing reads it. */
         s = on;
-        take(MAP("1", VAR("smp.render.v1", "4;0")), &s, &r);
+        read_settings(MAP("1", VAR("smp.render.v1", "4;0")), &s, &r);
         assert(!r.member && !sh_map_render_unlocked(&s.render) && !sh_map_bounds_overrides(&s.bounds));
     }
 
@@ -108,7 +116,7 @@ int main(void)
         static const char plain[] = MAP("1", VAR("String 1", "hello"));
         static const char empty[] = MAP("0", "");
         s = on;
-        take(plain, &s, &r);
+        read_settings(plain, &s, &r);
         assert(!r.failed && !r.member && !sh_map_render_unlocked(&s.render) && !sh_map_bounds_overrides(&s.bounds));
         assert(!put(plain, &off, &r) && !r.failed);
         b = put(empty, &on, &r);
@@ -133,7 +141,7 @@ int main(void)
             "{\n  \"variables\": {\n    \"allocCount\": [0, 0, 0, 0, 1],\n    \"string\": [\n"
             "      {\"info\": {\"name\": \"String 1\", \"~type\": \"snapVarInfo_t\"}, \"initialValue\": \"x\"}\n"
             "    ]\n  },\"snapmap-plus\":{\"format\":2,\"settings\":{\"render\":\"4;0\"}}\n}\n"));
-        take(b, &s, &r);
+        read_settings(b, &s, &r);
         assert(r.member && sh_map_render_unlocked(&s.render));
         HeapFree(GetProcessHeap(), 0, b);
     }
@@ -150,7 +158,7 @@ int main(void)
         sh_map_render render;
         static const char rendered[] = MAPM("0", "", SET("\"render\":\"4;0\""));
         sh_map_settings_reset();
-        assert(!sh_map_settings_prepare_load(rendered, strlen(rendered), &n));
+        prepare_map_settings(rendered, strlen(rendered));
         sh_map_settings_current(&cur);
         assert(!sh_map_render_unlocked(&cur.render));     /* not until the parse succeeded */
         sh_map_settings_loaded(1);
@@ -163,17 +171,17 @@ int main(void)
         HeapFree(GetProcessHeap(), 0, b);
         /* A member-carrying map loads the same way; its member stays for the
          * carrier strip that runs last. */
-        assert(!sh_map_settings_prepare_load(MAPM("0", "", BOTH), strlen(MAPM("0", "", BOTH)), &n));
+        prepare_map_settings(MAPM("0", "", BOTH), strlen(MAPM("0", "", BOTH)));
         sh_map_settings_loaded(1);
         sh_map_settings_current(&cur);
         assert(sh_map_render_unlocked(&cur.render) && sh_map_bounds_overrides(&cur.bounds));
         /* A failed parse of another map. */
-        assert(!sh_map_settings_prepare_load(MAP("0", ""), strlen(MAP("0", "")), &n));
+        prepare_map_settings(MAP("0", ""), strlen(MAP("0", "")));
         sh_map_settings_loaded(0);
         sh_map_settings_current(&cur);
         assert(sh_map_render_unlocked(&cur.render) && sh_map_bounds_overrides(&cur.bounds));
         /* A vanilla map never inherits them, and saves as the engine wrote it. */
-        (void)sh_map_settings_prepare_load(MAP("0", ""), strlen(MAP("0", "")), &n);
+        prepare_map_settings(MAP("0", ""), strlen(MAP("0", "")));
         sh_map_settings_loaded(1);
         sh_map_settings_current(&cur);
         assert(!sh_map_render_unlocked(&cur.render) && !sh_map_bounds_overrides(&cur.bounds));

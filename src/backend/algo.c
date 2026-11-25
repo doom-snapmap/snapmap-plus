@@ -99,7 +99,7 @@ static uint32_t pack_channel(float f)
     if (i > 255) i = 255;
     return (uint32_t)i;
 }
-uint32_t sh_algo_packrgba(const float *rgba)
+static uint32_t sh_algo_packrgba(const float *rgba)
 {
     if (!rgba) return 0;
     uint32_t r = pack_channel(rgba[0]);
@@ -211,7 +211,7 @@ static int curve_shape_ok(int count, int edge_mode, float period)
     return edge_mode != 2 || (_finite(period) && period > 0.0f);
 }
 
-float sh_algo_curveeval(const void *c, float t, uint8_t mode)
+static float sh_algo_curveeval(const void *c, float t, uint8_t mode)
 {
     (void)mode;   /* The engine resume hint is unused; bracket search starts from scratch. */
     if (!c) return 0.0f;

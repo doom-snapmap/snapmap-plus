@@ -841,7 +841,7 @@ static void absent_local_row_stands_in(void)
     (void)sh_cache_take_notice();
     sh_modmanifest_set_content(sh_cache_on_load);
     sh_cache_set_rescan(sh_modserve_index_rescan);
-    (void)sh_modmanifest_prepare_load(MAP_ABSENT, sizeof MAP_ABSENT - 1, NULL);
+    sh_modmanifest_prepare_load(MAP_ABSENT, sizeof MAP_ABSENT - 1);
     memset(&cur, 0, sizeof cur);
     CHECK(sh_modmanifest_current(&cur) == 1 && cur.count == 1 && !cur.rows[0].pinned);
     memset(&ref, 0, sizeof ref);
@@ -897,7 +897,7 @@ static void notices_name_objects_as_the_author_sees_them(void)
     (void)sh_cache_take_notice();
     sh_modmanifest_set_content(sh_cache_on_load);
     sh_cache_set_rescan(sh_modserve_index_rescan);
-    (void)sh_modmanifest_prepare_load(MAP_LABELED, sizeof MAP_LABELED - 1, NULL);
+    sh_modmanifest_prepare_load(MAP_LABELED, sizeof MAP_LABELED - 1);
     t = sh_cache_take_notice();
     CHECK(t && !strcmp(t, "This map is playing without the Wooden Crate from Absent Pack, which is not on this computer."));
     free(t);
@@ -913,7 +913,7 @@ static void notices_name_objects_as_the_author_sees_them(void)
     sh_modmanifest_reset();
     /* the mod is here: the installed mods name it (the labeler, modui.c from the Toybox rows) */
     sh_modmanifest_set_labeler(label_name);
-    (void)sh_modmanifest_prepare_load(MAP_DOOR, sizeof MAP_DOOR - 1, NULL);
+    sh_modmanifest_prepare_load(MAP_DOOR, sizeof MAP_DOOR - 1);
     saved = sh_modmanifest_on_save(MAP_DOOR, sizeof MAP_DOOR - 1, &n);
     CHECK(saved && strstr(saved, "\"labels\":{\"mods/testdoor/door\":\"Heavy Door\"}"));
     if (saved) HeapFree(GetProcessHeap(), 0, saved);
@@ -938,7 +938,7 @@ static void pinned_label_names_the_absent_object(void)
     (void)sh_cache_take_notice();
     sh_modmanifest_set_content(sh_cache_on_load);
     sh_cache_set_rescan(sh_modserve_index_rescan);
-    (void)sh_modmanifest_prepare_load(MAP_PINNED, sizeof MAP_PINNED - 1, NULL);
+    sh_modmanifest_prepare_load(MAP_PINNED, sizeof MAP_PINNED - 1);
     t = sh_cache_take_notice();
     CHECK(t && strstr(t, "This map is playing without the Big Tyrant from Far Demons") == t);
     if (t) printf("  notice: %s\n", t);
@@ -970,7 +970,7 @@ static void lacking_local_row_stands_in(void)
     sh_modmanifest_set_content(sh_cache_on_load);
     sh_cache_set_rescan(sh_modserve_index_rescan);
     CHECK(sh_modserve_root_lacks("testdoor", "mods/testdoor/gone") == 1 && !sh_modserve_root_lacks("testdoor", "mods/testdoor/door"));
-    (void)sh_modmanifest_prepare_load(MAP_LACKS, sizeof MAP_LACKS - 1, NULL);
+    sh_modmanifest_prepare_load(MAP_LACKS, sizeof MAP_LACKS - 1);
     memset(&cur, 0, sizeof cur);
     CHECK(sh_modmanifest_current(&cur) == 1 && cur.count == 1 && !cur.rows[0].pinned);
     CHECK(cur.count && sh_modserve_row_served_for(&cur.rows[0], NULL, &cause) == SH_MODSERVE_ROW_SERVED);
@@ -1016,7 +1016,7 @@ static void lacking_local_row_stands_in(void)
         CHECK(door && gone);
         sh_modmanifest_list_free(&back);
         CHECK(sh_modserve_root_lacks("testdoor", "mods/testdoor/gone") == 1);
-        (void)sh_modmanifest_prepare_load(saved ? saved : MAP_LACKS, saved ? n : sizeof MAP_LACKS - 1, NULL);
+        sh_modmanifest_prepare_load(saved ? saved : MAP_LACKS, saved ? n : sizeof MAP_LACKS - 1);
         memset(&cur, 0, sizeof cur);
         CHECK(sh_modmanifest_current(&cur) == 1 && cur.count == 1);
         listing = NULL;
@@ -1087,7 +1087,7 @@ static void published_map_follows_rebuild(const char *tmp, const char *store)
         "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/pubtyr01/tyrant\","
         "\"name\":\"\",\"state\":{}},\"uniqueId\":0}]}";
     static const char TYRANT_V2[] = "{\r\n\tinherit = \"snapmaps/doors/industrial_door_horizontal\";\r\n}";
-    char src[MAX_PATH], folder[MAX_PATH * 2], *saved, *loaded, *cause = NULL, err[192];
+    char src[MAX_PATH], folder[MAX_PATH * 2], *saved, *cause = NULL, err[192];
     sh_modmanifest_row mod, row;
     sh_modmanifest_list rows, cur;
     sh_modpin_row_result res;
@@ -1120,8 +1120,7 @@ static void published_map_follows_rebuild(const char *tmp, const char *store)
     sh_modmanifest_list_free(&rows);
     CHECK(text != NULL);
     if (!text) goto done;
-    loaded = sh_modmanifest_prepare_load(text, ln, NULL);
-    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+    sh_modmanifest_prepare_load(text, ln);
 
     /* Its publish's save: the pin step pins a copy; the slot's text and the open map keep the local row. */
     g_publish_pins = 0;
@@ -1151,8 +1150,7 @@ static void published_map_follows_rebuild(const char *tmp, const char *store)
     sh_modmanifest_list_free(&rows);
     CHECK(pinned_text != NULL);
     if (!pinned_text) goto done;
-    loaded = sh_modmanifest_prepare_load(pinned_text, pl, NULL);
-    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+    sh_modmanifest_prepare_load(pinned_text, pl);
     memset(&cur, 0, sizeof cur);
     CHECK(sh_modmanifest_current(&cur) == 1 && cur.rows[0].pinned);
     memset(&ref, 0, sizeof ref);
@@ -1944,7 +1942,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
             CHECK(pm_slot(&resume, m2, sizeof m2) == SH_PREFAB_MODS_REFUSED && strstr(m2, "map changed"));
             CHECK(HO(m2, sh_prefab_mods_resolve_main(text, len, &rows, "Door", &seq2, HO_P(0))) == SH_PREFAB_MODS_PLACE && !seq2);
             sh_cache_set_rescan(NULL);
-            (void)sh_modmanifest_prepare_load("{}", 2, NULL);
+            sh_modmanifest_prepare_load("{}", 2);
             sh_prefab_mods_bind(&PM_OPS);
         }
         sh_modmanifest_list_free(&rows);

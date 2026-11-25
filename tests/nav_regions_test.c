@@ -12,6 +12,13 @@
 
 void backend_log(const char *message) { (void)message; }
 
+static int read_regions(const char *json, size_t len, sh_nav_map *out)
+{
+    return sh_nav_regions_read_resolved(json, len, out, NULL, NULL);
+}
+
+#include "nav_map_fixture.h"
+
 static int g_failed;
 
 #define CHECK(expr) do {                                                         \
@@ -201,7 +208,7 @@ static void test_one_volume(void)
     put_entity(&ents, 1, 7, INHERIT, edit);
     json = map_of(inst.p, ents.p, "0,1,1", "7", &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.instance_count == 1);
     CHECK(strcmp(m.instances[0].module, MODULE) == 0);
     CHECK(near_f(m.instances[0].origin[0], 1152.0f));
@@ -255,7 +262,7 @@ static void test_marker_required(void)
     put_entity(&ents, 0, 4, "snapmaps/prop/static", edit);
     json = map_of(inst.p, ents.p, "0,4,4", "1,2,3,4", &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.region_count == 1);
     if (m.region_count == 1) {
         CHECK(m.regions[0].entity == 2);
@@ -302,7 +309,7 @@ static void test_box_shape(void)
                "\"spawnPosition\":{\"z\":32}");
     json = map_of(inst.p, ents.p, "0,5,5", "1,2,3,4,5", &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.region_count == 2);
     if (m.region_count == 2) {
         CHECK(m.regions[0].entity == 0);
@@ -349,7 +356,7 @@ static void test_two_instances_of_one_module(void)
     /* 2 instances -> 4 keyValues: a bucket each, then the orphan bucket */
     json = map_of(inst.p, ents.p, "0,1,2,2", "11,22", &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.instance_count == 2);
     CHECK(sh_nav_regions_nth_instance(&m, MODULE, 0) == 0);
     CHECK(sh_nav_regions_nth_instance(&m, MODULE, 1) == 1);
@@ -371,7 +378,7 @@ static void test_two_instances_of_one_module(void)
     /* the same map with the buckets holding the other entity: attribution
      * follows the multimap, not the order the entities happen to be in */
     json = map_of(inst.p, ents.p, "0,1,2,2", "22,11", &n);
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.region_count == 2);
     if (m.region_count == 2) {
         CHECK(m.regions[0].entity == 0 && m.regions[0].instance == 1);
@@ -381,7 +388,7 @@ static void test_two_instances_of_one_module(void)
 
     /* Incomplete ownership refuses the snapshot even when a preceding bucket is readable; no partial bake. */
     json = map_of(inst.p, ents.p, "0,1", "11,22", &n);
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.invalid_geometry == 1);
     CHECK(m.region_count == 0);
     CHECK(m.instances[0].region_count == 0);
@@ -392,20 +399,20 @@ static void test_two_instances_of_one_module(void)
      * instance: the claimed box is left out, and so is the box no bucket
      * lists, but the table itself is sound. */
     json = map_of(inst.p, ents.p, "0,1,2,2", "11,11", &n);
-    CHECK(sh_nav_regions_read(json,n,&m));CHECK(!m.invalid_geometry);
+    CHECK(read_regions(json,n,&m));CHECK(!m.invalid_geometry);
     CHECK(m.region_count == 0);
     CHECK(m.dropped_by[SH_NAVR_DROP_CONFLICT] == 1 && m.dropped_by[SH_NAVR_DROP_UNLISTED] == 1);
     free(json);
     /* Decreasing offsets and truncated value arrays are a malformed table. */
     json = map_of(inst.p, ents.p, "0,2,1,2", "11,22", &n);
-    CHECK(sh_nav_regions_read(json,n,&m));CHECK(m.invalid_geometry);free(json);
+    CHECK(read_regions(json,n,&m));CHECK(m.invalid_geometry);free(json);
     json = map_of(inst.p, ents.p, "0,1,2,2", "11", &n);
-    CHECK(sh_nav_regions_read(json,n,&m));CHECK(m.invalid_geometry);free(json);
+    CHECK(read_regions(json,n,&m));CHECK(m.invalid_geometry);free(json);
     json = map_of(inst.p, ents.p, "0,1,2,2", "11.5,22", &n);
-    CHECK(sh_nav_regions_read(json,n,&m));CHECK(m.invalid_geometry);free(json);
+    CHECK(read_regions(json,n,&m));CHECK(m.invalid_geometry);free(json);
     /* An id that names no box is harmless; the box nobody lists is left out. */
     json = map_of(inst.p, ents.p, "0,1,2,2", "11,99", &n);
-    CHECK(sh_nav_regions_read(json,n,&m));CHECK(!m.invalid_geometry);
+    CHECK(read_regions(json,n,&m));CHECK(!m.invalid_geometry);
     CHECK(m.region_count == 1 && m.regions[0].instance == 0);
     CHECK(m.dropped_total == 1 && m.dropped_by[SH_NAVR_DROP_UNLISTED] == 1);
     CHECK(m.dropped[0].uid == 22);
@@ -434,7 +441,7 @@ static void test_orphan_bucket(void)
     put_entity(&ents, 0, 9, INHERIT, edit);     /* in no bucket at all */
     json = map_of(inst.p, ents.p, "0,1,2", "5,6", &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.instance_count == 1);
     CHECK(m.region_count == 1);
     CHECK(m.instances[0].region_count == 1);
@@ -466,7 +473,7 @@ static void test_unnameable_instance(void)
     put_entity(&ents, 0, 2, INHERIT, edit);
     json = map_of(inst.p, ents.p, "0,1,1,2,2", "1,2", &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.instance_count == 3);
     CHECK(m.instances[0].module[0] == '\0');
     CHECK(m.instances[1].module[0] == '\0');
@@ -511,7 +518,7 @@ static void test_truncation(void)
     json = map_of(inst.p, ents.p, kv.p, vals.p, &n);
 
     sh_nav_regions_test_limits(64, 16);
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.region_count == 64);
     CHECK(m.instances[0].region_count == 64);
     /* Past the ceiling is a note per box, never a refusal. */
@@ -540,7 +547,7 @@ static void test_truncation(void)
         bclose(&kv2);
     }
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.instance_count == 16);
     CHECK(m.region_count == 0);
     CHECK(m.truncated == 1 && !m.invalid_geometry);
@@ -560,7 +567,7 @@ static void test_truncation(void)
         for (i = 0; i <= placed; i++) bput(&kv2, "%s%d", i ? "," : "", i);
         bput(&kv2, ",%d", placed);
         json = map_of(inst.p, ents2.p, kv2.p, vals2.p, &n);
-        CHECK(sh_nav_regions_read(json, n, &m) == 1);
+        CHECK(read_regions(json, n, &m) == 1);
         CHECK(!m.invalid_geometry && m.truncated);
         CHECK(m.region_count == 16);
         CHECK(m.dropped_by[SH_NAVR_DROP_CAPACITY] == placed - 16);
@@ -598,7 +605,7 @@ static void test_growth_past_old_caps(void)
     bput(&kv, ",%d", rooms * per_room);
     json = map_of(inst.p, ents.p, kv.p, vals.p, &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.instance_count == rooms && m.region_count == rooms * per_room);
     CHECK(m.region_count > 512 && m.instance_count > 256);
     CHECK(!m.truncated && !m.invalid_geometry && m.dropped_total == 0);
@@ -618,7 +625,7 @@ static void test_growth_past_old_caps(void)
     /* A second read of the same text is the same map, byte for byte. */
     {
         sh_nav_map again;
-        CHECK(sh_nav_regions_read(json, n, &again) == 1);
+        CHECK(read_regions(json, n, &again) == 1);
         CHECK(sh_nav_map_equal(&again, &m));
         sh_nav_map_move(&m, &again);
         CHECK(again.regions == NULL && m.region_count == rooms * per_room);
@@ -650,7 +657,7 @@ static void test_unreadable_room_drops_only_its_boxes(void)
     put_entity(&ents, 0, 22, INHERIT, edit);
     put_entity(&ents, 0, 33, INHERIT, edit);                /* pasted outside every room */
     json = map_of(inst.p, ents.p, "0,1,2,3", "11,22,33", &n);
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(!m.invalid_geometry);
     CHECK(m.instances[1].unusable == 1 && m.instances[0].unusable == 0);
     CHECK(m.region_count == 1 && m.regions[0].instance == 0);
@@ -695,7 +702,7 @@ static void test_map_text_defaults_from_the_entitydef(void)
     json = map_of(inst.p, ents.p, "0,2,2", "7,8", &n);
 
     /* Without the entityDef both are unreadable, and only they are left out. */
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(!m.invalid_geometry && m.region_count == 0 && m.dropped_by[SH_NAVR_DROP_SHAPE] == 2);
     sh_nav_map_free(&m);
 
@@ -721,7 +728,7 @@ static void refused(const char *json, size_t len)
 {
     sh_nav_map m;
     memset(&m, 0xAA, sizeof m);
-    CHECK(sh_nav_regions_read(json, len, &m) == 0);
+    CHECK(read_regions(json, len, &m) == 0);
     CHECK(m.instance_count == 0);
     CHECK(m.region_count == 0);
     CHECK(m.truncated == 0);
@@ -759,31 +766,31 @@ static void test_malformed(void)
     put_entity(&ents, 1, 1, INHERIT, edit);
     json = map_of(inst.p, ents.p, "0,1,1", "1", &n);
     for (cut = 1; cut < n; cut += 37) refused(json, cut);
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);      /* ...and whole, it still reads */
+    CHECK(read_regions(json, n, &m) == 1);      /* ...and whole, it still reads */
     CHECK(m.region_count == 1);
     free(json);
 
     /* a map that parses but whose multimap says nothing usable: every volume is
      * unattributed, which is empty rather than wrong */
     json = map_of(inst.p, ents.p, "\"a\",\"b\",\"c\"", "1", &n);
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.instance_count == 1);
     CHECK(m.region_count == 0);
     free(json);
 
     json = map_of(inst.p, ents.p, "", "", &n);
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.region_count == 0);
     free(json);
 
     /* keyValues that runs off the end of values, and one that runs backwards */
     json = map_of(inst.p, ents.p, "0,900,900", "1", &n);
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.invalid_geometry && m.region_count == 0);
     free(json);
 
     json = map_of(inst.p, ents.p, "9,1,1", "1", &n);
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.region_count == 0);
     free(json);
 
@@ -793,7 +800,7 @@ static void test_malformed(void)
         bopen(&b);
         bput(&b, "{\"instances\":[%s],\"entities\":[%s],\"~type\":\"idSnapMap\"}",
              inst.p, ents.p);
-        CHECK(sh_nav_regions_read(b.p, b.len, &m) == 1);
+        CHECK(read_regions(b.p, b.len, &m) == 1);
         CHECK(m.instance_count == 1);
         CHECK(m.region_count == 0);
         bclose(&b);
@@ -1027,7 +1034,7 @@ static char *two_box_map(sh_nav_map *m)
     edit_box(edit, sizeof edit, UNTICKED, "", 100, 200, 64, 200, 400, 128);
     put_entity(&ents, 0, 22, INHERIT, edit);
     json = map_of(inst.p, ents.p, "0,2,2", "11,22", &n);
-    CHECK(sh_nav_regions_read(json, n, m) == 1);
+    CHECK(read_regions(json, n, m) == 1);
     CHECK(m->region_count == 1);
     bclose(&inst);
     bclose(&ents);
@@ -1132,7 +1139,7 @@ static void test_sparse_orientation_seeds_identity(void)
         "\"spawnOrientation\":{\"mat\":{\"mat[0]\":{\"x\":0,\"y\":1},"
         "\"mat[1]\":{\"x\":-1,\"y\":0}}}", &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.region_count == 1);
     if (m.region_count == 1) {
         CHECK(near_f(m.regions[0].n[2], 1.0f));
@@ -1160,7 +1167,7 @@ static void test_45_yaw_on_oblong_pins_the_convention(void)
         0.70710678118, 0.70710678118, -0.70710678118, 0.70710678118);
     json = map_with_volume(200, 100, 10, 0, 0, 0, orient, &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.region_count == 1);
     if (m.region_count == 1) {
         /* Both conventions give these extents, which is exactly why the extents
@@ -1190,7 +1197,7 @@ static void test_box_on_its_side_uses_a_side_face(void)
         "\"spawnOrientation\":{\"mat\":{\"mat[1]\":{\"y\":0,\"z\":1},"
         "\"mat[2]\":{\"y\":-1,\"z\":0}}}", &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.region_count == 1);
     if (m.region_count == 1) {
         CHECK(near_f(m.regions[0].n[2], 1.0f));
@@ -1211,7 +1218,7 @@ static void test_inverted_box_takes_its_face_from_the_bottom(void)
         "\"spawnOrientation\":{\"mat\":{\"mat[1]\":{\"y\":-1},"
         "\"mat[2]\":{\"z\":-1}}}", &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.region_count == 1);
     if (m.region_count == 1) {
         CHECK(near_f(quad_top_z(&m.regions[0]), 100.0f));
@@ -1228,7 +1235,7 @@ static void test_absent_orientation_matches_the_old_rect(void)
     size_t n;
     char *json = map_with_volume(200, 400, 128, 100, 200, 64, NULL, &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.region_count == 1);
     if (m.region_count == 1) {
         CHECK(near_f(quad_min_x(&m.regions[0]), 0.0f));
@@ -1249,7 +1256,7 @@ static void test_non_orthonormal_matrix_is_refused(void)
     char *json = map_with_volume(128, 64, 32, 0, 0, 0,
         "\"spawnOrientation\":{\"mat\":{\"mat[0]\":{\"x\":3,\"y\":0,\"z\":0}}}", &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.region_count == 0);
     CHECK(m.invalid_geometry == 0 && m.dropped_by[SH_NAVR_DROP_SHAPE] == 1);
     free(json);
@@ -1264,7 +1271,7 @@ static void test_reflection_is_refused(void)
     char *json = map_with_volume(128, 64, 32, 0, 0, 0,
         "\"spawnOrientation\":{\"mat\":{\"mat[0]\":{\"x\":-1}}}", &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.region_count == 0);
     CHECK(m.invalid_geometry == 0 && m.dropped_by[SH_NAVR_DROP_SHAPE] == 1);
     free(json);
@@ -1290,7 +1297,7 @@ static void test_cylinder_keeps_the_map(void)
     put_entity(&ents, 0, 2, INHERIT, edit);
     json = map_of(inst.p, ents.p, "0,2,2", "1,2", &n);
 
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.invalid_geometry == 0);
     CHECK(m.unshaped == 1);
     CHECK(m.region_count == 1);
@@ -1310,7 +1317,7 @@ static void test_cylinder_keeps_the_map(void)
     edit_box(edit, sizeof edit, TICKED, "", 256, 0, 0, 64, 64, 8);
     put_entity(&ents, 0, 2, INHERIT, edit);
     json = map_of(inst.p, ents.p, "0,2,2", "1,2", &n);
-    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(read_regions(json, n, &m) == 1);
     CHECK(m.invalid_geometry == 0);
     CHECK(m.unshaped == 1);
     CHECK(m.obstacle_count == 0);
@@ -1344,7 +1351,7 @@ static void test_duplicate_box_ids(void)
         const char *why = NULL;
         json = map_of(inst.p, ents.p, repeated ? "0,2,2" : "0,1,1",
                       repeated ? "7,7" : "7", &n);
-        CHECK(sh_nav_regions_read(json, n, &m));
+        CHECK(read_regions(json, n, &m));
         CHECK(m.ids_unusable);
         CHECK(!m.invalid_geometry);
         CHECK(m.region_count == 2);
@@ -1366,7 +1373,7 @@ static void test_duplicate_box_ids(void)
      * boxes carrying it are left out and the rest of the map is kept. */
     put_instance(&inst, 0, MODULE_DECL, 1024, 0, 0, 0);
     json = map_of(inst.p, ents.p, "0,1,2,2", "7,7", &n);
-    CHECK(sh_nav_regions_read(json, n, &m));
+    CHECK(read_regions(json, n, &m));
     CHECK(m.ids_unusable && !m.invalid_geometry);
     CHECK(m.region_count == 0 && m.dropped_by[SH_NAVR_DROP_CONFLICT] == 2);
     free(json);
@@ -1379,7 +1386,7 @@ static void test_duplicate_box_ids(void)
     edit_box(edit, sizeof edit, "", "", 512, 0, 0, 64, 64, 8);
     put_entity(&ents, 0, 7, INHERIT, edit);
     json = map_of(inst.p, ents.p, "0,1,1", "7", &n);
-    CHECK(sh_nav_regions_read(json, n, &m));
+    CHECK(read_regions(json, n, &m));
     CHECK(m.ids_unusable && !m.invalid_geometry);
     CHECK(m.region_count == 1);
     {

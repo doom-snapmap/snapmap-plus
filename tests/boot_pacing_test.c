@@ -153,8 +153,7 @@ static int synthetic(void)
         assert(VirtualQuery(g_page,&mbi,sizeof mbi)&&mbi.Protect==PAGE_EXECUTE_READ);
         assert(!memcmp(g_page+PAGE_POLL,"\x48\x8d\x54\x24\x78",5));
     }
-    assert(sh_boot_pacing_live()==SH_BOOT_PACING_READ_POLL);
-    assert(sh_boot_pacing_install(r,3,3,10)==sh_boot_pacing_live());
+    assert(sh_boot_pacing_install(r,3,3,10)==SH_BOOT_PACING_READ_POLL);
 
     /* Removable: unpatching restores the native operand. */
     assert(code_unpatch(&g_patches[1])==B2_PATCH_OK);

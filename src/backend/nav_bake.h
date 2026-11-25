@@ -131,7 +131,9 @@ int sh_nav_bake_preview(sh_nav_bake_reader read_shipped, sh_nav_preview_line lin
 int sh_nav_bake_prepare(sh_nav_bake_reader read_shipped);
 
 /* Request worker shutdown outside DllMain; test/process teardown only. */
+#ifdef SH_NAV_BAKE_TESTING
 void sh_nav_bake_preview_stop(void);
+#endif
 
 /* 1 when the worker has finished a bake nobody has collected; cheap enough to ask every frame, so the green does
  * not stay stale until the next read. */

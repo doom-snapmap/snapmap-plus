@@ -8,13 +8,17 @@
 #include "sdkvalues.h"
 #include "modprog.h"
 
+#ifdef SH_SDK_FIXTURE
 static sdk_register_fn g_register;
-
 void sdk_set_register(sdk_register_fn fn) { g_register = fn; }
+#endif
 
 const char *sdk_register(const char *type, const char *text)
 {
-    return g_register ? g_register(type, text) : sh_modprog_register_decl(type, text);
+#ifdef SH_SDK_FIXTURE
+    if (g_register) return g_register(type, text);
+#endif
+    return sh_modprog_register_decl(type, text);
 }
 
 /* The render parms whose decl is flagged srgba. */
@@ -48,7 +52,7 @@ static int read_vec(const sdk_atom *a, double out[4], int *dims)
     return 1;
 }
 
-int sdk_value_is_form(const char *text, size_t n)
+static int sdk_value_is_form(const char *text, size_t n)
 {
     static const sdk_word_id forms[] = { SDK_V_PULSE, SDK_V_FLICKER, SDK_V_FADE, SDK_V_CURVE };
     size_t i, k;
@@ -385,10 +389,10 @@ int sdk_values_material_text(const char *path, const char *text, size_t len, cha
                 char key[96];
                 size_t i;
                 int r;
-                for (i = 1; i < line; i++) sdk_put(&w, "\n", 1);
-                sdk_put(&w, "{ ", 2);
-                sdk_put(&w, text + ks, end - ks);
-                sdk_put(&w, " }", 2);
+                for (i = 1; i < line; i++) sh_text_append(&w, "\n", 1);
+                sh_text_append(&w, "{ ", 2);
+                sh_text_append(&w, text + ks, end - ks);
+                sh_text_append(&w, " }", 2);
                 if (w.oom) { free(b.p); return -1; }
                 r = sdk_parse(path, w.p, w.n, &doc, why, why_len);
                 free(w.p);
@@ -412,7 +416,7 @@ int sdk_values_material_text(const char *path, const char *text, size_t len, cha
             line += lines;
             continue;
         }
-        sdk_put(&b, text + s, (nl ? e + 1 : e) - s);
+        sh_text_append(&b, text + s, (nl ? e + 1 : e) - s);
         pos = nl ? e + 1 : e;
         line++;
     }

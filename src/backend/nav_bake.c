@@ -961,7 +961,6 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
                      int left_out, int not_floor, bake_outcome *o)
 {
     sh_aas *model;
-    sh_aug_opts opts;
     sh_aug_report rep;
     char err[192];
     int i, floors = 0, keep, tries = 0, depth_cut = 0, depth_first = 0;
@@ -1007,12 +1006,7 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
     /* Floors come first in the offered boxes, walls that only block after. */
     while (floors < in_count && !in_plats[floors].obstacle_only) floors++;
     keep = floors;
-    memset(&opts, 0, sizeof opts);
-    opts.fall = SH_AUG_FALL_AUTO;
-    opts.inset = 1;
-    opts.traversal = 0;
     for (;;) {
-        opts.route_budget = budget;
         int augmented;
         err[0] = 0;
         model = sh_aas_parse(shipped, shipped_len, err, sizeof err);
@@ -1025,7 +1019,7 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
         }
         o->first_area = sh_aas_count(model, SH_AAS_L_AREAS);
         SH_PERF_BEGIN(ta);
-        augmented = sh_aas_augment(model, plats, plat_count, &opts, &rep);
+        augmented = sh_aas_augment(model, plats, plat_count, budget, &rep);
         SH_PERF_END(SH_PERF_BAKE_AUGMENT, ta);
         /* Pieces of the cut module floor come first among the added areas;
          * the preview draws only what stands on the boxes. */
@@ -1886,6 +1880,7 @@ int sh_nav_bake_preview_pending(void)
     return pending;
 }
 
+#ifdef SH_NAV_BAKE_TESTING
 void sh_nav_bake_preview_stop(void)
 {
     if (InterlockedCompareExchange(&g_pv_ready, 0, 0) != 2) return;
@@ -1893,6 +1888,7 @@ void sh_nav_bake_preview_stop(void)
     if (g_pv_wake) SetEvent(g_pv_wake);
     if (g_pv_thread) WaitForSingleObject(g_pv_thread, 2000);
 }
+#endif
 
 /* Everything the bake needs, read on this thread while the lock is held. */
 static preview_batch *preview_gather(sh_nav_bake_reader read_shipped)

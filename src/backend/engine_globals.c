@@ -1,4 +1,6 @@
 /* Resolves engine globals from RIP-relative references in signed code; see engine_globals.h. */
+#include "safe_read.h"
+#include "image_view.h"
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
@@ -50,31 +52,6 @@ static void cache_put(const char *name, uintptr_t addr)
     g_cache[i].addr = addr;                    /* publish last */
 }
 
-/* SEH-guarded 4-byte read: the anchor may sit in an uncommitted section tail. */
-static int read_i32(const uint8_t *p, int32_t *out)
-{
-    __try {
-        memcpy(out, p, sizeof(*out));
-        return 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
-static size_t image_size_of(const uint8_t *module_base)
-{
-    __try {
-        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)module_base;
-        const IMAGE_NT_HEADERS *nt;
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
-        nt = (const IMAGE_NT_HEADERS *)(module_base + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
-        return (size_t)nt->OptionalHeader.SizeOfImage;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
 uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *out_status)
 {
     const global_entry *e;
@@ -106,11 +83,11 @@ uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *
     st = sig_resolve_one(module_base, &anchor_sig, &r);
     if (st != SIG_OK) {
         if (out_status)
-            *out_status = (st == SIG_AMBIGUOUS) ? GLB_ANCHOR_AMBIGUOUS : GLB_ANCHOR_NOT_FOUND;
+            *out_status = GLB_ANCHOR_NOT_FOUND;
         return 0;
     }
 
-    if (!read_i32((const uint8_t *)r.addr + e->disp_slot, &disp)) {
+    if (!sh_read_i32((const uint8_t *)r.addr + e->disp_slot, &disp)) {
         if (out_status) *out_status = GLB_UNREADABLE;
         return 0;
     }
@@ -118,7 +95,7 @@ uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *
     /* RIP is measured from the instruction end, including any trailing immediate. */
     decoded = r.addr + e->disp_slot + 4 + e->disp_tail + (intptr_t)disp + (intptr_t)e->delta;
 
-    img_sz = image_size_of(module_base);
+    img_sz = sh_pe_image_size(module_base);
     if (img_sz == 0 || decoded < (uintptr_t)module_base ||
         decoded >= (uintptr_t)module_base + img_sz) {
         if (out_status) *out_status = GLB_OUT_OF_RANGE;

@@ -1,4 +1,6 @@
 /* editor_undo.c -- see editor_undo.h. */
+#include "image_view.h"
+#include "safe_read.h"
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,24 +16,12 @@
 #define EU_SCREEN_OFF   0x21088   /* editor screen; null while the editor is hidden */
 #define EU_MAX_ENTRIES  (1 << 20)
 
-static int eu_read_ptr(const void *p, void **out)
-{
-    __try { *out = *(void *const *)p; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { *out = NULL; return 0; }
-}
-
-static int eu_read_i32(const void *p, int *out)
-{
-    __try { *out = *(const int *)p; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { *out = 0; return 0; }
-}
-
 /* The header, validated: 1 with its fields. */
 static int eu_header(uint8_t *list, uint8_t **data, int *count, int *cap, uint8_t **cursor)
 {
     void *d = NULL, *c = NULL;
-    if (!list || !eu_read_ptr(list, &d) || !eu_read_i32(list + SH_EDITOR_UNDO_COUNT_OFF, count) ||
-        !eu_read_i32(list + SH_EDITOR_UNDO_CAP_OFF, cap) || !eu_read_ptr(list + SH_EDITOR_UNDO_CURSOR_OFF, &c))
+    if (!list || !sh_read_ptr(list, &d) || !sh_read_i32(list + SH_EDITOR_UNDO_COUNT_OFF, count) ||
+        !sh_read_i32(list + SH_EDITOR_UNDO_CAP_OFF, cap) || !sh_read_ptr(list + SH_EDITOR_UNDO_CURSOR_OFF, &c))
         return 0;
     *data = (uint8_t *)d;
     *cursor = (uint8_t *)c;
@@ -54,7 +44,7 @@ int sh_editor_undo_truncate(uint8_t *editor, sh_editor_undo_push_fn push, int *b
     int count = -1, cap = 0, ok = 0;
     if (before) *before = -1;
     if (after) *after = -1;
-    if (!editor || !push || !eu_read_ptr(editor + SH_EDITOR_UNDO_LIST_OFF, &l) || !l) return 0;
+    if (!editor || !push || !sh_read_ptr(editor + SH_EDITOR_UNDO_LIST_OFF, &l) || !l) return 0;
     list = (uint8_t *)l;
     if (!eu_header(list, &data, &count, &cap, &cursor)) return 0;
     if (before) *before = count;
@@ -69,7 +59,7 @@ int sh_editor_undo_truncate(uint8_t *editor, sh_editor_undo_push_fn push, int *b
     if (!ok) return -1;
     if (!eu_header(list, &data, &count, &cap, &cursor)) return -1;
     if (after) *after = count;
-    if (count != 1 || cursor != data || !eu_read_ptr(data, (void **)&first) || !first) return -1;
+    if (count != 1 || cursor != data || !sh_read_ptr(data, (void **)&first) || !first) return -1;
     return 1;
 }
 
@@ -109,15 +99,8 @@ static volatile LONG g_faulted;
 int sh_editor_undo_install(const sig_result *results, size_t n, const uint8_t *module_base)
 {
     const uint8_t *commit = (const uint8_t *)sig_addr_by_name(results, n, "EditorCommitEdit");
-    size_t image_size = 0;
+    size_t image_size = sh_pe_image_size(module_base);
     char line[200];
-    if (module_base) {
-        __try {
-            const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)module_base;
-            const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)(module_base + dos->e_lfanew);
-            image_size = nt->OptionalHeader.SizeOfImage;
-        } __except (EXCEPTION_EXECUTE_HANDLER) { image_size = 0; }
-    }
     g_push = (sh_editor_undo_push_fn)sh_editor_undo_decode_push(commit, module_base, image_size);
     g_commit = (eu_commit_fn)commit;
     g_idstr_ctor = (eu_idstr_ctor_fn)sig_addr_by_name(results, n, "IdStrCtor");
@@ -135,8 +118,8 @@ static uint8_t *eu_editor_map_open(void)
 {
     uint8_t *ed = (uint8_t *)sh_iface_engine_editor_base();
     void *map = NULL, *screen = NULL;
-    if (!ed || !eu_read_ptr(ed + EU_MAP_OFF, &map) || !map) return NULL;
-    if (!eu_read_ptr(ed + EU_SCREEN_OFF, &screen) || !screen) return NULL;
+    if (!ed || !sh_read_ptr(ed + EU_MAP_OFF, &map) || !map) return NULL;
+    if (!sh_read_ptr(ed + EU_SCREEN_OFF, &screen) || !screen) return NULL;
     return ed;
 }
 

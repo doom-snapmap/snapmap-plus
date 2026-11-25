@@ -4,6 +4,7 @@
 #define SNAPMAP_PLUS_MODMANIFEST_H
 
 #include <stddef.h>
+#include "map_carrier.h"
 /* Build hash text: 64 lowercase hex characters. */
 #define SH_MOD_HASH_CHARS 64
 
@@ -141,10 +142,12 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
  * substitutes, else its own hash. Returns modserve_activate_bundles' result. Main thread. */
 int sh_modmanifest_activate(const sh_modmanifest_list *rows);
 
-/* The DeserializeFromJson step: read and keep the rows as the current manifest, strip them, then activate them with
- * the builds the map scope lists beyond them. Returns the stripped buffer (HeapFree), or NULL to parse `json`
- * unchanged; never throws for malformed input. */
-char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_length);
+/* Read, retain and activate the map's rows. The parse detour removes the complete carrier. */
+void sh_modmanifest_prepare_load(const char *json, size_t length);
+/* The load path already read and checked these rows. Takes their ownership; NULL clears the active scope. */
+void sh_modmanifest_load_rows(const char *json, size_t length, sh_modmanifest_list *rows, unsigned rejected);
+size_t sh_modmanifest_read_member(const char *json, const sh_carrier_span *mods, sh_modmanifest_list *out,
+                                  unsigned *rejected);
 
 /* The SerializeToJson step: compute the placed names, ask modserve_bundles_for_names for their bundles, add the
  * current manifest's map-level rows, and return the text with one row per bundle. NULL when no change is needed or on

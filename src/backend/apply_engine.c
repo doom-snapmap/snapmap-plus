@@ -1,6 +1,7 @@
 /* Entity reflection, decl commits, and prefab staging for the shared interface. Deferred work runs through
  * clone_bss_apply on the engine command drain; apply_sync marshals off-main callers and refuses a missing transport.
  * Engine-owned strings and prefab arrays need process-heap lifetime across Play and map teardown. */
+#include "image_view.h"
 #include "safe_read.h"
 #include <windows.h>
 #include <stdint.h>
@@ -311,13 +312,7 @@ static size_t g_doom_module_span = 0;
 static void ae_init_module_span(void)
 {
     if (g_doom_module_span || !g_doom_base) return;
-    __try {
-        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)g_doom_base;
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
-        const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)(g_doom_base + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) return;
-        g_doom_module_span = (size_t)nt->OptionalHeader.SizeOfImage;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { g_doom_module_span = 0; }
+    g_doom_module_span = sh_pe_image_size(g_doom_base);
 }
 
 static int ae_in_doom_module(const void *p)

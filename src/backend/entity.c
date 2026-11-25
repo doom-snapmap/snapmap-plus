@@ -40,7 +40,7 @@ typedef int   (*map_writer_fn)(void *map, const char *path);
 #define ENT_ENTITYDEF_OFF    0x6d0
 #define ENTITYDEF_TEXT_OFF   0x140
 
-/* Pinned Vulkan fallback; host_image requires a verified executable hash. */
+/* Each renderer has a fallback RVA for its verified executable. */
 #define GAMEMGR_KNOWN_RVA    SH_RVA(0x5B0F6D0u, 0x4414D50u)
 
 /* The singleton slot is cached, not its value: the game manager is NULL at startup and read lazily after a map
@@ -54,7 +54,7 @@ static volatile LONG    g_installed    = 0;
 
 /* Decodes GameMgrLea or an independent global anchor; returns the readable pointer slot even when its value is
  * NULL. */
-const uint8_t *sh_resolve_gamemgr_slot(const sig_result *results, size_t n, const uint8_t *module_base)
+static const uint8_t *sh_resolve_gamemgr_slot(const sig_result *results, size_t n, const uint8_t *module_base)
 {
     void *accessor = (void *)sig_addr_by_name(results, n, "GameMgrLea");
     if (accessor) {
@@ -92,7 +92,7 @@ const uint8_t *sh_resolve_gamemgr_slot(const sig_result *results, size_t n, cons
             backend_log(line);
         }
     }
-    /* Last resort: pinned Vulkan RVA, allowed by the filename gate only. */
+    /* Only an identified game executable may use its recorded fallback RVA. */
     if (module_base && sh_host_is_supported_build()) {
         const uint8_t *slot = module_base + GAMEMGR_KNOWN_RVA;
         void *probe = NULL;

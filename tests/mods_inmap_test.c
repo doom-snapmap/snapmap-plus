@@ -392,8 +392,8 @@ static void load_as_content(const char *salt)
 {
     sh_modmanifest_list rows, pin;
     sh_modpin_result pr;
-    char err[256], *text, *loaded, *saved, content[MAX_PATH * 2], **placed = NULL;
-    size_t tl = 0, ll = 0, jl = 0, sl = 0, np, i;
+    char err[256], *text, *saved, content[MAX_PATH * 2], **placed = NULL;
+    size_t tl = 0, jl = 0, sl = 0, np, i;
     int failed = 0, pinned = 0;
     unsigned rej = 0;
     const char *json = map_text(&jl);
@@ -413,8 +413,7 @@ static void load_as_content(const char *salt)
     text = sh_modmanifest_write(json, jl, &pin, &tl, err, sizeof err);
     CHECK(text != NULL);
     if (text) {
-        loaded = sh_modmanifest_prepare_load(text, tl, &ll);
-        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+        sh_modmanifest_prepare_load(text, tl);
         HeapFree(GetProcessHeap(), 0, text);
     }
     np = sh_modmanifest_placed_names(json, jl, &placed, &failed);

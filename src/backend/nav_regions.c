@@ -109,29 +109,6 @@ int sh_nav_map_copy(sh_nav_map *dst, const sh_nav_map *src)
     return 1;
 }
 
-int sh_nav_map_equal(const sh_nav_map *a, const sh_nav_map *b)
-{
-    if (!a || !b) return a == b;
-    if (a->instance_count != b->instance_count || a->region_count != b->region_count ||
-        a->obstacle_count != b->obstacle_count || a->truncated != b->truncated ||
-        a->invalid_geometry != b->invalid_geometry || a->unmeasured != b->unmeasured ||
-        a->ids_unusable != b->ids_unusable || a->unshaped != b->unshaped ||
-        a->dropped_total != b->dropped_total || a->dropped_kept != b->dropped_kept ||
-        memcmp(a->dropped_by, b->dropped_by, sizeof a->dropped_by) ||
-        memcmp(a->dropped, b->dropped, (size_t)a->dropped_kept * sizeof a->dropped[0]))
-        return 0;
-    if (a->instance_count &&
-        memcmp(a->instances, b->instances, (size_t)a->instance_count * sizeof *a->instances))
-        return 0;
-    if (a->region_count &&
-        memcmp(a->regions, b->regions, (size_t)a->region_count * sizeof *a->regions))
-        return 0;
-    if (a->obstacle_count &&
-        memcmp(a->obstacles, b->obstacles, (size_t)a->obstacle_count * sizeof *a->obstacles))
-        return 0;
-    return 1;
-}
-
 /* Two reads of one box agree within float round trips: world positions returned to module space are exact only
  * to about 0.004 units at 32768. */
 #define NAVR_SAME_EPS        0.05f
@@ -995,10 +972,6 @@ done:
     free(kv); free(rhead); free(rnext);
 }
 
-int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
-{
-    return sh_nav_regions_read_resolved(json, len, out, NULL, NULL);
-}
 
 int sh_nav_regions_marks(const char *json, size_t len)
 {

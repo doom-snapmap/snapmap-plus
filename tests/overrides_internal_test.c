@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "overrides.h"
+#include "stream_fixture.h"
 #include "image_sites.h"
 
 static int g_failed;
@@ -69,58 +69,43 @@ static void test_stream_abi_and_memory_streams(void)
     void *stream;
 
     sh_overrides_test_stream_helpers_reset();
-    /* Require SIG_OK and an in-image address, accepting shifted RVAs.
-     * SIG_CHANGED and out-of-image pointers must refuse the provider. */
+    /* The signature resolver passes only matched locations. Each must lie inside the host image. */
     {
         const uint8_t *base = (const uint8_t *)GetModuleHandleA(NULL);
         CHECK(base != NULL);
         /* Four arbitrary, mutually different in-image offsets: no RVA is privileged. */
         CHECK(sh_overrides_test_supported_build_abi(
                   base,
-                  base + 0x1000u, 1,
-                  base + 0x1100u, 1,
-                  base + 0x1200u, 1,
-                  base + 0x1300u, 1) == 1);
+                  base + 0x1000u,
+                  base + 0x1100u,
+                  base + 0x1200u,
+                  base + 0x1300u) == 1);
         /* The same four shifted by an arbitrary amount are just as acceptable. */
         CHECK(sh_overrides_test_supported_build_abi(
                   base,
-                  base + 0x1001u, 1,
-                  base + 0x1101u, 1,
-                  base + 0x1201u, 1,
-                  base + 0x1301u, 1) == 1);
-        /* A hook-tolerant known_rva resolve of any one of them still refuses: the ctor prologue is
-         * decoded and the helpers are called through an engine-owned table. */
-        CHECK(sh_overrides_test_supported_build_abi(
-                  base,
-                  base + 0x1000u, 1,
-                  base + 0x1100u, 0,
-                  base + 0x1200u, 1,
-                  base + 0x1300u, 1) == 0);
-        CHECK(sh_overrides_test_supported_build_abi(
-                  base,
-                  base + 0x1000u, 0,
-                  base + 0x1100u, 1,
-                  base + 0x1200u, 1,
-                  base + 0x1300u, 1) == 0);
+                  base + 0x1001u,
+                  base + 0x1101u,
+                  base + 0x1201u,
+                  base + 0x1301u) == 1);
         /* An unresolved location, or one that is not in the host image at all, refuses. */
         CHECK(sh_overrides_test_supported_build_abi(
                   base,
-                  base + 0x1000u, 1,
-                  NULL, 1,
-                  base + 0x1200u, 1,
-                  base + 0x1300u, 1) == 0);
+                  base + 0x1000u,
+                  NULL,
+                  base + 0x1200u,
+                  base + 0x1300u) == 0);
         CHECK(sh_overrides_test_supported_build_abi(
                   base,
-                  base + 0x1000u, 1,
-                  base + 0x1100u, 1,
-                  base + 0x1200u, 1,
-                  base - 0x1000u, 1) == 0);
+                  base + 0x1000u,
+                  base + 0x1100u,
+                  base + 0x1200u,
+                  base - 0x1000u) == 0);
         CHECK(sh_overrides_test_supported_build_abi(
                   NULL,
-                  base + 0x1000u, 1,
-                  base + 0x1100u, 1,
-                  base + 0x1200u, 1,
-                  base + 0x1300u, 1) == 0);
+                  base + 0x1000u,
+                  base + 0x1100u,
+                  base + 0x1200u,
+                  base + 0x1300u) == 0);
 
         /* Accept a provider vtable in a read-only section; reject executable
          * and out-of-image pointers using real process addresses. */
@@ -145,27 +130,27 @@ static void test_stream_abi_and_memory_streams(void)
     CHECK(sh_overrides_test_stream_vtable_slot(32) == NULL);
     CHECK(sh_overrides_test_stream_vtable_slot(33) == NULL);
 
-    /* A dirty/missing helper refuses as one terminal publication: no tail slot can be observed
+    /* A missing helper refuses as one terminal publication: no tail slot can be observed
      * partially configured. */
-    CHECK(sh_overrides_test_stream_helpers_configure((void *)(uintptr_t)0x1111, 1,
-                                                      (void *)(uintptr_t)0x2222, 0,
-                                                      (void *)(uintptr_t)0x3333, 1) == 0);
+    CHECK(sh_overrides_test_stream_helpers_configure((void *)(uintptr_t)0x1111,
+                                                      NULL,
+                                                      (void *)(uintptr_t)0x3333) == 0);
     CHECK(sh_overrides_test_stream_helpers_ready() == 0);
     CHECK(sh_overrides_test_stream_vtable_slot(31) == NULL);
     CHECK(sh_overrides_test_stream_vtable_slot(32) == NULL);
     CHECK(sh_overrides_test_stream_vtable_slot(33) == NULL);
 
     sh_overrides_test_stream_helpers_reset();
-    CHECK(sh_overrides_test_stream_helpers_configure((void *)(uintptr_t)0x1111, 1,
-                                                      (void *)(uintptr_t)0x2222, 1,
-                                                      (void *)(uintptr_t)0x3333, 1) == 1);
+    CHECK(sh_overrides_test_stream_helpers_configure((void *)(uintptr_t)0x1111,
+                                                      (void *)(uintptr_t)0x2222,
+                                                      (void *)(uintptr_t)0x3333) == 1);
     CHECK(sh_overrides_test_stream_helpers_ready() == 1);
     CHECK(sh_overrides_test_stream_vtable_slot(31) == (void *)(uintptr_t)0x1111);
     CHECK(sh_overrides_test_stream_vtable_slot(32) == (void *)(uintptr_t)0x2222);
     CHECK(sh_overrides_test_stream_vtable_slot(33) == (void *)(uintptr_t)0x3333);
-    CHECK(sh_overrides_test_stream_helpers_configure((void *)(uintptr_t)0x4444, 1,
-                                                      (void *)(uintptr_t)0x5555, 1,
-                                                      (void *)(uintptr_t)0x6666, 1) == 0);
+    CHECK(sh_overrides_test_stream_helpers_configure((void *)(uintptr_t)0x4444,
+                                                      (void *)(uintptr_t)0x5555,
+                                                      (void *)(uintptr_t)0x6666) == 0);
     sh_overrides_test_stream_helpers_reset();
 
     stream = sh_overrides_test_memory_stream(source, sizeof(source) - 1);
@@ -173,54 +158,54 @@ static void test_stream_abi_and_memory_streams(void)
     source_two[0] = 'X';
     CHECK(stream != NULL);
     if (stream) {
-        CHECK(sh_overrides_test_stream_length(stream) == (long long)(sizeof(source) - 1));
-        CHECK(sh_overrides_test_stream_true_flag(stream) == 1);
-        CHECK(sh_overrides_test_stream_set_length(stream, 3) == 0);
-        CHECK(sh_overrides_test_stream_length(stream) == (long long)(sizeof(source) - 1));
-        CHECK(sh_overrides_test_stream_read(stream, readback, 2) == 2);
+        CHECK(stream_length(stream) == (long long)(sizeof(source) - 1));
+        CHECK(stream_true_flag(stream) == 1);
+        CHECK(stream_set_length(stream, 3) == 0);
+        CHECK(stream_length(stream) == (long long)(sizeof(source) - 1));
+        CHECK(stream_read(stream, readback, 2) == 2);
         CHECK(memcmp(readback, "01", 2) == 0);
 
         /* idFile seek origins are CUR=0, END=1, ABS=2. */
-        CHECK(sh_overrides_test_stream_seek(stream, 2, 0) == 0);
-        CHECK(sh_overrides_test_stream_read(stream, readback, 2) == 2);
+        CHECK(stream_seek(stream, 2, 0) == 0);
+        CHECK(stream_read(stream, readback, 2) == 2);
         CHECK(memcmp(readback, "45", 2) == 0);
-        CHECK(sh_overrides_test_stream_seek(stream, -3, 1) == 0);
-        CHECK(sh_overrides_test_stream_read(stream, readback, 3) == 3);
+        CHECK(stream_seek(stream, -3, 1) == 0);
+        CHECK(stream_read(stream, readback, 3) == 3);
         CHECK(memcmp(readback, "def", 3) == 0);
-        CHECK(sh_overrides_test_stream_seek(stream, 5, 2) == 0);
-        CHECK(sh_overrides_test_stream_read(stream, readback, 2) == 2);
+        CHECK(stream_seek(stream, 5, 2) == 0);
+        CHECK(stream_read(stream, readback, 2) == 2);
         CHECK(memcmp(readback, "56", 2) == 0);
 
         /* Signed cursor arithmetic refuses overflow and preserves position. */
-        CHECK(sh_overrides_test_stream_seek(stream, 5, 2) == 0);
-        CHECK(sh_overrides_test_stream_seek(stream, LLONG_MAX, 0) == -1);
-        CHECK(sh_overrides_test_stream_read(stream, readback, 2) == 2);
+        CHECK(stream_seek(stream, 5, 2) == 0);
+        CHECK(stream_seek(stream, LLONG_MAX, 0) == -1);
+        CHECK(stream_read(stream, readback, 2) == 2);
         CHECK(memcmp(readback, "56", 2) == 0);
-        CHECK(sh_overrides_test_stream_seek(stream, LLONG_MAX, 1) == -1);
+        CHECK(stream_seek(stream, LLONG_MAX, 1) == -1);
 
         /* An invalid origin refuses without changing the cursor. */
-        CHECK(sh_overrides_test_stream_seek(stream, 1, 99) == -1);
-        CHECK(sh_overrides_test_stream_read(stream, readback, 2) == 2);
+        CHECK(stream_seek(stream, 1, 99) == -1);
+        CHECK(stream_read(stream, readback, 2) == 2);
         CHECK(memcmp(readback, "78", 2) == 0);
 
         /* The native read-at helper is absolute and leaves the cursor after its read. */
-        CHECK(sh_overrides_test_stream_read_at(stream, 8, readback, 3) == 3);
+        CHECK(stream_read_at(stream, 8, readback, 3) == 3);
         CHECK(memcmp(readback, "89a", 3) == 0);
 
         /* Memory-backed streams are read-only, including the native write-at helper. */
-        CHECK(sh_overrides_test_stream_write_at(stream, 4, "Z", 1) == 0);
-        CHECK(sh_overrides_test_stream_read_at(stream, 4, readback, 2) == 2);
+        CHECK(stream_write_at(stream, 4, "Z", 1) == 0);
+        CHECK(stream_read_at(stream, 4, readback, 2) == 2);
         CHECK(memcmp(readback, "45", 2) == 0);
-        CHECK(sh_overrides_test_stream_write(stream, "x", 1) == 0);
-        sh_overrides_test_stream_close(stream);
+        CHECK(stream_write(stream, "x", 1) == 0);
+        stream_close(stream);
     }
 
     stream = sh_overrides_test_memory_stream((const unsigned char *)"second-stream", sizeof(source_two) - 1);
     CHECK(stream != NULL);
     if (stream) {
-        CHECK(sh_overrides_test_stream_read(stream, readback, 6) == 6);
+        CHECK(stream_read(stream, readback, 6) == 6);
         CHECK(memcmp(readback, "second", 6) == 0);
-        sh_overrides_test_stream_close(stream);
+        stream_close(stream);
     }
 }
 
@@ -245,10 +230,10 @@ static void test_file_stream_is_read_only(void)
     stream = sh_overrides_test_stream_open_file(path);
     CHECK(stream != NULL);
     if (stream) {
-        CHECK(sh_overrides_test_stream_length(stream) == 11);
-        CHECK(sh_overrides_test_stream_set_length(stream, 2) == 0);
-        CHECK(sh_overrides_test_stream_length(stream) == 11);
-        sh_overrides_test_stream_close(stream);
+        CHECK(stream_length(stream) == 11);
+        CHECK(stream_set_length(stream, 2) == 0);
+        CHECK(stream_length(stream) == 11);
+        stream_close(stream);
     }
     DeleteFileA(path);
 }
@@ -262,30 +247,30 @@ static void test_builtin_defaults_without_user_files(void)
     void *stream = sh_overrides_test_open("generated/decls/snapeditorentitydef/func/lift.decl", 0);
     CHECK(stream != NULL);
     if (stream) {
-        CHECK(sh_overrides_test_stream_length(stream) > 0);
-        CHECK(sh_overrides_test_stream_read(stream, bytes, 1) == 1 && bytes[0] == '{');
-        sh_overrides_test_stream_close(stream);
+        CHECK(stream_length(stream) > 0);
+        CHECK(stream_read(stream, bytes, 1) == 1 && bytes[0] == '{');
+        stream_close(stream);
     }
     /* Case and separators are tolerated, as the engine asks with either. */
     stream = sh_overrides_test_open("GENERATED\\decls\\snapeditorentitydef\\func\\lift.decl", 0);
     CHECK(stream != NULL);
-    if (stream) sh_overrides_test_stream_close(stream);
+    if (stream) stream_close(stream);
     /* Mode 2 bypasses the shadow entirely. */
     CHECK(sh_overrides_test_open("generated/decls/snapeditorentitydef/func/lift.decl", 2) == NULL);
     /* The Timeline tile is a decl DOOM never shipped: its runtime registration
      * loads the loose source-tree name, which is served too, in either case. */
     stream = sh_overrides_test_open("generated/decls/snapeditorentitydef/custom/timeline.decl", 0);
     CHECK(stream != NULL);
-    if (stream) sh_overrides_test_stream_close(stream);
+    if (stream) stream_close(stream);
     stream = sh_overrides_test_open("decltree/snapeditorentitydef/custom/timeline.decl", 0);
     CHECK(stream != NULL);
     if (stream) {
-        CHECK(sh_overrides_test_stream_read(stream, bytes, 1) == 1 && bytes[0] == '{');
-        sh_overrides_test_stream_close(stream);
+        CHECK(stream_read(stream, bytes, 1) == 1 && bytes[0] == '{');
+        stream_close(stream);
     }
     stream = sh_overrides_test_open("decltree/snapEditorEntityDef/custom/timeline.decl", 0);
     CHECK(stream != NULL);
-    if (stream) sh_overrides_test_stream_close(stream);
+    if (stream) stream_close(stream);
     /* Shipped tiles keep their compiled name only. */
     CHECK(sh_overrides_test_open("decltree/snapeditorentitydef/func/lift.decl", 0) == NULL);
     CHECK(sh_overrides_test_open("decltree/snapeditorentitydef/custom/other.decl", 0) == NULL);

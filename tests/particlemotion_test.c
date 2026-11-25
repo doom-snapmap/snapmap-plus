@@ -363,7 +363,6 @@ int main(void)
         CHECK(sh_family_salt(AT, parent) == 0u);
         parent[SH_MOTION_STAGE_FLAGS] |= SH_MOTION_STAGE_SORTED;
         CHECK(sh_family_salt(AT, parent) != 0u && sh_family_salt(AT, parent) == sh_family_salt(NEARBY, parent));
-        CHECK(sh_family_inherit(child) == 0.0f);
     }
 
     printf("%d checks, %d failed\n", g_checks, g_failed);

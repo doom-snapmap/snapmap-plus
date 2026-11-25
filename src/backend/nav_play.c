@@ -149,7 +149,6 @@ static void *nav_near_relay(uintptr_t call,void *handler,int instance)
 /* The contents gate's expected bytes (cmp byte [rbx+0xc8e],0; je +0xa), and the E8 the three call sites
  * hold: checked here, by the installs and by the image test on the executables' own code. */
 static const unsigned char k_gate_expected[9]={0x80,0xbb,0x8e,0x0c,0,0,0,0x74,0x0a};
-static int nav_play_gate_hold(const unsigned char *at){return !memcmp(at,k_gate_expected,sizeof k_gate_expected);}
 /* 1 and the call's target when the site is an E8 near call. */
 static int nav_play_call_target(uintptr_t site,uintptr_t *target)
 {
@@ -275,7 +274,7 @@ static int nav_snapbuild_detour(void *a, void *b, void *c)
     }
 }
 
-int sh_nav_play_install(void *snapbuild_fn, int status_ok)
+int sh_nav_play_install(void *snapbuild_fn)
 {
     char line[200];
     void *tramp;
@@ -287,14 +286,6 @@ int sh_nav_play_install(void *snapbuild_fn, int status_ok)
     }
     if (snapbuild_fn == NULL) {
         backend_log("NAV: pre-build live read SKIPPED -- SnapMapEditToSnapBuild not resolved");
-        return 0;
-    }
-    if (!status_ok) {
-        /* Hook-tolerant resolution can point at an existing detour; its bytes
-         * are not a usable prologue.
-         */
-        backend_log("NAV: pre-build live read SKIPPED -- SnapMapEditToSnapBuild resolved via "
-                    "hook-tolerant fallback (prologue already hooked)");
         return 0;
     }
     tramp = hook_prepare(snapbuild_fn, (void *)nav_snapbuild_detour, SNAPBUILD_STOLEN);

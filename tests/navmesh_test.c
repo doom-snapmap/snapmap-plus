@@ -12,6 +12,13 @@
 #include "map_shards.h"
 #include "map_carrier.h"
 
+static void build_map(const char *json, size_t len)
+{
+    sh_carrier_view view;
+    sh_carrier_view_read(json, len, &view);
+    sh_navmesh_build_from_map(json, len, &view.nav);
+}
+
 static int g_failed;
 
 #define CHECK(expr) do {                                                         \
@@ -470,7 +477,7 @@ static void test_report(void)
                    b.p, b.len, MAP_GOOD, &map_len);
     CHECK(map != NULL);
     if (map) {
-        sh_navmesh_build_from_map(map, map_len);
+        build_map(map, map_len);
         report_capture();
         CHECK(strstr(g_report, "1 map load(s) this session") != NULL);
         CHECK(strstr(g_report, "the last found 1 baked set(s)") != NULL);
@@ -478,7 +485,7 @@ static void test_report(void)
 
         /* the same session, one more load, nothing baked: the counter advances
          * and the table is empty -- the stale-clear rule, said out loud */
-        sh_navmesh_build_from_map(base_map(BASE_MODULE), strlen(base_map(BASE_MODULE)));
+        build_map(base_map(BASE_MODULE), strlen(base_map(BASE_MODULE)));
         report_capture();
         CHECK(strstr(g_report, "2 map load(s) this session") != NULL);
         CHECK(strstr(g_report, "the last found 0 baked set(s)") != NULL);
@@ -502,7 +509,7 @@ static void test_resource_names(void)
     if (map) {
         unsigned char *bytes = NULL;
         size_t len = 0;
-        sh_navmesh_build_from_map(map, map_len);
+        build_map(map, map_len);
         CHECK(sh_navmesh_test_served_count() == 1);
         CHECK(strcmp(sh_navmesh_test_served_name(0),
                      "maps/modules/ind_dlc/ind_totally_blank_room_4x/"
@@ -547,7 +554,7 @@ static void test_reader(void)
                    b.p, b.len, MAP_GOOD, &map_len);
     CHECK(map != NULL);
     if (map) {
-        sh_navmesh_build_from_map(map, map_len);
+        build_map(map, map_len);
         CHECK(sh_navmesh_test_served_count() == 1);
         CHECK(strcmp(sh_navmesh_test_served_name(0),
                      "maps/modules/ind_dlc/deep/room_4x/room_4x.aas_monster48") == 0);
@@ -565,7 +572,7 @@ static void test_reader(void)
     if (map) {
         unsigned char *bytes = NULL;
         size_t len = 0;
-        sh_navmesh_build_from_map(map, map_len);
+        build_map(map, map_len);
         CHECK(sh_navmesh_test_served_count() == 1);
         CHECK(sh_navmesh_open(
                   "maps/modules/" BASE_MODULE "/ind_totally_blank_room_4x.aas_monster128",
@@ -588,7 +595,7 @@ static void test_reader(void)
 
         /* THE STALE-CLEAR RULE. A map with no bake, loaded next, must not
          * inherit the previous map's navigation. */
-        sh_navmesh_build_from_map(base_map(BASE_MODULE), strlen(base_map(BASE_MODULE)));
+        build_map(base_map(BASE_MODULE), strlen(base_map(BASE_MODULE)));
         CHECK(sh_navmesh_test_served_count() == 0);
         CHECK(sh_navmesh_test_held_count() == 0);
         CHECK(sh_navmesh_open(
@@ -599,7 +606,7 @@ static void test_reader(void)
         {
             size_t bare_len = 0, back_len = 0;
             char *bare, *back;
-            sh_navmesh_build_from_map(map, map_len);
+            build_map(map, map_len);
             bare = sh_carrier_strip(map, map_len, &bare_len);
             CHECK(bare != NULL);
             back = bare ? sh_navmesh_embed_all(bare, bare_len, &back_len, NULL) : NULL;
@@ -607,7 +614,7 @@ static void test_reader(void)
             if (back) {
                 unsigned char *again = NULL;
                 size_t again_len = 0;
-                sh_navmesh_build_from_map(back, back_len);
+                build_map(back, back_len);
                 CHECK(sh_navmesh_test_served_count() == 1);
                 CHECK(sh_navmesh_open(
                           "maps/modules/" BASE_MODULE
@@ -636,7 +643,7 @@ static void test_reader(void)
     if (map) {
         unsigned char *bytes = NULL;
         size_t len = 0;
-        sh_navmesh_build_from_map(map, map_len);
+        build_map(map, map_len);
         CHECK(sh_navmesh_test_served_count() == 1);
         CHECK(sh_navmesh_open("maps/modules/" BASE_MODULE
                               "/ind_totally_blank_room_4x.aas_monster48", &bytes, &len) == 1);
@@ -663,7 +670,7 @@ static void test_reader(void)
             if (!m) continue;
             sh_navmesh_test_reset();
             log_reset();
-            sh_navmesh_build_from_map(m, len2);
+            build_map(m, len2);
             CHECK(sh_navmesh_test_served_count() == 0);
             CHECK(sh_navmesh_test_held_count() == 0);
             CHECK(log_contains(cases[i].needle));
@@ -684,7 +691,7 @@ static void test_reader(void)
                    b.p, b.len, MAP_GOOD, &map_len);
     CHECK(map != NULL);
     if (map) {
-        sh_navmesh_build_from_map(map, map_len);
+        build_map(map, map_len);
         CHECK(sh_navmesh_test_served_count() == 0);
         CHECK(sh_navmesh_test_held_count() == 1);        /* held, so a save keeps it */
         CHECK(log_contains("serves NO navigation"));
@@ -707,7 +714,7 @@ static void test_reader(void)
             CHECK(two != NULL);
             if (two) {
                 sh_navmesh_test_reset();
-                sh_navmesh_build_from_map(two, two_len);
+                build_map(two, two_len);
                 CHECK(sh_navmesh_test_served_count() == 0);
                 CHECK(sh_navmesh_test_held_count() == 2);
                 HeapFree(GetProcessHeap(), 0, two);
@@ -736,7 +743,7 @@ static void test_reader(void)
         if (m) {
             sh_navmesh_test_reset();
             log_reset();
-            sh_navmesh_build_from_map(m, len2);
+            build_map(m, len2);
             CHECK(sh_navmesh_test_served_count() == 0);
             CHECK(log_contains("places it 2 times"));
             free(m);
@@ -770,7 +777,7 @@ static void test_prose(void)
 
     sh_navmesh_test_reset();
     log_reset();
-    sh_navmesh_build_from_map(map, strlen(map));
+    build_map(map, strlen(map));
     CHECK(sh_navmesh_test_served_count() == 0);
     CHECK(sh_navmesh_test_held_count() == 0);
     CHECK(g_log_count == 0);                       /* not even a refusal: no set was seen */
@@ -816,7 +823,7 @@ static void test_carrier(void)
     made = make_map(base, BASE_MODULE, "monster48", big.p, big.len, MAP_GOOD, &made_len);
     CHECK(made != NULL && big.len > 6144);
     if (!made) { free_aas(&big); free_aas(&small); return; }
-    sh_navmesh_build_from_map(made, made_len);
+    build_map(made, made_len);
     CHECK(sh_navmesh_test_served_count() == 1 && serves_exactly("monster48", &big));
     bare = sh_carrier_strip(made, made_len, &bare_len);
     CHECK(bare && !strcmp(bare, base));
@@ -839,7 +846,7 @@ static void test_carrier(void)
         /* Reloaded from the member: the same bytes are served; a second save
          * is byte-identical. */
         sh_navmesh_test_reset();
-        sh_navmesh_build_from_map(saved, saved_len);
+        build_map(saved, saved_len);
         CHECK(sh_navmesh_test_served_count() == 1 && serves_exactly("monster48", &big));
         {
             char *plain = sh_carrier_strip(saved, saved_len, &again_len);
@@ -856,7 +863,7 @@ static void test_carrier(void)
             CHECK(both && count_of(both, "\"module\":") == 2);
             if (both) {
                 sh_navmesh_test_reset();
-                sh_navmesh_build_from_map(both, again_len);
+                build_map(both, again_len);
                 CHECK(sh_navmesh_test_served_count() == 2 && serves_exactly("monster48", &big) &&
                       serves_exactly("monster128", &small));
                 HeapFree(GetProcessHeap(), 0, both);
@@ -874,13 +881,13 @@ static void test_carrier(void)
                         "\"0123456789abcdef\",\"geom\":\"fedcba9876543210\",\"data\":7}]}}");
             sh_navmesh_test_reset();
             log_reset();
-            sh_navmesh_build_from_map(bad, strlen(bad));
+            build_map(bad, strlen(bad));
             CHECK(sh_navmesh_test_served_count() == 0 && sh_navmesh_test_held_count() == 0);
             CHECK(log_contains("does not read"));
             _snprintf_s(bad, sizeof bad, _TRUNCATE, "%.*s%s", (int)(base_len - 1), base,
                         ",\"snapmap-plus\":{\"format\":2,\"nav\":{\"not\":\"an array\"}}}");
             sh_navmesh_test_reset();
-            sh_navmesh_build_from_map(bad, strlen(bad));
+            build_map(bad, strlen(bad));
             CHECK(sh_navmesh_test_served_count() == 0 && sh_navmesh_test_held_count() == 0);
         }
 
@@ -888,7 +895,7 @@ static void test_carrier(void)
          * part back exactly as it was read. */
         g_nav_on = 0;
         sh_navmesh_test_reset();
-        sh_navmesh_build_from_map(saved, saved_len);
+        build_map(saved, saved_len);
         CHECK(sh_navmesh_test_served_count() == 0);
         again = sh_navmesh_embed_all(base, base_len, &again_len, NULL);
         CHECK(again && !strcmp(again, saved));
@@ -897,7 +904,7 @@ static void test_carrier(void)
 
         /* Nothing held: a save is the engine's bytes, and nothing failed. */
         sh_navmesh_test_reset();
-        sh_navmesh_build_from_map(base, base_len);
+        build_map(base, base_len);
         {
             int failed = -1;
             CHECK(sh_navmesh_embed_all(base, base_len, &again_len, &failed) == NULL && failed == 0);

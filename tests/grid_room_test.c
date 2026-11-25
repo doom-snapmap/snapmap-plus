@@ -99,10 +99,10 @@ static void lights(void)
     sh_grid_size s={SH_GRID_MODERN,{1536,1024,512}}; sh_grid_warp w;
     float p[3]={0,1264,1436},r[3]={3535.165527f,3459.952637f,2556.275879f},c[3]={0,0,1568};
     float o[3],nr[3],nc[3];
-    assert(sh_grid_warp_init(&s,&w)); assert(sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    assert(sh_grid_warp_init(&s,&w)); assert(sh_grid_light_axes(&w,p,r,c,NULL,1,o,nr,nc));
     close_to(o[1],1276.8f); close_to(o[2]+nc[2],348);
     close_to(nr[0],1060.5496581f); assert(o[2]>0 && o[2]<464 && nr[2]>0);
-    r[0]=-1; assert(!sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    r[0]=-1; assert(!sh_grid_light_axes(&w,p,r,c,NULL,1,o,nr,nc));
 }
 
 static void near_rel(float a, float b) { assert(fabsf(a-b) <= .0005f*fmaxf(1,fabsf(b))); }
@@ -133,31 +133,31 @@ static void light_cases(void)
     float o[3], nr[3], nc[3];
     sh_grid_default(SH_GRID_MODERN,&stock);
     /* Stock size is the identity, including the roof anchor. */
-    assert(sh_grid_warp_init(&stock,&w)&&sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    assert(sh_grid_warp_init(&stock,&w)&&sh_grid_light_axes(&w,p,r,c,NULL,1,o,nr,nc));
     near_rel(o[1],1264); near_rel(o[2],1436); near_rel(nr[0],3535); near_rel(nr[2],2556); near_rel(nc[2],1568);
     /* X only: X coverage doubles, height and depth are untouched. */
-    s=stock; s.xyz[0]=10240; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    s=stock; s.xyz[0]=10240; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light_axes(&w,p,r,c,NULL,1,o,nr,nc));
     near_rel(nr[0],7070); near_rel(nr[1],3460); near_rel(nr[2],2556); near_rel(o[2]+nc[2],3004);
     /* Y only: depth scales about the modern Y pivot 1280. */
-    s=stock; s.xyz[1]=2560; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    s=stock; s.xyz[1]=2560; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light_axes(&w,p,r,c,NULL,1,o,nr,nc));
     near_rel(o[1],1272); near_rel(nr[1],1730); near_rel(nr[0],3535); near_rel(o[2]+nc[2],3004);
     /* Z only: height follows the interior (height-48), the effective point
      * keeps its 340-unit stock clearance below the ceiling. */
-    s=stock; s.xyz[2]=6736; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    s=stock; s.xyz[2]=6736; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light_axes(&w,p,r,c,NULL,1,o,nr,nc));
     near_rel(o[2],2872); near_rel(nr[2],5112); near_rel(nr[0],3535); near_rel(o[2]+nc[2],6688-340);
     /* All three axes together equal the per-axis composition. */
-    s.xyz[0]=10240; s.xyz[1]=2560; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    s.xyz[0]=10240; s.xyz[1]=2560; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light_axes(&w,p,r,c,NULL,1,o,nr,nc));
     near_rel(nr[0],7070); near_rel(nr[1],1730); near_rel(nr[2],5112); near_rel(o[1],1272); near_rel(o[2]+nc[2],6348);
     /* Shrink below stock: the clearance is limited to a quarter of the height. */
-    s.xyz[0]=864; s.xyz[1]=272; s.xyz[2]=432; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    s.xyz[0]=864; s.xyz[1]=272; s.xyz[2]=432; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light_axes(&w,p,r,c,NULL,1,o,nr,nc));
     assert(o[2]>0&&o[2]<384&&o[2]+nc[2]<384); near_rel(o[2]+nc[2],384-96); near_rel(nr[0],3535.f*864/5120);
     /* Extreme: the format maximum still yields finite, contained geometry. */
-    assert(sh_grid_maximum(SH_GRID_MODERN,&s)&&sh_grid_warp_init(&s,&w)&&sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    assert(sh_grid_maximum(SH_GRID_MODERN,&s)&&sh_grid_warp_init(&s,&w)&&sh_grid_light_axes(&w,p,r,c,NULL,1,o,nr,nc));
     near_rel(o[2]+nc[2],32719-340); assert(nr[0]>40000&&o[1]>-30000&&o[1]<33000);
     /* Classic: no pivot offset, no ceiling margin, no anchor. */
     sh_grid_default(SH_GRID_CLASSIC,&s); s.xyz[2]=4096;
     {const float cp[3]={0,0,1024},cr[3]={1296,1296,1040},cc[3]={0,0,0};
-        assert(sh_grid_warp_init(&s,&w)&&sh_grid_light(&w,cp,cr,cc,0,o,nr,nc));
+        assert(sh_grid_warp_init(&s,&w)&&sh_grid_light_axes(&w,cp,cr,cc,NULL,0,o,nr,nc));
         near_rel(o[2],2048); near_rel(nr[2],2080); near_rel(nr[0],1296); near_rel(nc[2],0);}
     /* A quarter-turn light's X extent follows room Y and vice versa. */
     {const float axis[9]={0,-1,0, 1,0,0, 0,0,1},pr[3]={2500,2900,2300},zero[3]={0,0,0},pp[3]={2,1264,1600};

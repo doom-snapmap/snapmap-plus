@@ -345,10 +345,8 @@ static int f_resume(void *c, const sh_modpub_resume *r)
     /* The resume parses the retained text through the detour; that parse must
      * not abandon the hold it belongs to. */
     if (r->text) {
-        size_t n = 0;
-        char *stripped = sh_modmanifest_prepare_load(r->text, strlen(r->text), &n);
+        sh_modmanifest_prepare_load(r->text, strlen(r->text));
         sh_modpublished_parse_seen(SH_MODPUB_PARSE_OTHER, r->text, (void *)0x5150, 1);
-        if (stripped) HeapFree(GetProcessHeap(), 0, stripped);
     }
     return 1;
 }
@@ -454,10 +452,8 @@ static void reset(void)
  * report. */
 static void parse(int kind, const char *text, void *map)
 {
-    size_t n = 0;
-    char *stripped = sh_modmanifest_prepare_load(text, strlen(text), &n);
+    sh_modmanifest_prepare_load(text, strlen(text));
     sh_modpublished_parse_seen(kind, text, map, 1);
-    if (stripped) HeapFree(GetProcessHeap(), 0, stripped);
 }
 
 /* One main-thread tick. */

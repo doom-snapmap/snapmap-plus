@@ -10,7 +10,7 @@
 #include "static_model_guard.h"
 #include "engine_layout.h"
 #include "fault_record.h"
-#include "hook.h"
+#include "../backend/hook.h"
 #include "../backend/backend_log.h"
 #include "../backend/process_heap_scope.h"
 

@@ -17,8 +17,6 @@ int sh_sdk_compile(const char *path, const char *text, size_t len, char **out, s
 int sh_sdk_serve_compile(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
                          size_t why_len);
 
-/* The decl type an SDK path names: "material", "fx", "env", "gorewounds", or NULL for any other. */
-const char *sh_sdk_decl_type(const char *path);
 
 /* The decl name a path names (after generated/decls/<type>/, without .decl), malloc'd, or NULL. */
 char *sh_sdk_decl_name(const char *path);

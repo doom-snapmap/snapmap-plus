@@ -753,14 +753,6 @@ static float grid_world_limit(void)
      * Grid Room outset is reserved: modern X includes a 32-unit wall plus the 64-unit agent radius. */
     return isfinite(limit)&&limit>0?fminf(limit,32767-96):0;
 }
-static int inside_environment(const grid_move *moves,int n)
-{
-    int i,k;float limit=grid_world_limit();
-    if(!isfinite(limit)||limit<=0)return 0;
-    for(i=0;i<n;++i)if(moves[i].assigned)for(k=0;k<3;++k)
-        if(moves[i].bounds[k]<-limit||moves[i].bounds[k+3]>limit)return 0;
-    return 1;
-}
 /* The world box a module may occupy after an edit: the map boundary, widened to wherever that module already reaches.
  * An edit never creates or extends a boundary crossing, but an assembly that already crosses (a lowered cvar, an
  * older map) can still be edited and shrunk. */

@@ -6,6 +6,14 @@
 #include <string.h>
 
 /* A Grid Room's local box at a size, as the planner builds it. */
+static int count_room(const float (*boxes)[6], int n, int cull, sh_render_area_count *out)
+{
+    sh_render_cell_choice choice;
+    if (!out || !sh_render_area_cell_choose(boxes, n, cull, SH_RENDER_AREA_CELL, &choice)) return 0;
+    *out = choice.native;
+    return 1;
+}
+
 static void room_box(unsigned x, unsigned y, unsigned z, float out[6])
 {
     sh_grid_size size = {SH_GRID_MODERN, {x, y, z}};
@@ -21,12 +29,12 @@ static void room_box(unsigned x, unsigned y, unsigned z, float out[6])
  * (if any) must not fit with the margin the choice requires. */
 static void check_choice(const float (*boxes)[6], int n, const sh_render_cell_choice *c)
 {
-    sh_render_area_count smaller;
+    sh_render_cell_choice smaller;
     assert(c->fits);
     if (c->cell == SH_RENDER_AREA_CELL) { assert(sh_render_areas_fit(&c->count)); return; }
     assert(sh_render_areas_fit_coarse(&c->count) && !sh_render_areas_fit(&c->native));
-    assert(sh_render_areas_cell(boxes, n, 1, c->cell / 2, &smaller));
-    assert(c->cell / 2 == SH_RENDER_AREA_CELL ? !sh_render_areas_fit(&smaller) : !sh_render_areas_fit_coarse(&smaller));
+    assert(sh_render_area_cell_choose(boxes, n, 1, c->cell / 2, &smaller));
+    assert(c->cell / 2 == SH_RENDER_AREA_CELL ? !sh_render_areas_fit(&smaller.coarsest) : !sh_render_areas_fit_coarse(&smaller.coarsest));
 }
 static sh_render_cell_choice choose_room(unsigned x, unsigned y, unsigned z)
 {
@@ -42,7 +50,7 @@ static sh_render_area_count one_room(unsigned x, unsigned y, unsigned z, int cul
     float box[1][6];
     sh_render_area_count c;
     room_box(x, y, z, box[0]);
-    assert(sh_render_areas((const float (*)[6])box, 1, cull, &c));
+    assert(count_room((const float (*)[6])box, 1, cull, &c));
     return c;
 }
 int main(void)
@@ -66,28 +74,28 @@ int main(void)
      * 32 x 129 fits again. */
     {
         float box[1][6] = {{0, 0, 0, 32768, 32768, 100}};
-        assert(sh_render_areas((const float (*)[6])box, 1, 1, &c) && c.areas == 64 * 65 && sh_render_areas_fit(&c));
+        assert(count_room((const float (*)[6])box, 1, 1, &c) && c.areas == 64 * 65 && sh_render_areas_fit(&c));
         box[0][4] = 32769;
-        assert(sh_render_areas((const float (*)[6])box, 1, 1, &c) && c.areas == 128 * 65 && !sh_render_areas_fit(&c));
+        assert(count_room((const float (*)[6])box, 1, 1, &c) && c.areas == 128 * 65 && !sh_render_areas_fit(&c));
         box[0][4] = 32768; box[0][3] = 32769;
-        assert(sh_render_areas((const float (*)[6])box, 1, 1, &c) && c.areas == 64 * 129 && !sh_render_areas_fit(&c));
+        assert(count_room((const float (*)[6])box, 1, 1, &c) && c.areas == 64 * 129 && !sh_render_areas_fit(&c));
         box[0][3] = 65536; box[0][4] = 16384;
-        assert(sh_render_areas((const float (*)[6])box, 1, 1, &c) && c.areas == 32 * 129 && sh_render_areas_fit(&c));
+        assert(count_room((const float (*)[6])box, 1, 1, &c) && c.areas == 32 * 129 && sh_render_areas_fit(&c));
     }
     /* Two rooms: the tree splits X at 1024; the upper cell [1024,3072] keeps
      * three of its four pieces with culling (one lies wholly before the room),
      * all four without. */
     {
         float boxes[2][6] = {{0, 0, 0, 1024, 512, 100}, {2048, 0, 0, 3072, 512, 100}};
-        assert(sh_render_areas((const float (*)[6])boxes, 2, 1, &c));
+        assert(count_room((const float (*)[6])boxes, 2, 1, &c));
         assert(c.areas == 5 && c.nodes == 5);
-        assert(sh_render_areas((const float (*)[6])boxes, 2, 0, &c));
+        assert(count_room((const float (*)[6])boxes, 2, 0, &c));
         assert(c.areas == 6 && c.nodes == 5);
         /* Module order does not change the count. */
         {
             float swapped[2][6];
             memcpy(swapped[0], boxes[1], sizeof swapped[0]); memcpy(swapped[1], boxes[0], sizeof swapped[1]);
-            assert(sh_render_areas((const float (*)[6])swapped, 2, 1, &c) && c.areas == 5 && c.nodes == 5);
+            assert(count_room((const float (*)[6])swapped, 2, 1, &c) && c.areas == 5 && c.nodes == 5);
         }
     }
     /* A large room beside a stock room counts only the pieces each touches. */
@@ -96,7 +104,7 @@ int main(void)
         room_box(30000, 30000, 8000, boxes[0]);
         room_box(5120, 5120, 3392, boxes[1]);
         boxes[1][0] += 20000; boxes[1][3] += 20000;
-        assert(sh_render_areas((const float (*)[6])boxes, 2, 1, &c));
+        assert(count_room((const float (*)[6])boxes, 2, 1, &c));
         printf("30000 room beside a stock room: %lld areas, %lld nodes\n", c.areas, c.nodes);
         /* Culled pieces still leave their split nodes: nodes exceed areas here. */
         assert(c.areas == 4228 && c.nodes == 4295);
@@ -106,8 +114,8 @@ int main(void)
         volatile float big = 1e30f;
         float box[1][6] = {{0, 0, 0, 1, 1, 1}};
         box[0][3] = big * big;
-        assert(!sh_render_areas((const float (*)[6])box, 1, 1, &c));
-        assert(!sh_render_areas(NULL, 1, 1, &c));
+        assert(!count_room((const float (*)[6])box, 1, 1, &c));
+        assert(!count_room(NULL, 1, 1, &c));
     }
     /* Cell size choice. The reported room needs 1024: 64 x (64 + 1) areas. */
     {
@@ -135,7 +143,6 @@ int main(void)
             assert(k.cell == 512 && !k.fits && k.count.areas == 16512 && k.coarsest.areas == 16512);
             assert(!sh_render_area_cell_choose((const float (*)[6])box, 1, 1, 300, &k));
             assert(!sh_render_area_cell_choose((const float (*)[6])box, 1, 1, 1e9f, &k));
-            assert(!sh_render_areas_cell((const float (*)[6])box, 1, 1, 256, &c));
         }
         /* The margin a coarser size needs. */
         c.areas = 7680; c.nodes = 7680; assert(sh_render_areas_fit_coarse(&c));

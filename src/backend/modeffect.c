@@ -261,7 +261,7 @@ static void write_ev(sdk_buf *b, int index, const ev *e)
         put_num(b, 5, "roll", e->turn[2]);
         put_close(b, 4);
     }
-    if (e->parms.p) sdk_put(b, e->parms.p, e->parms.n);
+    if (e->parms.p) sh_text_append(b, e->parms.p, e->parms.n);
     sdk_printf(b, "\t\t\t}\n");
 }
 
@@ -1237,7 +1237,7 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
         if (s.oom) { free(s.p); c->oom = 1; return 0; }
         /* the decl */
         sdk_printf(&decl, "{\n\tedit = {\n\t\tstages = {\n\t\t\tnum = 1;\n\t\t\titem[0] = {\n");
-        sdk_put(&decl, s.p, s.n);
+        sh_text_append(&decl, s.p, s.n);
         sdk_printf(&decl, "\t\t\t}\n\t\t}\n");
         {
             sdk_buf tail = { 0 };
@@ -1248,7 +1248,7 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
             put_close(&tail, 3);
             put_close(&tail, 2);
             put_num(&tail, 2, "maxSystemDuration", (lifemax + (burst ? 0 : lifemax)) * 1000 * (cycles ? cycles : 1));
-            if (tail.p) sdk_put(&decl, tail.p, tail.n);
+            if (tail.p) sh_text_append(&decl, tail.p, tail.n);
             free(tail.p);
         }
         sdk_printf(&decl, "\t}\n}\n");

@@ -494,8 +494,8 @@ static void test_generation(void)
     {
         static const char MAPJ[] = "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
         sh_modmanifest_row ra, rb;
-        char *saved, *loaded;
-        size_t slen = 0, llen = 0;
+        char *saved;
+        size_t slen = 0;
         memset(&ra, 0, sizeof ra);
         memset(&rb, 0, sizeof rb);
         strcpy_s(ra.salt, sizeof ra.salt, "khands00");
@@ -515,13 +515,12 @@ static void test_generation(void)
         CHECK(sh_modserve_scope_set(list, 2, 1) >= 0);
         CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "handsModelMPUseDoomHands = \"player/fp_hands.md6\";"));
         /* The saved map loaded again: its choice is read back and applied. */
-        loaded = saved ? sh_modmanifest_prepare_load(saved, slen, &llen) : NULL;
+        if (saved) sh_modmanifest_prepare_load(saved, slen);
         CHECK(sh_modregistry_choices_get("entitydef/player/coop/edit/handsModelMPUseDoomHands", key, sizeof key) &&
               !strcmp(key, "krival00"));
         CHECK(sh_modserve_scope_set(list, 2, 1) >= 0);
         CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 &&
               strstr(text, "handsModelMPUseDoomHands = \"mods/krival00/hands.md6\";"));
-        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
         if (saved) HeapFree(GetProcessHeap(), 0, saved);
     }
 
@@ -1040,11 +1039,8 @@ static char *save_map(size_t *len)
 
 static void load_map(char *saved, size_t len)
 {
-    size_t llen = 0;
-    char *loaded;
     sh_modmanifest_reset();
-    loaded = saved ? sh_modmanifest_prepare_load(saved, len, &llen) : NULL;
-    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+    if (saved) sh_modmanifest_prepare_load(saved, len);
 }
 
 /* A map with two ports of one mod (the Hell Guard's staff and hammer) and the spider, saved with every folder here,

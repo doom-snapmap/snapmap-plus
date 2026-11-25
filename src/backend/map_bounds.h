@@ -32,11 +32,6 @@ int   sh_map_bounds_floors(float limit);
 
 /* Engine adapters run on the engine thread, like the map_render ones. */
 int  sh_map_bounds_install(const sig_result *results, size_t count, const uint8_t *base);
-/* The open map's setting, held by map_settings.c (read from the map's row at
- * every parse, written back at every save; the engine's variable lists never
- * carry it). map names the map the caller means and must not be NULL. */
-int  sh_map_bounds_read(void *map, sh_map_bounds *settings);
-int  sh_map_bounds_write(void *map, const sh_map_bounds *settings);
 /* Entry to native edit-to-build conversion (Play): select the open map's. */
 void sh_map_bounds_build(void *map);
 /* Selects the setting of a map just deserialized; NULL (before every load) restores the native limit. */

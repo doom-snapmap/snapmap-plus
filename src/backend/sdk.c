@@ -21,7 +21,7 @@ static long type_at(const char *path)
     return -1;
 }
 
-const char *sh_sdk_decl_type(const char *path)
+static const char *sh_sdk_decl_type(const char *path)
 {
     long at = type_at(path);
     const char *t;

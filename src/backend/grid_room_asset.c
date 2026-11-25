@@ -47,8 +47,8 @@ static int request(const char *name,sh_grid_size *size,char source[768],int *typ
     }
     p=name;
     if(starts(p,"generated/maps/modules/smpgrid/"))p+=10;
-    if(starts(p,"decltree/snapmodule/"))p+=20;
-    else if(starts(p,"decltree/snapModule/"))p+=20;
+    if (starts(p,"decltree/snapmodule/") || starts(p,"decltree/snapModule/"))
+        p += sizeof("decltree/snapmodule/") - 1;
     if(starts(p,"maps/modules/smpgrid/")){
         end=dimensions(p+21,size);if(!end)return -1;
         stock=sh_grid_stock_name(size->kind);
@@ -86,10 +86,10 @@ static int request(const char *name,sh_grid_size *size,char source[768],int *typ
         return -1;
     }
     p=name;
-    if(starts(p,"decltree/snapmoduleinfo/"))p+=24;
-    else if(starts(p,"decltree/snapModuleInfo/"))p+=24;
-    else if(starts(p,"generated/decls/snapmoduleinfo/"))p+=31;
-    else if(starts(p,"generated/decls/snapModuleInfo/"))p+=31;
+    if (starts(p,"decltree/snapmoduleinfo/") || starts(p,"decltree/snapModuleInfo/"))
+        p += sizeof("decltree/snapmoduleinfo/") - 1;
+    else if (starts(p,"generated/decls/snapmoduleinfo/") || starts(p,"generated/decls/snapModuleInfo/"))
+        p += sizeof("generated/decls/snapmoduleinfo/") - 1;
     if(starts(p,"smpgrid/")){
         end=dimensions(p+8,size);if(!end||strcmp(end,".decl"))return -1;
         snprintf(source,768,"generated/decls/snapmoduleinfo/%s.decl",sh_grid_stock_name(size->kind)+13);
@@ -200,12 +200,9 @@ int sh_grid_asset_open(const char *name,sh_grid_asset_read_fn read,
         ok=result!=NULL;
     }else if(type==ASSET_NAV){
         char error[192];sh_aas *aas=sh_aas_parse(input,bytes,error,sizeof error);
-        unsigned char *encoded=NULL;
-        if(aas&&sh_grid_nav_resize(aas,&size))encoded=sh_aas_write(aas,&result_bytes);
+        if(aas&&sh_grid_nav_resize(aas,&size))result=sh_aas_write_alloc(aas,&result_bytes,malloc);
         sh_aas_free(aas);
-        if(encoded){result=(unsigned char*)malloc(result_bytes);
-            if(result){memcpy(result,encoded,result_bytes);ok=1;}
-            HeapFree(GetProcessHeap(),0,encoded);}
+        ok=result!=NULL;
     }else if(type==ASSET_COPY){
         result=(unsigned char*)malloc(bytes);
         if(result){memcpy(result,input,bytes);result_bytes=bytes;ok=1;}

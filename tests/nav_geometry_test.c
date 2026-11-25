@@ -17,7 +17,7 @@ static void box(int i,float x0,float y0,float x1,float y1,float bottom,float top
     p->n[2]=1;p->depth=top-bottom;p->face=4;
 }
 static int bake(int n,double r,double h)
-{return sh_nav_geometry_build(boxes,n,r,h,0.7,0,result,source,pieces,buried,SH_AUG_MAX_PLATFORMS);}
+{return sh_nav_geometry_build_budget(boxes,n,NULL,0,r,h,0.7,0,result,source,pieces,buried,SH_AUG_MAX_PLATFORMS,NULL);}
 static double area(int n)
 {
     int i,k;double sum=0;
@@ -45,7 +45,7 @@ static int contains(int n,double x,double y,double z)
 }
 
 static int bake_steps(int n,double radius)
-{return sh_nav_geometry_build(boxes,n,radius,80,0.7,18,result,source,pieces,buried,SH_AUG_MAX_PLATFORMS);}
+{return sh_nav_geometry_build_budget(boxes,n,NULL,0,radius,80,0.7,18,result,source,pieces,buried,SH_AUG_MAX_PLATFORMS,NULL);}
 
 static void test_body_ray_exit(void)
 {
@@ -117,8 +117,8 @@ static void test_step_clearance(void)
         box(1,257,0,512,512,0,120);n=bake_steps(2,radii[r]);CHECK(n>0);
         CHECK(!contains(n,255,256,112));CHECK(!contains(n,258,256,120));
     }
-    CHECK(sh_nav_geometry_build(boxes,2,24,80,0.7,NAN,result,source,pieces,buried,512)==-1);
-    CHECK(sh_nav_geometry_build(boxes,2,24,80,0.7,80,result,source,pieces,buried,512)==-1);
+    CHECK(sh_nav_geometry_build_budget(boxes,2,NULL,0,24,80,0.7,NAN,result,source,pieces,buried,512,NULL)==-1);
+    CHECK(sh_nav_geometry_build_budget(boxes,2,NULL,0,24,80,0.7,80,result,source,pieces,buried,512,NULL)==-1);
 }
 
 static unsigned rng_state=0x4b71e239u;
@@ -334,8 +334,9 @@ int main(void)
         boxes[1].c[i][0]=(float)((x-y)*sqrt(0.5));boxes[1].c[i][1]=(float)((x+y)*sqrt(0.5));}
     n=bake(2,24,80);CHECK(n>0);CHECK(!contains(n,0,0,16));CHECK(contains(n,100,100,16));
     for(i=0;i<n;i++)for(k=0;k<result[i].corners;k++)CHECK(isfinite(result[i].c[k][0]));
-    /* A cap is a failed transaction, never a successful incomplete mesh. */
-    CHECK(sh_nav_geometry_build(boxes,2,24,80,0.7,0,result,source,pieces,buried,1)==-1);
+    /* A one-slot output retains only a whole face or the buried-source diagnostic. */
+    CHECK(sh_nav_geometry_build_budget(boxes,2,NULL,0,24,80,0.7,0,result,source,pieces,buried,1,NULL)==1);
+    CHECK(buried[0] || pieces[0] == 1);
     /* A non-navigable box still removes occupied standing room. */
     box(0,0,0,512,512,0,16);box(1,128,128,384,384,16,256);
     boxes[1].obstacle_only=1;n=bake(2,24,80);
@@ -358,7 +359,7 @@ int main(void)
     {sh_aug_platform swap=boxes[0];boxes[0]=boxes[2];boxes[2]=swap;}
     n=bake(3,24,80);CHECK(n>0);CHECK(fabs(area(n)-a)<0.1);
     CHECK(contains(n,250,200,128));CHECK(!contains(n,320,64,128));
-    CHECK(sh_nav_geometry_build(boxes,3,NAN,80,0.7,0,result,source,pieces,buried,512)==-1);
+    CHECK(sh_nav_geometry_build_budget(boxes,3,NULL,0,NAN,80,0.7,0,result,source,pieces,buried,512,NULL)==-1);
     /* Rigid rotations exercise every local face as a possible floor. The
      * expected normals come directly from the rotation matrix, independently
      * of the baker's reconstructed box and face enumeration. */

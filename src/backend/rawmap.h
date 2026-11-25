@@ -10,7 +10,7 @@
 
 /* Install the DeserializeFromJson detour only for a clean SIG_OK resolution (an existing inline hook cannot
  * supply the stolen instructions). Returns 1 when installed, else logs the refusal and returns 0. */
-int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok);
+int sh_rawmap_swap_install(void *deser_fn);
 
 /* Every path here is a malloc'd string (free) from the process heap, safe on the game's threads.
  * A UTF-8 path as the wide long form ("\\?\C:\..." or "\\?\UNC\..."; a relative path is made
@@ -45,7 +45,7 @@ int sh_rawmap_load_is_safe(void);
 
 /* Install the SerializeToJson detour (it embeds navigation and the map's Snapmap+ data in the output) only
  * for a clean SIG_OK resolution. Returns 1 when installed, else logs the refusal and returns 0. */
-int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok);
+int sh_rawmap_save_install(void *serialize_fn);
 
 /* Observe every successful save's final text (after the manifest rows are
  * written), on the thread that saved. One observer; NULL removes it. */

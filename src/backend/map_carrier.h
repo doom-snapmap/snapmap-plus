@@ -43,6 +43,7 @@ int sh_carrier_part(const char *json, size_t len, const char *part, size_t *from
 
 /* `json` without the member (every one) as a process-heap buffer (HeapFree); NULL when it has none or does not read. */
 char *sh_carrier_strip(const char *json, size_t len, size_t *out_len);
+char *sh_carrier_strip_view(const char *json, size_t len, const sh_carrier_view *view, size_t *out_len);
 
 /* `json` with the member's `part` ("mods", "settings" or "nav") set to `value` (raw JSON; NULL removes it),
  * other parts kept; the member is removed when no part is left, and a malformed member is replaced. Returns a
@@ -73,6 +74,7 @@ void sh_carrier_describe(const sh_carrier_view *view, char *out, size_t cap);
  * such a map is refused with SH_MAP_OLD_REFUSAL and its text is not changed. */
 enum { SH_MAP_OLD_NONE = 0, SH_MAP_OLD_VARIABLES = 1, SH_MAP_OLD_ROWS = 2, SH_MAP_OLD_FORMAT = 3 };
 int sh_map_old_shape(const char *json, size_t len);
+int sh_map_old_shape_view(const char *json, size_t len, const sh_carrier_view *view);
 #define SH_MAP_OLD_REFUSAL "This map was saved by an earlier Snapmap+; run the Snapmap+ installer to update it."
 
 #endif /* SNAPMAP_PLUS_MAP_CARRIER_H */

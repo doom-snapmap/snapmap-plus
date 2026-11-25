@@ -2,6 +2,7 @@
  * synthetic maps. Resource names are independent literals because a wrong
  * cooked name can silently fall through to shipped navigation. */
 #include <windows.h>
+#include "nav_map_fixture.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,11 @@
 #include "../src/backend/nav_overlay.h"
 #include "../src/backend/aas_edit.h"
 #include "aas_fixture.h"
+
+static int read_regions(const char *json, size_t len, sh_nav_map *out)
+{
+    return sh_nav_regions_read_resolved(json, len, out, NULL, NULL);
+}
 
 static int g_checks = 0, g_fail = 0;
 
@@ -340,7 +346,7 @@ static int snapshot_read(sh_nav_map *out, void *ctx)
 {
     (void)ctx;
     if (!g_snapshot_json) return 0;
-    return sh_nav_regions_read(g_snapshot_json, strlen(g_snapshot_json), out);
+    return read_regions(g_snapshot_json, strlen(g_snapshot_json), out);
 }
 
 static void test_complete_snapshot_tracks_creation_and_deletion(void)

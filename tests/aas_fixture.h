@@ -1,5 +1,5 @@
 /* A synthetic module for bakes: one flat floor slab spanning +/-2000 at z = 0,
- * findable through a three-node BSP. The same fixture aas_augment_test builds. */
+ * findable through a three-node BSP. Shared by the bake and augmentation tests. */
 #ifndef SH_TEST_AAS_FIXTURE_H
 #define SH_TEST_AAS_FIXTURE_H
 static const unsigned REC[22] = {

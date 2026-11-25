@@ -25,15 +25,12 @@ void sh_map_settings_default(sh_map_settings *s)
 static int ms_member(const char *json, size_t len, sh_map_settings *s, unsigned *refused)
 {
     static const char *const keys[2] = {"render", "bounds"};
-    size_t from = 0, to = 0;
     int i;
-    sh_map_settings_default(s);
-    if (sh_carrier_part(json, len, "settings", &from, &to) != 1) return 0;
     for (i = 0; i < 2; i++) {
         const char *body = NULL;
         size_t n = 0;
         char text[MS_VALUE_MAX + 1];
-        int got = sh_carrier_object_string(json + from, json + to, keys[i], &body, &n);
+        int got = sh_carrier_object_string(json, json + len, keys[i], &body, &n);
         if (got == 0) continue;
         if (got < 0 || n == 0 || n > MS_VALUE_MAX || memchr(body, '\\', n)) { (*refused)++; continue; }
         memcpy(text, body, n);
@@ -51,19 +48,15 @@ static int ms_member(const char *json, size_t len, sh_map_settings *s, unsigned 
     return 1;
 }
 
-char *sh_map_settings_take(const char *json, size_t len, sh_map_settings *out, size_t *out_len,
-                           sh_map_settings_report *report)
+void sh_map_settings_read(const char *json, size_t len, sh_map_settings *out, sh_map_settings_report *report)
 {
     sh_map_settings_report r;
     sh_map_settings s;
     memset(&r, 0, sizeof r);
     sh_map_settings_default(&s);
-    if (out_len) *out_len = 0;
     if (json && len) r.member = ms_member(json, len, &s, &r.refused);
     if (out) *out = s;
     if (report) *report = r;
-    /* Nothing to remove: the member goes with the parse detour's last step. */
-    return NULL;
 }
 
 /* The row text for a setting that is on; NULL when it is off. */
@@ -123,12 +116,12 @@ static void ms_describe(const sh_map_settings *s, char *out, size_t cap)
                 sh_map_bounds_overrides(&s->bounds) ? "on" : "off");
 }
 
-char *sh_map_settings_prepare_load(const char *json, size_t len, size_t *out_len)
+void sh_map_settings_prepare_load(const char *json, size_t len)
 {
     sh_map_settings s;
     sh_map_settings_report r;
-    char *out, line[320], what[96];
-    out = sh_map_settings_take(json, len, &s, out_len, &r);
+    char line[320], what[96];
+    sh_map_settings_read(json, len, &s, &r);
     AcquireSRWLockExclusive(&g_lock);
     g_pending = s;
     ReleaseSRWLockExclusive(&g_lock);
@@ -138,7 +131,6 @@ char *sh_map_settings_prepare_load(const char *json, size_t len, size_t *out_len
                     what, r.refused);
         backend_log(line);
     }
-    return out;
 }
 
 void sh_map_settings_loaded(int ok)

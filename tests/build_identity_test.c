@@ -63,7 +63,6 @@ static void check_constants(void)
     assert(SH_IDFILE_SLOTS == 34 && SH_IDFILE_READ_STRING_SLOT == 0xF8 &&
            SH_IDFILE_COMPARE_SLOT == 0x100 && SH_IDFILE_WRITE_STRING_SLOT == 0x108);
     assert(SH_SESSION_DEVMODE_FIELD == 0x349BB && SH_VALIDATOR_REFLECT_SLOT == 0x258);
-    assert(SH_GAME_SYSTEM_SLOT_RVA_VK == 0x2F48600u && SH_GAME_SYSTEM_SLOT_RVA_GL == 0x2F905D8u);
     /* Established by the build 13954591 address table. */
     assert(SH_CVARSYS_LAYOUT_ESTABLISHED && SH_IDCVAR_NAME_FOR_LOOKUP == 0x50);
     assert(SH_PROVIDER_OPEN_SLOT == 0x148);
@@ -99,15 +98,13 @@ static void check_selection(void)
 
     /* An unbound image is unsupported: no RVA is ever applied. */
     sh_host_test_bind_identity(NULL, NULL);
-    assert(!sh_host_image_is_supported(image) && sh_host_image_rva(image, 1, 2) == 0);
-    assert(sh_engine_game_system_slot(image) == 0);
+    assert(sh_host_image_rva(image, 1, 2) == 0);
     assert(sig_resolve_one(image, &intact, &r) == SIG_NOT_FOUND && r.addr == 0);
 
     /* Vulkan identity: the Vulkan RVA resolves when the whole pattern holds there,
      * and a detoured site is reported changed, never recovered. */
     sh_host_test_bind_identity(image, vk);
-    assert(sh_host_image_is_supported(image) && sh_host_image_rva(image, 1, 2) == 1);
-    assert(sh_engine_game_system_slot(image) == (uintptr_t)image + 0x2F48600u);
+    assert(sh_host_image_rva(image, 1, 2) == 1);
     assert(sig_resolve_one(image, &intact, &r) == SIG_OK && r.rva == 0x1100 && r.addr == (uintptr_t)image + 0x1100);
     assert(sig_resolve_one(image, &hooked, &r) == SIG_CHANGED && r.addr == 0);
     /* The scan finds the one intact copy, wherever the entry says it is. */
@@ -116,7 +113,6 @@ static void check_selection(void)
     /* OpenGL identity: its own (here absent) RVA applies, never the Vulkan one. */
     sh_host_test_bind_identity(image, gl);
     assert(sh_host_image_rva(image, 1, 2) == 2);
-    assert(sh_engine_game_system_slot(image) == (uintptr_t)image + 0x2F905D8u);
     assert(sig_resolve_one(image, &intact, &r) == SIG_NOT_FOUND && r.addr == 0);
     sh_host_test_bind_identity(NULL, NULL);
     puts("OK  recorded RVAs apply only to a supported image, per renderer");

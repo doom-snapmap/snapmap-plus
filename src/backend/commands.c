@@ -1,5 +1,6 @@
 /* Registers console commands and implements dispatch, resource listings, developer utilities, and command
  * exposure. Entity, reflection, and math handlers live in their own modules. */
+#include "../common/text.h"
 #include "safe_read.h"
 #include <windows.h>
 #include <stdint.h>
@@ -450,33 +451,6 @@ static const char *lr_decl_name(const void *decl)
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
 
-/* Accumulates newline-separated names for clipboard copy; an allocation failure stops collection while console
- * output continues. The caller frees the buffer. */
-typedef struct lr_buf {
-    char  *data;
-    size_t len;
-    size_t cap;
-    int    failed;
-} lr_buf;
-
-static void lr_buf_append(lr_buf *b, const char *s)
-{
-    if (b->failed || s == NULL) return;
-    size_t add = strlen(s) + 1;
-    if (b->len + add + 1 > b->cap) {
-        size_t ncap = b->cap ? b->cap * 2 : 4096;
-        while (ncap < b->len + add + 1) ncap *= 2;
-        char *nd = (char *)realloc(b->data, ncap);
-        if (!nd) { b->failed = 1; return; }
-        b->data = nd;
-        b->cap  = ncap;
-    }
-    memcpy(b->data + b->len, s, add - 1);
-    b->len += add - 1;
-    b->data[b->len++] = '\n';
-    b->data[b->len]   = '\0';
-}
-
 #ifdef SH_DIAG
 /* Prints what the resource layer serves for one engine path: its length and, with a match string, up to 16 lines
  * containing it. */
@@ -551,7 +525,7 @@ static void h_sh_listres(idCmdArgs *a)
     }
 
     int clip = sh_cvar_value_int(B2_CVAR_SH_COPY_RESLIST_TO_CLIPBOARD, 0);
-    lr_buf buf = { NULL, 0, 0, 0 };
+    sh_text_buf buf = {0};
 
     uint32_t printed = 0;
     for (uint32_t i = 0; i < count; i++) {
@@ -565,14 +539,17 @@ static void h_sh_listres(idCmdArgs *a)
 
         sh_printf("%s\n", name);
         printed++;
-        if (clip) lr_buf_append(&buf, name);
+        if (clip) {
+            sh_text_append_str(&buf, name);
+            sh_text_append(&buf, "\n", 1);
+        }
     }
 
-    if (clip && buf.data != NULL && buf.len > 0) {
-        if (sh_clipboard_set(buf.data))
+    if (clip && !buf.oom && buf.n) {
+        if (sh_clipboard_set(buf.p))
             sh_printf("sh_listres: copied %u name(s) to the clipboard.\n", printed);
     }
-    free(buf.data);
+    free(buf.p);
 }
 
 /* Lists live idEntity subclasses, including decl-less types and idTarget_Command, falling back to the static
@@ -848,7 +825,6 @@ static int eng_bmodel_builder(void *out208, const char *input, const char *outpu
 /* Local storage for engine objects. */
 #define GEN_IDSTR_BYTES   128
 #define GEN_MD6_BYTES     1024    /* the idMd6Builder ctx (ctor inits md6+0x38..+0x110; build writes +0xf8) */
-#define GEN_BMODEL_BYTES  256     /* the BModelBuilder out208 result struct (208 = 0xD0 bytes used) */
 #define GEN_BOPTS_BYTES   0xD0    /* BModel result buffer, filled with 0x01; arg4 of the builder is an idStr */
 
 /* Compiles a .md6model through the engine's builder: constructor, input assignment, output setup, build. The
@@ -936,9 +912,8 @@ static void h_sh_genbmodel(idCmdArgs *a)
 #define RW_MODEL_NAME_OFF         0x10
 #define ED_SHOWCURSOR_OFF         0x23624u
 #define RW_MODEL_COUNT_CAP        1000000u    /* stale-renderWorld guard on the model count */
-#define EDITOR_SINGLETON_RVA      SH_RVA(0x2F6AD18u, 0x2FB2C08u)  /* the editor global anchor locates the object */
 
-/* Resolves renderWorld by accessor, then the global anchor, then a Vulkan-name-gated RVA. Returns NULL if no
+/* Resolves renderWorld by accessor, then the global anchor, then the identified renderer's recorded RVA. Returns NULL if no
  * readable non-NULL object is found. */
 static void *dr_resolve_renderworld(void)
 {
@@ -958,7 +933,7 @@ static void *dr_resolve_renderworld(void)
             if (sh_safe_read((const uint8_t *)slot, (uint8_t *)&rw, sizeof rw) && rw) return rw;
         }
     }
-    /* Last resort: the pinned Vulkan slot behind the host filename gate. */
+    /* Only an identified game executable may use its recorded fallback RVA. */
     if (g_module_base && sh_host_is_supported_build()) {
         void *rw = NULL;
         if (sh_safe_read(g_module_base + RW_SLOT_KNOWN_RVA, (uint8_t *)&rw, sizeof rw) && rw) return rw;

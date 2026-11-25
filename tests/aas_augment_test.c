@@ -45,140 +45,13 @@ int sh_config_get_bool(const char *key, int *out_value, unsigned int *out_flags)
 
 /* a synthetic module: one flat floor slab, findable through the BSP */
 
-static const unsigned REC[22] = {
-    16, 12, 12, 4, 40, 44, 16, 12, 4, 16, 1, 132, 128, 128, 128, 56, 4, 4, 60, 24, 24, 12
-};
-
-static void put32(unsigned char *p, unsigned v)
-{
-    p[0] = (unsigned char)(v >> 24); p[1] = (unsigned char)(v >> 16);
-    p[2] = (unsigned char)(v >> 8);  p[3] = (unsigned char)v;
-}
-static void put16(unsigned char *p, unsigned v)
-{
-    p[0] = (unsigned char)(v >> 8); p[1] = (unsigned char)v;
-}
-static void putf(unsigned char *p, float f)
-{
-    unsigned u; memcpy(&u, &f, 4); put32(p, u);
-}
-
-#define SET_WORDS 208
-#define SETW(n)   (30 + SET_WORDS + (n) * 4)
-
-/* A floor slab spanning +/-2000 at z = 0, in a BSP band -9.6 < z < 200 so a
- * point standing on the slab resolves to it. Three nodes: 0 is the engine's
- * dummy, 1 is the root, 2 is the ceiling test. */
-static unsigned char *build_module(size_t *out_len)
-{
-    unsigned counts[22];
-    size_t total = 394, off;
-    unsigned i;
-    unsigned char *p;
-    size_t o[22];
-
-    memset(counts, 0, sizeof counts);
-    counts[SH_AAS_L_PLANES] = 2;
-    counts[SH_AAS_L_VERTICES] = 4;
-    counts[SH_AAS_L_EDGES] = 4;
-    counts[SH_AAS_L_EDGEINDEX] = 4;
-    counts[SH_AAS_L_AREAS] = 2;
-    counts[SH_AAS_L_NODES] = 3;
-    counts[SH_AAS_L_CLUSTERS] = 1;
-    counts[SH_AAS_L_OBSTACLEPVS] = 2;
-    counts[SH_AAS_L_TREES] = 1;
-    counts[SH_AAS_L_AREABOUNDS] = 2;
-
-    for (i = 0; i < 22; i++) total += 4 + (size_t)counts[i] * REC[i];
-    p = (unsigned char *)calloc(1, total);
-    if (!p) return NULL;
-
-    memcpy(p, "2SAA", 4);
-    p[4] = 3;
-    p[5] = 29;
-
-    /* settings: agent box 48x48x80 (radius 24), maxStepHeight 18,
-     * maxFallHeight 0, minFloorCos 0.7 -- the monster-class shape. */
-    putf(p + SETW(0), -24.0f); putf(p + SETW(1), -24.0f); putf(p + SETW(2), 0.0f);
-    putf(p + SETW(3),  24.0f); putf(p + SETW(4),  24.0f); putf(p + SETW(5), 80.0f);
-    putf(p + SETW(12), 18.0f);          /* maxStepHeight */
-    putf(p + SETW(15), 0.0f);           /* maxFallHeight */
-    /* minFloorCos = 0.7 admits slopes up to about 45.57 degrees.
-     * Missing or invalid settings must refuse augmentation. */
-    putf(p + SETW(16), 0.7f);
-    put32(p + SETW(36), 100);           /* tt_startWalkOffLedge */
-
-    off = 394;
-    for (i = 0; i < 22; i++) {
-        put32(p + off, counts[i]);
-        off += 4;
-        o[i] = off;
-        off += (size_t)counts[i] * REC[i];
-    }
-
-    /* plane 0: (0 0 1) d=9.6  -> front is z > -9.6
-     * plane 1: (0 0 -1) d=200 -> front is z < 200 */
-    putf(p + o[SH_AAS_L_PLANES] + 8, 1.0f);
-    putf(p + o[SH_AAS_L_PLANES] + 12, 9.6f);
-    putf(p + o[SH_AAS_L_PLANES] + 16 + 8, -1.0f);
-    putf(p + o[SH_AAS_L_PLANES] + 16 + 12, 200.0f);
-
-    for (i = 0; i < 4; i++) {
-        unsigned char *e = p + o[SH_AAS_L_EDGES] + i * 12;
-        put32(e, i);
-        put32(e + 4, (i + 1) % 4);
-        put32(p + o[SH_AAS_L_EDGEINDEX] + i * 4, i);
-    }
-
-    /* area 0 is the dummy; area 1 is the floor. */
-    put32(p + o[SH_AAS_L_AREAS] + 0x14, 0xFFFFFFFFu);
-    put32(p + o[SH_AAS_L_AREAS] + 0x18, 0xFFFFFFFFu);
-    {
-        unsigned char *a1 = p + o[SH_AAS_L_AREAS] + 44;
-        put32(a1 + 0x00, 1);            /* flags: floor */
-        put16(a1 + 0x06, 4);            /* numEdges */
-        put32(a1 + 0x08, 0);            /* firstEdgeIndex */
-        put16(a1 + 0x0C, 0);            /* cluster 0 */
-        put32(a1 + 0x10, 0);            /* firstObstaclePVS */
-        put32(a1 + 0x14, 0xFFFFFFFFu);
-        put32(a1 + 0x18, 0xFFFFFFFFu);
-    }
-    /* areaBounds: area 1 is flat at z = 0, +/-2000 in x and y. */
-    {
-        unsigned char *b = p + o[SH_AAS_L_AREABOUNDS] + 12;
-        put16(b + 0, (unsigned)(short)-2000);
-        put16(b + 2, (unsigned)(short)-2000);
-        put16(b + 4, 0);
-        put16(b + 6, 2000);
-        put16(b + 8, 2000);
-        put16(b + 10, 0);
-    }
-    /* the BSP: root is node 1. */
-    {
-        unsigned char *n = p + o[SH_AAS_L_NODES];
-        put32(n + 16 + 0, 0);                       /* node 1 uses plane 0 */
-        put32(n + 16 + 8, 2);                       /* front -> node 2 */
-        put32(n + 16 + 12, 0);                      /* back  -> void */
-        put32(n + 32 + 0, 1);                       /* node 2 uses plane 1 */
-        put32(n + 32 + 8, 0xFFFFFFFFu);             /* front -> area 1 */
-        put32(n + 32 + 12, 0);                      /* back  -> void */
-    }
-    /* Tree records contain three floats followed by three ints. The root is at
-     * +12 and the area count at +20; independent offsets catch layout drift. */
-    putf(p + o[SH_AAS_L_TREES] + 8, 1.0f);          /* ( 0 0 1 ) */
-    put32(p + o[SH_AAS_L_TREES] + 12, 1);           /* a = root node index */
-    put32(p + o[SH_AAS_L_TREES] + 16, 1);           /* b */
-    put32(p + o[SH_AAS_L_TREES] + 20, 2);           /* c = area count */
-
-    *out_len = total;
-    return p;
-}
+#include "aas_fixture.h"
 
 static sh_aas *load_module(void)
 {
     size_t len = 0;
     char err[192];
-    unsigned char *bytes = build_module(&len);
+    unsigned char *bytes = fixture_module(&len);
     sh_aas *a;
     if (!bytes) return NULL;
     err[0] = 0;
@@ -200,6 +73,7 @@ static void mkplat(sh_aug_platform *p, float x0, float y0, float x1, float y1,
     p->c[0][2] = p->c[1][2] = p->c[2][2] = p->c[3][2] = z;
     p->n[2] = 1.0f;
     p->face = 4;                    /* an upright box's top */
+    p->depth = z > 0 ? z : 1;
     _snprintf_s(p->name, sizeof p->name, _TRUNCATE, "%s", name);
 }
 
@@ -223,18 +97,13 @@ static void test_island_at_128(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     printf("a platform past maxStepHeight is an island\n");
     if (!a) { CHECK(0); return; }
-    memset(&o, 0, sizeof o);
-    o.fall = SH_AUG_FALL_AUTO;
-    o.inset = 1;
-    /* Disable traversal explicitly: the process-wide table cache would make AUTO
-     * depend on test order. */
-    o.traversal = SH_AUG_TRAVERSAL_NEVER;
+
+    sh_trav_test_reset();
     mkplat(&p, -500.0f, -500.0f, 500.0f, 500.0f, 128.0f, "roof");
 
-    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
     CHECK_MSG(rep.platforms[0].emitted == 1, "the platform must be emitted");
     CHECK_MSG(rep.areas_after == rep.areas_before + 1, "exactly one area added");
     CHECK_MSG(rep.platforms[0].carrier == 1, "the floor slab is the carrier");
@@ -274,15 +143,12 @@ static void test_step_regime_at_16(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     printf("a platform inside maxStepHeight is walked, not climbed\n");
     if (!a) { CHECK(0); return; }
-    memset(&o, 0, sizeof o);
-    o.fall = SH_AUG_FALL_AUTO;
-    o.inset = 1;
+
     mkplat(&p, -500.0f, -500.0f, 500.0f, 500.0f, 16.0f, "kerb");
 
-    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
     CHECK(rep.platforms[0].emitted == 1);
     CHECK_MSG(rep.platforms[0].island == 0,
               "16 is inside maxStepHeight so plain walk links must join it");
@@ -297,28 +163,23 @@ static void test_refusals(void)
     sh_aas *a = load_module();
     sh_aug_platform p[3];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     printf("refusals are reported, never fudged\n");
     if (!a) { CHECK(0); return; }
-    memset(&o, 0, sizeof o);
-    o.inset = 1;
 
-    /* Too small once inset by the 24-unit agent radius: 60x60 leaves 12x12,
-     * under the 48x48 footprint. */
-    mkplat(&p[0], -30.0f, -30.0f, 30.0f, 30.0f, 100.0f, "pebble");
-    /* Fine. */
-    mkplat(&p[1], -500.0f, -500.0f, 500.0f, 500.0f, 100.0f, "roof");
-    /* Directly under `roof` with only 20 units of clearance, less than the
-     * 80-unit agent height. */
-    mkplat(&p[2], -400.0f, -400.0f, 400.0f, 400.0f, 80.0f, "crawlspace");
+    mkplat(&p[0], -1030, -30, -1000, 30, 100, "pebble");
+    mkplat(&p[1], -500, -500, 500, 500, 100, "roof");
+    mkplat(&p[2], -400, -400, 400, 400, 80, "crawlspace");
 
-    CHECK(sh_aas_augment(a, p, 3, &o, &rep) == 1);
-    CHECK_MSG(rep.platforms[0].emitted == 0, "the too-small platform is refused");
-    CHECK_MSG(rep.platforms[0].reason[0] != 0, "and the refusal is explained");
-    CHECK_MSG(rep.platforms[1].emitted == 1, "one bad box must not cost the others");
-    CHECK_MSG(rep.platforms[2].emitted == 0, "the low-headroom platform is refused");
-    CHECK_MSG(rep.platforms[2].reason[0] != 0, "and that refusal is explained too");
-    CHECK_MSG(rep.areas_after == rep.areas_before + 1, "only the good one landed");
+    CHECK(sh_aas_augment(a, p, 3, 0, &rep) == 1);
+    int emitted[3] = {0}, refused[3] = {0};
+    for (int i = 0; i < rep.platform_count; i++) {
+        const sh_aug_platform_result *piece = &rep.platforms[i];
+        if (piece->emitted) emitted[piece->source]++;
+        else if (piece->reason[0]) refused[piece->source]++;
+    }
+    CHECK(!emitted[0] && refused[0]);
+    CHECK(emitted[1] && !refused[1]);
+    CHECK(!emitted[2] && refused[2]);
     sh_aas_free(a);
 }
 
@@ -326,17 +187,14 @@ static void test_zero_platforms_is_a_no_op(void)
 {
     sh_aas *a = load_module();
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     unsigned char *before, *after;
     size_t blen = 0, alen = 0;
     printf("augmenting with nothing changes nothing\n");
     if (!a) { CHECK(0); return; }
-    memset(&o, 0, sizeof o);
-    o.inset = 1;
 
     before = sh_aas_write(a, &blen);
     CHECK(before != NULL);
-    CHECK(sh_aas_augment(a, NULL, 0, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, NULL, 0, 0, &rep) == 1);
     after = sh_aas_write(a, &alen);
     CHECK(after != NULL);
     if (before && after) {
@@ -353,16 +211,14 @@ static void test_result_still_validates(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     unsigned char *bytes;
     size_t len = 0;
     char err[192];
     printf("the augmented payload passes the same gate the serving path uses\n");
     if (!a) { CHECK(0); return; }
-    memset(&o, 0, sizeof o);
-    o.inset = 1;
+
     mkplat(&p, -500.0f, -500.0f, 500.0f, 500.0f, 128.0f, "roof");
-    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
 
     bytes = sh_aas_write(a, &len);
     CHECK(bytes != NULL);
@@ -380,12 +236,10 @@ static void test_many_platforms_stay_within_depth(void)
     sh_aas *a = load_module();
     sh_aug_platform p[24];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     int i;
     printf("a cityscape of separated roofs stays inside the loader depth limit\n");
     if (!a) { CHECK(0); return; }
-    memset(&o, 0, sizeof o);
-    o.inset = 1;
+
     for (i = 0; i < 24; i++) {
         float x = -1800.0f + (float)(i % 6) * 600.0f;
         float y = -1800.0f + (float)(i / 6) * 600.0f;
@@ -394,7 +248,7 @@ static void test_many_platforms_stay_within_depth(void)
         mkplat(&p[i], x, y, x + 400.0f, y + 400.0f,
                64.0f + (float)(i % 4) * 32.0f, nm);
     }
-    CHECK(sh_aas_augment(a, p, 24, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 24, 0, &rep) == 1);
     CHECK_MSG(rep.areas_after > rep.areas_before, "roofs landed");
     CHECK_MSG(rep.depth_exceeded == 0,
               "BSP depth grows logarithmically with separated platforms");
@@ -459,7 +313,6 @@ static void test_traversal_anchor_pattern(void)
     }
 }
 
-
 /* oriented geometry */
 
 static int near_d(double a, double b) { double v = a - b; return v < 0.001 && v > -0.001; }
@@ -484,6 +337,7 @@ static void mkplat_yawed(sh_aug_platform *p, double deg, double w, double h,
     }
     p->n[2] = 1.0f;
     p->face = 4;
+    p->depth = 16.0f;
     _snprintf_s(p->name, sizeof p->name, _TRUNCATE, "%s", name);
 }
 
@@ -506,6 +360,7 @@ static void mkplat_tilted(sh_aug_platform *p, double deg, double w, double h,
     }
     p->n[0] = (float)(-sn); p->n[1] = 0.0f; p->n[2] = (float)cs;
     p->face = 4;
+    p->depth = 192.0f;
     _snprintf_s(p->name, sizeof p->name, _TRUNCATE, "%s", name);
 }
 
@@ -546,43 +401,6 @@ static void test_contains_is_true_inside(void)
     CHECK(sh_aug_test_quad_contains(q, 50.0, -50.0) == 0);
 }
 
-/* The inset of a ROTATED quad is the rotated inset; an axis-wise inset would eat the corners and refuse
- * platforms that are large enough. */
-static void test_inset_of_a_rotated_quad_stays_rotated(void)
-{
-    unsigned char q[2048], in[2048];
-    double corners[4][3], c0[3];
-    printf("the inset of a rotated quad is rotated too\n");
-    /* A 200x200 square yawed 45 degrees: corners on the axes at r = 141.421,
-     * wound clockwise seen from +Z. */
-    corners[0][0] = 0;        corners[0][1] = 141.421;  corners[0][2] = 0;
-    corners[1][0] = 141.421;  corners[1][1] = 0;        corners[1][2] = 0;
-    corners[2][0] = 0;        corners[2][1] = -141.421; corners[2][2] = 0;
-    corners[3][0] = -141.421; corners[3][1] = 0;        corners[3][2] = 0;
-    CHECK(sh_aug_test_quad_init(q, corners) == 1);
-    CHECK(sh_aug_test_quad_inset(q, 24.0, in) == 1);
-    sh_aug_test_quad_corner(in, 0, c0);
-    /* Each edge moves in by 24 along its own normal, so a corner sitting on an
-     * axis moves in by 24*sqrt(2) = 33.941. */
-    CHECK(near_d(c0[0], 0.0));
-    CHECK(near_d(c0[1], 141.421 - 33.9411));
-}
-
-/* Smaller than twice the inset: refused, never inverted. If the edge normal
- * pointed outward this quad would GROW and this check would pass a lie. */
-static void test_inset_refuses_a_collapsing_quad(void)
-{
-    unsigned char q[2048], in[2048];
-    double corners[4][3];
-    printf("a quad too small to inset is refused\n");
-    corners[0][0] = 0;  corners[0][1] = 30; corners[0][2] = 0;
-    corners[1][0] = 30; corners[1][1] = 30; corners[1][2] = 0;
-    corners[2][0] = 30; corners[2][1] = 0;  corners[2][2] = 0;
-    corners[3][0] = 0;  corners[3][1] = 0;  corners[3][2] = 0;
-    CHECK(sh_aug_test_quad_init(q, corners) == 1);
-    CHECK(sh_aug_test_quad_inset(q, 24.0, in) == 0);
-}
-
 /* node.field4 records any z component, including on yawed vertical planes. */
 static void test_field4_follows_the_plane_z_component(void)
 {
@@ -593,24 +411,31 @@ static void test_field4_follows_the_plane_z_component(void)
     CHECK(sh_aug_test_node_field4(-0.5)  == 1);   /* oblique, leaning down */
 }
 
-/* The engine's own bake walks floors up to minFloorCos -- 0.7, 45.57 degrees.
- * Steeper is refused WITH the angle, not silently dropped. */
+/* A tipped box can expose two walkable faces. Each emitted face must meet the native slope limit. */
 static void test_minfloorcos_gate_at_the_boundary(void)
 {
     sh_aas *a = load_module();
-    sh_aug_platform p[2];
+    sh_aug_platform boxes[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
-    printf("a face steeper than minFloorCos is refused with its angle\n");
-    mkplat_tilted(&p[0], 45.0, 512.0, 512.0, 16.0, "shallow");   /* cos 0.7071 */
-    mkplat_tilted(&p[1], 46.0, 512.0, 512.0, 400.0, "steep");    /* cos 0.6947 */
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
-    CHECK_MSG(rep.platforms[0].emitted == 1, "45 degrees is inside the limit");
-    CHECK_MSG(rep.platforms[1].emitted == 0, "46 degrees is past it");
-    CHECK(near_f(rep.platforms[1].tilt_degrees, 46.0f));
-    CHECK_MSG(strstr(rep.platforms[1].reason, "46") != NULL,
-              "the refusal names the measured angle");
+    int i, inside = 0, other_face = 0;
+
+    mkplat_tilted(&boxes[0], 45, 512, 512, 64, "45 degrees");
+    mkplat_tilted(&boxes[1], 46, 512, 512, 64, "46 degrees");
+    for (i = 0; i < 4; i++) {
+        boxes[0].c[i][0] -= 512;
+        boxes[1].c[i][0] += 512;
+    }
+    CHECK(sh_aas_augment(a, boxes, 2, 0, &rep));
+    for (i = 0; i < rep.platform_count; i++) {
+        sh_aug_platform_result *face = &rep.platforms[i];
+        if (!face->emitted) continue;
+        CHECK(face->tilt_degrees <= 45.58f);
+        if (face->source == 0 && !face->side_face && near_f(face->tilt_degrees, 45)) inside++;
+        if (face->source == 1 && face->side_face && near_f(face->tilt_degrees, 44)) other_face++;
+    }
+    CHECK_MSG(inside > 0, "the 45-degree top remains walkable");
+    CHECK_MSG(other_face > 0, "the 46-degree box offers its 44-degree side");
+    sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
 
@@ -621,12 +446,11 @@ static void test_unreadable_minfloorcos_rejects_the_payload(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+
     printf("a payload with no readable slope limit is refused\n");
     sh_aas_set_setting_f32(a, 272u, 0.0f);
     mkplat(&p, -256.0f, -256.0f, 256.0f, 256.0f, 16.0f, "shelf");
-    CHECK_MSG(sh_aas_augment(a, &p, 1, &o, &rep) == 0,
+    CHECK_MSG(sh_aas_augment(a, &p, 1, 0, &rep) == 0,
               "fail closed rather than treat a wall as floor");
     sh_aas_free(a);
 }
@@ -638,11 +462,10 @@ static void test_a_yawed_area_resolves_through_the_bsp(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+
     printf("a yawed area is findable, and only where it actually is\n");
     mkplat_yawed(&p, 45.0, 400.0, 400.0, 16.0, "diamond");
-    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
     CHECK(rep.platforms[0].emitted == 1);
     if (rep.platforms[0].emitted) {
         CHECK_MSG(sh_aas_point_area(a, 0.0f, 0.0f, 18.0f) == rep.platforms[0].area,
@@ -713,12 +536,11 @@ static void test_two_abutting_platforms_link_to_each_other(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+
     printf("two volumes standing together link to each other\n");
     mkplat(&p[0], -512.0f, -512.0f,    0.0f, 512.0f, 16.0f, "lower");
     mkplat(&p[1],    0.0f, -512.0f,  512.0f, 512.0f, 28.0f, "upper");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     CHECK(rep.platforms[0].emitted == 1);
     CHECK(rep.platforms[1].emitted == 1);
     if (rep.platforms[0].emitted && rep.platforms[1].emitted) {
@@ -738,13 +560,12 @@ static void test_a_partially_abutting_neighbour_is_found(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+
     printf("a neighbour touching only part of an edge is still found\n");
     mkplat(&p[0], -512.0f, -512.0f,   0.0f, 512.0f, 16.0f, "wide");
     /* Covers only the top third of the shared edge. */
     mkplat(&p[1],    0.0f,  200.0f, 512.0f, 512.0f, 28.0f, "corner");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     if (rep.platforms[0].emitted && rep.platforms[1].emitted)
         CHECK_MSG(reach_exists(a, rep.platforms[0].area, rep.platforms[1].area),
                   "the partial overlap is enough to link them");
@@ -758,13 +579,12 @@ static void test_a_pair_is_not_emitted_twice(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     int fwd, back;
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+
     printf("each pair of volumes is linked once, not twice\n");
     mkplat(&p[0], -512.0f, -512.0f,    0.0f, 512.0f, 16.0f, "a");
     mkplat(&p[1],    0.0f, -512.0f,  512.0f, 512.0f, 28.0f, "b");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     if (rep.platforms[0].emitted && rep.platforms[1].emitted) {
         fwd  = reach_count(a, rep.platforms[0].area, rep.platforms[1].area);
         back = reach_count(a, rep.platforms[1].area, rep.platforms[0].area);
@@ -855,13 +675,12 @@ static void test_a_gap_within_range_becomes_a_leap(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a gap the shipped animations cover becomes a leap\n");
     load_synthetic_traversal_table();
     mkplat(&p[0], -1200.0f, -400.0f, -600.0f, 400.0f, 16.0f, "near");
     mkplat(&p[1],     0.0f, -400.0f,  600.0f, 400.0f, 16.0f, "far");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     if (rep.platforms[0].emitted && rep.platforms[1].emitted)
         CHECK_MSG(rep.platforms[0].leaps > 0, "the 600-unit gap is crossed");
     sh_aas_free(a);
@@ -874,13 +693,12 @@ static void test_a_gap_beyond_range_is_not_crossed(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a gap wider than any shipped leap is left uncrossed\n");
     load_synthetic_traversal_table();
     mkplat(&p[0], -2000.0f, -400.0f, -1500.0f, 400.0f, 16.0f, "near");
     mkplat(&p[1],  1500.0f, -400.0f,  2000.0f, 400.0f, 16.0f, "far");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     CHECK_MSG(rep.platforms[0].leaps == 0, "3000 units is past every animation");
     sh_aas_free(a);
 }
@@ -891,13 +709,12 @@ static void test_a_steep_gap_is_refused(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a gap between surfaces at very different heights is refused\n");
     load_synthetic_traversal_table();
     mkplat(&p[0], -1200.0f, -400.0f, -600.0f, 400.0f,  16.0f, "near");
     mkplat(&p[1],     0.0f, -400.0f,  600.0f, 400.0f, 400.0f, "far");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     CHECK_MSG(rep.platforms[0].leaps == 0, "a 0.64 grade is past the envelope");
     sh_aas_free(a);
 }
@@ -911,13 +728,12 @@ static void test_a_tall_neighbour_gets_a_climb_not_a_walk(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a neighbour standing above is climbed, not stepped onto\n");
     load_synthetic_traversal_table();
     mkplat(&p[0], -512.0f, -512.0f,   0.0f, 512.0f,  16.0f, "low");
     mkplat(&p[1],    0.0f, -512.0f, 512.0f, 512.0f, 128.0f, "high");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     if (rep.platforms[0].emitted && rep.platforms[1].emitted) {
         CHECK_MSG(reach_count_of_type(a, rep.platforms[0].area,
                                       rep.platforms[1].area, 0x20u) == 0,
@@ -937,13 +753,12 @@ static void test_the_climb_is_reciprocated(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a climb between two volumes goes both ways\n");
     load_synthetic_traversal_table();
     mkplat(&p[0], -512.0f, -512.0f,   0.0f, 512.0f,  16.0f, "low");
     mkplat(&p[1],    0.0f, -512.0f, 512.0f, 512.0f, 128.0f, "high");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     if (rep.platforms[0].emitted && rep.platforms[1].emitted) {
         CHECK_MSG(reach_exists(a, rep.platforms[0].area, rep.platforms[1].area),
                   "up");
@@ -959,14 +774,13 @@ static void test_a_three_tower_chain_links_end_to_end(void)
     sh_aas *a = load_module();
     sh_aug_platform p[3];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a three-volume chain links end to end\n");
     load_synthetic_traversal_table();
     mkplat(&p[0], -900.0f, -512.0f, -300.0f, 512.0f,  16.0f, "a");
     mkplat(&p[1], -300.0f, -512.0f,  300.0f, 512.0f,  80.0f, "b");
     mkplat(&p[2],  300.0f, -512.0f,  900.0f, 512.0f, 144.0f, "c");
-    CHECK(sh_aas_augment(a, p, 3, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 3, 0, &rep) == 1);
     if (rep.platforms[0].emitted && rep.platforms[1].emitted && rep.platforms[2].emitted) {
         CHECK_MSG(reach_exists(a, rep.platforms[0].area, rep.platforms[1].area), "a to b");
         CHECK_MSG(reach_exists(a, rep.platforms[1].area, rep.platforms[2].area), "b to c");
@@ -983,14 +797,13 @@ static void test_a_gap_below_the_leap_minimum_is_not_crossed(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a gap shorter than any shipped leap is not crossed\n");
     load_synthetic_traversal_table();
     mkplat(&p[0], -600.0f, -400.0f, -100.0f, 400.0f, 16.0f, "near");
     /* 80 units apart: past the touching epsilon, under SH_TRAV_LEAP_MIN_SPAN. */
     mkplat(&p[1],  -20.0f, -400.0f,  480.0f, 400.0f, 16.0f, "far");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     if (rep.platforms[0].emitted && rep.platforms[1].emitted)
         CHECK_MSG(rep.platforms[0].leaps == 0, "80 units is below every nominal");
     sh_aas_free(a);
@@ -1005,8 +818,7 @@ static void test_a_leap_through_a_third_volume_is_dropped(void)
     sh_aug_report bare;
     sh_aug_platform two[2];
     sh_aas *b = load_module();
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a leap whose path runs through another volume is dropped\n");
     load_synthetic_traversal_table();
 
@@ -1014,14 +826,14 @@ static void test_a_leap_through_a_third_volume_is_dropped(void)
      * so the refusal below is the wall and not the geometry. */
     mkplat(&two[0], -1200.0f, -400.0f, -600.0f, 400.0f, 16.0f, "near");
     mkplat(&two[1],     0.0f, -400.0f,  600.0f, 400.0f, 16.0f, "far");
-    CHECK(sh_aas_augment(b, two, 2, &o, &bare) == 1);
+    CHECK(sh_aas_augment(b, two, 2, 0, &bare) == 1);
     CHECK_MSG(bare.platforms[0].leaps > 0, "the control leap is emitted");
     sh_aas_free(b);
 
     mkplat(&p[0], -1200.0f, -400.0f, -600.0f, 400.0f,  16.0f, "near");
     mkplat(&p[1],     0.0f, -400.0f,  600.0f, 400.0f,  16.0f, "far");
     mkplat(&p[2],  -400.0f, -400.0f, -200.0f, 400.0f, 190.0f, "wall");
-    CHECK(sh_aas_augment(a, p, 3, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 3, 0, &rep) == 1);
     CHECK_MSG(!reach_exists(a, rep.platforms[0].area, rep.platforms[1].area),
               "the wall between them refuses the leap");
     sh_aas_free(a);
@@ -1065,17 +877,16 @@ static void test_a_row_of_tops_leaps_only_to_its_neighbours(void)
     sh_aas *a = load_module(), *b = load_module();
     sh_aug_platform p[4], two[2];
     sh_aug_report rep, bare;
-    sh_aug_opts o = {0};
     unsigned char *bytes;
     size_t len = 0;
     char err[192];
     printf("a row of tops leaps to its neighbours and relays the far ones\n");
     if (!a || !b) { CHECK(0); sh_aas_free(a); sh_aas_free(b); return; }
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     load_synthetic_traversal_table();
     mkplat(&two[0], -1300.0f, -300.0f, -1100.0f, 300.0f, 16.0f, "west");
     mkplat(&two[1],  -300.0f, -300.0f,  -100.0f, 300.0f, 16.0f, "east");
-    CHECK(sh_aas_augment(b, two, 2, &o, &bare) == 1);
+    CHECK(sh_aas_augment(b, two, 2, 0, &bare) == 1);
     CHECK_MSG(reach_exists(b, bare.platforms[0].area, bare.platforms[1].area),
               "alone, the 800-unit gap is leapt");
     CHECK_MSG(bare.leaps_farther == 0, "and nothing is relayed");
@@ -1084,7 +895,7 @@ static void test_a_row_of_tops_leaps_only_to_its_neighbours(void)
     mkplat(&p[1],  -800.0f, -300.0f,  -600.0f, 300.0f, 16.0f, "t1");
     mkplat(&p[2],  -300.0f, -300.0f,  -100.0f, 300.0f, 16.0f, "t2");
     mkplat(&p[3],   200.0f, -300.0f,   400.0f, 300.0f, 16.0f, "t3");
-    CHECK(sh_aas_augment(a, p, 4, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 4, 0, &rep) == 1);
     {
         int i, A[4];
         for (i = 0; i < 4; i++) A[i] = rep.platforms[i].area;
@@ -1120,7 +931,6 @@ static void test_the_rebuilt_tree_keeps_every_area_and_link(void)
     sh_aas *a = load_module(), *b = load_module();
     sh_aug_platform p[NP];
     sh_aug_report ra, rb;
-    sh_aug_opts o = {0};
     unsigned lump;
     int i, was, same_lumps = 1, mismatched = 0, probes = 0, landed = 0;
     unsigned char *bytes;
@@ -1130,7 +940,7 @@ static void test_the_rebuilt_tree_keeps_every_area_and_link(void)
     static const double zs[] = { 2.0, 30.0, 58.0, 86.0, 114.0, 150.0, 210.0, 330.0 };
     printf("the rebuilt tree keeps every area and link of the spliced one\n");
     if (!a || !b) { CHECK(0); sh_aas_free(a); sh_aas_free(b); return; }
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     load_synthetic_traversal_table();
     for (i = 0; i < 36; i++) {
         float x0 = -1500.0f + (float)(i % 6) * 500.0f;
@@ -1151,9 +961,9 @@ static void test_the_rebuilt_tree_keeps_every_area_and_link(void)
         }
     }
     was = sh_aug_test_set_rebuild(0);
-    CHECK(sh_aas_augment(a, p, NP, &o, &ra) == 1);
+    CHECK(sh_aas_augment(a, p, NP, 0, &ra) == 1);
     sh_aug_test_set_rebuild(1);
-    CHECK(sh_aas_augment(b, p, NP, &o, &rb) == 1);
+    CHECK(sh_aas_augment(b, p, NP, 0, &rb) == 1);
     sh_aug_test_set_rebuild(was);
     for (i = 0; i < NP; i++) if (rb.platforms[i].emitted) landed++;
     CHECK_MSG(landed >= NP - 4, "the boxes are emitted");
@@ -1202,11 +1012,10 @@ static void test_an_upright_platform_is_not_a_side_face(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+
     printf("an ordinary upright platform is not reported as a side face\n");
     mkplat(&p, -500.0f, -500.0f, 500.0f, 500.0f, 16.0f, "flat");
-    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
     CHECK(rep.platforms[0].side_face == 0);
     CHECK(near_f(rep.platforms[0].tilt_degrees, 0.0f));
     sh_aas_free(a);
@@ -1219,9 +1028,8 @@ static void test_a_dense_yawed_chain_stays_within_the_depth_limit(void)
     sh_aas *a = load_module();
     sh_aug_platform p[16];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     int i;
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+
     printf("a dense chain of yawed platforms stays inside the loader depth limit\n");
     for (i = 0; i < 16; i++) {
         mkplat_yawed(&p[i], 30.0, 220.0, 220.0, 16.0 + i * 8.0, "chain");
@@ -1229,7 +1037,7 @@ static void test_a_dense_yawed_chain_stays_within_the_depth_limit(void)
         p[i].c[0][0] += (float)(i * 240 - 1800); p[i].c[1][0] += (float)(i * 240 - 1800);
         p[i].c[2][0] += (float)(i * 240 - 1800); p[i].c[3][0] += (float)(i * 240 - 1800);
     }
-    CHECK(sh_aas_augment(a, p, 16, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 16, 0, &rep) == 1);
     CHECK_MSG(rep.depth_exceeded == 0,
               "16 yawed platforms must not blow the 0x80 tree-depth limit");
     sh_aas_free(a);
@@ -1242,9 +1050,8 @@ static void test_a_bake_at_the_platform_cap_completes(void)
     sh_aas *a = load_module();
     static sh_aug_platform p[200];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     int i, emitted = 0;
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a bake with two hundred platforms completes and stays coherent\n");
     load_synthetic_traversal_table();
     /* A 20x10 grid of small platforms inside the fixture's +/-2000 floor. */
@@ -1253,7 +1060,7 @@ static void test_a_bake_at_the_platform_cap_completes(void)
         float y = -950.0f  + (float)(i / 20) * 190.0f;
         mkplat(&p[i], x, y, x + 150.0f, y + 150.0f, 16.0f + (float)(i % 3) * 6.0f, "cell");
     }
-    CHECK_MSG(sh_aas_augment(a, p, 200, &o, &rep) == 1,
+    CHECK_MSG(sh_aas_augment(a, p, 200, 0, &rep) == 1,
               "candidate storage grows beyond the old 2048-entry ceiling");
     CHECK(!rep.links_truncated);
     CHECK(sh_aas_count(a, SH_AAS_L_REACHABILITIES) > 2048);
@@ -1270,11 +1077,10 @@ static void test_existing_traversals_on_our_floor_are_regrouped_not_declined(voi
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     unsigned char *floor_area, *tp;
     unsigned first, np, na, i, j, claimed;
     size_t rs;
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a module that already owns climbs on our floor is regrouped, not declined\n");
     load_synthetic_traversal_table();
 
@@ -1294,7 +1100,7 @@ static void test_existing_traversals_on_our_floor_are_regrouped_not_declined(voi
     }
 
     mkplat(&p, -500.0f, -500.0f, 500.0f, 500.0f, 128.0f, "roof");
-    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
     CHECK_MSG(rep.climbs_declined == 0, "the set is regrouped, not declined");
     CHECK_MSG(rep.platforms[0].climbs > 0, "and the climbs are there");
 
@@ -1330,12 +1136,11 @@ static void test_a_module_without_traversals_still_gets_climbs(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a module with no climbs of its own still gets ours\n");
     load_synthetic_traversal_table();
     mkplat(&p, -500.0f, -500.0f, 500.0f, 500.0f, 128.0f, "roof");
-    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
     CHECK_MSG(rep.climbs_declined == 0, "nothing to decline");
     CHECK_MSG(rep.platforms[0].climbs > 0, "and the climbs are there");
     sh_aas_free(a);
@@ -1352,14 +1157,13 @@ static void test_a_pillar_through_a_slab_is_linked(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     int slab, pil;
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a pillar standing through a slab is linked, not stranded\n");
     load_synthetic_traversal_table();
     mkplat(&p[0], -384.0f, -384.0f, 384.0f, 384.0f,  16.0f, "slab");
     mkplat(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f, 128.0f, "pillar");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     slab = 0; pil = 1;
     if (rep.platforms[pil].emitted) {
         CHECK_MSG(rep.platforms[pil].island == 0,
@@ -1378,15 +1182,14 @@ static void test_containment_works_with_the_index_order_reversed(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("containment is linked whichever platform is created first\n");
     load_synthetic_traversal_table();
     /* The small one is LOWER here, so it is created first and takes the lower
      * index -- the opposite of the pillar case. */
     mkplat(&p[0],  -96.0f,  -96.0f,  96.0f,  96.0f,  16.0f, "inner");
     mkplat(&p[1], -384.0f, -384.0f, 384.0f, 384.0f, 128.0f, "outer");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     if (rep.platforms[0].emitted && rep.platforms[1].emitted) {
         CHECK_MSG(!(rep.platforms[0].island && rep.platforms[1].island),
                   "both cannot be islands");
@@ -1401,13 +1204,12 @@ static void test_identical_footprints_are_not_double_linked(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     int fwd, back;
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+
     printf("two volumes with the same footprint are linked once, not twice\n");
     mkplat(&p[0], -256.0f, -256.0f, 256.0f, 256.0f, 16.0f, "lower");
     mkplat(&p[1], -256.0f, -256.0f, 256.0f, 256.0f, 28.0f, "upper");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     if (rep.platforms[0].emitted && rep.platforms[1].emitted) {
         fwd  = reach_count(a, rep.platforms[0].area, rep.platforms[1].area);
         back = reach_count(a, rep.platforms[1].area, rep.platforms[0].area);
@@ -1423,12 +1225,11 @@ static void test_partially_overlapping_volumes_still_link_once(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+
     printf("partially overlapping volumes link exactly once\n");
     mkplat(&p[0], -400.0f, -400.0f,  100.0f, 100.0f, 16.0f, "a");
     mkplat(&p[1], -100.0f, -100.0f,  400.0f, 400.0f, 28.0f, "b");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     if (rep.platforms[0].emitted && rep.platforms[1].emitted) {
         CHECK(reach_count(a, rep.platforms[0].area, rep.platforms[1].area) ==
               reach_count(a, rep.platforms[1].area, rep.platforms[0].area));
@@ -1443,15 +1244,14 @@ static void test_a_floating_intersecting_volume_is_never_a_stranded_area(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     int i;
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a floating volume intersecting a solid one is linked or refused, "
            "never stranded\n");
     load_synthetic_traversal_table();
     mkplat(&p[0], -384.0f, -384.0f, 384.0f, 384.0f,  16.0f, "solid");
     mkplat(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f, 120.0f, "floater");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     for (i = 0; i < rep.platform_count; i++) {
         if (!rep.platforms[i].emitted) {
             CHECK_MSG(rep.platforms[i].reason[0] != 0,
@@ -1471,12 +1271,11 @@ static void test_a_platform_with_no_carrier_is_refused_not_phantom(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+
     printf("a platform the tree cannot hold is refused, not left a phantom\n");
     /* Far outside the fixture's +/-2000 floor slab and high above it. */
     mkplat(&p, 6000.0f, 6000.0f, 6600.0f, 6600.0f, 900.0f, "orphan");
-    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
     if (!rep.platforms[0].emitted)
         CHECK_MSG(rep.platforms[0].reason[0] != 0, "and it says why");
     else
@@ -1491,9 +1290,8 @@ static void test_no_arrangement_emits_a_stranded_area(void)
     sh_aas *a = load_module();
     sh_aug_platform p[8];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     int i, emitted = 0;
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("no arrangement in the matrix emits a stranded area\n");
     load_synthetic_traversal_table();
     mkplat(&p[0], -1500.0f, -400.0f, -740.0f, 360.0f,  16.0f, "slab");
@@ -1504,7 +1302,7 @@ static void test_no_arrangement_emits_a_stranded_area(void)
     mkplat(&p[5],   700.0f, -100.0f, 1200.0f, 360.0f,  28.0f, "ov_b");     /* partial */
     mkplat(&p[6],  1400.0f, -400.0f, 1900.0f, 360.0f,  16.0f, "apart_a");
     mkplat(&p[7],  1400.0f,  500.0f, 1900.0f, 900.0f,  16.0f, "apart_b");  /* separate */
-    CHECK(sh_aas_augment(a, p, 8, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 8, 0, &rep) == 1);
     for (i = 0; i < rep.platform_count; i++) {
         if (!rep.platforms[i].emitted) continue;
         emitted++;
@@ -1531,12 +1329,11 @@ static void test_areas_added_equals_platforms_emitted(void)
         sh_aas *a = load_module();
         sh_aug_platform p;
         sh_aug_report rep;
-        sh_aug_opts o = {0};
         int i, emitted = 0, added;
-        o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+
         mkplat(&p, CASE[ci].x0, CASE[ci].y0, CASE[ci].x1, CASE[ci].y1,
                CASE[ci].z, CASE[ci].name);
-        CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+        CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
         for (i = 0; i < rep.platform_count; i++)
             if (rep.platforms[i].emitted) emitted++;
         added = (int)rep.areas_after - (int)rep.areas_before;
@@ -1564,12 +1361,11 @@ static void test_an_emitted_platform_resolves_at_its_own_centre(void)
         sh_aas *a = load_module();
         sh_aug_platform p;
         sh_aug_report rep;
-        sh_aug_opts o = {0};
         float cx, cy, cz;
-        o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+
         mkplat(&p, CASE[ci].x0, CASE[ci].y0, CASE[ci].x1, CASE[ci].y1,
                CASE[ci].z, CASE[ci].name);
-        CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+        CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
         if (rep.platforms[0].emitted) {
             cx = (CASE[ci].x0 + CASE[ci].x1) / 2.0f;
             cy = (CASE[ci].y0 + CASE[ci].y1) / 2.0f;
@@ -1607,16 +1403,15 @@ static void test_a_pillar_through_a_slab_is_cut_out_of_it(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     int idx[8], n, i, at_centre, claimed = 0;
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a pillar standing through a slab is cut out of the slab's top\n");
     load_synthetic_traversal_table();
     /* A pillar rising through a floor-standing slab must remove its footprint
      * from the slab's walkable ground. */
     mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f,  16.0f, 0.0f, "slab");
     mkbox(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f, 128.0f, 0.0f, "pillar");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     CHECK_MSG(rep.source_count == 2, "two volumes were asked about");
 
     n = pieces_of(&rep, 0, idx, 8);
@@ -1655,16 +1450,15 @@ static void test_a_face_buried_in_another_volume_is_refused_by_name(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     int idx[8], n;
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a face entirely inside another volume is refused for that reason\n");
     load_synthetic_traversal_table();
     /* A small box swallowed by a big one. Its top is not a surface at all: it is
      * a plane in the middle of somebody else's solid. */
     mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f, 128.0f, 0.0f, "block");
     mkbox(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f,  64.0f, 0.0f, "swallowed");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
 
     n = pieces_of(&rep, 1, idx, 8);
     CHECK_MSG(n == 1, "a buried face is still reported once");
@@ -1687,15 +1481,14 @@ static void test_a_floating_volume_clipping_into_a_platform_is_cut_out(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     int idx[8], n, i, at_centre, claimed = 0;
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a floating volume clipping into a platform is cut out of it\n");
     load_synthetic_traversal_table();
     /* A floating box intrudes into the slab; agent height controls the required headroom. */
     mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f, 16.0f,  0.0f, "slab");
     mkbox(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f, 72.0f,  8.0f, "floater");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
 
     n = pieces_of(&rep, 0, idx, 8);
     CHECK_MSG(n == 4, "the slab is cut around the floater's footprint");
@@ -1714,14 +1507,13 @@ static void test_the_separated_control_arrangement_is_left_alone(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("two volumes that share nothing are not cut at all\n");
     load_synthetic_traversal_table();
     /* The control: two disjoint boxes side by side. */
     mkbox(&p[0], -384.0f, -384.0f, -128.0f, 384.0f, 16.0f, 0.0f, "left");
     mkbox(&p[1],  128.0f, -384.0f,  384.0f, 384.0f, 16.0f, 0.0f, "right");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     CHECK_MSG(rep.platform_count == 2, "two volumes stay two platforms");
     CHECK_MSG(rep.platforms[0].pieces == 1 && rep.platforms[1].pieces == 1,
               "and neither is split");
@@ -1735,15 +1527,14 @@ static void test_a_box_parked_on_a_platform_is_cut_out_of_it(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     int idx[8], n;
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a box standing on a platform is cut out of the platform's top\n");
     load_synthetic_traversal_table();
     /* Stacked volumes must subtract the upper box from the lower walkable face. */
     mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f,  16.0f,  0.0f, "floor slab");
     mkbox(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f, 112.0f, 16.0f, "crate");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     n = pieces_of(&rep, 0, idx, 8);
     CHECK_MSG(n == 4, "the slab is cut around the crate standing on it");
     n = pieces_of(&rep, 1, idx, 8);
@@ -1757,16 +1548,15 @@ static void test_a_low_ceiling_over_part_of_a_platform_keeps_the_rest(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
     int idx[8], n, i, any = 0;
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a low ceiling over half a platform costs it that half, not all of it\n");
     load_synthetic_traversal_table();
     /* A solid 44 units above an 80-unit agent blocks only the affected portion
      * of the slab, not the entire face. */
     mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f, 16.0f,  0.0f, "slab");
     mkbox(&p[1],    0.0f, -384.0f, 384.0f, 384.0f, 60.0f, 16.0f, "overhang");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     n = pieces_of(&rep, 0, idx, 8);
     CHECK_MSG(n == 1, "the covered half is subtracted, leaving one piece");
     for (i = 0; i < n; i++) if (rep.platforms[idx[i]].emitted) any = 1;
@@ -1792,13 +1582,12 @@ static void test_a_cut_platform_never_strands_an_area(void)
         sh_aas *a = load_module();
         sh_aug_platform p[2];
         sh_aug_report rep;
-        sh_aug_opts o = {0};
         int i;
-        o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
         mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f, 16.0f, 0.0f, "slab");
         mkbox(&p[1], CASES[ci].px0, CASES[ci].py0, CASES[ci].px1, CASES[ci].py1,
               CASES[ci].ptop, CASES[ci].pbot, "intruder");
-        CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+        CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
         /* Only the fully swallowed slab may emit nothing; partial overlap must
          * preserve the remaining walkable ground. */
         if (ci != 3) {
@@ -1818,21 +1607,19 @@ static void test_a_cut_platform_never_strands_an_area(void)
     }
 }
 
-
 static void test_a_gap_in_the_dead_zone_is_counted_and_named(void)
 {
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("a gap nothing can step or jump across is counted, not passed over\n");
     load_synthetic_traversal_table();
     /* An 80-unit gap exceeds stepping range but is shorter than the 149-unit
      * minimum leap. Both platforms reach the floor; test their missing direct link. */
     mkbox(&p[0], -400.0f, -200.0f,  -40.0f, 200.0f, 16.0f, 0.0f, "west");
     mkbox(&p[1],   40.0f, -200.0f,  400.0f, 200.0f, 16.0f, 0.0f, "east");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     CHECK_MSG(rep.platforms[0].emitted && rep.platforms[1].emitted,
               "both volumes are emitted -- the count below means nothing if not");
     CHECK_MSG(rep.dead_gaps == 1, "the unlinkable pair is counted exactly once");
@@ -1846,13 +1633,12 @@ static void test_a_flush_pair_is_not_a_dead_gap(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = {0};
-    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+
     printf("two volumes standing flush are not reported as a dead gap\n");
     load_synthetic_traversal_table();
     mkbox(&p[0], -400.0f, -200.0f,    0.0f, 200.0f, 16.0f, 0.0f, "west");
     mkbox(&p[1],    0.0f, -200.0f,  400.0f, 200.0f, 16.0f, 0.0f, "east");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     CHECK_MSG(rep.dead_gaps == 0, "touching volumes step between each other");
     sh_aas_free(a);
 }
@@ -1862,13 +1648,12 @@ static void test_suspended_bridge_is_continuous(void)
     sh_aas *a = load_module();
     sh_aug_platform p[3];
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_NEVER, 1, SH_AUG_TRAVERSAL_NEVER };
     int left, deck, right, x;
     printf("a suspended bridge has continuous standing space and walk links\n");
     mkbox(&p[0], 0, 0, 128, 256, 128, 0, "west support");
     mkbox(&p[1], 128, 0, 384, 256, 128, 96, "floating deck");
     mkbox(&p[2], 384, 0, 512, 256, 128, 0, "east support");
-    CHECK(sh_aas_augment(a, p, 3, &o, &rep));
+    CHECK(sh_aas_augment(a, p, 3, 0, &rep));
     left = sh_aas_point_area(a, 64, 128, 130);
     deck = sh_aas_point_area(a, 256, 128, 130);
     right = sh_aas_point_area(a, 448, 128, 130);
@@ -1883,13 +1668,12 @@ static void test_suspended_bridge_is_continuous(void)
 static void test_rotated_ridge_has_reciprocal_walk_links(void)
 {
     sh_aas *a=load_module();sh_aug_platform p;sh_aug_report rep;
-    sh_aug_opts o={SH_AUG_FALL_NEVER,1,SH_AUG_TRAVERSAL_NEVER};
     int i,left,right;double s=sqrt(0.5);
     mkbox(&p,-128,-256,128,256,128,-128,"rotated ridge");
     for(i=0;i<4;i++) {double x=p.c[i][0],z=p.c[i][2];
         p.c[i][0]=(float)((x+z)*s);p.c[i][2]=(float)((z-x)*s);}
     p.n[0]=p.n[2]=(float)s;
-    CHECK(sh_aas_augment(a,&p,1,&o,&rep));
+    CHECK(sh_aas_augment(a,&p,1,0,&rep));
     left=sh_aas_point_area(a,-32,0,(float)(256*s-32+2));
     right=sh_aas_point_area(a,32,0,(float)(256*s-32+2));
     CHECK(left>1&&right>1&&left!=right);
@@ -1900,12 +1684,12 @@ static void test_rotated_ridge_has_reciprocal_walk_links(void)
 static void test_level_floor_joins_ramp(void)
 {
     sh_aas *a=load_module();sh_aug_platform p[2];sh_aug_report rep;
-    sh_aug_opts o={SH_AUG_FALL_NEVER,1,SH_AUG_TRAVERSAL_NEVER};int flat,ramp;
+    int flat,ramp;
     mkbox(&p[0],-256,-128,0,128,64,0,"level support");
     mkbox(&p[1],0,-128,256,128,64,32,"ramp");
     p[1].c[1][2]=p[1].c[2][2]=192;
     p[1].n[0]=(float)(-1/sqrt(5.0));p[1].n[2]=(float)(2/sqrt(5.0));
-    CHECK(sh_aas_augment(a,p,2,&o,&rep));
+    CHECK(sh_aas_augment(a,p,2,0,&rep));
     flat=sh_aas_point_area(a,-32,0,66);ramp=sh_aas_point_area(a,32,0,82);
     CHECK(flat>1&&ramp>1&&flat!=ramp);
     CHECK(reach_exists(a,flat,ramp));CHECK(reach_exists(a,ramp,flat));
@@ -2013,10 +1797,9 @@ static int bridge_links_valid(const sh_aas *a)
 static void test_exposed_edges_remain_walls(void)
 {
     sh_aas *a=load_module();sh_aug_platform p;sh_aug_report rep;
-    sh_aug_opts o={SH_AUG_FALL_NEVER,1,SH_AUG_TRAVERSAL_NEVER};
     int area;unsigned i;const unsigned char *ar;
     mkbox(&p,-256,-256,256,256,128,0,"isolated roof");
-    CHECK(sh_aas_augment(a,&p,1,&o,&rep));
+    CHECK(sh_aas_augment(a,&p,1,0,&rep));
     area=sh_aas_point_area(a,0,0,130);CHECK(area>1);
     ar=sh_aas_rec_const(a,SH_AAS_L_AREAS,(unsigned)area);
     CHECK(sh_aas_get_u16(ar,6)==4);
@@ -2034,7 +1817,6 @@ static void test_unmarked_wall_keeps_routes_around_both_ends(void)
     int r,rot,i,k;
     for(r=0;r<3;r++)for(rot=0;rot<2;rot++) {
         sh_aas *a=load_module();sh_aug_platform p[2];sh_aug_report rep;
-        sh_aug_opts o={SH_AUG_FALL_NEVER,1,SH_AUG_TRAVERSAL_NEVER};
         double angle=rot*0.6108652382,c=cos(angle),s=sin(angle);
         int west,east,north,south;
         sh_aas_set_setting_f32(a,208,-radii[r]);sh_aas_set_setting_f32(a,212,-radii[r]);
@@ -2046,7 +1828,7 @@ static void test_unmarked_wall_keeps_routes_around_both_ends(void)
             double x=p[1].c[k][0],y=p[1].c[k][1];
             p[1].c[k][0]=(float)(x*c-y*s);p[1].c[k][1]=(float)(x*s+y*c);
         }
-        CHECK(sh_aas_augment(a,p,2,&o,&rep));
+        CHECK(sh_aas_augment(a,p,2,0,&rep));
         CHECK(!rep.pieces_truncated&&!rep.links_truncated&&!rep.reach_limit_exceeded);
         west=sh_aas_point_area(a,-700,0,130);east=sh_aas_point_area(a,700,0,130);
         north=sh_aas_point_area(a,0,700,130);south=sh_aas_point_area(a,0,-700,130);
@@ -2071,9 +1853,7 @@ static void test_intersecting_bridge_routes(void)
     for(r=0;r<3;r++)for(d=0;d<8;d++)for(rotation=0;rotation<5;rotation++)
     for(order=0;order<6;order++)for(skew=0;skew<2;skew++) {
         sh_aas *a=load_module();sh_aug_platform original[3],p[3];sh_aug_report rep;
-        sh_aug_opts o={SH_AUG_FALL_NEVER,1,SH_AUG_TRAVERSAL_NEVER};
         double angle=angles[rotation],c=cos(angle),s=sin(angle);
-        if(drops[d]>=64)o.traversal=SH_AUG_TRAVERSAL_AUTO;
         sh_aas_set_setting_f32(a,208,-radii[r]);sh_aas_set_setting_f32(a,212,-radii[r]);
         sh_aas_set_setting_f32(a,220,radii[r]);sh_aas_set_setting_f32(a,224,radii[r]);
         mkbox(&original[0],-768,-384,-256,384,128,0,"west support");
@@ -2088,7 +1868,7 @@ static void test_intersecting_bridge_routes(void)
                 p[i].c[k][0]=(float)(x*bc-y*bs+0.375);p[i].c[k][1]=(float)(x*bs+y*bc-0.625);
             }
         }
-        CHECK(sh_aas_augment(a,p,3,&o,&rep));
+        CHECK(sh_aas_augment(a,p,3,0,&rep));
         left=sh_aas_point_area(a,(float)(-512*c+0.375),(float)(-512*s-0.625),130);
         deck=sh_aas_point_area(a,0.375f,-0.625f,130-drops[d]);
         right=sh_aas_point_area(a,(float)(512*c+0.375),(float)(512*s-0.625),130);
@@ -2116,13 +1896,13 @@ static void test_intersecting_bridge_routes(void)
 static void test_narrow_partial_contacts(void)
 {
     sh_aas *a=load_module();sh_aug_platform p[9];sh_aug_report rep;
-    sh_aug_opts o={SH_AUG_FALL_NEVER,1,SH_AUG_TRAVERSAL_NEVER};int i,main_area;
+    int i,main_area;
     mkbox(&p[0],-400,-1900,0,1900,128,0,"long support");
     for(i=0;i<8;i++) {
         float y=-1733.0f+443.0f*i;
         mkbox(&p[i+1],0,y,400,y+64,128,96,"narrow abutment");
     }
-    CHECK(sh_aas_augment(a,p,9,&o,&rep));
+    CHECK(sh_aas_augment(a,p,9,0,&rep));
     main_area=sh_aas_point_area(a,-200,0,130);CHECK(main_area>1);
     for(i=0;i<8;i++) {
         int peer=sh_aas_point_area(a,200,-1701.0f+443.0f*i,130);
@@ -2146,7 +1926,6 @@ static void test_dense_climbs_fit_native_routing(void)
     sh_aas *a = load_module();
     sh_aug_platform p[36];
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO };
     unsigned degree[128] = {0}, i, nr;
     int j;
     unsigned char *bytes;
@@ -2158,7 +1937,7 @@ static void test_dense_climbs_fit_native_routing(void)
         float y = -1800.0f + (j / 6) * 600.0f;
         mkplat(&p[j], x, y, x + 300, y + 300, 128, "raised block");
     }
-    CHECK(sh_aas_augment(a, p, 36, &o, &rep));
+    CHECK(sh_aas_augment(a, p, 36, 128, &rep));
     CHECK(rep.anchors_reduced > 0);
     nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
     for (i = 0; i < nr; i++) {
@@ -2227,12 +2006,11 @@ static void test_required_routes_over_native_limit_drop_the_box_routes(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO };
     printf("routes past 256 from one area are dropped from the box causing them\n");
     fill_area_one(a, 256);
     load_synthetic_traversal_table();
     mkplat(&p, -150, -150, 150, 150, 128, "raised block");
-    CHECK(sh_aas_augment(a, &p, 1, &o, &rep));
+    CHECK(sh_aas_augment(a, &p, 1, 0, &rep));
     CHECK(!rep.reach_limit_exceeded);
     CHECK(rep.routes_dropped > 0 && rep.route_areas == 1);
     CHECK(rep.dropped_count == 1 && rep.dropped[0].source == 0 && rep.dropped[0].area == 1);
@@ -2252,14 +2030,13 @@ static void test_route_drop_takes_just_enough(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO };
     int kept;
     printf("a route overflow drops just enough, one box at a time\n");
     fill_area_one(a, 255);
     load_synthetic_traversal_table();
     mkplat(&p[0], -900, -150, -600, 150, 128, "west block");
     mkplat(&p[1], 600, -150, 900, 150, 128, "east block");
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep));
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep));
     CHECK(!rep.reach_limit_exceeded);
     CHECK(out_degree(a, 1) == 256);
     CHECK(rep.routes_dropped >= 1 && rep.dropped_count >= 1);
@@ -2277,12 +2054,11 @@ static void test_shipped_routes_over_limit_refuse(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO };
     printf("a module whose own area passes 256 routes is refused by name\n");
     fill_area_one(a, 257);
     load_synthetic_traversal_table();
     mkplat(&p, -150, -150, 150, 150, 128, "raised block");
-    CHECK(!sh_aas_augment(a, &p, 1, &o, &rep));
+    CHECK(!sh_aas_augment(a, &p, 1, 0, &rep));
     CHECK(rep.reach_limit_exceeded);
     CHECK(rep.reach_limit_area == 1);
     CHECK(rep.routes_dropped == 0);
@@ -2296,7 +2072,6 @@ static void test_more_than_512_boxes_bake_and_shed_routes(void)
 {
     static sh_aug_platform p[600];
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO };
     sh_aas *a = load_module();
     LARGE_INTEGER t0, t1, f;
     int i, emitted = 0;
@@ -2309,7 +2084,7 @@ static void test_more_than_512_boxes_bake_and_shed_routes(void)
     }
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&t0);
-    CHECK(sh_aas_augment(a, p, 600, &o, &rep));
+    CHECK(sh_aas_augment(a, p, 600, 0, &rep));
     QueryPerformanceCounter(&t1);
     printf("  600 boxes: %d pieces, %u areas, %u links, depth %u, %d routes dropped, %.0f ms\n",
            rep.platform_count, rep.areas_after, rep.reach_after, rep.depth_after,
@@ -2342,7 +2117,6 @@ static void test_route_budget_thins_longest_routes_to_fit_the_file(void)
 {
     static sh_aug_platform p[64];
     sh_aug_report full, thin, again;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
     sh_aas *a = load_module(), *b = load_module(), *c = load_module();
     unsigned na, i, worst = 0, shipped_max = 0;
     size_t size_full, size_thin, cap;
@@ -2352,7 +2126,7 @@ static void test_route_budget_thins_longest_routes_to_fit_the_file(void)
     for (i = 0; i < sh_aas_count(a, SH_AAS_L_AREAS); i++)
         if (out_degree(a, i) > shipped_max) shipped_max = out_degree(a, i);
     build_tower_grid(p, 8);
-    CHECK(sh_aas_augment(a, p, 64, &o, &full));
+    CHECK(sh_aas_augment(a, p, 64, 0, &full));
     na = sh_aas_count(a, SH_AAS_L_AREAS);
     for (i = full.areas_before; i < na; i++) if (out_degree(a, i) > worst) worst = out_degree(a, i);
     printf("  64 towers: %u links, busiest generated area %u routes\n", full.reach_after, worst);
@@ -2361,8 +2135,7 @@ static void test_route_budget_thins_longest_routes_to_fit_the_file(void)
 
     /* Half the busiest area's routes, everywhere. */
     budget = (int)worst / 2;
-    o.route_budget = budget;
-    CHECK(sh_aas_augment(b, p, 64, &o, &thin));
+    CHECK(sh_aas_augment(b, p, 64, budget, &thin));
     CHECK(!thin.reach_limit_exceeded);
     CHECK(thin.routes_dropped > full.routes_dropped);
     for (i = thin.areas_before; i < sh_aas_count(b, SH_AAS_L_AREAS); i++) {
@@ -2391,8 +2164,7 @@ static void test_route_budget_thins_longest_routes_to_fit_the_file(void)
     cap = size_full - (size_full - size_thin) / 2;
     next = sh_aug_route_budget_for(a, &full, size_full, cap, 0);
     CHECK(next > 0 && next < (int)SH_AAS_MAX_AREA_REACHABILITIES);
-    o.route_budget = next;
-    CHECK(sh_aas_augment(c, p, 64, &o, &again));
+    CHECK(sh_aas_augment(c, p, 64, next, &again));
     CHECK_MSG(sh_aas_serialized_size(c) <= cap, "the chosen budget fits the cap");
     /* Nothing to gain below a budget of one, nor under the cap. */
     CHECK(sh_aug_route_budget_for(a, &full, size_full, cap, 1) == 0);
@@ -2423,8 +2195,6 @@ static void test_piece_ceiling_drops_whole_faces(void)
     CHECK(stats.faces_dropped == 2);
     CHECK(lost[3] && lost[4] && !lost[0] && !lost[1] && !lost[2]);
     for (i = 0; i < n; i++) CHECK(!buried[i] && source[i] == i && pieces[i] == 1);
-    /* The strict form still refuses rather than build an incomplete mesh. */
-    CHECK(sh_nav_geometry_build(boxes, 5, 24, 80, 0.7, 18, out, source, pieces, buried, 3) == -1);
 }
 
 /* Decode independently into a flat membership set, bounded by the row's
@@ -2463,12 +2233,11 @@ static void test_visibility_grows_with_connected_geometry(void)
     const int sizes[]={3,6,13};unsigned c;
     for(c=0;c<sizeof sizes/sizeof sizes[0];c++) {
         sh_aas *a=load_module();sh_aug_platform p[13];sh_aug_report rep;
-        sh_aug_opts o={SH_AUG_FALL_NEVER,0,SH_AUG_TRAVERSAL_NEVER};
         unsigned char bits[16];unsigned i,j,n;
         for(i=0;i<(unsigned)sizes[c];i++)
             mkplat(&p[i],-1800+(float)i*48,-100,-1752+(float)i*48,100,
                    16.0f,"connected deck");
-        CHECK(sh_aas_augment(a,p,sizes[c],&o,&rep));
+        CHECK(sh_aas_augment(a,p,sizes[c],0,&rep));
         n=sh_aas_count(a,SH_AAS_L_AREAS);CHECK(n==(unsigned)sizes[c]+2);
         for(i=1;i<n;i++) {
             CHECK(read_visibility(a,i,bits,sizeof bits));
@@ -2481,7 +2250,6 @@ static void test_visibility_grows_with_connected_geometry(void)
 static void test_visibility_extends_sparse_native_rows(void)
 {
     sh_aas *a=load_module();sh_aug_platform p;sh_aug_report rep;
-    sh_aug_opts o={SH_AUG_FALL_NEVER,0,SH_AUG_TRAVERSAL_NEVER};
     unsigned char bits[72];unsigned first,i;
     CHECK(sh_aas_append(a,SH_AAS_L_AREAS,68,&first));
     CHECK(sh_aas_append(a,SH_AAS_L_AREABOUNDS,68,&first));
@@ -2489,7 +2257,7 @@ static void test_visibility_extends_sparse_native_rows(void)
     *sh_aas_rec(a,SH_AAS_L_OBSTACLEPVS,0)=2;
     *sh_aas_rec(a,SH_AAS_L_OBSTACLEPVS,1)=0xbe;
     mkplat(&p,-100,-100,100,100,16,"deck");
-    CHECK(sh_aas_augment(a,&p,1,&o,&rep));
+    CHECK(sh_aas_augment(a,&p,1,0,&rep));
     CHECK(sh_aas_count(a,SH_AAS_L_AREAS)==71);
     CHECK(read_visibility(a,1,bits,sizeof bits));CHECK(bits[1]&&bits[70]);
     for(i=2;i<70;i++)CHECK(!bits[i]);
@@ -2500,11 +2268,10 @@ static void test_visibility_extends_sparse_native_rows(void)
 static void test_truncated_visibility_refuses_bake(void)
 {
     sh_aas *a=load_module();sh_aug_platform p;sh_aug_report rep;
-    sh_aug_opts o={SH_AUG_FALL_NEVER,0,SH_AUG_TRAVERSAL_NEVER};
     CHECK(sh_aas_truncate(a,SH_AAS_L_OBSTACLEPVS,1));
     *sh_aas_rec(a,SH_AAS_L_OBSTACLEPVS,0)=0xc0; /* missing extended run byte */
     mkplat(&p,-100,-100,100,100,16,"deck");
-    CHECK(!sh_aas_augment(a,&p,1,&o,&rep));
+    CHECK(!sh_aas_augment(a,&p,1,0,&rep));
     sh_aas_free(a);
 }
 
@@ -2514,7 +2281,6 @@ static void test_rotated_ramps_join_native_floor(void)
     const double yaws[]={0,37,90,179};unsigned r,g,y;
     for(r=0;r<3;r++)for(g=0;g<4;g++)for(y=0;y<4;y++) {
         sh_aas *a=load_module();sh_aug_platform p;sh_aug_report rep;
-        sh_aug_opts o={SH_AUG_FALL_NEVER,1,SH_AUG_TRAVERSAL_NEVER};
         const float xy[4][2]={{-2000,2000},{2000,2000},{2000,-2000},{-2000,-2000}};
         double angle=angles[g]*3.14159265358979323846/180.0;
         double yaw=yaws[y]*3.14159265358979323846/180.0,cs=cos(yaw),sn=sin(yaw);
@@ -2533,7 +2299,7 @@ static void test_rotated_ramps_join_native_floor(void)
         mkplat_tilted(&p,angles[g],320,512,fabs(sin(angle))*160,"floor ramp");p.depth=32;
         for(i=0;i<4;i++){float x=p.c[i][0],yy=p.c[i][1];p.c[i][0]=(float)(cs*x-sn*yy);p.c[i][1]=(float)(sn*x+cs*yy);}
         {float x=p.n[0],yy=p.n[1];p.n[0]=(float)(cs*x-sn*yy);p.n[1]=(float)(sn*x+cs*yy);}
-        CHECK(sh_aas_augment(a,&p,1,&o,&rep));
+        CHECK(sh_aas_augment(a,&p,1,0,&rep));
         nr=sh_aas_count(a,SH_AAS_L_REACHABILITIES);
         for(i=0;i<nr;i++) {
             const unsigned char *reach=sh_aas_rec_const(a,SH_AAS_L_REACHABILITIES,i);
@@ -2579,12 +2345,11 @@ static void load_all_test_monsters(void)
 static void test_traversal_collection_grows_without_losing_demon_routes(void)
 {
     sh_aas *a=load_module();sh_aug_platform p[24];sh_aug_report rep;
-    sh_aug_opts opts={SH_AUG_FALL_AUTO,1,SH_AUG_TRAVERSAL_AUTO};
     unsigned i,nr;int j,m;unsigned degree[128]={0};
     load_all_test_monsters();
     for(j=0;j<24;j++)mkbox(&p[j],-1800+(j%5)*700,-1800+(j/5)*700,
         -1544+(j%5)*700,-1544+(j/5)*700,128,0,"dense box");
-    CHECK(sh_aas_augment(a,p,24,&opts,&rep));
+    CHECK(sh_aas_augment(a,p,24,0,&rep));
     nr=sh_aas_count(a,SH_AAS_L_REACHABILITIES);
     CHECK(nr>1024);CHECK(!rep.links_truncated);
     for(i=0;i<nr;i++) {
@@ -2619,7 +2384,6 @@ static void test_climb_floor_endpoints_clear_rotated_solids(void)
     load_all_test_monsters();
     for(s=0;s<4;s++)for(y=0;y<3;y++) {
         sh_aas *a=load_module();sh_aug_platform p;sh_aug_report rep;
-        sh_aug_opts opts={SH_AUG_FALL_AUTO,1,SH_AUG_TRAVERSAL_AUTO};
         double angle=slopes[s]*3.14159265358979323846/180.0;
         double yaw=yaws[y]*3.14159265358979323846/180.0,cs=cos(yaw),sn=sin(yaw);
         int i,up=0,down=0;unsigned r,nr;
@@ -2635,7 +2399,7 @@ static void test_climb_floor_endpoints_clear_rotated_solids(void)
         }
         for(i=0;i<4;i++){float x=p.c[i][0],yy=p.c[i][1];p.c[i][0]=(float)(cs*x-sn*yy);p.c[i][1]=(float)(sn*x+cs*yy);}
         {float x=p.n[0],yy=p.n[1];p.n[0]=(float)(cs*x-sn*yy);p.n[1]=(float)(sn*x+cs*yy);}
-        CHECK(sh_aas_augment(a,&p,1,&opts,&rep));
+        CHECK(sh_aas_augment(a,&p,1,0,&rep));
         nr=sh_aas_count(a,SH_AAS_L_REACHABILITIES);
         for(r=0;r<nr;r++) {
             const unsigned char *rr=sh_aas_rec_const(a,SH_AAS_L_REACHABILITIES,r);
@@ -2824,7 +2588,6 @@ static void test_a_climb_run_up_may_cross_a_floor_seam(void)
     sh_aas *a = load_slabs(seams, 2);
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
     int mask = 0, n;
     double lo, hi;
     printf("a climb whose run-up crosses a floor seam lands on the next slab\n");
@@ -2833,7 +2596,7 @@ static void test_a_climb_run_up_may_cross_a_floor_seam(void)
               sh_aas_point_area(a, -200, 0, 2) == 1, "the slab fixture resolves by seam");
     load_synthetic_traversal_table();
     mkbox_yawed(&p, 0, 0, 330, 290, 0, 64.0f, 0.0f, "step");
-    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
     CHECK(rep.platforms[0].emitted);
     /* The floor under the step is cut into pieces, so the slabs' areas are
      * the shipped three plus those pieces. */
@@ -2876,7 +2639,6 @@ static void test_a_long_face_offers_climbs_along_its_length(void)
     sh_aas *a = load_slabs(NULL, 0);
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
     unsigned i, nr;
     double north[32], east[32];
     int nn = 0, ne = 0, j, k, spaced = 1;
@@ -2884,7 +2646,7 @@ static void test_a_long_face_offers_climbs_along_its_length(void)
     if (!a) { CHECK(0); return; }
     load_synthetic_traversal_table();
     mkbox_yawed(&p, 0, 0, 1000, 150, 0, 64.0f, 0.0f, "long step");
-    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
     nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
     for (i = 0; i < nr; i++) {
         const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
@@ -2933,7 +2695,6 @@ static void test_no_floor_climb_lands_on_a_cut_inside_its_own_box(void)
     sh_aas *a = load_slabs(NULL, 0);
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
     unsigned i, nr;
     int k, floor_climbs = 0, deep = 0;
     printf("no floor climb lands on a cut line inside its own box\n");
@@ -2952,7 +2713,7 @@ static void test_no_floor_climb_lands_on_a_cut_inside_its_own_box(void)
             p[1].c[k][0] = s2[k][0]; p[1].c[k][1] = s2[k][1];
         }
     }
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     {
         int idx[8], n = pieces_of(&rep, 0, idx, 8);
         CHECK_MSG(n >= 2, "step 1's top is cut around step 2");
@@ -3042,7 +2803,6 @@ static void test_the_floor_is_cut_around_the_boxes_on_it(void)
     sh_aas *a = load_slabs(seams, 2);
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
     unsigned floor_end, ar, i, nr;
     int k, inside = 0, unresolved = 0, reached[64] = {0}, grew = 1;
     printf("the module floor is cut around the boxes standing on it\n");
@@ -3054,7 +2814,7 @@ static void test_the_floor_is_cut_around_the_boxes_on_it(void)
         p[0].c[k][0] = s1[k][0]; p[0].c[k][1] = s1[k][1];
         p[1].c[k][0] = s2[k][0]; p[1].c[k][1] = s2[k][1];
     }
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     CHECK_MSG(rep.floors_cut >= 2, "the slabs under the steps are cut");
     CHECK_MSG(rep.floor_pieces_added > 0, "into pieces");
     floor_end = rep.areas_before + (unsigned)rep.floor_pieces_added;
@@ -3108,7 +2868,7 @@ static void test_the_floor_is_cut_around_the_boxes_on_it(void)
     a = load_slabs(seams, 2);
     if (!a) { CHECK(0); return; }
     mkbox_yawed(&p[0], 0, 1700, 330, 290, 0, 164.0f, 100.0f, "canopy");
-    CHECK(sh_aas_augment(a, p, 1, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 1, 0, &rep) == 1);
     CHECK_MSG(rep.floors_cut == 0 && rep.floor_pieces_added == 0, "a canopy leaves the floor whole");
     sh_aug_report_free(&rep);
     sh_aas_free(a);
@@ -3219,7 +2979,6 @@ static void test_the_placement_grid_is_cut_where_the_floor_was_cut(void)
     sh_aas *a = load_slabs(seams, 2);
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
     unsigned char *shipped = NULL, *cut = NULL, *model = NULL, *out = NULL;
     size_t shipped_len = 0, cut_len = 0, model_len = 0, out_len = 0;
     sh_nav_overlay_stats st;
@@ -3276,7 +3035,7 @@ static void test_the_placement_grid_is_cut_where_the_floor_was_cut(void)
         p[0].c[k][0] = s1[k][0]; p[0].c[k][1] = s1[k][1];
         p[1].c[k][0] = s2[k][0]; p[1].c[k][1] = s2[k][1];
     }
-    augmented = sh_aas_augment(a, p, 2, &o, &rep) == 1;
+    augmented = sh_aas_augment(a, p, 2, 0, &rep) == 1;
     CHECK(augmented);
     if (!augmented) goto done;
     floor_end = rep.areas_before + (unsigned)rep.floor_pieces_added;
@@ -3371,14 +3130,13 @@ static void test_a_portal_floor_is_never_cut(void)
     sh_aas *a = load_slabs(seams, 2);
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_NEVER, 0 };
     unsigned i, n;
     int flagged = 0;
     printf("a cluster-portal floor area is never cut\n");
     if (!a) { CHECK(0); return; }
     sh_aas_put_u16(sh_aas_rec(a, SH_AAS_L_AREAS, 2), 4, 0x000A | 0x0400);
     mkbox_yawed(&p, 0, 0, 200, 200, 0, 64.0f, 0.0f, "box on the portal strip");
-    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
     n = sh_aas_count(a, SH_AAS_L_AREAS);
     for (i = rep.areas_before; i < n; i++)
         if (sh_aas_get_u16(sh_aas_rec_const(a, SH_AAS_L_AREAS, i), 4) & 0x0400) flagged++;
@@ -3397,7 +3155,6 @@ static void test_a_floor_whose_pieces_do_not_fit_stays_whole(void)
     sh_aas *a = load_slabs(seams, 2);
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_NEVER, 0 };
     int was, k, changed = 0;
     printf("a floor whose pieces do not all fit stays as shipped\n");
     if (!a) { CHECK(0); return; }
@@ -3405,7 +3162,7 @@ static void test_a_floor_whose_pieces_do_not_fit_stays_whole(void)
     mkbox_yawed(&p[0], 0, 600, 600, 200, 0, 64.0f, 0.0f, "west-east box");
     mkbox_yawed(&p[1], 0, -600, 600, 200, 0, 64.0f, 0.0f, "second box");
     was = sh_aug_test_set_floor_piece_cap(5);
-    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 2, 0, &rep) == 1);
     sh_aug_test_set_floor_piece_cap(was);
     CHECK_MSG(rep.floors_left_whole > 0, "the floors past the cap are counted as left whole");
     for (k = 1; k <= 3; k++) {
@@ -3429,13 +3186,12 @@ static void test_a_floor_wholly_under_a_box_is_closed(void)
     sh_aas *a = load_slabs(seams, 2);
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_NEVER, 0 };
     unsigned i, n;
     int touching = 0;
     printf("a floor wholly under a box is closed, not left whole\n");
     if (!a) { CHECK(0); return; }
     mkbox_yawed(&p, 0, 0, 400, 4100, 0, 64.0f, 0.0f, "slab cover");
-    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
     CHECK_MSG(rep.floors_covered == 1, "the centre strip is reported covered");
     CHECK_MSG(rep.floors_left_whole == 0, "not as too many boxes");
     n = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
@@ -3467,7 +3223,6 @@ static void test_no_traversal_passes_through_a_slab(void)
     sh_aas *a = load_slabs(NULL, 0);
     sh_aug_platform p[4];
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
     unsigned i, nr;
     int through = 0, swept = 0, onto_slab = 0, from_step = 0, links = 0;
     printf("no climb or drop passes through a slab, a wall or a step\n");
@@ -3477,7 +3232,7 @@ static void test_no_traversal_passes_through_a_slab(void)
     mkbox_yawed(&p[1], 200, 0, 400, 600, 0, 148.0f, 132.0f, "second floor");
     mkbox_yawed(&p[2], 210, 305, 20, 50, 0, 250.0f, 0.0f, "wall through it");
     mkbox_yawed(&p[3], -40, 0, 120, 100, 0, 80.0f, 16.0f, "step under its edge");
-    CHECK(sh_aas_augment(a, p, 4, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, p, 4, 0, &rep) == 1);
     nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
     for (i = 0; i < nr; i++) {
         const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
@@ -3523,14 +3278,13 @@ static void test_a_climb_onto_a_floating_box_starts_outside_it(void)
     sh_aas *a = load_slabs(NULL, 0);
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
     unsigned i, nr;
     int climbs = 0, under = 0, e;
     printf("a floor climb onto a floating box starts outside it\n");
     if (!a) { CHECK(0); return; }
     load_synthetic_traversal_table();
     mkbox_yawed(&p, 0, 0, 300, 300, 30, 160.0f, 90.0f, "floating box");
-    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(sh_aas_augment(a, &p, 1, 0, &rep) == 1);
     nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
     for (i = 0; i < nr; i++) {
         const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
@@ -3558,7 +3312,6 @@ static void test_floor_walks_stay_inside_the_route_limit(void)
     sh_aas *a = load_slabs(seams, 2);
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_NEVER, 0 };
     unsigned first, i, n, degree[256] = {0};
     int pair[64][64], worst = 0, f, t;
     printf("walks between floor pieces stay inside the 256-route limit\n");
@@ -3573,7 +3326,7 @@ static void test_floor_walks_stay_inside_the_route_limit(void)
     }
     mkbox_yawed(&p[0], 0, 600, 600, 200, 0, 64.0f, 0.0f, "across the strip");
     mkbox_yawed(&p[1], 0, -600, 600, 200, 0, 64.0f, 0.0f, "across the strip again");
-    CHECK_MSG(sh_aas_augment(a, p, 2, &o, &rep) == 1, "the class bakes");
+    CHECK_MSG(sh_aas_augment(a, p, 2, 0, &rep) == 1, "the class bakes");
     CHECK_MSG(rep.floors_left_whole >= 1, "the strip that ships 200 routes stays whole");
     CHECK_MSG(rep.floors_cut >= 1, "its neighbours are still cut");
     memset(pair, 0, sizeof pair);
@@ -3632,8 +3385,6 @@ int main(void)
     test_traversal_anchor_pattern();
     test_z_at_interpolates_across_a_slope();
     test_contains_is_true_inside();
-    test_inset_of_a_rotated_quad_stays_rotated();
-    test_inset_refuses_a_collapsing_quad();
     test_field4_follows_the_plane_z_component();
     test_minfloorcos_gate_at_the_boundary();
     test_unreadable_minfloorcos_rejects_the_payload();

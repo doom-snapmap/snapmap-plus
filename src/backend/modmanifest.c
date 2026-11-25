@@ -793,12 +793,16 @@ static size_t mm_read_member(const char *from, const char *to, sh_modmanifest_li
 size_t sh_modmanifest_read(const char *json, size_t length, sh_modmanifest_list *out,
                            unsigned *rejected)
 {
-    size_t from = 0, to = 0, read = 0;
+    sh_carrier_view view;
+    sh_carrier_view_read(json, length, &view);
+    return sh_modmanifest_read_member(json, &view.mods, out, rejected);
+}
+
+size_t sh_modmanifest_read_member(const char *json, const sh_carrier_span *mods, sh_modmanifest_list *out,
+                                  unsigned *rejected)
+{
     unsigned bad = 0;
-    if (rejected) *rejected = 0;
-    if (!json || !length || !out) return 0;
-    if (sh_carrier_part(json, length, "mods", &from, &to) != 1) return 0;
-    read = mm_read_member(json + from, json + to, out, &bad);
+    size_t read = mods->present && out ? mm_read_member(json + mods->from, json + mods->to, out, &bad) : 0;
     if (rejected) *rejected = bad;
     return read;
 }
@@ -1756,8 +1760,6 @@ static int mm_activate_load(const sh_modmanifest_list *rows)
     return active;
 }
 
-static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length);
-
 /* 1 when the text carries rows: the member's "mods" part. */
 static int mm_carries_rows(const char *json, size_t length)
 {
@@ -1823,10 +1825,14 @@ int sh_modmanifest_current_restore_previous(void)
     return n;
 }
 
-char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_length)
+void sh_modmanifest_prepare_load(const char *json, size_t length)
 {
-    mm_prev_take();
-    return mm_prepare_rows(json, length, out_length);
+    sh_carrier_view view;
+    sh_modmanifest_list rows = {0};
+    unsigned rejected = 0;
+    sh_carrier_view_read(json, length, &view);
+    sh_modmanifest_read_member(json, &view.mods, &rows, &rejected);
+    sh_modmanifest_load_rows(json, length, view.mods.present ? &rows : NULL, rejected);
 }
 
 void sh_modmanifest_load_refuse(const char *sentence)
@@ -1938,34 +1944,31 @@ void sh_modmanifest_content_for(const char *json, size_t length, const sh_modman
     sh_modmanifest_list_free(&rows_here);
 }
 
-static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length)
+void sh_modmanifest_load_rows(const char *json, size_t length, sh_modmanifest_list *list, unsigned rejected)
 {
-    sh_modmanifest_list list = {0};
-    unsigned rejected = 0;
     int active;
     char *line, *names;
 
-    if (out_length) *out_length = 0;
-    if (!mm_carries_rows(json, length)) {
+    mm_prev_take();
+    if (!list) {
         mm_set_current(NULL);
         mm_subst_load(NULL, NULL, 0);
         mm_choices_load(NULL);
         mm_scope_load(json, length, NULL);
         (void)mm_activate_load(NULL);
-        return NULL;
+        return;
     }
-    sh_modmanifest_read(json, length, &list, &rejected);
     /* Pinned rows: the content cache composes what it can before the rows resolve (modcache.h). */
-    sh_modmanifest_content_for(json, length, &list);
+    sh_modmanifest_content_for(json, length, list);
 
-    names = mm_describe(&list);
+    names = mm_describe(list);
     /* The map scope first: the bundles' shadows and requirements are live
      * before their gameplay decls register; the registry choices before the
      * listing that computes the registries. */
-    mm_subst_load(&list, json, length);
-    mm_choices_load(&list);
-    mm_scope_load(json, length, &list);
-    active = mm_activate_load(&list);
+    mm_subst_load(list, json, length);
+    mm_choices_load(list);
+    mm_scope_load(json, length, list);
+    active = mm_activate_load(list);
     /* `active` counts the registration steps the activation found ready (new
      * names; a bundle of shadows and requirements has none), not bundles. */
     {
@@ -1973,7 +1976,7 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
         if (active < 0) strcpy_s(what, sizeof what, "activation refused (see above)");
         else if (!active) strcpy_s(what, sizeof what, "no new decls to register");
         else _snprintf_s(what, sizeof what, _TRUNCATE, "%d registration step(s) ready", active);
-        line = sh_textf("MODS: map manifest names %zu build(s)%s%s; %s", list.count, list.count ? ": " : "",
+        line = sh_textf("MODS: map manifest names %zu build(s)%s%s; %s", list->count, list->count ? ": " : "",
                         names ? names : "", what);
     }
     backend_log(line ? line : "MODS: map manifest read");
@@ -1984,10 +1987,7 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
         _snprintf_s(note, sizeof note, _TRUNCATE, "MODS: %u manifest row(s) did not parse and were dropped", rejected);
         backend_log(note);
     }
-    mm_set_current(&list);
-    sh_modmanifest_list_free(&list);
-    /* Nothing to strip: the member goes with the parse detour's last step. */
-    return NULL;
+    mm_set_current(list);
 }
 
 typedef struct mm_save_ctx { sh_modmanifest_list list; int failed; } mm_save_ctx;

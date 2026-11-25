@@ -23,10 +23,10 @@
 /* Swap the resource-provider open slot. The constructor and three idStr helpers must be clean SIG_OK matches in
  * module_base; returns 1 on installation, otherwise 0 and logs the reason. */
 int sh_overrides_install(const uint8_t *module_base,
-                         void *ctor_fn, int ctor_status_ok,
-                         void *read_string_fn, int read_string_status_ok,
-                         void *compare_fn, int compare_status_ok,
-                         void *write_string_fn, int write_string_status_ok);
+                         void *ctor_fn,
+                         void *read_string_fn,
+                         void *compare_fn,
+                         void *write_string_fn);
 
 /* Read the effective navigation base (Grid generation applied, without re-entering navigation) into a new
  * process-heap buffer the caller frees. Needs a prior hook call to have captured the provider object. */
@@ -45,35 +45,24 @@ const char *sh_overrides_check_sites(const uint8_t *module_base, const void *cto
 #ifdef SH_OVERRIDES_TESTING
 void *sh_overrides_test_open(const char *name, unsigned int mode);
 void *sh_overrides_test_memory_stream(const unsigned char *body, size_t length);
-long long sh_overrides_test_stream_read(void *stream, void *buffer, uint64_t length);
-long long sh_overrides_test_stream_read_at(void *stream, long long offset,
-                                           void *buffer, uint64_t length);
-long long sh_overrides_test_stream_write(void *stream, const void *buffer, uint64_t length);
-long long sh_overrides_test_stream_write_at(void *stream, long long offset,
-                                            const void *buffer, uint64_t length);
-int sh_overrides_test_stream_seek(void *stream, long long offset, int origin);
-long long sh_overrides_test_stream_length(void *stream);
-int sh_overrides_test_stream_true_flag(void *stream);
-int sh_overrides_test_stream_set_length(void *stream, long long length);
 size_t sh_overrides_test_stream_vtable_slots(void);
 void *sh_overrides_test_stream_vtable_slot(size_t index);
 /* Run read_installed_resource against a caller-supplied engine open and
  * provider, restoring the installed ones afterwards. The result is HeapAlloc'd. */
 unsigned char *sh_overrides_test_read_installed(void *open_fn, void *provider,
                                                 const char *name, size_t *out_len);
-int sh_overrides_test_stream_helpers_configure(void *read_string, int read_clean,
-                                                void *compare, int compare_clean,
-                                                void *write_string, int write_clean);
+int sh_overrides_test_stream_helpers_configure(void *read_string,
+                                                void *compare,
+                                                void *write_string);
 int sh_overrides_test_stream_helpers_ready(void);
 void sh_overrides_test_stream_helpers_reset(void);
 int sh_overrides_test_supported_build_abi(const uint8_t *module_base,
-                                          const void *ctor, int ctor_status_ok,
-                                          const void *read_string, int read_string_status_ok,
-                                          const void *compare, int compare_status_ok,
-                                          const void *write_string, int write_string_status_ok);
+                                          const void *ctor,
+                                          const void *read_string,
+                                          const void *compare,
+                                          const void *write_string);
 int sh_overrides_test_address_in_readonly_section(const uint8_t *module_base, const void *address);
 void *sh_overrides_test_stream_open_file(const char *path);
-void sh_overrides_test_stream_close(void *stream);
 #endif
 
 #endif /* BACKEND_B1_OVERRIDES_H */

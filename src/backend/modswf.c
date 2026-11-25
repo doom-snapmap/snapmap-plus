@@ -1,6 +1,7 @@
 /* modswf.c -- see modswf.h. One idFileResource vtable slot, answered for
  * installed mods' cooked movies by the engine's own below-2 open path. */
 #define WIN32_LEAN_AND_MEAN
+#include "image_view.h"
 #include <windows.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -84,16 +85,13 @@ void **sh_modswf_find_slot(const uint8_t *module_base, uint64_t value)
 {
     void **found = NULL;
     __try {
-        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)module_base;
-        const IMAGE_NT_HEADERS64 *nt;
+        const IMAGE_NT_HEADERS64 *nt = sh_pe_headers(module_base);
         const IMAGE_SECTION_HEADER *sec;
         unsigned i;
-        if (!module_base || dos->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
-        nt = (const IMAGE_NT_HEADERS64 *)(module_base + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) return NULL;
+        if (!nt) return NULL;
         sec = IMAGE_FIRST_SECTION(nt);
         for (i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
-            size_t span = sec->Misc.VirtualSize ? sec->Misc.VirtualSize : sec->SizeOfRawData;
+            size_t span = sh_pe_section_span(sec);
             const uint64_t *q, *end;
             if (!(sec->Characteristics & IMAGE_SCN_MEM_READ) ||
                 (sec->Characteristics & (IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE))) continue;

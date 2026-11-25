@@ -1,3 +1,4 @@
+#include "image_view.h"
 #include "map_bounds.h"
 #include "map_render.h"
 #include "map_settings.h"
@@ -300,11 +301,12 @@ static char *read_source_file_why(size_t *out_len, char **why, int *importing)
 
 /* Refuse a map in an earlier shape (sh_map_old_shape) before anything reads it, holding the sentence as the
  * load's refusal (sh_modmanifest_load_refuse); a faulting check refuses too. Returns 1 when refused. */
-static int old_shape_refused(const char *json, size_t len)
+static int old_shape_refused(const char *json, size_t len, sh_carrier_view *view)
 {
     int shape;
     __try {
-        shape = sh_map_old_shape(json, len);
+        sh_carrier_view_read(json, len, view);
+        shape = sh_map_old_shape_view(json, len, view);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("CARRIER: the earlier-shape check FAULTED; the map is refused");
         sh_modmanifest_load_refuse(RAWMAP_CHECK_FAULTED);
@@ -322,13 +324,11 @@ static int old_shape_refused(const char *json, size_t len)
  * the engine entities whose mod was never activated, and DOOM's fatal error follows. */
 #define RAWMAP_ROWS_UNREAD "This map's mod list has an entry this version of Snapmap+ cannot read, so the map was not "                            "opened. Update Snapmap+ and open it again."
 
-static int unread_rows_refused(const char *json, size_t len)
+static int unread_rows_refused(const char *json, const sh_carrier_span *mods, sh_modmanifest_list *rows)
 {
-    sh_modmanifest_list rows = {0};
     unsigned rejected = 0;
     __try {
-        (void)sh_modmanifest_read(json, len, &rows, &rejected);
-        sh_modmanifest_list_free(&rows);
+        sh_modmanifest_read_member(json, mods, rows, &rejected);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("CARRIER: the mod list check FAULTED; the map is refused");
         sh_modmanifest_load_refuse(RAWMAP_CHECK_FAULTED);
@@ -340,19 +340,16 @@ static int unread_rows_refused(const char *json, size_t len)
     return 1;
 }
 
-/* Read the map manifest, strip its rows and activate the bundles it names, on every parse. Returns an owned
- * process-heap buffer, or NULL to keep the input; a faulting read sets *faulted and the map is refused. */
-static char *manifest_prepare_guarded(const char *json, size_t len, int *faulted)
+/* Apply the rows already checked for this parse. */
+static int manifest_prepare_guarded(const char *json, size_t len, sh_modmanifest_list *rows)
 {
-    *faulted = 0;
     __try {
-        size_t out_len = 0;
-        return sh_modmanifest_prepare_load(json, len, &out_len);
+        sh_modmanifest_load_rows(json, len, rows, 0);
+        return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: map manifest read FAULTED; the map is refused");
         sh_modmanifest_load_refuse(RAWMAP_CHECK_FAULTED);
-        *faulted = 1;
-        return NULL;
+        return 0;
     }
 }
 
@@ -360,17 +357,13 @@ static char *manifest_prepare_guarded(const char *json, size_t len, int *faulted
  * detour's entry by the engine caller's return address. */
 static __declspec(thread) int g_parse_kind;
 
-/* Read the map's settings rows into the settings of the map being parsed and
- * strip them (map_settings.h). Returns an owned process-heap buffer, or NULL
- * to keep the input. */
-static char *settings_prepare_guarded(const char *json, size_t len)
+static void settings_prepare_guarded(const char *json, size_t len)
 {
     __try {
-        size_t out_len = 0;
-        return sh_map_settings_prepare_load(json, len, &out_len);
+        sh_map_settings_prepare_load(json, len);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        sh_map_settings_prepare_load(NULL, 0);
         backend_log("SETTINGS: map settings read FAULTED; the map loads with both settings off");
-        return NULL;
     }
 }
 
@@ -504,14 +497,11 @@ static const unsigned char ISBRANCH_PAT[] = {
 static void *find_is_branch_map(const unsigned char *base)
 {
     __try {
-        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
-        const IMAGE_NT_HEADERS64 *nt;
+        const IMAGE_NT_HEADERS64 *nt = sh_pe_headers(base);
         const IMAGE_SECTION_HEADER *sec;
         unsigned i, k;
 
-        if (base == NULL || dos->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
-        nt = (const IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) return NULL;
+        if (!nt) return NULL;
         sec = IMAGE_FIRST_SECTION(nt);
 
         for (i = 0; i < nt->FileHeader.NumberOfSections; i++) {
@@ -568,11 +558,11 @@ int sh_rawmap_branch_install(const unsigned char *module_base)
 
 /* Remove the map's "snapmap-plus" member (map_carrier.h) once every part is read. Returns an owned
  * process-heap buffer, or NULL to keep the input. */
-static char *carrier_strip_guarded(const char *json, size_t len)
+static char *carrier_strip_guarded(const char *json, size_t len, const sh_carrier_view *view)
 {
     __try {
         size_t out_len = 0;
-        return sh_carrier_strip(json, len, &out_len);
+        return sh_carrier_strip_view(json, len, view, &out_len);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("CARRIER: strip FAULTED; the engine parses the map with its member, which it ignores");
         return NULL;
@@ -580,13 +570,12 @@ static char *carrier_strip_guarded(const char *json, size_t len)
 }
 
 /* One load line naming the member's parts, or why it was refused. */
-static void carrier_describe_guarded(const char *json, size_t len)
+static void carrier_describe_guarded(const sh_carrier_view *view)
 {
     __try {
-        sh_carrier_view view;
         char what[200], *line;   /* map_carrier.h's summary: counts and states, a fixed few words */
-        if (!sh_carrier_view_read(json, len, &view) || view.state == SH_CARRIER_ABSENT) return;
-        sh_carrier_describe(&view, what, sizeof what);
+        if (view->state == SH_CARRIER_ABSENT) return;
+        sh_carrier_describe(view, what, sizeof what);
         line = sh_textf("CARRIER: map read: %s", what);
         backend_log(line ? line : "CARRIER: map read");
         free(line);
@@ -600,34 +589,27 @@ static void carrier_describe_guarded(const char *json, size_t len)
  * Returns an owned process-heap buffer or NULL to use the original. */
 static char *prepare_map_buffer(const char *json, int *refused)
 {
-    char *manifest, *settings, *current = NULL, *bare;
+    sh_carrier_view view;
+    sh_modmanifest_list rows = {0};
     size_t len = json ? strlen(json) : 0;
-    int faulted = 0;
 
     *refused = 0;
-    if (len == 0) return NULL;
-    if (old_shape_refused(json, len)) { *refused = 1; return NULL; }
-    if (unread_rows_refused(json, len)) { *refused = 1; return NULL; }
-    carrier_describe_guarded(json, len);
-
-    sh_navmesh_build_from_map(json, len);
-    /* The author's marked regions, so a map with none does not inherit the last map's. */
-    sh_nav_bake_set_map(json, len);
-
-    manifest = manifest_prepare_guarded(json, len, &faulted);
-    if (faulted) { *refused = 1; return NULL; }
-    if (manifest) current = manifest;
-    /* The map's Snapmap+ settings (map_settings.h), held for the map. */
-    settings = settings_prepare_guarded(current ? current : json, current ? strlen(current) : len);
-    if (settings) {
-        if (current) HeapFree(GetProcessHeap(), 0, current);
-        current = settings;
+    if (!len) return NULL;
+    if (old_shape_refused(json, len, &view) || unread_rows_refused(json, &view.mods, &rows)) {
+        sh_modmanifest_list_free(&rows);
+        *refused = 1;
+        return NULL;
     }
-    /* Last: every part has been read; the engine never sees the member. */
-    bare = carrier_strip_guarded(current ? current : json, current ? strlen(current) : len);
-    if (!bare) return current;
-    if (current) HeapFree(GetProcessHeap(), 0, current);
-    return bare;
+    carrier_describe_guarded(&view);
+    sh_navmesh_build_from_map(json, len, &view.nav);
+    sh_nav_bake_set_map(json, len);
+    if (!manifest_prepare_guarded(json, len, view.mods.present ? &rows : NULL)) {
+        sh_modmanifest_list_free(&rows);
+        *refused = 1;
+        return NULL;
+    }
+    settings_prepare_guarded(view.settings.present ? json + view.settings.from : NULL, view.settings.to - view.settings.from);
+    return carrier_strip_guarded(json, len, &view);
 }
 
 /* A rawmap opens only through the editor reload (editor_frame.c): sh_rawmap_prepare_reload keeps its checked
@@ -926,7 +908,7 @@ static int sh_deser_detour(const char *json, void *out_map)
     return deser_prepared(json, out_map);
 }
 
-int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)
+int sh_rawmap_swap_install(void *deser_fn)
 {
     char line[200];
 
@@ -937,12 +919,6 @@ int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)
     }
     if (deser_fn == NULL) {
         backend_log("RAWMAP: load detour SKIPPED -- DeserializeFromJson not resolved");
-        return 0;
-    }
-    if (!deser_status_ok) {
-        /* An already-hooked prologue is refused: its detour bytes cannot be stolen as native instructions. */
-        backend_log("RAWMAP: load detour SKIPPED -- DeserializeFromJson resolved via hook-tolerant "
-                    "fallback (prologue already hooked); not installing over an existing detour");
         return 0;
     }
     void *tramp = hook_prepare(deser_fn, (void *)sh_deser_detour, DESER_STOLEN);
@@ -2096,7 +2072,7 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
     return rc;
 }
 
-int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok)
+int sh_rawmap_save_install(void *serialize_fn)
 {
     char line[200];
 
@@ -2107,12 +2083,6 @@ int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok)
     }
     if (serialize_fn == NULL) {
         backend_log("RAWMAP: save detour SKIPPED -- SerializeToJson not resolved");
-        return 0;
-    }
-    if (!serialize_status_ok) {
-        /* Refuse an already-hooked prologue, matching the load detour policy. */
-        backend_log("RAWMAP: save detour SKIPPED -- SerializeToJson resolved via hook-tolerant "
-                    "fallback (prologue already hooked); not installing over an existing detour");
         return 0;
     }
     void *tramp = hook_prepare(serialize_fn, (void *)sh_ser_detour, SAVE_STOLEN);

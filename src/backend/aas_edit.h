@@ -85,6 +85,8 @@ void sh_aas_free(sh_aas *a);
  * NULL if the result would exceed sh_aas_payload_cap(). Re-serializing an
  * unmodified model reproduces its input byte for byte. */
 unsigned char *sh_aas_write(const sh_aas *a, size_t *out_len);
+/* Produce identical bytes with the allocator required by the resource owner. */
+unsigned char *sh_aas_write_alloc(const sh_aas *a, size_t *out_len, void *(*allocate)(size_t));
 
 /* The bytes sh_aas_write would produce, whatever the cap. */
 size_t sh_aas_serialized_size(const sh_aas *a);
@@ -125,10 +127,14 @@ void sh_aas_put_f32(unsigned char *rec, unsigned off, float v);
 
 /* Settings occupy 364 bytes at SH_AAS_HEADER_BYTES; offsets below are relative to that block. Agent bounds
  * set clearance and maxStepHeight limits walk links. */
+/* The final 39 big-endian words follow the three length-prefixed strings. */
+#define SH_AAS_SETTING_WORD(n) (SH_AAS_SETTINGS_BYTES - 39u * 4u + (unsigned)(n) * 4u)
 float sh_aas_setting_f32(const sh_aas *a, unsigned off);
 /* An integer setting, such as a tt_* travel time. */
 uint32_t sh_aas_setting_u32(const sh_aas *a, unsigned off);
-void  sh_aas_set_setting_f32(sh_aas *a, unsigned off, float v);
+#ifdef SH_AAS_FIXTURE
+void sh_aas_set_setting_f32(sh_aas *a, unsigned off, float v);
+#endif
 
 /* The nav class's agent box, decoded from the settings block. */
 void sh_aas_agent_bounds(const sh_aas *a, float out_mins[3], float out_maxs[3]);

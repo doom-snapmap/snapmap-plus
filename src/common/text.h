@@ -26,6 +26,22 @@ static __inline int sh_path_eq(const char *a, const char *b)
     return !*a && !*b;
 }
 
+/* Return the path suffix following a case- and slash-insensitive prefix. */
+static __inline const char *sh_path_after_prefix(const char *path, const char *prefix)
+{
+    if (!path) return NULL;
+    for (; *prefix; ++path, ++prefix)
+        if (sh_path_fold(*path) != sh_path_fold(*prefix)) return NULL;
+    return path;
+}
+
+static __inline unsigned long long sh_text_hash(const char *s, size_t n)
+{
+    unsigned long long h = 1469598103934665603ULL;
+    for (size_t i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ULL; }
+    return h;
+}
+
 typedef struct sh_text_buf { char *p; size_t n, cap; int oom; } sh_text_buf;
 
 static __inline void sh_text_append(sh_text_buf *b, const char *s, size_t n)
@@ -50,6 +66,19 @@ static __inline void sh_text_append(sh_text_buf *b, const char *s, size_t n)
 static __inline void sh_text_append_str(sh_text_buf *b, const char *s)
 {
     sh_text_append(b, s, strlen(s));
+}
+
+/* Uppercase, space-separated bytes for a bounded diagnostic. */
+static __inline void sh_hex_bytes(const unsigned char *bytes, size_t n, char *out, size_t cap)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    size_t used = 0;
+    for (size_t i = 0; i < n && used + 3 < cap; i++) {
+        out[used++] = digits[bytes[i] >> 4];
+        out[used++] = digits[bytes[i] & 15];
+        out[used++] = ' ';
+    }
+    if (cap) out[used ? used - 1 : 0] = 0;
 }
 
 /* The formatted text, malloc'd (free); NULL when memory runs out. */
@@ -122,17 +151,6 @@ static __inline int sh_text_set(char **dst, const char *fmt, ...)
     if (!out) return 0;
     free(*dst);
     *dst = out;
-    return 1;
-}
-
-/* Copy src whole into out[cap]. Returns 1, or 0 with out untouched when it
- * does not fit: a caller with a fixed buffer refuses rather than cuts. */
-static __inline int sh_text_fits(char *out, size_t cap, const char *src)
-{
-    size_t n = src ? strlen(src) : 0;
-    if (!out || n + 1 > cap) return 0;
-    if (n) memcpy(out, src, n);
-    out[n] = 0;
     return 1;
 }
 

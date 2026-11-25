@@ -136,9 +136,7 @@ no log and its serializer cannot write one; every transport (cloud save,
 publish upload, download, Save to My Downloaded Maps, a lobby joiner's fetch)
 moves the saved bytes unchanged, and a vanilla editor save drops the member.
 
-Load: every parse the `DeserializeFromJson` detour sees (`rawmap.c`
-`prepare_map_buffer`: My Maps, a published read, a joiner's download, a rawmap)
-first asks `sh_map_old_shape` (`map_carrier.c`) whether the text is in an
+When the editor opens a map, the `DeserializeFromJson` detour calls `prepare_map_buffer` for My Maps, published and lobby downloads, and rawmaps. It indexes the root carrier once. The settings, navigation and mod readers borrow their value spans until the detour returns. The strip step uses the same recorded member offsets to produce the bytes handed to the engine. The reader checks whether the text is in an
 earlier shape: a `variables.string` name in one of the families earlier builds
 wrote (`smpkg.`, `smpbind.`, `smpref.`, `smpmod1.`, `smpprod1.`,
 `smp.render.v1`, `smp.bounds.v1`, `smnav1.`), a format-1 member,
@@ -1844,7 +1842,8 @@ the derived `.bin` and SPIR-V against the engine's checks, and, given
 
 A mod adds animation event rows to its own clips when they play on a game
 model, without replacing any game file (`clip_events.{c,h}`,
-`clip_events_rule.c`, `clip_events_sigs.c`). It writes an md6Def of its own,
+`clip_events_rule.c`, `clip_events_sigs.c`). Both clip events and attachment tags use
+`md6_registry.c` for registry rows and `md6_registry_engine.c` for per-Play carrier lookup. It writes an md6Def of its own,
 the carrier, that inherits the model the clip plays on
 (`init { inherit "player/mp/tp_body_mp.md6" }`) and lists the rows in its
 `events { anim "<clip>" { event ... } }` blocks, and names it in the author
@@ -1981,7 +1980,7 @@ Each sentence says what to write instead.
 
 The registry of a Play is built at the Play gate (`sh_modserve_play_begin`,
 main thread, before the level load) from the `attachmentTags` of the builds the
-open map serves, exactly as clip events' is (`sh_at_registry_add` checks every
+open map serves, exactly as clip events' is (`sh_md6_registry_add` checks every
 row again: a carrier or a prop outside `mods/<salt>/` is dropped with a line,
 so no build can register a stock prop or another mod's), sorted by prop name
 and published with one pointer swap; the map-load gate drops it. It holds

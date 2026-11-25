@@ -215,17 +215,17 @@ static void test_handles(void)
     memset(g_present, 0, sizeof g_present);
     sh_script_handles_set_resolver(fake_resolve);
     sh_script_handles_reset();
-    CHECK(sh_script_handles_add(0, SH_SCRIPT_SPAWN_ID_NONE, NULL) == 0);
-    CHECK(sh_script_handles_add(0, SH_SCRIPT_SPAWN_ID_WORLD, NULL) == 0);
-    CHECK(sh_script_handles_add(-1, 5, NULL) == 0);
-    a = sh_script_handles_add(0, 10, &full);
-    b = sh_script_handles_add(1, 11, NULL);
-    c = sh_script_handles_add(0, 12, NULL);
-    d = sh_script_handles_add(0, 13, NULL);
+    CHECK(sh_script_handles_add_named(0, SH_SCRIPT_SPAWN_ID_NONE, NULL, NULL) == 0);
+    CHECK(sh_script_handles_add_named(0, SH_SCRIPT_SPAWN_ID_WORLD, NULL, NULL) == 0);
+    CHECK(sh_script_handles_add_named(-1, 5, NULL, NULL) == 0);
+    a = sh_script_handles_add_named(0, 10, NULL, &full);
+    b = sh_script_handles_add_named(1, 11, NULL, NULL);
+    c = sh_script_handles_add_named(0, 12, NULL, NULL);
+    d = sh_script_handles_add_named(0, 13, NULL, NULL);
     CHECK(a && b && c && d && !full);
     CHECK(a != b && b != c && c != d);
-    CHECK(sh_script_handles_add(0, 10, NULL) == a);     /* the same spawn again */
-    CHECK(sh_script_handles_add(1, 10, NULL) == 0);     /* another mod cannot claim it */
+    CHECK(sh_script_handles_add_named(0, 10, NULL, NULL) == a);     /* the same spawn again */
+    CHECK(sh_script_handles_add_named(1, 10, NULL, NULL) == 0);     /* another mod cannot claim it */
     CHECK(sh_script_handles_find(11, &mod) == b && mod == 1);
     CHECK(sh_script_handles_find(99, &mod) == 0 && mod == -1);
     CHECK(sh_script_handle_mod(a) == 0 && sh_script_handle_mod(b) == 1 && sh_script_handle_mod(0) == -1);
@@ -253,20 +253,20 @@ static void test_handles(void)
     CHECK(sh_script_handles_sweep(ch, 16) == 0);
     CHECK(!sh_script_handle_alive(b) && sh_script_handle_entity(b) == NULL);   /* a released handle stays dead */
     /* A sweep with less room continues next time. */
-    for (i = 100; i < 105; i++) { g_present[i] = 1; CHECK(sh_script_handles_add(2, (uint32_t)i, NULL)); }
+    for (i = 100; i < 105; i++) { g_present[i] = 1; CHECK(sh_script_handles_add_named(2, (uint32_t)i, NULL, NULL)); }
     CHECK(sh_script_handles_sweep(ch, 2) == 2);
     CHECK(sh_script_handles_sweep(ch, 16) == 3);
     /* A map change: handles of the last map name nothing. */
     old = a;
     sh_script_handles_reset();
     CHECK(sh_script_handle_mod(old) == -1 && sh_script_handle_entity(old) == NULL && !sh_script_handle_alive(old));
-    a = sh_script_handles_add(0, 10, NULL);
+    a = sh_script_handles_add_named(0, 10, NULL, NULL);
     CHECK(a && a != old);
     CHECK(sh_script_handles_sweep(ch, 16) == 1 && sh_script_handle_entity(a) != NULL);
     /* No count of its own: 100,000 records at once, every one found. */
     sh_script_handles_reset();
     full = 0;
-    for (i = 0; i < 100000; i++) if (!sh_script_handles_add(0, (uint32_t)(20000 + i), &full)) break;
+    for (i = 0; i < 100000; i++) if (!sh_script_handles_add_named(0, (uint32_t)(20000 + i), NULL, &full)) break;
     CHECK(i == 100000 && full == 0);
     CHECK(sh_script_handles_count() == 100000);
     CHECK(sh_script_handles_find((uint32_t)(20000 + 99999), &mod) != 0 && mod == 0);

@@ -1,4 +1,5 @@
 /* config_json.c -- see config_json.h. Pure C; no Windows or engine dependencies. */
+#include "../common/text.h"
 #include "config_json.h"
 
 #include <stdint.h>
@@ -474,53 +475,22 @@ int sh_json_validate_ex(const char *json, size_t length, unsigned max_depth,
     return validate(json, length, max_depth, out_kind, error, 0);
 }
 
-int sh_native_json_validate(const char *json, size_t length, unsigned max_depth,
-                            sh_json_kind *out_kind, sh_json_error *error)
-{
-    return validate(json, length, max_depth, out_kind, error, 1);
-}
-
-static int visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
-                                  sh_json_object_visitor visitor,
-                                  sh_json_field_filter filter, void *context, int native_strings)
+int sh_json_visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
+                                   sh_json_object_visitor visitor, sh_json_field_filter filter, void *context)
 {
     json_cursor c = {0};
     if (!json || !max_depth || !visitor) return 0;
     c.begin = (const unsigned char *)json; c.p = c.begin; c.end = c.begin + length;
     c.max_depth = max_depth; c.visitor = visitor; c.visitor_context = context;
     c.filter = filter;
-    c.native_strings = native_strings;
     skip_ws(&c);
     if (!scan_value(&c, 0, NULL)) return 0;
     skip_ws(&c); return c.p == c.end;
 }
 
-int sh_json_visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
-                                   sh_json_object_visitor visitor,
-                                   sh_json_field_filter filter, void *context)
-{
-    return visit_objects_filtered(json, length, max_depth, visitor, filter, context, 0);
-}
-
-int sh_native_json_visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
-                                          sh_json_object_visitor visitor,
-                                          sh_json_field_filter filter, void *context)
-{
-    return visit_objects_filtered(json, length, max_depth, visitor, filter, context, 1);
-}
-
 static char *copy_range(const unsigned char *begin, const unsigned char *end)
 {
-    size_t n;
-    char *copy;
-    if (!begin || !end || end < begin) return NULL;
-    n = (size_t)(end - begin);
-    if (n == SIZE_MAX) return NULL;
-    copy = (char *)malloc(n + 1);
-    if (!copy) return NULL;
-    if (n) memcpy(copy, begin, n);
-    copy[n] = 0;
-    return copy;
+    return begin && end && end >= begin ? sh_textn((const char *)begin, (size_t)(end - begin)) : NULL;
 }
 
 static int object_append_owned(sh_json_object *object, char *key, size_t key_length,
@@ -716,60 +686,17 @@ int sh_native_json_decode_string(const char *json, size_t length,
     return decode_string(json, length, out, out_capacity, out_length, 1);
 }
 
-typedef struct json_builder {
-    char *data;
-    size_t length;
-    size_t capacity;
-    int failed;
-} json_builder;
-
-static void builder_reserve(json_builder *b, size_t extra)
+static void builder_char(sh_text_buf *b, char ch)
 {
-    size_t needed, next;
-    char *grown;
-    if (b->failed) return;
-    if (extra > SIZE_MAX - b->length - 1) {
-        b->failed = 1;
-        return;
-    }
-    needed = b->length + extra + 1;
-    if (needed <= b->capacity) return;
-    next = b->capacity ? b->capacity : 128;
-    while (next < needed) {
-        if (next > SIZE_MAX / 2) {
-            next = needed;
-            break;
-        }
-        next *= 2;
-    }
-    grown = (char *)realloc(b->data, next);
-    if (!grown) {
-        b->failed = 1;
-        return;
-    }
-    b->data = grown;
-    b->capacity = next;
+    sh_text_append(b, &ch, 1);
 }
 
-static void builder_bytes(json_builder *b, const char *bytes, size_t length)
-{
-    builder_reserve(b, length);
-    if (b->failed) return;
-    if (length) memcpy(b->data + b->length, bytes, length);
-    b->length += length;
-}
-
-static void builder_char(json_builder *b, char ch)
-{
-    builder_bytes(b, &ch, 1);
-}
-
-static void builder_indent(json_builder *b, unsigned count)
+static void builder_indent(sh_text_buf *b, unsigned count)
 {
     while (count--) builder_char(b, ' ');
 }
 
-static void builder_quoted(json_builder *b, const char *bytes, size_t length)
+static void builder_quoted(sh_text_buf *b, const char *bytes, size_t length)
 {
     static const char hex[] = "0123456789abcdef";
     size_t i;
@@ -777,19 +704,19 @@ static void builder_quoted(json_builder *b, const char *bytes, size_t length)
     for (i = 0; i < length; i++) {
         unsigned char ch = (unsigned char)bytes[i];
         switch (ch) {
-        case '"': builder_bytes(b, "\\\"", 2); break;
-        case '\\': builder_bytes(b, "\\\\", 2); break;
-        case '\b': builder_bytes(b, "\\b", 2); break;
-        case '\f': builder_bytes(b, "\\f", 2); break;
-        case '\n': builder_bytes(b, "\\n", 2); break;
-        case '\r': builder_bytes(b, "\\r", 2); break;
-        case '\t': builder_bytes(b, "\\t", 2); break;
+        case '"': sh_text_append(b, "\\\"", 2); break;
+        case '\\': sh_text_append(b, "\\\\", 2); break;
+        case '\b': sh_text_append(b, "\\b", 2); break;
+        case '\f': sh_text_append(b, "\\f", 2); break;
+        case '\n': sh_text_append(b, "\\n", 2); break;
+        case '\r': sh_text_append(b, "\\r", 2); break;
+        case '\t': sh_text_append(b, "\\t", 2); break;
         default:
             if (ch < 0x20) {
                 char escaped[6] = {
                     '\\', 'u', '0', '0', hex[ch >> 4], hex[ch & 0x0F]
                 };
-                builder_bytes(b, escaped, sizeof(escaped));
+                sh_text_append(b, escaped, sizeof(escaped));
             } else {
                 builder_char(b, (char)ch);
             }
@@ -802,7 +729,7 @@ static void builder_quoted(json_builder *b, const char *bytes, size_t length)
 char *sh_json_serialize_object(const sh_json_object *object,
                                unsigned base_indent, size_t *out_length)
 {
-    json_builder b = {0};
+    sh_text_buf b = {0};
     size_t i;
     if (!object) return NULL;
     builder_char(&b, '{');
@@ -811,20 +738,18 @@ char *sh_json_serialize_object(const sh_json_object *object,
         const sh_json_member *member = &object->members[i];
         builder_indent(&b, base_indent + 2);
         builder_quoted(&b, member->key, member->key_length);
-        builder_bytes(&b, ": ", 2);
-        builder_bytes(&b, member->value_json, strlen(member->value_json));
+        sh_text_append(&b, ": ", 2);
+        sh_text_append(&b, member->value_json, strlen(member->value_json));
         if (i + 1 < object->count) builder_char(&b, ',');
         builder_char(&b, '\n');
     }
     if (object->count) builder_indent(&b, base_indent);
     builder_char(&b, '}');
     if (base_indent == 0) builder_char(&b, '\n');
-    builder_reserve(&b, 0);
-    if (b.failed) {
-        free(b.data);
+    if (b.oom) {
+        free(b.p);
         return NULL;
     }
-    b.data[b.length] = 0;
-    if (out_length) *out_length = b.length;
-    return b.data;
+    if (out_length) *out_length = b.n;
+    return b.p;
 }

@@ -113,13 +113,6 @@ void sh_bt_table_free(sh_bt_table *t)
     memset(t, 0, sizeof *t);
 }
 
-static size_t bt_hash(const char *s)
-{
-    size_t h = 1469598103934665603ULL;
-    for (; *s; ++s) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }
-    return h;
-}
-
 /* Inserts key (with a one-letter namespace) into the set. Returns 1 when it is added, 0 when already present or
  * out of memory. */
 static int bt_seen_insert(sh_bt_table *t, char ns, const char *key)
@@ -132,7 +125,7 @@ static int bt_seen_insert(sh_bt_table *t, char ns, const char *key)
         if (!n) return 0;
         for (j = 0; j < t->seen_cap; ++j) {
             if (!t->seen[j]) continue;
-            h = bt_hash(t->seen[j]) & (cap - 1);
+            h = sh_text_hash(t->seen[j], strlen(t->seen[j])) & (cap - 1);
             while (n[h]) h = (h + 1) & (cap - 1);
             n[h] = t->seen[j];
         }
@@ -142,7 +135,7 @@ static int bt_seen_insert(sh_bt_table *t, char ns, const char *key)
     k = (char *)malloc(len + 2);
     if (!k) return 0;
     k[0] = ns; memcpy(k + 1, key, len + 1);
-    h = bt_hash(k) & (t->seen_cap - 1);
+    h = sh_text_hash(k, strlen(k)) & (t->seen_cap - 1);
     for (i = 0; i < t->seen_cap && t->seen[h]; ++i, h = (h + 1) & (t->seen_cap - 1)) {
         if (!strcmp(t->seen[h], k)) { free(k); return 0; }
     }

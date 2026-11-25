@@ -19,7 +19,7 @@
 #include "modbundle.h"
 #include "store_lock.h"
 #include "modstore.h"
-#include "overrides.h"
+#include "stream_fixture.h"
 
 void sh_modserve_test_cache(int enabled);
 size_t sh_modserve_test_cache_bytes(void);
@@ -384,13 +384,13 @@ static int provider_text(const char *name, unsigned mode, char *out, size_t cap)
     long long n;
     out[0] = 0;
     if (!s) return 0;
-    n = sh_overrides_test_stream_length(s);
+    n = stream_length(s);
     if (n > 0) {
         size_t take = (size_t)n < cap - 1 ? (size_t)n : cap - 1;
-        sh_overrides_test_stream_read(s, out, take);
+        stream_read(s, out, take);
         out[take] = 0;
     }
-    sh_overrides_test_stream_close(s);
+    stream_close(s);
     return 1;
 }
 

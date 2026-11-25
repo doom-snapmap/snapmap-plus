@@ -1413,32 +1413,12 @@ done:
     return result;
 }
 
+#ifdef SH_CONFIG_TESTING
 int sh_config_set_json(const char *key, const char *value_json)
 {
     return set_json_for_access(key, value_json, SH_CONFIG_BACKEND_WRITE);
 }
-
-int sh_config_get_string(const char *key, char *out, int out_capacity)
-{
-    int json_length, result = -1;
-    char *json = NULL;
-    size_t decoded_length = 0;
-    json_length = sh_config_get_json(key, NULL, 0, NULL);
-    if (json_length < 0) return -1;
-    json = (char *)malloc((size_t)json_length + 1);
-    if (!json) return -1;
-    if (sh_config_get_json(key, json, json_length + 1, NULL) != json_length)
-        goto done;
-    if (!sh_json_decode_string(json, (size_t)json_length, out,
-                               out_capacity > 0 ? (size_t)out_capacity : 0,
-                               &decoded_length) ||
-        decoded_length > INT_MAX)
-        goto done;
-    result = (int)decoded_length;
-done:
-    free(json);
-    return result;
-}
+#endif
 
 char *sh_config_get_text(const char *key)
 {

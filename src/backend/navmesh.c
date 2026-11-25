@@ -29,8 +29,7 @@ typedef struct nav_set {
     char     digest[SH_SMNAV_DIGEST_CHARS + 1];
     char     geom[SH_SMNAV_GEOM_CHARS + 1];
     unsigned total;
-    unsigned present;
-    int      consistent;         /* headers agree, no duplicate or out-of-range index */
+    int      consistent;         /* one readable set for this module and class */
     sh_shard_chunk *chunks;      /* [total], pointers into the map buffer; scan-time only */
     unsigned char  *payload;     /* process-heap buffer, never engine map-heap storage */
     size_t          payload_len;
@@ -114,7 +113,6 @@ typedef struct nav_hdr {
     char     cls[SH_SMNAV_CLASS_CAP];
     char     digest[SH_SMNAV_DIGEST_CHARS + 1];
     char     geom[SH_SMNAV_GEOM_CHARS + 1];
-    unsigned idx, total;
 } nav_hdr;
 
 static int nav_is_class_char(char c)
@@ -159,10 +157,10 @@ static int nav_copy_class(const char *p, size_t n, char *out, size_t cap)
     return 1;
 }
 
-static int nav_copy_hex(const char *p, size_t n, char *out, size_t want)
+static int nav_copy_hex(const char *p, size_t n, char *out, size_t cap)
 {
     size_t i;
-    if (n != want) return 0;
+    if (n + 1 != cap) return 0;
     for (i = 0; i < n; i++) if (!sh_shard_is_hex(p[i])) return 0;
     memcpy(out, p, n);
     out[n] = '\0';
@@ -329,8 +327,8 @@ static int nav_walk_reach_chains(const sh_aas_layout *a, char *err, size_t err_c
 
     for (list = 0; list < 2; list++) {
         unsigned char *bits = seen + (size_t)list * bytes;
-        size_t head_off = (list == 0) ? 0x14 : 0x18;
-        size_t link_off = (list == 0) ? 0x20 : 0x24;
+        unsigned head_off = (list == 0) ? 0x14 : 0x18;
+        unsigned link_off = (list == 0) ? 0x20 : 0x24;
         for (area = 0; area < num_areas; area++) {
             unsigned degree = 0;
             int32_t at = sh_aas_get_i32(NAV_REC(a, SH_AAS_L_AREAS, area), head_off);
@@ -370,7 +368,7 @@ done:
 int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_t err_cap)
 {
     sh_aas_layout a;
-    uint32_t i, n;
+    uint32_t n;
     if (!sh_aas_read_layout(p, len, SH_AAS_MAX_BAKE_PAYLOAD, &a, err, err_cap)) return 0;
     /* An area's first traversal point is a u16, so the table indexes at most 65536 points. */
     if (a.count[SH_AAS_L_TRAVERSALPOINTS] > SH_AAS_MAX_TRAVERSAL_POINTS) {
@@ -545,62 +543,6 @@ static int nav_build_names(nav_set *s)
     return 1;
 }
 
-/* Pass 1, one chunk: groups it with its (module, class) set. Returns 0 when the table is full. */
-static int nav_collect_one(const nav_hdr *hp, const char *chunk, size_t chunk_len)
-{
-    const nav_hdr h = *hp;
-    nav_set *s;
-    {
-        s = nav_find_set(h.module, h.cls);
-        if (!s) {
-            if (g_set_count >= SH_SMNAV_MAX_SETS) return 0;
-            s = &g_sets[g_set_count++];
-            memset(s, 0, sizeof *s);
-            strcpy_s(s->module, sizeof s->module, h.module);
-            strcpy_s(s->cls, sizeof s->cls, h.cls);
-            strcpy_s(s->digest, sizeof s->digest, h.digest);
-            strcpy_s(s->geom, sizeof s->geom, h.geom);
-            s->total = h.total;
-            s->consistent = 1;
-            s->chunks = (sh_shard_chunk *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-                                                    (size_t)h.total * sizeof *s->chunks);
-            if (!s->chunks) {
-                s->consistent = 0;
-                strcpy_s(s->reason, sizeof s->reason, "there was no memory to collect its parts");
-                return 1;
-            }
-        }
-        if (!s->chunks) return 1;
-
-        if (s->total != h.total || strcmp(s->digest, h.digest) != 0 ||
-            strcmp(s->geom, h.geom) != 0) {
-            s->consistent = 0;
-            strcpy_s(s->reason, sizeof s->reason, "the map carries two different bakes for it");
-            return 1;
-        }
-        if (h.idx >= s->total) {
-            s->consistent = 0;
-            strcpy_s(s->reason, sizeof s->reason, "a part index is out of range");
-            return 1;
-        }
-        if (!chunk) {
-            s->consistent = 0;
-            strcpy_s(s->reason, sizeof s->reason, "a part's value could not be read");
-            return 1;
-        }
-        if (s->chunks[h.idx].filled) {
-            s->consistent = 0;
-            strcpy_s(s->reason, sizeof s->reason, "a part index appears twice");
-            return 1;
-        }
-        s->chunks[h.idx].p = chunk;
-        s->chunks[h.idx].n = chunk_len;
-        s->chunks[h.idx].filled = 1;
-        s->present++;
-    }
-    return 1;
-}
-
 static void nav_overflow(void)
 {
     nav_refuse("the map carries more baked module/class sets than the %d this build vets; "
@@ -615,18 +557,6 @@ static int nav_member_field(const char *obj, const char *end, const char *key, c
     size_t n;
     if (sh_carrier_object_string(obj, end, key, &body, &n) != 1) return 0;
     return copy(body, n, out, cap);
-}
-
-static int nav_copy_digest(const char *p, size_t n, char *out, size_t cap)
-{
-    (void)cap;
-    return nav_copy_hex(p, n, out, SH_SMNAV_DIGEST_CHARS);
-}
-
-static int nav_copy_geom(const char *p, size_t n, char *out, size_t cap)
-{
-    (void)cap;
-    return nav_copy_hex(p, n, out, SH_SMNAV_GEOM_CHARS);
 }
 
 /* Pass 1 over the member's "nav" part [from, to) (map_carrier.h): one object per set, its "data" the base64
@@ -645,8 +575,8 @@ static void nav_collect_member(const char *from, const char *to)
         if (*set != '{' ||
             !nav_member_field(set, end, "module", h.module, sizeof h.module, nav_copy_module) ||
             !nav_member_field(set, end, "class", h.cls, sizeof h.cls, nav_copy_class) ||
-            !nav_member_field(set, end, "digest", h.digest, sizeof h.digest, nav_copy_digest) ||
-            !nav_member_field(set, end, "geom", h.geom, sizeof h.geom, nav_copy_geom)) {
+            !nav_member_field(set, end, "digest", h.digest, sizeof h.digest, nav_copy_hex) ||
+            !nav_member_field(set, end, "geom", h.geom, sizeof h.geom, nav_copy_hex)) {
             nav_refuse("a navigation set in the map's member does not read; it is ignored");
             continue;
         }
@@ -664,12 +594,38 @@ static void nav_collect_member(const char *from, const char *to)
             nav_refuse("'%s' (%s) is not served -- its data in the map's member does not read", h.module, h.cls);
             continue;
         }
-        h.total = total;
-        while (sh_carrier_array_next(&data_cursor, end, &chunk, &chunk_len) == 1) {
-            h.idx = idx++;
-            if (*chunk == '"' && chunk_len >= 2) {
-                if (!nav_collect_one(&h, chunk + 1, chunk_len - 2)) overflow = 1;
-            } else if (!nav_collect_one(&h, NULL, 0)) overflow = 1;
+        {
+            nav_set *s = nav_find_set(h.module, h.cls);
+            if (s) {
+                s->consistent = 0;
+                strcpy_s(s->reason, sizeof s->reason,
+                         s->total != total || strcmp(s->digest, h.digest) || strcmp(s->geom, h.geom)
+                         ? "the map carries two different bakes for it" : "the map carries its bake twice");
+                continue;
+            }
+            if (g_set_count >= SH_SMNAV_MAX_SETS) { overflow = 1; continue; }
+            s = &g_sets[g_set_count++];
+            memset(s, 0, sizeof *s);
+            strcpy_s(s->module, sizeof s->module, h.module);
+            strcpy_s(s->cls, sizeof s->cls, h.cls);
+            strcpy_s(s->digest, sizeof s->digest, h.digest);
+            strcpy_s(s->geom, sizeof s->geom, h.geom);
+            s->total = total;
+            s->chunks = (sh_shard_chunk *)HeapAlloc(GetProcessHeap(), 0, (size_t)total * sizeof *s->chunks);
+            if (!s->chunks) {
+                strcpy_s(s->reason, sizeof s->reason, "there was no memory to collect its parts");
+                continue;
+            }
+            s->consistent = 1;
+            while (sh_carrier_array_next(&data_cursor, end, &chunk, &chunk_len) == 1) {
+                if (*chunk != '"' || chunk_len < 2) {
+                    s->consistent = 0;
+                    strcpy_s(s->reason, sizeof s->reason, "a part's value could not be read");
+                    break;
+                }
+                s->chunks[idx].p = chunk + 1;
+                s->chunks[idx++].n = chunk_len - 2;
+            }
         }
     }
     if (r < 0) nav_refuse("the navigation list in the map's member does not read; what read is kept");
@@ -691,12 +647,6 @@ static void nav_reassemble(void)
         if (!s->consistent) {
             if (!s->reason[0])
                 strcpy_s(s->reason, sizeof s->reason, "its part headers disagree");
-            nav_refuse("'%s' (%s) is not served -- %s", s->module, s->cls, s->reason);
-            continue;
-        }
-        if (s->present != s->total) {
-            _snprintf_s(s->reason, sizeof s->reason, _TRUNCATE,
-                        "only %u of its %u parts are present", s->present, s->total);
             nav_refuse("'%s' (%s) is not served -- %s", s->module, s->cls, s->reason);
             continue;
         }
@@ -795,12 +745,11 @@ static void nav_accept(const char *json, size_t len)
 }
 
 /* The guarded scan of the member's "nav" part, with the lock already held. */
-static void nav_build_locked(const char *json, size_t len)
+static void nav_build_locked(const char *json, size_t len, const sh_carrier_span *nav)
 {
     __try {
-        size_t from = 0, to = 0;
-        if (json && len && sh_carrier_part(json, len, "nav", &from, &to) == 1) {
-            nav_collect_member(json + from, json + to);
+        if (nav->present) {
+            nav_collect_member(json + nav->from, json + nav->to);
             nav_reassemble();
             nav_accept(json, len);
         }
@@ -810,7 +759,7 @@ static void nav_build_locked(const char *json, size_t len)
     }
 }
 
-void sh_navmesh_build_from_map(const char *json, size_t len)
+void sh_navmesh_build_from_map(const char *json, size_t len, const sh_carrier_span *nav)
 {
     size_t i, sets, served = 0, modules = 0, held;
     char line[256];
@@ -824,16 +773,14 @@ void sh_navmesh_build_from_map(const char *json, size_t len)
     if (g_raw_nav) { HeapFree(GetProcessHeap(), 0, g_raw_nav); g_raw_nav = NULL; g_raw_nav_len = 0; }
     /* When off, the table stays empty so the previous map's navigation is not left live; the member part is kept
      * as text so a save does not drop the bake. */
-    if (on) nav_build_locked(json, len);
-    else if (json && len) {
-        size_t from = 0, to = 0;
-        if (sh_carrier_part(json, len, "nav", &from, &to) == 1) {
-            g_raw_nav = (char *)HeapAlloc(GetProcessHeap(), 0, to - from + 1);
-            if (g_raw_nav) {
-                memcpy(g_raw_nav, json + from, to - from);
-                g_raw_nav[to - from] = 0;
-                g_raw_nav_len = to - from;
-            }
+    if (on) nav_build_locked(json, len, nav);
+    else if (nav->present) {
+        size_t from = nav->from, to = nav->to;
+        g_raw_nav = (char *)HeapAlloc(GetProcessHeap(), 0, to - from + 1);
+        if (g_raw_nav) {
+            memcpy(g_raw_nav, json + from, to - from);
+            g_raw_nav[to - from] = 0;
+            g_raw_nav_len = to - from;
         }
     }
     for (i = 0; i < g_set_count; i++) {

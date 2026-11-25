@@ -129,16 +129,6 @@ static int boot_composition_whole(const char *build)
     return sh_cache_composed(build, &complete) && complete;
 }
 
-/* The function's address for an install that requires an intact prologue, or
- * NULL; *clean says whether it resolved. */
-static void *sig_fn(const sig_result *results, size_t n, const char *name, int *clean)
-{
-    const sig_result *r = sig_lookup(results, n, name);
-    int ok = r && r->status == SIG_OK;
-    if (clean) *clean = ok;
-    return ok ? (void *)r->addr : NULL;
-}
-
 /* Record each named feature off when an install reported failure. */
 static int need(int installed, const char *why, const char *feature, const char *also, const char *more)
 {
@@ -151,12 +141,10 @@ static int need(int installed, const char *why, const char *feature, const char 
 
 static void install_features(const sig_result *results, size_t db)
 {
-    int clean = 0;
-
     /* Map loading: rawmaps and the map carrier (mods, map settings) run inside
      * the DeserializeFromJson detour. */
-    void *deser = sig_fn(results, db, "DeserializeFromJson", &clean);
-    need(sh_rawmap_swap_install(deser, clean), "map loads cannot be intercepted",
+    void *deser = sig_pointer(results, db, "DeserializeFromJson");
+    need(sh_rawmap_swap_install(deser), "map loads cannot be intercepted",
          SH_FEATURE_RAWMAPS, SH_FEATURE_MODS, SH_FEATURE_MAP_SETTINGS);
     /* Answer "is the open map a branch?" for a swapped map, so the engine's own Save asks for
      * a name rather than overwriting the map the rawmap opened over. */
@@ -165,24 +153,24 @@ static void install_features(const sig_result *results, size_t db)
     /* The editor-frame hook: a main-thread frame boundary, and the in-place map
      * reload it drives for the File menu's Load Rawmap. */
     {
-        void *ed_frame = sig_fn(results, db, "EditorFrame", &clean);
-        need(sh_editor_frame_install(ed_frame, clean, sig_fn(results, db, "EditorLoadMap", NULL), g_doom_base),
+        void *ed_frame = sig_pointer(results, db, "EditorFrame");
+        need(sh_editor_frame_install(ed_frame, sig_pointer(results, db, "EditorLoadMap"), g_doom_base),
              "the editor frame hook is not installed", SH_FEATURE_RAWMAPS, NULL, NULL);
         {
-            void *read_text = sig_fn(results, db, "ReadLocalSavedMapText", &clean);
-            need(sh_editor_frame_carrier_install(read_text, clean, sig_fn(results, db, "IdStrAssignCStr", NULL)),
+            void *read_text = sig_pointer(results, db, "ReadLocalSavedMapText");
+            need(sh_editor_frame_carrier_install(read_text, sig_pointer(results, db, "IdStrAssignCStr")),
                  "a rawmap cannot be opened without reading one of your saved maps", SH_FEATURE_RAWMAPS, NULL, NULL);
         }
         /* Save Rawmap serializes the open map, not the newest save on disk. The tag
          * function also derives the engine's idStr ctor/dtor. */
-        sh_rawmap_set_live_serialize(sig_fn(results, db, "EditorMapToJson", NULL),
-                                     sig_fn(results, db, "SnapMapAddBranchTag", NULL));
+        sh_rawmap_set_live_serialize(sig_pointer(results, db, "EditorMapToJson"),
+                                     sig_pointer(results, db, "SnapMapAddBranchTag"));
     }
 
     /* Saves: mirror to rawmap JSON and write the map carrier. */
     {
-        void *serialize = sig_fn(results, db, "SerializeToJson", &clean);
-        need(sh_rawmap_save_install(serialize, clean), "map saves cannot be intercepted",
+        void *serialize = sig_pointer(results, db, "SerializeToJson");
+        need(sh_rawmap_save_install(serialize), "map saves cannot be intercepted",
              SH_FEATURE_RAWMAPS, SH_FEATURE_MODS, SH_FEATURE_MAP_SETTINGS);
     }
     need(sh_map_payload_install(results, db), "the map size limits are not raised",
@@ -200,7 +188,7 @@ static void install_features(const sig_result *results, size_t db)
      * while it is armed the shield recovers faults during a load (redirect_policy.h). */
     sh_load_screen_stop_install(g_doom_base, results, db);
 
-    void *get_decls = sig_fn(results, db, "GetDeclsOfType", NULL);
+    void *get_decls = sig_pointer(results, db, "GetDeclsOfType");
 
     /* Installed mods: read every bundle index before the provider can be
      * asked for a file, so the first open already sees the table. Stock
@@ -261,25 +249,24 @@ static void install_features(const sig_result *results, size_t db)
      * after the serving index so the first pass already carries the admitted
      * bundles' strings. */
     {
-        void *sort_body = sig_fn(results, db, "StridsSortBody", &clean);
-        need(sh_strids_install(sort_body, clean,
-                               sig_fn(results, db, "StridsTableLea", NULL),
-                               sig_fn(results, db, "StridsInsert", NULL),
-                               sig_fn(results, db, "StridsHash", NULL),
-                               sig_fn(results, db, "IdStrAssign", NULL)),
+        void *sort_body = sig_pointer(results, db, "StridsSortBody");
+        need(sh_strids_install(sort_body,
+                               sig_pointer(results, db, "StridsTableLea"),
+                               sig_pointer(results, db, "StridsInsert"),
+                               sig_pointer(results, db, "StridsHash"),
+                               sig_pointer(results, db, "IdStrAssign")),
              "the language table cannot be extended", SH_FEATURE_TEXT, NULL, NULL);
     }
 
     /* Replace resource-provider open-by-name slot +0x148 after validating the provider ABI and all three
      * idStr helpers. It serves map navigation, Grid Room variants, mods and defaults, else the engine's resources. */
-    int ctor_clean = 0, read_clean = 0, compare_clean = 0, write_clean = 0;
-    void *res_ctor = sig_fn(results, db, "ResProviderCtor", &ctor_clean);
-    void *read_string = sig_fn(results, db, "IdFileReadString", &read_clean);
-    void *compare = sig_fn(results, db, "IdFileCompare", &compare_clean);
-    void *write_string = sig_fn(results, db, "IdFileWriteString", &write_clean);
-    int overrides_installed = need(sh_overrides_install(g_doom_base, res_ctor, ctor_clean,
-                                                        read_string, read_clean, compare, compare_clean,
-                                                        write_string, write_clean),
+    void *res_ctor = sig_pointer(results, db, "ResProviderCtor");
+    void *read_string = sig_pointer(results, db, "IdFileReadString");
+    void *compare = sig_pointer(results, db, "IdFileCompare");
+    void *write_string = sig_pointer(results, db, "IdFileWriteString");
+    int overrides_installed = need(sh_overrides_install(g_doom_base, res_ctor,
+                                                        read_string, compare,
+                                                        write_string),
                                    "the resource provider cannot be extended",
                                    SH_FEATURE_MODS, SH_FEATURE_GRID_SIZES, SH_FEATURE_TIMELINES);
 
@@ -315,11 +302,11 @@ static void install_features(const sig_result *results, size_t db)
 
     /* Register cvars before commands. Commands additionally need cmdSystem;
      * each registration path handles missing dependencies independently. */
-    sh_cvars_install(sig_fn(results, db, "CvarRegister", NULL), g_doom_base);
+    sh_cvars_install(sig_pointer(results, db, "CvarRegister"), g_doom_base);
 
     void *cmdsys = sh_resolve_cmdsys(results, db, g_doom_base);
-    need(sh_commands_install(sig_fn(results, db, "AddCommand", NULL), cmdsys,
-                             sig_fn(results, db, "Printf", NULL), get_decls, g_doom_base),
+    need(sh_commands_install(sig_pointer(results, db, "AddCommand"), cmdsys,
+                             sig_pointer(results, db, "Printf"), get_decls, g_doom_base),
          "the console command system is unavailable", SH_FEATURE_CONSOLE, NULL, NULL);
 
     /* Create the shared interface and launch the frontend after sh registration. */
@@ -378,8 +365,8 @@ static void install_features(const sig_result *results, size_t db)
      * Later bake callbacks can see entities with incomplete defsub state and
      * cannot safely clone them. Install only after the live read surface exists. */
     {
-        void *snapbuild = sig_fn(results, db, "SnapMapEditToSnapBuild", &clean);
-        need(sh_nav_play_install(snapbuild, clean), "the play build cannot be observed",
+        void *snapbuild = sig_pointer(results, db, "SnapMapEditToSnapBuild");
+        need(sh_nav_play_install(snapbuild), "the play build cannot be observed",
              SH_FEATURE_NAVIGATION, NULL, NULL);
         sh_nav_play_install_instances(results, db);
         sh_nav_play_install_volume_contents(results, db);

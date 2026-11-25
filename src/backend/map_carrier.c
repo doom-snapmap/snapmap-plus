@@ -272,27 +272,28 @@ static char *cr_cut(const char *json, size_t len, size_t from, size_t to, size_t
 
 char *sh_carrier_strip(const char *json, size_t len, size_t *out_len)
 {
-    sh_carrier_view v;
-    char *cur = NULL;
-    size_t cur_len = len;
-    unsigned guard = 0;
+    sh_carrier_view view;
+    sh_carrier_view_read(json, len, &view);
+    return sh_carrier_strip_view(json, len, &view, out_len);
+}
+
+char *sh_carrier_strip_view(const char *json, size_t len, const sh_carrier_view *view, size_t *out_len)
+{
+    sh_carrier_view next;
+    char *owned = NULL;
     if (out_len) *out_len = 0;
-    for (;;) {
-        const char *src = cur ? cur : json;
-        char *next;
-        size_t next_len = 0;
-        if (!sh_carrier_view_read(src, cur_len, &v) || v.state == SH_CARRIER_ABSENT || ++guard > 64) break;
-        next = cr_cut(src, cur_len, v.cut_from, v.cut_to, &next_len);
-        if (!next) {
-            if (cur) HeapFree(GetProcessHeap(), 0, cur);
-            return NULL;
-        }
-        if (cur) HeapFree(GetProcessHeap(), 0, cur);
-        cur = next;
-        cur_len = next_len;
+    for (unsigned count = 0; view->members && count < 64; count++) {
+        char *cut = cr_cut(json, len, view->cut_from, view->cut_to, &len);
+        if (owned) HeapFree(GetProcessHeap(), 0, owned);
+        if (!cut) return NULL;
+        owned = cut;
+        json = cut;
+        if (view->members == 1) break;
+        sh_carrier_view_read(json, len, &next);
+        view = &next;
     }
-    if (cur && out_len) *out_len = cur_len;
-    return cur;
+    if (owned && out_len) *out_len = len;
+    return owned;
 }
 
 char *sh_carrier_put(const char *json, size_t len, const char *part, const char *value, size_t value_len,
@@ -320,7 +321,7 @@ char *sh_carrier_put(const char *json, size_t len, const char *part, const char 
     for (i = 0; i < CR_PARTS; i++) if (pv[i]) any = 1;
 
     if (v.state != SH_CARRIER_ABSENT) {
-        base = sh_carrier_strip(json, len, &src_len);
+        base = sh_carrier_strip_view(json, len, &v, &src_len);
         if (!base) { CR_ERR("no memory to rewrite the map"); return NULL; }
         src = base;
     } else {
@@ -463,10 +464,9 @@ static int cr_is_name_value(const char *json, const char *quote)
     return memcmp(r - 5, "\"name\"", 6) == 0;
 }
 
-int sh_map_old_shape(const char *json, size_t len)
+int sh_map_old_shape_view(const char *json, size_t len, const sh_carrier_view *view)
 {
     size_t f;
-    sh_carrier_view v;
     if (!json || !len) return SH_MAP_OLD_NONE;
     for (f = 0; f < sizeof cr_old_families / sizeof cr_old_families[0]; f++) {
         size_t m = strlen(cr_old_families[f]), at = 0;
@@ -484,10 +484,9 @@ int sh_map_old_shape(const char *json, size_t len)
             }
         }
     }
-    if (!sh_carrier_view_read(json, len, &v)) return SH_MAP_OLD_NONE;
-    if (v.format == 1) return SH_MAP_OLD_FORMAT;
-    if (v.state == SH_CARRIER_PRESENT && v.mods.present) {
-        const char *cursor = json + v.mods.from, *end = json + v.mods.to, *elem;
+    if (view->format == 1) return SH_MAP_OLD_FORMAT;
+    if (view->mods.present) {
+        const char *cursor = json + view->mods.from, *end = json + view->mods.to, *elem;
         size_t elem_len;
         while (sh_carrier_array_next(&cursor, end, &elem, &elem_len) == 1) {
             if (*elem != '{') continue;
@@ -501,4 +500,11 @@ int sh_map_old_shape(const char *json, size_t len)
         }
     }
     return SH_MAP_OLD_NONE;
+}
+
+int sh_map_old_shape(const char *json, size_t len)
+{
+    sh_carrier_view view;
+    sh_carrier_view_read(json, len, &view);
+    return sh_map_old_shape_view(json, len, &view);
 }

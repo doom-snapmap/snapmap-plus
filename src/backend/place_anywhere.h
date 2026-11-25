@@ -20,6 +20,5 @@ int sh_place_gate_branch(const unsigned char *site,int gate);
 #ifndef SH_PLACE_ANYWHERE_PURE
 /* Boot thread. Patches both gates or neither, and logs either way. */
 int sh_place_anywhere_install(const sig_result *results,size_t count);
-int sh_place_anywhere_live(void);
 #endif
 #endif

@@ -9,6 +9,7 @@
 #include <tlhelp32.h>
 #include <shlobj.h>
 #include <dbghelp.h>
+#include "fault_shield.h"
 #include "../backend/host_image.h"
 #include "../common/wide_path.h"
 
@@ -82,22 +83,8 @@ static void diag_raw(const char *prefix, DWORD code, const void *rip, const void
  * This can take the loader lock; ordinary first-chance breadcrumbs avoid it. */
 static void module_for(const void *addr, char *out, size_t cap, uintptr_t *off)
 {
-    HMODULE hmod = NULL;
-    if (off) *off = 0;
-    if (out && cap) out[0] = '\0';
-    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCWSTR)addr, &hmod) && hmod) {
-        static wchar_t path[SH_WPATH_MAX];
-        DWORD n = GetModuleFileNameW(hmod, path, SH_WPATH_MAX);
-        if (n && n < SH_WPATH_MAX && out && cap) {
-            const wchar_t *base = wcsrchr(path, L'\\');
-            sh_wpath_utf8(base ? base + 1 : path, out, cap);
-        }
-        if (off) *off = (uintptr_t)addr - (uintptr_t)hmod;
-    } else {
-        if (out && cap) strncpy_s(out, cap, "???", _TRUNCATE);
-    }
+    static wchar_t path[SH_WPATH_MAX];
+    if (!shield_module_at(addr, path, SH_WPATH_MAX, out, cap, off)) strncpy_s(out, cap, "???", _TRUNCATE);
 }
 
 static const char *code_name(DWORD code)

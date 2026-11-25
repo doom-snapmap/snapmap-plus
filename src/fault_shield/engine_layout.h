@@ -123,4 +123,12 @@
  * MOV [RSP+0x20],-2 -- 15 position-independent bytes before the cookie load. */
 #define SMI_STOLEN             15u
 
+#include "../backend/engine_globals.h"
+
+static __inline void shield_clear_suppressor_b(const uint8_t *base)
+{
+    uintptr_t slot = base ? glb_resolve(base, "throw_suppressor_b", NULL) : 0;
+    if (slot && *(volatile int32_t *)slot) *(volatile int32_t *)slot = 0;
+}
+
 #endif /* SHIELD_ENGINE_LAYOUT_H */

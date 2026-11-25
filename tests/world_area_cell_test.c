@@ -59,7 +59,7 @@ static int synthetic(void)
     assert(!sh_world_area_cell_install(&r,1,NULL)&&!g_live);
     /* Not live: the hooks do nothing. */
     sh_world_area_cell_build(map);sh_world_area_cell_build_end();
-    assert(sh_world_area_cell_current()==512.0f&&site_reads(site)==512.0f);
+    assert(site_reads(site)==512.0f);
 
     /* Installed: the load reads the product page, 512 at rest. */
     r.status=SIG_OK;

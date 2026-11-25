@@ -25,7 +25,6 @@ typedef struct entry {
 static entry   *g_e;
 static int32_t  g_cap;                       /* slots allocated */
 static int32_t  g_used;                      /* slots handed out this map (fresh ones lie above) */
-static int32_t  g_active;                    /* entries pending or live */
 static int32_t  g_head = -1, g_tail = -1;    /* the active list */
 static int32_t  g_free_head = -1, g_free_tail = -1, g_nfree;
 static int32_t *g_hash;                      /* index + 1, 0 = empty */
@@ -153,7 +152,6 @@ static void release_locked(int i)
     if (g_free_tail >= 0) g_e[g_free_tail].next = i; else g_free_head = i;
     g_free_tail = i;
     g_nfree++;
-    g_active--;
 }
 
 void sh_script_handles_set_resolver(sh_script_resolve_fn fn)
@@ -185,7 +183,6 @@ void sh_script_handles_reset(void)
     }
     if (g_hash) memset(g_hash, 0, (size_t)g_hash_size * sizeof *g_hash);
     g_used = 0;
-    g_active = 0;
     g_head = g_tail = -1;
     g_free_head = g_free_tail = -1;
     g_nfree = 0;
@@ -212,7 +209,6 @@ static sh_script_handle add_locked(int mod, uint32_t spawn_id, const char *names
         e->prev = g_tail;
         if (g_tail >= 0) g_e[g_tail].next = i; else g_head = i;
         g_tail = i;
-        g_active++;
         hash_put(i);
         h = handle_of(i);
     }
@@ -229,11 +225,6 @@ sh_script_handle sh_script_handles_add_named(int mod, uint32_t spawn_id, const c
     h = add_locked(mod, spawn_id, names, full);
     ReleaseSRWLockExclusive(&g_lock);
     return h;
-}
-
-sh_script_handle sh_script_handles_add(int mod, uint32_t spawn_id, int *full)
-{
-    return sh_script_handles_add_named(mod, spawn_id, NULL, full);
 }
 
 sh_script_handle sh_script_handles_ref(uint32_t spawn_id)
@@ -317,6 +308,7 @@ void *sh_script_handle_entity(sh_script_handle h)
     return e;
 }
 
+#ifdef SH_SCRIPT_HANDLE_FIXTURE
 int sh_script_handle_alive(sh_script_handle h)
 {
     int i, alive = 0;
@@ -326,6 +318,7 @@ int sh_script_handle_alive(sh_script_handle h)
     ReleaseSRWLockShared(&g_lock);
     return alive;
 }
+#endif
 
 int sh_script_handles_sweep(sh_script_handle_change *out, int cap)
 {
@@ -358,6 +351,7 @@ int sh_script_handles_sweep(sh_script_handle_change *out, int cap)
     return n;
 }
 
+#ifdef SH_SCRIPT_HANDLE_FIXTURE
 int sh_script_handles_live(int mod)
 {
     int i, n = 0;
@@ -370,9 +364,10 @@ int sh_script_handles_live(int mod)
 
 int sh_script_handles_count(void)
 {
-    int n;
+    int i, n = 0;
     AcquireSRWLockShared(&g_lock);
-    n = g_active;
+    for (i = g_head; i >= 0; i = g_e[i].next) n++;
     ReleaseSRWLockShared(&g_lock);
     return n;
 }
+#endif

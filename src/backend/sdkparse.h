@@ -5,6 +5,7 @@
 #define SNAPMAP_PLUS_SDKPARSE_H
 
 #include <stddef.h>
+#include "../common/text.h"
 
 #include "sdkwords.h"
 
@@ -67,8 +68,7 @@ int sdk_first_type(const char *text, size_t len, char *kind, size_t cap);
 void sdk_say(char *why, size_t why_len, const sdk_doc *d, size_t line, const char *fmt, ...);
 
 /* A growing text buffer. */
-typedef struct sdk_buf { char *p; size_t n, cap; int oom; } sdk_buf;
-void sdk_put(sdk_buf *b, const char *s, size_t n);
+typedef sh_text_buf sdk_buf;
 void sdk_printf(sdk_buf *b, const char *fmt, ...);
 /* A number as the decl writers write it: 9 significant digits (a 32-bit float read back exactly), no trailing zeros,
  * "0" for zero. */

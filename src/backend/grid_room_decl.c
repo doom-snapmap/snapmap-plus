@@ -362,12 +362,19 @@ item_done:free(decoded);free(kind);free(name);dispose(r);if(!valid)goto done;
     *count=used;ok=1;
 done:dispose(root);return ok;
 }
+
 int sh_grid_decl_lights(const sh_grid_size *size,const char *source,size_t length,
                        sh_grid_builtin_light *out,size_t capacity,size_t *count)
-{return size?lights(size,source,length,out,capacity,count):0;}
-int sh_grid_decl_light_values(const char *source,size_t length,
-                              sh_grid_builtin_light *out,size_t capacity,size_t *count)
-{return lights(NULL,source,length,out,capacity,count);}
+{
+    return size && lights(size,source,length,out,capacity,count);
+}
+
+#ifdef SH_GRID_LIGHT_FIXTURE
+int sh_grid_decl_light_values(const char *source,size_t length,sh_grid_builtin_light *out,size_t capacity,size_t *count)
+{
+    return lights(NULL,source,length,out,capacity,count);
+}
+#endif
 
 int sh_grid_flight_warp(const sh_grid_size *size,const char *source,size_t length,
                          const char *resource,sh_grid_warp *out)

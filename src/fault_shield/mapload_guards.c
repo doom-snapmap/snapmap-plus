@@ -9,7 +9,7 @@
 
 #include "../backend/signatures.h" /* EventLink / InteractableSpawn are signature-resolved */
 #include "fault_record.h"    /* shield_emit -> shield_faults.log */
-#include "hook.h"
+#include "../backend/hook.h"
 
 /* Probe every page in a span; a one-byte read would miss an unmapped tail. */
 static int mem_range_readable(const void *addr, size_t nbytes)

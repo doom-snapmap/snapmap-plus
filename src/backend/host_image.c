@@ -1,4 +1,5 @@
 /* host_image.c -- see host_image.h. */
+#include "image_view.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -60,14 +61,8 @@ static BOOL CALLBACK resolve_host(PINIT_ONCE once, PVOID arg, PVOID *context)
 
     for (i = 0; i < sizeof k_doom_names / sizeof k_doom_names[0]; i++) {
         if (_wcsicmp(leaf, k_doom_names[i]) == 0) {
-            IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)h;
-            IMAGE_NT_HEADERS *nt;
-            if (dos->e_magic != IMAGE_DOS_SIGNATURE)
-                return TRUE;
-            nt = (IMAGE_NT_HEADERS *)((uint8_t *)h + dos->e_lfanew);
-            if (nt->Signature != IMAGE_NT_SIGNATURE)
-                return TRUE;
-            g_size = (size_t)nt->OptionalHeader.SizeOfImage;
+            g_size = sh_pe_image_size((const uint8_t *)h);
+            if (!g_size) return TRUE;
             g_base = (const uint8_t *)h;
             WideCharToMultiByte(CP_UTF8, 0, leaf, -1, g_name, (int)sizeof g_name, NULL, NULL);
             return TRUE;
@@ -107,7 +102,7 @@ const sh_build_identity *sh_host_identity_for_digest(const unsigned char digest[
 
 /* Hash the file, not loaded code: relocations and installed detours must not
  * change build identity. Opening without write sharing pins the bytes we read. */
-int sh_host_file_sha256(const wchar_t *path, unsigned char digest[32])
+static int sh_host_file_sha256(const wchar_t *path, unsigned char digest[32])
 {
     HANDLE file = INVALID_HANDLE_VALUE;
     BCRYPT_ALG_HANDLE algorithm = NULL;
@@ -245,10 +240,6 @@ const sh_build_identity *sh_host_image_identity(const uint8_t *base)
     return base == sh_host_image_base() ? sh_host_identity() : NULL;
 }
 
-int sh_host_image_is_supported(const uint8_t *base)
-{
-    return sh_host_image_identity(base) != NULL;
-}
 
 uint32_t sh_host_image_rva(const uint8_t *base, uint32_t rva_vk, uint32_t rva_gl)
 {

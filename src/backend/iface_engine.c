@@ -70,10 +70,6 @@
 #define MAP_ENT_LAYER_ARR_OFF  0x6f0        /* mapObj+0x6f0 -> int* per-entity layer/module index */
 #define MAP_SCRATCH_LAYER_OFF  0x758        /* mapObj+0x758 -> int, the scratch/working layer id */
 /* Loaded-map tables that format module-qualified entity references. */
-#define LM_ENTPOS_ARR_OFF      0x708        /* loaded-map+0x708 -> entity-id-by-placement-position array (u32) */
-#define LM_ENTPOS_CNT_OFF      0x710        /* loaded-map+0x710 -> placement-position count (u32) */
-#define LM_MODBOUND_ARR_OFF    0x720        /* loaded-map+0x720 -> per-module cumulative-position boundaries (s32, sorted) */
-#define LM_MODBOUND_CNT_OFF    0x728        /* loaded-map+0x728 -> module-boundary count (s32) */
 #define LM_MODTABLE_OFF        0x750        /* loaded-map+0x750 -> module table (stride 0x98) */
 #define MOD_STRIDE             0x98         /* module-table entry stride */
 #define MOD_NAME_OFF           0x48         /* module entry+0x48 -> module name char* */
@@ -86,12 +82,7 @@
  * native picking also intersects a dev-layer mask. */
 #define ENT_LAYER_BITS_OFF     0x160        /* entity[id]+0x160 -> layer bitmask (uint) */
 #define DEVL_CVAR_VALUE_OFF    0x30         /* idCVar+0x30 -> current integer value (== cvars.c value note) */
-#define DEVL_CVAR_NAME_OFF     SH_IDCVAR_NAME /* idCVar registered name char* (== cvars.c IDCVAR_NAME_OFF) */
 /* Audit RVA only; runtime resolves cvar_system_slot from a signed code reference. */
-#define DEVL_CVARSYS_SLOT_PINNED_RVA  SH_RVA(0x2F451D0u, 0x2F8D1D0u)
-#define DEVL_CVARSYS_ARR_OFF   0x08         /* cvarSys+0x08 -> FULL idCVar** array */
-#define DEVL_CVARSYS_CNT_OFF   0x10         /* cvarSys+0x10 -> FULL count (u32) */
-#define DEVL_CVAR_LIST_CAP     100000u      /* stale-cvarSys guard */
 #define DEVL_CVAR_NAME         "snapEdit_enableDevLayer"
 #define ENT_DECL_OFF           0x8          /* *(ent+8) -> the entity's decl object (classname blob root) */
 #define DECL_BLOB_B_OFF        0x38         /* Resolved source text pointer. */
@@ -108,13 +99,9 @@
 
 /* The display name is a full idStr, assigned through IdStrAssignCStr to keep length, data and SSO/heap
  * ownership; class/inherit are pooled pointer slots and use IdStrAssign instead. Audit RVA only. */
-#define IDSTR_OPASSIGN_PINNED_RVA      SH_RVA(0x33A7F0u, 0x33A440u)
 
 /* Asset registry node layout; decl dropdowns use the separate typeinfo walk. */
-#define DECLNODE_ARRAY_OFF      0x20        /* decl-manager node -> decl-pointer array */
-#define DECLNODE_COUNT_OFF      0x28        /* decl-manager node -> decl count (u32) */
 #define DECL_NAME_OFF           0x08        /* decl object -> name char* (*decl + 8) */
-#define DECLNODE_COUNT_CAP      (1u << 20)  /* stale-node guard (same cap sh_listres uses) */
 
 #define SEL_MAX_IDS            65536        /* sanity cap on a selection/array count (stale-obj guard) */
 #define ENT_COUNT_CAP         1000000u      /* sanity cap on the entity array count */

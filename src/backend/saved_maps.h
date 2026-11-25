@@ -8,8 +8,9 @@
 
 /* The savegame.user folder (malloc'd), or NULL when the Saved Games folder is unknown. */
 char *sh_saved_maps_root(void);
-/* Read the slots under `path` instead (tests, tools); NULL restores the game's folder. */
-void  sh_saved_maps_set_root(const char *path);
+#ifdef SH_SAVED_MAP_FIXTURE
+void sh_saved_maps_set_root(const char *path);
+#endif
 
 
 /* One slot: its local id (the folder's suffix), the cloud-saved item id its game.details names ("" for none), and

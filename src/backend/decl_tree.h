@@ -29,10 +29,6 @@ sh_dt_node *sh_dt_root(sh_dt *t);
 /* The text of a tree (malloc'd, NUL-terminated): tabs per depth, the base
  * text's line ending, every kept token in order. */
 char  *sh_dt_text(const sh_dt *t, size_t *len);
-/* Semantic equality: fields and entries in any order, list items in order. */
-int    sh_dt_equal(const sh_dt *a, const sh_dt *b);
-/* 1 when both texts parse and are semantically equal. */
-int    sh_dt_texts_equal(const char *a, size_t alen, const char *b, size_t blen);
 /* The unique block member at `path` ('/' between keys, named heads as
  * `anim "clip"`) below `n`, or NULL. */
 sh_dt_node *sh_dt_at(sh_dt_node *n, const char *path);

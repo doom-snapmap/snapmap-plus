@@ -86,7 +86,7 @@ static float g_active=SH_BOUNDS_NATIVE;
 /* The setting belongs to the open map and is held by map_settings.c: every
  * map parse reads it from the "bounds" key of the map's member's settings
  * part, which goes before the engine sees it, and every save writes it back. */
-int sh_map_bounds_read(void *map,sh_map_bounds *settings)
+static int sh_map_bounds_read(void *map,sh_map_bounds *settings)
 {
     sh_map_settings current;
     if(!map||!settings)return 0;
@@ -94,7 +94,7 @@ int sh_map_bounds_read(void *map,sh_map_bounds *settings)
     *settings=current.bounds;
     return sh_map_bounds_valid(settings);
 }
-int sh_map_bounds_write(void *map,const sh_map_bounds *settings)
+static int sh_map_bounds_write(void *map,const sh_map_bounds *settings)
 {
     int ok=g_installed&&map&&sh_map_bounds_valid(settings);
     if(ok)sh_map_settings_set_bounds(settings);

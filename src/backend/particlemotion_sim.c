@@ -157,12 +157,6 @@ uint32_t sh_family_salt(const float o[3], const uint8_t *stage)
     return h;
 }
 
-float sh_family_inherit(const uint8_t *child)
-{
-    (void)child;
-    return 0.0f;
-}
-
 float sh_motion_scale(const float f[3])
 {
     float s = f[0] > f[1] ? f[0] : f[1];

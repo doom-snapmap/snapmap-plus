@@ -8,6 +8,7 @@
 #ifndef SNAPMAP_PLUS_NAVMESH_H
 #define SNAPMAP_PLUS_NAVMESH_H
 
+#include "map_carrier.h"
 #include <stddef.h>
 
 /* The native router packs an outgoing reachability ordinal into eight bits. */
@@ -20,7 +21,6 @@
 #define SH_SMNAV_MODULE_CAP     128         /* "category/module" + NUL */
 #define SH_SMNAV_CLASS_CAP      32          /* "monster128" + NUL */
 #define SH_SMNAV_MAX_SHARDS     2048        /* parts per (module, class) */
-#define SH_SMNAV_HEADER_CAP     224
 #define SH_SMNAV_RESNAME_CAP    320
 #define SH_SMNAV_REASON_CAP     192
 /* Base64 characters per "data" chunk. Native deserialization fails on string variables of 16384 characters,
@@ -58,7 +58,7 @@ void sh_navmesh_install(void);
 
 /* Called from the deserialize funnel on every buffer before the engine parses it. Clears the serving table and
  * rebuilds it from this map's saved parts; a fault inside disables the feature for the session. */
-void sh_navmesh_build_from_map(const char *json, size_t len);
+void sh_navmesh_build_from_map(const char *json, size_t len, const sh_carrier_span *nav);
 
 /* Re-embeds every payload the current map holds, so a save with no fresh bake preserves its navigation. Returns
  * a new HeapAlloc'd buffer with *out_len set, or NULL to leave the save alone; *failed (may be NULL) is 1 when

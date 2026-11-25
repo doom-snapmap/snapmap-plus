@@ -58,12 +58,12 @@ static int synthetic(void)
     assert(!sh_object_entry_install(&r,1)&&strstr(last_log,"unexpected bytes")&&!g_page);
     r.status=SIG_CHANGED;r.addr=(uintptr_t)site;
     assert(!sh_object_entry_install(&r,1)&&!g_live&&strstr(last_log,"lands under its roof"));
-    assert(sh_object_entry_drop()==SH_OBJECT_ENTRY_NATIVE_DROP&&site_reads(site)==18364.0f);
+    assert(site_reads(site)==18364.0f);
 
     /* Installed: the load reads the product page. A second install is a no-op. */
     r.status=SIG_OK;
     assert(sh_object_entry_install(&r,1)&&g_live&&g_patch.live&&strstr(last_log,"entry drop 66048"));
-    assert(site_reads(site)==SH_OBJECT_ENTRY_DROP&&sh_object_entry_drop()==SH_OBJECT_ENTRY_DROP);
+    assert(site_reads(site)==SH_OBJECT_ENTRY_DROP);
     assert(sh_object_entry_site(site,&constant)&&constant==(uintptr_t)&g_page->drop);
     assert(sh_object_entry_install(&r,1));
 

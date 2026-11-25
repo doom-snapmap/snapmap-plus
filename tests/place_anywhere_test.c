@@ -68,7 +68,7 @@ static int synthetic(void)
     sh_patch_test_faults(0,0,0);
 
     /* Installed: both JNZ become JMP with their displacements kept. */
-    assert(sh_place_anywhere_install(r,2)&&sh_place_anywhere_live()&&strstr(last_log,"open air"));
+    assert(sh_place_anywhere_install(r,2)&&strstr(last_log,"open air"));
     assert(p[6]==SH_PLACE_GATE_JMP&&p[7]==0x27&&p[0x123]==SH_PLACE_GATE_JMP&&p[0x124]==0x2e);
     assert(sh_place_anywhere_install(r,2));
     assert(code_unpatch(&g_patch[0])==B2_PATCH_OK&&code_unpatch(&g_patch[1])==B2_PATCH_OK);

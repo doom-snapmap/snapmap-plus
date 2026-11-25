@@ -8,25 +8,6 @@
 #include "md6_tokens.h"
 #include "../common/text.h"
 
-static int at_name_cmp(const char *a, const char *b)
-{
-    for (; *a && *b; ++a, ++b) {
-        char x = sh_path_fold(*a), y = sh_path_fold(*b);
-        if (x != y) return (unsigned char)x < (unsigned char)y ? -1 : 1;
-    }
-    return *a ? 1 : *b ? -1 : 0;
-}
-
-int sh_at_under_mods(const char *prop)
-{
-    return sh_ce_decl_under_mods(prop);
-}
-
-int sh_at_prop_of_mod(const char *prop, const char *salt)
-{
-    return sh_ce_def_of_mod(prop, salt);
-}
-
 void sh_at_md6_free(sh_at_md6 *m)
 {
     int i;
@@ -88,18 +69,6 @@ int sh_at_md6_read(const char *text, size_t len, sh_at_md6 *out)
     return 1;
 }
 
-static void at_say(sh_ce_line_fn fn, void *ctx, int *oom, const char *fmt, ...)
-{
-    char *line;
-    va_list ap;
-    va_start(ap, fmt);
-    line = sh_vtextf(fmt, ap);
-    va_end(ap);
-    if (!line) { if (oom) *oom = 1; return; }
-    if (fn) fn(ctx, line);
-    free(line);
-}
-
 typedef struct at_given { const char *prop; int entry; } at_given;
 
 char *sh_at_build_registry(const char *salt, const char *const *names, int n, sh_ce_text_fn text, void *text_ctx,
@@ -123,13 +92,13 @@ char *sh_at_build_registry(const char *salt, const char *const *names, int n, sh
         if (!name || !name[0]) continue;
         for (k = 0; k < i && !dup; k++) dup = names[k] && sh_path_eq(names[k], name);
         if (dup) {
-            at_say(warn, warn_ctx, oom, "mod.json attachment_tags lists \"%s\" twice; the second entry is ignored. "
+            sh_md6_registry_note(warn, warn_ctx, oom, "mod.json attachment_tags lists \"%s\" twice; the second entry is ignored. "
                    "List each md6Def once.", name);
             continue;
         }
         found = sh_ce_def_of_mod(name, salt) && text ? text(text_ctx, name, &body, &blen) : 0;
         if (found <= 0) {
-            at_say(warn, warn_ctx, oom, found < 0
+            sh_md6_registry_note(warn, warn_ctx, oom, found < 0
                    ? "mod.json attachment_tags: \"%s\" could not be read, so it was left out. Check that the file is "
                      "not open in another program and press Refresh."
                    : "mod.json attachment_tags: \"%s\" is not a model definition of this mod, so it was left out. List "
@@ -141,12 +110,12 @@ char *sh_at_build_registry(const char *salt, const char *const *names, int n, sh
         if (!sh_at_md6_read(body, blen, &read[i])) { free(body); *oom = 1; break; }
         free(body);
         if (!read[i].base) {
-            at_say(warn, warn_ctx, oom, "mod.json attachment_tags: \"%s\" does not say which game model it gives tag "
+            sh_md6_registry_note(warn, warn_ctx, oom, "mod.json attachment_tags: \"%s\" does not say which game model it gives tag "
                    "info for, so it was left out. Start it with init { inherit \"<that model>\" }.", name);
             continue;
         }
         if (!read[i].nprops) {
-            at_say(warn, warn_ctx, oom, "mod.json attachment_tags: \"%s\" gives no tag info, so it was left out. Give "
+            sh_md6_registry_note(warn, warn_ctx, oom, "mod.json attachment_tags: \"%s\" gives no tag info, so it was left out. Give "
                    "it a props { prop \"mods/<folder name>/<attached md6Def>.md6\" { tag \"<tag name>\" { trans ( x y "
                    "z ) rot ( x y z w ) parent \"<joint>\" } } } block.", name);
             continue;
@@ -154,8 +123,8 @@ char *sh_at_build_registry(const char *salt, const char *const *names, int n, sh
         for (k = 0; k < read[i].nprops; k++) {
             const char *prop = read[i].props[k];
             int g, other = -1;
-            if (!sh_at_prop_of_mod(prop, salt)) {
-                at_say(warn, warn_ctx, oom, "mod.json attachment_tags: \"%s\" gives tag info for \"%s\", which is not "
+            if (!sh_ce_def_of_mod(prop, salt)) {
+                sh_md6_registry_note(warn, warn_ctx, oom, "mod.json attachment_tags: \"%s\" gives tag info for \"%s\", which is not "
                        "an md6Def of this mod, so it is not used. A mod can give tag info only for its own md6Defs, "
                        "the ones under mods/<folder name>/.", name, prop);
                 continue;
@@ -163,7 +132,7 @@ char *sh_at_build_registry(const char *salt, const char *const *names, int n, sh
             for (g = 0; g < ngiven && other < 0; g++) if (sh_path_eq(given[g].prop, prop)) other = given[g].entry;
             if (other >= 0) {
                 if (other != i)
-                    at_say(warn, warn_ctx, oom, "mod.json attachment_tags: \"%s\" gets tag info from \"%s\" and from "
+                    sh_md6_registry_note(warn, warn_ctx, oom, "mod.json attachment_tags: \"%s\" gets tag info from \"%s\" and from "
                            "\"%s\"; only \"%s\"'s is used. Keep its tag info in one md6Def.", prop, names[other], name,
                            names[other]);
                 continue;
@@ -202,109 +171,3 @@ char *sh_at_build_registry(const char *salt, const char *const *names, int n, sh
 }
 
 /* Returns a JSON string's text when it has no escapes, NULL for anything else. */
-static const char *at_plain(const mpj *v)
-{
-    if (!v || v->type != MPJ_STR || !v->text || !v->text[0] || strchr(v->text, '\\')) return NULL;
-    return v->text;
-}
-
-static void at_row_free(sh_at_row *w)
-{
-    free(w->prop);
-    free(w->carrier);
-    free(w->base);
-    free(w->salt);
-    free(w->label);
-}
-
-int sh_at_registry_add(sh_at_registry *r, const char *salt, const char *label, const char *registries,
-                       sh_ce_line_fn line, void *line_ctx)
-{
-    mpj *root, *list;
-    int i, k, added = 0, failed = 0;
-    const char *who = label && label[0] ? label : salt;
-    if (!r || !salt || !registries || !strstr(registries, "\"" SH_AT_REGISTRY_KEY "\"")) return 0;
-    root = mpj_parse(registries, strlen(registries));
-    if (!root) {
-        at_say(line, line_ctx, NULL, "MODS: attachment-tags: %s: its build's record could not be read, so the tag info "
-               "it gives is not used. Press Refresh in the Mods tab to build it again.", who);
-        return 0;
-    }
-    list = root->type == MPJ_OBJ ? mpj_get(root, SH_AT_REGISTRY_KEY) : NULL;
-    for (i = 0; list && list->type == MPJ_ARR && i < list->n && !failed; i++) {
-        const mpj *e = list->items[i];
-        const char *carrier = e && e->type == MPJ_OBJ ? at_plain(mpj_get(e, "md6Def")) : NULL;
-        const char *base = e && e->type == MPJ_OBJ ? at_plain(mpj_get(e, "base")) : NULL;
-        const mpj *props = e && e->type == MPJ_OBJ ? mpj_get(e, "props") : NULL;
-        if (!carrier || !base || !props || props->type != MPJ_ARR || !sh_ce_def_of_mod(carrier, salt)) {
-            at_say(line, line_ctx, NULL, "MODS: attachment-tags: %s: an attachment_tags row of its build is not one of "
-                   "its own md6Defs, so it is not used. Press Refresh in the Mods tab to build the mod again.", who);
-            continue;
-        }
-        for (k = 0; k < props->n; k++) {
-            const char *prop = at_plain(props->items[k]);
-            sh_at_row *w;
-            int j, dup = 0;
-            if (!prop || !sh_at_prop_of_mod(prop, salt)) {
-                at_say(line, line_ctx, NULL, "MODS: attachment-tags: %s: \"%s\" gives tag info for an md6Def that is "
-                       "not its own, so it is not used.", who, carrier);
-                continue;
-            }
-            for (j = 0; j < r->n && !dup; j++) dup = sh_path_eq(r->rows[j].prop, prop);
-            if (dup) continue;
-            if (r->n == r->cap) {
-                int c = r->cap ? r->cap * 2 : 16;
-                sh_at_row *g = (sh_at_row *)realloc(r->rows, sizeof *g * (size_t)c);
-                if (!g) { failed = 1; break; }
-                r->rows = g;
-                r->cap = c;
-            }
-            w = &r->rows[r->n];
-            memset(w, 0, sizeof *w);
-            w->prop = sh_text(prop);
-            w->carrier = sh_text(carrier);
-            w->base = sh_text(base);
-            w->salt = sh_text(salt);
-            w->label = sh_text(who);
-            if (!w->prop || !w->carrier || !w->base || !w->salt || !w->label) { at_row_free(w); failed = 1; break; }
-            r->n++;
-            added++;
-        }
-    }
-    mpj_free(root);
-    if (added) r->mods++;
-    return failed ? -1 : added;
-}
-
-static int at_row_cmp(const void *a, const void *b)
-{
-    return at_name_cmp(((const sh_at_row *)a)->prop, ((const sh_at_row *)b)->prop);
-}
-
-void sh_at_registry_seal(sh_at_registry *r)
-{
-    if (r && r->n > 1) qsort(r->rows, (size_t)r->n, sizeof *r->rows, at_row_cmp);
-}
-
-sh_at_row *sh_at_registry_find(const sh_at_registry *r, const char *prop)
-{
-    int lo = 0, hi;
-    if (!r || !prop || !r->n) return NULL;
-    hi = r->n - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2, c = at_name_cmp(prop, r->rows[mid].prop);
-        if (!c) return &r->rows[mid];
-        if (c < 0) hi = mid - 1;
-        else lo = mid + 1;
-    }
-    return NULL;
-}
-
-void sh_at_registry_free(sh_at_registry *r)
-{
-    int i;
-    if (!r) return;
-    for (i = 0; i < r->n; i++) at_row_free(&r->rows[i]);
-    free(r->rows);
-    memset(r, 0, sizeof *r);
-}

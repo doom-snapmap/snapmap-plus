@@ -9,7 +9,7 @@
 #include <string.h>
 #include "../common/wide_path.h"
 #include "fault_record.h"
-#include "hook.h"
+#include "../backend/hook.h"
 #include "recovery.h"
 #include "saved_map_guard.h"
 

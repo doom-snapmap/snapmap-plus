@@ -65,9 +65,6 @@ int sh_grid_light_scale(const sh_grid_size *size, float scale[3], float pivot[3]
 int sh_grid_light_axes(const sh_grid_warp *warp, const float origin[3],
                        const float radius[3], const float center[3], const float axis[9],
                        int roof_anchor, float new_origin[3], float new_radius[3], float new_center[3]);
-int sh_grid_light(const sh_grid_warp *warp, const float origin[3],
-                   const float radius[3], const float center[3], int roof_anchor,
-                   float new_origin[3], float new_radius[3], float new_center[3]);
 /* Distance cutoffs (maxVisibleRange, maxShadowVisibleRange) grow with the
  * largest size ratio and never fall below their stock values. */
 float sh_grid_light_range_scale(const sh_grid_size *size);

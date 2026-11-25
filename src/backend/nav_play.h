@@ -4,9 +4,8 @@
 #define SNAPMAP_PLUS_NAV_PLAY_H
 #include "signatures.h"
 
-/* Install the pre-build snapshot detour. Refuses when status_ok is false, since hook-tolerant resolution may point
- * at another detour's prologue. Returns 1 when installed. */
-int sh_nav_play_install(void *snapbuild_fn, int status_ok);
+/* Install the pre-build snapshot detour at its verified signature. */
+int sh_nav_play_install(void *snapbuild_fn);
 int sh_nav_play_install_instances(const sig_result *results, size_t count);
 int sh_nav_play_install_volume_contents(const sig_result *results, size_t count);
 /* Serve the bake's cut placement-grid models to the editor's surface rebuild. */
