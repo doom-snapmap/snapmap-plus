@@ -1,5 +1,6 @@
 /* modnet_test -- the WinHTTP store client against a loopback stub of the store (mod_store_stub.h): URL and argument
- * rules, a unit's archive request, injected failures, cancel, and the job helper. No real store is contacted. */
+ * rules, a unit's archive request, injected failures, cancel, and the job helper. The optional --idle-timeout and
+ * --slow-progress cases exercise the real 30-second file download timeout. */
 #include "heap_out.h"
 #include "mod_store_stub.h"
 #include "../src/backend/modnet.h"
@@ -57,12 +58,14 @@ static int quick_body(void *ctx, const modnet_io *io) { (void)ctx; (void)io; ret
 
 static unsigned long long g_pr_done, g_pr_total;
 static int g_pr_calls;
+static HANDLE wrote_prefix, release_server;
 static void progress(void *ctx, unsigned long long done, unsigned long long total)
 {
     (void)ctx;
     g_pr_calls++;
     g_pr_done = done;
     g_pr_total = total;
+    if (wrote_prefix && done == 5) SetEvent(wrote_prefix);
 }
 
 static const char stream_hash[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -87,6 +90,70 @@ static void ranged_reply(SOCKET s, const char *headers)
     } else snprintf(head, sizeof head, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", total);
     send(s, head, (int)strlen(head), 0);
     send(s, stream_body + start, end - start, 0);
+    if (release_server) WaitForSingleObject(release_server, 40000);
+}
+
+static void stalled_chunk_reply(SOCKET s, const char *headers)
+{
+    static const char first[] = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                                "5\r\nabcde\r\nA;x=slow";
+    (void)headers;
+    send(s, first, sizeof first - 1, 0);
+    /* The connection carries traffic but the next chunk never delivers any payload. */
+    for (int i = 0; i < 40 && WaitForSingleObject(release_server, 1000) == WAIT_TIMEOUT; i++)
+        if (send(s, "x", 1, 0) != 1) break;
+}
+
+static void slow_reply(SOCKET s, const char *headers)
+{
+    static const char first[] = "HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\nabc";
+    (void)headers;
+    send(s, first, sizeof first - 1, 0);
+    for (int i = 3; i < 15; i += 3) {
+        Sleep(8000);
+        if (send(s, stream_body + i, 3, 0) != 3) break;
+    }
+}
+
+static unsigned char bulk_block[16384];
+#define BULK_BLOCKS 256
+
+static void bulk_reply(SOCKET s, const char *headers)
+{
+    char head[128];
+    int n = snprintf(head, sizeof head, "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+                     sizeof bulk_block * BULK_BLOCKS);
+    (void)headers;
+    send(s, head, n, 0);
+    for (int block = 0; block < BULK_BLOCKS; block++) {
+        for (size_t off = 0; off < sizeof bulk_block; off += n) {
+            n = send(s, (const char *)bulk_block + off, (int)(sizeof bulk_block - off), 0);
+            if (n <= 0) return;
+        }
+    }
+}
+
+static void test_bulk_download(const char *tmp)
+{
+    char out[MAX_PATH * 2];
+    unsigned char block[sizeof bulk_block];
+    modnet_result result;
+    modnet_io io = {NULL, progress, NULL};
+    FILE *f = NULL;
+    int blocks = 0;
+    for (size_t i = 0; i < sizeof bulk_block; i++) bulk_block[i] = (unsigned char)(i * 41);
+    snprintf(out, sizeof out, "%s\\bulk.part", tmp);
+    g_stub.stream = bulk_reply;
+    CHECK(modnet_get_blob(stream_hash, out, 0, &io, &result) == MODNET_OK && result.requests == 1);
+    CHECK(result.received == sizeof bulk_block * BULK_BLOCKS && g_pr_done == result.received && g_pr_total == g_pr_done);
+    CHECK(fopen_s(&f, out, "rb") == 0);
+    if (f) {
+        while (fread(block, 1, sizeof block, f) == sizeof block && !memcmp(block, bulk_block, sizeof block)) blocks++;
+        CHECK(blocks == BULK_BLOCKS && feof(f));
+        fclose(f);
+    }
+    printf("4 MiB in %.1f ms\n", result.ms);
+    g_stub.stream = NULL;
 }
 
 static void test_resume_progress(const char *tmp)
@@ -123,7 +190,87 @@ static void test_resume_progress(const char *tmp)
     g_stub.stream = NULL;
 }
 
-int main(void)
+typedef struct stalled_get {
+    const char *out;
+    volatile LONG cancel;
+    int code;
+    modnet_result result;
+} stalled_get;
+
+static const unsigned char selection[] = {0x05};
+
+static DWORD WINAPI read_stalled(LPVOID context)
+{
+    stalled_get *get = context;
+    modnet_io io = {&get->cancel, progress, NULL};
+    get->code = modnet_get_unit_archive(stream_hash, selection, sizeof selection, get->out, 0, &io, &get->result);
+    return 0;
+}
+
+static void test_stalled_download(const char *tmp, int idle_timeout)
+{
+    char out[MAX_PATH * 2], bytes[16] = {0};
+    HANDLE worker;
+    stalled_get get = {0};
+    modnet_result resumed;
+    FILE *f = NULL;
+    ULONGLONG started, elapsed;
+    snprintf(out, sizeof out, "%s\\stalled.part", tmp);
+    get.out = out;
+    wrote_prefix = CreateEventW(NULL, TRUE, FALSE, NULL);
+    release_server = CreateEventW(NULL, TRUE, FALSE, NULL);
+    CHECK(wrote_prefix && release_server);
+    g_stub.stream = idle_timeout ? stalled_chunk_reply : ranged_reply;
+    stream_end = 5;
+    worker = CreateThread(NULL, 0, read_stalled, &get, 0, NULL);
+    CHECK(worker && WaitForSingleObject(wrote_prefix, 2500) == WAIT_OBJECT_0);
+    /* Let the worker enter its next WinHTTP read while the server remains open. */
+    CHECK(WaitForSingleObject(worker, 250) == WAIT_TIMEOUT);
+    started = GetTickCount64();
+    if (!idle_timeout) InterlockedExchange(&get.cancel, 1);
+    CHECK(WaitForSingleObject(worker, idle_timeout ? 35000 : 1500) == WAIT_OBJECT_0);
+    elapsed = GetTickCount64() - started;
+    SetEvent(release_server);
+    WaitForSingleObject(worker, INFINITE);
+    CHECK(get.code == (idle_timeout ? MODNET_E_TIMEOUT : MODNET_E_CANCELLED));
+    CHECK(!idle_timeout || elapsed >= 28000);
+    CHECK(get.result.received == 5);
+    printf("%s after %llu ms, retained %llu bytes\n", idle_timeout ? "idle timeout" : "cancel", elapsed,
+           get.result.received);
+    CloseHandle(worker);
+    EnterCriticalSection(&g_stub.cs);
+    CloseHandle(wrote_prefix); CloseHandle(release_server);
+    wrote_prefix = release_server = NULL;
+    g_stub.stream = ranged_reply;
+    stream_end = 15;
+    LeaveCriticalSection(&g_stub.cs);
+    CHECK(modnet_get_unit_archive(stream_hash, selection, sizeof selection, out, 5, NULL, &resumed) == MODNET_OK);
+    CHECK(resumed.status == 206 && resumed.received == 10 && strstr(g_stub.last_get, "/archive?want=BQ"));
+    CHECK(fopen_s(&f, out, "rb") == 0);
+    if (f) { CHECK(fread(bytes, 1, sizeof bytes, f) == 15 && !memcmp(bytes, stream_body, 15)); fclose(f); }
+    g_stub.stream = NULL;
+}
+
+static void test_slow_progress(const char *tmp)
+{
+    char out[MAX_PATH * 2], bytes[16] = {0};
+    modnet_result result;
+    modnet_io io = {NULL, progress, NULL};
+    ULONGLONG started = GetTickCount64();
+    FILE *f = NULL;
+    snprintf(out, sizeof out, "%s\\slow.part", tmp);
+    g_stub.stream = slow_reply;
+    g_pr_calls = 0;
+    CHECK(modnet_get_blob(stream_hash, out, 0, &io, &result) == MODNET_OK && result.received == 15);
+    CHECK(GetTickCount64() - started >= 31000);
+    CHECK(g_pr_calls >= 5 && g_pr_done == 15 && g_pr_total == 15);
+    CHECK(fopen_s(&f, out, "rb") == 0);
+    if (f) { CHECK(fread(bytes, 1, sizeof bytes, f) == 15 && !memcmp(bytes, stream_body, 15)); fclose(f); }
+    printf("active download finished after %llu ms\n", GetTickCount64() - started);
+    g_stub.stream = NULL;
+}
+
+int main(int argc, char **argv)
 {
     char url[64], tmp[MAX_PATH];
     modnet_result r;
@@ -154,7 +301,12 @@ int main(void)
     }
     CHECK(modnet_set_base_url(url));
 
+    test_bulk_download(tmp);
+    if (argc == 2 && !strcmp(argv[1], "--bulk")) goto done;
     test_resume_progress(tmp);
+    test_stalled_download(tmp, 0);
+    if (argc == 2 && !strcmp(argv[1], "--idle-timeout")) test_stalled_download(tmp, 1);
+    if (argc == 2 && !strcmp(argv[1], "--slow-progress")) test_slow_progress(tmp);
 
     /* ---- a unit's archive: one request, every file, or the files a mask names as ?want=<base64url> ---- */
     {
@@ -259,6 +411,7 @@ int main(void)
     CHECK(modnet_job_wait(5000) && g_job_done_result == 7);
     CHECK(modnet_job_cancel() == 0);
 
+done:
     modnet_shutdown();
     stub_stop();
     mt_remove_tree(tmp);

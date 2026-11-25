@@ -42,7 +42,8 @@
 #define MN_PART_TRIES   4       /* starts of one upload in parts, each resuming the last */
 
 static SRWLOCK   g_lock = SRWLOCK_INIT;
-static HINTERNET g_session;
+static SRWLOCK   g_open_lock = SRWLOCK_INIT;
+static HINTERNET g_sessions[2];       /* ordinary requests and cancellable file downloads */
 static char     *g_override;         /* malloc'd; NULL: the setting */
 static wchar_t  *g_host;             /* malloc'd, while a session is open */
 static char     *g_session_url;      /* the base URL the pooled session was opened with (malloc'd) */
@@ -257,8 +258,10 @@ done:
 
 static void mn_close_session_locked(void)
 {
-    if (g_session) WinHttpCloseHandle(g_session);
-    g_session = NULL;
+    for (int i = 0; i < 2; i++) {
+        if (g_sessions[i]) WinHttpCloseHandle(g_sessions[i]);
+        g_sessions[i] = NULL;
+    }
     free(g_host);
     free(g_prefix);
     free(g_session_url);
@@ -293,55 +296,66 @@ void modnet_shutdown(void)
     ReleaseSRWLockExclusive(&g_lock);
 }
 
-/* Create the session under the exclusive lock. */
-static int mn_open_session_locked(char *why, size_t why_cap)
+/* A changed address owns g_lock exclusively. At a stable address g_open_lock serializes lazy creation. */
+static int mn_open_session_locked(int stream, char *why, size_t why_cap)
 {
-    char *url;
-    DWORD protocols;
-    if (g_session) return 1;
-    /* modnet_base_url takes the shared lock; read the override directly. */
-    if (!(url = mn_url_from(g_override))) { strncpy_s(why, why_cap, "out of memory", _TRUNCATE); return 0; }
-    if (!mn_parse_url(url, &g_host, &g_port, &g_secure, &g_prefix, why, why_cap)) { free(url); return 0; }
-    g_session_url = url;
+    HINTERNET session;
+    DWORD protocols, flags = stream ? WINHTTP_FLAG_ASYNC : 0;
+    if (g_sessions[stream]) return 1;
+    if (!g_session_url) {
+        char *url = mn_url_from(g_override);
+        if (!url) { strncpy_s(why, why_cap, "out of memory", _TRUNCATE); return 0; }
+        if (!mn_parse_url(url, &g_host, &g_port, &g_secure, &g_prefix, why, why_cap)) { free(url); return 0; }
+        g_session_url = url;
+    }
     if (mn_is_loopback(g_host)) {
-        g_session = WinHttpOpen(MN_AGENT, WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        session = WinHttpOpen(MN_AGENT, WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, flags);
     } else {
         /* The system's proxy configuration; the static WinHTTP setting on
          * systems without automatic proxy support. */
-        g_session = WinHttpOpen(MN_AGENT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
-                                WINHTTP_NO_PROXY_BYPASS, 0);
-        if (!g_session)
-            g_session = WinHttpOpen(MN_AGENT, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
-                                    WINHTTP_NO_PROXY_BYPASS, 0);
+        session = WinHttpOpen(MN_AGENT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
+                              WINHTTP_NO_PROXY_BYPASS, flags);
+        if (!session)
+            session = WinHttpOpen(MN_AGENT, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+                                  WINHTTP_NO_PROXY_BYPASS, flags);
     }
-    if (!g_session) {
+    if (!session) {
         _snprintf_s(why, why_cap, _TRUNCATE, "the HTTP session could not be opened (error %lu)", GetLastError());
-        mn_close_session_locked();
         return 0;
     }
-    WinHttpSetTimeouts(g_session, MN_RESOLVE_MS, MN_CONNECT_MS, MN_SEND_MS, MN_RECEIVE_MS);
+    WinHttpSetTimeouts(session, MN_RESOLVE_MS, MN_CONNECT_MS, MN_SEND_MS, MN_RECEIVE_MS);
     protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
-    if (!WinHttpSetOption(g_session, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof protocols)) {
+    if (!WinHttpSetOption(session, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof protocols)) {
         protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
-        WinHttpSetOption(g_session, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof protocols);
+        WinHttpSetOption(session, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof protocols);
     }
+    g_sessions[stream] = session;
     return 1;
 }
 
 /* Take the shared lock with an open session. Returns 1 holding the lock. */
-static int mn_acquire(char *why, size_t why_cap)
+static int mn_acquire(int stream, char *why, size_t why_cap)
 {
     /* The setting is read on every request, so a changed "mods.store" takes effect at the next request: a session
      * opened for another base URL is dropped (after the requests in flight finish) and reopened. */
-    char *wanted = modnet_base_url();
     for (;;) {
+        char *wanted = modnet_base_url();
         AcquireSRWLockShared(&g_lock);
-        if (g_session && (!wanted || strcmp(g_session_url, wanted) == 0)) { free(wanted); return 1; }
+        if (g_session_url && (!wanted || strcmp(g_session_url, wanted) == 0)) {
+            int ok;
+            AcquireSRWLockExclusive(&g_open_lock);
+            ok = mn_open_session_locked(stream, why, why_cap);
+            ReleaseSRWLockExclusive(&g_open_lock);
+            free(wanted);
+            if (!ok) ReleaseSRWLockShared(&g_lock);
+            return ok;
+        }
         ReleaseSRWLockShared(&g_lock);
         AcquireSRWLockExclusive(&g_lock);
-        if (g_session && wanted && strcmp(g_session_url, wanted) != 0) mn_close_session_locked();
-        if (!mn_open_session_locked(why, why_cap)) { ReleaseSRWLockExclusive(&g_lock); free(wanted); return 0; }
+        if (g_session_url && wanted && strcmp(g_session_url, wanted) != 0) mn_close_session_locked();
+        if (!mn_open_session_locked(stream, why, why_cap)) { ReleaseSRWLockExclusive(&g_lock); free(wanted); return 0; }
         ReleaseSRWLockExclusive(&g_lock);
+        free(wanted);
     }
 }
 
@@ -462,6 +476,62 @@ static int mn_winhttp_error(modnet_result *r, const char *step)
     return mn_fail(r, MODNET_E_NET, "%s failed (winhttp %lu)", step, e);
 }
 
+typedef struct mn_stream {
+    HANDLE ready, closed;
+    ULONGLONG last_progress;
+    DWORD status, error, bytes;
+    int attached;
+} mn_stream;
+
+/* The request owner issues one operation at a time and keeps its buffers alive until HANDLE_CLOSING. */
+static void CALLBACK mn_stream_callback(HINTERNET req, DWORD_PTR context, DWORD status, void *info, DWORD len)
+{
+    mn_stream *s = (mn_stream *)context;
+    (void)req;
+    if (!s) return;
+    if (status == WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING) {
+        SetEvent(s->closed);
+        return;
+    }
+    s->status = status;
+    s->error = status == WINHTTP_CALLBACK_STATUS_REQUEST_ERROR ? ((WINHTTP_ASYNC_RESULT *)info)->dwError : 0;
+    s->bytes = status == WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE ? *(DWORD *)info : len;
+    SetEvent(s->ready);
+}
+
+static int mn_stream_attach(mn_stream *s, HINTERNET req)
+{
+    DWORD_PTR context = (DWORD_PTR)s;
+    DWORD flags = WINHTTP_CALLBACK_FLAG_SENDREQUEST_COMPLETE | WINHTTP_CALLBACK_FLAG_HEADERS_AVAILABLE |
+                  WINHTTP_CALLBACK_FLAG_DATA_AVAILABLE | WINHTTP_CALLBACK_FLAG_READ_COMPLETE |
+                  WINHTTP_CALLBACK_FLAG_REQUEST_ERROR | WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING;
+    s->ready = CreateEventW(NULL, FALSE, FALSE, NULL);
+    s->closed = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!s->ready || !s->closed || !WinHttpSetOption(req, WINHTTP_OPTION_CONTEXT_VALUE, &context, sizeof context)) return 0;
+    s->attached = WinHttpSetStatusCallback(req, mn_stream_callback, flags, 0) != WINHTTP_INVALID_STATUS_CALLBACK;
+    s->last_progress = GetTickCount64();
+    return s->attached;
+}
+
+static int mn_completion(mn_stream *s, BOOL started, DWORD expected, const char *step, const modnet_io *io, modnet_result *r)
+{
+    if (!started && (!s || GetLastError() != ERROR_IO_PENDING)) return mn_winhttp_error(r, step);
+    if (!s) return MODNET_OK;
+    for (;;) {
+        DWORD wait;
+        if (mn_cancelled(io)) return mn_fail(r, MODNET_E_CANCELLED, NULL);
+        wait = WaitForSingleObject(s->ready, 100);
+        if (wait == WAIT_OBJECT_0) {
+            if (s->error) { SetLastError(s->error); return mn_winhttp_error(r, step); }
+            if (s->status != expected) return mn_fail(r, MODNET_E_PROTOCOL, "unexpected HTTP operation");
+            return MODNET_OK;
+        }
+        if (wait != WAIT_TIMEOUT) return mn_winhttp_error(r, step);
+        if (GetTickCount64() - s->last_progress >= MN_RECEIVE_MS)
+            return mn_fail(r, MODNET_E_TIMEOUT, "%s timed out waiting for more data", step);
+    }
+}
+
 /* One HTTP exchange. MODNET_OK means a complete response arrived (any
  * status, in r->status); the body is returned malloc'd and NUL-terminated. */
 static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, const modnet_io *io, modnet_result *r)
@@ -475,6 +545,7 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
     size_t got = 0, cap = 0;
     unsigned long long declared = 0, cap_bytes, retained = 0, full = 0;
     int code = MODNET_OK, have_declared = 0;
+    mn_stream download = {0}, *stream = q->sink ? &download : NULL;
 
     *resp = NULL;
     *resp_len = 0;
@@ -487,17 +558,18 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
         return mn_fail(r, MODNET_E_ARG, "bad route");
     }
     why[0] = 0;
-    if (!mn_acquire(why, sizeof why)) {
+    if (!mn_acquire(stream != NULL, why, sizeof why)) {
         free(wroute);
         return mn_fail(r, MODNET_E_CONFIG, "%s", why[0] ? why : "no mod store address");
     }
     path = sh_wtextf(L"%s%s", g_prefix, wroute);
     if (!path) { code = mn_fail(r, MODNET_E_ARG, "out of memory"); goto done; }
-    conn = WinHttpConnect(g_session, g_host, g_port, 0);
+    conn = WinHttpConnect(g_sessions[stream != NULL], g_host, g_port, 0);
     if (!conn) { code = mn_winhttp_error(r, "connect"); goto done; }
     req = WinHttpOpenRequest(conn, q->verb, path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                              g_secure ? WINHTTP_FLAG_SECURE : 0);
     if (!req) { code = mn_winhttp_error(r, "open request"); goto done; }
+    if (stream && !mn_stream_attach(stream, req)) { code = mn_winhttp_error(r, "prepare download"); goto done; }
     /* The store never redirects; following one could send content elsewhere. */
     policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
     WinHttpSetOption(req, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof policy);
@@ -518,11 +590,11 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
     }
     if (!headers) { code = mn_fail(r, MODNET_E_ARG, "out of memory"); goto done; }
     r->requests++;
-    if (!WinHttpSendRequest(req, headers, (DWORD)-1L, WINHTTP_NO_REQUEST_DATA, 0,
-                            q->content_type ? (DWORD)q->body_len : 0, 0)) {
-        code = mn_winhttp_error(r, "send");
-        goto done;
-    }
+    code = mn_completion(stream, WinHttpSendRequest(req, headers, (DWORD)-1L, WINHTTP_NO_REQUEST_DATA, 0,
+                         q->content_type ? (DWORD)q->body_len : 0, (DWORD_PTR)stream),
+                         WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE, "send", io, r);
+    if (code != MODNET_OK) goto done;
+    if (stream) stream->last_progress = GetTickCount64();
     if (q->content_type && q->body_len) {
         size_t off = 0;
         unsigned char *chunkbuf = NULL;
@@ -562,7 +634,9 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
         }
         free(chunkbuf);
     }
-    if (!WinHttpReceiveResponse(req, NULL)) { code = mn_winhttp_error(r, "response"); goto done; }
+    code = mn_completion(stream, WinHttpReceiveResponse(req, NULL), WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE, "response", io, r);
+    if (code != MODNET_OK) goto done;
+    if (stream) stream->last_progress = GetTickCount64();
     size = sizeof status;
     if (!WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
                              &status, &size, WINHTTP_NO_HEADER_INDEX)) {
@@ -647,30 +721,31 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
     for (;;) {
         DWORD avail = 0, rd = 0;
         if (mn_cancelled(io)) { code = mn_fail(r, MODNET_E_CANCELLED, NULL); goto done; }
-        if (!WinHttpQueryDataAvailable(req, &avail)) { code = mn_winhttp_error(r, "download"); goto done; }
+        code = mn_completion(stream, WinHttpQueryDataAvailable(req, stream ? NULL : &avail),
+                             WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE, "download", io, r);
+        if (code != MODNET_OK) goto done;
+        if (stream) avail = stream->bytes;
         if (avail == 0) break;
         if ((unsigned long long)got + avail > cap_bytes) {
             if (status >= 300) break;   /* enough of a refusal to read its cause */
             code = mn_fail(r, MODNET_E_TOO_LARGE, "the response is larger than %llu bytes", cap_bytes);
             goto done;
         }
-        if (q->sink && status < 300) {
-            /* Streamed to the file, one chunk at a time. */
-            DWORD left = avail;
-            while (left) {
-                DWORD want = left > MN_CHUNK ? MN_CHUNK : left, put = 0;
-                if (!WinHttpReadData(req, buf, want, &rd)) { code = mn_winhttp_error(r, "download"); goto done; }
-                if (rd == 0) break;
-                if (!WriteFile(q->sink, buf, rd, &put, NULL) || put != rd) {
-                    code = mn_fail(r, MODNET_E_ARG, "the download cannot be written (error %lu)", GetLastError());
-                    goto done;
-                }
-                got += rd;
-                r->received += rd;
-                left -= rd < left ? rd : left;
-                if (io && io->progress) io->progress(io->context, retained + got, full ? full : declared);
+        if (stream && status < 300) {
+            DWORD put, want = avail > MN_CHUNK ? MN_CHUNK : avail;
+            code = mn_completion(stream, WinHttpReadData(req, buf, want, NULL),
+                                 WINHTTP_CALLBACK_STATUS_READ_COMPLETE, "download", io, r);
+            if (code != MODNET_OK) goto done;
+            rd = stream->bytes;
+            if (!rd) break;
+            if (!WriteFile(q->sink, buf, rd, &put, NULL) || put != rd) {
+                code = mn_fail(r, MODNET_E_ARG, "the download cannot be written (error %lu)", GetLastError());
+                goto done;
             }
-            if (left) break;
+            got += rd;
+            stream->last_progress = GetTickCount64();
+            r->received += rd;
+            if (io && io->progress) io->progress(io->context, retained + got, full ? full : declared);
             continue;
         }
         if (got + avail + 1 > cap) {
@@ -683,7 +758,10 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
             buf = grown;
             cap = want;
         }
-        if (!WinHttpReadData(req, buf + got, avail, &rd)) { code = mn_winhttp_error(r, "download"); goto done; }
+        code = mn_completion(stream, WinHttpReadData(req, buf + got, avail, stream ? NULL : &rd),
+                             WINHTTP_CALLBACK_STATUS_READ_COMPLETE, "download", io, r);
+        if (code != MODNET_OK) goto done;
+        if (stream) { rd = stream->bytes; stream->last_progress = GetTickCount64(); }
         if (rd == 0) break;
         got += rd;
         r->received += rd;
@@ -702,8 +780,11 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
     *resp_len = got;
     buf = NULL;
 done:
-    free(buf);
     if (req) WinHttpCloseHandle(req);
+    if (download.attached) WaitForSingleObject(download.closed, INFINITE);
+    if (download.closed) CloseHandle(download.closed);
+    if (download.ready) CloseHandle(download.ready);
+    free(buf);
     if (conn) WinHttpCloseHandle(conn);
     ReleaseSRWLockShared(&g_lock);
     free(path);
