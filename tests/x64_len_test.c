@@ -1,8 +1,5 @@
-/* x64 prologue length decoder checks.
- * Without arguments: hand-assembled encodings with known lengths and flags.
- * With a build 13954591 executable: resolve the four cs_dontuse signatures and
- * require the decoded stolen boundary, and the RIP-relative flag, that an
- * independent disassembler reports for each prologue. Run via run-tests.ps1. */
+/* x64 prologue length decoder checks: hand-assembled encodings without arguments; with a build 13954591
+ * executable, the four cs_dontuse signatures' stolen boundary and RIP-relative flag against a disassembler's. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

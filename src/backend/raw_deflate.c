@@ -94,10 +94,9 @@ static int huff_build(huff_t *h, const unsigned char *lens, unsigned n,
         return 1;
     }
     if (left) {
-        /* The code-length alphabet must be complete. zlib/RFC canonical behavior permits a
-         * one-symbol, one-bit literal/length tree (the EOB-only form), while a dynamic distance
-         * tree has the one-bit single-symbol form or no symbols at all. Fixed blocks have the
-         * specified 30 five-bit distance codes and two reserved holes. */
+        /* The code-length alphabet must be complete, except the one-bit single-symbol literal/length (EOB-only)
+         * tree, a dynamic distance tree with one symbol or none, and the fixed distance table's two reserved holes
+         * (30 five-bit codes). */
         if (kind == HUFF_LITERAL_LENGTH && used == 1u && max == 1u) {
             /* permitted EOB-only literal/length tree */
         } else if (kind == HUFF_DISTANCE && used == 1u && max == 1u) {
@@ -148,19 +147,9 @@ static const unsigned short DEXT[30] = {
     0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13
 };
 
-/* The decoder body, shared by both entry points.
- *
- * `exact` is the ONLY difference between them, and it touches exactly two lines below -- the two
- * places `dst_len` is asked to be the finished output length rather than a capacity. Everywhere else
- * it was already a bound (`out >= dst_len`, `len > dst_len - out`), so the capacity form removes a
- * requirement and adds no new arithmetic. Stream validation is identical in both: complete BFINAL or
- * the Z_SYNC_FLUSH form, zero alignment padding, no trailing or concatenated bytes.
- *
- * Why the capacity form is needed at all: a saved map's `map.decl` is zlib(rawmap JSON) with no
- * uncompressed length recorded anywhere in the file (its 4-byte header is a checksum -- verified
- * against real saves: 0x9D4CF0F1 for a 2,638-byte file that inflates to 23,638). The exact form
- * cannot decode a stream whose output length you do not already know, and guessing by doubling can
- * never land on it. */
+/* The decoder body, shared by both entry points: with `exact` the output length must equal `dst_len`, otherwise it
+ * is only a capacity (a saved map's `map.decl` is zlib(rawmap JSON) with no length recorded). Stream validation is
+ * identical in both: complete BFINAL or Z_SYNC_FLUSH form, zero padding, no trailing or concatenated bytes. */
 static size_t inflate_body(const unsigned char *src, size_t src_len,
                            unsigned char *dst, size_t dst_len, int exact, int *valid)
 {
@@ -191,10 +180,8 @@ static size_t inflate_body(const unsigned char *src, size_t src_len,
             s.pos += len;
             out += len;
             if (!final && !len && nlen == 0xffffu) {
-                /* Doom's gameresources slices are zlib Z_SYNC_FLUSH fragments:
-                 * the selected pindex boundary is immediately after this
-                 * non-final empty stored block. Do not continue into a second
-                 * stream or tolerate trailing bytes. */
+                /* Doom's gameresources slices are zlib Z_SYNC_FLUSH fragments ending right after this non-final
+                 * empty stored block; no second stream or trailing byte is tolerated. */
                 if ((exact && out != dst_len) || s.pos != s.len) return 0;
                 if (valid) *valid = 1;
                 return out;

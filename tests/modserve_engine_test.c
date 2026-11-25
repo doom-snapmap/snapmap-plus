@@ -1,9 +1,5 @@
-/* modserve_engine_test.c -- the engine side of mod serving (modserve_engine.c)
- * against a faked engine table: the decl registry, DeclFind, the generic load
- * with its nesting detour, the heap stack and the resource objects are plain
- * memory the test owns, so the side's decisions about resource levels and the
- * kept set are checked without the game. The index (modserve.c) is real and
- * empty: these checks drive the engine operations directly. */
+/* modserve_engine_test.c -- checks modserve_engine.c against a faked engine table (decl registry, DeclFind,
+ * generic load, heap stack and resources are plain memory), so resource levels and the kept set need no game. */
 #include "../src/backend/modserve_engine.c"
 
 static int g_failed;
@@ -205,10 +201,8 @@ static void fe_reset(void)
 
 /* ------------------------------------------------------------------ the keepability rule */
 
-/* A map pass's step (persist 0) returns to the engine's level, and neither it
- * nor what its load loads joins the kept set (a mod without editor rows is
- * not made permanent at the next Play entry). A kept step's decl and its
- * load's children are kept. */
+/* A map pass's step (persist 0) returns to the engine's level and joins no kept set, nor does what its load
+ * loads; a kept step's decl and its load's children are kept. */
 static void test_op_load_levels(void)
 {
     fe_res *def, *model, *row, *rowmodel;
@@ -296,8 +290,8 @@ static void test_reparse_drops_type_info(void)
     CHECK(r.reparsed == 1 && def->loads == 1 && g_typeinfo_dropped == 1);
 }
 
-/* R-DS5: a refresh item of type "model" (a .bmodel) is a static model; a walk holding one begins a reload pass of
- * the static model guard, and one without none. */
+/* A refresh item of type "model" (a .bmodel) is a static model; a walk holding one begins a static-model reload
+ * pass, and one without does not. */
 static void test_static_model_kind(void)
 {
     me_raw r;
@@ -317,8 +311,7 @@ static void test_static_model_kind(void)
     CHECK(g_smodel_begins == 1 && r.names[1].kind == ME_RAW_SMODEL);
 }
 
-/* No count of the product's own on the models, images and anims a pass reloads (the list held 4096 before; a pack
- * with more changed in one refresh kept the rest stale). */
+/* The list of models, images and anims a pass reloads has no fixed cap. */
 static void test_raw_names_grow(void)
 {
     me_raw r;

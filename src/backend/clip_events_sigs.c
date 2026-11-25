@@ -1,21 +1,9 @@
-/* clip_events_sigs.c -- the three event lookups clip events detours (clip_events.h), kept apart so the
- * two-image test (tests/clip_events_sigs_test.c) links them without the engine side.
- *
- * Build 13954591 (snaphak-re shared Ghidra, logs/shared-ghidra/gk/d-vk-1416d7680, d-vk-1416d7810,
- * d-vk-1416d79b0, d-gl-1416d8190; paired with tools/re/site_pair.py). Each is
- * bool f(idDeclMD6 *model, idMD6Anim *anim, int from, int to[, int filter], idList *out): it empties `out`,
- * returns false for a NULL anim, queries the model's own event table (+0x228) with the anim's name (+0x08),
- * then each parent (+0x98) into a local list merged into `out` (VK 0x1416D9920, GL 0x1416DA4B0), and returns
- * whether `out` holds a row.
- *   Md6EventsInWindow  VK 0x1416D7680  GL 0x1416D8190  the window query VK 0x1416D71D0 / GL 0x1416D7CE0;
- *                      15-byte window (mov rax,rsp; push rdi; push r14; push r15; sub rsp,0x460).
- *   Md6EventsOfType    VK 0x1416D7810  GL 0x1416D8320  with a filter; query VK 0x1416D7350 / GL 0x1416D7E60.
- *   Md6EventsOfType2   VK 0x1416D79B0  GL 0x1416D84C0  with a filter; query VK 0x1416D7500 / GL 0x1416D8010.
- * The two filtered lookups are the same bytes up to their first query call (the pattern below, 196 bytes,
- * matches both in each executable); the call's target tells them apart, so each is accepted at its recorded
- * RVA only when its E8 at +0xC3 reaches its own query, checked by that query's own pattern (each query is the
- * only match in each executable). Both filtered windows are 16 bytes (mov rax,rsp; push r12; push r14;
- * push r15; sub rsp,0x460). No window holds a relative operand. */
+/* clip_events_sigs.c -- the three event lookups clip events detours (clip_events.h), build 13954591. Each is
+ * bool f(idDeclMD6 *model, idMD6Anim *anim, int from, int to[, int filter], idList *out): it empties `out`, queries the
+ * model's own event table (+0x228) by the anim's name (+0x08), then each parent (+0x98), and returns whether `out`
+ * holds a row. The two filtered lookups share their bytes up to the first query call (CE_FILTERED matches both), so
+ * each is accepted at its recorded RVA only when its E8 at +0xC3 reaches its own query. No window has a relative
+ * operand. */
 #include <stddef.h>
 #include <string.h>
 #include "clip_events.h"
@@ -75,7 +63,7 @@ sig_status sh_ce_site_resolve(const uint8_t *module_base, const sh_ce_site_sig *
         memcpy(&rel, call + 1, 4);
         if ((uintptr_t)(call + 5 + rel) == q.addr) return SIG_OK;
     }
-    /* a lookalike, or a changed query: not the lookup recorded here */
+    /* A lookalike or a changed query is not the recorded lookup. */
     out->status = SIG_CHANGED;
     out->addr = 0;
     return SIG_CHANGED;

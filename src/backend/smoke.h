@@ -8,12 +8,9 @@
 #include <stddef.h>
 #include "signatures.h"
 
-/* Report the bootstrap's pre-install resolution snapshot (and, in the
- * diagnostic build, test a scratch detour); return 0 only when that scratch
- * detour failed, since then no engine code may be patched. An unresolved
- * signature is reported, and turns off only the features that need it.
- * deferred_ms is elapsed startup time for the result log, not a delay
- * performed by this call. */
+/* Reports the pre-install resolution snapshot (and, in the diagnostic build, tests a scratch detour); returns 0 only
+ * when that detour failed, since then no engine code may be patched. deferred_ms is elapsed startup time for the
+ * log, not a delay. */
 int sh_smoke_run(const uint8_t *doom_base, const sig_result *results, size_t count,
                  unsigned long deferred_ms);
 

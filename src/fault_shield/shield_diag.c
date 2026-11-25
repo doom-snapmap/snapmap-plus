@@ -1,9 +1,6 @@
-/* Diagnostic-build crash and environment logger (SH_DIAG only).
- * Handlers preserve exception disposition. Normal first-chance capture keeps
- * raw breadcrumbs; fatal statuses that reach the VEH and unhandled faults also
- * attempt module, stack, and dump capture. Stack overflow skips the stack walk.
- * Direct fail-fast termination can bypass both handlers, so absent records do
- * not prove a clean exit. Logs and dumps live under snapmap-plus\logs. */
+/* Diagnostic-build crash and environment logger (SH_DIAG only). First-chance capture keeps raw breadcrumbs;
+ * fatal statuses reaching the VEH and unhandled faults also capture modules, stack and a dump (stack overflow
+ * skips the walk). Direct fail-fast can bypass both handlers, so absent records do not prove a clean exit. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -129,7 +126,6 @@ static const char *code_name(DWORD code)
 /* A severity-ERROR status (0xCxxxxxxx) is a crash-class exception we record. */
 static int is_crash_class(DWORD code) { return (code & 0xF0000000u) == 0xC0000000u; }
 
-/* --------------------------------------------------- environment dump (modules + folders) -------- */
 static void dump_modules(void)
 {
     HANDLE snap = INVALID_HANDLE_VALUE;
@@ -205,7 +201,7 @@ static void dump_env(void)
     dump_modules();
 }
 
-/* Full fatal capture. */
+/* Log the registers of a captured context. */
 static void dump_registers(const CONTEXT *c)
 {
     char m[64]; uintptr_t off;
@@ -279,8 +275,6 @@ static void log_fault_full(const char *tag, PEXCEPTION_POINTERS ep)
     dump_registers(ep->ContextRecord);
     stack_walk(ep->ContextRecord, 32);
 }
-
-/* ------------------------------------------------------------- the handlers -------------------- */
 
 /* Keep ordinary first-chance capture small. Fatal statuses below also attempt
  * full capture if they reach this handler. Always continue exception search. */

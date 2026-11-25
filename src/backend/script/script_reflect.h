@@ -1,13 +1,6 @@
-/* Reflection for mod scripts: a path such as "aiEditable.staggerEnabled" or
- * "encounterMods.healthMod" or "inventory[2].ammo" is walked through the
- * game's own type tables (every class, field, offset and enum the engine
- * reflects), so a script reaches any reflected field of any object by name
- * and no field needs an offset written into Snapmap+.
- *
- * This file is the walk, pure: the host supplies the types (the engine's, or
- * a test's) and reads memory. A path is names separated by dots, with [n]
- * after a list or array (the first element is [1], as in Lua). A pointer or an entity reference met inside a path
- * is followed.
+/* Reflection for mod scripts: walks a path such as "aiEditable.staggerEnabled" or "inventory[2].ammo" through the
+ * game's own type tables, so no field offset is written into Snapmap+. The walk is pure: the host supplies the
+ * types and reads memory; a path is dotted names with [n] after a list or array (the first element is [1]).
  *
  * Kinds of value a path can end in:
  *   BOOL INT UINT FLOAT DOUBLE   numbers (size bytes at addr)
@@ -47,11 +40,9 @@ typedef struct sh_rf_host {
     const char *(*enum_name)(void *ctx, const char *type, long long value);
     /* Copy n bytes at addr; 0 when unreadable. */
     int (*read)(void *ctx, const void *addr, void *out, size_t n);
-    /* The object a reference at addr names now and its class (an entity's own
-     * class, not the reference's declared one); 0 when it names none. */
+    /* The object a reference at addr names and its own class (not the declared one); 0 when it names none. */
     int (*follow_ref)(void *ctx, const void *addr, const char *declared, const void **object, const char **cls);
-    /* The class of the object a pointer of declared type `declared` points
-     * at (an entity's or decl's own class); NULL keeps the declared one. */
+    /* The own class of the object a pointer of declared type `declared` points at; NULL keeps the declared one. */
     const char *(*object_class)(void *ctx, const void *object, const char *declared);
 } sh_rf_host;
 
@@ -79,15 +70,14 @@ int sh_rf_classify(const sh_rf_host *h, const char *type, const char *ops, uint3
 /* The field `name` of class `cls` (its own or an ancestor's): 1 with it. */
 int sh_rf_find_field(const sh_rf_host *h, const char *cls, const char *name, sh_rf_field *out);
 
-/* Walk `path` from the object at `object` of class `cls`. 1 with the place
- * it ends; 0 with a sentence in err that names the part that failed. An
- * empty path ends at the object itself (STRUCT). */
+/* Walk `path` from the object at `object` of class `cls`: 1 with where it ends, 0 with err naming the failed
+ * part. An empty path ends at the object itself (STRUCT). */
 int sh_rf_resolve(const sh_rf_host *h, const void *object, const char *cls, const char *path, sh_rf_loc *out,
                   char *err, size_t err_cap);
 
-/* The same walk, also telling where it last stepped through a pointer into an object `is_anchor` takes (an object
- * that outlives the map, such as a decl): that object, its class (owned text, free it), and `at`, the offset in
- * `path` where the rest of the walk from it begins. With no such step `anchor->object` is NULL. */
+/* The same walk, also reporting the last pointer step into an object `is_anchor` accepts (one that outlives the
+ * map, such as a decl): that object, its class (owned text), and `at`, the offset in `path` where the rest
+ * begins. With no such step `anchor->object` is NULL. */
 typedef struct sh_rf_anchor { const void *object; char *cls; size_t at; } sh_rf_anchor;
 int sh_rf_resolve_anchored(const sh_rf_host *h, const void *object, const char *cls, const char *path,
                            int (*is_anchor)(const char *cls), sh_rf_loc *out, sh_rf_anchor *anchor, char *err,
@@ -96,14 +86,12 @@ int sh_rf_resolve_anchored(const sh_rf_host *h, const void *object, const char *
 /* The element `index` of a LIST or ARRAY: 1 with its place, 0 with err. */
 int sh_rf_element(const sh_rf_host *h, const sh_rf_loc *list, uint32_t index, sh_rf_loc *out, char *err, size_t err_cap);
 
-/* How many elements a LIST or ARRAY holds now; -1 when unreadable. */
+/* How many elements a LIST or ARRAY holds; -1 when unreadable. */
 long long sh_rf_count(const sh_rf_host *h, const sh_rf_loc *list);
 
-/* The collision box of an entity: the bounds of the first clip model of its physics, in the entity's own
- * frame (around its origin). The physics is the demon's own (`aiVolatile.physics.object`) when the entity
- * has it, else its `defaultPhysicsObj`; on it the clip model is named by `clipModels` (an actor's two
- * pointers, the first set one) or `clipModel` (one pointer); its `bounds` are two idVec3. Every name is
- * found in the game's type tables. 1 with the box; 0 with a sentence in err. */
+/* The collision box of an entity: the bounds of the first clip model of its physics (`aiVolatile.physics.object`,
+ * else `defaultPhysicsObj`; `clipModels` first set pointer, or `clipModel`), in the entity's own frame. All names
+ * come from the game's type tables. 1 with the box; 0 with err. */
 int sh_rf_bounds(const sh_rf_host *h, const void *object, const char *cls, float mins[3], float maxs[3],
                  char *err, size_t err_cap);
 

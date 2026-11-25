@@ -28,13 +28,12 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, resolve_prefab_model) == 0x308);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, request_prefab_mesh) == 0x310);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, get_prefab_mesh) == 0x318);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, resolve_prefab_defaults) == 0x320);
-/* ext 24/25, appended 2026-09-07: the File menu's RAWMAP file surface -- report the staged load/save
- * paths, and point either side at a caller-chosen file. Append-only again. */
+/* ext 24/25: the File menu's RAWMAP surface -- report the staged load/save paths, set either to a chosen file. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_status) == 0x328);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_configure) == 0x330);
-/* ext 26, appended 2026-09-07: reload the editor map now, so a staged rawmap actually opens. */
+/* ext 26: reload the editor map now, so a staged rawmap actually opens. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_load_now) == 0x338);
-/* ext 27, appended 2026-09-23: the navigation view the View menu updates. */
+/* ext 27: the navigation view the View menu updates. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, navmesh_view) == 0x340);
 /* ext 28: run a call on DOOM's main thread and wait for it. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, run_on_main) == 0x348);

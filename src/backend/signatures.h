@@ -1,8 +1,6 @@
-/* Engine function signatures for the one supported build (host_image.h).
- * Every entry records its RVA in both build 13954591 executables; at run time a
- * signature resolves only at that RVA for the host's renderer, and only when
- * its whole masked pattern holds there. sig_scan_one, the whole-image scan,
- * is the tool that derives the recorded RVAs and proves them unique offline. */
+/* Engine function signatures for build 13954591 (host_image.h). Each entry records its RVA in both executables
+ * and resolves at run time only there, and only when its whole masked pattern holds; sig_scan_one (whole-image scan)
+ * derives the RVAs offline. */
 #ifndef BACKEND_SIGNATURES_H
 #define BACKEND_SIGNATURES_H
 

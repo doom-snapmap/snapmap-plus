@@ -16,7 +16,7 @@
 #include "modlook.h"    /* sh_look_compile: the Graphics SDK's looks, checked and scanned as the engine reads them */
 #include "modsalt.h"
 #include "modauthor.h"  /* the mod folder an author writes and the engine names it stands for */
-#include "strkeys.h"   /* string edits: keys the game or the product defines (DECISIONS 9) */
+#include "strkeys.h"   /* string edits: keys the game or the product defines */
 #include "companion.h"
 #include "mp_json.h"
 #include "plain_reason.h"
@@ -637,11 +637,9 @@ static int mb_plain_integer(const char *s, size_t n)
     return 1;
 }
 
-/* A plain integer followed by a point and 1 to 17 fraction digits, with no
- * exponent: the canonical spelling of a fixed decimal such as the owner-local
- * transforms in a companions block. The author's digits are kept verbatim so
- * the canonical text, and therefore the bundle hash, never depends on float
- * formatting. */
+/* A plain integer followed by a point and 1 to 17 fraction digits, with no exponent: the canonical spelling
+ * of a fixed decimal such as the owner-local transforms in a companions block. The digits are kept verbatim
+ * so the canonical text, and the bundle hash, never depend on float formatting. */
 static int mb_plain_decimal(const char *s, size_t n)
 {
     size_t dot = 0, frac;
@@ -713,10 +711,9 @@ static int mbj_canon(const mbj *v, mb_buf *b, char **cause)
 static const char MB_SOUND_EVENT[] = "soundEvent";
 
 /* ------------------------------------------------- decl type spellings ---- */
-/* generated/decls/<folder>/ to the engine's type name, from the 13954591
- * snap_gameresources.index and gameresources.index decl rows (278 folders).
- * Sorted by folder for bsearch. `renderparm` carries one renderProg row in the
- * archive; its type is renderParm. */
+/* generated/decls/<folder>/ to the engine's type name, from the 13954591 snap_gameresources.index and
+ * gameresources.index decl rows (278 folders), sorted by folder for bsearch. `renderparm` carries one
+ * renderProg row in the archive; its type is renderParm. */
 typedef struct mb_decl_type { const char *folder, *type; } mb_decl_type;
 static const mb_decl_type MB_DECL_TYPES[] = {
     {"accolade","accolade"},{"actormodifier","actorModifier"},{"actorpopulation","actorPopulation"},{"advancedscreenviewshake","advancedScreenViewShake"},
@@ -1321,12 +1318,10 @@ char *sh_mb_module_info_request(const char *request)
     return out;
 }
 
-/* The mega2 loader opens <path without extension>_sq1..16.mega2 for the path
- * SetSource is given, and modvt.c gives "virtualtextures/" + the family name +
- * ".pages", so a member's family is the request without "virtualtextures/"
- * and "_sq<N>.mega2". The family must sit in a folder below mods/ and must not
- * contain "_vmtr": a material whose landpagefile contains it binds the stock
- * family instead. */
+/* The mega2 loader opens <path without extension>_sq1..16.mega2 for the path SetSource is given, and modvt.c
+ * gives "virtualtextures/" + the family name + ".pages", so a member's family is the request without
+ * "virtualtextures/" and "_sq<N>.mega2". The family must sit in a folder below mods/ and must not contain
+ * "_vmtr" (a material whose landpagefile contains it binds the stock family). */
 int sh_mb_vt_member(const char *request, char **family, int *member)
 {
     const char *leaf, *digits, *end;
@@ -1480,11 +1475,9 @@ int sh_mb_logical_name(const char *r, char type[SH_MB_TYPE_CAP], char **name)
         return mb_copy_out(type, tcap, "swf", 3) && mb_name_out(name, r + 10, n - 10 - 5, ".swf");
     /* A SnapMap module decl is named by its own path, as a map's moduleName holds it. */
     if (mb_is_module_request(r)) return mb_copy_out(type, tcap, "snapModule", 10) && mb_name_out(name, r, n, "");
-    /* A permutation decl (generated/renderprogs/permutations/<program>_<mask>.decl)
-     * is named by its request path: that is the string the permutation lookup
-     * formats and passes to DeclFind (VK 0x141910010). It is decl text but not
-     * a generated/decls/ decl, so it is never registered; it is served when
-     * opened and checked with its program (mb_check_renderprogs). */
+    /* A permutation decl (generated/renderprogs/permutations/<program>_<mask>.decl) is named by its request
+     * path, the string the permutation lookup passes to DeclFind (VK 0x141910010). It is never registered;
+     * it is served when opened and checked with its program (mb_check_renderprogs). */
     if (sh_mb_bank_stem(r, NULL, 0)) cls = "soundBank";
     else if (sh_mb_script_request(r, NULL, NULL) > 0) cls = "script";
     else if (mb_ends(r, ".bmodel")) cls = "model";
@@ -1505,9 +1498,8 @@ int sh_mb_logical_name(const char *r, char type[SH_MB_TYPE_CAP], char **name)
     return mb_copy_out(type, tcap, cls, strlen(cls)) && mb_name_out(name, r, n, "");
 }
 
-/* The engine's binary name for an extension-differs load (R1 1i):
- * "<root>/<list type>/<stem>.<ext>", stem = name without extension, cut at '$',
- * then every character outside [A-Za-z0-9$./\\] becomes '_' (':' kept at
+/* The engine's binary name for an extension-differs load: "<root>/<list type>/<stem>.<ext>", stem = name
+ * without extension, cut at '$', then every character outside [A-Za-z0-9$./\\] becomes '_' (':' kept at
  * index 1). The product lower-cases what the hook sees. */
 /* The engine's binary name as a heap string, or NULL (no stem, or out of memory). */
 static char *mb_binary_name(const char *root, const char *list, const char *name, const char *ext)
@@ -1627,7 +1619,7 @@ int sh_mb_need_requests(const char *type, const char *name, char *out[], int max
     }
     if (mb_ieq_n(type, tl, "anim")) {
         if (mb_iends(name, nl, ".bmd6anim")) { mb_put_req(out, &k, max, mb_own_name(name)); return k; }
-        /* cooked/ at load state >= 2, generated/ as the retry form (R1 1i). */
+        /* cooked/ at load state >= 2, generated/ as the retry form. */
         mb_put_req(out, &k, max, mb_binary_name("cooked", "anim", name, "bmd6anim"));
         mb_put_req(out, &k, max, mb_binary_name("generated", "anim", name, "bmd6anim"));
         return k;
@@ -1644,10 +1636,9 @@ int sh_mb_need_requests(const char *type, const char *name, char *out[], int max
     }
     if (mb_ieq_n(type, tl, "model")) {
         if (mb_iends(name, nl, ".bmodel")) { mb_put_req(out, &k, max, mb_own_name(name)); return k; }
-        /* cooked/model/ for authored models; the md6 collision models
-         * (md6/.../collision/<x>.lwo, named by the death-collision entities)
-         * ship only as generated/model/md6/... beside generated/cm/md6/...,
-         * and 13954591 holds no cooked/model/md6/ row at all. */
+        /* cooked/model/ for authored models; the md6 collision models (md6/.../collision/<x>.lwo, named by
+         * the death-collision entities) ship only as generated/model/md6/... beside generated/cm/md6/...,
+         * and 13954591 holds no cooked/model/md6/ row. */
         mb_put_req(out, &k, max, mb_binary_name("cooked", "model", name, "bmodel"));
         mb_put_req(out, &k, max, mb_binary_name("generated", "model", name, "bmodel"));
         return k;
@@ -1700,40 +1691,9 @@ char *sh_mb_strip_key(const char *in)
 }
 
 /* ------------------------------------------------------- decl scanning ---- */
-/* A lexical pass over decl text that records references; it is not a parser
- * and accepts anything the structural check admits. Tokens: quoted strings
- * (no escapes: the engine's decl lexer keeps backslashes), words, braces,
- * '=', ';', ',' and parenthesised groups (skipped). A statement is
- * `key [=] value`; a block is `key [value] [=] {`.
- *
- * Keys scanned (ASCII case-insensitive), value must be quoted unless noted:
- *   inherit            top level only, and only a "mods/..." parent (stock
- *                      parents are not needs) -> the declaring decl's own type
- *   mesh               md6Def            -> baseModel
- *   skeleton           md6Def            -> skeleton
- *   anim               md6Def, any depth -> anim (events and aliases blocks)
- *   modelInfos, models animWeb: each quoted ".md6" name in the block (the
- *                      engine's `"<md6>" "<alias>"` pairs, or a list)
- *                                        -> md6Def
- *   name               animWeb, any depth, a ".md6anim" value -> anim
- *   declPrt, declRibbon fx           -> particle, ribbon
- *   lightMtr, decalMtr fx            -> material
- *   material           particle, ribbon -> material
- *   any key, a ".swf" value  entityDef (guiData swfFile, guiFile) -> swf
- *   model, renderModelName  any decl     -> md6Def for ".md6", model for
- *                                           .lwo/.ase/.ma/.obj/.fbx/.bmodel
- *   md6Def             any decl          -> md6Def
- *   entityDef          any decl          -> entityDef
- *   item[N] inside a buildGameRefEntityDefs block -> entityDef
- *   previewImage       snapEditorEntityDef -> material
- *   *program           material (quoted or bare word) -> renderProg
- *   *map, *mask, editorimage, qer_editorimage  material -> image
- * Values that are empty or start with '_' (engine-internal names) are skipped.
- *   soundShader, sound any decl, only a "mods/..." name -> sound
- * Not scanned: animWebDecl, fxDecl, stock sounds and sound events, aiVoiceOver,
- * damage and projectile decls, inventory items, an effect's flares, models,
- * sounds and tables, skins, ".break" models, table references inside material
- * expressions, md6Def meshKits, and every other reference key. */
+/* A lexical pass over decl text that records references; it is not a parser and accepts anything the
+ * structural check admits. Tokens are quoted strings (no escapes: the engine's decl lexer keeps
+ * backslashes), words, braces, '=', ';', ',' and skipped groups; mb_scan_value holds the scanned keys. */
 
 typedef struct mb_tok { int kind; const char *p; size_t n; } mb_tok;
 enum { TK_END, TK_WORD, TK_STR, TK_LBRACE, TK_RBRACE, TK_EQ, TK_SEMI, TK_COMMA, TK_GROUP };
@@ -1843,7 +1803,7 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
             return;
         }
     }
-    /* old-key materials rewrite the layerparms image unquoted; the build must see it as it sees a quoted one */
+    /* A compiled look writes the layerparms image unquoted; the build must see it as it sees a quoted one */
     if (!quoted && sc->is_material && mb_ieq_n(k, kn, "layerparms")) { sc->fn(sc->ctx, "image", v, vn); return; }
     /* A look's keys the compiler passes through as the author wrote them (a particle look's transmap, a base
      * surface's maps) may be bare words: a bare mod image path is the same need a quoted one is. */
@@ -1868,7 +1828,7 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
         if (mb_ieq_n(k, kn, "declRibbon")) { sc->fn(sc->ctx, "ribbon", v, vn); return; }
         if (mb_ieq_n(k, kn, "lightMtr") || mb_ieq_n(k, kn, "decalMtr")) { sc->fn(sc->ctx, "material", v, vn); return; }
         /* The tables, flares and envs an effect names, when they are the mod's or the product's (the Graphics SDK's
-         * derived ones: snapmapplus_sdk_<hex>, snapmapplus/sdk/<hex>); the game's own stay unscanned, as before. */
+         * derived ones: snapmapplus_sdk_<hex>, snapmapplus/sdk/<hex>); the game's own stay unscanned. */
         if (mb_sdk_or_mod(v, vn)) {
             if (mb_ieq_n(k, kn, "intensityTable") || mb_ieq_n(k, kn, "sizeTable") || mb_ieq_n(k, kn, "customTable1") ||
                 mb_ieq_n(k, kn, "customTable2") || (kn > 11 && mb_ieq_n(k, 11, "offsetTable")) ||
@@ -1993,12 +1953,10 @@ void sh_mb_scan_needs(const char *decl_type, const unsigned char *text, size_t l
     }
 }
 
-/* A bare (unquoted) word naming a mod resource whose name holds '-'. The
- * engine's breakable and material lexers end a bare word at '-', so
- * `fx mods/<salt>/fx/x-y` reaches the game as two tokens and the decl falls
- * back to defaults. A quoted token reaches the decl lookup whole, so a decl
- * name is quoted; a raw file (an image, a model) may instead use '_', the
- * spelling the engine derives its path with. A salt itself never has '-'. */
+/* A bare (unquoted) word naming a mod resource whose name holds '-'. The engine's breakable and material
+ * lexers end a bare word at '-', so `fx mods/<salt>/fx/x-y` reaches the game as two tokens and the decl
+ * falls back to defaults. A decl name is therefore quoted; a raw file (an image, a model) may instead use
+ * '_', the spelling the engine derives its path with. A salt itself never has '-'. */
 int sh_mb_scan_bare_hyphen(const unsigned char *text, size_t len, sh_mb_bare_fn fn, void *ctx)
 {
     size_t pos = 0, counted = 0;
@@ -2293,8 +2251,8 @@ int sh_mb_rekey_path(const char *rel, const char *folder, const char *key, char 
     return 1;
 }
 
-/* The retired author keys (ONE-SHAPE rule 6): the first one `root` holds at
- * its top level, or "hud.schema"; NULL when none. */
+/* The author keys the build refuses: the first one `root` holds at its top level, or "hud.schema"; NULL when
+ * none. */
 static const char *mb_retired_key(const mbj *root)
 {
     static const char *const retired[] = { "id", "key", "shadows", "stock", "scope", "player", "extends", "replaces",
@@ -2435,10 +2393,8 @@ static void mb_companion_needs(sh_mb_bundle *b)
     sh_companion_table_free(&t);
 }
 
-/* What a scene node's "scenes" entry spawns (modscene_decl.h, kept in extra)
- * is a need of the node's own entityDef, like a companion: the serving closure
- * registers it with the node and the validator checks that it resolves. The
- * block's grammar is the registered extra check's (sh_mb_set_extra_check);
+/* What a scene node's "scenes" entry spawns (modscene_decl.h, kept in extra) is a need of the node's own
+ * entityDef, like a companion. The block's grammar is the registered extra check's (sh_mb_set_extra_check);
  * here only well-formed spawn names count. */
 
 static void mb_scene_needs(sh_mb_bundle *b)
@@ -2525,11 +2481,9 @@ static void mb_need_cb(void *ctx, const char *type, const char *name, size_t n)
         f->event_count++;
         return;
     }
-    /* A look's images (snapmapplus/look/<hash>: a parameter or colour image) are what the look compiler derives from
-     * this very material, again wherever the material serves: no need of it. Recorded, each became a pointer in the
-     * material's units that a player's product cannot answer before the unit's material has served (the composition
-     * was refused and stood in: the all-mods unit proof, DS-E). The provider serves such an image without a pointer
-     * once the material that names it has compiled in the process (modserve.c ms_open_derived, R-HD1). */
+    /* A look's image (snapmapplus/look/<hash>) is derived by the look compiler from this very material
+     * wherever it serves, so it is no need: recorded, it would become a pointer a player's product cannot
+     * answer before the material has served (modserve.c ms_open_derived). */
     if (n > 17 && !_strnicmp(name, "snapmapplus/look/", 17)) return;
     if (!mb_add_need(c->file, type, name, n)) c->oom = 1;
 }
@@ -2544,15 +2498,11 @@ static char *mb_trimmed_dup(const mbj *v)
 
 /* ----------------------------------------------------------- descriptor ---- */
 
-/* requirements: {"cvars": {<name>: <value>}, "commands": {"activate": [...],
- * "deactivate": [...]}} -> canonical text. No cvar or command is named here:
- * a cvar is any engine identifier, a command any single console line, and the
- * player accepted them by installing the mod. The canonical text is
+/* requirements: {"cvars": {<name>: <value>}, "commands": {"activate": [...], "deactivate": [...]}} -> canonical
+ * text. No cvar or command is named here: a cvar is any engine identifier, a command any single console line, and
+ * the player accepted them by installing the mod. The canonical text is
  *   {"commands":{"activate":[...],"deactivate":[...]},"cvars":{...}}
- * with "cvars" always present (sorted names, string values) and "commands",
- * and each of its lists, only when not empty (lines in the author's order), so
- * a bundle that carries only cvars keeps the text and hash it had when cvars
- * were the only key. */
+ * with "cvars" always present (sorted names, string values) and "commands" and each list only when not empty. */
 static int mb_req_cvar_name(const char *s, size_t n)
 {
     size_t i;
@@ -2887,11 +2837,9 @@ static int mb_common_fields(sh_mb_bundle *b, const mbj *root)
     return 1;
 }
 
-/* The author block of mod.json (the file without its "snapmap-plus" member).
- * `block` is the builder block of the same file, or NULL. A retired author
- * key refuses the folder (ONE-SHAPE rule 6); every other key that is not a
- * known field is kept verbatim in "extra" (strings, hud, companions,
- * description, ...). */
+/* The author block of mod.json (the file without its "snapmap-plus" member). `block` is the builder block of
+ * the same file, or NULL. A key mb_retired_key names refuses the folder; every other key that is not a known
+ * field is kept verbatim in "extra" (strings, hud, companions, description, ...). */
 static int mb_is_hex64(const mbj *v);
 
 static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block, int building)
@@ -2958,8 +2906,8 @@ typedef struct mb_walk {
     wchar_t *root;          /* the mod folder, long form */
     const char *folder;     /* its name, as the author named it (UTF-8) */
     int stock;              /* a stock reader is registered: defer type and size refusals */
-    const sh_mb_resolver *r;/* whether DOOM holds a path (D14's two sentences); may be NULL */
-    int outside;            /* walking a folder that is none of the mod's: every file is refused (D14) */
+    const sh_mb_resolver *r;/* whether DOOM holds a path; may be NULL */
+    int outside;            /* walking a folder that is none of the mod's: every file is refused */
 } mb_walk;
 
 static const char *mb_rp_forbidden(const char *request);
@@ -2977,7 +2925,7 @@ static void mb_walk_file(mb_walk *w, const char *child, unsigned long long size)
     if (!path_lower) { mb_error(w->b, "out of memory"); return; }
     mb_lower(path_lower);
     if (w->outside) {
-        /* D14 (SPEC-distribution 3.10): the file is named, and the sentence says whether it is DOOM's own */
+        /* the file is named, and the sentence says whether it is DOOM's own */
         int dooms = w->r && w->r->stock && w->r->stock(w->r->stock_context, path_lower) == 1;
         char *why = sh_ma_outside_cause(child, dooms);
         mb_error(w->b, "%s", why ? why : "out of memory");
@@ -3017,9 +2965,8 @@ static void mb_walk_file(mb_walk *w, const char *child, unsigned long long size)
     } else if ((f = mb_add_file(w->b)) == NULL) {
         mb_error(w->b, "out of memory");
     } else {
-        /* DECISIONS 13: the recorded path is lower case with '/',
-         * whatever the spelling on disk (Windows opens it either way);
-         * archives and installs use it. */
+        /* The recorded path is lower case with '/', whatever the spelling on disk (Windows opens it either
+         * way); archives and installs use it. */
         f->path = path_lower;
         path_lower = NULL;
         f->request = req_lower;
@@ -3105,9 +3052,9 @@ static void mb_walk_top(mb_walk *w)
     if (h == INVALID_HANDLE_VALUE) { mb_error(w->b, "cannot list the mod folder: %s", sh_reason_win32(GetLastError(), "the mod folder", 0)); return; }
     do {
         char *name;
-        /* The mod is mod.json and its folders by what things are (modauthor.h, DECISIONS 16): a file beside
-         * mod.json (a README, desktop.ini) and a folder whose name starts with '.' (.git) are ignored and never
-         * carried; any other folder is a mistake the build names. */
+        /* The mod is mod.json and its folders by what things are (modauthor.h): a file beside mod.json (a
+         * README, desktop.ini) and a folder whose name starts with '.' (.git) are ignored and never carried;
+         * any other folder is a mistake the build names. */
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
         name = sh_mb_utf8(fd.cFileName);
         if (!name) { mb_error(w->b, "out of memory"); continue; }
@@ -3117,7 +3064,7 @@ static void mb_walk_top(mb_walk *w)
             wchar_t *sub = mb_wjoin(w->root, fd.cFileName);
             char *rel = sh_text(name);
             if (rel) mb_lower(rel);
-            /* a folder that is none of the mod's: each file in it is refused by name (D14) */
+            /* a folder that is none of the mod's: each file in it is refused by name */
             w->outside = !sh_ma_folder(name, strlen(name));
             if (sub && rel) mb_walk_dir(w, sub, rel);
             else mb_error(w->b, "out of memory");
@@ -3169,11 +3116,9 @@ static int mb_resolve_one(sh_mb_bundle *b, const mb_req_index *own, const sh_mb_
     return found ? 1 : unknown ? -1 : 0;
 }
 
-/* The installed text a file came from, for needs the game's own text leaves
- * dangling. A pointer's text is the installed text (source: the pointer's).
- * A carried decl under the key is compared with the installed decl at its
- * request with the mods/<salt>/ segment cut (a copy of stock text after the
- * namespace rewrite), loaded once per file on its first unresolved need. */
+/* The installed text a file came from, for needs the game's own text leaves dangling: a pointer's text, or
+ * the installed decl at a carried decl's request with the mods/<salt>/ segment cut (a copy of stock text
+ * after the namespace rewrite). Loaded once per file, on its first unresolved need. */
 typedef struct mb_twin {
     int state;                          /* 0 not looked up, 1 loaded, -1 none */
     sh_mb_file text;                    /* only needs, need_count used */
@@ -3228,12 +3173,10 @@ static const char *mb_stock_names_too(mb_twin *t, const sh_mb_file *f, const sh_
 }
 
 /* ----------------------------------------------------- render programs ---- */
-/* A bundle that carries a render program must carry what the engine checks:
- * the cooked program's checksum is MD5fold of the served decl text, each
- * SPIR-V header names the stage text it was compiled from, and every stage
- * and permutation the engine binds is present (a missing stage file is a
- * fatal error at bind). MD5fold is MD5 with its four 32-bit words XORed
- * together (VK 0x1402d6a90). */
+/* A bundle that carries a render program must carry what the engine checks: the cooked program's checksum is
+ * MD5fold of the served decl text, each SPIR-V header holds the MD5fold of its stage text, and every stage
+ * and permutation the engine binds is present (a missing stage file is a fatal error at bind). MD5fold is
+ * MD5 with its four 32-bit words XORed together (VK 0x1402d6a90). */
 
 static const uint32_t MB_MD5_K[64] = {
     0xd76aa478u, 0xe8c7b756u, 0x242070dbu, 0xc1bdceeeu, 0xf57c0fafu, 0x4787c62au, 0xa8304613u, 0xfd469501u,
@@ -3746,20 +3689,17 @@ int sh_mb_text_same(const unsigned char *a, size_t an, const unsigned char *b, s
     }
 }
 
-/* Decl-grammar text: a decl under generated/decls/, a snapModule decl, or a
- * render program's permutation decl (generated/renderprogs/permutations/
- * <program>_<mask>.decl, `{ permutations { } parms { } state { } hlsl_vp { }
- * hlsl_fp { } }`), which the engine parses like its program's decl. Its
- * identity is its text and a copy at a game name is never a binary. */
+/* Decl-grammar text: a decl under generated/decls/, a snapModule decl, or a render program's permutation
+ * decl (generated/renderprogs/permutations/<program>_<mask>.decl), which the engine parses like its
+ * program's decl. Its identity is its text and a copy at a game name is never a binary. */
 static int mb_decl_text(const sh_mb_file *f)
 {
     return f->is_decl || f->is_module || sh_mb_rp_permutation(f->request, NULL, NULL);
 }
 
-/* A decl-grammar copy at a game name whose text is the game's but for line
- * ends (an export that turned CRLF into LF) is the game's file: a pointer
- * recording the game's bytes, served from the player's disk. Anything else
- * is left as it was (an edited copy, or a name the game does not hold). */
+/* A decl-grammar copy at a game name whose text is the game's but for line ends (an export that turned CRLF
+ * into LF) is the game's file: a pointer recording the game's bytes, served from the player's disk. Anything
+ * else (an edited copy, or a name the game does not hold) stays as it is. */
 static wchar_t *mb_file_wpath(const wchar_t *root, const char *path);
 static void mb_text_pointer(sh_mb_bundle *b, sh_mb_file *f, const wchar_t *root)
 {
@@ -3789,11 +3729,10 @@ static void mb_text_pointer(sh_mb_bundle *b, sh_mb_file *f, const wchar_t *root)
     HeapFree(GetProcessHeap(), 0, game);
 }
 
-/* Whether f's name is under the mod's own namespace: 1 yes; 0 no, with the rule it misses in `why`. A decl is named
- * mods/<salt>/...; a skins decl by the mesh it skins and a raw file by its
- * path, either containing /mods/<salt>/ or the engine's '_' spelling of it; a
- * module lives in maps/modules/mods/<salt>/; a bank's stem starts with the
- * key. Pure: the sub-rules of a name under it are the caller's. */
+/* Whether f's name is under the mod's own namespace: 1 yes; 0 no, with the rule it misses in `why`. A decl
+ * is named mods/<salt>/...; a skins decl by the mesh it skins and a raw file by its path, either containing
+ * /mods/<salt>/ or the engine's '_' spelling of it; a module lives in maps/modules/mods/<salt>/; a bank's
+ * stem starts with the key. Pure: the sub-rules of a name under it are the caller's. */
 static int mb_ns_test(const sh_mb_bundle *b, const sh_mb_file *f, char **why)
 {
     char ns_decl[SH_MB_ID_MAX + 8], ns_raw[SH_MB_ID_MAX + 8];
@@ -3894,7 +3833,7 @@ void sh_mb_set_bank_need(sh_mb_bank_need_fn fn) { InterlockedExchangePointer((vo
  * decl that needs it. */
 static void mb_registry_banks(sh_mb_bundle *b, mb_buf *o, int *first)
 {
-    /* As many banks as the mod's sounds need (decision 26: no count of its own). */
+    /* As many banks as the mod's sounds need, with no count of its own. */
     sh_mb_bank_need_fn need = g_bank_need;
     char (*banks)[80] = NULL, **ord = NULL;
     const char **why = NULL;
@@ -3954,9 +3893,8 @@ static void mb_registry_banks(sh_mb_bundle *b, mb_buf *o, int *first)
 /* The product block's "registries" object: what the
  * product will generate from this bundle when a map declares it. Keys in
  * byte order; members only when not empty. */
-/* A strings key is `<salt>_<name>` (DECISIONS 5): the salt, an underscore, and
- * a name of letters, digits and underscores. No '/': the engine's string ids
- * were only ever exercised with [a-z0-9_]. Keys compare without case. */
+/* A strings key is `<salt>_<name>`: the salt, an underscore, and a name of letters, digits and underscores.
+ * No '/': the engine's string ids are only exercised with [a-z0-9_]. Keys compare without case. */
 static int mb_string_key_ok(const char *key, const char *salt)
 {
     size_t n = strlen(salt), i;
@@ -4139,9 +4077,8 @@ static void mb_registries(sh_mb_bundle *b, const wchar_t *root)
     strings = extra ? mbj_get(extra, "strings") : NULL;
     en = strings && strings->t == MBJ_OBJ ? mbj_get(strings, "en") : NULL;
     if (en && en->t == MBJ_OBJ && en->count) {
-        /* DECISIONS 9: a key the game or the product defines is an edit of
-         * that string ("stringEdits"); every other key is the mod's own,
-         * named under its salt ("strings"). */
+        /* A key the game or the product defines is an edit of that string ("stringEdits"); every other key
+         * is the mod's own, named under its salt ("strings"). */
         char **keys = (char **)calloc(en->count, sizeof(char *)), **edits = (char **)calloc(en->count, sizeof(char *));
         size_t n = 0, ne = 0;
         for (i = 0; keys && edits && i < en->count; i++) {
@@ -4205,11 +4142,9 @@ static wchar_t *mb_file_wpath(const wchar_t *root, const char *path)
     return full;
 }
 
-/* Derived edits: every decl the mod carries at a game
- * name with other bytes is an edited copy. Its structural diff against the
- * game's text of the same decl is recorded (b->edits); the product applies
- * it per map and never serves the copy. A copy or a game text outside the
- * decl grammar is refused. Then a partial a retired intent key names. */
+/* Derived edits: every decl the mod carries at a game name with other bytes is an edited copy. Its
+ * structural diff against the game's text of the same decl is recorded (b->edits); the product applies it
+ * per map and never serves the copy. A copy or a game text outside the decl grammar is refused. */
 /* The edited copies (sh_mb_file.edited): each REPLACE file the bundle's edits
  * name moves from classes.replaces to classes.edits. After mb_classify_all,
  * once the edits are derived (a build) or read (a load). */
@@ -4253,9 +4188,9 @@ static void mb_names_free(mb_names *s)
     memset(s, 0, sizeof *s);
 }
 
-/* An edit's entry is kept unless it names a name of the bundle's own namespace that nothing resolves: a unit, or a
- * composition of units, carries the mod's edited copy of a DOOM decl whole, and its entries for the mod's other
- * objects would name what is not served (R-LV2: the conductor's list named a demon the unit lacks). */
+/* An edit's entry is kept unless it names a name of the bundle's own namespace that nothing resolves: a
+ * unit, or a composition of units, carries the mod's edited copy of a DOOM decl whole, and its entries for
+ * the mod's other objects would name what is not served. */
 static int mb_edit_entry_keep(void *context, const char *entry)
 {
     const mb_names *absent = (const mb_names *)context;
@@ -4389,23 +4324,13 @@ static void mb_report(sh_mb_bundle *b)
 }
 
 /* -------------------------------------------- campaign-only closure ---- */
-/* SnapMap's session loads snap_gameresources, never the campaign's
- * gameresources, so a served decl naming content only the campaign archive
- * holds leaves a hole the engine logs and plays on with (a med_station animWeb
- * whose wallhealthstation.md6 is missing, a model whose skeleton is not
- * there, an effect whose particle is not there, a panel without its movie).
- * Every such name becomes a pointer of the bundle at the game's own path (a
- * surface: served from the player's disk, never carried or uploaded), and a
- * decl brought along this way is scanned for its own needs until nothing
- * campaign-only is left. A movie brings its atlas (generated/swf/<stem>.bimage)
- * with it; an image no archive holds as a standalone image may be a
- * transparency or decal atlas of that name; an image a virtual-textured
- * material names in a source field is sampled from the installed
- * virtual-texture pages when the material has a row there, so it needs
- * nothing. The set is derived from this build's needs alone: the product
- * block marks these pointers ("closure": true) and the next build drops them
- * and derives them again. Bounded by the file count and the manifest size;
- * the first name past either fails the build. */
+/* SnapMap's session loads snap_gameresources, never the campaign's gameresources, so a served decl naming
+ * content only the campaign archive holds leaves a hole the engine logs. Every such name becomes a pointer
+ * at the game's own path (served from the player's disk, never carried), and a decl brought along is scanned
+ * for its own needs in turn. A movie brings its atlas (generated/swf/<stem>.bimage); an image no archive
+ * holds standalone may be an atlas of that name; a virtual-textured material's image needs nothing when it
+ * has an installed row. The set derives from this build's needs alone; the first name past the file-count or
+ * manifest-size bound fails the build. */
 
 static void mb_emit_file(mb_buf *o, const sh_mb_file *f);
 static char *mb_emit(const sh_mb_bundle *b, int with_bundle, size_t *out_len);
@@ -4441,10 +4366,9 @@ static size_t mb_closure_find(const mb_closure *c, const char *request, int *fou
     return lo;
 }
 
-/* The installed virtual-texture tables (virtualtextures/_vmtr.vmtr and
- * _vmtr_dlc<N>.vmtr, loose files at the install root): every quoted string
- * of a table is the material name of one row. Read once per build, and only
- * when a virtual-textured material's image would otherwise be added. */
+/* The installed virtual-texture tables (virtualtextures/_vmtr.vmtr and _vmtr_dlc<N>.vmtr, loose files at the
+ * install root): every quoted string of a table is the material name of one row. Read once per build, and
+ * only when a virtual-textured material's image would otherwise be added. */
 static void mb_closure_vt_load(mb_closure *c)
 {
     unsigned u;
@@ -4557,16 +4481,12 @@ static int mb_closure_vt_served(mb_closure *c, const sh_mb_file *f, const char *
 }
 
 /* ----------------------------------------------------- whole models ---- */
-/* A model is one unit: the engine loads an md6Def's mesh, then the skeleton
- * whose name the cooked mesh carries (a little-endian u32 length at 0x0C and
- * the name, "MM" at 2), then that skeleton's default clip
- * <skeleton>/_default.md6anim. An md6Def names only the mesh, so the builder
- * reads the skeleton's name from the mesh bytes (the bundle's own copy, else
- * the installed one SnapMap loads first) and records the skeleton and the
- * default clip as needs of the md6Def beside the mesh. Needs are names: a
- * kept md6Def keeps all three for the session (sh_modserve_holds_raise), and
- * only a name only the campaign archives hold becomes a pointer. A name
- * nothing holds is not recorded (the engine's own hole, as before). */
+/* A model is one unit: the engine loads an md6Def's mesh, then the skeleton whose name the cooked mesh
+ * carries (a little-endian u32 length at 0x0C and the name, "MM" at 2), then that skeleton's default clip
+ * <skeleton>/_default.md6anim. The builder reads the skeleton's name from the mesh bytes (the bundle's own
+ * copy, else the installed one SnapMap loads first) and records the skeleton and the default clip as needs
+ * of the md6Def. A kept md6Def keeps all three for the session (sh_modserve_holds_raise), and only a name
+ * only the campaign archives hold becomes a pointer; a name nothing holds is not recorded. */
 
 #define MB_MESH_PREFIX 4096u
 
@@ -4711,7 +4631,7 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
     mb_buf one = {0};
     if (c->ops->identify(c->ops->context, request, sha, &size) != SH_MB_STOCK_OK || strlen(sha) != SH_MB_HASH_HEX ||
         !sh_mb_logical_name(request, type, &name))
-        return 1;   /* left to the need check, which reports it as before */
+        return 1;   /* left to the need check, which reports it */
     if (c->n == c->cap) {
         size_t grown_cap = c->cap * 2 + 64, *grown = (size_t *)realloc(c->by_req, sizeof(size_t) * grown_cap);
         if (!grown) { free(name); mb_error(b, "out of memory"); return 0; }
@@ -4760,12 +4680,10 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
     return 1;
 }
 
-/* One need of file `file`, met by any of the `n` (at most 2) candidate
- * requests. Returns 1 when it is settled (in the bundle, loaded by SnapMap on
- * its own, or added now), 0 when no archive holds any candidate. Another
- * installed mod pointing at the same campaign file does not settle it: that
- * mod is served only where a map declares it, so this bundle carries its own
- * pointer. */
+/* One need of file `file`, met by any of the `n` (at most 2) candidate requests. Returns 1 when it is
+ * settled (in the bundle, loaded by SnapMap on its own, or added), 0 when no archive holds any candidate.
+ * Another installed mod pointing at the same campaign file does not settle it: that mod is served only where
+ * a map declares it, so this bundle carries its own pointer. */
 static int mb_closure_offer(mb_closure *c, size_t file, const sh_mb_need *need, char *const cand[], int n)
 {
     sh_mb_bundle *b = c->b;
@@ -4822,9 +4740,8 @@ static void mb_closure_missing(mb_closure *c, size_t file, const char *program, 
     c->stopped = 1;
 }
 
-/* A program unit (the program or one permutation): its cooked Vulkan .bin
- * (required), an OpenGL .bin and the SPIR-V stages the archive holds. Which
- * stages a unit needs is checked afterwards from the .bin itself
+/* A program unit (the program or one permutation): its cooked Vulkan .bin (required), an OpenGL .bin and the
+ * SPIR-V stages the archive holds. Which stages a unit needs is checked afterwards from the .bin itself
  * (mb_check_renderprogs). */
 static void mb_closure_unit(mb_closure *c, size_t file, const char *program, const char *stem, const char *spirv_name)
 {
@@ -4905,14 +4822,12 @@ static void mb_closure_parms(mb_closure *c, size_t file, const char *decl)
     HeapFree(GetProcessHeap(), 0, text);
 }
 
-/* A material's program is one unit with its files (archive_renderprog.py's
- * closure, reproduced for all 923 programs of 13954591): the decl, the cooked
- * .bin and SPIR-V, and every permutation's decl, .bin and SPIR-V, at the
- * paths the archive stores (split SPIR-V names included; the shared includes
- * under decls/renderprogs/ never). Shipping a program without its permutation
- * files is fatal (0xE06D7363 when the permutation open fails), so a
- * campaign-only program comes whole or the build fails naming the first
- * missing member. SnapMap's own programs add nothing. */
+/* A material's program is one unit with its files: the decl, the cooked .bin and SPIR-V, and every
+ * permutation's decl, .bin and SPIR-V, at the paths the archive stores (split SPIR-V names included; the
+ * shared includes under decls/renderprogs/ never), for all 923 programs of 13954591. Shipping a program
+ * without its permutation files is fatal (0xE06D7363 when the permutation open fails), so a campaign-only
+ * program comes whole or the build fails naming the first missing member. SnapMap's own programs add
+ * nothing. */
 static void mb_closure_program(mb_closure *c, size_t file, const char *name)
 {
     char *program, *decl, *stem, where[32];
@@ -5364,12 +5279,10 @@ done:
     free(outn);
 }
 
-/* Requirements the build can see (DECISIONS 17): a mod that brings campaign
- * content (a closure pointer, or a surface restoring installed content
- * SnapMap's provider cannot see) needs the game's cut-content blacklists off,
- * g_useResourceBlackList 0 and g_useImageBlackList 0, so the author never
- * writes them. An author value for either is replaced, with a warning
- * (`report`: a build; a load derives the same silently, so the hash agrees). */
+/* Requirements the build can see: a mod that brings campaign content (a closure pointer, or a surface
+ * restoring installed content SnapMap's provider cannot see) needs g_useResourceBlackList 0 and
+ * g_useImageBlackList 0, so the author never writes them. An author value for either is replaced with a
+ * warning (`report`: a build; a load derives the same silently, so the hash agrees). */
 static void mb_derive_requirements(sh_mb_bundle *b, int report)
 {
     static const char *const gates[] = { "g_useResourceBlackList", "g_useImageBlackList" };
@@ -5427,10 +5340,10 @@ static void mb_derive_requirements(sh_mb_bundle *b, int report)
     mbj_free(req);
 }
 
-/* SPEC-distribution 3.10: a native/ file whose bytes are DOOM's own is a pointer, never carried, and the build says the
- * mod does not need it. Only where that is true: content SnapMap sees (snap_gameresources, a loose file), or campaign
- * content another file of the mod names, which the closure finds by itself; a campaign file nothing names is what
- * makes it reach SnapMap, so it is needed. */
+/* A native/ file whose bytes are DOOM's own is a pointer, never carried, and the build says the mod does not
+ * need it, but only where that is true: content SnapMap sees (snap_gameresources, a loose file) or campaign
+ * content another file of the mod names (the closure finds it). A campaign file nothing names is what makes
+ * it reach SnapMap, so it is needed. */
 static void mb_warn_native_same(sh_mb_bundle *b)
 {
     size_t i, j, k;
@@ -5453,9 +5366,9 @@ static void mb_warn_native_same(sh_mb_bundle *b)
     }
 }
 
-/* A text of the mod that spells one of its names as the engine does (mods/<salt>/x): served as written, it breaks
- * when the mod gets another salt, so the build says to write the name by its folder (R-NM1, "Not done"). One warning
- * per file, at the first such name; the namespace it spells counts for "spelled". */
+/* A text of the mod that spells one of its names as the engine does (mods/<salt>/x): served as written, it
+ * breaks when the mod gets another salt, so the build says to write the name by its folder. One warning per
+ * file, at the first such name; the namespace it spells counts for "spelled". */
 static void mb_spelled_text(sh_mb_bundle *b, const sh_mb_file *f, const unsigned char *t, size_t n, mb_spell *sp)
 {
     size_t i, k, line = 1;
@@ -5557,7 +5470,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 char *look = NULL, *notes = NULL;
                 size_t look_len = 0;
                 /* A material is read as the engine will read it: a look compiled (a mistake in one stops the
-                 * build with its sentence), a material of the old keys rewritten. */
+                 * build with its sentence) and the compiled text scanned. */
                 sh_mb_look_fn look_fn = (sh_mb_look_fn)InterlockedCompareExchangePointer((PVOID volatile *)&g_mb_look, NULL, NULL);
                 sh_mb_sdk_fn sdk_fn = (sh_mb_sdk_fn)InterlockedCompareExchangePointer((PVOID volatile *)&g_mb_sdk, NULL, NULL);
                 int refused = 0, is_mat = !strcmp(f->ptype, "material") || !strcmp(f->ptype, "material2");
@@ -5668,13 +5581,10 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         }
 
         {
-            /* Additive mods: the file's path and bytes decide what it is
-             * (mb_class_of). A pointer restoring installed content under the
-             * game's own name surfaces it; a name under the key is an addition
-             * or a borrow; any other name must be a game name, and the file
-             * replaces it (a shadow, derived, never declared) or, for an
-             * editor type, is an editor tweak. A decl there is an edited copy
-             * whose edits are derived (mb_derive_edits); a binary is refused. */
+            /* The file's path and bytes decide what it is (mb_class_of): installed content under the game's
+             * own name is a surface, a name under the key an addition or a borrow, any other game name a
+             * shadow (an edited copy for a decl, mb_derive_edits) or an editor tweak; a binary there is
+             * refused. */
             char *why = NULL;
             int restore = f->stock && f->stock_source && sh_mb_stock_restore(f->request, f->stock_source);
             int in_ns = !restore && mb_ns_test(b, f, &why);
@@ -5700,13 +5610,9 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                              f->path);
             } else {
                 int got = r && r->stock ? r->stock(r->stock_context, f->request) : -1;
-                /* A changed DOOM file (native/, SPEC-distribution 3.10): a decl
-                 * is an edited copy (mb_derive_edits), any other kind a
-                 * replacement, served at DOOM's name only in maps that use
-                 * the mod (a shadow, the serving index's map scope; manager
-                 * decision D-A3). A native/ path DOOM does not hold is no
-                 * change to anything of DOOM's: it is the mod's own and goes
-                 * in its kind's folder (D-A5). */
+                /* A changed DOOM file (native/): a decl is an edited copy (mb_derive_edits), any other kind
+                 * a replacement served at DOOM's name only in maps that use the mod (a shadow). A native/
+                 * path DOOM does not hold is the mod's own and goes in its kind's folder. */
                 if (got == 1) {
                     f->shadowed = 1;
                 } else if (got == 0) {
@@ -5806,19 +5712,15 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
              * not refused. */
             if (strcmp(f->needs[k].type, "image") == 0)
                 mb_warn(b, "%s needs image %s, which resolves to nothing", f->path, f->needs[k].name);
-            /* A shadow replaces a stock file whose own text may name content
-             * the game ships without (the stock hands model names six
-             * animations no archive holds); the engine already tolerates
-             * those names, so a replacement that keeps them is reported, not
-             * refused. */
+            /* A shadow replaces a stock file whose own text may name content the game ships without (the
+             * stock hands model names six animations no archive holds); the engine already tolerates those
+             * names, so a replacement that keeps them is reported, not refused. */
             else if (f->shadowed && got == 0)
                 mb_warn(b, "%s needs %s %s, which resolves to nothing (a replaced stock file: reported, not refused)",
                         f->path, f->needs[k].type, f->needs[k].name);
-            /* The game's own text of the decl this file is or was copied
-             * from names the same missing resource (stock md6Defs keep event
-             * and alias blocks of clips no archive holds): the engine already
-             * tolerates it, so a copy that keeps it is reported, not refused.
-             * A need only the mod introduces stays an error. */
+            /* The game's own text of the decl this file is a copy of names the same missing resource (stock
+             * md6Defs keep event and alias blocks of clips no archive holds): the engine tolerates it, so
+             * the copy is reported, not refused. A need only the mod introduces stays an error. */
             else if (got == 0 && (also = mb_stock_names_too(&twin, f, &f->needs[k])) != NULL)
                 mb_warn(b, "%s names %s %s, which no archive holds; the game's own %s names it too", f->path,
                         f->needs[k].type, f->needs[k].name, also);
@@ -5872,10 +5774,9 @@ static void mb_key(mb_buf *o, int *first, const char *key)
     mb_put(o, ":", 1);
 }
 
-/* Keys in byte order: author bundle extra files format homepage id name
- * requirements shadows; file keys: blob needs path provides request size,
- * or for a stock pointer needs path provides request stock{sha256 source}.
- * "bundle" (the hash itself) only in the manifest form a reader checks. */
+/* Keys in byte order: author bundle extra files format homepage id name requirements shadows; file keys:
+ * blob needs path provides request size, or for a stock pointer needs path provides request stock{sha256
+ * source}. "bundle" (the hash itself) only in the manifest form a reader checks. */
 /* One file element of the canonical manifest's "files" array. */
 static void mb_emit_file(mb_buf *o, const sh_mb_file *f)
 {
@@ -5972,10 +5873,9 @@ static int mb_write_wfile(const wchar_t *path, const void *data, size_t len)
     int ok = 0, attempt;
     if (!tmp) return 0;
     _snwprintf_s(tmp, n + 16, _TRUNCATE, L"%s.tmp%lu", path, GetCurrentProcessId());
-    /* A virus scanner, the indexer or a reader holds the file open for a moment after it is
-     * written or read, and the replace then fails with a sharing or access error. mb_record_read
-     * waits those out; the write waits them out the same way (a load-dependent flake: a record section was not
-     * saved under load). */
+    /* A virus scanner, the indexer or a reader holds the file open for a moment after it is written or read,
+     * and the replace then fails with a sharing or access error. mb_record_read waits those out; the write
+     * waits them out the same way. */
     for (attempt = 0; attempt < 20; attempt++) {
         SetLastError(ERROR_SUCCESS);
         h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -6145,10 +6045,9 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
     return 1;
 }
 
-/* A built mod.json: the author block, then the builder block (format 2).
- * A block without "build" is a failed build (its "cause") or a folder given
- * its salt and not built yet: the load fails with that, after reading the
- * salt, "built", "rules" and "tree" so the store still knows the folder. */
+/* A built mod.json: the author block, then the builder block (format 2). A block without "build" is a failed
+ * build (its "cause") or a folder given its salt and not built yet: the load fails with that, after reading
+ * the salt, "built", "rules" and "tree" so the store still knows the folder. */
 /* The block's "units_of" (a composition's unit hashes) into the bundle; 1, or 0 when it is not a list of hashes
  * (or memory runs out). */
 static int mb_units_of_read(sh_mb_bundle *out, const mbj *block)
@@ -6542,12 +6441,9 @@ char *sh_mb_salt_modjson(const char *text, size_t n, const char *from, const cha
 
 
 /* ------------------------------------------- a new mod's strings keys ---- */
-/* At every scan that moves a folder's own content under its salt, its strings
- * keys without the "<salt>_" prefix (string edits aside) gain it and their
- * "#str_<key>" references follow (sh_ms_assign_salt). A key is found by a
- * byte-exact walk of the author's text: the top-level "strings" member, each
- * language object in it, each of its keys. A new key that would equal one the
- * object already holds takes "_2", "_3", ... */
+/* At every scan that moves a folder's own content under its salt, its strings keys without the "<salt>_"
+ * prefix (string edits aside) gain it and their "#str_<key>" references follow (sh_ms_assign_salt). A key is
+ * found by a byte-exact walk of the author's text; a new key equal to one the object holds takes "_2", "_3". */
 
 
 /* Past one JSON value at p (whitespace before it skipped); NULL when it does
@@ -6658,8 +6554,8 @@ static int mb_sk_is_name(char c)
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
-/* The prefixed key: "<salt>_<key>", a leading "mods/<salt>/" of an earlier
- * spelling dropped and every other character outside [A-Za-z0-9_] made '_'. */
+/* The prefixed key: "<salt>_<key>", with a leading "mods/<salt>/" dropped and every other character outside
+ * [A-Za-z0-9_] made '_'. */
 static char *mb_sk_new_key(const char *key, size_t n, const char *salt, const char *from)
 {
     size_t sl = strlen(salt), fl = from ? strlen(from) : 0, i, w;
@@ -6691,7 +6587,7 @@ static int mb_sk_key(void *vctx, const char *key, size_t key_len, const char *va
     (void)value_end;
     if (memchr(k, '\\', kn)) return 1;   /* an escaped key is left as written (the build names it) */
     if (kn > sl && !_strnicmp(k, c->salt, sl) && k[sl] == '_') return 1;   /* already prefixed */
-    if (sh_strkey_is_edit(k, kn)) return 1;   /* a string edit stays as the game names it (DECISIONS 9) */
+    if (sh_strkey_is_edit(k, kn)) return 1;   /* a string edit stays as the game names it */
     for (i = 0; i < c->nkeys && !(strlen(c->keys[i].from) == kn && !memcmp(c->keys[i].from, k, kn)); i++) {}
     if (i == c->nkeys) {
         if (c->nkeys == c->kcap) {
@@ -7342,9 +7238,9 @@ static void mb_tree_walk(mb_tlist *l, const wchar_t *top, const char *top_rel)
                     }
                     if (l->n == l->cap) { free(child); l->failed = 1; }
                     else {
-                        /* The file's own size and write time, not the folder listing's copy of them: the listing
-                         * keeps the old ones while another program still holds a file it wrote (an editor that
-                         * keeps it open), so a Refresh then saw no change (R-LB1 F8). */
+                        /* The file's own size and write time, not the folder listing's copy of them: the
+                         * listing keeps stale ones while another program still holds a file it wrote (an
+                         * editor that keeps it open), so a Refresh would see no change. */
                         WIN32_FILE_ATTRIBUTE_DATA a;
                         wchar_t *full = mb_wjoin(cur.dir, fd.cFileName);
                         if (full && GetFileAttributesExW(full, GetFileExInfoStandard, &a)) {
@@ -7438,11 +7334,10 @@ done:
 
 /* ---------------------------------------------------- product record ---- */
 
-/* The mods folder's named lock (store_lock.h), shared by every process that
- * writes the folder or its record. One mutex per folder serves both the
- * store lock (modstore_lock) and the record lock below; it is recursive
- * within a thread, so a store step that writes the record holds it once
- * more. Handles are opened once per folder and kept. */
+/* The mods folder's named lock (store_lock.h), shared by every process that writes the folder or its record.
+ * One mutex per folder serves both the store lock (modstore_lock) and the record lock below; it is recursive
+ * within a thread, so a store step that writes the record holds it once more. Handles are opened once per
+ * folder and kept. */
 static SRWLOCK g_lock_open = SRWLOCK_INIT;
 static struct { wchar_t name[64]; HANDLE h; } g_lock_handles[32];
 static unsigned g_lock_next;
@@ -7524,10 +7419,9 @@ static wchar_t *mb_record_path(const char *mods_root)
     return w;
 }
 
-/* The record's root object: *state 1 read, 0 absent, -1 the file cannot be
- * read (`why` says why), -2 it is not a JSON object. Another program holding
- * the file without read sharing (a backup tool, an editor, a scanner) is
- * waited for, up to a second. */
+/* The record's root object: *state 1 read, 0 absent, -1 the file cannot be read (`why` says why), -2 it is
+ * not a JSON object. Another program holding the file without read sharing (a backup tool, an editor, a
+ * scanner) is waited for, up to a second. */
 /* `why` holds a short phrase of its own (no name): MB_REC_WHY bytes. */
 #define MB_REC_WHY 96
 static mbj *mb_record_read(const wchar_t *path, int *state, char why[MB_REC_WHY])

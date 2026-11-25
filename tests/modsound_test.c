@@ -1,29 +1,6 @@
-/* modsound_test.c -- mod sound banks (modsound.c) and the builder's bank and
- * sound-decl rules (modbundle.c).
- *
- * Offline: the served-request to file-name rule, the wide-name match, the
- * s_loadBanks decode, the bank table (stock pointers, duplicates and the cap
- * refused), the Wwise open replacement against a real temporary file (the
- * AkFileDesc filled as the engine's default hook fills it, the handle reading
- * the bank's bytes, a wrong size or another name going to the original), the
- * submit pass (once per sound-system lifetime, nothing before Wwise is up,
- * again after LoadBanks), and the builder: a bank only at
- * sound/soundbanks/pc/<id>_<rest>.bnk without _sp, _snapmaps or initial,
- * version 113 with id FNV-1(stem), never a shadow; a mods/ soundShader is a
- * need of type sound, a stock one is not.
- * With build 13954591 executables as arguments: the four signatures resolve
- * at their recorded RVAs, the console function decodes to soundSystem and its
- * +0x140, and the read-only slots holding the open-by-name (two) and
- * LoadBanks (one) are the recorded vtable entries.
- * Stock banks on demand (lane L8): a synthetic soundbanksinfo.xml (an event
- * in a loaded bank needs nothing, one only in an _sp bank needs it, one in
- * both needs nothing; the decl-name alias), the per-bundle needs (registries
- * "banks" and served sound decls, each checked against the index), the
- * builder's registries "banks", and the map pass with fake engine calls
- * (operator new, ctor, LoadBank inside heap 0, the product's callback handing
- * the cookie to the engine's, once per process, the log line, Wwise not up,
- * a refusal, a callback after the wait); on the images, the four stock-bank
- * signatures and the cookie site decoding to them. Run via run-tests.ps1. */
+/* modsound_test.c -- tests for mod sound banks (modsound.c) and the builder's bank and sound-decl rules
+ * (modbundle.c): file-name resolution, the Wwise open replacement, bank submission, stock banks on demand,
+ * and, with build 13954591 executables as arguments, the engine signatures. Run via run-tests.ps1. */
 #include "heap_out.h"
 #include <windows.h>
 #include <stdint.h>
@@ -42,8 +19,6 @@ void backend_log(const char *message) { (void)message; }
 
 static int g_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
-
-/* ------------------------------------------------------------ pure rules */
 
 static void test_names(void)
 {
@@ -87,7 +62,7 @@ static void test_decode(void)
     /* LEA target = c+11+0x100; MOV target = c+23+0x234 = the LEA target + 0x140. */
     CHECK(sh_modsound_decode_cmd(c, &ss, &slot));
     CHECK(ss == (uintptr_t)c + 11 + 0x100 && slot == ss + 0x140);
-    c[19] = 0x35;   /* the slot is no longer soundSystem+0x140 */
+    c[19] = 0x35;   /* the slot is not soundSystem+0x140 */
     CHECK(!sh_modsound_decode_cmd(c, &ss, &slot));
     c[19] = 0x34;
     c[33] = 0x28;   /* JMP [RAX+0x28]: another vtable slot */
@@ -120,8 +95,6 @@ static void test_table(void)
     sh_modsound_table_free(&t);
     CHECK(t.count == 0);
 }
-
-/* ------------------------------------------------------------ the routes */
 
 static int n_orig_open, n_orig_lb, n_submit;
 static char last_submit[128];
@@ -233,8 +206,8 @@ static void test_routes(void)
     CHECK(n_orig_lb == 3 && n_submit == 4 && sh_modsound_test_pass() == 0);
     submit_result = 1;
 
-    /* A rebuilt table keeps what was already submitted under the same name;
-     * a new bank is submitted at the next pass. */
+    /* A rebuilt table keeps what was already submitted under the same name; a new bank is submitted at the
+     * next pass. */
     CHECK(sh_modsound_table_add(&t, "sound/soundbanks/pc/p6probe_more.bnk", path, sizeof bytes, "p6probe", 0) == 1);
     sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &t);
     CHECK(sh_modsound_test_pass() == 1 && n_submit == 5 && !strcmp(last_submit, "p6probe_more.bnk"));
@@ -252,7 +225,7 @@ static void test_routes(void)
     CHECK(sh_modsound_restart_banks(NULL, NULL) == 1);
     CHECK(sh_modsound_test_pass() == 0 && n_submit == 5);   /* nothing is given to Wwise again */
 
-    /* The file no longer has the indexed size: the engine answers. */
+    /* The file no longer has the indexed size, so the engine answers. */
     f = fopen(path, "ab");
     fputc(0, f);
     fclose(f);
@@ -287,8 +260,6 @@ static void test_routes(void)
     sh_modsound_table_free(&t);
     DeleteFileA(path);
 }
-
-/* ------------------------------------------------------------ stock banks */
 
 /* The shape of the installed soundbanksinfo.xml (13954591), cut down. */
 static const char XML[] =
@@ -565,8 +536,6 @@ static void test_filtered_submit(void)
     sh_modsound_table_free(&t);
 }
 
-/* ------------------------------------------------------------ builder */
-
 static char g_dir[MAX_PATH];
 static void put_bytes(const char *rel, const void *data, size_t n)
 {
@@ -755,7 +724,7 @@ static void test_builder(void)
     put_bank("sounds/sub/x.bnk", "p6probes_x", 0x71, 0);
     build_expect(0, "a sound bank goes in sounds/ itself");
     drop("sounds/sub/x.bnk");
-    /* The retired "shadows" key refuses the folder (a stock bank's refusal: modbundle_test). */
+    /* The "shadows" key refuses the folder (a stock bank's refusal: modbundle_test). */
     put("mod.json", "{\"version\": \"1.0.0\", \"name\": \"Sound probe\", "
                     "\"shadows\": [\"sound/soundbanks/pc/p6probes_sfx.bnk\"]}");
     build_expect(0, SH_MB_EARLIER);
@@ -775,9 +744,8 @@ static void test_builder(void)
     }
 }
 
-/* SH_MODSOUND_FIXTURE names a source mod folder (snaphak-re's lane P6f
- * p6probe): build it and print what each file provides and needs. Stock
- * names are taken as installed (the archives are not read here). */
+/* SH_MODSOUND_FIXTURE names a source mod folder: build it and print what each file provides and needs, with
+ * stock names taken as installed. */
 static int any_stock(void *ctx, const char *request) { (void)ctx; return strstr(request, "/mods/") == NULL; }
 static void test_fixture(const char *folder)
 {
@@ -800,8 +768,6 @@ static void test_fixture(const char *folder)
     CHECK(banks >= 1 && sounds >= 1);
     sh_mb_free(&b);
 }
-
-/* ------------------------------------------------------------ images */
 
 static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
 {

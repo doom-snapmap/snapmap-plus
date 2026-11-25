@@ -1,12 +1,6 @@
-/* modmanifest_test -- the map manifest: the salt and row grammar, the row
- * round trip, the rows in the map's "snapmap-plus" member (map_carrier.h),
- * rows in an earlier shape refused, placed names, the save-time closure
- * through the serving layer, the load step, and map-level rows (attached
- * mods) with the map scope's hook and the row resolver.
- *
- * The serving layer (modserve_activate_bundles, sh_modserve_row_build and
- * modserve_bundles_for_names_visit, declared in modserve.h) is replaced by
- * doubles defined here. */
+/* modmanifest_test -- the map manifest: the salt and row grammar, the row round trip, the rows in the map's
+ * "snapmap-plus" member (map_carrier.h), refused unsupported rows, placed names, the save-time closure, the load
+ * step and map-level rows. The serving layer is replaced by doubles defined here. */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
 #include <windows.h>
@@ -235,8 +229,8 @@ static void value_round_trip(void)
     sh_modmanifest_row_free(&back);
     free(value);
 
-    /* Refusals: wrong hash, bad salt, no "@", missing size, names not a list, a format 1 row ("<salt>@<build>", an
-     * earlier shape); an unknown member is kept out, a missing name is empty, a "build" member of a local row is not read. */
+    /* Refusals: wrong hash, bad salt, no "@", missing size, names not a list, a format 1 row ("<salt>@<build>");
+     * an unknown member is kept out, a missing name is empty, a "build" member of a local row is not read. */
     {
         static const char short_hash[] = "{\"mod\":\"alexpink@abc\",\"size\":1}";
         static const char bad_salt[] = "{\"mod\":\"Alexpink@" HASH_A "\",\"size\":1}";
@@ -259,7 +253,7 @@ static void value_round_trip(void)
               !strcmp(back.salt, "alexpink") && !strcmp(back.build, SH_MODMANIFEST_LOCAL_BUILD));
         sh_modmanifest_row_free(&back);
     }
-    /* A row that names an "id" or a "bundle" is in an earlier shape. */
+    /* A row that names an "id" or a "bundle" is in an unsupported shape. */
     {
         static const char old_row[] = "{\"id\":\"alex.pink-imp\",\"version\":\"1\",\"bundle\":\"" HASH_A "\",\"size\":1}";
         static const char mixed[] = "{\"mod\":\"alexpink@" HASH_A "\",\"bundle\":\"" HASH_A "\",\"size\":1}";
@@ -354,9 +348,8 @@ static void text_round_trip_and_order(void)
 /* The save chain on one text: settings, then navigation, then the manifest,
  * each putting its part; the member carries all three in its order and the
  * load reads the rows back while the other parts are left to their readers. */
-/* A member whose rows name an "id" and a "bundle" is an earlier shape (the
- * parse detour refuses such a map first, sh_map_old_shape): its rows do not
- * read, and the refusal note is held as the load's refusal. */
+/* A member whose rows name an "id" and a "bundle" is in an unsupported shape (the parse detour refuses such a map
+ * first, sh_map_old_shape): its rows do not read, and the refusal note is held as the load's refusal. */
 static void old_shape_rows(void)
 {
     static const char OLD[] =
@@ -644,9 +637,9 @@ static void save_closure(void)
     }
 }
 
-/* R-LV4: a resized Grid Room and a navigation-marked Blocking Box saved with no row and no tag; the owner rules both
- * mods (PLATFORM, Vanilla stays vanilla). What a map uses of Snapmap+ itself is the product's own entry of the rows:
- * written by a save while the map uses it, gone when it does not, never a row (nothing to download). */
+/* A resized Grid Room and a navigation-marked Blocking Box are saved with no row and no tag. What a map uses of
+ * Snapmap+ itself is the product's own entry of the rows: written by a save while the map uses it, gone when it
+ * does not, never a row (nothing to download). */
 static unsigned g_uses_answer;
 static unsigned fake_uses(const char *json, size_t length, const char *const *names, size_t count)
 {
@@ -976,7 +969,7 @@ static void map_level(void)
     if (saved) HeapFree(GetProcessHeap(), 0, saved);
 
     /* A map-level row (nothing served for it) is still written, beside the placed imp's row,
-     * which no build serves now and is kept as it was. */
+     * which no build serves and is kept as written. */
     g_installed_count = 0;
     make_row(&back, "eringone", "3", HASH_E, 9);
     CHECK(sh_modmanifest_current_attach(&back) == 1);
@@ -1120,8 +1113,8 @@ static void choices(void)
     CHECK(saved && strstr(saved, "\"choices\":{\"weapons/weapon/zion/player/sp/pistol\":\"alexpink\"}"));
     CHECK(saved && !strstr(saved, "carolgon"));
     CHECK(g_mods_lines >= 1);
-    /* The save pins each ported demon's type on its mod's row: an earlier pin gives way to the type the listing
-     * has now, and a type of a mod the map has no row of pins nothing. */
+    /* The save pins each ported demon's type on its mod's row: a stale pin gives way to the type the listing
+     * reports, and a type of a mod the map has no row of pins nothing. */
     {
         char *pinned;
         size_t plen = 0;
@@ -1158,7 +1151,7 @@ static void choices(void)
     g_installed_count = 2;
 }
 
-/* ---- the version rule (D23, D23a, S9) ------------------------------------------------------------------------- */
+/* ---- the version rule ---- */
 
 static int g_carry_answer;
 static int vr_carries(const char *salt, const char *name) { (void)salt; (void)name; return g_carry_answer; }
@@ -1300,13 +1293,11 @@ static void version_rule(void)
     g_installed_count = 0;
 }
 
-/* A local row whose folder is absent is served by its stand-ins (D6a, a composition of no units in the content
- * cache): a save keeps the type pins and the size it was loaded with (R-LV9: the row came back with the stand-ins'
- * size and no choices). With the folder here, the listing decides the pins: a demon it types keeps its pin, one it
- * does not (the folder no longer ports it) gives it up. */
+/* A local row whose folder is absent is served by its stand-ins: a save keeps the type pins and size it was loaded
+ * with. With the folder here, the listing decides the pins: a demon it no longer types gives its pin up. */
 #define PIN_IMP "\"spawnAIType_t/19/mods/alexpink/single_imp\":\"alexpink\""
 
-/* A pinned row composed with stand-ins (its unit not here, D60) keeps its pin the same way; composed whole, the listing
+/* A pinned row composed with stand-ins (its unit not here) keeps its pin the same way; composed whole, the listing
  * decides; unbound (no cache), a pinned row counts as whole. */
 static int g_whole_answer;
 static int whole_stub(const char *build) { (void)build; return g_whole_answer; }
@@ -1393,7 +1384,7 @@ static void standin_pins(void)
     saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
     CHECK(saved && strstr(saved, PIN_IMP) && strstr(saved, "\"size\":11782"));
     if (saved) HeapFree(GetProcessHeap(), 0, saved);
-    /* The folder here and no longer porting the imp: the pin goes. */
+    /* The folder is here and no longer ports the imp: the pin goes. */
     g_npins = 0;
     saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
     CHECK(saved && !strstr(saved, "spawnAIType_t/") && strstr(saved, "\"size\":11782"));

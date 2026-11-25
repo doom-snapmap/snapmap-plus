@@ -1,25 +1,9 @@
-/* script_sandbox_test.c -- the mod script runtime (src/backend/script), with
- * no engine: an in-memory file source stands in for the serving layer and a
- * handle set for the engine's entity table.
- *
- * The engine hooks are stood in for as they behave: a spawn is recorded in
- * the handle table under its mod with its entityDef chain
- * (sh_script_hooks_record), a removal is the resolver no longer finding the
- * spawn id, and damage, death, animation and input records are posted to
- * the mod's queue (sh_script_queue_post). Test ids are spawn ids.
- *
- * Covers: each forbidden facility absent; bytecode refused (an entry file
- * and a required one, real lua_dump output); a script that never returns
- * stopped by the wall clock, also inside pcall, xpcall, run() and
- * coroutine.resume, inside a backtracking pattern and inside long string
- * comparisons; no limit of its own otherwise: a 20 MiB table, long work in
- * one call, a long subject searched, 5,000 records in one frame, 100,000 log
- * lines kept whole; the api declaration; the plain stop line with file and
- * line; two mods isolated; registration, the bound-name and owner queries,
- * and dispatch of every event kind; the re-entrancy queue and its passes;
- * timers and coroutines; deterministic random; teardown with nothing left;
- * and the loader fed malformed text. The wall-clock stop is set to 300 ms for
- * the test (the product's is 5 s). */
+/* script_sandbox_test.c -- the mod script runtime (src/backend/script) with no engine: an in-memory file source stands
+ * in for the serving layer and a handle set for the entity table. Hooks record a spawn under its mod with its entityDef
+ * chain (sh_script_hooks_record), a removal is the resolver no longer finding the spawn id, and event records go to the
+ * mod's queue (sh_script_queue_post); test ids are spawn ids. Covers forbidden facilities, bytecode refusal, the
+ * wall-clock stop (300 ms here, 5 s in the product) as the only limit, the api declaration, stop lines, mod isolation,
+ * registration and dispatch, the re-entrancy queue, timers, coroutines, teardown and malformed loader text. */
 #include "heap_out.h"
 #include <windows.h>
 #include <stdint.h>
@@ -36,7 +20,7 @@
 static int g_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
 
-/* ------------------------------------------------------------ the source */
+/* the source */
 
 typedef struct { char salt[16]; char path[64]; char *text; size_t len; } tfile;
 static tfile g_files[256];
@@ -94,7 +78,7 @@ static void src_release(void *ctx, char *text) { (void)ctx; free(text); }
 
 static const sh_script_source g_src = { NULL, src_list, src_read, src_release };
 
-/* ------------------------------------------------------------ entities */
+/* entities */
 
 static uint64_t g_dead[64];
 static int g_ndead;
@@ -160,7 +144,7 @@ static int t_owner(uint64_t id, char *salt, size_t cap)
     return sh_script_entity_owner(h, salt, cap);
 }
 
-/* ---------------------------------------------------------------- logs */
+/* logs */
 
 static char g_log[65536];
 static void log_cat(void *ctx, const char *line)
@@ -198,7 +182,7 @@ static int run_one(const char *body)
     return sh_script_status("aaaaaaaa");
 }
 
-/* ------------------------------- test API (as another module would add it) */
+/* test API, as another module would add it */
 
 static int t_resolve(lua_State *L)
 {
@@ -237,7 +221,7 @@ static int t_owns(lua_State *L)
     return 1;
 }
 
-/* ---------------------------------------------------------------- tests */
+/* tests */
 
 static void test_absent(void)
 {
@@ -444,7 +428,7 @@ static void test_growth(void)
     int st;
     size_t before;
     sh_script_limits_reset();   /* the product's wall-clock stop: this work is long but returns */
-    /* a 20 MiB script table (the old cap was 32 MiB in all) */
+    /* a 20 MiB script table */
     st = run_one("api = 1\nbig = {}\nfor i = 1, 400000 do big[i] = string.rep('x', 32) .. i end\n"
                  "print('rows', #big, collectgarbage('count') > 20 * 1024)\n");
     CHECK(st == SH_SCRIPT_RUNNING);
@@ -454,7 +438,7 @@ static void test_growth(void)
     sh_script_map_end();
     CHECK(sh_script_bytes_in_use() == 0);
 
-    /* long work in one call (the old budget stopped this at 2 million steps) */
+    /* long work in one call */
     st = run_one("api = 1\nlocal n = 0\nfor i = 1, 20000000 do n = n + i end\nprint('sum', n)\n"
                  "local t = {} for i = 1, 200000 do t[i] = -i end\ntable.sort(t)\nprint('sorted', t[1])\n");
     CHECK(st == SH_SCRIPT_RUNNING);
@@ -462,7 +446,7 @@ static void test_growth(void)
     CHECK(strstr(g_log, "sorted\t-200000") != NULL);
     sh_script_map_end();
 
-    /* a long subject searched (the old cap was 4,096 bytes), ordinary patterns */
+    /* a long subject searched, ordinary patterns */
     st = run_one("api = 1\nlocal s = string.rep('a', 500000) .. 'b'\nprint('found', s:find('b'))\n"
                  "local k, v = ('speed = 42'):match('^(%w+)%s*=%s*(%d+)$')\n"
                  "assert(k == 'speed' and v == '42')\n"
@@ -472,7 +456,7 @@ static void test_growth(void)
     CHECK(strstr(g_log, "patterns ok") != NULL);
     sh_script_map_end();
 
-    /* 20,000 timers at once (the old cap was 4,096) */
+    /* 20,000 timers at once */
     st = run_one("api = 1\nlocal fired = 0\nfor i = 1, 20000 do after(0.1, function() fired = fired + 1 end) end\n"
                  "after(0.2, function() print('fired', fired) end)\n");
     CHECK(st == SH_SCRIPT_RUNNING);
@@ -567,7 +551,7 @@ static void test_error_lines(void)
           "Script stopped: Test Mod, scripts\\main.lua line 3: \"target\" is nothing here. Check that it is set before it is used." },
         { "api = 1\nmove_to(1)\n",
           "Script stopped: Test Mod, scripts\\main.lua line 2: \"move_to\" is not a Snapmap+ call, and this mod's scripts never set it. Check the name, or update Snapmap+ if the mod was made for a newer one." },
-        /* the API guard: a call to a name that does not exist stops the mod even inside pcall (R-AR7) */
+        /* the API guard: a call to a name that does not exist stops the mod even inside pcall */
         { "api = 1\nlocal ok = pcall(fx, 1)\n",
           "Script stopped: Test Mod, scripts\\main.lua line 2: \"fx\" is not a Snapmap+ call, and this mod's scripts never set it. Check the name, or update Snapmap+ if the mod was made for a newer one." },
         { "api = 1\nlocal ok = pcall(function() fx_stop(1) end)\n",
@@ -817,7 +801,7 @@ static void test_reentrancy(void)
     CHECK(sh_script_bytes_in_use() == 0);
     sh_script_map_end();
 
-    /* 5,000 records in one frame (the old queue held 1,024): every one delivered */
+    /* 5,000 records in one frame: every one delivered */
     files_clear();
     file_add("aaaaaaaa", "main.lua", "api = 1\nlocal n = 0\non.input('x', function() n = n + 1 end)\n"
                                      "every(0.5, function() print('inputs', n) end)\n");
@@ -989,7 +973,7 @@ static void count_line(void *ctx, const char *line)
     if (n > g_longest) g_longest = n;
 }
 
-/* A stop line longer than the old 512 bytes: the script's own error text whole. */
+/* A long stop line: the script's own error text whole. */
 static void test_long_stop_line(void)
 {
     char *line;
@@ -1003,8 +987,7 @@ static void test_long_stop_line(void)
     sh_script_map_end();
 }
 
-/* entityDef names past the old 191 characters, and a mod display name past
- * the old 95: carried whole through registration, the spawn chain, the
+/* A long entityDef name and a long mod display name: carried whole through registration, the spawn chain, the
  * handlers and the stop line. */
 static void test_long_names(void)
 {

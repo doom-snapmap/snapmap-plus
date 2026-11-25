@@ -1,7 +1,6 @@
-/* modregistry_choices.c -- the open map's choices between mods' edits (modregistry.h):
- * validated here, stored by the map manifest (modmanifest.c), which gives
- * them to the serving index. Apart from modregistry.c so that the binaries
- * and tests that link the serving index without the manifest stay as they are. */
+/* modregistry_choices.c -- validates the open map's choices between mods' edits (modregistry.h) and stores them in the
+ * map manifest (modmanifest.c), which gives them to the serving index. Kept apart from modregistry.c so the binaries
+ * and tests that link the serving index without the manifest do not need it. */
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>

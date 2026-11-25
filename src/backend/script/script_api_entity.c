@@ -5,30 +5,25 @@
  *   e:distance(other) e:is_player() e:remove() e:view_angle_to(other, [use_view_pos])
  *   e:animation_state(node, [via]) e:force_animation(node, [blend]) e:animation_finished()
  *   e:current_animation() e:animation_event(name) e:tint(r, g, b, [seconds]) e:glow(r, g, b, [seconds])
- * Reads work on any entity; a call that changes an entity works only on the
- * mod's own (placed from its entityDefs or spawned by its scripts), except
- * that any mod may heal a player. A removed entity answers nil (alive and
- * is_player answer false). Every refusal is one plain sentence at the
- * calling script line, raised before the engine is touched.
+ * Reads work on any entity; a call that changes an entity works only on the mod's own (placed from its entityDefs
+ * or spawned by its scripts), except that any mod may heal a player. A removed entity answers nil (alive and
+ * is_player answer false). Every refusal is one plain sentence at the calling script line, raised before the
+ * engine is touched.
  *
  * Engine paths (script_api_common.h has the build 13954591 facts):
- *   position, axis    physics +0x808, vtable +0x80 / +0x88; set: entity SetOrigin +0x338, SetAxis +0x358,
- *                     UpdateVisuals +0x3C0 (the pair the engine's setOrigin event makes)
+ *   position, axis    physics +0x808, vtable +0x80 / +0x88; set: SetOrigin +0x338, SetAxis +0x358, UpdateVisuals +0x3C0
  *   velocity          getLinearVelocity / setLinearVelocity events
- *   health            idAI2: its idAIHealth (heal through the engine's Heal, lower by the field, never to
- *                     0: death comes from damage); idPlayer: getPlayerHealth / getPlayerMaxHealth /
- *                     increaseHealth events
+ *   health            idAI2: its idAIHealth (heal through Heal, lower by the field, never to 0: death comes from
+ *                     damage); idPlayer: getPlayerHealth / getPlayerMaxHealth / increaseHealth events
  *   remove            the engine's remove event, queued
- *   animation         idAI2: ssaction_ChangeAnimState(Via) / ssaction_ForceAnimState (they act while the
- *                     AI is parked in its script state); other entities: changeAnimState(Via) /
- *                     forceAnimState / animState_IsFinished. idAI2 does not handle the latter four
- *                     (its dispatcher and its parents' have no case for events 326..331).
- *   current_animation      the idAI2 animWeb's current node; animation_event and animation_finished are that node
- *                     observed every frame against the last request (script_api_common.c)
- *   view angle        idPlayer: getViewAngles (its aim) and getViewPos; other entities: the axis forward
- *   tint, glow        the engine's lerpRenderParmFrom event (idEntity: it sets a render parm of the entity's
- *                     render model and fades it in game time) on the parms color, bloomcolor and
- *                     highlightcolor, found as renderParm decls by name (script_api_tint.h)
+ *   animation         idAI2: ssaction_ChangeAnimState(Via) / ssaction_ForceAnimState (they act while the AI is
+ *                     parked in its script state; the stock events 326..331 have no idAI2 case); other entities:
+ *                     changeAnimState(Via) / forceAnimState / animState_IsFinished
+ *   current_animation the idAI2 animWeb's current node; animation_event and animation_finished observe it every
+ *                     frame against the last request (script_api_common.c)
+ *   view angle        idPlayer: getViewAngles and getViewPos; other entities: the axis forward
+ *   tint, glow        the lerpRenderParmFrom event on the parms color, bloomcolor and highlightcolor, found as
+ *                     renderParm decls by name (script_api_tint.h)
  *   spawn             idGameLocal +0x448 create, the pose, +0x458 finish, as idTarget_Spawn does */
 #include <math.h>
 #include <stdlib.h>
@@ -54,8 +49,6 @@ static const sh_script_engine *eng(void)
 {
     return sh_script_api_engine();
 }
-
-/* ------------------------------------------------------------ position */
 
 static int origin_of(void *ent, float out[3])
 {
@@ -168,8 +161,6 @@ static int l_distance(lua_State *L)
     return 1;
 }
 
-/* -------------------------------------------------------------- health */
-
 static float earg_number(const sh_script_earg *r, int *ok)
 {
     *ok = 1;
@@ -238,8 +229,6 @@ static int l_alive(lua_State *L)
     return 1;
 }
 
-/* ---------------------------------------------------------------- name */
-
 static int l_def(lua_State *L)
 {
     const sh_script_engine *e = eng();
@@ -275,8 +264,6 @@ static int l_remove(lua_State *L)
     if (ent) sh_script_api_post(ent, "remove", NULL, 0);
     return 0;
 }
-
-/* ------------------------------------------------------------ aiming */
 
 static void angles_dir(const float ang[3], float dir[3])
 {
@@ -319,10 +306,8 @@ static int l_view_angle_to(lua_State *L)
     return 1;
 }
 
-/* ----------------------------------------------------------- animation */
-
-/* "subweb/state", or the state alone in the AI's current subweb. */
-/* The node's full "subweb/state" (malloc'd; NULL without memory). */
+/* The node's full "subweb/state" from "subweb/state" or the state alone in the AI's current subweb (malloc'd;
+ * NULL without memory). */
 static char *anim_path(void *ent, const char *node)
 {
     const sh_script_engine *e = eng();
@@ -363,9 +348,8 @@ static int l_anim_state(lua_State *L)
     if (!dest || (via && !vpath)) { free(dest); free(vpath); return luaL_error(L, "not enough memory"); }
     sh_script_api_anim_request(h, dest, via ? vpath : NULL);
     if (sh_script_api_kind(ent) == SH_SCRIPT_KIND_AI) {
-        /* idAI2 ignores the stock animWeb events: the designer commands act
-         * on a demon parked in its script state, so the AI calls park it and
-         * run them (ssaction_ChangeAnimState, ..Via). */
+        /* idAI2 ignores the stock animWeb events: its ssaction_ChangeAnimState(Via) act on a demon parked in its
+         * script state, so the AI calls park it and run them. */
         (void)sh_script_ai_anim(ent, h, dest, via ? vpath : NULL, SH_AI_ORDER_CHANGE, 0);
     } else {
         sh_script_earg a[4];
@@ -493,8 +477,6 @@ static int l_anim_finished(lua_State *L)
     }
 }
 
-/* -------------------------------------------------------------- spawn */
-
 /* Spawns `def` and records it for the mod; `is_game` when the name is one of the game's (or one the product
  * serves), which the spawn hook does not record by itself. `shown` names it in a refusal. */
 static int spawn_recorded(lua_State *L, const char *def, const char *shown, const float pos[3], double yaw, int is_game)
@@ -543,8 +525,6 @@ static int l_spawn(lua_State *L)
     return spawn_recorded(L, def, lua_tostring(L, 1), pos, yaw, is_game);
 }
 
-/* ------------------------------------------------------------ players */
-
 static int l_players(lua_State *L)
 {
     const sh_script_engine *e = eng();
@@ -566,15 +546,11 @@ static int l_players(lua_State *L)
     return 1;
 }
 
-/* --------------------------------------------------------- tint, glow */
-
 static sh_tint_table g_tint;
 
-/* tint(r, g, b, [seconds]) and glow(r, g, b, [seconds], [strength]): the entity's look (script_api_tint.h); a
- * glow adds its colour times its strength, SH_TINT_GLOW_STRENGTH_DEFAULT when none is given. Answers true when
- * the engine took all three parms, false when it did not (the entity has no render model, or an event is not the
- * game's), nil when the entity is gone or the game's render parms cannot be found. Every argument is checked
- * before the engine is touched. */
+/* tint(r, g, b, [seconds]) and glow(r, g, b, [seconds], [strength]): the entity's look (script_api_tint.h). Answers
+ * true when the engine took all three parms, false when it did not (no render model), nil when the entity is gone
+ * or the render parms are not found. */
 static int tint_call(lua_State *L, const char *call, int kind)
 {
     static const char *const what[3] = { "the red", "the green", "the blue" };
@@ -633,14 +609,11 @@ static int tint_call(lua_State *L, const char *call, int kind)
     return 1;
 }
 
-/* -------------------------------------------------------- recolour (Graphics SDK) */
-
 /* e:recolour{ primary = {r,g,b}, secondary = ..., pattern = { {r,g,b}, {r,g,b} }, scratches = ..., dirt = ...,
- * glow = ..., seconds = s }: DOOM 2016's colour regions (the customization template, skinvmtr_custom and its
- * family), which the engine itself writes per render entity (VK FUN_140fdeb70 / FUN_140fdf770, through the same
- * per-entity parm set as lerpRenderParmFrom). A colour is written as a material's constant reads (sRGB decoded); a
- * region keeps its last colour per entity so a fade starts from it, the first fade from the colour itself. Answers
- * true when every parm was sent. On an entity whose surfaces have no colour regions nothing changes. */
+ * glow = ..., seconds = s }: the colour regions of DOOM 2016's customization template (skinvmtr_custom and its
+ * family), which the engine writes per render entity (VK FUN_140fdeb70 / FUN_140fdf770) through the parm set
+ * lerpRenderParmFrom uses. Colours are sRGB decoded; a region keeps its last colour per entity so a fade starts
+ * from it. Answers true when every parm was sent; an entity without colour regions is unchanged. */
 #include "../sdkwords.h"
 
 typedef struct recolour_rec { sh_script_handle h; int parm; float v[4]; } recolour_rec;
@@ -753,13 +726,10 @@ static int l_recolour(lua_State *L)
     return 1;
 }
 
-/* ------------------------------------------------- environments (Graphics SDK) */
-
 /* set_environment(name): the mod's environment (an env decl written `type environment`, modenv.h) laid over the
- * level's own on the players' views, blending in over its `blend`: the fx it compiles to (FX_ENV_CHANGE items, the
- * view's own override, VK FUN_1416f0240 case 0xb) played by its emitter. clear_environment() stops it, which
- * releases the values with the same blend. One environment of a mod at a time; a new one replaces the last. Near the
- * entity limit it is skipped with a log line, never an error. */
+ * level's own on the players' views, blending in over its `blend`, by the fx it compiles to (FX_ENV_CHANGE items,
+ * VK FUN_1416f0240 case 0xb) played by its emitter. clear_environment() releases the values with the same blend; a
+ * mod has one environment at a time, and near the entity limit it is skipped with a log line. */
 #define SHS_REG_ENV "sh.sdk.environment"
 
 static void env_stop(lua_State *L)
@@ -812,8 +782,6 @@ static int l_clear_environment(lua_State *L)
 
 static int l_tint(lua_State *L) { return tint_call(L, "tint", 0); }
 static int l_glow(lua_State *L) { return tint_call(L, "glow", 1); }
-
-/* ------------------------------------------------------- registration */
 
 void sh_script_api_entity_register(void)
 {

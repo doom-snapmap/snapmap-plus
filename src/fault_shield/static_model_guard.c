@@ -1,25 +1,8 @@
-/* Static render models never build from a surface table that is not a static
- * model's (static_model_guard.h). The update of a static render model
- * ("StaticModelUpdate", the idRenderModelStatic vtable +0x78 method) copies
- * its backing's surface table when it rebuilds, and reads it when its skin or
- * custom material changed. Before the original runs, the guard works out which
- * backing it will read (after the reload counter moved, the engine looks the
- * backing up again by name; the guard makes that same call first), checks that
- * table and, when it is not a static model's, points the render model at the
- * engine's own "_empty" model with the never-built marker, so the engine
- * rebuilds an empty copy. The render model draws nothing for the rest of the
- * map; nothing is freed; one line names the backing in the product's logs.
- *
- * Healthy models pay only a few loads per update: the table is checked only
- * when the engine is about to read it. The original runs outside every __try,
- * so the engine's own C++ throws still reach its Frame catch.
- *
- * Page checks cannot prove memory is the object it claims to be; the table
- * check uses two invariants of the engine's own code instead. A backing
- * surface's material is an engine object (its first word is a vtable inside
- * DOOM's image), and a backing surface never holds vertex-cache slots: the
- * render model's teardown frees the slots of every surface it copied, so a
- * slot in a backing would be freed by every render model built from it. */
+/* Before StaticModelUpdate (idRenderModelStatic vtable +0x78) runs, the guard finds the backing it will read
+ * (repeating the engine's by-name lookup when the reload counter moved), checks that surface table and, if it
+ * is bad, points the model at the engine's "_empty" model with the never-built marker; nothing is freed.
+ * A good table has materials whose first word is a vtable inside DOOM's image and no vertex-cache slots. The
+ * original runs outside every __try so the engine's C++ throws reach its Frame catch. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -176,15 +159,9 @@ static void smg_report(const uint8_t *backing, const char *why, int surface)
     backend_log(m);
 }
 
-/* ---------------------------------------------------------------------------
- * A backing static model the product reloaded in place (a native/ replacement
- * served or withdrawn by a map-scope change, R-DS5) keeps its pointer, and the
- * update rebuilds a render model's copy only for a never-built marker (-1) or a
- * changed backing pointer (VK 0x1414c54d0 / GL 0x1414b8a30: a moved reload
- * counter alone re-looks the backing up and finds the same pointer). So each
- * render model of a reloaded backing gets the never-built marker once, at its
- * next update, and copies the table the reload made.
- * ------------------------------------------------------------------------ */
+/* A backing reloaded in place keeps its pointer, and the update (VK 0x1414c54d0 / GL 0x1414b8a30)
+ * rebuilds a copy only for a never-built marker (-1) or a changed backing pointer, so each render model of
+ * a reloaded backing gets the never-built marker once, at its next update. */
 #define SMG_RELOADED_MAX 64
 #define SMG_REBUILT_MAX  4096
 static SRWLOCK         g_reload_lock = SRWLOCK_INIT;
@@ -300,10 +277,9 @@ static void smg_log(const char *msg)
     backend_log(msg);
 }
 
-/* StaticModelUpdate's byte checks, public so the build-image test runs them on each executable's own function:
- * 0 when the 12-byte head, the counter compare and the list LEA are as expected and the counter is the list's reload
- * counter (list +0x60), with *list and *counter set; 1 when the head or the two instructions differ; 2 when the
- * counter is not the list's. SEH-guarded: unreadable counts as 1. */
+/* StaticModelUpdate's byte checks: 0 when the 12-byte head, counter compare and list LEA are as expected and
+ * the counter is the list's reload counter (list +0x60), with *list and *counter set; 1 when the head or an
+ * instruction differs or is unreadable; 2 when the counter is not the list's. */
 int sh_static_model_update_check(const uint8_t *target, const uint8_t **list, const uint8_t **counter)
 {
     static const uint8_t head[] = { 0x40, 0x57, 0x48, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x05 };
@@ -376,21 +352,10 @@ int sh_static_model_guard_install(const uint8_t *module_base, const sig_result *
     return 1;
 }
 
-/* ------------------------------------------------------------------------
- * A session static model reloads its surfaces in process heap 0.
- *
- * A refcounted static model (its byte +0x68 set) frees its surfaces when its
- * reference count falls to zero and loads them again when the count next
- * rises: IncReferenceCount ("StaticModelIncRef") calls the model's own load
- * (vtable +0x40) directly, not through ResourceGenericLoad, and that load
- * allocates the surface table and geometry from the current heap. The
- * editor's map reloads run with a map heap selected, and the next Play load
- * releases that heap; a model at level 4 is not purged then, so it stays
- * listed with a freed table, and the next static render model built from it
- * faults (R-CR1: the door cap models/snapmaps/door_caps/cap_05.lwo, level 4,
- * refcounted). So when such a reload is about to run for a level-4 model with
- * a map heap selected, it runs inside process heap 0, where the model lives.
- * ------------------------------------------------------------------------ */
+/* A refcounted static model (byte +0x68 set) reloads its surfaces in IncReferenceCount ("StaticModelIncRef"),
+ * which calls the model's own load (vtable +0x40) and allocates from the current heap. If a map heap is
+ * selected, the next Play load releases it while a level-4 model stays listed with a freed table, and the
+ * next render model built from it faults. So that reload runs inside process heap 0, where the model lives. */
 typedef void (*incref_fn)(void *model);
 static incref_fn          g_orig_incref;
 static sh_process_heap_api g_heap_api;
@@ -458,8 +423,7 @@ static void sh_incref_detour(void *model)
     }
 }
 
-/* StaticModelIncRef's 15-byte head, public so the build-image test runs the same check on each executable's own
- * function. 1 when it is as expected. SEH-guarded. */
+/* 1 when StaticModelIncRef's 15-byte head is as expected; SEH-guarded. */
 int sh_static_model_incref_head_ok(const uint8_t *target)
 {
     static const uint8_t head[] = { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x60,

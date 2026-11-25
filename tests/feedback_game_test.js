@@ -1,5 +1,5 @@
 /* Tests the relay's game-identity handling: only the identity strings of known
- * builds (13954591, and 2642713 for legacy reports) are accepted, the issue body
+ * builds (13954591 and 2642713) are accepted, the issue body
  * always carries a "- Game:" line, and an unrecognized value is never echoed.
  * Extract the functions from the Worker source without its runtime imports. */
 'use strict';

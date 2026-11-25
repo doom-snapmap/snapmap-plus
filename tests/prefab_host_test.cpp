@@ -1,8 +1,5 @@
-// prefab_host_test -- the WebView host's Prefabs tab decisions (prefab_host.h):
-// Create's precheck tells an empty selection from a hovered entity that is not
-// selected, a prefab's kind is its file's top-level ~type with or without the
-// snapmapPlus block, the live usage is posted again only when it changed, and a
-// name is one Windows can hold as a file or folder name.
+// prefab_host_test -- the WebView host's Prefabs tab decisions (prefab_host.h): Create's precheck, a prefab's
+// kind from its file's top-level ~type, live usage posted only when changed, and names Windows can hold.
 #include <stdio.h>
 #include <string.h>
 #include <string>

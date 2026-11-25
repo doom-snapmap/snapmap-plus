@@ -1,9 +1,5 @@
-/* Rawmaps: map JSON files outside DOOM's saves. File > Load Rawmap opens one
- * at once through the editor reload (editor_frame.c), and the load detour
- * gives only that reload's parse the rawmap's text; Save Rawmap writes the
- * open map. Every map parse is prepared here (navigation, settings, mods).
- * Paths are UTF-8; file calls are the wide Windows ones.
- */
+/* Rawmaps: map JSON files outside DOOM's saves. Owns Load Rawmap (through the editor reload), Save Rawmap
+ * and the preparation of every map parse; paths are UTF-8, file calls the wide Windows ones. */
 #ifndef BACKEND_RAWMAP_H
 #define BACKEND_RAWMAP_H
 
@@ -12,21 +8,13 @@
 
 #include "snapmap_plus_iface.h"
 
-/* Install the DeserializeFromJson detour only for a clean SIG_OK resolution.
- * An existing inline hook cannot supply the original stolen instructions.
- * Returns 1 when installed, otherwise logs the refusal and returns 0.
- */
+/* Install the DeserializeFromJson detour only for a clean SIG_OK resolution (an existing inline hook cannot
+ * supply the stolen instructions). Returns 1 when installed, else logs the refusal and returns 0. */
 int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok);
 
-/* Paths have no length of their own here: every path is a malloc'd string
- * sized to it (free). The backend's C runtime allocates from the process
- * heap, never an engine heap, so these are safe on the game's threads.
- *
- * A UTF-8 path as the wide long form the wide Windows file calls take
- * ("\\?\C:\..." or "\\?\UNC\server\share\..."; a relative path is made
- * absolute first), so a path of any depth up to Windows' own 32,767 UTF-16
- * units opens. NULL when the path is empty or not UTF-8 (last error
- * ERROR_INVALID_NAME) or memory runs out. */
+/* Every path here is a malloc'd string (free) from the process heap, safe on the game's threads.
+ * A UTF-8 path as the wide long form ("\\?\C:\..." or "\\?\UNC\..."; a relative path is made
+ * absolute first). NULL when empty, not UTF-8 (ERROR_INVALID_NAME) or out of memory. */
 wchar_t *sh_rawmap_path_wide(const char *utf8);
 /* A wide path as UTF-8 without the long-form prefix; NULL when empty or out of memory. */
 char *sh_rawmap_path_utf8(const wchar_t *wide);
@@ -35,11 +23,8 @@ char *sh_rawmap_path_utf8(const wchar_t *wide);
  * rawmap.json path. Returns 1 if accepted. */
 int sh_rawmap_swap_set_source(const char *path);
 
-/* Open a rawmap in the editor now: `path` (UTF-8) becomes the load path when
- * given, else the current load path opens. Refused, with the reason in *msg
- * (malloc'd), when the file is not a rawmap or the editor cannot open it now;
- * nothing is kept for a later map. 1 = the reload was queued for the next
- * editor frame (*msg says so). */
+/* Open a rawmap in the editor now: `path` (UTF-8) becomes the load path when given. Returns 1 when the
+ * reload is queued for the next editor frame, else 0 with the reason in *msg (malloc'd). */
 int sh_rawmap_open_now(const char *path, char **msg);
 
 /* How many rawmaps have been opened this session. */
@@ -58,12 +43,8 @@ char *sh_rawmap_diag_status(void);
 /* Opening a rawmap requires installed overwrite protection unless explicitly disabled. */
 int sh_rawmap_load_is_safe(void);
 
-/* Save processing calls native SerializeToJson, preserves its bool return,
- * and embeds navigation and the map's Snapmap+ data into the output.
- */
-/* Install the SerializeToJson detour only for a clean SIG_OK resolution.
- * Returns 1 when installed, otherwise logs the refusal and returns 0.
- */
+/* Install the SerializeToJson detour (it embeds navigation and the map's Snapmap+ data in the output) only
+ * for a clean SIG_OK resolution. Returns 1 when installed, else logs the refusal and returns 0. */
 int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok);
 
 /* Observe every successful save's final text (after the manifest rows are
@@ -71,25 +52,18 @@ int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok);
 typedef void (*sh_rawmap_save_observer)(const char *text, size_t length);
 void sh_rawmap_set_save_observer(sh_rawmap_save_observer observer);
 
-/* Resolve native idStr assignment for navigation embedding. Without
- * it, save-output replacement is unavailable.
- */
+/* Resolve native idStr assignment for navigation embedding; without it save-output replacement is unavailable. */
 void sh_rawmap_embed_install(const void *module_base);
 
-/* Serialize the LIVE map rather than reading the newest save off disk, so unsaved
- * edits and never-saved maps export correctly. `map_to_json` is the resolved
- * SnapMapToJson, NOT SerializeToJson. `add_branch_tag_fn` is used only to derive
- * the engine's idStr ctor/dtor, which have too many twins to signature directly. */
+/* Serialize the LIVE map, so unsaved edits export. `map_to_json` is the resolved SnapMapToJson, NOT
+ * SerializeToJson; `add_branch_tag_fn` only derives the engine's idStr ctor/dtor (too many twins to sign). */
 int sh_rawmap_set_live_serialize(void *map_to_json, void *add_branch_tag_fn);
 
 /* 1 = both functions resolved and the live path has not faulted this session. */
 int sh_rawmap_live_serialize_ready(void);
 
-/* Serialize `map` and write it to `destination` (UTF-8). MAIN THREAD ONLY: it
- * reads engine state and allocates through the engine's allocator, so it must be
- * entered from the editor-frame hook. *msg (malloc'd) receives one sentence for
- * the player: where the map was saved, or why it was not. sh_pretty_on changes
- * only the file's layout. */
+/* Serialize `map` and write it to `destination` (UTF-8). MAIN THREAD ONLY, from the editor-frame hook
+ * (it allocates through the engine's allocator). *msg (malloc'd) is one sentence: where it was saved or why not. */
 int sh_rawmap_write_from_live(void *map, const char *destination, char **msg, unsigned long long *out_bytes);
 
 /* The open edit map as JSON, copied into the process heap (free with HeapFree). No
@@ -103,19 +77,15 @@ int sh_rawmap_deserialize_plain(void *native, const char *json, void *out_map);
 /* Count successful rawmap saves for the File menu's status. */
 unsigned long sh_rawmap_save_count(void);
 
-/* ---------------------------------------------------------------- a rawmap that names mods ------
- * A rawmap's manifest rows (its snapmap-plus member, map_carrier.h) name the mods it places. The .json alone loads only
- * where those mods are installed, so every rawmap save of a map with at least
- * one row also writes the mods-carrying export (modexport.c) beside the JSON,
- * at the same path with .zip (rawmap.json -> rawmap.zip), and says so with one
- * toast and one console line. A save whose own path ends in .zip is the export
- * already. A map with no rows writes only the JSON. */
+/* A rawmap's manifest rows (map_carrier.h) name the mods it places, so a save of a map with at least one row
+ * also writes the mods-carrying export (modexport.c) beside the JSON, same path with .zip. A save whose own
+ * path ends in .zip is the export already; a map with no rows writes only the JSON. */
 typedef struct sh_rawmap_save_report {
-    char *json;                           /* malloc'd; NULL when the save was a .zip */
-    char *zip;                            /* malloc'd: the export, or NULL for a map without mods */
-    unsigned long long json_bytes, zip_bytes;   /* zip_bytes 0 with zip set: it was refused */
+    char *json;                           /* malloc'd; NULL for a .zip save */
+    char *zip;                            /* malloc'd export, or NULL without mods */
+    unsigned long long json_bytes, zip_bytes;   /* zip_bytes 0 with zip set: refused */
     unsigned mods;                        /* rows in the saved map */
-    char *zip_error;                      /* why the export was not written (malloc'd, whole), or NULL */
+    char *zip_error;                      /* malloc'd reason the export failed, or NULL */
     unsigned long sequence;               /* increments on every reported write */
 } sh_rawmap_save_report;
 
@@ -129,21 +99,16 @@ void sh_rawmap_save_report_free(sh_rawmap_save_report *r);
  * an empty one, or when memory runs out. */
 char *sh_rawmap_companion_zip_path(const char *json_path);
 
-/* How many mods the open map uses, as far as the backend knows without
- * reading the editor: the rows of its last save since it opened, else the
- * rows it was opened with. Any thread. */
+/* How many mods the open map uses, without reading the editor: the rows of its last save, else the rows
+ * it was opened with. Any thread. */
 int sh_rawmap_open_map_mods(void);
 
-/* 1 while the open map is a rawmap opened by the reload and no save has named it
- * yet, with the rawmap's file name in *name (malloc'd; NULL otherwise). Its
- * edit still holds the id of the saved map the reload borrowed, so this is the
- * open map's identity until the first save. */
+/* 1 while the open map is a reload-opened rawmap no save has named yet, with its file name in *name
+ * (malloc'd; NULL otherwise). Its edit still holds the borrowed saved map's id until the first save. */
 int sh_rawmap_open_unsaved(char **name);
 
-/* The edit's saved-map id (its local id idStr) for the branch answer: 1 with
- * `out` filled, else 0. iface_engine.c binds it. While the edit of a map the
- * swap opened still holds the id its reload borrowed, Save asks for a name;
- * once a save gave it its own id, Save writes that map (the engine answers). */
+/* The edit's saved-map id (its local id idStr) for the branch answer: 1 with `out` filled, else 0.
+ * iface_engine.c binds it. */
 typedef int (*sh_rawmap_edit_id_fn)(char *out, size_t cap);
 void sh_rawmap_set_edit_id_reader(sh_rawmap_edit_id_fn fn);
 
@@ -154,101 +119,80 @@ void sh_rawmap_set_notify(void (*toast)(const char *title, const char *text), vo
 /* Tell the player one sentence (toast and console line) on the next main tick. Any thread. */
 void sh_rawmap_tell(const char *text);
 
-/* Main-thread tick: take a finished import or export (below) and show the
- * last sentence (toast and console line) once. Idle cost: two reads. */
+/* Main-thread tick: take a finished import or export (below) and show the last sentence once. */
 void sh_rawmap_poll_main(void);
 
-/* A rawmap ZIP's import, a .zip save and the companion .zip beside a .json
- * save run on a thread of their own, one at a time, never on DOOM's: an
- * import holds its text and asks the editor to open the map again when it is
- * done; an export records the save report and says which file to share. 1
- * while one runs or waits for the main tick. Any thread. */
+/* A rawmap ZIP's import, a .zip save and the companion .zip run one at a time on a thread of their own,
+ * never DOOM's. 1 while one runs or waits for the main tick. Any thread. */
 int sh_rawmap_transport_busy(void);
 
-/* The editor reload's own check, on its frame and before LoadMap (MAIN
- * THREAD): read the load path once (a .zip imports its mods here), count
- * the mods it names that are not installed and, when there are any, hand them
- * to the rawmap hold (modpublished.h) and refuse with the reason in *why (malloc'd).
- * On 1 the text is kept for the parse; call sh_rawmap_reload_done with
- * LoadMap's result after it returns, on every path (`faulted` when it
- * faulted); a failure is told to the player there. */
+/* The editor reload's check, on its frame before LoadMap (MAIN THREAD): read the load path once (a .zip
+ * imports its mods here) and, when it names mods that are not installed, hand them to the rawmap hold
+ * (modpublished.h) and refuse with the reason in *why (malloc'd). On 1 the text is kept for the parse; call
+ * sh_rawmap_reload_done with LoadMap's result on every path (`faulted` when it faulted). */
 int  sh_rawmap_prepare_reload(char **why);
 void sh_rawmap_reload_done(int rc, int faulted);
 
-/* The rawmap hold's resume: the mods are installed, so open the rawmap again
- * now when the editor can take it. *note (malloc'd) receives a sentence for the player
- * when it could not. Returns 1. */
+/* The rawmap hold's resume: open the rawmap again when the editor can take it, else *note (malloc'd)
+ * gets a sentence for the player. Returns 1. */
 int sh_rawmap_reopen_after_mods(char **note);
 
 /* Bytes in the most recent successful rawmap save, or 0 before any write. */
 unsigned long long sh_rawmap_save_last_bytes(void);
 
-/* ---------------------------------------------------------------- the File-menu file surface -------
- * The +0x328/+0x330/+0x338 vtable-slot bodies, handed to iface_engine so every slot binds in one
- * call. None touches the engine: opening and saving queue onto the editor frame. */
+/* The +0x328/+0x330/+0x338 File-menu vtable-slot bodies, handed to iface_engine in one call.
+ * None touches the engine: opening and saving queue onto the editor frame. */
 void sh_rawmap_get_slots(sh_rawmap_status_fn *status, sh_rawmap_configure_fn *configure,
                          sh_rawmap_load_now_fn *load_now);
 
-/* Would this file be accepted as a rawmap to open? Checks readable / non-empty / under 2 GB (the
- * engine's own string length) / starts like JSON after whitespace. *why (malloc'd) gets the reason
- * as a lower-case clause that reads after "The rawmap was not loaded: ". Returns 1 = acceptable. A
- * pass is not a promise the map is valid; the engine's own parse decides that. */
+/* Would this file be accepted as a rawmap to open? It must be readable, non-empty, under 2 GB (the
+ * engine's string length) and start like JSON. *why (malloc'd) is a lower-case clause reading after
+ * "The rawmap was not loaded: ". Returns 1 = acceptable; the engine's parse decides validity. */
 int sh_rawmap_validate_source(const char *path, char **why);
 
-/* 1 = this file is a rawmap, by the top-level "~type":"idSnapMap" the engine's serializer writes.
- * Stricter than sh_rawmap_validate_source on purpose: that guards an explicit load of a named file,
- * this decides whether to OFFER a file in a listing -- and the folders involved also hold
- * config.json, install.json, pinned.json and prefabs, which are all valid JSON and none of them
- * maps. Reads the last 8 KB. */
+/* 1 = this file is a rawmap, by the top-level "~type":"idSnapMap" in its last 8 KB. Stricter than
+ * sh_rawmap_validate_source: it decides whether to OFFER a file in a listing, and the folders also hold
+ * config.json, install.json, pinned.json and prefabs, which are JSON but not maps. */
 int sh_rawmap_looks_like_rawmap(const char *path);
 
-/* The EFFECTIVE paths, malloc'd (NULL only when memory runs out): the rawmap that opens, and where
- * Save Rawmap writes. These are the paths actually in force, defaults included. */
+/* The EFFECTIVE paths in force, defaults included, malloc'd (NULL only when memory runs out): the rawmap
+ * that opens, and where Save Rawmap writes. */
 char *sh_rawmap_load_path(void);
 char *sh_rawmap_save_path(void);
 
-/* The DEFAULT path (both load and save), regardless of what is set, malloc'd. Pair with the two
- * above to tell "the usual file" from "the file currently in force". */
+/* The DEFAULT path (load and save), regardless of what is set, malloc'd. */
 char *sh_rawmap_default_path(void);
 
-/* WHERE SAVES GO. One path, belonging to the map that is open. "" or NULL means the
- * default rawmap.json. "Save Rawmap As" and `sh_rawmaps savepath <path>` set it, so a
- * later save writes to the same file. Refuses anything dest_path_is_usable refuses.
- *
- * A rawmap someone downloads and opens is an archive entry, so opening one never aims
- * a save at it: only picking it here does, and only for the map now open. */
+/* Where saves go: one path belonging to the open map; "" or NULL means the default rawmap.json. "Save
+ * Rawmap As" and `sh_rawmaps savepath <path>` set it. Refuses what dest_path_is_usable refuses; opening
+ * a rawmap never aims a save at it. */
 int sh_rawmap_set_save_target(const char *path);
 
-/* The target as set (malloc'd), or "" when saves go to the default; NULL only when memory
- * runs out. Tells "this file" from "the usual file"; sh_rawmap_save_path reports where bytes
- * actually land. */
+/* The target as set (malloc'd), or "" when saves go to the default; NULL only when memory runs out.
+ * sh_rawmap_save_path reports where bytes actually land. */
 char *sh_rawmap_save_target(void);
 
-/* Call when a different map is opened: drops the target, so a save cannot land on a
- * file that was aimed at while some other map was open. */
+/* Call when a different map is opened: drops the target so a save cannot land on another map's file. */
 void sh_rawmap_clear_save_target_for_new_map(void);
 
-/* Enable the IsBranchMap answer for substituted maps. This changes no live tags.
- * Disabling it explicitly allows saves to overwrite the borrowed map slot. */
+/* Enable the IsBranchMap answer for substituted maps (no live tags change); disabling it lets saves
+ * overwrite the borrowed map slot. */
 void sh_rawmap_set_branch_tag(int on);
 int  sh_rawmap_branch_tag_enabled(void);
 
-/* Detour idSnapEditorLocal::IsBranchMap so a map opened from a rawmap answers yes, which is what
- * makes the engine's own Save ask for a name instead of overwriting the map the rawmap opened
- * over. Finds the function itself: a second function in the image has the same body around a
- * different tag check, so the match is confirmed by the literal its callee names. Returns 1 when
- * installed; every refusal is logged and leaves the engine's own answer in place. */
+/* Detour idSnapEditorLocal::IsBranchMap so a rawmap-opened map answers yes and the engine's Save asks
+ * for a name instead of overwriting the borrowed map. A second function has the same body around a different
+ * tag check, so the match is confirmed by the literal its callee names. Returns 1 when installed; a refusal
+ * is logged and leaves the engine's answer in place. */
 int sh_rawmap_branch_install(const unsigned char *module_base);
 
-/* Could we write a rawmap at `path`? The file need not exist -- a save creates it -- but the path
- * must name a folder and that folder must exist. This is what stops a bare word like "banana" from
- * becoming a file in DOOM's own install folder. *why (malloc'd) gets the reason on failure. */
+/* Could we write a rawmap at `path`? The file may be new, but its folder must exist, which stops a bare
+ * word like "banana" becoming a file in DOOM's install folder. *why (malloc'd) gets the reason. */
 int sh_rawmap_dest_path_is_usable(const char *path, char **why);
 
-/* Can we write there RIGHT NOW? As above, plus: the file must not already exist as a folder or as a
- * read-only file. Ask this at a save, not when vetting a save-path setting -- the write is queued
- * onto a later frame, so a refusal has to happen before the command reports anything. Attribute-only,
- * so a full disk or a lock still fails later; it never opens the target. */
+/* Can we write there RIGHT NOW? As above, plus the file must not be a folder or read-only. Ask this at a
+ * save, since the write is queued onto a later frame. Attribute-only (never opens the target), so a full
+ * disk or a lock still fails later. */
 int sh_rawmap_dest_writable_now(const char *path, char **why);
 
 /* The same verdict about the load path, plus whether opening rawmaps is safe on this build. */

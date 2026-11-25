@@ -40,8 +40,6 @@ static int zip_cause(char **cause, const char *fmt, ...)
     return 0;
 }
 
-/* ------------------------------------------------------------ crc32 ----- */
-
 static uint32_t g_zip_crc_table[256];
 static INIT_ONCE g_zip_crc_once = INIT_ONCE_STATIC_INIT;
 
@@ -84,8 +82,6 @@ static int zip_ascii(const char *s)
     for (; *s; s++) if ((unsigned char)*s >= 0x80) return 0;
     return 1;
 }
-
-/* ------------------------------------------------------------ writer ---- */
 
 static int zip_wraw(sh_zip_writer *w, const void *p, size_t n)
 {
@@ -239,8 +235,6 @@ void sh_zip_writer_free(sh_zip_writer *w)
     w->n = w->cap = 0;
 }
 
-/* ------------------------------------------------------------ reader ---- */
-
 static int zip_read_at(HANDLE h, unsigned long long at, void *buf, size_t n)
 {
     LARGE_INTEGER li;
@@ -274,9 +268,8 @@ int sh_zip_name_ok(const char *s, size_t n)
     return 1;
 }
 
-/* Entry names compare without case first (DECISIONS 13: names are the
- * game's, and two names one Windows folder cannot tell apart are one file),
- * then byte for byte, so the order is total and find agrees with sort. */
+/* Entry names compare without case first (two names one Windows folder cannot tell apart are one file), then
+ * byte for byte, so the order is total and find agrees with sort. */
 static int zip_name_cmp(const char *a, const char *b)
 {
     int c = _stricmp(a, b);
@@ -339,10 +332,8 @@ static int zip_damaged(sh_zip_reader *r, unsigned char *cd, char **cause)
     return zip_cause(cause, "the export's file list is damaged" ZIP_AGAIN);
 }
 
-/* The ZIP64 values of an entry whose classic fields carry the marker: the
- * extra field `x` (xl bytes) must be well formed, and its ZIP64 record must
- * hold exactly the values the markers ask for, in the format's order
- * (uncompressed, compressed, local record offset). 1, else 0. */
+/* 1 when the extra field `x` (xl bytes) is well formed and its ZIP64 record holds exactly the values the markers
+ * ask for (uncompressed, compressed, local record offset), else 0. */
 static int zip_entry64(sh_zip_rentry *e, int want_usize, int want_csize, int want_lho, const unsigned char *x, unsigned xl)
 {
     unsigned at = 0, need = (want_usize ? 8u : 0u) + (want_csize ? 8u : 0u) + (want_lho ? 8u : 0u);
@@ -366,11 +357,9 @@ static int zip_entry64(sh_zip_rentry *e, int want_usize, int want_csize, int wan
     return seen == (need != 0);
 }
 
-/* The end of the directory: the classic end record at `found` in the tail
- * (the archive's last tail_n bytes) and, when it points to them, the ZIP64
- * locator and end record. 1 with the entry count, the directory's size and
- * offset, and where the records after the directory start; 0 damaged, -1 a
- * split archive. */
+/* Read the end of the directory: the classic end record at `found` in the tail and, when it points to them,
+ * the ZIP64 locator and end record. 1 with the entry count, directory size and offset, and the end of the
+ * directory records; 0 damaged, -1 a split archive. */
 static int zip_find_dir(sh_zip_reader *r, const unsigned char *tail, size_t tail_n, size_t found, uint64_t *entries,
                         uint64_t *cd_size, uint64_t *cd_off, uint64_t *dir_end)
 {
@@ -439,10 +428,8 @@ int sh_zip_reader_open(sh_zip_reader *r, const char *path, char **cause)
         sh_zip_reader_close(r);
         return zip_cause(cause, "the export is split across several files, which is not supported" ZIP_AGAIN);
     }
-    /* The directory lies whole before the records that end it, and every
-     * entry's record and data before the directory. Each entry takes at
-     * least 46 bytes of it, which bounds the count before anything is
-     * allocated. */
+    /* The directory lies whole before the records that end it; each entry takes at least 46 bytes of it, which
+     * bounds the count before anything is allocated. */
     if (!dir || cd_off > dir_end || cd_size > dir_end - cd_off || entries > cd_size / 46u || (size_t)cd_size != cd_size)
         return zip_damaged(r, NULL, cause);
     cd = (unsigned char *)malloc(cd_size ? (size_t)cd_size : 1);
@@ -476,11 +463,8 @@ int sh_zip_reader_open(sh_zip_reader *r, const char *path, char **cause)
             sh_zip_reader_close(r);
             return zip_cause(cause, "the export is split across several files, which is not supported" ZIP_AGAIN);
         }
-        /* Every field a later read trusts is checked here, once: the method
-         * (stored or deflate only; a folder reader's marker never comes from
-         * a file), no encryption, the ZIP64 values a marker asks for, a
-         * stored entry's two sizes equal, and its local record inside the
-         * archive before the directory. */
+        /* Every field a later read trusts is checked here, once: method, encryption, ZIP64 values, a stored
+         * entry's equal sizes, and its local record lying before the directory. */
         if (e->flags & 1) {
             free(cd);
             sh_zip_reader_close(r);

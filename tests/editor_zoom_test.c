@@ -51,7 +51,7 @@ static int synthetic_main(void)
     assert(sh_editor_zoom_orbit_height(0,1)==16000&&sh_editor_zoom_orbit_height(16000,NAN)==16000);
     assert(sh_editor_zoom_clamp_scale(0.25f)==1&&sh_editor_zoom_clamp_scale(9)==SH_ZOOM_SCALE_MAX);
     assert(sh_editor_zoom_blueprint_far(16000,2,NAN)==66000);
-    /* Unlocked bounds 23936 at x2: height 47872, far plane 98736 (R-006 D7). */
+    /* Unlocked bounds 23936 at x2: height 47872, far plane 98736. */
     assert(sh_editor_zoom_orbit_height(23936,2)==47872&&sh_editor_zoom_blueprint_far(23936,2,0)==98736);
     /* With the editor's far-plane write redirected the height is free; without
      * it only the blend raises r_zfar and it stops above the 33000 volume. */
@@ -66,10 +66,8 @@ static int synthetic_main(void)
     assert(fabsf(sh_editor_zoom_blend(1,0,1,0.3f)-0.3f)<1e-6f);
     assert(fabsf(sh_editor_zoom_blend(0,1,1,0.3f)-0.7f)<1e-6f);
     assert(sh_editor_zoom_blend(1,0,1,2.0f)==1&&sh_editor_zoom_blend(1,0,1,-1.0f)==0);
-    /* Module picking (R-011): native 50000 at scale 1; at least the native
-     * pick:far ratio above it, and long enough to reach the farthest module
-     * corner (floors +/-52 x 192 at the ceiling) from the farthest camera
-     * whenever the zoom is raised (scale 1 keeps the native 50000). */
+    /* Module picking: native 50000 at scale 1; when the zoom is raised, long enough to reach the farthest
+     * module corner from the farthest camera. */
     assert(sh_editor_zoom_pick_distance(16000,1,SH_ZOOM_NATIVE_PICK)==SH_ZOOM_NATIVE_PICK);
     assert(sh_editor_zoom_pick_distance(0,NAN,NAN)==SH_ZOOM_NATIVE_PICK);
     {

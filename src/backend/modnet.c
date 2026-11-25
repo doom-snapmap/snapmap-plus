@@ -21,8 +21,8 @@
 #define WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY 4
 #endif
 
-/* SPEC-distribution 5.22: the store counts clients by this, and refuses retired ones. The release tag the build
- * stamps (build.ps1 -Version), "dev" for a local build. */
+/* The release tag the build stamps (build.ps1 -Version), "dev" for a local build; the store counts clients by it and
+ * refuses retired ones. */
 #ifndef SNAPMAP_PLUS_VERSION
 #define SNAPMAP_PLUS_VERSION "dev"
 #endif
@@ -40,8 +40,6 @@
  * check it before it answers, so the answer waits that long. */
 #define MN_COMPLETE_MS  (15u * 60u * 1000u)
 #define MN_PART_TRIES   4       /* starts of one upload in parts, each resuming the last */
-
-/* ------------------------------------------------------------ session ---- */
 
 static SRWLOCK   g_lock = SRWLOCK_INIT;
 static HINTERNET g_session;
@@ -333,10 +331,8 @@ static int mn_open_session_locked(char *why, size_t why_cap)
 /* Take the shared lock with an open session. Returns 1 holding the lock. */
 static int mn_acquire(char *why, size_t why_cap)
 {
-    /* The setting is read on every request so a changed "mods.store" takes
-     * effect at the next request, not at the next launch: a session opened
-     * for another base URL is dropped (after the requests in flight finish)
-     * and reopened for the current one. */
+    /* The setting is read on every request, so a changed "mods.store" takes effect at the next request: a session
+     * opened for another base URL is dropped (after the requests in flight finish) and reopened. */
     char *wanted = modnet_base_url();
     for (;;) {
         AcquireSRWLockShared(&g_lock);
@@ -348,8 +344,6 @@ static int mn_acquire(char *why, size_t why_cap)
         ReleaseSRWLockExclusive(&g_lock);
     }
 }
-
-/* ------------------------------------------------------------ exchange --- */
 
 typedef struct mn_req {
     const wchar_t *verb;
@@ -373,8 +367,6 @@ static int mn_cancelled(const modnet_io *io)
 {
     return io && io->cancel && InterlockedCompareExchange(io->cancel, 0, 0) != 0;
 }
-
-/* ------------------------------------------------------------ the product's version against the store's minimum */
 
 static SRWLOCK g_min_lock = SRWLOCK_INIT;
 static char g_min_seen[64];
@@ -430,7 +422,7 @@ static int mn_winhttp_error(modnet_result *r, const char *step)
     if (e == ERROR_WINHTTP_OPERATION_CANCELLED) return mn_fail(r, MODNET_E_CANCELLED, NULL);
     if (e == ERROR_WINHTTP_SECURE_FAILURE) return mn_fail(r, MODNET_E_NET, "%s: TLS failure", step);
     if (e == ERROR_WINHTTP_NAME_NOT_RESOLVED) {
-        /* No name resolves: this computer is not connected (S2), as against a store that does not answer (S4). */
+        /* No name resolves: this computer is not connected, as against a store that does not answer. */
         r->offline = 1;
         return mn_fail(r, MODNET_E_NET, "%s: the store host could not be resolved", step);
     }
@@ -547,7 +539,7 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
     }
     r->status = (int)status;
     {
-        /* A busy store says when to ask again (seconds); the client waits it out (SPEC-distribution 10.3). */
+        /* A busy store says when to ask again (seconds); the client waits it out. */
         wchar_t ra[32];
         DWORD n = sizeof ra;
         if (WinHttpQueryHeaders(req, WINHTTP_QUERY_RETRY_AFTER, WINHTTP_HEADER_NAME_BY_INDEX, ra, &n,
@@ -557,7 +549,7 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
         }
     }
     {
-        /* D41: the oldest product the store still serves; remembered for the once-per-start notice. */
+        /* The oldest product the store still serves; remembered for the once-per-start notice. */
         wchar_t mv[64];
         DWORD n = sizeof mv;
         if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CUSTOM, L"X-Snapmap-Plus-Minimum", mv, &n, WINHTTP_NO_HEADER_INDEX))
@@ -736,8 +728,6 @@ static int mn_end(modnet_result *r, double t0, int code)
     return code;
 }
 
-/* ------------------------------------------------------------ text ------ */
-
 typedef struct mn_buf { char *p; size_t n, cap; int bad; } mn_buf;
 
 static void mn_put(mn_buf *b, const char *s, size_t n)
@@ -776,8 +766,6 @@ static void mn_put_json_string(mn_buf *b, const char *s)
     mn_put(b, "\"", 1);
 }
 
-/* ------------------------------------------------------------ routes ---- */
-
 typedef struct mn_hashset { char (*v)[MODNET_HASH_HEX + 1]; int n, cap; } mn_hashset;
 
 static int mn_set_has(const mn_hashset *s, const char *h)
@@ -802,9 +790,7 @@ static int mn_set_add(mn_hashset *s, const char *h)
     return 1;
 }
 
-/* ------------------------------------------------------------ units ----- */
-
-/* The signed headers of a write (SPEC-distribution 4.3), from the signer, for a body of SHA-256 `body_sha`.
+/* The signed headers of a write, from the signer, for a body of SHA-256 `body_sha`.
  * NULL with the failure set in r when there is no signer or it fails. */
 static wchar_t *mn_sign(const modnet_signer *signer, const char *method, const char *route, const char *body_sha,
                         modnet_result *r)
@@ -1246,7 +1232,7 @@ int modnet_map_claim(const char *ref, const char *const *units, size_t n, const 
         mpj *root = mpj_parse((const char *)resp, rlen);
         const mpj *rv = root && root->type == MPJ_OBJ ? mpj_get(root, "rev") : NULL;
         if (r->status == 200 || r->status == 201 || r->status == 451) {
-            /* 451: the claim holds every unit but the removed ones (SPEC 10.2). */
+            /* 451: the claim holds every unit but the removed ones. */
             if (!rv || !mpj_is_num(rv) || (r->status == 451 && !mn_hash_list(root, "removed", removed, nremoved)))
                 code = r->status == 451 ? mn_status_fail(r, resp, rlen, "claim") : mn_fail(r, MODNET_E_PROTOCOL, "claim: the answer has no rev");
             else { *rev_out = mpj_int(rv); r->created = r->status == 201; }
@@ -1361,8 +1347,6 @@ int modnet_asked_units(const char *const *refs, const char *const *secrets, size
     free(resp);
     return mn_end(r, t0, code);
 }
-
-/* ------------------------------------------------------------ jobs ------ */
 
 static SRWLOCK g_job_lock = SRWLOCK_INIT;
 static int     g_job_running;

@@ -1,9 +1,5 @@
-/* plain_reason_test -- the table of plain reasons (plain_reason.h): every
- * Win32 code and store status it names comes out as words with a next step
- * and no bare number, a full disk names the drive and the bytes needed, a
- * file name's character is named, the store's codes agree with modnet.h, and
- * an unknown code still says what to do.
- */
+/* plain_reason_test -- the table of plain reasons (plain_reason.h): every Win32 code and store status it names
+ * comes out as words with a next step and no bare number, and the store's codes agree with modnet.h. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>

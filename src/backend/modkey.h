@@ -1,27 +1,9 @@
-/* modkey.h -- the publishing key (SPEC-distribution 4.2-4.3).
- *
- * An ECDSA P-256 key pair the product makes at a player's first map publish, with a 32-byte claim seed. Its public
- * half, the raw uncompressed point (65 bytes) written base64url without padding, is the publisher's identity at the
- * mod store. It signs every write the product sends (the three X-Publisher-* headers, modnet.h modnet_signer) and
- * derives each published map's claim secret, HMAC-SHA256(seed, "snapmap-plus/claim/1\n" + ref) (D8), so a backup of
- * the key restores every map's claims. It never takes part in map content.
- *
- * Stored at <folder>\<16 hex of the public point's SHA-256>.key, JSON
- *   {"created":<unix s>,"format":1,"name":"<account name last presented>","protected":"<base64>","public":"<b64url>"}
- * where "protected" is CryptProtectData (the current Windows user) of the private scalar and the seed. The folder is
- * the product's own data folder (%LOCALAPPDATA%\snapmap-plus\publishing), never the game's.
- *
- * The active key is the one <folder>\active names (its file's 16-hex leaf); the others are inactive, kept so the claims
- * they made keep their secrets (a restore makes the restored key active and keeps the former one). Without an active
- * file the newest key is the active one.
- *
- * The backup (4.2) is <name>.snapmap-plus-key, JSON
- *   {"format":1,"public":"<b64url>","kdf":{"pbkdf2-sha256":600000,"salt":"<b64url 16>"},"nonce":"<b64url 12>",
- *    "sealed":"<b64url 80>"}
- * where "sealed" is AES-256-GCM (CNG) of the private scalar and the seed (64 bytes, then the 16-byte tag), under the
- * key PBKDF2-SHA256 derives from the passphrase. A restore checks the
- * tag (a wrong passphrase) and that the sealed scalar is the public point's (an altered file). Windows CNG and DPAPI;
- * any thread. */
+/* modkey.h -- the publishing key: an ECDSA P-256 pair plus a 32-byte claim seed, made at a player's first map publish.
+ * Its public point (65 bytes, base64url) is the publisher's identity at the mod store; it signs every write
+ * (modnet.h modnet_signer) and derives each claim secret, HMAC-SHA256(seed, "snapmap-plus/claim/1\n" + ref).
+ * Stored as <folder>\<16 hex of the public point's SHA-256>.key, the private scalar and seed under DPAPI; <folder>\active
+ * names the active key (else the newest). The passphrase backup is AES-256-GCM (CNG) under a PBKDF2-SHA256 key.
+ * Windows CNG and DPAPI; any thread. */
 #ifndef SNAPMAP_PLUS_MODKEY_H
 #define SNAPMAP_PLUS_MODKEY_H
 

@@ -114,9 +114,8 @@ static void mt_author(const char *salt, const char *request, char *out, size_t c
     free(p);
 }
 
-/* Re-spell a copy of a mod folder in the earlier layout, for the tests of the readers and converters of the
- * earlier shapes: every file below the mod folder's own folders moves to assets\\<engine request>. Files beside
- * mod.json stay. */
+/* Re-spell a copy of a mod folder in the flat assets layout: every file below the mod folder's own folders moves to
+ * assets\<engine request>; files beside mod.json stay. */
 static void mt_old_walk(const char *folder, const char *rel, char names[][260], int *n)
 {
     WIN32_FIND_DATAA fd;
@@ -225,8 +224,7 @@ static void mt_put32(unsigned char *p, unsigned long v)
     p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
 }
 
-/* A ZIP of n stored text entries, for exports no release writes (the retired
- * forms, hand-made layouts). Returns 1 written. */
+/* A ZIP of n stored text entries, for hand-made layouts and exports no release writes. Returns 1 written. */
 static int mt_zip_stored(const char *path, int n, const char *const *names, const char *const *datas)
 {
     unsigned char *buf, *p, *cd0;

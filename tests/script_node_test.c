@@ -1,24 +1,8 @@
-/* script_node_test.c -- the Script node and map variables (src/backend/script/script_node.c).
- *
- * Without the game:
- *   - which scripts give their mod a Script node (on.input outside comments
- *     and strings), the node's entityDef name, the generated row (its two
- *     decls, its strings, the files an author may not write);
- *   - the played map's names: Script nodes by uniqueId from the map JSON,
- *     variables by type and list position, a name two variables share;
- *   - the door example (tests\fixtures\scripts\door-logic) end to end through
- *     the runtime: three inputs into Script nodes named "switch_used" fire
- *     every Script node named "open_door" of that mod once, with the
- *     activator, and no other node; an input no script handles and a fire
- *     that finds no node each write one plain line and the mod keeps running;
- *   - vars.get and vars.set on the four variable types, clamped writes, the
- *     changed notification only on change, and the plain refusals.
- * With the executables (run-tests passes them): every private signature
- * resolves once at its recorded RVA, the Relay window is the bytes the
- * installer compares and whole instructions, the Relay calls FireOutput with
- * event 8, idGameLocal vtable +0x720 returns gameLocal + 0x49C510, and the
- * stock Integer Operation calls the variable-changed notification.
- *
+/* script_node_test.c -- the Script node and map variables (script_node.c). Without the game: which scripts give their
+ * mod a Script node and its generated row, the played map's node and variable names, the door example end to end
+ * through the runtime, and vars.get/vars.set. With the executables: the private signatures resolve once, the Relay
+ * window is whole instructions and calls FireOutput with event 8, idGameLocal vtable +0x720 returns gameLocal + 0x49C510,
+ * and the stock Integer Operation calls the variable-changed notification.
  *   script_node_test.exe <tests\fixtures\scripts> [DOOMx64vk.exe] [DOOMx64.exe] */
 #include "heap_out.h"
 #include <windows.h>
@@ -41,7 +25,7 @@ static int g_fail;
 
 static char g_base[MAX_PATH];
 
-/* ================================================================ pure */
+/* pure functions */
 
 static void test_registers_input(void)
 {
@@ -196,7 +180,7 @@ static void test_map_names(void)
     CHECK(sh_script_node_map_load(k_map, sizeof k_map - 1, err, sizeof err));
 }
 
-/* ================================================== the fake engine */
+/* the fake engine */
 
 typedef struct fake_node { sh_script_handle h; int uid; } fake_node;
 static fake_node g_nodes[16];
@@ -310,7 +294,7 @@ static const sh_script_node_ops k_fake = { NULL, fake_nodes, fake_uid, fake_fire
 static int g_token;
 static void *resolve(uint32_t spawn_id) { (void)spawn_id; return &g_token; }
 
-/* -------------------------------------------------- script sources */
+/* script sources */
 
 /* Mods given as text: salt -> one entry file. */
 typedef struct mem_mod { const char *salt, *name, *file, *text; } mem_mod;
@@ -397,14 +381,14 @@ static int test_open_vars(lua_State *L)
     return 0;
 }
 
-/* A test-only global: the mod has n Script nodes from now on (0: the recorded ones). */
+/* A test-only global: the mod has n Script nodes (0: the recorded ones). */
 static int test_many(lua_State *L)
 {
     g_many = (int)lua_tointeger(L, 1);
     return 0;
 }
 
-/* ============================================ the door, end to end */
+/* the door, end to end */
 
 static void test_door(void)
 {
@@ -487,7 +471,7 @@ static void test_door(void)
     g_folder_salt = NULL;
 }
 
-/* ===================================================== node() and vars */
+/* node() and vars */
 
 static void test_api(void)
 {
@@ -559,7 +543,7 @@ static void test_api(void)
     CHECK(strstr(g_out, "fired\t1\t1\n") != NULL && g_nfired >= 2 && g_fired[0].activator == 0);   /* the 300 fired below count too */
     CHECK(strstr(g_out, "missing\t0\t0\n") != NULL);
     CHECK(strstr(g_out, "many\t300\n") != NULL);   /* every node of the mod fires: no count is the limit */
-    CHECK(strstr(g_out, "longnode\t300\ttrue\n") != NULL);   /* a node name of any length (the old cap was 127) */
+    CHECK(strstr(g_out, "longnode\t300\ttrue\n") != NULL);   /* a node name of any length */
     CHECK(strstr(g_out, "Warning: scripts\\main.lua line 14: node(\"no_such_node\"):fire() found no Script node of Vars Mod "
                         "named \"no_such_node\" in this map, so nothing fired. Place a Script node from Vars Mod and name it "
                         "\"no_such_node\".\n") != NULL);
@@ -603,7 +587,7 @@ static void test_api(void)
     g_nmem = 0;
 }
 
-/* ======================================================== the images */
+/* the images */
 
 static uint8_t *map_pe_by_rva(const char *path, uint32_t *image_size)
 {

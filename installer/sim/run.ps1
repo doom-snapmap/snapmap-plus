@@ -1,18 +1,6 @@
-# Simulate every installer migration path against scratch folders and a fake GitHub Releases API,
-# and check the layout contract after every step (see installer/README.md, "Simulation harness").
-#
+# Simulates every installer migration path against scratch folders and a fake Releases API, checking the
+# layout contract after every step; your real DOOM and data folders are never written (see installer/README.md).
 #   powershell -NoProfile -ExecutionPolicy Bypass -File installer\sim\run.ps1
-#
-# It builds the DLLs and dist\ (build.ps1, package.ps1), two installers with different version
-# stamps, and the helper in this folder; copies DOOMx64vk.exe and DOOMx64.exe from your DOOM folder
-# (read only) so build detection sees the real game; then runs each scenario in a fresh scratch DOOM
-# and data folder, with LOCALAPPDATA, USERPROFILE and TEMP pointed at that scenario's scratch
-# folders and SNAPMAP_PLUS_API_BASE at the fake API. Your real DOOM and data folders are never
-# written. Exit code 0 means every step of every scenario met the contract.
-#
-# Converting earlier releases' data is not in this release: scenario b checks the earlier release's
-# folders are left as they are.
-#
 # Keep this script ASCII for PowerShell 5.1.
 param(
     [string]$Doom = "",              # your DOOM 2016 folder; found through Steam when omitted
@@ -57,7 +45,7 @@ function Invoke-Native([string]$what, [scriptblock]$block) {
     if ($LASTEXITCODE -ne 0) { throw "$what failed (exit $LASTEXITCODE)" }
 }
 
-# --- Checks before anything is built or written ---------------------------------------------------
+# Checks before anything is built or written.
 if (-not $Doom) { $Doom = Find-Doom }
 if (-not $Doom -or -not (Test-Path -LiteralPath (Join-Path $Doom "DOOMx64vk.exe")) -or -not (Test-Path -LiteralPath (Join-Path $Doom "DOOMx64.exe"))) {
     throw "no DOOM 2016 folder with DOOMx64vk.exe and DOOMx64.exe found -- pass -Doom <folder>"
@@ -74,7 +62,6 @@ if (Test-Path -LiteralPath $Scratch) {
 New-Item -ItemType Directory -Force $Scratch | Out-Null
 Set-Content -LiteralPath (Join-Path $Scratch $marker) -Value "scratch folder of installer\sim\run.ps1" -Encoding ASCII
 
-# --- Build -----------------------------------------------------------------------------------------
 Say "== Building"
 if (-not $SkipNativeBuild) {
     Invoke-Native "build.ps1" { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo "build.ps1") | Out-Host }
@@ -94,8 +81,7 @@ foreach ($pair in @(@($tagA, $binA), @($tagB, $binB))) {
 }
 Say ("  installers: {0} ({1}), {2} ({3})" -f $tagA, (Get-FileHash $binA).Hash.Substring(0, 12), $tagB, (Get-FileHash $binB).Hash.Substring(0, 12))
 
-# --- Scratch copies of the game's files (the real folder is only read) --------------------------------
-# The executables let the installer detect the build.
+# Scratch copies of the game's executables, which let the installer detect the build.
 $gameFiles = @("DOOMx64vk.exe", "DOOMx64.exe")
 $base = Join-Path $Scratch "base"
 foreach ($f in $gameFiles) {
@@ -105,7 +91,6 @@ foreach ($f in $gameFiles) {
 }
 Say ("  copied {0} from {1}" -f ($gameFiles -join ", "), $Doom)
 
-# --- The fake Releases API -------------------------------------------------------------------------
 $served = Join-Path $Scratch "served"
 New-Item -ItemType Directory -Force $served | Out-Null
 function Publish([string]$tag) { Copy-Item -LiteralPath (Join-Path $Scratch "releases\$tag") -Destination (Join-Path $served $tag) -Recurse -Force }
@@ -218,7 +203,7 @@ try {
     $s = New-Scenario "b-beta19" $binB
     Seed $s "beta19"
     $keepB = @("config.json", "overrides\tinypack\package.json")
-    # The update converts nothing and leaves the earlier release's mods, overrides\ and removed-mods\ as they are.
+    # The update leaves the mods, overrides\ and removed-mods\ folders as they are.
     $keepB += @("removed-mods")
     Step $s "update" @("update", "--yes", "--plain") "installed" $pair $keepB @("the other DOOM build's files") @("Converting mods")
     Step $s "uninstall" @("uninstall", "--yes", "--plain") "uninstalled" @() $keepB @()

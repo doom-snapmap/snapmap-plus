@@ -1,7 +1,6 @@
-/* clip_events_test.c -- the pure half of clip events (clip_events_rule.c): the namespace tests every lookup
- * makes, the md6Def reader, the build's registries rows and every entry or clip it leaves out with its warning,
- * the per-Play registry (only a mod's own clips, first rows kept, found by name in any case or slash) and the
- * chain rule on fake models. The engine sites are in clip_events_sigs_test and detour_windows_test. */
+/* clip_events_test.c -- the pure half of clip events (clip_events_rule.c): the namespace tests, the md6Def reader, the
+ * build's registry rows with each skipped entry's warning, the per-Play registry and the chain rule on fake models.
+ * The engine sites are covered by clip_events_sigs_test and detour_windows_test. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +11,7 @@ static int g_checks, g_failed;
 
 #define SALT "abcd1234"
 
-/* ------------------------------------------------------------ warnings */
+/* warnings */
 
 static char g_lines[16][512];
 static int g_nlines;
@@ -34,7 +33,7 @@ static int said(const char *part)
     return 0;
 }
 
-/* --------------------------------------------------- the mod's md6Defs */
+/* the mod's md6Defs */
 
 typedef struct fake_def { const char *name, *text; } fake_def;
 static const fake_def *g_defs;

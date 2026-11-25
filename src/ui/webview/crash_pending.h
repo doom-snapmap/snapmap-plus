@@ -36,7 +36,7 @@ inline bool newest_first(const std::string &a, const std::string &b)
     return a > b;
 }
 
-/* Reclassify whenever any retained filename changes, including older arrivals. */
+/* Remembers the retained filenames; changed() is true when the set differs, so any change reclassifies. */
 class inventory {
     std::vector<std::string> seen;
 public:

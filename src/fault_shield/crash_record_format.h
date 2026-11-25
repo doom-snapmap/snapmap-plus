@@ -5,8 +5,7 @@
 #include <stddef.h>
 
 typedef struct crash_record {
-    /* "fatal" | "classB" | "engine_fatalerror" | "offthread". The frontend treats
-     * classB/offthread as nonterminal notices; a record alone does not prove survival.
+    /* "fatal" | "classB" | "engine_fatalerror" | "offthread"; classB/offthread are nonterminal notices.
      * Update crash_record_is_terminal when adding a kind. */
     const char *kind;
     unsigned long code;       /* exception code (0 if not a hardware fault) */
@@ -16,12 +15,11 @@ typedef struct crash_record {
     const char *stack;        /* multi-line "MOD+0xRVA" walk, or "" */
     const char *engine_text;  /* the engine's own formatted error text, or "" */
     const char *dump;         /* crash-dump path if one was written, or "" */
-    const char *version;      /* installed version string AT FAULT TIME (read at arm), or "" */
-    /* Renderer at fault time: "vulkan", "opengl", or "" if unresolved. Preserve this
-     * snapshot when reporting after a restart into the other renderer. */
+    const char *version;      /* product version string, or "" */
+    /* Renderer snapshotted at arm time: "vulkan", "opengl", or "" if unresolved. */
     const char *renderer;
-    /* Game identity at arm time (sh_host_game_identity), e.g. "DOOM 2016 build
-     * 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)", or "". */
+    /* Game identity from sh_host_game_identity at arm time, e.g. "DOOM 2016 build 13954591
+     * (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)", or "". */
     const char *game;
     const char *time;         /* preformatted local "YYYY-MM-DD HH:MM:SS" */
 } crash_record;

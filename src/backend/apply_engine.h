@@ -14,10 +14,9 @@
  * slot checks its own dependencies when installation is partial. */
 int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *module_base, void *cmdsys);
 
-/* The Prefabs tab's view of Load / Place (sh_prefab_watch): seq counts the
- * decided object pastes, result is the last one's SH_PREFAB_PLACE_* and reason
- * says why it was staged only. Returns 1 while a queued paste is held in the
- * 3D view (EntityMode in its grab), 0 otherwise. Any thread; guarded reads. */
+/* The Prefabs tab's view of Load / Place (sh_prefab_watch): seq counts decided pastes, result is the last
+ * one's SH_PREFAB_PLACE_* and reason says why it is only staged. Returns 1 while a queued paste is held in
+ * the 3D view (EntityMode grab), 0 otherwise. Any thread; guarded reads. */
 int sh_apply_engine_place_watch(int *seq, int *result, const char **reason);
 
 /* Maintenance after a successful native Frame, outside recovery. Unknown or
@@ -34,7 +33,7 @@ void sh_apply_engine_get_slots(sh_serialize_entity_fn *serialize_entity,
                                sh_schedule_apply_fn   *apply_edit,
                                sh_read_prefab_fn      *read_prefab,
                                sh_apply_sync_fn       *apply_sync,   /* +0x290 synchronous apply, with main-thread marshal when available. */
-                               sh_normalize_timeline_inherit_fn *normalize_timeline_inherit); /* +0x298 retired, returns 1 */
+                               sh_normalize_timeline_inherit_fn *normalize_timeline_inherit); /* +0x298 always returns 1 */
 
 /* Make an entity holder unshared before writing it: cell is the entity
  * array cell. Returns 1 when the cell holds an unshared holder, or when
@@ -63,10 +62,10 @@ void sh_apply_engine_get_serialize_selection(sh_serialize_selection_fn *serializ
 int sh_apply_engine_entity_count(void *ctx);
 int sh_apply_engine_entity_valid(int id, void *ctx);
 /* The entity's JSON into out when it fits, and its whole length either way
- * (a length of cap or more was not copied); 0 when it cannot be read. */
+ * (a length of cap or more is not copied); 0 when it cannot be read. */
 int sh_apply_engine_entity_json(int id, char *out, int cap, void *ctx);
 /* The editor's live transform for an entity. A serialized spawnPosition is the
- * value the box was created with, so only this sees one the user has moved. */
+ * creation value, so only this sees a position the user has moved. */
 int sh_apply_engine_entity_transform(int id, float origin[3], float m[3][3],
                                      float size[3], int *instance, void *ctx);
 
@@ -84,16 +83,16 @@ void sh_apply_engine_install_edit_hook(const sig_result *results, size_t n);
 void sh_apply_engine_nav_request_update(void);
 
 /* One shared update lifecycle for View and the native editor menu. Completion
- * means the worker result was collected, including when preview is disabled. */
+ * means the worker result is collected, including when preview is disabled. */
 enum { SH_NAV_UPDATE_IDLE, SH_NAV_UPDATE_REQUESTED, SH_NAV_UPDATE_BUILDING,
        SH_NAV_UPDATE_READY, SH_NAV_UPDATE_FAILED };
 int sh_apply_engine_nav_update_status(void);
 
-/* An entity's decl text was replaced in place, which reaches neither CommitEdit
- * nor GridApplyEntityTree. Main thread only. */
+/* An entity's decl text is replaced in place, which reaches neither CommitEdit nor GridApplyEntityTree.
+ * Main thread only. */
 void sh_apply_engine_nav_decl_rewritten(int id);
 
-/* Bit 0: the view no longer matches the map. Bit 1: an update is owed.
+/* Bit 0: the view does not match the map. Bit 1: an update is owed.
  * Bit 2: the map refused every read attempt. */
 int sh_apply_engine_nav_view_state(void);
 
@@ -113,13 +112,10 @@ int sh_apply_engine_nav_regions(sh_nav_map *out, void *ctx);
 
 /* Bracket the pre-build snapshot of one SnapMapEditToSnapBuild call with the
  * idSnapMapEdit it converts. Inside the bracket sh_apply_engine_nav_regions
- * reads that object instead of the editor's map (see nav_snapshot.h), so a map
- * launched from the hub, the map browser or a co-op join gets its own
- * navigation, and an editor map left over from an earlier session cannot
- * stand in for it. Main thread only. */
+ * reads that object instead of the editor's map (see nav_snapshot.h). Main thread only. */
 void sh_apply_engine_nav_build_begin(const void *build_map);
 void sh_apply_engine_nav_build_end(void);
-/* Which map the last Play's navigation was read from, for sh_navmesh. */
+/* Which map the last Play's navigation is read from, for sh_navmesh. */
 const char *sh_apply_engine_nav_build_source(void);
 
 /* Time both ways of reading current editor geometry and report them. Main

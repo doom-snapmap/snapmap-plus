@@ -6,7 +6,6 @@
 #include <string.h>
 #include "clipboard.h"
 
-/* This module owns the user32 dependency for clipboard access. */
 #pragma comment(lib, "user32.lib")
 
 int sh_clipboard_set(const char *text)
@@ -25,7 +24,7 @@ int sh_clipboard_set(const char *text)
     if (!OpenClipboard(NULL)) { GlobalFree(mem); return 0; }
     int copied = 0;
     EmptyClipboard();
-    if (SetClipboardData(CF_UNICODETEXT, mem) != NULL) copied = 1;   /* the clipboard owns mem now */
+    if (SetClipboardData(CF_UNICODETEXT, mem) != NULL) copied = 1;   /* ownership of mem passes to the clipboard */
     else GlobalFree(mem);
     CloseClipboard();
     return copied;
@@ -34,12 +33,12 @@ int sh_clipboard_set(const char *text)
 int sh_clipboard_utf8_fit(const char *text, int len, int cap)
 {
     if (len <= cap) return len;
-    /* Step back over continuation bytes (10xxxxxx) so a character is never cut in two. */
+    /* Steps back over continuation bytes (10xxxxxx) so a character is never cut in two. */
     while (cap > 0 && ((unsigned char)text[cap] & 0xC0u) == 0x80u) cap--;
     return cap;
 }
 
-/* Copy clipboard-owned CF_UNICODETEXT as UTF-8 without taking ownership of its handle. */
+/* Copies clipboard-owned CF_UNICODETEXT as UTF-8 without taking ownership of its handle. */
 int sh_clipboard_get(char *out, int cap)
 {
     if (out == NULL || cap <= 0) return 0;

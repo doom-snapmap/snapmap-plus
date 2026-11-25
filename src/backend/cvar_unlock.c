@@ -1,8 +1,5 @@
-/* Expose registered cvars to console and startup +cvar lookup.
- * A deferred worker aliases the developer lookup to the full table and marks
- * cvars settable. It aliases only after the engine has finished registering
- * cvars, because registration writes both tables and grows the full one.
- * Engine-memory accesses are guarded because initialization can race the worker. */
+/* Exposes registered cvars to console and startup +cvar lookup: a deferred worker aliases the developer
+ * lookup to the full table and marks cvars settable, only after engine registration has finished. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -13,31 +10,16 @@
 #include "host_image.h"
 #include "engine_globals.h"
 
-/* Registration and the developer-table alias.
- *
- * idCVarSystemLocal::RegisterStaticVars (VK 0x1402953a0, GL 0x1402955c0) is
- * the only code that writes either table. Init calls it once on the main
- * thread and runs the first startup +cvar pass (VK 0x14156f9a0) right after
- * it. It walks the static chain from its head through idCVar +0x90, appending
- * each cvar to the full hash and list and, when the cvar carries
- * CVAR_FLAG_EXPOSE, to the developer hash and list. The lists and the hash's
- * index chain grow by reallocation, freeing the old arrays.
- *
- * Aliasing while that loop ran left the developer header pointing at arrays
- * the full table then freed, and let the loop's developer appends write
- * through the copied header into the full table's arrays. The +cvar pass,
- * which looks names up in the developer table, then read freed memory and
- * faulted in idCVarSystem::Find (snaphak-re boot-time-13954591 R-004). */
+/* idCVarSystemLocal::RegisterStaticVars (VK 0x1402953a0, GL 0x1402955c0) is the only writer of either
+ * table; it walks the static chain (idCVar +0x90), appending each cvar to the full hash and list and,
+ * with CVAR_FLAG_EXPOSE, to the developer ones, reallocating and freeing the arrays as they grow.
+ * Aliasing mid-loop would leave the developer header on freed arrays, so the alias waits for it. */
 
 typedef enum { CVU_REG_NOT_STARTED, CVU_REG_RUNNING, CVU_REG_DONE } cvu_reg_state;
 
-/* Read where registration stands; *out_count and *out_chain receive the full
- * list's count and the registered chain's length. The full list's first entry
- * is the chain head registration started from; cvars constructed later are
- * linked in front of it and never registered. Registration is done once the
- * full list holds that whole chain, ending with its tail, and the developer
- * list holds every exposed chain entry, ending with the last one. Each count
- * is stored after its entry, so a final count means the appends are visible. */
+/* Reads where registration stands; *out_count and *out_chain receive the full list's count and the
+ * chain length from its first entry (later-constructed cvars link in front and are never registered).
+ * Done means both lists hold their whole chain; counts are stored after entries, so a final count is visible. */
 static cvu_reg_state cvu_registration_state(const uint8_t *cvarSys, uint32_t *out_count, uint32_t *out_chain)
 {
     *out_count = 0;
@@ -81,15 +63,10 @@ static void store64(uint8_t *dst, const uint8_t *src, size_t off)
     MemoryBarrier();
 }
 
-/* Copy the full table's headers over the developer table's; return 0 if the
- * object is unreadable or the full hash is smaller than the developer hash.
- * The main thread may be in idCVarSystem::Find (VK 0x1402943f0) meanwhile: it
- * reads the hash mask, the bucket array, the list, then the index chain and
- * the list again, without a lock. Each field is one aligned 8-byte store, in
- * an order that keeps every mix of old and new fields in bounds: the list
- * before its count, and the list and index chain before the buckets that hold
- * full-table indices, then the masks. Old masks stay in bounds of the new
- * bucket array because it is at least as large. Unchanged headers are left. */
+/* Copies the full table's headers over the developer table's; returns 0 if unreadable or the full hash
+ * is smaller. idCVarSystem::Find (VK 0x1402943f0) reads them lock-free meanwhile, so each field is one
+ * aligned 8-byte store in an order keeping every old/new mix in bounds: list before count, list and
+ * index chain before buckets, then masks (old masks fit the larger new bucket array). */
 static int alias_dev_to_full(uint8_t *cvarSys)
 {
     __try {
@@ -99,14 +76,15 @@ static int alias_dev_to_full(uint8_t *cvarSys)
             return 1;
         if (*(const int32_t *)(fh + IDHASH_HASH_SIZE_OFF) < *(const int32_t *)(dh + IDHASH_HASH_SIZE_OFF))
             return 0;
-        store64(dl, fl, 0x00);   /* list array */
-        store64(dl, fl, 0x08);   /* count, capacity */
-        store64(dl, fl, 0x10);   /* granularity, tag, ownership */
-        store64(dh, fh, 0x08);   /* index chain */
-        store64(dh, fh, 0x10);   /* hash size, index size */
-        store64(dh, fh, 0x00);   /* buckets */
-        store64(dh, fh, 0x18);   /* granularity, hash mask */
-        store64(dh, fh, 0x20);   /* lookup mask, tag */
+        /* List (array, count), then index chain, then buckets, then masks. */
+        store64(dl, fl, 0x00);
+        store64(dl, fl, 0x08);
+        store64(dl, fl, 0x10);
+        store64(dh, fh, 0x08);
+        store64(dh, fh, 0x10);
+        store64(dh, fh, 0x00);
+        store64(dh, fh, 0x18);
+        store64(dh, fh, 0x20);
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;

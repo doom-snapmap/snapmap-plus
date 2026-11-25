@@ -1,9 +1,7 @@
 /* modlook_test.c -- the Graphics SDK's look compiler (modlook.c, docs/graphics-sdk.md).
  *
- * Every field and default of both looks, the routes to the game's own programs, the two shared texture places and
- * what overflows them, each mistake's sentence, old-key materials (the four fixtures) against
- * sh_modprog_legacy_material, and determinism. The compiled text is read back the way the engine would: its keys, and
- * the parameter image's 28 vectors decoded from the image the text names.
+ * Fields and defaults of both looks, routes to the game's own programs, the shared texture places and their
+ * overflow, each mistake's sentence, old-key materials against sh_modprog_legacy_material, and determinism.
  *
  *   modlook_test.exe [fixtures=<dir of tests/fixtures/modprog>] */
 #define WIN32_LEAN_AND_MEAN
@@ -531,7 +529,7 @@ static void test_not_looks(void)
     release(&x);
 }
 
-/* ------------------------------------------------------------------------------------------ old keys, served as written ---- */
+/* ---- old-key materials, served as written ---- */
 
 static char *g_fixtures;
 static char *read_fixture(const char *name, size_t *n)

@@ -1,12 +1,7 @@
-/* modlobby_sites_test.c -- the co-op lobby's bind checks (modlobby.c sh_modlobby_check_sites, the function the DLL's
- * bind runs) against each build 13954591 executable given on the command line:
- *   - the six lobby signatures resolve at their recorded RVAs, as the boot resolves them (sig_resolve_all);
- *   - every byte check holds on the executable's own code, so the lobby installs and publishing maps with mods is
- *     on (R-LB1: a check that could never match turned it off on both renderers);
- *   - the checks hold the same with the four detours' stolen windows written over, as they are once the lobby's
- *     hooks are in (no check reads a window);
- *   - a changed byte at the controller's lobby-parameters call is refused and named.
- * Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
+/* modlobby_sites_test.c -- the co-op lobby's bind checks (sh_modlobby_check_sites) against each build 13954591
+ * executable given on the command line: the six lobby signatures resolve at their recorded RVAs, every byte check
+ * holds on the executable's own code (also with the four detours' stolen windows written over), and a changed byte at
+ * the controller's lobby-parameters call is refused and named. Run via run-tests.ps1 with -Doom / -DoomAlt. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

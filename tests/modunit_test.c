@@ -1,8 +1,5 @@
-/* modunit_test.c -- the unit (modunit.h): the closure of one placed object inside one mod build.
- *
- * Name keys, the closure of an object and its independence from the rest of the pack, the identity (a change in
- * another object's files leaves the hash alone), the proof that refuses a changed file, the registry and enumerated
- * decls, boards cut at the square, scripts, what players asked for, the mod.json share, composition and storing.
+/* modunit_test.c -- the unit (modunit.h): the closure of one placed object inside one mod build, its identity
+ * and proof, registry and enumerated decls, boards, scripts, composition and storing.
  *
  *   modunit_test.exe
  */
@@ -162,8 +159,6 @@ static size_t count_of(const char *hay, const char *needle)
     return n;
 }
 
-/* ------------------------------------------------------------------ 1 */
-
 static void test_keys(void)
 {
     char *k;
@@ -175,8 +170,6 @@ static void test_keys(void)
     CHECK(sh_unit_enumerated_type("snapAIScore") && sh_unit_enumerated_type("snapaiencounter"));
     CHECK(!sh_unit_enumerated_type("entityDef"));
 }
-
-/* ------------------------------------------------------------------ 2 */
 
 static void test_closure(const char *top)
 {
@@ -244,8 +237,6 @@ static void test_closure(const char *top)
     sh_mb_free(&b);
 }
 
-/* ------------------------------------------------------------------ 3, 4 */
-
 static void test_identity(const char *top)
 {
     char folder[MAX_PATH * 2], crate1[SH_MB_HASH_HEX + 1], barrel1[SH_MB_HASH_HEX + 1], whole1[SH_MB_HASH_HEX + 1];
@@ -293,8 +284,6 @@ static void test_identity(const char *top)
     sh_mb_free(&b);
 }
 
-/* ------------------------------------------------------------------ 5 */
-
 static void test_proof(const char *top)
 {
     char folder[MAX_PATH * 2], *why = NULL;
@@ -314,10 +303,9 @@ static void test_proof(const char *top)
     sh_mb_free(&b);
 }
 
-/* 6: a native/ edited copy of the conductor list. The builder derives the copy's edits against the game's own text,
- * read here from a fake installed-content reader. The pack's edits name both objects; a composition of the crate's
- * unit alone keeps only the crate's entry (R-DS5: a unit's copy of a changed DOOM decl keeps the entries for what it
- * carries, so the conductor never names a demon the map was not given). */
+/* 6: a native/ edited copy of the conductor list, its edits derived against the game's text from a fake
+ * installed-content reader. A unit's copy of a changed DOOM decl keeps only the entries for what it carries,
+ * so the conductor never names a demon the map was not given. */
 #define CONDUCTOR "generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl"
 static const char g_conductor_stock[] =
     "{\n\tinherit = \"ai/base/conductor\";\n\tedit = {\n\t\taiTypeList = {\n\t\t\tnum = 1;\n"
@@ -342,9 +330,8 @@ static int cs_read(void *c, const char *source, const char *sha, unsigned char *
 }
 static const sh_mb_stock_ops g_conductor_ops = { NULL, NULL, cs_identify, NULL, cs_read };
 
-/* 6b: a native/ copy of a DOOM material, unchanged (a surface: the mod serves DOOM's own bytes at DOOM's name). The
- * sweep of the owner's mods found one named only by a DOOM mesh the mod borrows, which no edge of the mod's own files
- * reaches: it travels in every unit, as a pointer, as the editor serves it wherever the mod is used. */
+/* 6b: a native/ copy of a DOOM material, unchanged (a surface: the mod serves DOOM's own bytes at DOOM's
+ * name). One named only by a DOOM mesh the mod borrows is reached by no edge, so it travels in every unit as a pointer. */
 #define SURFACE_MAT "generated/decls/material/models/mapobjects/rock_kit.decl"
 static const char g_surface_text[] = "{\ndiffusemap\t\"models/mapobjects/rock_kit\"\n}\n";
 static int sf_identify(void *c, const char *source, char sha[SH_MB_HASH_HEX + 1], unsigned long long *size)
@@ -440,8 +427,6 @@ static void test_registry_edits(const char *top)
     sh_mb_set_stock_ops(NULL);
 }
 
-/* ------------------------------------------------------------------ 7 */
-
 static void test_boards(const char *top)
 {
     char folder[MAX_PATH * 2];
@@ -482,8 +467,6 @@ static void test_boards(const char *top)
     sh_mb_free(&b);
 }
 
-/* ------------------------------------------------------------------ 8 */
-
 static void test_scripts(const char *top)
 {
     char folder[MAX_PATH * 2];
@@ -494,8 +477,8 @@ static void test_scripts(const char *top)
     write_pack(folder);
     mt_write(folder, "scripts\\crate.lua", "api = 1\nlocal crate_lib = require(\"crate_lib\")\nlocal spec = { attacks = \"crate_attacks\", graph = \"crate-graph\" }\nlocal attacks = require(spec.attacks)\nlocal graph = require(spec.graph)\n-- \"crate_notes\" is named only in this comment\nlocal def = \"entities/crate\"\n");
     mt_write(folder, "scripts\\lib\\crate_lib.lua", "local extra = \"materials/crate_extra\"\nreturn extra\n");
-    /* a module the script requires by a name it passes on (R-LV2), with any character require takes (R-UC1: a name
-     * of scripts\lib is [A-Za-z0-9_-]) */
+    /* a module the script requires by a name it passes on, with any character require takes (a name of
+     * scripts\lib is [A-Za-z0-9_-]) */
     mt_write(folder, "scripts\\lib\\crate_attacks.lua", "return {}\n");
     mt_write(folder, "scripts\\lib\\crate-graph.lua", "return {}\n");
     mt_write(folder, "scripts\\lib\\crate_notes.lua", "return {}\n");
@@ -520,8 +503,6 @@ static void test_scripts(const char *top)
     sh_mb_free(&b);
 }
 
-/* ------------------------------------------------------------------ 9 */
-
 static void test_asked(const char *top)
 {
     char folder[MAX_PATH * 2];
@@ -543,8 +524,6 @@ static void test_asked(const char *top)
     if (unit_with(&b, folder, "mods/" SALT "/barrel", &e_by, &u)) { CHECK(kept(&b, &u, "images/spare.bimage") == 1); sh_unit_free(&u); }
     sh_mb_free(&b);
 }
-
-/* ------------------------------------------------------------------ 10 */
 
 static void test_mod_share(const char *top)
 {
@@ -593,8 +572,6 @@ static void test_mod_share(const char *top)
         CHECK(hash1[0] && !strcmp(hash1, hash2));
     }
 }
-
-/* ------------------------------------------------------------------ 11 */
 
 static char *source_of(void *ctx, const char *path)
 {
@@ -708,8 +685,6 @@ static void test_compose(const char *top)
     sh_unit_free(&u);
     sh_mb_free(&b);
 }
-
-/* ------------------------------------------------------------------ 12 */
 
 static void test_store(const char *top)
 {

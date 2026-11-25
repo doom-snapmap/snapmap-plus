@@ -1,6 +1,6 @@
 /* Pure category arithmetic of the Snapmap+ settings tab. Native code wraps
  * modulo 2 (and 0x80000001); the tab wraps modulo the session's count. Also
- * the float-row unwrap helper (rows are now created without the native wrap).
+ * the float-row unwrap helper (rows are created without the native wrap).
  * Compile settings_tab.c with /DSH_SETTINGS_TAB_PURE. */
 #include "../src/backend/settings_tab.h"
 #include <assert.h>

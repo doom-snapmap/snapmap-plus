@@ -1,14 +1,7 @@
-/* fault_shield_sites_test.c -- the fault shield's bind checks, the product's own check code, run on each build
- * 13954591 executable named on the command line (run-tests.ps1 -Doom / -DoomAlt). A check that could never match the
- * shipped bytes leaves its guard off in every session; these run it against the real code:
- *   - recovery.c: idCommonLocal::Frame against k_frame_prologue (recovery_frame_prologue_ok), and the FatalError
- *     wrapper's level byte at +0x28 (recovery_fatalerror_site_ok);
- *   - mapload_guards.c: EventLink and InteractableSpawn against their stolen prologues;
- *   - static_model_guard.c: StaticModelUpdate's head, counter compare, list LEA and the counter == list + 0x60
- *     relation (sh_static_model_update_check), and StaticModelIncRef's head;
- *   - serialized_entities_guard.c: SerializedEntityIndexWrite's index write (sh_serialized_entities_site_ok).
- * Each site is resolved as its install resolves it: by signature name through sig_resolve_all, at the recorded RVA.
- * The four product files are compiled into this test; the stubs below stand in for the rest of the DLL. */
+/* fault_shield_sites_test.c -- runs the fault shield's own bind checks (recovery.c, mapload_guards.c,
+ * static_model_guard.c, serialized_entities_guard.c) against each build 13954591 executable named on the command
+ * line (run-tests.ps1 -Doom / -DoomAlt). Each site resolves as its install resolves it, by signature name at the
+ * recorded RVA; the four product files are compiled in and the stubs below stand in for the rest of the DLL. */
 #include "../src/fault_shield/recovery.c"
 #include "../src/fault_shield/mapload_guards.c"
 #include "../src/fault_shield/static_model_guard.c"

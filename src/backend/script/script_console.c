@@ -42,10 +42,8 @@ static const char *plural(int n, const char *one, const char *many)
     return n == 1 ? one : many;
 }
 
-/* A mod whose script files no longer match its build (edited since the last
- * Refresh) cannot start: one sentence naming the first file and what to do.
- * 1 when said. The mod is rebuilt by 'sh_mods rescan' or the Mods tab's
- * Refresh and by DOOM's start; the next Play then runs the new files. */
+/* Says one sentence naming the first script file that differs from the mod's build (the mod cannot start) and what
+ * to do; 1 when said. */
 static int say_stale(con *c, const char *salt, const char *name)
 {
     int count = 0;

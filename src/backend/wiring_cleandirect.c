@@ -1,7 +1,6 @@
-/* Extend the revealed sh_target_any wire tool to bare entity targets.
- * Normal input/output nodes use stock wire creation. Bare targets instead add
- * a state.edit.targets reference to the source, avoiding an unroutable CSR edge.
- * Creator functions resolve by signature; recheck field offsets when porting. */
+/* Extend the revealed sh_target_any wire tool to bare entity targets, which get a state.edit.targets
+ * reference on the source instead of an unroutable CSR edge; input/output nodes use stock wiring.
+ * Creators resolve by signature. */
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
@@ -16,14 +15,14 @@
 #define SIG_CREATOR_OUTNODE  "WireConnectCreator1"    /* output-node-source connect creator */
 #define WIRING_STOLEN        15u
 
-/* Recheck these fields in the WireConnectCreator0/1 tool reads when porting. */
+/* Field offsets read by WireConnectCreator0/1; recheck when porting. */
 #define WORLD_ENTTABLE_OFF   0x204c8   /* world(param_2) -> loaded-map/entity-table object */
-#define MAP_ENTARRAY_OFF     0x6a0     /* that object -> the entity-ptr array (8-byte entries) */
-#define ENT_DECL_OFF         0x08      /* entity + 8 -> the resolved decl (idDeclSnapEditorEntity) */
-#define DECL_FLAGS_OFF       0x3cd     /* decl -> the editor-flags byte */
-#define DECL_ISINPUT_BIT     0x10      /* decl+0x3cd bit 0x10 = is-input-node (the clean-direct gate) */
-#define DECL_ISOUTPUT_BIT    0x20      /* decl+0x3cd bit 0x20 = is-output-node (leave those untouched) */
-#define WCD_TOOL_SOURCE_OFF  0x08      /* Source entity ID; rederive from the creator's tool reads. */
+#define MAP_ENTARRAY_OFF     0x6a0     /* that object -> entity-ptr array (8-byte entries) */
+#define ENT_DECL_OFF         0x08      /* entity -> resolved decl (idDeclSnapEditorEntity) */
+#define DECL_FLAGS_OFF       0x3cd     /* decl -> editor-flags byte */
+#define DECL_ISINPUT_BIT     0x10      /* is-input-node (the clean-direct gate) */
+#define DECL_ISOUTPUT_BIT    0x20      /* is-output-node (left untouched) */
+#define WCD_TOOL_SOURCE_OFF  0x08      /* tool -> source entity ID */
 
 typedef void (*creator_fn)(void *tool, void *world, int idx);
 

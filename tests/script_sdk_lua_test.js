@@ -1,6 +1,5 @@
 // script_sdk_lua_test.js -- the script SDK's embedded libraries (src/backend/script/script_sdk_lua.c) are what
-// src/sdk/lua gives. The file is generated and checked in; a Lua change that was not regenerated ships the old
-// library in the DLL (an API rename once left enemy_placement.lua calling a method that no longer existed).
+// src/sdk/lua gives. The file is generated and checked in, so a Lua change that is not regenerated fails here.
 const { execFileSync } = require('child_process');
 const path = require('path');
 const gen = path.join(__dirname, '..', 'tools', 'gen_script_sdk.js');

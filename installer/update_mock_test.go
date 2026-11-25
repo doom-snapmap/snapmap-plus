@@ -206,8 +206,8 @@ func newUpdateRig(t *testing.T, runningTag string) *updateRig {
 }
 
 // seedUserData writes the player data the installer must leave exactly as it is: the backend's
-// config, prefabs and strings, a mods folder holding both an earlier release's layout and the
-// current one, and the retired overrides and override-backups folders with packages in them.
+// config, prefabs and strings, a mods folder holding two layouts, and the retired overrides and
+// override-backups folders with packages in them.
 func (r *updateRig) seedUserData(t *testing.T) {
 	t.Helper()
 	for rel, content := range map[string]string{
@@ -410,7 +410,7 @@ func TestUpdateFromMockWithNoNewerRelease(t *testing.T) {
 	r.noTempLeftovers(t, "update")
 }
 
-// An installer asset whose bytes differ from the release digest is refused; the old image stays.
+// An installer asset whose bytes differ from the release digest is refused; the running image stays.
 func TestSelfUpdateRefusesCorruptInstaller(t *testing.T) {
 	r := newUpdateRig(t, "v1.0.0-beta.1")
 	m := newMockGitHub(t)
@@ -524,7 +524,7 @@ func TestUpdateInterruptedDownloadsCleanUp(t *testing.T) {
 }
 
 // Install, update, uninstall and reinstall never create, change or remove mods\, the retired
-// package folders or the backend's config: the backend converts them at its first start.
+// package folders or the backend's config.
 func TestLifecycleLeavesModsAndRetiredFolders(t *testing.T) {
 	r := newUpdateRig(t, "v1.0.0-beta.1")
 	r.seedUserData(t)

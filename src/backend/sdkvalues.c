@@ -8,8 +8,6 @@
 #include "sdkvalues.h"
 #include "modprog.h"
 
-/* ----------------------------------------------------------------------------------- registration ---- */
-
 static sdk_register_fn g_register;
 
 void sdk_set_register(sdk_register_fn fn) { g_register = fn; }
@@ -19,9 +17,7 @@ const char *sdk_register(const char *type, const char *text)
     return g_register ? g_register(type, text) : sh_modprog_register_decl(type, text);
 }
 
-/* ---------------------------------------------------------------------------------------- sRGB parms ---- */
-
-/* The render parms whose decl is flagged srgba (work/PG1/inventory/renderparms.tsv, both archives). */
+/* The render parms whose decl is flagged srgba. */
 static const char *const SRGB_PARMS[] = {
     "bloodcolor", "bloodcolorlerp", "bloomcolor", "cloudamblight", "cloudcovercolorparms", "color", "color2", "color3",
     "color4", "custombloomalbedo", "customdirtalbedo", "customdirtspecularsmoothness", "custompattern2albedo0",
@@ -43,8 +39,6 @@ int sdk_parm_is_srgb(const char *name, size_t n)
 }
 
 double sdk_srgb_to_linear(double x) { return sdk_srgb_decode(x); }
-
-/* ------------------------------------------------------------------------------------------ reading ---- */
 
 static int read_vec(const sdk_atom *a, double out[4], int *dims)
 {
@@ -225,8 +219,6 @@ shape:
     return 0;
 }
 
-/* --------------------------------------------------------------------------------------- the tables ---- */
-
 char *sdk_value_table_text(const sdk_value *v, int c, int clamp, double *lo, double *hi)
 {
     sdk_buf b = { 0 };
@@ -251,8 +243,6 @@ char *sdk_value_table_text(const sdk_value *v, int c, int clamp, double *lo, dou
     if (b.oom) { free(b.p); return NULL; }
     return b.p;
 }
-
-/* ------------------------------------------------------------------------------- material registers ---- */
 
 static void lit(sdk_buf *b, const char *eol, int t, double x)
 {
@@ -335,8 +325,6 @@ int sdk_value_material(const sdk_doc *d, size_t line, const char *key, const sdk
     *temp = t;
     return 1;
 }
-
-/* ----------------------------------------------------------------------------------- material texts ---- */
 
 /* The highest tempN the text names. */
 static int max_temp(const char *text, size_t len)

@@ -1,14 +1,6 @@
-/* script_reason.h -- the plain wording of a script stop.
- *
- * Lua's own messages ("attempt to index a nil value (field 'target')",
- * "'end' expected (to close 'function' at line 3) near <eof>") are rewritten
- * by one table into a sentence an author can act on ("\"target\" is nothing
- * here", "\"end\" expected to close \"function\" on line 3"), plus what to do.
- * A message no rule matches (an author's own error("..."), an API call's
- * refusal) is kept as written. The stops the runtime decides itself (no
- * memory left, a call that does not return) have their own wording.
- *
- * Pure: no Lua state. Every text is malloc'd, of its own length. */
+/* script_reason.h -- the plain wording of a script stop: one table rewrites Lua's own messages ("attempt to
+ * index a nil value (field 'target')") into a sentence an author can act on plus what to do; any other message
+ * is kept as written. Pure, no Lua state; every text is malloc'd. */
 #ifndef SH_SCRIPT_REASON_H
 #define SH_SCRIPT_REASON_H
 
@@ -22,34 +14,26 @@ extern "C" {
 #define SH_SCRIPT_STOP_ERROR    0   /* a Lua error: the message says why */
 #define SH_SCRIPT_STOP_MEMORY   3   /* the process had no memory to give */
 #define SH_SCRIPT_STOP_WALL     5   /* one call ran longer than the wall-clock stop */
-/* A call to a name that does not exist (the API guard: script_runtime.c,
- * script_lib_base.c): a global that is no Snapmap+ call and that the scripts
- * never set, or an entity method Snapmap+ does not have. A pcall, xpcall or
- * coroutine around it cannot catch it: the mod stops with one line naming the
- * call. */
+/* A call to a name that does not exist (the API guard in script_runtime.c and script_lib_base.c): an unset
+ * global or an entity method Snapmap+ lacks. No pcall or coroutine catches it; the mod stops naming the call. */
 #define SH_SCRIPT_STOP_UNKNOWN_CALL   6
 #define SH_SCRIPT_STOP_UNKNOWN_METHOD 7
 
-/* Split a Lua message "scripts\x.lua:12: text" into file ("scripts\x.lua"),
- * line (12) and the text after it, which is returned. Without that prefix,
- * file is "" and *line 0 and msg itself is returned. Only names under
- * scripts\ are taken as a file, so an author's text with a colon is safe. */
-/* *file is malloc'd (the caller frees it), NULL when there is none. */
+/* Split a Lua message "scripts\x.lua:12: text" into file, line and the returned text after it. Without that
+ * prefix (only names under scripts\ count) file is "", *line 0 and msg itself is returned; *file is malloc'd. */
 const char *sh_script_split_where(const char *msg, char **file, int *line);
 
-/* The plain sentence (*what) and the next step (*todo) for a Lua message with
- * its location already removed, both malloc'd (NULL only when out of memory;
- * the caller frees them). Neither ends with a period. *todo may be "". */
+/* The plain sentence (*what) and next step (*todo) for a Lua message with its location removed, both
+ * malloc'd (NULL only when out of memory) and without a final period; *todo may be "". */
 void sh_script_reason(const char *text, char **what, char **todo);
 
-/* The same for a stop the runtime decided; `limit` is the wall-clock stop in
- * ms, `call` the name an unknown-call stop names (NULL otherwise). */
+/* The same for a stop the runtime decided; `limit` is the wall-clock stop in ms, `call` the unknown-call
+ * stop's name (NULL otherwise). */
 void sh_script_reason_stop(int stop, unsigned long long limit, const char *call, char **what, char **todo);
 
-/* The one stop line:
+/* The one stop line, malloc'd (NULL when out of memory):
  *   Script stopped: <mod>, scripts\x.lua line 12: <what>. <todo>.
  * without " line N" when line is 0 and without the location when file is "". */
-/* Returned malloc'd (NULL when out of memory). */
 char *sh_script_stop_text(const char *mod, const char *file, int line, const char *what, const char *todo);
 
 #ifdef __cplusplus

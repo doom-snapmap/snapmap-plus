@@ -1,11 +1,7 @@
-/* sync_clock_sigs_test.c -- the engine site the sync clock detours (src/backend/sync_clock_sigs.c, sync_clock.c),
- * checked on each build 13954591 executable given on the command line:
- *   - the re-anchor resolves at its recorded RVA and its 49-byte pattern is the only match in the executable;
- *   - the shape the detour relies on: the null test and its near jz (the one relative instruction of the window,
- *     relocated), then position-independent pushes; the window ends on an instruction boundary;
- *   - its only callers are the eight calls of the adaptive-tick loop, which pass the precision as the fifth
- *     argument (a byte on the stack).
- * Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
+/* sync_clock_sigs_test.c -- checks the engine site the sync clock detours (src/backend/sync_clock_sigs.c) on each
+ * build 13954591 executable given on the command line: the re-anchor's 49-byte pattern is unique and resolves at its
+ * recorded RVA, the window is whole instructions with one relative jz, and its only callers are the eight calls of
+ * the adaptive-tick loop. Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

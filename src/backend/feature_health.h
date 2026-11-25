@@ -1,13 +1,6 @@
-/* The features that are off this session, in one place.
- *
- * The game build is pinned by hash, so a feature is off only when its engine
- * function was not where the build puts it (another program changed the
- * game's code) or a patch could not be made. Each install records such a
- * feature once, by the name the player knows it by. The Snapmap+ window shows
- * one line naming them (sh_features_off_text, interface slot features_off),
- * and a feature the player invokes from the UI refuses with
- * sh_feature_refusal instead of doing nothing. Background guards stay in the
- * log only. Safe from any thread. */
+/* The features that are off this session: a feature is off when its engine function is not where the pinned build
+ * puts it or a patch could not be made, recorded once by its player-facing name. The Snapmap+ window names them
+ * (sh_features_off_text), and a UI call refuses with sh_feature_refusal. Safe from any thread. */
 #ifndef BACKEND_FEATURE_HEALTH_H
 #define BACKEND_FEATURE_HEALTH_H
 
@@ -50,7 +43,7 @@
 #define SH_FEATURE_FLY_TO          "fly to"
 #define SH_FEATURE_LARGE_MAPS      "saving large maps"
 
-/* Record feature as off this session, once; why goes to the log only. */
+/* Records feature as off this session, once; why goes to the log only. */
 void sh_feature_off(const char *feature, const char *why);
 
 /* 1 when feature was recorded off. */
@@ -60,10 +53,8 @@ int sh_feature_is_off(const char *feature);
  * every feature that is off; NULL when none is off. */
 char *sh_features_off_text(void);
 
-/* Write "<Feature> is unavailable in this session." into out when feature is
- * off and return its length; 0 (and an empty string) when it is available.
- * The features are the names above: the longest sentence is under 128 bytes,
- * the size every caller passes. */
+/* Writes "<Feature> is unavailable in this session." into out when feature is off and returns its length; 0 (and an
+ * empty string) when it is available. The longest sentence is under 128 bytes, the size every caller passes. */
 size_t sh_feature_refusal(const char *feature, char *out, size_t cap);
 
 /* Interface slot features_off (snapmap_plus_iface.h): the same line as owned
@@ -72,8 +63,7 @@ struct sh_iface;
 char *sh_feature_health_slot(struct sh_iface *self);
 
 #ifdef SH_DIAG
-/* The diagnostic build's status export: the index-th feature off, by name (malloc'd); NULL past
- * the end. */
+/* The diagnostic build's status export: the index-th feature off, by name (malloc'd); NULL past the end. */
 char *sh_feature_off_name(int index);
 #endif
 

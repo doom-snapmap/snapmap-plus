@@ -270,10 +270,8 @@ var prefabViewport = (function () {
   function entityRole(className, inherit, edit) {
     var c=String(className||'').toLowerCase(), h=String(inherit||'').toLowerCase();
     if (c.indexOf('volume_blocking') !== -1 || h === 'snapmaps/volume/blocking') return 'blocker';
-    /* Most saved SnapMap entities have isVisible=false, including solid props, pickups, and logic.
-       It is editor/runtime state, not a semantic hidden-volume flag. Inheritance distinguishes an
-       interactable whose implementation class happens to be idVolume_Trigger_Editable from an
-       actual trigger volume. */
+    /* Most saved entities have isVisible=false, so it is not a hidden-volume flag. Inheritance separates an
+       interactable whose class is idVolume_Trigger_Editable from an actual trigger volume. */
     if (c.indexOf('interactable') !== -1 || h.indexOf('snapmaps/interactibles/') === 0) return 'interactable';
     if (c.indexOf('snapmaplistener') !== -1 || h.indexOf('snapmaps/listener/') === 0) return 'output';
     if (c.indexOf('snapmapaction') !== -1 || h.indexOf('snapmaps/action/') === 0) return 'input';
@@ -798,7 +796,7 @@ var prefabViewport = (function () {
        and native window resizes all converge here; RAF coalescing keeps it to one draw per visual frame. */
     new ResizeObserver(function(){ markDirty(); }).observe(host);
   } else {
-    /* WebView2 supports ResizeObserver; this keeps direct-browser preview usable on older engines. */
+    /* Fallback for browsers without ResizeObserver. */
     window.addEventListener('resize', markDirty);
   }
   new MutationObserver(function(){ markDirty(); }).observe(document.documentElement,{attributes:true,attributeFilter:['class']});

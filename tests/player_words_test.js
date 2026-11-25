@@ -1,12 +1,8 @@
 'use strict';
-/* Every sentence the mod system can put in front of a player is free of the internal words (PLATFORM's vocabulary
-   rule; SPEC-distribution I11): no salt, hash, unit, composition, manifest, bundle, sidecar, staging, claim, the
-   store's setting or file names, and no error number. Builder causes an author reads may name mod.json, the Toybox and
-   decls; log lines ("MODS:", "PREFABS:", "CARRIER:", backend_log) are not the player's and are not read.
-
-   The sentences are found in the source, so a new one cannot slip past: every string literal (adjacent literals
-   joined) passed to a player sink, every #define whose name says it is a sentence, and every row of the reason table.
-   A format directive stands for its argument. Pure ASCII. */
+/* Every sentence the mod system can show a player avoids the internal words (salt, hash, unit, composition, manifest,
+   bundle, sidecar, staging, claim, store names, error numbers); builder causes may name mod.json, the Toybox and decls.
+   Sentences are read from the source (sink literals, sentence-named #defines, reason table rows); log lines are not.
+   Pure ASCII. */
 const fs = require('fs');
 const path = require('path');
 
@@ -24,8 +20,8 @@ const BANNED = [
     [/\bclaims?\b/i, 'claim'], [/mods\.store/i, 'mods.store'], [/config\.json/i, 'config.json'],
     [/snapmap-plus\.json/i, 'snapmap-plus.json'], [/\.content\b/i, '.content'], [/\berror\s+(%|\d|0x)/i, 'error number'],
     [/system error/i, 'system error'], [/\bthe log\b/i, 'the log'],
-    /* DS-WORDS: a refusal or notice names a mod by its name, never by a path under the mods folder (in the C source a
-       backslash is written twice) */
+    /* a refusal or notice names a mod, never a path under the mods folder (in the C source a backslash is written
+       twice) */
     [/\bmods\\\\/i, 'a mods\\ path']];
 /* Words a builder cause may use for an author (the builder speaks to the mod's author). */
 const LOG_PREFIX = /^(MODS|PREFABS|CARRIER|RAWMAP|LEGACY|STORE|PUBLISH):/;
@@ -101,8 +97,8 @@ for (const f of fs.readdirSync(root).filter(n => /\.(c|h)$/.test(n))) {
     }
 }
 
-/* The Snapmap+ window's pages write sentences of their own: none names a path under the mods folder (DS-WORDS). The
-   Files view shows a mod's own files to its author, by their paths inside the mod, never by the mods folder. */
+/* The window's pages write sentences of their own: none names a path under the mods folder. The Files view shows a
+   mod's files by their paths inside the mod. */
 const pages = path.join(__dirname, '..', 'src', 'ui', 'webview');
 for (const f of fs.readdirSync(pages).filter(n => /\.js$/.test(n))) {
     const src = fs.readFileSync(path.join(pages, f), 'utf8');

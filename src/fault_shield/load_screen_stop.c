@@ -1,15 +1,8 @@
-/* Stop the loading-screen thread at CancelMapChange entry (load_screen_stop.h).
- *
- * Build 13954591, both renderers:
- *   - idLoadScreen::LevelLoadCompleted (VK 0x141676770 / GL 0x1416774B0) sets the
- *     thread's stop byte +0x4B1, waits for it (idSysThread::WaitForThread on its
- *     manual-reset done event, so a repeat call does not block), syncs the renderer
- *     (vtable +0xF0, +0xB8) and frees the load GUI with null checks;
- *   - the thread's Run (VK 0x1416772D0) sets +0x4B2, draws until +0x4B1, then clears both;
- *   - CancelMapChange (VK 0x141586720 / GL 0x1415877B0) reaches the renderer sync
- *     (common vtable +0x60) and the menu load, whose own LevelLoadCompleted comes
- *     only after that sync, with the old thread still drawing.
- * Engine calls stay outside every __try so the engine's C++ exceptions pass through. */
+/* Stop the loading-screen thread at CancelMapChange entry (load_screen_stop.h). idLoadScreen::LevelLoadCompleted
+ * (VK 0x141676770 / GL 0x1416774B0) sets the thread's stop byte +0x4B1 and waits for it; the thread's Run
+ * (VK 0x1416772D0) sets +0x4B2 while drawing. CancelMapChange (VK 0x141586720 / GL 0x1415877B0) syncs the renderer
+ * before its own LevelLoadCompleted, so the thread would still be drawing. Engine calls stay outside every
+ * __try so the engine's C++ exceptions pass through. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -48,7 +41,7 @@ static int thread_still_drawing(void)
 }
 
 #define MAP_END_MAX 4
-static sh_map_end_fn g_map_end[MAP_END_MAX];   /* the subscribers, in the order they were added */
+static sh_map_end_fn g_map_end[MAP_END_MAX];   /* subscribers, in add order */
 
 static void sh_cancel_map_change_detour(void *common, uint8_t arg)
 {
@@ -104,7 +97,7 @@ int sh_load_screen_stop_install(const uint8_t *module_base, const sig_result *re
 
     if (g_armed) return 1;
     if (module_base == NULL) return 0;
-    if (g_orig_cancel) {   /* an earlier attempt left a trampoline: release it before retrying */
+    if (g_orig_cancel) {   /* a failed install left a trampoline: release it before retrying */
         if (!hook_unpatch((void *)g_orig_cancel)) return 0;
         g_orig_cancel = NULL;
     }

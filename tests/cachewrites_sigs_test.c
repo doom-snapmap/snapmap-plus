@@ -1,8 +1,6 @@
-/* cachewrites_sigs_test.c -- the engine function cache writes bind (cachewrites_sigs.c, cachewrites.c), checked
- * on each build 13954591 executable given on the command line:
- *   - the atomic write resolves at its recorded RVA, and its pattern is the only match in the executable;
- *   - its detour window is whole instructions with no RIP-relative operand or relative branch.
- * Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
+/* cachewrites_sigs_test.c -- the engine's cache-write bind (cachewrites_sigs.c, cachewrites.c) on each build
+ * 13954591 executable named on the command line: the atomic write resolves at its recorded RVA with a unique
+ * pattern, and its detour window is whole instructions with no RIP-relative operand or relative branch. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

@@ -1,7 +1,5 @@
-/* Runtime check of XINPUT1_4 ordinal 2 (GetState) and 3 (SetState), matching
- * DOOM's imports. Guard buffers detect writes from an incorrect export; SEH
- * turns an access violation into a test failure. Accept success or no-controller
- * status from the real proxy DLL. */
+/* Runtime check of XINPUT1_4 ordinal 2 (GetState) and 3 (SetState), matching DOOM's imports. Guard buffers detect
+ * stray writes and SEH turns an access violation into a failure; success or no-controller status passes. */
 #include <windows.h>
 #include <stdio.h>
 

@@ -607,11 +607,9 @@ static int mu_ends(const char *s, const char *suffix)
     return n >= k && !_stricmp(s + n - k, suffix);
 }
 
-/* One sentence for an entry's cause (the store's, the builder's or the
- * serving index's): what is wrong and what to do. The causes the window
- * itself knows the next step for are said here; every other cause is the
- * raiser's own sentence, shown inside "This mod could not be built: ..."
- * (each is written plainly where it is raised). */
+/* One sentence for an entry's cause (the store's, the builder's or the serving index's): what is wrong and what to
+ * do. Causes the window knows the next step for are said here; any other is the raiser's own sentence, shown inside
+ * "This mod could not be built: ...". */
 static char *mu_plain_cause(const sh_ms_entry *e, const char *cause)
 {
     const char *c = cause ? cause : "";
@@ -758,10 +756,8 @@ static char *mu_strdup(const char *s)
     return d;
 }
 
-/* The editor rows of entry i: each snapEditorEntityDef file's display name
- * (its displayNameTag through the bundle's strings, then any installed
- * mod's, else the decl name) and the entityDef a placed entity of it
- * inherits. */
+/* The editor rows of entry i: each snapEditorEntityDef file's display name (its displayNameTag through the bundle's
+ * strings, then any installed mod's, else the decl name) and the entityDef a placed entity of it inherits. */
 static void mu_entry_rows(mu_model *m, size_t i)
 {
     mu_entry *u = &m->entries[i];
@@ -851,10 +847,9 @@ static const char **mu_blobs(const sh_ms_entry *e, size_t *n)
     return v;
 }
 
-/* Two mods with near-identical content are two mods (identity is the salt): the
- * tab only says so. For each root mod, the other root mod whose files include
- * the most of its carried files at equal bytes, when that is at least half of
- * them (the blocks the scan read; nothing is hashed here). */
+/* For each root mod, the other root mod whose files include the most of its carried files at equal bytes, when that is
+ * at least half of them (the scan's blocks; nothing is hashed). Two near-identical mods stay two mods: the tab
+ * only says so. */
 static void mu_same_files(mu_model *m)
 {
     size_t n = m->list.count, i, k, q;
@@ -1057,10 +1052,8 @@ static const char *mu_entry_title(const sh_ms_entry *s);
 
 /* ---- what the builder derived */
 
-/* The stock banks the product block's registries "banks" names, each with
- * this process's state: up to 8. */
-/* A bank leaf longer than SH_MBI_LEAF_MAX (a Windows file name, modbankinfo.h)
- * names no installed bank. */
+/* The stock banks the product block's registries "banks" names, each with this process's state: up to 8. A leaf
+ * longer than SH_MBI_LEAF_MAX (a Windows file name, modbankinfo.h) names no installed bank. */
 static int mu_stock_banks(const sh_mb_bundle *bd, char banks[8][SH_MBI_LEAF_MAX])
 {
     mpj *x;
@@ -1103,11 +1096,8 @@ static void mu_put_stock_banks(mu_buf *b, const sh_mb_bundle *bd)
     mu_putn(b, "]", 1);
 }
 
-/* What the builder derived from the files (payload "facts"): the classes,
- * the editor tweaks, every replacement with whether it is an edited copy,
- * the game files the mod edits with their operation counts (the product
- * block's "edits"), and the product block's
- * "registries" (conductor encounters, string keys, stock banks). */
+/* What the builder derived from the files (payload "facts"): the classes, the editor tweaks, every replacement (an
+ * edited copy or not), the game files the mod edits with operation counts, and the product block's "registries". */
 typedef struct mu_edits_ctx { mu_buf *b; int first; unsigned files; } mu_edits_ctx;
 
 static void mu_put_edit_file(void *context, const char *file, const sh_dt_counts *c)
@@ -1313,13 +1303,10 @@ static int mu_path_cmp(const void *a, const void *b)
     return c ? c : x->entry - y->entry;
 }
 
-/* Every game file an admitted mod replaces, and every path nobody serves (two
- * mods provide it with different bytes), grouped by path: conflicts first,
- * with the copy that serves and why, then the replaced game files, then the
- * edited copies: an edited copy is compared with the game's text at build and
- * the game file is generated per map, never served, so it is neither a
- * replacement nor a conflict (the registry report's "registry edits" lines
- * name the same copies). Mods are named by their folders. */
+/* Every game file an admitted mod replaces and every path nobody serves (two mods provide it with different bytes),
+ * grouped by path: conflicts first (with the serving copy and why), then replaced game files, then edited copies.
+ * An edited copy is compared with the game's text at build and its game file is generated per map, never served,
+ * so it is neither a replacement nor a conflict. Mods are named by their folders. */
 static void mu_print_shadows(const mu_out *o, const mu_model *m)
 {
     mu_path *paths = NULL;
@@ -1675,10 +1662,8 @@ static void mu_map_visit(void *context, const char *bundle_id, const char *bundl
     mp->hit_count++;
 }
 
-/* Which mods each entity and module uses: an entity whose placed names
- * include one a mod provides (the save closure's own matching), and, for a
- * manifest row the closure does not reach (its mod is not installed), one
- * whose placed names include a name the row recorded. */
+/* Which mods each entity and module uses: those whose placed names include a name a mod provides (the save closure's
+ * own matching) or, for a manifest row the closure does not reach (its mod is not installed), a name the row recorded. */
 static void mu_map_attribute(mu_map *mp)
 {
     size_t i, k, h, r;
@@ -1839,8 +1824,8 @@ static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
         }
         if (mp->have_mm) mu_map_attribute(mp);
         /* A bundle the placed names reached that the save writes no row of is not used by the map: the version rule
-         * (D23) folded it into the installed version's row of the same mod, whose entities and modules it was
-         * serving, so they count there. One mod, one entry, as the saved map will have it. */
+         * folds it into the installed version's row of the same mod, whose entities and modules it serves, so they
+         * count there. One mod, one entry, as the saved map has it. */
         for (i = 0; mp->have_save && i < mp->mod_count;) {
             mu_mapmod *x = &mp->mods[i];
             size_t j, w;
@@ -1897,16 +1882,15 @@ static int mu_row_is_mod(const mu_model *m, const sh_modmanifest_row *row, const
 }
 
 /* The installed folder (entry index) a mod of the map is, or -1 when it is not installed: the folder whose build
- * serves it, else the folder of the build its save row names, else the installed folder of its namespace. A
- * composition (a published or downloaded map's own content) is no folder, so without the last step the folder of the
- * same mod installed here would not show as in this map. */
+ * serves it, else the folder of the build its save row names, else the installed folder of its namespace (a
+ * composition is no folder, so the last step finds the copy installed here). */
 static int mu_mapmod_entry(const mu_model *m, const mu_mapmod *x)
 {
     int at = mu_find_hash(m, x->hash);
     /* the build the save writes for it (a row moved to the installed version while a composition still serves) */
     if (at < 0 && x->row) at = mu_find_hash(m, x->row->build);
-    /* a row of the save names the mod by its namespace: a local row follows the installed folder of it (D9), and a
-     * pinned row is served by its composition with that folder alongside in the editor (D26) */
+    /* a row of the save names the mod by its namespace: a local row follows the installed folder of it, and a pinned
+     * row is served by its composition with that folder alongside in the editor */
     if (at < 0 && x->in_rows) at = mu_find_salt(m, x->id, -1);
     return at;
 }
@@ -1931,10 +1915,8 @@ static const char *mu_row_state(const mu_model *m, const sh_modmanifest_row *r, 
     return at >= 0 ? "skipped" : "missing";
 }
 
-/* The slots the open map's declared mods set in their edits
- * (modregistry.h, "<game file>/<path>"): every slot two or more keys set to
- * different values, with its providers in row order, the map's choice and
- * the key that serves. */
+/* The slots the open map's declared mods set in their edits (modregistry.h, "<game file>/<path>") that two or more
+ * keys set to different values, with the providers in row order, the map's choice and the key that serves. */
 typedef struct mu_slot {
     char *slot;                          /* malloc'd */
     char (*keys)[SH_MB_ID_MAX + 1];      /* the providers' salts, in row order (malloc'd, n of cap) */
@@ -2139,10 +2121,8 @@ static void mu_put_entity_names(mu_buf *b, const mu_model *m, const mu_map *mp, 
     mu_putn(b, "]", 1);
 }
 
-/* "asked": what players of the published map asked for of a mod and did
- * not get, because the map carried only part of the mod: the record's
- * "asked" section under the item (written by the product before units; nothing writes it now),
- * [{"mod","request","by"}], the mod named by its name. */
+/* "asked": what players of the published map asked of a mod and did not get because the map carried only part of it:
+ * the record's "asked" section under the item, [{"mod","request","by"}], the mod named by its name. */
 static void mu_put_asked(mu_buf *b, const mu_model *m, const char *item)
 {
     char *text = NULL;
@@ -2560,8 +2540,7 @@ static char *mu_refresh_sentence(const sh_modserve_refresh *rf)
     return NULL;
 }
 
-/* "refresh":{reparsed, reloaded, needsMapReload, needsRestart, note} plus
- * what is still pending and whether it was deferred. */
+/* "refresh":{reparsed, reloaded, needsMapReload, needsRestart, pending, deferred}. */
 static void mu_put_refresh(mu_buf *b, const sh_modserve_refresh *rf)
 {
     mu_key(b, "refresh", 0);
@@ -2577,12 +2556,9 @@ static void mu_put_refresh(mu_buf *b, const sh_modserve_refresh *rf)
 
 /* ---- the file actions: Install, New mod, Refresh and Add to my mods */
 
-/* Their file work (copies, salts, builds) runs on the calling thread, which
- * may be the window's worker rather than the game's main thread, and nothing
- * calls it failed for taking long. The game's part (mu_apply) is the main
- * thread's: off it, the result is kept here and "apply": true asks for
- * SH_MODS_ACT_APPLY, which finishes it with what the game did. On the main
- * thread both run in one call. */
+/* The file work (copies, salts, builds) runs on the calling thread, which may be the window's worker, and is never
+ * failed for taking long. Off the main thread the result is kept here and "apply": true asks for SH_MODS_ACT_APPLY,
+ * which runs the game's part (mu_apply) and finishes it; on the main thread both run in one call. */
 static int  g_owed_action;
 static int  g_owed_ok;
 static char *g_owed_msg;     /* malloc'd, or NULL */
@@ -2667,10 +2643,8 @@ static int mu_absolute(const char *folder)
     return folder && ((folder[0] && folder[1] == ':') || (folder[0] == '\\' && folder[1] == '\\'));
 }
 
-/* One mod folder, as the install button has always done it. */
-/* The record (mods\snapmap-plus.json) could not be read or written during the
- * action: the player reads which file and what to do (modbundle.h
- * sh_mb_record_why), not only the backend log. */
+/* The record (mods\snapmap-plus.json) could not be read or written during the action: the player reads which file
+ * and what to do (modbundle.h sh_mb_record_why), not only the backend log. */
 static char *mu_record_note(char *msg);
 
 /* An install refusal: the store's own (where it cannot copy or write) as it
@@ -2767,14 +2741,9 @@ static int mu_install_one(const char *folder)
     return rc;
 }
 
-/* The install action's argument: one or more absolute folders, separated by
- * newlines (the picker allows several). A picked folder that holds mod.json is
- * one mod; one that does not is looked into for every mod folder below it, so
- * a folder of mods, grouped or not, installs in one go. One picked mod keeps
- * the single result above; anything else answers with the bulk result: how
- * many installed and how many refused, with each refusal's cause, "key" the
- * first installed folder so the page can select it, and one rescan at the
- * end. */
+/* The install action's argument: absolute folders separated by newlines. A folder holding mod.json is one mod; any
+ * other is searched for every mod folder below it. One mod keeps the single result above; anything else answers
+ * with the bulk result (installed and refused counts, each refusal's cause, "key" the first installed folder). */
 typedef struct mu_bulk_item { char *folder; int found; const char *why; } mu_bulk_item;
 
 static int mu_bulk_add(mu_bulk_item **items, size_t *n, size_t *cap, const char *folder, int found)
@@ -3150,11 +3119,9 @@ static void mu_removal_free(mu_removal *r)
 
 static const char *mu_entry_title(const sh_ms_entry *s);
 
-/* Move the marked entries' folders to the Windows Recycle Bin, under the
- * store lock (sh_ms_delete_mod_folder: a direct child of the store root;
- * deleted outright, links removed and never followed, when the bin cannot
- * take it, counted in `outright`). An entry whose folder cannot be removed is
- * unmarked and counted as failed. */
+/* Move the marked entries' folders to the Windows Recycle Bin under the store lock (sh_ms_delete_mod_folder: a
+ * direct child of the store root; links are removed, never followed; deleted outright, counted in `outright`, when
+ * the bin cannot take it). An entry whose folder cannot be removed is unmarked and counted as failed. */
 static void mu_remove_marked(const mu_model *m, unsigned char *removing, mu_removal *out)
 {
     size_t n = m->list.count, i;
@@ -3190,7 +3157,7 @@ static void mu_remove_marked(const mu_model *m, unsigned char *removing, mu_remo
         sh_modserve_refresh rf;
         char why[200];
         if (mu_rescan(&rf, why, sizeof why) < 0) mu_log("uninstall: %s", why);
-        sh_cache_sweep_async();   /* a mod uninstalled: the content cache is swept (5.17) */
+        sh_cache_sweep_async();   /* a mod uninstalled: the content cache is swept */
     }
     modstore_unlock();
 }
@@ -3224,10 +3191,9 @@ static void mu_msg(char **msg, const char *fmt, ...)
     if (text) { free(*msg); *msg = text; }
 }
 
-/* A row another build of its mod serves (the root folder of the player's own
- * map, or the build an editor load substituted): the next save records that
- * build, and Remove from map drops the row of that mod whatever build it
- * names. */
+/* A row another build of its mod serves (the root folder of the player's own map, or a build an editor load
+ * substituted): the next save records that build, and Remove from map drops the row of that mod whatever build
+ * it names. */
 static void mu_say_substituted(const mu_out *o, const mu_model *m, const char *prefix, const char *salt,
                                const char *declared, const char *serving)
 {
@@ -3263,12 +3229,9 @@ static int mu_busy(char *cause, size_t cap)
 
 /* ---- the undo history (Uninstall) */
 
-/* The open map's undo and redo history is cleared after an Uninstall so no
- * snapshot older than its delete remains (a Ctrl+Z would otherwise bring back
- * entities whose mod is gone). When the uninstall deleted entities, the
- * native "Delete Selection" commit lands on later editor frames; the clear
- * waits for it on the tick, which runs after every native frame while one is
- * owed (sh_modui_poll_due). */
+/* The open map's undo and redo history is cleared after an Uninstall so no snapshot older than its delete remains
+ * (Ctrl+Z would bring back entities of the gone mod). The native "Delete Selection" commit lands on later editor
+ * frames, so the tick (sh_modui_poll_due, every frame while a clear is owed) waits for it. */
 static volatile LONG g_undo_owed;
 static ULONGLONG g_undo_owed_at;
 static char *g_undo_owed_key;   /* malloc'd, or NULL */
@@ -3358,26 +3321,12 @@ static int mu_saved_maps_using(const char *salt)
 static volatile LONG g_scope_owed;
 static volatile LONG g_scope_editor;
 
-/* A hub launch's listing and what the product has seen of its Play
- * The gate's listing must hold through the level load: a
- * poll that finds the game idle between the gate and the load is not the
- * end of the Play. Driven by the signals the product has:
- *
- *   NONE      no hub launch listing (the editor's, or nothing, is in force)
- *   LAUNCHED  sh_modui_scope_launch: the gate passed; the launched map's rows
- *             are declared and nothing has run yet. An idle poll does nothing.
- *   LOADING   the busy callback (a load state, the load screen, Play) was
- *             seen after the launch. An idle poll does nothing.
- *   PLAYING   the Play-begin gate ran for it (the SnapBuild detour's
- *             sh_modserve_play_begin asks mu_scope_source at AT_PLAY). An
- *             idle poll does nothing until the game was seen busy after it.
- *   RUNNING   busy was seen after the Play began (the level load, Play).
- *   ENDED     the first idle poll after RUNNING: the Play is over. The tick
- *             clears the listing and the rows and returns to NONE.
- *
- * The editor's return (the tick with an editor map) ends the launch without
- * the hub clear, since the editor's load lists its own map, and a refused
- * launch (sh_modui_scope_launch_refused) clears or restores at once. */
+/* A hub launch's listing and what the product has seen of its Play, so an idle poll between the gate and the level
+ * load is not taken for the end of the Play. NONE -> LAUNCHED (the gate passed; its rows are declared) -> LOADING
+ * (busy seen) -> PLAYING (the Play-begin gate ran: sh_modserve_play_begin asks mu_scope_source at AT_PLAY) -> RUNNING
+ * (busy seen after the Play began) -> ENDED (the first idle poll after RUNNING: the tick clears the listing and the
+ * rows, back to NONE). The editor's return ends a launch without the hub clear; a refused launch
+ * (sh_modui_scope_launch_refused) clears or restores at once. */
 enum { MU_LAUNCH_NONE, MU_LAUNCH_LAUNCHED, MU_LAUNCH_LOADING, MU_LAUNCH_PLAYING, MU_LAUNCH_RUNNING, MU_LAUNCH_ENDED };
 static volatile LONG g_launch;
 
@@ -3413,8 +3362,8 @@ static void mu_launch_play_begin(void)
         mu_log("scope: the launched map's Play began; its rows hold until that Play is over");
 }
 
-/* An idle poll away from the editor: 1 when the launched Play ran and is
- * over (RUNNING becomes ENDED); any earlier state stays as it is. */
+/* An idle poll away from the editor: 1 when the launched Play ran and is over (RUNNING becomes ENDED); any other
+ * state is unchanged. */
 static int mu_launch_idle(void)
 {
     return InterlockedCompareExchange(&g_launch, MU_LAUNCH_ENDED, MU_LAUNCH_RUNNING) == MU_LAUNCH_RUNNING;
@@ -3463,7 +3412,7 @@ static int mu_listing_live(void)
     int changed;
     memset(&placed, 0, sizeof placed);
     if (e->placed_names && e->placed_names(mu_names_add, &placed) < 0) mu_names_free(&placed);
-    /* An object placed from the installed version of a mod the map names by units moves that mod now (D23). */
+    /* An object placed from the installed version of a mod the map names by units moves that mod to it. */
     if (placed.count && sh_modmanifest_version_rule((const char *const *)placed.items, placed.count) > 0)
         InterlockedIncrement(&g_gen);
     (void)sh_modmanifest_current(&rows);
@@ -3522,7 +3471,7 @@ static int mu_scope_listed(char (*out)[SH_MODMANIFEST_HASH_CAP], int cap)
 static void mu_scope_hook(const sh_modmanifest_list *rows, const char *const *names, size_t name_count, int when)
 {
     int changed;
-    /* A map was opened: an open Mods tab gets a fresh document (the window's pushed refresh). */
+    /* A map is opened: an open Mods tab gets a fresh document (the window's pushed refresh). */
     if (when == SH_MODSERVE_AT_LOAD) InterlockedIncrement(&g_gen);
     if (!sh_modserve_scope_enabled()) return;
     if (when == SH_MODSERVE_AT_LOAD) InterlockedExchange(&g_scope_editor, 0);
@@ -3532,10 +3481,9 @@ static void mu_scope_hook(const sh_modmanifest_list *rows, const char *const *na
     else InterlockedExchange(&g_scope_owed, 1);
 }
 
-/* The serving layer's source at the Play entry: Play does not serialize the
- * map. Only the editor's Play reads the open map live; a hub launch keeps the
- * listing its launch gate set (sh_modui_scope_launch), since the editor's
- * entities and manifest are not the launched map's. */
+/* The serving layer's source at the Play entry: only the editor's Play reads the open map live; a hub launch keeps
+ * the listing its gate set (sh_modui_scope_launch), since the editor's entities and manifest are not the launched
+ * map's. */
 static int mu_scope_source(int when)
 {
     if (!sh_modserve_scope_enabled() || !mu_on_main()) return 0;
@@ -3567,11 +3515,9 @@ int sh_modui_scope_launch(const char *why)
     int changed = 0, moved;
     const char *at = why && why[0] ? why : "launch";
     if (!mu_on_main()) return 0;
-    /* Once per launch, at the gate, before anything of the launch is set:
-     * the decls the level load would parse are parsed here, at the hub, in
-     * the hub's (editor) mode, as an editor entry parses them. A
-     * second boundary of the same launch (launched, or loading: its level
-     * load has not reached Play) does not run it again. */
+    /* Once per launch, at the gate, before anything else of it is set: the decls the level load would parse are parsed
+     * here at the hub, in editor mode, as an editor entry parses them. A second boundary of the same launch
+     * (launched or loading) does not repeat it. */
     if (e->launch_preload && InterlockedCompareExchange(&g_launch, 0, 0) != MU_LAUNCH_LAUNCHED &&
         InterlockedCompareExchange(&g_launch, 0, 0) != MU_LAUNCH_LOADING) {
         int r = e->launch_preload(at);
@@ -3621,10 +3567,8 @@ int sh_modui_scope_launch_refused(const char *why)
         if (moved) (void)mu_scope_apply("launch refused");
         return 0;
     }
-    /* The editor still shows its map (the launch was asked over it): that
-     * map's rows, which the launched map's parse replaced, come back.
-     * Anywhere else (the browser, the hub) nothing was launched, so nothing
-     * is declared. */
+    /* The editor still shows its map (the launch was asked over it): that map's rows, which the launched map's parse
+     * replaced, come back. Elsewhere (the browser, the hub) nothing was launched, so nothing is declared. */
     editor = e->map_info && e->map_info(&info) == 1;
     if (editor && sh_modmanifest_current_restore_previous() >= 0) {
         mu_settings_restore();
@@ -3667,11 +3611,9 @@ static int mu_resolve_row(const char *build, const char *salt, sh_modmanifest_ro
     return ok;
 }
 
-/* The tick's part: in the editor, a save's change is applied, and an editor
- * map open without a listing gets one; once the editor has left the map (the
- * hub or the browser), its listing goes. A menu screen over the open map
- * (the Start menu's Settings) also takes the editor screen down, so the exit
- * waits for map_left to say the editor no longer runs a state. */
+/* The tick's part: in the editor, a save's change is applied and an editor map without a listing gets one; once the
+ * editor has left the map (the hub or the browser) its listing goes. A menu screen over the open map also takes the
+ * editor screen down, so the exit waits for map_left. */
 static void mu_scope_tick(int editor_map)
 {
     const sh_modui_engine *e = mu_engine();
@@ -3690,10 +3632,8 @@ static void mu_scope_tick(int editor_map)
                 (void)mu_scope_apply("map exit");
             }
         } else if (mu_launch_idle()) {
-            /* ENDED: the launched Play began, the game was busy with it, and
-             * it is idle again, so that Play is over. Never on an idle poll
-             * before its Play ran (the gap between the gate and the level
-             * load). */
+            /* ENDED: the launched Play began, the game was busy with it, then idle, so that Play is over. An idle poll
+             * before it ran (the gap between the gate and the level load) does not end it. */
             InterlockedExchange(&g_launch, MU_LAUNCH_NONE);
             sh_modmanifest_current_close();
             mu_settings_close();
@@ -3875,13 +3815,10 @@ static const char *mu_delete_cause(int status)
     }
 }
 
-/* The rows a map remove drops: never before the map holds none of the
- * mod's objects. With placed entities the native delete releases them at
- * once but commits its undo step on later editor frames, so the drop is owed
- * to the tick (mu_drop_tick), which waits for that commit, reads the map
- * again and drops the rows only when no object of the mod is left; objects
- * that are still there (a delete the editor did not finish) keep their row.
- * Main thread (the state sits with the undo history's, above). */
+/* The rows a map remove drops are never dropped before the map holds none of the mod's objects: the native delete
+ * commits its undo step on later editor frames, so the drop is owed to the tick (mu_drop_tick), which reads the map
+ * again and drops the rows only when no object of the mod is left. Main thread (the state sits with the undo
+ * history's, above). */
 
 /* Drop the noted rows, with the last mod the search tag, and bring the
  * change into the game. */
@@ -3925,12 +3862,9 @@ static void mu_drop_tick(void)
     mu_model_free(&m);
 }
 
-/* Remove the planned mod from the open map: its entities in one native
- * Delete Selection (one undo step; the editor drops the wires and references
- * to them with the entities), then its manifest row, and with the last mod
- * the search tag, at once when it has no entities, else once the delete has
- * committed (mu_drop_tick). 1 done, 0 refused (msg says why; nothing
- * changed). */
+/* Remove the planned mod from the open map: its entities in one native Delete Selection (one undo step), then its
+ * manifest row and, for the last mod, the search tag, at once or once the delete commits (mu_drop_tick). 1 done,
+ * 0 refused (msg says why; nothing changed). */
 static int mu_map_apply(const mu_model *m, mu_map *mp, const mu_plan *p, const char *key, char *msg, size_t cap)
 {
     const sh_modui_engine *e = mu_engine();
@@ -4060,11 +3994,9 @@ static const char *mu_entry_title(const sh_ms_entry *s)
     return s->loaded && s->bundle.name && s->bundle.name[0] ? s->bundle.name : mu_leaf(s->name);
 }
 
-/* The one folder an uninstall of `key` removes, in the tab and the console
- * alike: the folder of that name under mods\, else (the console, by_key) the
- * first folder sh_ms_entry_matches finds for it (a nested folder's own name,
- * or a salt). Another folder of the
- * same mod stays, and the dry run says so. Returns the entry, or -1. */
+/* The one folder an uninstall of `key` removes, in the tab and the console alike: the folder of that name under
+ * mods\, else (the console, by_key) the first folder sh_ms_entry_matches finds for it (a nested folder's own name,
+ * or a salt). Another folder of the same mod stays, and the dry run says so. Returns the entry, or -1. */
 static int mu_uninstall_target(const mu_model *m, const char *key, int by_key)
 {
     size_t i;
@@ -4082,10 +4014,8 @@ static int mu_entry_has_row(const mu_model *m, size_t at, const char *name)
     return 0;
 }
 
-/* mapRemoveModPreview, mapRemoveMod, uninstallPreview and uninstall, for the
- * tab and the console (o non-NULL prints the same consequences; by_key, the
- * console's uninstall, also finds a mod by a nested folder's own name or its
- * salt, mu_uninstall_target). */
+/* mapRemoveModPreview, mapRemoveMod, uninstallPreview and uninstall, for the tab and the console (o non-NULL prints
+ * the same consequences; by_key also finds a mod by a nested folder's own name or its salt). */
 static int mu_map_action(int action, const char *key, const mu_out *o, int by_key)
 {
     int uninstall = action == SH_MODS_ACT_UNINSTALL || action == SH_MODS_ACT_UNINSTALL_PREVIEW;
@@ -4159,11 +4089,9 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
         mu_line(o, "%s %s: %s", verb, key, msg ? msg : "");
         mu_result_head(&b, action, 0, msg ? msg : "");
     } else if (!apply) {
-        /* The dry run: the consequence list the confirmation shows. It is
-         * computed per mod: when another folder of the mod stays installed
-         * (the copy a map brought, or the player's own), the maps that use it
-         * open with that one, and only the Toybox rows no staying folder adds
-         * leave the editor. */
+        /* The dry run: the consequence list the confirmation shows, computed per mod. When another folder of the mod
+         * stays installed (the copy a map brought, or the player's own), the maps that use it open with that one,
+         * and only the Toybox rows no staying folder adds leave the editor. */
         const sh_ms_entry *s = entry >= 0 ? &m.list.items[entry] : NULL;
         const sh_ms_entry *stay = NULL;
         size_t stay_at = 0;
@@ -4265,9 +4193,8 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
             mu_removal rm;
             int deleted_entities = removed_from_map && mp.mods[p.mod].uid_count > 0, undo = 0;
             memset(&rm, 0, sizeof rm);
-            /* The undo history: no snapshot older than the delete may stay.
-             * After an entity delete the native commit lands on a later
-             * editor frame, and the tick clears once it has; otherwise now. */
+            /* The undo history: no snapshot older than the delete may stay. After an entity delete the native commit
+             * lands on a later editor frame and the tick clears once it has; otherwise the clear is immediate. */
             if (mp.entities >= 0) {
                 if (deleted_entities) { mu_undo_owe(key); undo = 1; }
                 else undo = mu_undo_clear_now(key);
@@ -4312,10 +4239,8 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
     return mu_result_tail(&b);
 }
 
-/* The map's mod rows and choices live outside the edit map, so a change to
- * them alone leaves the editor's map unmodified and leaving it without a Save
- * writes nothing. Each change commits one undo step, as a placed
- * entity does, so the editor asks to save. */
+/* The map's mod rows and choices live outside the edit map, so a change to them alone would leave it unmodified;
+ * each change commits one undo step, as a placed entity does, so the editor asks to save. */
 static void mu_mark_modified(const char *label)
 {
     const sh_modui_engine *e = mu_engine();
@@ -4325,13 +4250,9 @@ static void mu_mark_modified(const char *label)
 
 /* ---- map add: a map-level row */
 
-/* Attach `key` (a folder, as sh_ms_entry_matches reads it, or a salt) to the
- * open map: the current manifest gets a map-level row naming the build of the
- * mod's folder at the root, and the map scope follows at once. The next save
- * writes the row. A folder a downloaded map or a prefab brought names its mod:
- * the root folder of its salt is the one the player's maps use (placing a
- * prefab puts its mods there after the one approval); without one the player is
- * sent to Add to my mods. */
+/* Attach `key` (a folder as sh_ms_entry_matches reads it, or a salt) to the open map: the current manifest gets a
+ * map-level row naming the build of the mod's root folder, applied at once and written by the next save. A folder a
+ * downloaded map or prefab brought attaches the root folder of its salt, else the player is sent to Add to my mods. */
 static int mu_map_add(const char *key, const mu_out *o)
 {
     const int action = SH_MODS_ACT_MAP_ADD;
@@ -4385,8 +4306,7 @@ static int mu_map_add(const char *key, const mu_out *o)
         const mu_mapmod *x = NULL;
         int found = 0;
         memset(&row, 0, sizeof row);
-        /* A row the map already has for this mod (an earlier build of it) is
-         * the one marked. */
+        /* A row the map already has for this mod (another build of it) is the one marked. */
         for (i = 0; i < mp.rows.count && !found; i++)
             if (mu_same_bundle(&m, mp.rows.rows[i].build, e->bundle.hash) || !_stricmp(mp.rows.rows[i].salt, e->salt)) {
                 row = mp.rows.rows[i];
@@ -4426,7 +4346,7 @@ static int mu_map_add(const char *key, const mu_out *o)
     return mu_result_tail(&b);
 }
 
-/* ---- update: the version rule by hand (5.10) */
+/* ---- update: the version rule by hand */
 
 /* The root folder's loaded build of `salt` (the installed version), or -1. */
 static int mu_root_entry(const mu_model *m, const char *salt)
@@ -4437,10 +4357,9 @@ static int mu_root_entry(const mu_model *m, const char *salt)
     return -1;
 }
 
-/* The name of a pinned map row of `salt` whose installed version would change what the map serves (5.10: Update is
- * offered only then, when an object's unit, or the whole-mod unit of a map-level row, differs from the pinned one;
- * modpin.h sh_modpin_row_differs), or NULL. An author's own unchanged published map is never told it uses another
- * version. */
+/* The name of a pinned map row of `salt` whose installed version would change what the map serves (an object's unit,
+ * or the whole-mod unit of a map-level row, differs from the pinned one: sh_modpin_row_differs), or NULL. An author's
+ * own unchanged published map is never told it uses another version. */
 static const char *mu_update_name(const mu_model *m, const mu_map *mp, const char *salt)
 {
     size_t k;
@@ -4451,9 +4370,8 @@ static const char *mu_update_name(const mu_model *m, const mu_map *mp, const cha
     return NULL;
 }
 
-/* Update (5.10): every placed object of the mod `salt` moves to the installed version's files (D23), unless that
- * version lacks one of them (D23a, owner question Q9): then nothing moves and the sentence says which. Nothing is
- * saved until the author saves. */
+/* Update: every placed object of the mod `salt` moves to the installed version's files, unless that version lacks
+ * one of them: then nothing moves and the sentence says which. Nothing is saved until the author saves. */
 static int mu_map_update(const char *salt, const mu_out *o)
 {
     const int action = SH_MODS_ACT_MAP_UPDATE;
@@ -4755,10 +4673,8 @@ static void mu_put_file(mu_buf *b, int first, const char *path, unsigned long lo
     mu_putn(b, "}", 1);
 }
 
-/* modFiles: every file of the folder and every game file its build reads
- * from the install, each with its class, whether it is the game's own bytes
- * and which archive holds them, and the plain cause when the folder's cause
- * names it. */
+/* modFiles: every file of the folder and every game file its build reads from the install, each with its class,
+ * whether it is the game's own bytes, which archive holds them, and the plain cause when the folder's cause names it. */
 static int mu_files(const char *key)
 {
     const int action = SH_MODS_ACT_FILES;
@@ -4970,10 +4886,9 @@ static void mu_remove_tree(const wchar_t *dir)
     RemoveDirectoryW(dir);
 }
 
-/* content (SPEC-distribution 2.10): the map content on disk, one line per kept or played map's mod and the storage
- * line ("Map content: 1.3 GB for 14 maps."), from this computer alone (the Mods tab never asks the store): "lines"
- * the texts, and "rows" beside them, one per line, the token Add to my mods takes for that line's map mod (5.15), ""
- * for the storage line. With arg "removePlayed", Remove content of maps you only played first (5.17). */
+/* content: the map content on disk, one line per kept or played map's mod and a storage line, from this computer
+ * alone: "lines" the texts and "rows" the token Add to my mods takes per line ("" for storage). With arg
+ * "removePlayed", the content of maps only played is removed first. */
 typedef struct mu_lines { mu_buf *b, *rows; int n; } mu_lines;
 static void mu_content_line(void *context, const char *line, const char *row)
 {
@@ -5020,9 +4935,8 @@ static int mu_content(const char *arg)
     free(message);
     return mu_result_tail(&b);
 }
-/* addToMine (arg: a content line's row, mu_content): Add to my mods from a row of a map on this computer
- * (SPEC-distribution 5.15): the row's units made a mod folder of the player's own, "<name> (my copy)", with a new
- * salt, built by the rescan. Only the objects that map has. */
+/* addToMine (arg: a content line's row, mu_content): the row's units made a mod folder of the player's own, "<name>
+ * (my copy)", with a new salt, built by the rescan. Only the objects that map has. */
 static int mu_add_mine(const char *row)
 {
     const int action = SH_MODS_ACT_ADD_MINE;
@@ -5063,10 +4977,9 @@ static int mu_add_mine(const char *row)
     return rc;
 }
 
-/* newMod: a mod folder named after the mod with a working example (an
- * entityDef and its Toybox row), built at once by the rescan, so the list
- * shows it ready and the Toybox has its row. There is no folder watcher: the
- * message says Refresh picks up the author's edits. */
+/* newMod: a mod folder named after the mod with a working example (an entityDef and its Toybox row), built at once
+ * by the rescan so the list shows it ready. There is no folder watcher: the message says Refresh picks up the
+ * author's edits. */
 static int mu_new_mod(const char *name)
 {
     const int action = SH_MODS_ACT_NEW_MOD;

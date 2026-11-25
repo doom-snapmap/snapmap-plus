@@ -1,7 +1,5 @@
-/* modpub_sites.c -- the bind-time byte checks of the published-map gates (modpublished.c) and the publish hooks
- * (modpublish.c), read in Ghidra on both build 13954591 executables. Their own file, with only the C library, so the
- * image-backed tests/modpub_sites_test.c runs the very functions the two binds run against each shipped executable
- * (R-LB1: a bind check no test ran against the executables turned a feature off in every session). */
+/* modpub_sites.c -- the bind-time byte checks of the published-map gates and the publish hooks, read in Ghidra on both
+ * build 13954591 executables. It links only the C library so tests/modpub_sites_test.c runs the same functions. */
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -50,8 +48,6 @@ static size_t eng_vcall_slot(const uint8_t *p)
     if (displacement <= 0 || displacement >= 0x800 || displacement % 8) return 0;
     return (size_t)displacement / sizeof(void *);
 }
-
-/* ------------------------------------------------------------ the published-map gates (modpublished.c eng_bind) */
 
 const char *sh_modpub_check_sites(const sh_modpub_sites *s, sh_modpub_bound *out)
 {
@@ -127,8 +123,6 @@ const char *sh_modpub_check_sites(const sh_modpub_sites *s, sh_modpub_bound *out
     return NULL;
 }
 
-/* ------------------------------------------------------------ the publish hooks (modpublish.c eng_bind) */
-
 const char *sh_modpublish_check_sites(const sh_modpublish_sites *s, sh_modpublish_bound *out)
 {
     sh_modpublish_bound b;
@@ -191,8 +185,6 @@ const char *sh_modpublish_check_sites(const sh_modpublish_sites *s, sh_modpublis
     return NULL;
 }
 
-/* ------------------------------------------------------------ the cloud save's read of the slot */
-
 /* idSnapMapCloud's cloud-save request (VK 0x1411BE200, GL 0x1411BD5D0) reads the map's slot back,
  * ReadLocalSavedMapText(model->localId, &text, 0, -1), then packs and uploads what it read: `call` is that call
  * (CloudSaveSlotReadCall: mov rcx,[r13+0x10] before it; mov r15d,eax; test eax,eax; je after). The other caller of the
@@ -227,21 +219,10 @@ const char *sh_modpublish_check_cloud_meta(const uint8_t *meta, const uint8_t *m
     return NULL;
 }
 
-/* ------------------------------------------------------------ the FINISH step (modpublish.c eng_bind_finish) */
-
-/* MapProperties frame (VK 0x14118FDD0, GL 0x14118EF50), its PUBLISH case:
- *   -0x16  lea rcx,[rsi+0x28]; mov rdx,rdi; call <settings copy>
- *   -0x0A  mov r8b,1; movzx edx,r8b; mov rcx,rdi
- *   +0x00  call <gate>            the game's own refusals: a dialog, the screens closed, 1
- *   +0x05  test al,al; jne <out>
- *   +0x0D  mov rcx,rdi; call <close>   the screens close (the editor's state stack pops)
- *   +0x15  movzx edx,byte [rsi+0x21]; mov rcx,rdi; call PublishStart
- * and, 0x3E3 bytes before the gate call, the frame takes the screens' pending result: [editor+0x21088]+0xA18 -> +0x8E0,
- * read and zeroed. The gate shows its dialogs on [editor+0x21088]+0x8E8 and sets +0xA2C bit 0; the show reads the
- * descriptor's title (+0x10), text (+0x40), button labels (+0x68/+0x70, +0x98/+0xA0) and kind (+0xC0) and clears the
- * answered flag +0x1D8; EditorFrame calls the dialog's input while bit 0 is set and clears the bit once the flag is
- * set; the input writes the answer +0x1DC (0 the first button, 1 the second or Back) and the flag. Same bytes on
- * both renderers. */
+/* MapProperties frame (VK 0x14118FDD0, GL 0x14118EF50), its PUBLISH case: the gate call, then the screens' close, then
+ * PublishStart, with the frame's pending screen result read 0x3E3 bytes before the gate call. The gate shows its dialogs
+ * through [editor+0x21088]+0x8E8 and the dialog input writes the answer at +0x1DC and the answered flag at +0x1D8.
+ * Same bytes on both renderers. */
 const char *sh_modpublish_check_finish(const sh_modpublish_finish_sites *s, sh_modpublish_finish_bound *out)
 {
     static const uint8_t GATE_DIALOG[] = { 0x48, 0x8b, 0x88, 0xe8, 0x08, 0x00, 0x00, 0xe8 };
@@ -261,8 +242,7 @@ const char *sh_modpublish_check_finish(const sh_modpublish_finish_sites *s, sh_m
         return "FINISH gate call +0x05: the screens' close";
     if (memcmp(s->call + 0x15, "\x0f\xb6\x56\x21\x48\x8b\xcf", 7) || eng_call(s->call + 0x1C) != (void *)s->start)
         return "FINISH gate call +0x15: PublishStart(editor, overwrite)";
-    /* then the frame's success event: idStructuredLogManager::CreateInfoLog(manager(), "snapeditor.publish.success",
-     * "idSnapEditorState_MapProperties::Frame - snap editor publish success") */
+    /* the frame's success event: idStructuredLogManager::CreateInfoLog(manager(), "snapeditor.publish.success", ...) */
     if (!(b.event_owner = eng_call(s->call + 0x21)) || memcmp(s->call + 0x26, "\x48\x8b\xc8", 3) ||
         !(b.event_desc = (const char *)eng_rip(s->call + 0x29, "\x4c\x8d\x05", 3)) ||
         !(b.event_name = (const char *)eng_rip(s->call + 0x30, "\x48\x8d\x15", 3)) || !(b.event_log = eng_call(s->call + 0x37)))
@@ -275,7 +255,7 @@ const char *sh_modpublish_check_finish(const sh_modpublish_finish_sites *s, sh_m
     if (memcmp(slot, "\x48\x8b\x8f\x88\x10\x02\x00\x48\x8b\x81\x18\x0a\x00\x00\x39\x98\xe0\x08\x00\x00\x74", 21) ||
         memcmp(slot + 0x16, "\x8b\x98\xe0\x08\x00\x00\xc7\x80\xe0\x08\x00\x00\x00\x00\x00\x00", 16))
         return "FINISH gate call -0x3E3: the screens' pending result";
-    /* the gate's three dialogs (limits, start module, deprecated entity), each on the editor screen's dialog */
+    /* the gate's three dialogs (limits, start module, deprecated entity) */
     gate = (const uint8_t *)b.gate;
     for (i = 0; i + sizeof GATE_DIALOG + 4 + sizeof GATE_MODAL <= 0x280; i++)
         if (!memcmp(gate + i, GATE_DIALOG, sizeof GATE_DIALOG) &&

@@ -1,43 +1,29 @@
-/* Script calls that reach the whole game, beyond the calls written for one
- * purpose: every engine event, every SnapMap event, every cvar and every
- * decl. With e:get and e:set (script_api_reflect.h) they give a script what
- * the game's own code and SnapMap's wired logic have.
+/* Script calls that reach the whole game, beyond the calls written for one purpose: every engine event, every
+ * SnapMap event, every cvar and every decl. With e:get and e:set (script_api_reflect.h) they give a script what the
+ * game's own code and SnapMap's wired logic have.
  *
- *   e:run_event(name, ...)     run an engine event on the entity now and return
- *                          its result (a number, text, a position, an entity,
- *                          a decl's name) or nothing. The values are the
- *                          event's own arguments, in order: whole numbers,
- *                          true/false, numbers, text, positions {x, y, z},
- *                          angles {pitch, yaw, roll}, colors {r, g, b, a},
- *                          entities (nil for none) and decls (from decl()).
- *   e:queue_event(name, ...)      the same, queued for the end of this frame.
- *   event_arguments(name)       what an event takes, as a list of words ("number",
- *                          "entity", ...), or nil when the game has no such
- *                          event.
- *   e:signal(event[, by])  fire a SnapMap event on the entity, as the game
- *                          does: everything wired to that output of the
- *                          object runs, with `by` as the activator.
- *                          e:signal("ai_killed"), e:signal("trigger_touched", player).
- *   on.signal(event, fn)   (the runtime's) fn(entity, activator) whenever any
- *                          object of the map fires that SnapMap event.
- *   console_variable(name)             a cvar's value (a number when it reads as one).
- *   console_variable(name, value)      set it for this map; it is put back when the map
- *                          ends while it still holds the script's value (a
- *                          change made since by the player, the console or a
- *                          mod's requirement is left as it is), and at the
- *                          next start when a quit or crash mid-map left it in
- *                          the game's saved settings.
- *   entities()             every entity of the map now, players first (filter
- *                          with e:definition(), e:class() or e:get(...)).
- *   decl(type, name)       a decl of the mod, or of the game with
- *                          native("..."): d:get(path), d:set(path, value),
- *                          d:fields([path]), d:name(), d:type(). What a
- *                          script sets in a decl is put back when the map
- *                          ends.
+ *   e:run_event(name, ...)     run an engine event on the entity and return its result (a number, text, a
+ *                              position, an entity, a decl's name) or nothing; the arguments are the event's own,
+ *                              in order: numbers, true/false, text, positions {x, y, z}, angles {pitch, yaw, roll},
+ *                              colors {r, g, b, a}, entities (nil for none) and decls (from decl())
+ *   e:queue_event(name, ...)   the same, queued for the end of this frame
+ *   event_arguments(name)      what an event takes, as a list of words ("number", "entity", ...), or nil when
+ *                              the game has no such event
+ *   e:signal(event[, by])      fire a SnapMap event on the entity, as the game does: everything wired to that
+ *                              output runs, with `by` as the activator (e:signal("trigger_touched", player))
+ *   on.signal(event, fn)       (the runtime's) fn(entity, activator) whenever any object fires that SnapMap event
+ *   console_variable(name)     a cvar's value (a number when it reads as one)
+ *   console_variable(name, value)  set it for this map; it is put back when the map ends while it still holds the
+ *                              script's value, and at the next start when a quit or crash left it in the saved
+ *                              settings
+ *   entities()                 every entity of the map, players first (filter with e:definition(), e:class() or
+ *                              e:get(...))
+ *   decl(type, name)           a decl of the mod, or of the game with native("..."): d:get(path), d:set(path,
+ *                              value), d:fields([path]), d:name(), d:type(); what a script sets is put back when
+ *                              the map ends
  *
- * Event names are the engine's ("setOrigin", "activate"); SnapMap events are
- * the editor's outputs, written with or without SNAP_EVENT_ and in any case
- * ("ai_killed"). Every refusal is a sentence naming the call and the part. */
+ * Event names are the engine's ("setOrigin", "activate"); SnapMap events are the editor's outputs, written with or
+ * without SNAP_EVENT_ and in any case ("ai_killed"). Every refusal is a sentence naming the call and the part. */
 #ifndef SH_SCRIPT_API_GAME_H
 #define SH_SCRIPT_API_GAME_H
 
@@ -46,8 +32,7 @@
 typedef struct sh_script_game_ops {
     /* The name of a decl; NULL when unreadable. */
     const char *(*decl_name)(void *decl);
-    /* A SnapMap event's number from its key (lower case, without
-     * snap_event_), -1 when the game has none. */
+    /* A SnapMap event's number from its key (lower case, without snap_event_), -1 when the game has none. */
     int (*signal_number)(const char *event);
     /* Fire it on the entity; 1 when the game ran it. */
     int (*signal_fire)(void *ent, int number, void *activator);
@@ -72,9 +57,9 @@ void sh_script_api_game_set(const sh_script_game_ops *ops);
 /* Register the calls (once). */
 void sh_script_api_game_register(void);
 
-/* The journal of the cvar restores a running map still owes (NULL when none), and the start's recovery from it: each
- * cvar that still holds the script's value, when that is not the cvar's default (the game saved it in its settings
- * at a quit or crash mid-map), gets back the value the script displaced. Returns how many were put back. */
+/* The journal of the cvar restores a running map still owes (NULL when none), and the start's recovery from it: a
+ * cvar that still holds the script's value, when that is not its default, gets back the value the script displaced.
+ * Returns how many were put back. */
 char *sh_script_game_cvar_journal_text(void);
 int sh_script_game_cvar_recover(const char *journal);
 

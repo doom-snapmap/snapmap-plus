@@ -1,7 +1,6 @@
-/* Tests the release-retest workflow's version and game-build rules by
- * extracting its helper functions from the workflow script: a release after
- * v0.2.1-beta.19 prompts only reports from build 13954591, and a report with
- * no "- Game:" line from v0.2.1-beta.19 or earlier counts as the 2018 build. */
+/* Tests the release-retest workflow's version and game-build rules by extracting its helper functions: a release after
+ * v0.2.1-beta.19 prompts only reports from build 13954591, and a report with no "- Game:" line from v0.2.1-beta.19 or
+ * earlier counts as the 2018 build. */
 'use strict';
 const fs = require('fs');
 const path = require('path');

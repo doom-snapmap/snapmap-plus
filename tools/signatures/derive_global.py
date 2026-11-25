@@ -120,10 +120,8 @@ def build_sig(sec, anchor_ins, n_after=6):
             for op in ins.operands:
                 if op.type == CS_OP_MEM and op.mem.base == X86_REG_RIP:
                     idx = b.rfind(struct.pack('<i', op.mem.disp))
-                    # RIP-relative addressing uses the end of the whole instruction.
-                    # Record any
-                    # immediate bytes after disp32 so decoding does not select a
-                    # neighboring address.
+                    # RIP-relative addressing uses the end of the whole instruction, so record any
+                    # immediate bytes after disp32 to decode the right address.
                     if idx >= 0:
                         target_slot = cur + idx
                         target_tail = len(b) - (idx + 4)

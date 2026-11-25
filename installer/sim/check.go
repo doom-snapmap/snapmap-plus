@@ -11,17 +11,11 @@ import (
 	"strings"
 )
 
-// The layout contract the harness checks after every step.
-//
-// DOOM folder: exactly the vanilla executables plus the files the step expects (--expect: the pair,
-// and any file of another tool the scenario seeded), nothing else. Runtime folders the DLLs write
-// while the game runs (snapmap-plus\logs, snapmap-plus\crash) are never present in a simulation.
-//
-// Data folder, installed: snapmap-plus.exe and install.json, plus the player's data (an executable
-// of an earlier release that no install placed fails the contract); install.json starts with its version key, names this DOOM folder and the pair, and
-// records each executable present with the hash on disk; cache\installer holds only what install.json
-// records (backups of files that were not ours, replaced images still to remove). Uninstalled: none
-// of the installer's files remain. Either way every --keep file (the player's data) is still there.
+// The layout contract checked after every step. DOOM folder: exactly the vanilla executables plus the
+// files the step expects (--expect). Data folder, installed: snapmap-plus.exe, install.json (version key
+// first, naming this DOOM folder and pair and each executable's hash) and the player's data, with
+// cache\installer holding only what install.json records. Uninstalled: none of the installer's files
+// remain; either way every --keep file is still there.
 
 var vanilla = []string{"DOOMx64.exe", "DOOMx64vk.exe"}
 
@@ -34,7 +28,7 @@ var playerData = map[string]string{
 	"config.json": "player data", "prefabs": "player data", "strings": "player data", "mods": "player data",
 	"rawmap.json": "player data", "test-maps": "player data", "cache": "regenerable cache", "token": "player data",
 	"pinned.json": "player data",
-	// Folders of earlier releases stay as they are: converting earlier releases' data is not in this release.
+	// Folders a previous install placed that this release does not ship stay as they are.
 	"overrides":    "player data (an earlier release's retired package folder; kept as it is)",
 	"removed-mods": "player data (an earlier release's recycle bin of mods; kept as it is)",
 }

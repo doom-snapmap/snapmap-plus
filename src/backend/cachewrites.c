@@ -1,11 +1,6 @@
-/* cachewrites.c -- cache writes out of the game folder: the detour of the engine's atomic write (cachewrites.h).
- *
- * The root is resolved once at install: the Saved Games folder followed by `\id Software\DOOM`, the default of
- * the engine's fs_savepath. The cvar's own string is not read: the product's cvar reader (engine_cvar_read.h)
- * reads integers only, and the cvar system is not up when the detour is installed. A cache write gets the
- * absolute path `<root>\base\<rel>` (sh_cachewrite_redirect), its parent folders below the root are made, and
- * the game's function writes there with the same path type, buffer and length. Any other write, and a cache
- * write whose folder cannot be made, is passed to the game's function unchanged. */
+/* cachewrites.c -- the detour of the engine's atomic write (cachewrites.h). The root is the Saved Games folder plus
+ * `\id Software\DOOM` (the default fs_savepath), resolved at install because the cvar system is not up yet; a cache
+ * write gets `<root>\base\<rel>`, and any other write, or one whose folder cannot be made, passes through unchanged. */
 #include <windows.h>
 #include <shlobj.h>
 #include <stdint.h>
@@ -39,8 +34,8 @@ static void cw_log(const char *fmt, ...)
     backend_log(line);
 }
 
-/* The Saved Games folder followed by `\id Software\DOOM`, in the ANSI code page the engine's narrow paths use.
- * 0 when the folder is unknown or its name has a character that code page cannot spell. */
+/* Resolves the Saved Games folder plus `\id Software\DOOM` in the ANSI code page the engine's narrow paths use.
+ * Returns 0 when the folder is unknown or its name has a character that code page cannot spell. */
 static int resolve_root(void)
 {
     static const GUID kSavedGames =
@@ -64,7 +59,7 @@ static int resolve_root(void)
     return 1;
 }
 
-/* Make the folders of path below the root, the target's own name excluded. 1 when they all exist. */
+/* Makes the folders of path below the root, the target's own name excluded. Returns 1 when they all exist. */
 static int make_parents(char *path)
 {
     size_t i;

@@ -2,12 +2,8 @@
 #include "map_render.h"
 #include "map_settings.h"
 #include "world_area_cell.h"
-/* DeserializeFromJson detour: prepare every map's JSON, then call the native
- * parser. Inside the editor reload that opens a rawmap (editor_frame.c), the
- * editor's parse reads the rawmap's checked text instead of the borrowed saved
- * map's; no other parse is ever substituted. Paths are UTF-8 throughout and
- * every file call is the wide Windows one.
- */
+/* DeserializeFromJson detour: prepares every map's JSON, then calls the native parser; only the editor
+ * reload that opens a rawmap gets the rawmap's checked text. */
 #include <windows.h>
 #include <stdint.h>
 #include <limits.h>
@@ -34,22 +30,16 @@
 #include "navmesh.h"
 #include "nav_bake.h"
 #include "nav_regions.h"
-#include "editor_frame.h"   /* sh_editor_frame_request_reload -- the +0x338 load-now slot */
+#include "editor_frame.h"   /* sh_editor_frame_request_reload */
 #include "../common/text.h"
 #include "../fault_shield/recovery.h"   /* shield_note_refused_load: a refused map is sound */
 
-/* DeserializeFromJson prologue steal window. Decoded from the signature DB pattern
- *   40 55            push rbp                      (2)
- *   56               push rsi                      (1)
- *   57               push rdi                      (1)
- *   48 8D 6C 24 90   lea  rbp,[rsp-0x70]           (5)  -- rsp-relative, position-independent
- *   48 81 EC 70 01.. sub  rsp,0x170                (7)
- * = 16 bytes of whole, register/rsp-only, position-independent instructions (no RIP-rel, no rel
- * jmp/call). Same 16-byte window the smoke self-test exercises. */
+/* DeserializeFromJson prologue steal window: push rbp/rsi/rdi, lea rbp,[rsp-0x70] (5) and the start of
+ * sub rsp,0x170 (7) are 16 bytes of whole, rsp-only, position-independent instructions (no RIP-rel,
+ * no rel jmp/call). */
 #define DESER_STOLEN 16
 
-/* The engine target's prototype: int DeserializeFromJson(const char* json, idSnapMap* out). Variant A
- * (buffer-first). */
+/* The engine target's prototype: int DeserializeFromJson(const char* json, idSnapMap* out). */
 typedef int (*deser_fn_t)(const char *json, void *out_map);
 
 static deser_fn_t g_deser_orig = NULL;   /* the trampoline -> the real engine DeserializeFromJson */
@@ -60,9 +50,7 @@ static SRWLOCK g_paths_lock = SRWLOCK_INIT;
 /* Load source override (malloc'd), or NULL for %LOCALAPPDATA%/snapmap-plus/rawmap.json. */
 static char *g_src_path;
 
-/* Every path string in this file is malloc'd and sized to its path. The
- * backend's C runtime allocates from the process heap, never from an engine
- * heap, so a path made on a game thread is freed by this code on any thread. */
+/* Every path string here is malloc'd from the process heap, never an engine heap, so any thread frees it. */
 wchar_t *sh_rawmap_path_wide(const char *utf8)
 {
     wchar_t *w, *out, *body;
@@ -167,18 +155,16 @@ char *sh_rawmap_default_path(void) { return default_rawmap_path(); }
 
 static void rawmap_tell(const char *text);
 
-/* A held load's text: the bytes the hold checked (for a .zip, the map its
- * import returned), kept so the load the hold's resume starts parses them
- * instead of reading the source again. A ZIP is imported once, at the hold,
- * not again at the resume. It is ready only once the hold resumed
- * (sh_rawmap_reopen_after_mods); any other read of the source drops it. */
+/* A held load's text (for a .zip, the map its import returned), kept so the resumed load parses it instead
+ * of reading the source again. Ready only once the hold resumed (sh_rawmap_reopen_after_mods); any other
+ * read of the source drops it. */
 static SRWLOCK g_held_lock = SRWLOCK_INIT;
 static char *g_held;                   /* process heap */
 static size_t g_held_len;
 static char *g_held_path;             /* malloc'd */
 static int g_held_ready;
-/* 1 when the last read returned a resumed hold's text: that load has had its fetch, so it is never held again (R-LV2:
- * a pinned row whose units could not be had stayed missing, and every resume held the load again, without end). */
+/* 1 when the last read returned a resumed hold's text: that load has had its fetch, so it is never held
+ * again (a pinned row that cannot be fetched would otherwise hold every resume). */
 static int g_read_resumed;
 static int g_held_fetched;            /* the held text is a hold's, resumed after its fetch (not an import's) */
 
@@ -233,17 +219,14 @@ static int transport_start_import(const char *path, char **why);
 /* The text, or "" for none. */
 static const char *rawmap_s(const char *text) { return text ? text : ""; }
 
-/* Set *why (malloc'd, the old one freed) when why is not NULL. */
+/* Set *why (malloc'd, the previous text freed) when why is not NULL. */
 static void rawmap_why(char **why, const char *text)
 {
     if (why) { free(*why); *why = sh_text(text); }
 }
 
-/* Read a NUL-terminated process-heap buffer; caller frees it. Return NULL on
- * failure, with the reason and next step in *why (malloc'd) when why is
- * given. A .zip not imported yet starts its import off the game's thread
- * (*importing set, NULL returned); the load opens again when it is done.
- */
+/* Read the source into a NUL-terminated process-heap buffer (caller frees); NULL on failure, with the reason
+ * in *why. A .zip not imported yet starts its import off the game's thread (*importing set, NULL returned). */
 static char *read_source_file_why(size_t *out_len, char **why, int *importing)
 {
     char *path = resolve_source_path(), *held, *line;
@@ -311,14 +294,11 @@ static char *read_source_file_why(size_t *out_len, char **why, int *importing)
     return buf;
 }
 
-/* The refusal of a map whose Snapmap+ data a check could not finish: the
- * engine never gets a map that was not checked. */
+/* The refusal of a map whose Snapmap+ data a check could not finish. */
 #define RAWMAP_CHECK_FAULTED "Snapmap+ could not check this map, so it was not opened. Restart DOOM and open it again."
 
-/* A map in an earlier shape (map_carrier.h, sh_map_old_shape) is refused
- * before anything reads it: one line, and the plain sentence held as the
- * load's refusal (sh_modmanifest_load_refuse). A check that faults refuses
- * too. Returns 1 when refused. */
+/* Refuse a map in an earlier shape (sh_map_old_shape) before anything reads it, holding the sentence as the
+ * load's refusal (sh_modmanifest_load_refuse); a faulting check refuses too. Returns 1 when refused. */
 static int old_shape_refused(const char *json, size_t len)
 {
     int shape;
@@ -337,10 +317,8 @@ static int old_shape_refused(const char *json, size_t len)
     return 1;
 }
 
-/* A map whose mod list has a row this version cannot read (one a newer
- * Snapmap+ wrote, or a damaged one) is refused too. Dropping the row and
- * opening the map would hand the engine entities whose mod was never
- * activated: models that do not exist, and DOOM's fatal error for them. */
+/* A map whose mod list has a row this version cannot read is refused: opening it without the row would hand
+ * the engine entities whose mod was never activated, and DOOM's fatal error follows. */
 #define RAWMAP_ROWS_UNREAD "This map's mod list has an entry this version of Snapmap+ cannot read, so the map was not "                            "opened. Update Snapmap+ and open it again."
 
 static int unread_rows_refused(const char *json, size_t len)
@@ -361,11 +339,8 @@ static int unread_rows_refused(const char *json, size_t len)
     return 1;
 }
 
-/* Read the map manifest, keep it for the load, strip its rows before the
- * engine parses and activate the bundles it names. Runs on every parse.
- * Returns an owned process-heap buffer, or NULL to keep the input; a read
- * that faults sets *faulted and the map is refused (its mods were not
- * activated, and its placed entities would fail the editor's validator). */
+/* Read the map manifest, strip its rows and activate the bundles it names, on every parse. Returns an owned
+ * process-heap buffer, or NULL to keep the input; a faulting read sets *faulted and the map is refused. */
 static char *manifest_prepare_guarded(const char *json, size_t len, int *faulted)
 {
     *faulted = 0;
@@ -398,41 +373,28 @@ static char *settings_prepare_guarded(const char *json, size_t len)
     }
 }
 
-/* ------------------------------------------------------------------ "is this a branch map?" -----
- * The editor asks one small function whether the open map is a branch, and answers "Save over the
- * map you opened" or "Save asks for a name" from it. That function reads the map's tag list for
- * "map:branch".
- *
- * We answer it instead of writing the tag. Putting the tag in the map JSON does not work -- the
- * loader ignores the array and the map comes back with no tags -- and adding it to the live map
- * after the load grows that tag list under whatever already holds the array, which faults on a
- * later read. Answering costs the engine nothing: no engine data changes. */
+/* The editor asks IsBranchMap (the map's tag list holds "map:branch") to choose between "Save over the map
+ * you opened" and "Save asks for a name". We answer it rather than write the tag: the loader ignores a tag
+ * array in the JSON, and growing the live tag list faults on a later read. */
 
 /* Whether a map opened from a rawmap counts as a branch. On, the engine's own Save asks for a
  * name; off, it overwrites the map the rawmap opened over. */
 static volatile LONG g_branch_tag    = 1;
-static volatile LONG g_open_is_rawmap = 0;   /* 1 = the open map was substituted by the swap */
-/* The open map's identity after a swap: a new map, not saved yet, opened from
- * this file (its base name). The reload that opens it borrows the saved map
- * the editor had open, whose id the edit keeps until the first save, so the
- * Mods tab and `sh_mods map` ask this, not the edit's id (sh_rawmap_open_unsaved). */
+static volatile LONG g_open_is_rawmap = 0;   /* 1 = the open map came from the swap */
+/* The open map's identity after a swap: unsaved, named by this file's base name (sh_rawmap_open_unsaved).
+ * Its edit keeps the borrowed saved map's id until the first save, so callers ask this, not the edit. */
 static SRWLOCK g_open_lock = SRWLOCK_INIT;
 static char *g_open_name;               /* malloc'd, or NULL */
 static volatile LONG g_open_unsaved = 0;
-/* The saved-map id the swap's map borrowed, read from the edit the first time
- * the branch answer is asked; "" until then. While the edit still holds it the
- * open map is the rawmap's and Save asks for a name. Once a save gave the map
- * its own id it is a saved map like any other: the engine answers, so the next
- * Save writes that map instead of asking again. The engine's saved-map ids are
- * 20 hex digits; the reader leaves an id that would not fit empty (unread,
- * never cut). */
+/* The saved-map id the swap's map borrowed, read from the edit at the first branch answer; "" until then.
+ * While the edit holds it Save asks for a name; once a save gave the map its own id the engine answers.
+ * The reader leaves an id that does not fit (ids are 20 hex digits) empty, never cut. */
 static char g_borrowed_id[64];
 static sh_rawmap_edit_id_fn g_edit_id;
 
 void sh_rawmap_set_edit_id_reader(sh_rawmap_edit_id_fn fn) { g_edit_id = fn; }
 
-/* `name` is the rawmap's file name; NULL clears it. When the copy cannot be
- * made for want of memory the open map is still the rawmap's, named "rawmap". */
+/* `name` is the rawmap's file name; NULL clears it. Out of memory, the open map is named "rawmap". */
 static void open_identity_set(const char *name)
 {
     char *kept = name ? sh_text(name) : NULL, *old;
@@ -496,20 +458,15 @@ static unsigned char sh_isbranch_detour(void *editor)
     if (InterlockedCompareExchange(&g_open_is_rawmap, 0, 0) != 0 &&
         InterlockedCompareExchange(&g_branch_tag, 0, 0) != 0) {
         if (open_still_borrowed()) return 1;
-        /* Saved under its own id since: no longer the rawmap's borrowed map. */
+        /* Saved under its own id: no longer the rawmap's borrowed map. */
         InterlockedExchange(&g_open_is_rawmap, 0);
         backend_log("RAWMAP: the map opened from a rawmap has its own saved-map id now; Save writes it");
     }
     return g_isbranch_orig ? g_isbranch_orig(editor) : 0;
 }
 
-/* idSnapEditorLocal::IsBranchMap. Two functions in the image share its exact shape -- the same
- * body around a call to a different tag check -- so the pattern alone is ambiguous. The one we
- * want is the one whose callee names "map:branch", which is what this follows:
- *
- *     +0x10  E8 <rel32>          the tag check
- *     callee +0x?? 48 8D 15 ...  lea rdx, [the tag literal]
- */
+/* idSnapEditorLocal::IsBranchMap. Two functions in the image share its shape around a different tag
+ * check, so the match is the one whose callee (the E8 call at +0x10) loads the "map:branch" literal. */
 #define ISBRANCH_STOLEN 14   /* through `test rcx,rcx`, before the short jump at +0x0E */
 
 static int callee_names_branch(const unsigned char *site)
@@ -608,9 +565,8 @@ int sh_rawmap_branch_install(const unsigned char *module_base)
     return 1;
 }
 
-/* Remove the map's "snapmap-plus" member (map_carrier.h) once every part has
- * been read from it. Returns an owned process-heap buffer, or NULL to keep
- * the input. */
+/* Remove the map's "snapmap-plus" member (map_carrier.h) once every part is read. Returns an owned
+ * process-heap buffer, or NULL to keep the input. */
 static char *carrier_strip_guarded(const char *json, size_t len)
 {
     __try {
@@ -638,12 +594,9 @@ static void carrier_describe_guarded(const char *json, size_t len)
     }
 }
 
-/* Prepare the chosen JSON before native parsing: refuse a map in an earlier
- * shape (*refused set, NULL returned, nothing read), else rebuild map-scoped
- * navigation state, read the map's Snapmap+ data from the "snapmap-plus"
- * member and remove the member last. Each failed step retains the preceding
- * buffer. Returns an owned process-heap buffer or NULL to use the original.
- */
+/* Prepare the chosen JSON before native parsing: refuse a map in an earlier shape (*refused set, NULL
+ * returned), else rebuild navigation state, read the "snapmap-plus" member's data and strip the member last.
+ * Returns an owned process-heap buffer or NULL to use the original. */
 static char *prepare_map_buffer(const char *json, int *refused)
 {
     char *manifest, *settings, *current = NULL, *bare;
@@ -657,8 +610,7 @@ static char *prepare_map_buffer(const char *json, int *refused)
     carrier_describe_guarded(json, len);
 
     sh_navmesh_build_from_map(json, len);
-    /* The regions the author marked, read from the same bytes and cleared the
-     * same way. A map with no marked volume must not inherit the last map's. */
+    /* The author's marked regions, so a map with none does not inherit the last map's. */
     sh_nav_bake_set_map(json, len);
 
     manifest = manifest_prepare_guarded(json, len, &faulted);
@@ -677,20 +629,9 @@ static char *prepare_map_buffer(const char *json, int *refused)
     return bare;
 }
 
-/* ------------------------------------------------------------ opening a rawmap
- * A rawmap opens only through the editor reload (editor_frame.c): the reload
- * checks the file on its own frame, before LoadMap (sh_rawmap_prepare_reload),
- * and keeps the text it read, so the parse uses exactly the bytes that were
- * checked and a .zip is imported once. LoadMap borrows a saved map's id; only
- * the editor's parse inside that one call reads the rawmap's text instead
- * (sh_deser_detour). Every other parse -- a published map, the lobby, a map
- * opened from My Maps -- is the engine's own.
- *
- * A rawmap whose rows name a mod this machine does not have never reaches the
- * engine: SnapMap's validator rejects the placed entities as corruption and
- * the player is thrown out. Such a map goes to the rawmap hold
- * (modpublished.c), which offers the download when the mod store has the mods
- * and refuses with a notice when it does not. */
+/* A rawmap opens only through the editor reload (editor_frame.c): sh_rawmap_prepare_reload keeps its checked
+ * text and only the editor's parse inside LoadMap reads it. A rawmap naming mods this machine lacks goes to
+ * the rawmap hold (modpublished.c), since SnapMap's validator would reject its entities. */
 #ifdef SH_DIAG
 /* The diagnostic build's record of the immediate-open path (sh_rawmap_diag_status). */
 static void rawmap_diag_note(int new_seq, const char *state, const char *path, int rc,
@@ -715,8 +656,8 @@ static const char *rawmap_base_name(const char *path)
     return b;
 }
 
-/* The rows the rawmap names that nothing serves, or (size_t)-1 when the
- * check faulted: the map is then refused, never handed to the engine. */
+/* The count of rows the rawmap names that nothing serves, or (size_t)-1 when the check faulted and the
+ * map is refused. */
 #define RAWMAP_MISSING_FAULTED ((size_t)-1)
 static size_t rawmap_missing_guarded(const char *text, size_t len, sh_modmanifest_list *rows)
 {
@@ -788,8 +729,7 @@ int sh_rawmap_prepare_reload(char **why)
         return rawmap_reload_refused(sh_text("The rawmap was not opened: the game ran out of memory. Restart DOOM and "
                                              "open it again."), "refused", "", 0, 0, why);
     name = rawmap_base_name(path);
-    /* A .zip is imported off the game's thread first: its mods install before
-     * the rows are counted, and the load opens again when the import is done. */
+    /* A .zip is imported off the game's thread first, and the load opens again when that is done. */
     text = read_source_file_why(&len, &cause, &importing);
     if (text == NULL && importing) {
         rc = rawmap_reload_refused(sh_textf("Importing %s and its mods; it opens when that is done.", name),
@@ -802,9 +742,7 @@ int sh_rawmap_prepare_reload(char **why)
         line = sh_textf("RAWMAP: open refused -- %s was not opened: %s", path, rawmap_s(cause));
         backend_log(line ? line : "RAWMAP: open refused");
         free(line);
-        /* The importer's or Windows' own reason and next step reach the player
-         * (console and toast): the page's Load Rawmap toast was shown before
-         * this frame ran. */
+        /* The importer's or Windows' own reason reaches the player (console and toast). */
         line = sh_textf("%s was not opened: %s.", name, rawmap_s(cause));
         free(cause);
         rc = rawmap_reload_refused(line, "refused", path, 0, 0, why);
@@ -820,8 +758,7 @@ int sh_rawmap_prepare_reload(char **why)
         free(path);
         return rc;
     }
-    /* A rawmap whose content is units (pinned rows: it came from elsewhere) follows "Play maps whose mods include
-     * scripts" at every open, however its content got here. */
+    /* A rawmap whose content is units (pinned rows) follows "Play maps whose mods include scripts" at every open. */
     if ((held = rawmap_scripts_off_guarded(&rows)) != 0) {
         sh_modmanifest_list_free(&rows);
         HeapFree(GetProcessHeap(), 0, text);
@@ -832,8 +769,7 @@ int sh_rawmap_prepare_reload(char **why)
         return rc;
     }
     if (missing && g_read_resumed) {
-        /* Its fetch already ran and its notice was given: a pinned row opens with its stand-ins, anything else the
-         * engine reports. Holding it again would fetch again without end. */
+        /* Its fetch already ran: a pinned row opens with its stand-ins. Holding it again would fetch without end. */
         line = sh_textf("RAWMAP: %s still misses %u mod(s) after its download; it opens with what is here", path,
                         (unsigned)missing);
         backend_log(line ? line : "RAWMAP: the resumed load still misses mods; it opens with what is here");
@@ -915,17 +851,14 @@ static int deser_prepared(const char *json, void *out_map)
 {
     char *prepared;
     int refused = 0;
-    /* A read that is not a published map's is the editor's (My Maps, an opened
-     * map, a rawmap): a row whose build is gone is served by another build of
-     * its salt. A rawmap's missing mods were held before this parse. */
+    /* A read that is not a published map's is the editor's: a row whose build is gone is served by another
+     * build of its salt. */
     sh_modmanifest_set_editor_load(g_parse_kind == SH_MODPUB_PARSE_OTHER);
     prepared = prepare_map_buffer(json, &refused);
     sh_modmanifest_set_editor_load(0);
     if (refused) {
-        /* The engine never parses it: the open map keeps its settings, and the
-         * gates see a failed parse whose refusal note they say. The map is
-         * sound, so the engine's "damaged" notice and its offer to replace
-         * the map with its published version are dismissed. */
+        /* The engine never parses it: the open map keeps its settings and the gates see a failed parse. The
+         * map is sound, so the engine's "damaged" notice and replace offer are dismissed. */
         shield_note_refused_load();
         sh_map_settings_loaded(0);
         sh_modpublished_parse_seen(g_parse_kind, json, out_map, 0);
@@ -934,8 +867,7 @@ static int deser_prepared(const char *json, void *out_map)
     int rc = g_deser_orig(prepared ? prepared : json, out_map);
     /* The parsed map's settings become the open map's before anything selects them. */
     sh_map_settings_loaded(rc);
-    /* Beside the manifest the preparation kept: which read this was, the map it
-     * filled, and the text, for the published-map and offline-play gates. */
+    /* Record which read this was, the map it filled and its text for the published-map and offline-play gates. */
     sh_modpublished_parse_seen(g_parse_kind, json, out_map, rc);
     if (rc) sh_map_render_loaded(out_map);
     if (rc) sh_map_bounds_loaded(out_map);
@@ -944,8 +876,7 @@ static int deser_prepared(const char *json, void *out_map)
     return rc;
 }
 
-/* 1 when this parse is the editor's parse inside a rawmap reload: the only
- * parse whose text is replaced. */
+/* 1 when this parse is the editor's parse inside a rawmap reload: the only parse whose text is replaced. */
 static int rawmap_parse_is_reload(int parse_kind)
 {
     return InterlockedCompareExchange(&g_in_reload, 0, 0) != 0 && parse_kind == SH_MODPUB_PARSE_OTHER;
@@ -954,19 +885,16 @@ static int rawmap_parse_is_reload(int parse_kind)
 static int sh_deser_detour(const char *json, void *out_map)
 {
     if (g_deser_orig == NULL) return 0;   /* defensive: should never happen once installed */
-    /* The detour is entered by the prologue jump, so this is the engine caller's
-     * return address: PublishedMapRead+0x12A or SnapMapReadSizeLimit+0x5D for a
+    /* The return address is the engine caller's: PublishedMapRead+0x12A or SnapMapReadSizeLimit+0x5D for a
      * published read. */
     g_parse_kind = sh_modpublished_classify(_ReturnAddress());
     sh_map_render_loaded(NULL);
     sh_map_bounds_loaded(NULL);
 
-    /* A map is being opened, so the save file picked for the last one stops
-     * applying. */
+    /* A map is being opened, so the last map's save file stops applying. */
     InterlockedIncrement(&g_load_generation);
     sh_rawmap_clear_save_target_for_new_map();
-    /* The editor may reuse the map object, so the placement grid's cut models
-     * cannot be keyed on its pointer; they go with every parse. */
+    /* The editor may reuse the map object, so the placement grid's cut models reset on every parse. */
     sh_nav_bake_map_opened();
 
     if (rawmap_parse_is_reload(g_parse_kind)) {
@@ -974,8 +902,7 @@ static int sh_deser_detour(const char *json, void *out_map)
         unsigned long n;
         int rc;
         if (g_prepared == NULL) {
-            /* The reload borrowed another saved map's id: that map must not
-             * open in the rawmap's stead. */
+            /* The reload borrowed another saved map's id, which must not open in the rawmap's stead. */
             backend_log("RAWMAP: the reload's checked text is gone; the reload parses nothing");
             return 0;
         }
@@ -983,8 +910,7 @@ static int sh_deser_detour(const char *json, void *out_map)
         line = sh_textf("RAWMAP: opening %s (%zu bytes) [#%lu]", rawmap_s(g_prepared_path), g_prepared_len, n);
         backend_log(line ? line : "RAWMAP: opening the rawmap");
         free(line);
-        /* The checked text stays held until the reload ends, so a second parse
-         * inside the same LoadMap reads the same bytes. */
+        /* The checked text stays held until the reload ends, so a second parse in the same LoadMap sees it. */
         rc = deser_prepared(g_prepared, out_map);
         /* The open map came from a rawmap, which is what the branch answer keys off. */
         open_borrow_reset();
@@ -1011,9 +937,7 @@ int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)
         return 0;
     }
     if (!deser_status_ok) {
-        /* Refuse an already-hooked prologue; its detour bytes cannot be
-         * stolen as native instructions.
-         */
+        /* An already-hooked prologue is refused: its detour bytes cannot be stolen as native instructions. */
         backend_log("RAWMAP: load detour SKIPPED -- DeserializeFromJson resolved via hook-tolerant "
                     "fallback (prologue already hooked); not installing over an existing detour");
         return 0;
@@ -1057,37 +981,20 @@ unsigned long sh_rawmap_swap_count(void)
 {
     return (unsigned long)InterlockedCompareExchange(&g_swap_count, 0, 0);
 }
-/* Save processing. */
+#include "cvars.h"        /* sh_cvar_value_int / B2_CVAR_SH_PRETTY_ON */
+#include "json_pretty.h"  /* json_pretty */
 
-/* Call native SerializeToJson and preserve its bool result. Navigation
- * embedding may replace the output JSON before the caller consumes it.
- * Save Rawmap writes the open map through sh_rawmap_write_from_live; sh_pretty_on
- * changes only that file's layout.
- */
-#include "cvars.h"        /* sh_cvar_value_int / B2_CVAR_SH_PRETTY_ON -- the rawmap file's pretty switch */
-#include "json_pretty.h"  /* json_pretty -- the pure whitespace re-layout that switch selects */
-
-/* SerializeToJson prologue steal window. Decoded from the live engine prologue (DOOM RVA 0x5F2390,
- * ratified 2026-06-20 against the unpacked exe):
- *   40 53            push rbx                      (2)
- *   56               push rsi                      (1)
- *   57               push rdi                      (1)
- *   48 81 EC E0 00.. sub  rsp,0xe0                 (7)
- *   48 C7 44 24 70.. mov  qword ptr [rsp+0x70],-2  (9)
- * = 20 bytes of whole, register/rsp-only, position-independent instructions (no RIP-rel, no rel
- * jmp/call). The NEXT instruction (+0x14 `MOV RAX,[rip-rel]`) IS RIP-relative, so the window stops at 20.
- * These 20 bytes are exactly the SerializeToJson signature's fixed prefix in the sig DB. */
+/* SerializeToJson prologue steal window: push rbx/rsi/rdi, sub rsp,0xe0 and mov [rsp+0x70],-2 are 20 bytes of
+ * whole, rsp-only, position-independent instructions. The next instruction (+0x14 MOV RAX,[rip-rel]) is
+ * RIP-relative, so the window stops at 20 (the signature's fixed prefix). */
 #define SAVE_STOLEN 20
 
 /* Native idStr length and data-pointer offsets. */
 #define IDSTR_LEN_OFF   0x08   /* int  len  (character count, excl NUL) */
 #define IDSTR_DATA_OFF  0x10   /* char* data (inline baseBuffer for short strings, else heap) */
 
-/* SerializeToJson returns bool in AL, with output idStr in RDX. The pinned
- * save-snapshot caller at 0x59D2F0+0x54 consumes AL with MOVZX EBX,AL.
- * Capture and return that byte on every path; declaring this hook void lets
- * later calls overwrite the save verdict.
- */
+/* SerializeToJson returns bool in AL (the save-snapshot caller at 0x59D2F0+0x54 reads it with MOVZX EBX,AL),
+ * output idStr in RDX. The hook returns that byte on every path; a void hook would let later calls overwrite it. */
 typedef unsigned char (*serialize_fn_t)(void *map, void *out_idstr, unsigned char compact);
 
 static serialize_fn_t g_ser_orig = NULL;   /* the trampoline -> the real engine SerializeToJson */
@@ -1132,13 +1039,11 @@ int sh_rawmap_snapshot_inspect(void *editor_serializer, void *map, void *out_ids
 static volatile LONG     g_save_count = 0;
 static volatile LONGLONG g_last_bytes   = 0;
 
-/* What the last rawmap save wrote: the JSON, and the export beside it when the
- * map names mods. Read by the File menu's status and `sh_rawmaps`. */
+/* What the last rawmap save wrote: the JSON, and the export beside it when the map names mods. */
 static SRWLOCK g_report_lock = SRWLOCK_INIT;
 static sh_rawmap_save_report g_report;
 
-/* Rows in the text the last engine save produced, and the map it belonged to:
- * how the File menu knows to offer .zip first. */
+/* Rows in the text the last engine save produced, and its map generation (the File menu offers .zip first). */
 static volatile LONG g_saved_rows = -1;
 static volatile LONG g_saved_rows_generation = 0;
 
@@ -1151,9 +1056,8 @@ void sh_rawmap_set_notify(void (*toast)(const char *title, const char *text), vo
     g_notify_print = print;
 }
 
-/* The sentence waits for the main tick (sh_rawmap_poll_main): a save is
- * reported from inside the engine's serializer, which is no place to raise a
- * toast. One slot; a newer save's sentence replaces an unshown one. */
+/* The sentence waits for the main tick (sh_rawmap_poll_main), since a save is reported from inside the
+ * engine's serializer. One slot; a newer sentence replaces an unshown one. */
 static SRWLOCK g_tell_lock = SRWLOCK_INIT;
 static char *g_tell;                        /* the sentence, whole (malloc'd), or NULL */
 static volatile LONG g_tell_pending;
@@ -1190,9 +1094,8 @@ void sh_rawmap_tell(const char *text)
     if (text && text[0]) rawmap_tell(text);
 }
 
-/* File > Load Rawmap refused a file: the backend log now, the console line on
- * the next main tick (the page already shows the toast). Mirrors the prefab
- * Import's "The prefab was not imported: ..." line. */
+/* File > Load Rawmap refused a file: log it now and print the console line on the next main tick (the page
+ * shows the toast). */
 static void rawmap_tell_load_refused(const char *path, const char *reason)
 {
     char *line = sh_textf("RAWMAP: load of %s refused: %s", path ? path : "", reason ? reason : "");
@@ -1248,7 +1151,7 @@ int sh_rawmap_open_map_mods(void)
     size_t current = sh_modmanifest_current(&rows);
     LONG saved = InterlockedCompareExchange(&g_saved_rows, 0, 0);
     sh_modmanifest_list_free(&rows);
-    /* A save of this map since it opened knows what it places now. */
+    /* A save of this map since it opened knows what it places. */
     if (saved >= 0 && (unsigned long)InterlockedCompareExchange(&g_saved_rows_generation, 0, 0) ==
                       sh_rawmap_load_generation())
         return (int)saved;
@@ -1269,13 +1172,9 @@ char *sh_rawmap_companion_zip_path(const char *json_path)
     return out;
 }
 
-/* ------------------------------------------------------------ transport off the game's thread
- * A rawmap ZIP's import, a .zip save and the companion .zip beside a .json
- * save read and write every file of the map's mods: they run on a thread of
- * their own, one at a time, never on DOOM's. The main tick
- * (sh_rawmap_poll_main) takes the result: an import holds its text for the
- * load it opens again; an export records the save report and says which
- * file to share. Neither changes what the open map serves. */
+/* A rawmap ZIP's import, a .zip save and the companion .zip run one at a time on their own thread, never
+ * DOOM's. The main tick (sh_rawmap_poll_main) takes the result: an import holds its text for the reload,
+ * an export records the save report. */
 enum { RT_IDLE = 0, RT_RUNNING = 1, RT_DONE = 2 };
 enum { RT_IMPORT = 1, RT_EXPORT_DIRECT = 2, RT_EXPORT_BESIDE = 3 };
 static struct {
@@ -1320,9 +1219,8 @@ static void transport_clear(void)
     g_rt.len = 0;
 }
 
-/* Start a job on its thread (main thread). 1 started; 0 with *why when one
- * is running or the thread could not start. `data` (process heap) and
- * `json` (malloc'd, or NULL) are the job's from here, whatever the answer. */
+/* Start a job on its thread (main thread). 1 started; 0 with *why when one is running or the thread failed.
+ * `data` (process heap) and `json` (malloc'd, or NULL) are the job's whatever the answer. */
 static int transport_start(int kind, const char *path, char *data, size_t len, unsigned mods, char *json,
                            unsigned long long json_bytes, char **why)
 {
@@ -1405,7 +1303,7 @@ static void transport_poll(void)
             rawmap_tell_free(sh_textf("%s was not opened: %s.", name,
                                       g_rt.cause && g_rt.cause[0] ? g_rt.cause : "the file could not be read; try again"));
         } else {
-            /* The load opens again and parses exactly what was imported. */
+            /* The reload parses exactly what was imported. */
             held_keep(g_rt.data, g_rt.len, g_rt.path);
             held_mark_ready(g_rt.path);
             g_rt.data = NULL;
@@ -1459,8 +1357,7 @@ static unsigned rawmap_mods_of(const char *data, size_t len)
     return n;
 }
 
-/* A .zip save: its export starts off the game's thread. 1 when it started,
- * else 0 with *why. */
+/* A .zip save: its export starts off the game's thread. 1 when it started, else 0 with *why. */
 static int rawmap_write_zip(const char *data, size_t len, const char *path, char **why)
 {
     char *copy = transport_copy(data, len);
@@ -1469,10 +1366,8 @@ static int rawmap_write_zip(const char *data, size_t len, const char *path, char
     return transport_start(RT_EXPORT_DIRECT, path, copy, len, mods, NULL, 0, why);
 }
 
-/* After a .json rawmap write to `path` succeeded: record it, and for a map
- * that names mods start the export beside it (said when it is done). A map
- * with no mods writes only the JSON, as it always has. `data` may be engine
- * memory; the caller guards the read. */
+/* After a .json rawmap write to `path` succeeded: record it, and for a map that names mods start the
+ * export beside it. `data` may be engine memory; the caller guards the read. */
 static void rawmap_after_write(const char *data, size_t len, const char *path, unsigned long long wrote)
 {
     sh_rawmap_save_report r;
@@ -1499,18 +1394,12 @@ static void rawmap_after_write(const char *data, size_t len, const char *path, u
     report_set(&r);
 }
 
-/* WHERE SAVES GO.
- *
- * One path, belonging to the map that is open. Empty means the default
- * %LOCALAPPDATA%\snapmap-plus\rawmap.json. "Save Rawmap As" sets it, so a later
- * "Save Rawmap" writes to the same file; opening a different map clears it.
- *
- * The lifetime is the point. A rawmap someone downloads and opens is an archive
- * entry, so nothing about opening one may aim a save at it -- only picking it in
- * Save As does that, for the map in front of them, and not for the next one. */
+/* Where saves go: one path belonging to the open map; empty means %LOCALAPPDATA%\snapmap-plus\rawmap.json.
+ * Only "Save Rawmap As" sets it (opening a rawmap never aims a save at it), and opening a different map
+ * clears it. */
 static char *g_save_target;   /* malloc'd, or NULL for the default */
 
-/* Defined further down, next to the status JSON that is its other caller. */
+/* Defined further down. */
 static char *json_escape(const char *src);
 
 /* The folder part of `path` (malloc'd), or NULL when it has none. */
@@ -1534,9 +1423,8 @@ static char *dest_dir_part(const char *path)
     return out;
 }
 
-/* Create every folder in `dir` that is missing, through its long form. Walks left to right so the
- * parents come first, because CreateDirectory makes one level at a time. Returns 1 when the folder
- * exists afterwards; 0 leaves the Windows error as the last error. */
+/* Create every missing folder in `dir` through its long form, parents first (CreateDirectory makes one level
+ * at a time). Returns 1 when the folder exists afterwards; 0 leaves the Windows error as the last error. */
 static int ensure_dir(const char *dir)
 {
     wchar_t *w;
@@ -1584,21 +1472,9 @@ static int ensure_dir(const char *dir)
     return ok;
 }
 
-/* IS THIS A PLACE WE COULD WRITE A FILE?
- *
- * A save destination cannot be checked the way a load source is: neither the file NOR its folder is
- * supposed to exist yet. A missing folder is fine -- the save creates it, so `savepath
- * D:\archive\2026\mine.json` works on a machine that has never had that folder. What is checked is
- * that the thing is a PATH at all.
- *
- * That is the mistake worth catching. `savepath banana` used to be accepted and pinned, because
- * anything that was not one of the two keywords was taken as a path: every save after it went to a
- * file called "banana" in whatever directory DOOM was started from, and nothing said so. Someone
- * typing a bare word is naming a setting they misremembered, not a file.
- *
- * So: it must have a folder part and a file part. The drive, if one is named, must exist -- a save
- * cannot conjure a Z: drive, and finding that out at save time is finding out too late.
- * Deliberately unchecked: the extension. Where someone keeps their own maps is theirs to decide. */
+/* Is `path` a place we could write a file? The folder may be missing (the save creates it), but the path
+ * must have a folder part and a file part, and a named drive must exist, so a bare word like "banana"
+ * is refused. The extension is deliberately unchecked. */
 static int dest_folder_is_usable(const char *path, char **why)
 {
     char *dir;
@@ -1632,18 +1508,10 @@ int sh_rawmap_dest_path_is_usable(const char *path, char **why)
     return dest_folder_is_usable(path, why);
 }
 
-/* CAN WE WRITE THERE RIGHT NOW? Stricter than dest_folder_is_usable, and asked at a different
- * moment: that one vets a SETTING, where the file is not expected to exist and its permissions may
- * change before the next save. This one is asked at the save itself.
- *
- * The gap it closes: a read-only destination was accepted and the console said "Writing the open map
- * to <path>". The write is queued onto a later editor frame, so by the time it failed the command had
- * already reported success and only the log disagreed. Since the writer renames a temp file over the
- * target, a read-only target fails at the rename -- late, silently, and after the console had spoken.
- *
- * Only the attribute is checked, so this is not a guarantee: a full disk, a revoked share or a lock
- * held by another program still fail at the write. It catches the case someone can actually cause by
- * hand, and it never opens the target -- opening it to test would truncate the file it is protecting. */
+/* Can we write there right now? Stricter than dest_folder_is_usable and asked at the save itself: the
+ * write is queued onto a later editor frame, and the writer renames a temp file over the target, so a
+ * read-only target would fail at the rename after the console had already spoken. Only the attribute is
+ * checked, and the target is never opened (that would truncate it). */
 int sh_rawmap_dest_writable_now(const char *path, char **why)
 {
     DWORD attr;
@@ -1664,10 +1532,8 @@ int sh_rawmap_dest_writable_now(const char *path, char **why)
     return 1;
 }
 
-/* Point saves at `path`. "" or NULL goes back to the default rawmap.json.
- * Refuses a path whose folder does not exist, so a bare word cannot become a
- * file in DOOM's own install folder. 0 also when memory runs out (the target
- * is then unchanged). */
+/* Point saves at `path`; "" or NULL goes back to the default rawmap.json. Refuses a path
+ * dest_folder_is_usable refuses, and returns 0 (target unchanged) when memory runs out. */
 int sh_rawmap_set_save_target(const char *path)
 {
     char *chosen = NULL, *dflt, *old;
@@ -1719,31 +1585,11 @@ void sh_rawmap_clear_save_target_for_new_map(void)
 static unsigned long long write_file_atomic(const char *data, size_t len, const char *path, DWORD *out_error);
 static char *pretty_copy(const char *data, size_t len, size_t *out_len);
 
-/* ------------------------------------------------------- serialize the LIVE map ----------------
- * Save Rawmap used to read the newest saved map's map.decl off DISK. That is wrong in two ways the
- * person can hit without doing anything unusual:
- *
- *   - unsaved edits are not in it. It exports the last SAVED state and reports success.
- *   - on a map that has never been saved there is no folder for it, so it exports whichever OTHER
- *     map was saved most recently. Silently. Same class of "borrowed the wrong slot" mistake as the
- *     load bug.
- *
- * Asking the engine to serialize the map that is actually open removes both, and removes the disk
- * entirely from the save path: no newest-folder scan, no dirty flag to consult, nothing to grey out.
- *
- * WHAT TO CALL. SnapMapToJson (0x59D2F0), NOT SerializeToJson (0x5F2390). SerializeToJson's first
- * argument is a temporary snapshot object that SnapMapToJson builds and destroys around it -- see
- * the signature note. The save detour never had to know that, because it only ever inspects the
- * argument the engine already prepared for it.
- *
- * THE idStr. The engine writes its output into an idStr we supply, so it must be a real one: its
- * own constructor and destructor, taken from the engine, never a zeroed block. A zeroed idStr has a
- * null data pointer and a zero alloced count, and whether the engine's assignment path tolerates
- * that is an assumption this project does not need to make. Both come from decoding the two CALLs
- * inside SnapMapAddBranchTag, which is uniquely signable -- the technique the resolve-address
- * discipline prescribes for functions with identical twins, and which this codebase already uses to
- * reach idList-grow. sizeof(idStr) is 0x30, DIRECT from that same function's tag-list stride
- * (LEA RCX,[RAX+RAX*2]; SHL RCX,4). */
+/* Save Rawmap serializes the LIVE map through the engine (not the newest save on disk), so unsaved edits
+ * and never-saved maps export correctly. The call is SnapMapToJson (0x59D2F0), NOT SerializeToJson
+ * (0x5F2390), whose first argument is a temporary snapshot SnapMapToJson builds and destroys around it.
+ * The output idStr must be a real one: the engine's own ctor and dtor, decoded from the two CALLs inside
+ * the uniquely signable SnapMapAddBranchTag. sizeof(idStr) is 0x30, from that function's tag-list stride. */
 
 typedef unsigned char (*map_to_json_fn)(void *map, void *out_idstr, unsigned char compact);
 typedef void *(*idstr_ctor_fn)(void *self, const char *init);
@@ -1756,9 +1602,8 @@ static idstr_ctor_fn  g_idstr_ctor  = NULL;
 static idstr_dtor_fn  g_idstr_dtor  = NULL;
 static volatile LONG  g_live_faulted = 0;
 
-/* Offsets of the two CALL instructions inside SnapMapAddBranchTag, from its own base. Checked for an
- * E8 opcode before the displacement is believed: a constant offset into another function is a guess
- * until the byte there agrees, and this project's rule is that addresses come from derivation. */
+/* Offsets of the two CALL instructions inside SnapMapAddBranchTag, from its own base; the E8 opcode is
+ * checked before the displacement is believed. */
 #define ADDTAG_CALL_IDSTR_CTOR 0x35
 #define ADDTAG_CALL_IDSTR_DTOR 0xB2
 
@@ -1805,16 +1650,15 @@ int sh_rawmap_live_serialize_ready(void)
     return (g_map_to_json != NULL && g_idstr_ctor != NULL && g_idstr_dtor != NULL) ? 1 : 0;
 }
 
-/* Defined below, beside the save detour that is their other caller. Both writers put a
- * map through the same encoders, so a rawmap carries what an engine save carries. */
+/* Defined below, beside the save detour: both writers use the same encoders, so a rawmap carries what an
+ * engine save carries. */
 static void settings_on_save(void *out_idstr);
 static void nav_embed_on_save(void *out_idstr);
 static void nav_regions_on_save(void *out_idstr);
 static void manifest_on_save(void *out_idstr);
 
-/* Serialize `map` and write it to the rawmap destination. MAIN THREAD ONLY -- it reads engine state
- * and allocates through the engine's allocator, so it is called from the editor-frame hook, never
- * from the UI thread. */
+/* Serialize `map` and write it to the rawmap destination. MAIN THREAD ONLY (editor-frame hook): it reads
+ * engine state and allocates through the engine's allocator. */
 int sh_rawmap_write_from_live(void *map, const char *destination, char **msg, unsigned long long *out_bytes)
 {
     unsigned char blk[IDSTR_SIZE];
@@ -1842,21 +1686,17 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char **msg, un
 
     memset(blk, 0, sizeof blk);
 
-    /* One guard around the whole engine sequence. A fault after the constructor leaks that one
-     * idStr, which is accepted deliberately: the alternative is unwinding engine state we do not
-     * own, and the fault also disables this path for the session, so it can happen once. */
+    /* One guard around the whole engine sequence. A fault after the constructor leaks that one idStr; the
+     * fault also disables this path for the session, so it happens once. */
     __try {
         g_idstr_ctor(blk, "");
-        /* SnapMapToJson calls the hooked serializer. Suppress its save side effects
-         * here so the explicit export embeds and writes exactly once. */
+        /* SnapMapToJson calls the hooked serializer; suppress its save side effects so the export embeds once. */
         g_snapshot_depth++;
         __try { rc = g_map_to_json(map, blk, 1); }
         __finally { g_snapshot_depth--; }
         if (rc) {
-            /* The same encoders the save detour runs, in the same order. The engine
-             * hands back map state with the shards already stripped at load, so writing
-             * this buffer straight out drops the navigation its author baked. Each one
-             * no-ops if its own dependencies are unresolved. */
+            /* The save detour's encoders, in its order: the engine's map state has the nav shards stripped at
+             * load, so writing the buffer as is would drop the baked navigation. Each no-ops if unresolved. */
             settings_on_save(blk);
             nav_embed_on_save(blk);
             manifest_on_save(blk);
@@ -1924,9 +1764,8 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char **msg, un
     return 1;
 }
 
-/* The open edit map as JSON in a process-heap copy, with no save side effects:
- * no navigation embedding and no file write. MAIN THREAD ONLY. *out is freed with
- * HeapFree(GetProcessHeap()). */
+/* The open edit map as JSON in a process-heap copy (HeapFree), with no navigation embedding, file write or
+ * other save side effect. MAIN THREAD ONLY. */
 int sh_rawmap_serialize_live_copy(void *edit_map, char **out, size_t *out_len)
 {
     unsigned char blk[IDSTR_SIZE];
@@ -1964,9 +1803,8 @@ int sh_rawmap_serialize_live_copy(void *edit_map, char **out, size_t *out_len)
     return ok;
 }
 
-/* Parse map JSON into an idSnapMap through the native parser only, bypassing
- * the load swap and every per-map-open side effect. `native` is the resolved
- * DeserializeFromJson, used when the detour is not installed. MAIN THREAD. */
+/* Parse map JSON into an idSnapMap through the native parser, bypassing the load swap and per-map-open side
+ * effects. `native` is the resolved DeserializeFromJson, used when the detour is not installed. MAIN THREAD. */
 int sh_rawmap_deserialize_plain(void *native, const char *json, void *out_map)
 {
     deser_fn_t fn = g_deser_orig ? g_deser_orig : (deser_fn_t)native;
@@ -1989,8 +1827,7 @@ static unsigned long long write_file_atomic(const char *data, size_t len, const 
     if ((wpath = sh_rawmap_path_wide(path)) == NULL) { err = GetLastError(); goto fail; }
     if ((dir = dest_dir_part(path)) == NULL) { err = ERROR_PATH_NOT_FOUND; goto fail; }
     if (!ensure_dir(dir)) { err = GetLastError() ? GetLastError() : ERROR_PATH_NOT_FOUND; goto fail; }
-    /* CREATE_NEW never truncates someone else's scratch file. Separate writers
-     * must own separate temporaries until each publishes its complete result. */
+    /* CREATE_NEW never truncates another writer's temporary file. */
     for (attempt = 0; attempt < 64; ++attempt) {
         free(temp);
         temp = sh_wtextf(L"%s.smp-%lu-%lu.tmp", wpath, GetCurrentProcessId(),
@@ -2031,8 +1868,7 @@ fail:
 }
 
 #ifdef SH_RAWMAP_TESTING
-/* Test-only door onto the writer: the destination rules only mean anything in terms
- * of what actually reaches disk. Compiled out of shipping builds. */
+/* Test-only door onto the writer; compiled out of shipping builds. */
 unsigned long long sh_rawmap_test_write(const char *data, size_t len)
 {
     char *path = resolve_dest_path(), *why = NULL;
@@ -2052,10 +1888,8 @@ unsigned long long sh_rawmap_test_write(const char *data, size_t len)
 
 #endif
 
-/* Produce an owned pretty-printed copy, or NULL to keep the engine bytes. The
- * caller guards reads of the engine-owned source. Formatting refusal never
- * suppresses the file write.
- */
+/* Produce an owned pretty-printed copy, or NULL to keep the engine bytes (a refusal never suppresses the
+ * write). The caller guards reads of the engine-owned source. */
 static char *pretty_copy(const char *data, size_t len, size_t *out_len)
 {
     size_t need = json_pretty(data, len, NULL, 0);   /* pass 1: measure (no store) */
@@ -2071,9 +1905,7 @@ static char *pretty_copy(const char *data, size_t len, size_t *out_len)
     return buf;
 }
 
-/* ==== embed-on-save: the navigation a map carries travels inside it ==== */
-
-/* idStr layout, the same three offsets swf_textedit.c writes through. */
+/* idStr layout offsets. */
 #ifndef IDSTR_FLAGS_OFF
 #define IDSTR_FLAGS_OFF 0x00
 #endif
@@ -2105,9 +1937,7 @@ void sh_rawmap_embed_install(const void *module_base)
         : "NAV: embed-on-save DARK -- idStr assignment unresolved; saves are unchanged");
 }
 
-/* Assign body through the native idStr helper. A zero flags word disables
- * stealing, so the engine copies the temporary bytes.
- */
+/* Assign body through the native idStr helper; a zero flags word disables stealing, so the engine copies. */
 static int replace_out_idstr(void *out_idstr, const char *body, size_t body_len)
 {
     uint8_t src[IDSTR_SIZE];
@@ -2138,9 +1968,7 @@ static int read_out_idstr(void *out_idstr, const char **data, int *len)
     return *data != NULL && *len > 0;
 }
 
-/* Refresh marked volumes from save output. Editor previews and the final Play
- * snapshot separately capture unsaved edits through nav_bake.
- */
+/* Refresh marked volumes from save output; editor previews and the Play snapshot capture unsaved edits via nav_bake. */
 static void nav_regions_on_save(void *out_idstr)
 {
     const char *data = NULL;
@@ -2221,16 +2049,12 @@ static void manifest_on_save(void *out_idstr)
     HeapFree(GetProcessHeap(), 0, body);
 }
 
-/* Serialize, then embed delivery payloads into the output. Preserve
- * the native bool result on every return.
- */
+/* Serialize, then embed the Snapmap+ payloads into the output; returns the native bool result on every path. */
 static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char compact)
 {
     if (g_ser_orig == NULL) return 0;   /* defensive: should never happen once installed */
 
-    /* Call native serialization unconditionally and capture its bool result
-     * before any helper can clobber AL.
-     */
+    /* Capture the native bool result before any helper can clobber AL. */
     const unsigned char rc = g_ser_orig(map, out_idstr, compact);
     if (g_snapshot_depth) {
         if (rc && g_snapshot_visit)
@@ -2240,15 +2064,13 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
 
     if (!rc) return rc;
 
-    /* Each puts its part into the one "snapmap-plus" member, appended last at
-     * the root (map_carrier.h); none writes a variable. Nothing to carry
-     * leaves the engine's bytes as they are. */
+    /* Each puts its part into the one "snapmap-plus" member appended last at the root (map_carrier.h);
+     * nothing to carry leaves the engine's bytes as they are. */
     settings_on_save(out_idstr);
     /* Restore retained navigation so ordinary saves preserve it. */
     nav_embed_on_save(out_idstr);
     manifest_on_save(out_idstr);
-    /* A save of a map opened from a rawmap makes it a saved map of its own:
-     * the edit's id and name are its from now on. */
+    /* A save of a rawmap-opened map makes it a saved map of its own, with the edit's id and name. */
     open_identity_set(NULL);
     {
         const char *saved = NULL;
@@ -2318,12 +2140,8 @@ unsigned long long sh_rawmap_save_last_bytes(void)
     return (unsigned long long)InterlockedCompareExchange64(&g_last_bytes, 0, 0);
 }
 
-/* ==== the File-menu file surface (+0x328 status / +0x330 configure) ==== */
-
-/* `src` as a JSON string body (malloc'd; NULL reads as ""), escaping what a Windows path can actually
- * contain. Backslash is the whole reason this exists -- an unescaped "C:\maps\x.json" makes the
- * frontend's JSON.parse throw, so the paths this file reports would break the very menu that shows
- * them. Quote and the C0 range are escaped for completeness. NULL when memory runs out. */
+/* `src` as a JSON string body (malloc'd; NULL reads as ""), escaping backslash (an unescaped Windows path
+ * breaks the frontend's JSON.parse), quote and the C0 range. NULL when memory runs out. */
 static char *json_escape(const char *src)
 {
     size_t w = 0, n = src ? strlen(src) : 0;
@@ -2343,30 +2161,10 @@ static char *json_escape(const char *src)
     return out;
 }
 
-/* Is this file a SnapMap RAWMAP, as opposed to some other JSON the tool wrote?
- *
- * `sh_rawmaps list` showed every *.json it found, and that is wrong in two directions at once. The
- * default folder is %LOCALAPPDATA%\snapmap-plus\, which also holds config.json, install.json and
- * pinned.json; and prefabs\ is full of *.snapmap.json files that are NOT maps. Offering any of
- * those as something to load is worse than useless -- it invites loading one.
- *
- * sh_rawmap_validate_source cannot answer this: it requires a JSON OBJECT, which all of the above
- * are. It is deliberately left that lenient -- it guards an explicit load of a file someone named,
- * where the honest failure is a parse error rather than a refusal based on a guess. A listing can be
- * pickier than a loader, because guessing wrong here only hides a row.
- *
- * WHAT ACTUALLY DISTINGUISHES THEM is the top-level "~type" the engine's own serializer writes:
- *
- *     a rawmap  ends  ..."version":111,"~type":"idSnapMap","~version":111}
- *     a prefab  says  "~type":"idSnapEntityPrefab"
- *
- * Checked in the TAIL, not the head. Keys come out in sorted order, so "~type" is the second to last
- * of them -- 36 bytes from the end of a 3 MB rawmap on this machine. A tail read costs exactly what
- * a head read costs, and 8 KB of it is a wide margin for a pretty-printed file (sh_pretty_on
- * re-lays these out, which is also why the search cannot assume there is no space after the colon).
- *
- * The quotes in the needle matter: idSnapMapCapEntity begins with idSnapMap, and a PREFAB of map
- * geometry can contain those entities. Searching for the quoted value cannot confuse the two. */
+/* Is this file a SnapMap rawmap, as opposed to other JSON (config.json, prefabs)? The engine's serializer
+ * writes the top-level "~type":"idSnapMap" (a prefab says idSnapEntityPrefab) with keys sorted, so it sits
+ * near the end and the last 8 KB is searched. The needle is quoted because idSnapMapCapEntity, which a
+ * prefab can contain, begins with idSnapMap. */
 int sh_rawmap_looks_like_rawmap(const char *path)
 {
     HANDLE h;
@@ -2386,10 +2184,8 @@ int sh_rawmap_looks_like_rawmap(const char *path)
 
     if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0) { CloseHandle(h); return 0; }
 
-    /* The engine writes the root "~type" last, so the tail is enough -- unless
-     * the product's "snapmap-plus" member follows it (map_carrier.h: appended
-     * after "~type", and a navigation bake makes it far longer than the tail).
-     * Read the whole file then, and look just before the member. */
+    /* The tail is enough unless the "snapmap-plus" member (map_carrier.h) follows "~type"; then the
+     * whole file is read below. */
     at.QuadPart = (sz.QuadPart > (LONGLONG)tail) ? (sz.QuadPart - (LONGLONG)tail) : 0;
     if (!SetFilePointerEx(h, at, NULL, FILE_BEGIN)) { CloseHandle(h); return 0; }
 
@@ -2399,8 +2195,7 @@ int sh_rawmap_looks_like_rawmap(const char *path)
     if (ReadFile(h, buf, tail, &rd, NULL) && rd > 0) {
         buf[rd] = '\0';                    /* strstr needs the terminator; the +1 above is for it */
         found = (strstr(buf, "\"idSnapMap\"") != NULL) ? 1 : 0;
-        /* The tail may sit wholly inside the member's data (a navigation
-         * chunk is 1 MiB), so nothing in it says a member is there. */
+        /* The tail may sit wholly inside the member's data (a navigation chunk is 1 MiB). */
         if (!found && sz.QuadPart > (LONGLONG)tail && sz.QuadPart <= (LONGLONG)INT_MAX) {
             char *all = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)sz.QuadPart + 1);
             LARGE_INTEGER zero;
@@ -2449,8 +2244,7 @@ int sh_rawmap_validate_source(const char *path, char **why)
         return 0;
     }
 
-    /* Match the signed native length used by read_source_file and idStr.
-     * Report an unrepresentable file before a later map-load attempt. */
+    /* Match the signed native length of idStr, so an unrepresentable file is reported before a load. */
     if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0) {
         CloseHandle(h);
         rawmap_why(why, "that file is empty");
@@ -2465,9 +2259,7 @@ int sh_rawmap_validate_source(const char *path, char **why)
     if (!ReadFile(h, probe, (DWORD)sizeof probe, &rd, NULL)) rd = 0;
     CloseHandle(h);
 
-    /* A rawmap is a JSON object. Skip a UTF-8 BOM and leading whitespace, then require '{'. This
-     * catches the realistic mistake -- picking a map.decl (zlib bytes) or some unrelated file -- and
-     * says so now instead of substituting unparseable bytes into a real map load. */
+    /* A rawmap is a JSON object: skip a UTF-8 BOM and whitespace, then require '{' (a map.decl is zlib bytes). */
     i = 0;
     if (rd >= 3 && (unsigned char)probe[0] == 0xEF
                 && (unsigned char)probe[1] == 0xBB
@@ -2514,7 +2306,7 @@ int sh_rawmap_open_now(const char *path, char **msg)
         return 0;
     }
     if (path && path[0]) {
-        /* Nothing is remembered for later: a file that cannot open now is refused now. */
+        /* A file that cannot open now is refused now. */
         if (!sh_editor_frame_can_reload(msg)) return 0;
         if (!sh_rawmap_validate_source(path, &reason)) {
             rawmap_tell_load_refused(path, reason);
@@ -2595,8 +2387,7 @@ char *sh_rawmap_diag_status(void)
 }
 #endif
 
-/* Hand `text` to the window as owned interface text in *out (the old one
- * released); `text` (malloc'd) is freed. */
+/* Hand `text` to the window as owned interface text in *out (the previous one released); `text` (malloc'd) is freed. */
 static void rawmap_give(char **out, char *text)
 {
     if (out) sh_iface_text_set(out, text);
@@ -2620,10 +2411,8 @@ static char *slot_rawmap_status(sh_iface *self)
     zip_esc = json_escape(last.zip);
     err_esc = json_escape(last.zip_error);
 
-    /* Paths are UTF-8 (the page reads the status as UTF-8). `saveTarget` is the
-     * file Save writes to, or "" for the default; it rides the status because
-     * the console can set it too. What the last save wrote, and how many mods
-     * the open map uses (the File menu offers .zip first when it uses any). */
+    /* Paths are UTF-8. `saveTarget` is the file Save writes to, or "" for the default; `mapMods` lets the
+     * File menu offer .zip first. */
     text = load_esc && save_esc && target_esc && json_esc && zip_esc && err_esc
          ? sh_iface_textf("{\"load\":\"%s\",\"save\":\"%s\",\"saves\":%lu,\"lastBytes\":%llu,\"loads\":%lu,"
                           "\"saveTarget\":\"%s\",\"lastJson\":\"%s\",\"lastJsonBytes\":%llu,\"lastZip\":\"%s\","
@@ -2638,11 +2427,8 @@ static char *slot_rawmap_status(sh_iface *self)
     return text;
 }
 
-/* `arm` is a verb code (the vtable is matched slot for slot between the DLLs):
- *   -1 leave alone   2 make `load_path` the file to open now (it is checked,
- *   and refused when the editor cannot open it now)   3 keep saving to the
- *   current save path   4 saves go back to the default file   5 save now.
- * 0 and 1 named the retired every-load switch and are refused. */
+/* `arm` is a verb code: -1 leave alone, 2 make `load_path` the file to open now (checked), 3 keep saving
+ * to the current save path, 4 saves go back to the default file, 5 save now. */
 static int slot_rawmap_configure(sh_iface *self, const char *load_path, const char *save_path,
                                  int arm, char **out_msg)
 {
@@ -2684,8 +2470,7 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
         }
     }
 
-    /* A save always uses the live editor. An unavailable or busy editor must
-     * not export a different saved map. */
+    /* A save always uses the live editor, so an unavailable or busy editor never exports another saved map. */
     if ((save_path && save_path[0]) || arm == 5) {
         ok = sh_editor_frame_request_rawmap_save_to(save_path, &reason);
         rawmap_give(out_msg, reason);
@@ -2694,8 +2479,7 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
         ok = sh_rawmap_set_save_target(NULL);
     }
 
-    /* 3 pins whatever the save path already resolves to, so ticking never
-     * moves the destination -- it only makes the current one stick. 4 releases it. */
+    /* 3 pins whatever the save path already resolves to, so the destination does not move; 4 releases it. */
     if (arm == 3) {
         char *now = resolve_dest_path();
         if (now && now[0]) sh_rawmap_set_save_target(now);
@@ -2707,8 +2491,7 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
     return ok;
 }
 
-/* Open the load path now. The engine call and its frame-boundary discipline live in
- * editor_frame.c; this is only the slot. */
+/* Open the load path now; the engine call lives in editor_frame.c. */
 static int slot_rawmap_load_now(sh_iface *self, char **out_msg)
 {
     char refusal[128], *msg = NULL;

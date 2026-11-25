@@ -32,10 +32,8 @@ const wchar_t *sh_host_dir(void);
  * on an unsupported executable. */
 const char *sh_host_renderer_name(void);
 
-/* Snapmap+ supports one DOOM build: the April 2024 update, Steam build 13954591.
- * The host is identified by the SHA-256 of its executable file, never by its
- * name, size or loaded bytes. Any other executable (the 2018 build included) is
- * unsupported: the backend logs that once and only forwards XInput. */
+/* Snapmap+ supports Steam build 13954591, identified by the SHA-256 of the executable file, never by name,
+ * size or loaded bytes. Any other executable is logged once and only XInput is forwarded. */
 typedef struct sh_build_identity {
     unsigned char  sha256[32];
     int            vulkan;      /* 1 Vulkan executable, 0 OpenGL executable */
@@ -50,19 +48,16 @@ extern const sh_build_identity SH_KNOWN_BUILDS[];
 /* Look a digest up in SH_KNOWN_BUILDS; NULL when it is not a supported executable. */
 const sh_build_identity *sh_host_identity_for_digest(const unsigned char digest[32]);
 
-/* SHA-256 of a file's bytes. Returns 1 on success. Opening without write
- * sharing pins the bytes being read. */
+/* SHA-256 of a file's bytes; returns 1 on success. The file is opened without write sharing. */
 int sh_host_file_sha256(const wchar_t *path, unsigned char digest[32]);
 
 /* The live host's identity (hashes the executable once), or NULL. */
 const sh_build_identity *sh_host_identity(void);
 int sh_host_is_supported_build(void);
 
-/* The one game-identity string every report carries, e.g.
+/* The game-identity string every report carries, e.g.
  *   DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)
- * (Steam build, binary name, renderer of the executable, first eight hex
- * digits of its SHA-256). Writes it and returns 1 for a supported executable;
- * otherwise writes "" and returns 0. */
+ * Writes it and returns 1 for a supported executable; otherwise writes "" and returns 0. */
 #define SH_GAME_IDENTITY_MAX 96
 int sh_build_game_identity(const sh_build_identity *identity, char *out, size_t cap);
 int sh_host_game_identity(char *out, size_t cap);

@@ -1,9 +1,6 @@
-/* script_reflect_test.c - the reflection walk of mod scripts over a fake type
- * table shaped like the game's (src/backend/script/script_reflect.h): classes
- * with superclasses, nested structs, enums, idStr, idList, idArray, fixed
- * arrays, pointers to objects and entity references. The objects are real
- * structs in this process, so every address the walk returns is read back and
- * compared with the struct's own member. */
+/* script_reflect_test.c - the reflection walk of mod scripts over a fake type table shaped like the game's
+ * (src/backend/script/script_reflect.h). The objects are real structs in this process, so every address the walk
+ * returns is compared with the struct's own member. */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -134,7 +131,7 @@ int main(void)
     CHECK(at(&d, "idPlaceableSnapAIEncounter", "opaque", &loc, err) && loc.kind == SH_RF_POINTER && !strcmp(loc.type, "idWeird"));
     sh_rf_loc_free(&loc);
 
-    /* an entity reference is followed to the entity it names now, with that entity's own class */
+    /* an entity reference is followed to the entity it names, with that entity's own class */
     CHECK(at(&d, "idPlaceableSnapAIEncounter", "target", &loc, err) && loc.kind == SH_RF_REF && !strcmp(loc.type, "idAI2"));
     sh_rf_loc_free(&loc);
     CHECK(at(&d, "idPlaceableSnapAIEncounter", "target.encounterMods.damageMod", &loc, err) && *(const float *)loc.addr == 3.0f);

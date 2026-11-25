@@ -1,21 +1,8 @@
-// gen_programs.js -- embed the shaders of the product's render programs (modprog.h) in the backend.
-//   node tools/gen_programs.js           write src/backend/programs/programs_layered.c, programs_particles.c,
-//                                          programs_hair.c and tests/modprog_fixture.c
-//   node tools/gen_programs.js --check   exit 1 when they are not what the sources give
-// Sources: one file per program, src/backend/programs/shaders/layered.rp, particles.rp and hair.rp: DOOM 2016's render program
-// language, two sections (see the header of either file): hlsl_fp_header { the functions } and call { the statements
-// that call them }. From one source this builds what both renderers need:
-//   - the OpenGL text: the header section and the call text as they are (the engine compiles a program from its decl
-//     text; modprog.c inserts them in the base program's decl);
-//   - the Vulkan stage text: the header functions translated to GLSL (translate() below: a handful of explicit token
-//     rules) with each $texture as the engine names it in a stage's text, samp_<lowercase parm>;
-//   - the SPIR-V: the same translated functions plus a stub (the samplers and a uniform block, main()) compiled by
-//     glslangValidator (GLSLANG_VALIDATOR names it, else it is looked up on PATH) to SPIR-V 1.0, which modprog.c
-//     splices into the base program's fragment module (it finds the functions and samplers by name).
-// The generated files hold the SPIR-V words and the texts, so a build needs no shader compiler.
-// tests/modprog_fixture.c is modprog_test's stand-in program (tests/fixtures/modprog/lit.frag, particle.frag and
-// hair.frag, plain GLSL: not render program language).
-// --check compares the texts always and the SPIR-V only where a compiler is at hand (CI has none).
+// gen_programs.js -- embeds the product's render-program shaders (modprog.h) in the backend: writes programs_layered.c,
+// programs_particles.c and programs_hair.c under src/backend/programs and tests/modprog_fixture.c; --check exits 1 when stale.
+// Each .rp source (shaders/layered.rp, particles.rp, hair.rp) has hlsl_fp_header and call sections; the OpenGL text is both as
+// written, the Vulkan stage text is the header translated to GLSL (translate()), and the SPIR-V is that plus a stub built by
+// glslangValidator (GLSLANG_VALIDATOR or PATH). --check compares texts always and SPIR-V only where a compiler is at hand.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -26,8 +13,6 @@ const out = path.join(root, 'src', 'backend', 'programs', 'programs_layered.c');
 const epOut = path.join(root, 'src', 'backend', 'programs', 'programs_particles.c');
 const hrOut = path.join(root, 'src', 'backend', 'programs', 'programs_hair.c');
 const fixtureOut = path.join(root, 'tests', 'modprog_fixture.c');
-
-// ------------------------------------------------------------------------------------------- the lexer ----
 
 // Tokens: ws (with comments: they never matter to a rule), id, num, dollar (a $parm), pp (#), punct (one character).
 function tokenize(text) {
@@ -95,24 +80,10 @@ function dedent(text) {
   return lines.map((l) => l.slice(common ? Math.min(common.length, /^[ \t]*/.exec(l)[0].length) : 0)).join('\n') + '\n';
 }
 
-// ----------------------------------------------------------------------------------------- the translator ----
-
-// The rules, the language the engine compiles (rpc.py's reading of it) to the GLSL the Vulkan side compiles:
-//   float2/3/4 int2/3/4 uint2/3/4 bool2/3/4 -> vec2/3/4 ivec uvec bvec; float2x2 float3x3 float4x4 -> mat2 mat3 mat4
-//     (other floatCxR -> matCxR); float, int, uint, bool, sampler2D pass; lerp -> mix; frac -> fract; ddx ddy ->
-//     dFdx dFdy; rsqrt -> inversesqrt; _float2/3/4( x ) (the engine's splat) -> vec2/3/4( x );
-//   a float literal's trailing f is dropped (2f -> 2.0);
-//   static is dropped (the engine drops it), as are BRANCH LOOP IFANY UNROLL FLATTEN (empty on PC);
-//   saturate( x ) -> clamp( x, 0.0, 1.0 );
-//   tex2D( s, uv ) -> texture( s, uv ); tex2D( s, uv, dx, dy ) -> textureGrad( s, uv, dx, dy );
-//   tex2Dlod( s, float4( uv, 0, 0 ) ) -> textureLod( s, uv, 0.0 ) (any other coordinate is refused);
-//   texelFetch( s, int2( x, y ), lod ) passes through (the engine's language has GLSL's texelFetch; int2 -> ivec2);
-//   clip( x ) -> if ( x < 0.0 ) discard, a scalar x (clip( a - b ) -> if ( a < b ) discard: the same test, a - b being
-//     negative exactly when a < b); a statement, so it needs its own ;
-//   $name -> the sampler the caller names for the texture parm (samp_<lowercase name> in the stage text); a $ whose
-//     name is not a texture of the program is refused: a render parm is passed in by the call block, never read here.
-// Anything else passes through. Refused with the reason: a # directive, the engine's own functions and types this
-// does not translate (mul, half*, fixed, the other tex* lookups, SineCosine, anyEqual..., register, groupshared).
+// The token rules from the engine's HLSL-like language to GLSL: type, function and intrinsic renames, dropped qualifiers
+// (static, BRANCH, LOOP, IFANY, UNROLL, FLATTEN), saturate, tex2D, tex2Dlod with a zero-lod float4 and clip rewritten, and
+// $name -> the program's sampler (samp_<lowercase name> in stage text; a $ that is not a texture parm is refused). A # directive
+// and the engine's own mul, half*, fixed, other tex* lookups and similar are refused; anything else passes through.
 const TYPES = { float2: 'vec2', float3: 'vec3', float4: 'vec4', int2: 'ivec2', int3: 'ivec3', int4: 'ivec4',
   uint2: 'uvec2', uint3: 'uvec3', uint4: 'uvec4', bool2: 'bvec2', bool3: 'bvec3', bool4: 'bvec4',
   float2x2: 'mat2', float3x3: 'mat3', float4x4: 'mat4' };
@@ -206,8 +177,6 @@ function tr(toks, opts) {
   return o;
 }
 
-// ------------------------------------------------------------------------------------------ the programs ----
-
 // A program: its source, the samplers its header names ([the stub's sampler, the texture parm]) and its stub.
 function layeredSpec() {
   // the parameter image takes the place of layer 0's height image: the program's 20 textures stay 20
@@ -276,8 +245,6 @@ function buildProgram(spec) {
 function buildPrograms() {
   return { layered: buildProgram(layeredSpec()), particles: buildProgram(particlesSpec()), hair: buildProgram(hairSpec()) };
 }
-
-// ------------------------------------------------------------------------------------------- the output ----
 
 function compile(text) {
   const exe = process.env.GLSLANG_VALIDATOR || 'glslangValidator';

@@ -96,8 +96,7 @@ static char *sm_map_text(const char *path, size_t *len, int *absent)
     *len = 0;
     if (!raw) return NULL;
     if (n < 4 + 2 + 4 || (raw[4] & 0x0F) != 8 || ((raw[4] << 8) | raw[5]) % 31 || (raw[5] & 0x20)) { free(raw); return NULL; }
-    /* The buffer doubles until the whole text fits, of any size; DEFLATE expands at most 1032 to 1, so past that the
-     * stream is malformed. */
+    /* The buffer doubles until the text fits; DEFLATE expands at most 1032 to 1, so past that the stream is malformed. */
     for (cap = n * 8 < 65536 ? 65536 : n * 8; cap / 2 <= n * 1032 + 65536 && cap < ((size_t)-1) / 2; cap *= 2) {
         size_t got;
         out = (char *)malloc(cap + 1);

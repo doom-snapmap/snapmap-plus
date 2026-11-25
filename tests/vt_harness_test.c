@@ -1,17 +1,10 @@
-/* vt_harness_test.c -- the sh_vt diagnostic's pure helpers, and the
- * reference family bundle end to end.
+/* vt_harness_test.c -- the sh_vt diagnostic's pure helpers, and the reference family bundle end to end.
  *
  *   vt_harness_test.exe [<rctest mod folder>]
  *
- * Without an argument: the member cell lookup (the
- * record decoding is modvt_test.c's). With the folder made by snaphak-re's
- * make_family.py, in the one shape under the salt rctestvt (or SH_VT_RCTEST
- * set to it): a copy is built by the
- * real bundle builder with a stock stand-in, admitted by the real serving
- * index, its request paths looked up, its family collected as modvt.c
- * registers it, and the editor plan's order checked (the material before the
- * entityDef that names it through customMaterial, the sedef last). The folder
- * holds stock game bytes, so it is not part of the repository. */
+ * Without an argument it checks the member cell lookup. With the folder made by make_family.py (salt rctestvt, or
+ * SH_VT_RCTEST set to it) it builds a copy, admits it, collects its family as modvt.c does and checks the editor
+ * plan's order. The folder holds stock game bytes, so it is not part of the repository. */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
 #include <windows.h>

@@ -1,8 +1,5 @@
-/* script_api_reflect_test.c -- get, set, fields, class and enum of mod
- * scripts (src/backend/script/script_api_reflect.c) over the fake type table
- * of reflect_fake.h and real structs: every kind of value read and written
- * from Lua, on the mod's own entity and on another's, and each refusal's
- * sentence. */
+/* script_api_reflect_test.c -- get, set, fields, class and enum of mod scripts (src/backend/script/script_api_reflect.c)
+ * over the fake type table of reflect_fake.h, on the mod's own entity and on another's, and each refusal's sentence. */
 #include "heap_out.h"
 #include <windows.h>
 #include <stddef.h>
@@ -344,8 +341,8 @@ static void test_refusals(void)
     g_ready = 1;
 }
 
-/* SPEC 5.23, the restore rule: a decl written through an entity's pointer is put back at the map's end, found again
- * by its name (never by an address a re-parse can free), and a field someone else changed since is theirs. */
+/* The restore rule: a decl written through an entity's pointer is put back at the map's end, found by its name (never
+ * by an address a re-parse can free), and a field someone else changed since is theirs. */
 static void test_restore(void)
 {
     g_enc.value = 9;
@@ -356,7 +353,7 @@ static void test_restore(void)
     CHECK(g_enc.value == 9);                 /* the decl outlives the map: put back */
     CHECK(g_own.base.team == 1);             /* the entity's own field ends with the entity: not touched */
 
-    /* by name: the decl was parsed again elsewhere; the restore finds it by name and leaves the old address alone */
+    /* by name: the decl was parsed again elsewhere; the restore finds it by name and leaves the stale address alone */
     run("api = 1\nent(0):set('encounter.value', 42)\n");
     g_reparsed = 1;
     g_enc_parsed.value = 42;

@@ -1,8 +1,6 @@
-/* Per-map "Unlock Map Bounds": a Snapmap+ map setting that widens the space
- * modules may occupy. Native SnapMap invalidates any module whose world bounds
- * leave +/-snapEdit_environmentModuleBounds (16000). Every client recomputes
- * that validity from its own cvar when it opens the map, so a map that uses
- * the wider space needs Snapmap+ on every player's PC. */
+/* Per-map "Unlock Map Bounds": widens the space modules may occupy beyond native +/-16000
+ * (snapEdit_environmentModuleBounds). Every client recomputes validity from its own cvar, so such a map needs
+ * Snapmap+ on every player's PC. */
 #ifndef SH_MAP_BOUNDS_H
 #define SH_MAP_BOUNDS_H
 #include <stddef.h>
@@ -31,9 +29,8 @@ float sh_map_bounds_clamp(float requested);
 /* The world limit in units this setting selects (native when absent). */
 float sh_map_bounds_effective(const sh_map_bounds *settings);
 int   sh_map_bounds_overrides(const sh_map_bounds *settings);
-/* The settings row is a toggle: on when the stored limit is above native
- * (including values saved by the earlier numeric row), and turning it on
- * stores the ceiling, off stores native. */
+/* The settings row is a toggle: on when the stored limit is above native, and
+ * turning it on stores the ceiling, off stores native. */
 int   sh_map_bounds_enabled(const sh_map_bounds *settings);
 void  sh_map_bounds_from_toggle(int on, sh_map_bounds *settings);
 /* Blueprint floor range that keeps the native proportion of floors to space. */
@@ -48,11 +45,9 @@ int  sh_map_bounds_read(void *map, sh_map_bounds *settings);
 int  sh_map_bounds_write(void *map, const sh_map_bounds *settings);
 /* Entry to native edit-to-build conversion (Play): select the open map's. */
 void sh_map_bounds_build(void *map);
-/* A map was just deserialized: select its setting; NULL before every load
- * restores the native limit. */
+/* Selects the setting of a map just deserialized; NULL (before every load) restores the native limit. */
 void sh_map_bounds_loaded(void *snapshot);
-/* Apply a limit to the engine cvars now; NULL or native restores the values
- * captured before the first override. */
+/* Applies a limit to the engine cvars; NULL or native restores the values captured before the first override. */
 void sh_map_bounds_select(const sh_map_bounds *settings);
 /* Add the "Unlock Map Bounds" on/off row to the Snapmap+ settings tab. Call
  * after sh_settings_tab_install. */

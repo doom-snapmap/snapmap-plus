@@ -10,8 +10,6 @@
 #define DT_DEPTH 48
 #define DT_PATH  64
 
-/* ------------------------------------------------------------------ arena */
-
 typedef struct dt_chunk { struct dt_chunk *next; size_t used, cap; char data[1]; } dt_chunk;
 
 struct sh_dt {
@@ -85,8 +83,6 @@ static void dt_remove_kid(sh_dt_node *parent, int i)
     parent->nkids--;
 }
 
-/* ------------------------------------------------------------------ small text */
-
 typedef struct dt_buf { char *p; size_t n, cap; int oom; } dt_buf;
 
 static void dt_put(dt_buf *b, const char *s, size_t n)
@@ -136,8 +132,6 @@ static void dt_cause(char *cause, size_t cap, const char *fmt, ...)
     _vsnprintf_s(cause, cap, _TRUNCATE, fmt, ap);
     va_end(ap);
 }
-
-/* ------------------------------------------------------------------ lexer and parser */
 
 enum { DT_END, DT_WORD, DT_STR, DT_LB, DT_RB, DT_EQ, DT_SEMI, DT_GROUP, DT_BAD };
 typedef struct dt_tok { int kind; const char *p; size_t n; } dt_tok;
@@ -396,8 +390,6 @@ sh_dt *sh_dt_parse(const char *text, size_t len, char *cause, size_t cap)
     return t;
 }
 
-/* ------------------------------------------------------------------ writing */
-
 static void dt_indent(dt_buf *b, int depth) { int i; for (i = 0; i < depth; ++i) dt_put(b, "\t", 1); }
 
 static void dt_write_members(dt_buf *b, const sh_dt_node *n, int depth, int canon, const char *eol);
@@ -515,8 +507,6 @@ static int dt_val_eq(const char *a, size_t an, const char *b, size_t bn)
     return eq;
 }
 
-/* ------------------------------------------------------------------ semantic form */
-
 static int dt_str_cmp(const void *a, const void *b) { return strcmp(*(const char *const *)a, *(const char *const *)b); }
 
 /* Order-free text: fields and entries sorted, list items in order, keys
@@ -600,8 +590,6 @@ int sh_dt_texts_equal(const char *a, size_t alen, const char *b, size_t blen)
     return eq;
 }
 
-/* ------------------------------------------------------------------ identity */
-
 /* The canonical head of a member: its key, plus ` <name>` for a named block. */
 static char *dt_head(const sh_dt_node *n)
 {
@@ -645,8 +633,6 @@ static int dt_name_field(const sh_dt_node *n, const char **p, size_t *len)
 
 static int dt_word_eq(const sh_dt_node *a, const sh_dt_node *b) { return dt_ieq(a->key, a->key_n, b->key, b->key_n); }
 
-/* ------------------------------------------------------------------ JSON out */
-
 static void dt_jstr(dt_buf *b, const char *s, size_t n)
 {
     size_t i;
@@ -666,8 +652,6 @@ static void dt_jstr(dt_buf *b, const char *s, size_t n)
 }
 
 static void dt_jcstr(dt_buf *b, const char *s) { dt_jstr(b, s, strlen(s)); }
-
-/* ------------------------------------------------------------------ JSON in */
 
 enum { DJ_NULL, DJ_STR, DJ_NUM, DJ_ARR, DJ_OBJ, DJ_LIT };
 typedef struct dj {
@@ -845,8 +829,6 @@ static int dj_int(const dj *o, const char *key)
     const dj *v = dj_get(o, key);
     return v && v->t == DJ_NUM ? atoi(v->s) : 0;
 }
-
-/* ------------------------------------------------------------------ diff */
 
 typedef struct dt_diff {
     dt_buf out;                        /* the ops array's members */
@@ -1181,8 +1163,6 @@ char *sh_dt_diff(const char *request, const char *stock, size_t stock_len, const
     return dt_done(&o, NULL);
 }
 
-/* ------------------------------------------------------------------ navigation */
-
 sh_dt_node *sh_dt_child(sh_dt_node *n, const char *key)
 {
     int i, hits = 0;
@@ -1229,8 +1209,6 @@ int sh_dt_set_value(sh_dt *t, sh_dt_node *n, const char *val, size_t len)
     return 1;
 }
 
-/* ------------------------------------------------------------------ apply */
-
 enum { OP_SET, OP_REMOVE, OP_LIST, OP_UNLIST, OP_KEYED, OP_UNKEY, OP_BAG, OP_UNBAG, OP_BAD };
 
 typedef struct dt_op {
@@ -1241,9 +1219,9 @@ typedef struct dt_op {
     char *slot;                        /* malloc'd (dt_src_ops_free) */
     unsigned long long digest;
     int skip;                          /* lost a clash */
-    int lost_to, lost_by_choice;       /* with skip: the source that serves the slot, and whether the map chose it */
-    int unioned;                       /* with skip: its spawn types are in the first source's composed value */
-    char *own_entry;                   /* malloc'd: a composed statement `entry` points to, or NULL */
+    int lost_to, lost_by_choice;       /* with skip: serving source; map chose it */
+    int unioned;                       /* with skip: types merged into the first source's value */
+    char *own_entry;                   /* malloc'd composed statement `entry` points to, or NULL */
 } dt_op;
 
 typedef struct dt_src_ops { dj *json; dt_op *ops; int n; } dt_src_ops;
@@ -1647,15 +1625,9 @@ static void dt_union_words(dt_buf *words, const char *value, size_t n)
     }
 }
 
-/* Encounter members' spawn types (memberType) are sets of flags, so the values
- * several sources set compose as the union of their words, in row order,
- * instead of clashing: two mods that each add their ported demon to a stock
- * encounter's member both keep theirs. This holds for a set of one memberType
- * and for a set of a block whose statements differ between the sources only
- * in memberType values (a whole memberList): the first source's statement
- * with each value the union of the sources' values at that place. 1 when
- * `op`'s slot was composed so (the first source's op carries it, the others
- * merge). */
+/* Spawn types (memberType) are flag sets, so values several sources set compose as the union of their
+ * words in row order instead of clashing; this covers one memberType and a whole memberList differing
+ * only in memberType values. Returns 1 when `op`'s slot was composed so (the first source's op carries it). */
 static int dt_union_types(dt_src_ops *so, const sh_dt_source *src, const int *who, int nwho, const dt_op *op,
                           sh_dt_report *report)
 {
@@ -1766,7 +1738,7 @@ sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, con
             dt_buf list = { NULL, 0, 0, 0 };
             const char *names;
             if (op->skip || !(op->kind == OP_SET || op->kind == OP_REMOVE || op->kind == OP_KEYED || op->kind == OP_UNKEY)) continue;
-            /* The first claim of this slot (earlier claims were handled with their slot). */
+            /* Only the first claim of a slot is handled here; later claims ride with it. */
             {
                 int earlier = 0;
                 for (s2 = 0; s2 < s && !earlier; ++s2)
@@ -1877,8 +1849,6 @@ done:
     free(game);
     return t;
 }
-
-/* ------------------------------------------------------------------ edits readers */
 
 static void dt_counts_of(const dj *e, sh_dt_counts *c)
 {

@@ -1,6 +1,6 @@
 // snapmap-plus-sim is the installer simulation harness's helper (installer/sim/run.ps1 drives it). It
 // never ships: it serves a fake GitHub Releases API on a loopback port, packs release assets from a
-// dist/ folder, lays out the DOOM and data folders earlier releases left, and checks the layout
+// dist/ folder, lays out the DOOM and data folders a previous install left, and checks the layout
 // contract after every step.
 //
 //	snapmap-plus-sim release --dist <dist> --exe <snapmap-plus.exe> --out <root>\<tag>

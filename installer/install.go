@@ -57,8 +57,7 @@ func cmdInstall(f flags) error {
 	if err := checkBundleForBuild(b.files, build); err != nil {
 		return err
 	}
-	// Only the detected build's pair is installed, whatever else the bundle carries (bundles of
-	// earlier releases also carried the 2018 release's files).
+	// Only the detected build's pair is installed, whatever else the bundle carries.
 	pair := buildPair(build.build)
 	files, skipped := splitBundleForBuild(b.files, pair)
 
@@ -89,7 +88,7 @@ func cmdInstall(f flags) error {
 	tidyRetiredFolders()
 	reportStartupTidy()
 	ui.LazySection("Migrating player data")
-	// Bring player content forward from earlier install locations.
+	// Move player content from the locations a previous install used into the data folder.
 	migrateUserData()
 
 	rec := &installRecord{}
@@ -153,7 +152,7 @@ func cmdInstall(f flags) error {
 	if err := saveInstall(b.version, doom, build.build, rec); err != nil {
 		return fmt.Errorf("installed the files, but couldn't write the install record (%v) -- run: snapmap-plus update", err)
 	}
-	migrateLegacyLogs(doom) // runtime logs live in snapmap-plus\logs\ -- fold older locations (snaphak_logs\, snaphak\logs\) in (best-effort)
+	migrateLegacyLogs(doom) // best-effort: move logs from snaphak_logs\ and snaphak\logs\ into snapmap-plus\logs\
 	ui.Blank()
 	ui.OK("Snapmap+ %s installed.", b.version)
 	ensureWebView2Runtime(f) // the HTML UI renders in the WebView2 runtime -- ensure it's present (never fails the install)
@@ -185,11 +184,11 @@ func saveInstall(ver, doom, build string, rec *installRecord) error {
 	})
 }
 
-// earlierInstall names what an install found before it and what it will do about it.
+// earlierInstall names what an install found in the DOOM folder and what it will do about it.
 type earlierInstall struct{ found, plan string }
 
-// describeEarlier recognises the migration path: the original SnapHak, a release that left the other
-// build's files or its own backups and records, the current layout, or nothing.
+// describeEarlier recognises what the folder holds: the original SnapHak, files a previous install
+// placed that this release does not ship (the other build's, backups, records), the current layout, or nothing.
 func describeEarlier(doom, build string, prior *installRecord, legacy []string, own doomOwnership) earlierInstall {
 	ver := "an earlier release"
 	if prior != nil && prior.Version != "" {
@@ -262,14 +261,14 @@ func upperFirst(s string) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
-// tidyRetiredFolders removes the retired package folders of earlier releases while they are empty;
-// reportStartupTidy prints what it did. One that still holds files is the player's and stays.
+// tidyRetiredFolders removes the package folders a previous install placed that this release does not
+// ship, while they are empty; reportStartupTidy prints what it did. One that holds files stays.
 func tidyRetiredFolders() {
 	dir := appDataDir()
 	if dir == "" {
 		return
 	}
-	for _, name := range []string{"override-backups", "package-cache", "package-staging"} { // each a retired package folder
+	for _, name := range []string{"override-backups", "package-cache", "package-staging"} { // package folders this release does not ship
 		p := filepath.Join(dir, name)
 		if st, err := os.Lstat(p); err != nil || !st.IsDir() {
 			continue
@@ -282,13 +281,13 @@ func tidyRetiredFolders() {
 	}
 }
 
-// migrateLegacyLogs moves old runtime logs into snapmap-plus/logs. Locked files
-// and name collisions stay at the old location; migration failure is nonfatal.
+// migrateLegacyLogs moves runtime logs from snaphak_logs\ and snaphak\logs\ into snapmap-plus\logs\.
+// Locked files and name collisions stay where they are; failure is nonfatal.
 func migrateLegacyLogs(doom string) {
 	newDir := filepath.Join(doom, "snapmap-plus", "logs")
 	foldLogsForward(filepath.Join(doom, "snaphak_logs"), newDir)
 	foldLogsForward(filepath.Join(doom, "snaphak", "logs"), newDir)
-	removeIfEmpty(filepath.Join(doom, "snaphak")) // the previous-name overlay dir, once its DLL + logs are gone
+	removeIfEmpty(filepath.Join(doom, "snaphak")) // the snaphak overlay dir, once empty
 }
 
 // foldLogsForward moves every file in old into newDir (keeping any that already exist there), then removes old
@@ -337,7 +336,7 @@ func cmdUpdate(f flags) error {
 	if err := cmdInstall(f); err != nil {
 		return err
 	}
-	// The overlay is updated; now refresh snapmap-plus.exe itself (best-effort -- never fails the overlay update).
+	// Refresh snapmap-plus.exe itself; best-effort, never fails the overlay update.
 	if !f.noSelf {
 		ui.LazySection("Updating snapmap-plus.exe")
 		selfUpdate(f, resolveToken(f))
@@ -382,8 +381,8 @@ func cmdUninstall(f flags) error {
 	reportStartupTidy()
 	ui.Section("Removing Snapmap+ from the DOOM folder")
 
-	// Remove every file of ours, wherever a release put it. Backups of files that were not ours move
-	// out of DOOM first, then go back where they were.
+	// Remove every file of ours; backups of files that were not ours move out of DOOM first, then go
+	// back where they were.
 	t := cleanDoomFolder(doom, nil, newOwnership(doom, rec, nil), rec)
 	printDoomTidy(doomTidy{removed: t.removed}, appDataDir())
 	for _, bk := range rec.Backups {

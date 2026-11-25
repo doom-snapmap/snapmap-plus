@@ -1,14 +1,10 @@
-# Shared MSVC build helpers for src\backend\build.ps1, src\ui\build.ps1 and
-# tests\run-tests.ps1. Dot-source this file. Sources compile to objects (once, in parallel), and a
-# separate step links them, so a rebuild recompiles only what changed. Keep this script ASCII for
-# PowerShell 5.1.
+# Shared MSVC build helpers for src\backend\build.ps1, src\ui\build.ps1 and tests\run-tests.ps1;
+# dot-source it. Sources compile to objects in parallel and a separate step links them. Keep this
+# script ASCII for PowerShell 5.1.
 #
-# Staleness is decided by content, never by file times (a fresh checkout dates every file at the
-# checkout). Each object has a key beside it (<obj>.key): a SHA-256 over the compile flags, the
-# toolset, and the path and text of the source and of every project file it includes (quoted
-# #include, followed recursively). A source recompiles when its object or key is missing or the key
-# differs, so build\obj can be restored from a cache. Angle-bracket includes are system or SDK
-# headers; the toolset and the SDK path (in the flags) are part of the key.
+# Staleness is decided by content, never file times: each object has a <obj>.key holding a SHA-256
+# over the compile flags, the toolset, and the path and text of the source and every quoted
+# #include it reaches (recursively). A source recompiles when its object or key is missing or differs.
 
 # Import the vcvars64 environment into this process once. A child build started by this process
 # inherits it and skips the import (vcvars64.bat costs a few seconds per call).

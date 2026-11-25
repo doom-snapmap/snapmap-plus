@@ -1,9 +1,6 @@
-/* valid_class_map.h -- inherit -> Y -> valid-classes, the THREAD-SAFE fallback for the dropdown
- * enumerator. The live engine type-lookup (sh_typeinfo_inherit_base / _class_derives) is GAME-THREAD-AFFINE
- * and returns null on the frontend's UI thread; the dropdown enumerator runs UI-thread, so when the live lookup
- * fails it serves from this corpus snapshot instead. GENERATED from the reference entityDef corpus
- * (enumerator/inherit_y.json + valid_class_map.json + hierarchy.json). BUILD-SPECIFIC: regenerate on a DOOM
- * type-hierarchy change (the live apply-guard remains the source of truth; this is a UI hint). DO NOT hand-edit. */
+/* valid_class_map.h -- inherit -> Y -> valid-classes, the thread-safe fallback for the dropdown enumerator.
+ * The live type lookup (sh_typeinfo_inherit_base / _class_derives) is game-thread-affine and returns null on the
+ * UI thread, so the enumerator serves from this snapshot instead. GENERATED, build-specific; DO NOT hand-edit. */
 #ifndef B2_VALID_CLASS_MAP_H
 #define B2_VALID_CLASS_MAP_H
 

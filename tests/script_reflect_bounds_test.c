@@ -1,8 +1,7 @@
-/* script_reflect_bounds_test.c - sh_rf_bounds (src/backend/script/script_reflect.h): an entity's collision box
- * found by name in a type table shaped like the game's. A demon's box comes from its own physics
- * (aiVolatile.physics.object, an actor whose clipModels field the game describes as one 16-byte "idClipModel"
- * though it holds two pointers), the first set pointer of the two; another entity's from its
- * defaultPhysicsObj.clipModel; an entity with neither, or with no clip model now, has none. */
+/* script_reflect_bounds_test.c - sh_rf_bounds (src/backend/script/script_reflect.h): an entity's collision box found
+ * by name in a type table shaped like the game's. A demon's comes from aiVolatile.physics.object (the first set
+ * pointer of its two clip models, described as one 16-byte "idClipModel"), another entity's from
+ * defaultPhysicsObj.clipModel, and an entity with neither has none. */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -109,7 +108,7 @@ int main(void)
     CHECK(sh_rf_bounds(&H, &d, "idAI2", mn, mx, err, sizeof err));
     CHECK(mx[0] == 10 && mx[2] == 20);
 
-    /* no clip model now: none, in a sentence */
+    /* no clip model at the moment: none, in a sentence */
     d.aiVolatile.physics.object.actor.clipModels[1] = NULL;
     d.base.defaultPhysicsObj.clipModel = NULL;
     CHECK(!sh_rf_bounds(&H, &d, "idAI2", mn, mx, err, sizeof err));

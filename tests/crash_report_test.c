@@ -88,7 +88,7 @@ int main(void)
     for (int i = 0; i < 9; i++) crash_report_file("fatal", 0, 0, 0, "", "", "", "");
     assert(check_files(1) == 7 && emitted == 7);
     /* The game identity is taken at arm time only: writing records never asks
-     * for it, and a record carries whatever was captured. */
+     * for it. */
     assert(game_calls == 0);
     sh_host_game_identity(g_game, sizeof g_game); game_calls = 0;
     g_records_written = 0;

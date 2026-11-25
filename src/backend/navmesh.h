@@ -1,33 +1,10 @@
-/* Read and serve navigation baked into a map. Live editor baking is handled
- * separately by nav_bake.
+/* Reads and serves navigation baked into a map; live editor baking is nav_bake's. The data is the "nav" part of
+ * the map's "snapmap-plus" member (map_carrier.h): one {"module","class","digest","geom","data":[base64 chunks]}
+ * object per (module, class), served under maps/modules/.../<module>.aas_<class> and the matching .baas_ name.
  *
- * Where it lives: the "nav" part of the map's "snapmap-plus" member
- * (map_carrier.h describes the grammar): one object per (module, class) set,
- * {"module":"<category>/<module>","class":"<class>","digest":"<16 hex>",
- * "geom":"<16 hex>","data":["<base64 chunk>",...]}. A save writes it there
- * (sh_navmesh_embed_all), never as variables.
- *
- * Resource aliases use maps/modules/.../<module>.aas_<class> and
- * generated/maps/modules/.../<module>.baas_<class>.
- *
- * Rebuild the serving table from empty on every map load. Verify delivery and
- * AAS structure, then admit all classes together per module; repeated module
- * placements cannot use this shared-name format. Retain verified payloads for
- * save re-embedding even if serving is refused; with navmesh.enabled off the
- * member's part is kept as text and written back unchanged. Table storage and
- * served copies use the process heap.
- *
- * Chunk size (SH_SMNAV_CARRIER_CHUNK): the product strips the member before
- * the engine parses, so only a machine without Snapmap+ ever lexes it. String
- * variables failed native deserialization at 16384 characters. The member
- * was measured live on Vulkan (13954591) with Snapmap+ leaving an unknown
- * root member to the engine: a single string of 8192, 65536 and 1048576
- * characters and an array of 2048 strings of 4096 characters (8 MiB) all
- * loaded in the editor and played with no engine message above level 4, and
- * a 1048576-character string in a declared member came back intact through
- * an editor save. Chunks are therefore 1048576 characters, the largest size
- * proven; a payload within SH_SMNAV_MAX_PAYLOAD needs at most 11.
- */
+ * The serving table is rebuilt on every map load, admitting all classes of a module together once verified.
+ * Verified payloads are kept for save re-embedding even when serving is refused; with navmesh.enabled off the
+ * member's part is written back unchanged as text. */
 #ifndef SNAPMAP_PLUS_NAVMESH_H
 #define SNAPMAP_PLUS_NAVMESH_H
 
@@ -36,7 +13,7 @@
 /* The native router packs an outgoing reachability ordinal into eight bits. */
 #define SH_AAS_MAX_AREA_REACHABILITIES 256u
 
-/* ---- the frozen wire format ------------------------------------------- */
+/* Wire format. */
 
 #define SH_SMNAV_DIGEST_CHARS   16          /* sha256 prefix over the payload */
 #define SH_SMNAV_GEOM_CHARS     16          /* sha256 prefix over the source geometry */
@@ -46,27 +23,25 @@
 #define SH_SMNAV_HEADER_CAP     224
 #define SH_SMNAV_RESNAME_CAP    320
 #define SH_SMNAV_REASON_CAP     192
-/* Base64 characters per chunk of a set's "data" in the map's member
- * (map_carrier.h). See the measurement note above. */
+/* Base64 characters per "data" chunk. Native deserialization fails on string variables of 16384 characters,
+ * but a 1048576-character string in an engine-received member loads, plays and survives a save; a payload
+ * within SH_SMNAV_MAX_PAYLOAD needs at most 11 chunks. */
 #define SH_SMNAV_CARRIER_CHUNK  1048576u
 
-/* ---- budgets ----------------------------------------------------------- */
+/* Budgets. */
 
 #define SH_SMNAV_MAX_PAYLOAD    (8u * 1024u * 1024u)    /* one baked payload */
 #define SH_SMNAV_MAX_TOTAL      (32u * 1024u * 1024u)   /* all of them, per map */
 #define SH_SMNAV_MAX_SETS       192                     /* (module, class) pairs per map */
 #define SH_SMNAV_MAX_MODULES    64
 
-/* One AAS file the bake produces, validates and serves. LoadBinary reads each
- * lump's count and allocates it on the heap with no file-size check, and a
- * bake is served from memory, never stored in the map, so this is the
- * product's own bound on one copy's memory, not an engine limit. A 600-box
- * copy measured 9.14 MiB. Past it the bake sheds routes, then floors. */
+/* The product's own bound on one AAS file the bake produces and serves, since LoadBinary allocates each lump's
+ * count with no file-size check. Past it the bake sheds routes, then floors. */
 #define SH_AAS_MAX_BAKE_PAYLOAD (16u * 1024u * 1024u)
 
-/* ---- the AAS2 3.29 binary shape the validator walks -------------------- */
+/* The AAS2 3.29 binary shape the validator walks. */
 
-#define SH_AAS_MAGIC            "2SAA"      /* 0x41415332 written little-endian */
+#define SH_AAS_MAGIC            "2SAA"      /* 0x41415332, little-endian */
 #define SH_AAS_MAJOR            3
 #define SH_AAS_MINOR            29
 #define SH_AAS_HEADER_BYTES     30
@@ -74,34 +49,25 @@
 #define SH_AAS_PREAMBLE_BYTES   (SH_AAS_HEADER_BYTES + SH_AAS_SETTINGS_BYTES)   /* 0x18A */
 #define SH_AAS_LUMPS            22
 #define SH_AAS_MAX_DEPTH        0x80        /* the engine's own tree-depth limit */
-#define SH_AAS_MAX_AREAS        0xFFFEu     /* area indices are u16 everywhere */
+#define SH_AAS_MAX_AREAS        0xFFFEu     /* area indices are u16 */
 #define SH_AAS_MAX_RECORDS      0x1000000u  /* per-lump record cap */
-#define SH_AAS_MAX_TRAVERSAL_POINTS 0x10000u /* an area's first traversal point is a u16 */
+#define SH_AAS_MAX_TRAVERSAL_POINTS 0x10000u /* a first traversal point is a u16 */
 
-/* Log configured state. Serving uses the existing override-provider hook;
- * load/save handling uses the rawmap funnel.
- */
+/* Logs the configured state. Serving uses the override-provider hook; load/save handling uses the rawmap funnel. */
 void sh_navmesh_install(void);
 
-/* THE LIFECYCLE. Called from the deserialize funnel on EVERY buffer the engine
- * is about to parse, before the parse. Clears the serving table and rebuilds it
- * from this map's saved parts; a map with none leaves it empty. Never throws:
- * a fault inside disables the feature for the session. */
+/* Called from the deserialize funnel on every buffer before the engine parses it. Clears the serving table and
+ * rebuilds it from this map's saved parts; a fault inside disables the feature for the session. */
 void sh_navmesh_build_from_map(const char *json, size_t len);
 
-/* THE AUTHOR SIDE. Re-embed every payload the current map is holding, so a
- * load-then-save with no fresh bake preserves the navigation the map arrived
- * with. Returns a new HeapAlloc'd buffer with *out_len set, or NULL for "leave
- * this save alone"; *failed (may be NULL) is 1 when the map held navigation
- * that could not be written, 0 when there was nothing to write. */
+/* Re-embeds every payload the current map holds, so a save with no fresh bake preserves its navigation. Returns
+ * a new HeapAlloc'd buffer with *out_len set, or NULL to leave the save alone; *failed (may be NULL) is 1 when
+ * the map held navigation that could not be written. */
 char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len, int *failed);
 
-/* THE SERVE PATH, called from the overrides open hook. Returns 1 when `name` is
- * a resource this map's bake replaces, with *out_bytes a HeapAlloc'd COPY the
- * caller owns (the table may be rebuilt while the engine still reads a stream,
- * so a served stream never aliases table memory) and *out_len its length.
- * Returns 0 for every other name, which is the overwhelmingly common case and
- * costs one bounded compare per served entry. */
+/* Called from the overrides open hook. Returns 1 when `name` is a resource this map's bake replaces, with
+ * *out_bytes a HeapAlloc'd copy the caller owns (the table may be rebuilt while the engine reads a stream) and
+ * *out_len its length; 0 for every other name. */
 int sh_navmesh_open(const char *name, unsigned char **out_bytes, size_t *out_len);
 
 /* Is the feature live (configured on, and not disabled by a fault)? */
@@ -111,10 +77,8 @@ int sh_navmesh_enabled(void);
  * `out` is a printf-like sink (the console's sh_printf in production). */
 void sh_navmesh_report(void (*out)(const char *fmt, ...));
 
-/* Validate AAS2 3.29 layout, bounds, cross-indices and BSP/reachability
- * walks. Returns 1 on success, or 0 with err. This checks structure, not
- * navigation quality or complete engine semantics.
- */
+/* Validates AAS2 3.29 layout, bounds, cross-indices and BSP/reachability walks. Returns 1 on success, or 0 with
+ * err; it checks structure, not navigation quality. */
 int sh_navmesh_validate_aas(const unsigned char *payload, size_t len,
                             char *err, size_t err_cap);
 

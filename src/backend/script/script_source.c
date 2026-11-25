@@ -290,9 +290,8 @@ static void salt_of_hash(void *context, const char *id, const char *hash, int ad
     h->composition = composition;
 }
 
-/* One served script: its bytes as the mod's folder holds them now (never the
- * index's cache of the bytes first read, which would hide an edit), kept only
- * when they are the bytes its build recorded. */
+/* One served script: its bytes read from the mod's folder (not the index's cache, which would hide an edit),
+ * kept only when they are the bytes its build recorded. */
 static void keep_script(void *context, const char *relpath, const char *request, uint64_t size, const char *sha256,
                         const char *bundle_hash)
 {

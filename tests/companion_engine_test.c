@@ -1,9 +1,6 @@
-/* companion_engine_test.c -- the engine side of owner-bound companions
- * (companion_engine.c) against a faked engine table: the entityDef manager,
- * the game's create and finish calls (finish runs CallSpawn, so a companion's
- * own spawn re-enters the detour), the owner's physics and a serving index
- * with two builds of one salt. Checks which build an owner's companions come
- * from and that a new index never replaces the tables a spawn loop reads. */
+/* companion_engine_test.c -- owner-bound companions (companion_engine.c) against a faked engine table and a serving
+ * index with two builds of one salt. Checks which build an owner's companions come from and that a new index never
+ * replaces the tables a spawn loop reads. */
 #include "../src/backend/companion_engine.c"
 
 static int t_failed;
@@ -21,7 +18,6 @@ void backend_log(const char *message)
     if (at + n + 2 < sizeof g_log) { memcpy(g_log + at, message, n); g_log[at + n] = '\n'; g_log[at + n + 1] = 0; }
 }
 
-/* ------------------------------------------------------------------ link stand-ins */
 
 const sig_entry SH_COMPANION_SIGNATURES[] = { { NULL } };
 const sig_entry SH_MODSCENE_SPAWN_SIGNATURES[] = { { NULL } };
@@ -60,7 +56,6 @@ int sh_modserve_lookup(const char *request, sh_modserve_hit *out)
     return 1;
 }
 
-/* ------------------------------------------------------------------ the faked engine */
 
 typedef struct fe_decl { unsigned char b[0x80]; } fe_decl;          /* +0x08 name, +0x2c state, +0x58 inherit, +0x60 class */
 typedef struct fe_ent { unsigned char b[0x900]; } fe_ent;           /* +0x6d0 decl, +0x808 physics, +0x3a8 pose */
@@ -200,17 +195,15 @@ static void test_companions_from_serving_build(void)
     t_nspawned = 0;
     callspawn_detour(fe_entity(owner));
     CHECK(t_nspawned == 1 && t_spawned[0] == &g_decls[1]);
-    /* Nothing serves the owner now: no companions. */
+    /* Nothing serves the owner: no companions. */
     g_owner_hash = "3333333333333333333333333333333333333333333333333333333333333333";
     t_nspawned = 0;
     callspawn_detour(fe_entity(owner));
     CHECK(t_nspawned == 0);
 }
 
-/* A new index published while an owner's companions spawn (a companion in the
- * mods namespace re-enters the detour from its own CallSpawn) is not read
- * there: the owner's loop finishes over the tables it started with, and the
- * next outermost spawn reads the new index. */
+/* A new index published while an owner's companions spawn (a companion in the mods namespace re-enters the detour)
+ * is not read there: the loop finishes over its own tables, and the next outermost spawn reads the new index. */
 static void test_rebuild_waits_for_the_outer_spawn(void)
 {
     fe_decl *owner;

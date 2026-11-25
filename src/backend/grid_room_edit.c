@@ -17,8 +17,8 @@ int sh_grid_cap_transform(const sh_grid_size *before,const sh_grid_size *after,
     if(!before||!after||before->kind!=after->kind||!source||!result||
        !sh_grid_warp_init(before,&old)||!sh_grid_warp_init(after,&next))return 0;
     for(i=0;i<12;++i)if(!isfinite(source[i]))return 0;
-    /* idSnapEntity stores local origin first, followed by its orientation.
-     * Door/frame dimensions and orientation are never deformed. */
+    /* idSnapEntity stores the local origin first, then its orientation; door and frame dimensions and orientation are
+     * never deformed. */
     memmove(result,source,12*sizeof(float));
     for(i=0;i<3;++i)result[i]=sh_grid_coordinate(&next,i,inverse(&old.axis[i],source[i]));
     return 1;

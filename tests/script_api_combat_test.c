@@ -1,24 +1,7 @@
-/* script_api_combat_test.c -- the combat calls of mod scripts
- * (src/backend/script/script_api_combat.c) and the delivery of the damage,
- * death, pain, animation, frame-event and projectile records the hooks post,
- * against a fake engine: a mod's AI, a stock AI, a player, a prop of the mod,
- * a wall and a world; decls of the mod by type.
- *
- * Covers: damage and e:damage (the engine event and its arguments, the world
- * as attacker when none is given), hitscan hits and misses, radius_damage,
- * explode with and without an effect, fx on an entity's own fx decl and as a
- * placed effect (move_effect, stop_effect), sound and its channels, tag and
- * can_see_from, pain, fire at an entity and at a position (the projectile it
- * returns, steer, explode); every refusal is one plain sentence naming the
- * file and line (another mod's or the game's decl, a decl the mod lacks, an
- * attacker that is not the mod's, a projectile the mod did not launch, a
- * condition the game does not have); the hooks' records reach on.damage,
- * on.death, on.animation, on.frame_event, on.pain and on.projectile with their
- * values; the records the hooks keep (last hit, first death, launches), each
- * released with its entity; a script holding projectiles as long as it likes:
- * 300 alive at once steered every frame, 5,000 alive steered in one frame,
- * every call on one that is gone answering nil or false and never stopping
- * the mod, and the launch records gone with them. */
+/* script_api_combat_test.c -- the combat calls of mod scripts (src/backend/script/script_api_combat.c) and the
+ * delivery of the hooks' damage, death, pain, animation, frame-event and projectile records, against a fake engine.
+ * It covers damage, hitscan, fx, sound, tags, fire and steer, each refusal's sentence, and scripts holding
+ * thousands of projectiles that later vanish. */
 #include "heap_out.h"
 #include <windows.h>
 #include <math.h>
@@ -667,7 +650,7 @@ static void test_sdk_calls(void)
     CHECK(has(g_events, "bindToJoint@snapmapplus/effect/mods/" SALT "/blast(e:mods/" SALT "/ai/brute,'','head',0);"));
     CHECK(has(g_events, "setColor@snapmapplus/effect/mods/" SALT "/blast(1,0.5,0);"));
     CHECK(has(g_events, "bind@snapmapplus/effect/mods/" SALT "/blast(e:mods/" SALT "/ai/brute);"));
-    /* a name that is not an SDK effect plays as before: the mod's effect entity */
+    /* a name that is not an SDK effect plays the mod's effect entity */
     CHECK(has(g_log, "old\tfx/beam_impact"));
     CHECK(has(g_log, "env\ttrue\ttrue"));
     CHECK(has(g_events, "post remove@snapmapplus/effect/snapmapplus/sdk/0123456789abcdef();"));
@@ -929,7 +912,7 @@ static void test_incoming(void)
     CHECK(has(log_now(), "incoming\t2"));
     CHECK(has(g_log, "at\t1\t400.0\t0.250"));
     CHECK(has(g_log, "at\t2\t1000.0\t1.250"));
-    /* the still one now closes at 800 (300 / 800) and d at 400 / 800; a and f keep the demon's pace */
+    /* the still one closes at 800 (300 / 800) and d at 400 / 800; a and f keep the demon's pace */
     CHECK(has(g_log, "running\t2\t0.375\t400.0"));
     CHECK(has(g_log, "none\t0"));
     refused("api = 1\non.spawn('ai/brute', function(self)\n  self:incoming_projectiles()\nend)\n",
@@ -1020,7 +1003,7 @@ static void test_hook_records(void)
     CHECK(sh_script_queue_post(mod, SH_SCRIPT_EV_ANIM, self, 0, 0, 0, "throw", NULL) == 1);
     CHECK(sh_script_queue_post(mod, SH_SCRIPT_EV_ANIM, self, 0, 0, 0, "fsm_window:Combat:0.5", NULL) == 1);
     {
-        /* a row of 400 characters (the old record cut it at 127): the command and its argument arrive whole */
+        /* a row of 400 characters: the command and its argument arrive whole */
         static char longrow[420];
         memcpy(longrow, "fsm_window:", 11);
         memset(longrow + 11, 'x', 389);

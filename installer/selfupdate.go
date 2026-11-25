@@ -32,9 +32,7 @@ func assetMatchesFile(a *ghAsset, path string) bool {
 	return err == nil && sum == hexDigest
 }
 
-// selfUpdate runs after the overlay update and reports failures without failing
-// that installation. Check disk contents as well as the running version: this
-// process can keep running after an earlier update replaced its executable.
+// selfUpdate runs after the overlay update and reports failures without failing that installation.
 // The new binary takes effect on the next launch.
 func selfUpdate(f flags, token string) {
 	rel, err := fetchRelease(f, token)
@@ -53,8 +51,7 @@ func selfUpdate(f flags, token string) {
 
 // selfUpdateTo replaces the running image with the release's snapmap-plus.exe when the release ships one
 // and the bytes on disk differ. It returns the executable's path and whether it was replaced; every
-// failure is a warning. Shared by the start-of-run update (which then relaunches) and the update
-// command's final step (which only reports).
+// failure is a warning. Both the start-of-run update and the update command's final step use it.
 func selfUpdateTo(rel *ghRelease, token string) (string, bool) {
 	var asset *ghAsset
 	for i := range rel.Assets {
@@ -73,7 +70,7 @@ func selfUpdateTo(rel *ghRelease, token string) (string, bool) {
 		return "", false
 	}
 	if assetMatchesFile(asset, exe) {
-		return exe, false // the on-disk exe is already this release (an earlier run updated it) -- nothing to do
+		return exe, false // the on-disk exe is already this release
 	}
 	tmp, err := os.MkdirTemp("", "snapmap-plus-exe-")
 	if err != nil {
@@ -87,7 +84,7 @@ func selfUpdateTo(rel *ghRelease, token string) (string, bool) {
 	}
 	if onDisk, err := fileSHA256(exe); err == nil {
 		if fresh, err := fileSHA256(newExe); err == nil && fresh == onDisk {
-			return exe, false // same bytes already in place (release had no digest to catch this earlier)
+			return exe, false // same bytes already in place (the release carried no digest)
 		}
 	}
 	if err := replaceExe(exe, newExe); err != nil {
@@ -119,16 +116,15 @@ type replaceExeOps struct {
 	remove   func(string) error
 }
 
-// Stage complete bytes before moving the current image aside. A failed rollback reports the old
-// image's recovery path and never removes that image.
+// replaceExe stages complete bytes before moving the current image aside. A failed rollback reports
+// the old image's recovery path and never removes that image.
 func replaceExe(path, newExe string) error {
 	return replaceExeWithOps(path, newExe, replaceExeOps{copyFile, os.Rename, os.Remove})
 }
 
 // replaceExeWithOps moves the current image into the data folder's cache\installer (beside it when
-// that is not possible), puts the new bytes in its place, and removes the replaced image at once. A
-// replaced image that is still running cannot be removed: it is recorded in install.json and removed
-// at the next start.
+// that is not possible), puts the new bytes in its place and removes the replaced image. A replaced
+// image that is still running is recorded in install.json and removed at the next start.
 func replaceExeWithOps(path, newExe string, ops replaceExeOps) error {
 	staged, err := os.CreateTemp(filepath.Dir(path), ".snapmap-plus-update-*")
 	if err != nil {

@@ -1,21 +1,9 @@
-/* rawmap_picker.h -- the file types the File menu's rawmap dialogs offer.
- *
- * A rawmap travels two ways: the .json (the map alone) and the .zip export
- * (the map and every mod it uses, modexport.c). Load Rawmap lists both kinds
- * together. Save Rawmap As offers .zip first when the open map uses a mod,
- * because the .json alone does not load for anyone who lacks the mods, and
- * .json first otherwise. Header-only and free of window state so the choice
- * is testable (tests/rawmap_picker_test.cpp).
- *
- * The Prefabs tab's Export and Import use the same dialogs for a prefab's
- * export (backend/prefab_mods.c): always a ZIP, <name>.json and every mod it
- * records. Import takes that ZIP, or the .json of one that was extracted.
- *
- * Each dialog opens in the last folder the player used for it, kept in
- * config.json under its own key (folder_config_key). Until one is kept, or
- * when the kept folder is gone, the prefab dialogs open in Downloads and the
- * rawmap dialogs in the rawmaps folder (%LOCALAPPDATA%\snapmap-plus, where
- * rawmap.json lives). */
+/* rawmap_picker.h -- the file types the File menu's rawmap dialogs offer, free of window state
+ * (tests/rawmap_picker_test.cpp). A rawmap is a .json (the map alone) or a .zip export (the map and every mod it
+ * uses, modexport.c); Load lists both, and Save As offers .zip first when the open map uses a mod. The Prefabs
+ * tab's Export (always a ZIP of <name>.json and its mods, backend/prefab_mods.c) and Import use the same dialogs.
+ * Each dialog opens in its last folder, kept in config.json under folder_config_key; without one the prefab dialogs
+ * open in Downloads and the rawmap dialogs in %LOCALAPPDATA%\snapmap-plus. */
 #ifndef SNAPMAP_PLUS_RAWMAP_PICKER_H
 #define SNAPMAP_PLUS_RAWMAP_PICKER_H
 
@@ -83,8 +71,7 @@ inline choice for_prefab_dialog(bool save)
     return c;
 }
 
-/* "mapMods" from the backend's rawmap status object; 0 when absent (an older
- * backend, or no map open). */
+/* "mapMods" from the backend's rawmap status object; 0 when absent (or no map is open). */
 inline int map_mods_from_status(const char *status_json)
 {
     const char *at = status_json ? strstr(status_json, "\"mapMods\":") : nullptr;

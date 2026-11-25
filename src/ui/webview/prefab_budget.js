@@ -1,13 +1,8 @@
-/* What a prefab adds to the SnapMap editor's limits. Pure (no DOM); browser global + CommonJS test
-   export. Pure ASCII.
-
-   The editor sums one 12-int block per counted thing (FIELDS below) and compares the sum with its
-   limits. A placed entity costs exactly its palette row's sedef `limits` block, with network 0 when
-   it is network-static; an entity whose inherit has no palette row costs 1 entity, 1 render model
-   and 1 network. A placed module costs its own block, its template block, the VIEW-automation
-   entities the engine instantiates into the room, and the 50 KB base of its entity bucket. The
-   backend sends the per-row and per-module blocks once per palette build (backend/budget_table.c);
-   this module only adds them up. */
+/* What a prefab adds to the SnapMap editor's limits. Pure (no DOM); browser global + CommonJS test export. ASCII.
+   The editor sums one 12-int block per counted thing (FIELDS) and compares the sum with its limits. A placed
+   entity costs its palette row's sedef `limits` block (network 0 when network-static; 1 entity, 1 render model and
+   1 network with no palette row); a placed module costs its own, template and VIEW-automation blocks plus the 50 KB
+   base of its bucket. The backend sends the blocks once per palette build (backend/budget_table.c). */
 var prefabBudget = (function () {
   var FIELDS = ['editorModels', 'entities', 'renderModels', 'lights', 'network', 'thinks', 'worldAreas',
                 'decals', 'renderKB', 'collisionKB', 'generalKB', 'numAI'];
@@ -100,11 +95,9 @@ var prefabBudget = (function () {
     return b;
   }
 
-  /* entities: scene entities (raw prefab JSON objects); modules: decl names or {name, layerMask}.
-     opts.entityModule[i]: the module index entity i belongs to, -1 for the global group (counted on
-     every layer); without it every entity is filtered as in a default room (layer 1 | autoView).
-     opts.skipView: a module prefab's scene entity on a VIEW-automation row is not counted, because the
-     engine instantiates those from the module itself (its view block), so each is counted once. */
+  /* entities: raw prefab scene entities; modules: decl names or {name, layerMask}. opts.entityModule[i] is entity
+     i's module index (-1 for the global group, counted on every layer). opts.skipView leaves out a module
+     prefab's VIEW-automation scene entities, which the module's own view block already counts. */
   function sum(entities, modules, table, opts) {
     var total = zero(), misses = [], unknown = [], seenMiss = {}, seenUnknown = {}, filtered = 0;
     var list = Array.isArray(entities) ? entities : [], mods = Array.isArray(modules) ? modules : [];
@@ -173,21 +166,16 @@ var prefabBudget = (function () {
   function reachedBy(r) { return r.network >= 1 || r.objects >= 1 || r.memory >= 1 || r.demons > 1; }
   function meterReached(name, value) { return name === 'demons' ? value > 1 : value >= 1; }
 
-  /* The colour a meter's resulting value takes in Prefab Details: 'ok' below WARN_AT (75%), 'warn'
-     from WARN_AT up to the limit, 'over' at or past it (100%). Every meter the editor would report as
-     reached is therefore 'over'; DEMONS at exactly 100% is 'over' too, because no demon fits after it,
-     although the editor's "limits reached" flag waits for the 65th. */
+  /* A meter's colour in Prefab Details: 'ok' below WARN_AT (75%), 'warn' up to the limit, 'over' at or past it.
+     DEMONS at exactly 100% is 'over' because no demon fits after it, though the editor's flag waits for the 65th. */
   var WARN_AT = 0.75, OVER_AT = 1;
   function meterLevel(r) {
     if (!(r < OVER_AT)) return isNaN(r) ? 'ok' : 'over';
     return r >= WARN_AT ? 'warn' : 'ok';
   }
 
-  /* meters(addBlock, usage, limits[, held]). held: this prefab is the one the player is holding in
-     the 3D view (a Load / Place before Space or Esc). The editor's usage already counts what is held
-     (identical held and after Space, for object and module prefabs), so "Map after" is the live
-     usage itself and the bar's current part is all of it: the prefab is never added twice. add
-     stays the prefab's own share. */
+  /* meters(addBlock, usage, limits[, held]). held: the prefab is held in the 3D view; the editor's usage already
+     counts it, so "Map after" is the live usage itself and the prefab is never added twice. */
   function meters(addBlock, usage, limits, held) {
     var l = block(limits), u = block(usage), after = held ? block(usage) : add(block(usage), addBlock);
     var rAdd = meterRatios(addBlock, l), rBefore = meterRatios(u, l), rAfter = meterRatios(after, l), out = {};

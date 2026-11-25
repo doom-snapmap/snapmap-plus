@@ -335,7 +335,7 @@ int sh_modpin_row(sh_modmanifest_row *row, const char *map_json, size_t len, con
     }
     if (whole_only || row->attached || !n) {
         if (!mpn_unit_of(&b, folder, SH_UNIT_WHOLE, &env, &units[n], content_root, &why)) {
-            /* The whole build closes by definition (3.7): a failure here is the folder changing under the pin. */
+            /* The whole build closes by definition: a failure here is the folder changing under the pin. */
             mpn_logf("MODS: pin: %s could not be pinned (%s); its row stays local", b.name ? b.name : row->salt,
                      why ? why : "?");
             mpn_result(out, row, SH_MODPIN_ABSENT, 0, 0, why);
@@ -381,7 +381,7 @@ int sh_modpin_row_differs(const sh_modmanifest_row *row)
     size_t k;
     int differs = 0;
     if (!row || !row->pinned || !row->unit_count) return -1;
-    /* The installed version: the row as a local row of its salt resolves to the root folder (D6a). */
+    /* The installed version: the row as a local row of its salt resolves to the root folder. */
     memset(&local, 0, sizeof local);
     strcpy_s(local.salt, sizeof local.salt, row->salt);
     memset(local.build, '0', SH_MOD_HASH_CHARS);
@@ -447,7 +447,7 @@ int sh_modpin_rows(sh_modmanifest_list *rows, const char *map_json, size_t len, 
         memset(&r, 0, sizeof r);
         s = sh_modpin_row(&rows->rows[i], map_json, len, content_root, &r);
         if (s < 0) {
-            /* Nothing half-pinned: every row back as it was. */
+            /* Nothing half-pinned: every row is left unchanged. */
             size_t k;
             free(r.why);
             for (k = 0; k < rows->count; k++) sh_modmanifest_row_free(&rows->rows[k]);

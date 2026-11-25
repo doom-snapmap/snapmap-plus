@@ -7,7 +7,7 @@ static int is_sep(char c) { return c == '/' || c == '\\'; }
 
 static char lower(char c) { return c >= 'A' && c <= 'Z' ? (char)(c - 'A' + 'a') : c; }
 
-/* rel begins with `word` followed by a slash, ASCII case-insensitively. */
+/* Tests that rel begins with `word` followed by a slash, ASCII case-insensitively. */
 static int begins_dir(const char *rel, const char *word)
 {
     size_t i;
@@ -25,7 +25,7 @@ static int ends_with(const char *rel, size_t n, const char *tail)
     return 1;
 }
 
-/* rel has a `..` element between slashes or at either end. */
+/* Tests that rel has a `..` element between slashes or at either end. */
 static int has_parent(const char *rel)
 {
     const char *p = rel;

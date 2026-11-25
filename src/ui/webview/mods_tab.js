@@ -1,26 +1,6 @@
-/* The Mods tab: the player's mods, the content of the maps on this computer, and the selected mod's
-   details, with the few actions a player uses (install, make a new mod, refresh, use a mod in the
-   open map or remove it from the map, uninstall, copy a kept map's mod into your mods). Browser
-   global + CommonJS test export. Pure ASCII.
-
-   The backend (backend/modui.c, the `mods` interface slot) builds one document on the game thread
-   (payload v4, docs/webview-ui.md): one row per mod folder of mods\ (its key is the folder's path
-   under mods\) with its organizing folder ("group"), and the open map's mods (the rows its save
-   would write now: the In this map block, the rows' glyph and the This map window). The list shows
-   "Your mods", with the organizing folders inside it, then "Maps on this computer" (the content
-   answer). Each row: the mod's name and size, one status glyph (needs attention, else in this
-   map, else ready). The details pane: the description, what the mod adds (its Toybox rows by
-   name), what it changes in the game (its edits, in words), what it borrows from the game (a
-   count, expandable), the console settings it needs, its files, and, for a mod that cannot be
-   used, the backend's one plain sentence saying what is wrong and what to do. A mod carrying the
-   same files as another shows an informational hint. A mod with scripts says what they drive and
-   which Script nodes they answer and fire, shows its script log, and while a script stopped shows
-   the stop line as its state. Nothing a player reads names a salt, a hash, a build number or the
-   internal words; the salt reaches the page only for the Files view's paths, and an author never
-   needs it. There is no folder watcher: Refresh rereads the folder, and the empty state and New mod
-   say so. The host posts the document as {kind:'mods', data} after every action; showing the tab
-   asks for a Refresh. The one repeating request is the script log's (modsScripts, read only), each
-   second while the tab shows a mod with scripts. All text goes through textContent. */
+/* The Mods tab: the player's mods, the content of the maps on this computer, and the selected mod's details with the
+   few actions a player uses. Renders the one document the backend (backend/modui.c) posts as {kind:'mods', data}
+   (docs/webview-ui.md); all text goes through textContent. Browser global plus CommonJS test export, pure ASCII. */
 var modsTab = (function () {
   var STATES = {
     ready: {label: 'Ready', tone: 'ok'},
@@ -40,8 +20,8 @@ var modsTab = (function () {
     return 'Carries ' + plural(s.count, 'file') + ' that ' + s.name + ' also carries. They stay two separate mods.';
   }
   var IN_MAP_TEXT = 'In this map';
-  /* The one glyph of a mod the open map uses, wherever that shows (the row, the In this map block, the This map
-     window, the Prefabs tab); the block shows the same glyph dimmed for every other state. */
+  /* The one glyph of a mod the open map uses, wherever that shows (row, In this map block, This map window, Prefabs
+     tab); the block shows the same glyph dimmed for every other state. */
   var IN_MAP_GLYPH = {tone: 'map', icon: 'map', label: IN_MAP_TEXT};
   var NOT_IN_MAP_GLYPH = {tone: 'mapoff', icon: 'map', label: 'Not in this map'};
   /* There is no folder watcher: Refresh is how a changed mod is read again. */
@@ -49,10 +29,8 @@ var modsTab = (function () {
   /* An action whose files landed while the game did not take its part (the host's applyPending). */
   var APPLY_PENDING_TEXT = 'The game has not taken the change yet; press Refresh to bring it in.';
   var EMPTY_TEXT = 'No mods yet. Make your own with New mod, or add a mod folder or ZIP you have with Install.';
-  /* The two *Preview actions are dry runs that answer with the consequence list the confirmation
-     shows. mapAddMod attaches the selected mod to the open map without placing anything (a
-     map-level row); it removes nothing, so it has no dry run. Uninstall moves the folder to the
-     Windows Recycle Bin. */
+  /* The two *Preview actions are dry runs that answer with the confirmation's consequence list; mapAddMod attaches
+     the selected mod to the open map as a map-level row and removes nothing, so it has none. */
   var ACTIONS = ['install', 'rescan', 'openFolder', 'openFile', 'mapAddMod', 'addToMine',
                  'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry',
                  'modFiles', 'modFileText', 'newMod', 'content', 'mapUpdate'];
@@ -91,9 +69,8 @@ var modsTab = (function () {
      Other reference kinds are not consequences of the removal and are not shown. */
   var REF_KINDS = {wire: 'wire', timeline: 'timeline'};
   var MAP_STATES = {installed: 'ok', active: 'ok'};
-  /* A map needs the files its rows list; a mod folder provides them (the asset rule). Whether a Play
-     can download it depends on the map (a map never published, the editor's own Play cannot), so the
-     line says only what is true in every case. */
+  /* A map needs the files its rows list and a mod folder provides them; whether a Play can download them depends on
+     the map, so the line says only what is true in every case. */
   var NOT_INSTALLED = 'not installed on this computer';
   var MAP_CAUSES = {missing: NOT_INSTALLED, incomplete: 'installed, but it lacks files this map uses',
                     skipped: 'installed, but it cannot be used right now'};
@@ -127,9 +104,8 @@ var modsTab = (function () {
   var EDITOR_TWEAKS_TEXT = 'they apply in your editor whatever map is open and are never saved with a map or used at Play';
   var NOTHING_CHANGED_TEXT = 'Changes nothing of the game; it only adds.';
 
-  /* ---- mod scripts (docs/webview-ui.md "Scripts"): what a mod's scripts drive, read by the
-     builder without running them (the row's "scripts"), and how they ran in the current or last
-     Play (the row's "scriptRun", then the host's modsScripts answers while the tab shows). */
+  /* ---- mod scripts (docs/webview-ui.md "Scripts"): what the builder reads of them without running (the row's
+     "scripts") and how they ran in the current or last Play (the row's "scriptRun", then modsScripts answers). */
   /* The events a script binds on an object, as a player says them (the static pass's words). */
   var SCRIPT_EVENTS = {spawn: 'when it spawns', think: 'every frame', remove: 'when it is removed',
                        damage: 'when it takes damage', death: 'when it dies', anim: 'on its animation events'};
@@ -147,7 +123,7 @@ var modsTab = (function () {
                         'The next Play starts it again.';
   var SCRIPT_LOG_EMPTY = 'Nothing logged yet.';
   var SCRIPT_DYNAMIC_TEXT = 'Some names are set while the map runs, so they are not listed here.';
-  /* The player's setting (design: scripts download with maps): on by default. */
+  /* The player's setting for maps whose mods carry scripts: on by default. */
   var SCRIPTED_MAPS_KEY = 'mods.scripted_maps';
   var SCRIPTED_MAPS_LABEL = 'Play Maps Whose Mods Include Scripts';
   var SCRIPTED_MAPS_NOTE = 'When this is off, Snapmap+ refuses a map whose mods include scripts before it downloads anything.';
@@ -231,10 +207,8 @@ var modsTab = (function () {
   }
   function isScript(path) { return /\.lua$/i.test(str(path)); }
 
-  /* What the editor says about a placed entity a mod's scripts use (the Entities tab): a Script
-     node (entityDef mods/<salt>/script) with the names its mod's scripts answer and fire, or an
-     object a script drives (its entityDef bound by name). null when no script uses it. `mods` is the
-     tab's model. */
+  /* What the editor says about a placed entity a mod's scripts use (the Entities tab): a Script node with the names
+     its mod's scripts answer and fire, or an object a script drives; null when none uses it. `mods` is the tab's model. */
   var SCRIPT_NODE_RE = /^mods\/([^\/]+)\/script$/i;
   function scriptModFor(mods, salt) {
     var found = null;
@@ -300,8 +274,7 @@ var modsTab = (function () {
     var r = obj(v), c = r && obj(r.commands);
     return {activate: c ? normNames(c.activate) : [], deactivate: c ? normNames(c.deactivate) : []};
   }
-  /* The derived facts (payload facts): null when the backend did not send them (a mod that is not
-     built). */
+  /* The derived facts (payload facts): null when the backend did not send them (a mod that is not built). */
   function normFacts(v) {
     var f = obj(v);
     if (!f) return null;
@@ -434,8 +407,7 @@ var modsTab = (function () {
             map: mp ? {name: str(mp.name), entities: names, entityCount: Math.max(num(mp.entityCount), names.length),
                        references: normRefs(mp.references), manifestRow: bool(mp.manifestRow), attached: bool(mp.attached),
                        tagRemoved: bool(mp.tagRemoved), vanillaAfter: bool(mp.vanillaAfter), published: bool(mp.published)} : null,
-            /* Uninstall moves the folder to the Recycle Bin (older backends said move or delete);
-               savedMaps is -1 when the saves could not be read. */
+            /* Uninstall moves the folder to the Recycle Bin; savedMaps is -1 when the saves could not be read. */
             install: ins ? {folder: str(ins.folder), disposition: 'recycle',
                             savedMaps: ins.savedMaps === undefined || ins.savedMaps === null ? -1 : num(ins.savedMaps),
                             undoCleared: bool(ins.undoCleared),
@@ -449,11 +421,9 @@ var modsTab = (function () {
     var cause = tone === 'ok' ? STATUS.ok.label : (MAP_CAUSES[r.state] || MAP_CAUSES.skipped);
     return {tone: tone, icon: STATUS[tone].icon, label: STATUS[tone].label, cause: cause};
   }
-  /* ---- a mod and the open map (docs/webview-ui.md, "A mod and the open map"). One state, said with the same
-     words and the same glyph in the details pane's In this map block, the list row, the This map window and the
-     Prefabs tab. It is read from the document's map.mods, which are the rows the open map's save would write now
-     (an object placed, deleted or undone moves the document), and a mod is matched to its entry by its namespace,
-     so every folder of the mod (the player's own, a downloaded map's copy) shows the map's use of it. */
+  /* ---- a mod and the open map (docs/webview-ui.md, "A mod and the open map"): one state, said with the same words
+     and glyph everywhere. It is read from the document's map.mods (the rows the open map's save would write) and
+     matched to a mod by its namespace, so every folder of the mod shows the map's use of it. */
   var MAP_STATE = {
     noMap: 'No map open',
     out: 'Not in this map',
@@ -578,9 +548,8 @@ var modsTab = (function () {
     return formatSize(b.size) + (b.scripts ? ', runs scripts' : '');
   }
 
-  /* One of the two states, its one-line cause (the icon's hover title) and the details sentence.
-     A ready mod whose script stopped in the current or last Play shows the stop line as its state
-     until the next Play; it is still usable, so it is not attention. */
+  /* One of the two states, its one-line cause (the icon's hover title) and the details sentence; a ready mod whose
+     script stopped shows the stop line as its state until the next Play, and is not attention. */
   function statusInfo(b) {
     if (b.state !== 'ready') {
       var cause = b.cause || UNUSABLE_TEXT;
@@ -627,10 +596,9 @@ var modsTab = (function () {
     return editFile(e) + ': ' + (parts.length ? parts.map(function (p) { return p.text; }).join(', ') : NO_EDIT_TEXT);
   }
 
-  /* Colour in the details pane (docs/webview-ui.md): the Decl Text editor's token hues, each naming
-     one kind, each with a hover title. A path splits into its folder (dimmed), the mod's own
-     namespace mods/<key>/ (the string hue) and the file name in the text colour; a path without that
-     namespace is the game's, its file name in the keyword hue. */
+  /* Colour in the details pane (docs/webview-ui.md): the Decl Text editor's token hues, each kind with a hover
+     title. A path splits into its folder (dimmed), the mod's namespace mods/<key>/ and its file name; a path
+     without that namespace is the game's. */
   var PATH_TITLES = {own: 'the mod\'s own file', edit: 'a game file this mod edits', replace: 'a game file this mod replaces',
                      borrow: 'a game file this mod reads from your install'};
   function ownSpan(path, keys) {
@@ -664,9 +632,8 @@ var modsTab = (function () {
   /* A console value as the editor shows it: a number in the number hue, anything else a string. */
   function valueClass(v) { return /^-?\d+(\.\d+)?$/.test(str(v).trim()) ? 'mk-num' : 'mk-str'; }
 
-  /* What the mod changes in the game, as {text, list?, kind?, items?} lines in the details pane's
-     order: the game files it edits (in words), the texts it changes, the game files a received
-     folder replaces, the encounters it lists, the game sound banks it loads, and its editor tweaks. */
+  /* What the mod changes in the game, as {text, list?, kind?, items?} lines in the details pane's order: edited
+     game files, changed texts, replaced files, listed encounters, loaded sound banks and editor tweaks. */
   function changeLines(b) {
     var f = b.facts, out = [];
     if (!f) return out;
@@ -740,9 +707,8 @@ var modsTab = (function () {
   function gameTitle(f) {
     return "The game's own file, " + FILE_SOURCES[f.container] + '. The mod does not carry it.';
   }
-  /* The folder tree of the files the filter keeps: folders with their file counts and
-     problem counts; a folder holding only one folder shows as one row ("cm/models/x",
-     "mods/<key>/demons"). */
+  /* The folder tree of the files the filter keeps, with file and problem counts; a folder holding only one folder
+     shows as one row ("cm/models/x"). */
   function fileTree(files, query) {
     var q = str(query).trim().toLowerCase();
     function dir(name, path) { return {name: name, path: path, dirs: [], files: [], byName: {}, count: 0, attn: 0}; }
@@ -781,12 +747,9 @@ var modsTab = (function () {
     return root;
   }
 
-  /* ------------------------------------------------------------------------------------------ DOM */
-
   /* env: {document, byId(id), post(message), toast(text, kind), tokens(text)?}.
-     tokens returns the decl language's tokens for the Files view's highlighting; menu shows the
-     page's context menu. The retired collapsed-groups setting (mods.collapsed_groups) is neither
-     read nor written: which organizing folders are closed lasts for the session only. */
+     tokens returns the decl language's tokens for the Files view's highlighting; menu shows the page's context
+     menu. Which organizing folders are closed lasts for the session only. */
   function create(env) {
     var doc = env.document, byId = env.byId;
     var model = normalize(null), loaded = false, waiting = false, busy = '', quiet = false, selectedKey = '';
@@ -910,7 +873,7 @@ var modsTab = (function () {
         var n = byId(id);
         if (n) n.disabled = !!busy || (!sel && id === 'modsUninstallBtn');
       });
-      /* Files, the details head's left-most button (owner 2026-11-09), needs only a selection. */
+      /* Files, the details head's left-most button needs only a selection. */
       var fb = byId('modsFilesBtn');
       if (fb) fb.disabled = !sel;
       var mb = byId('modsMapBtn');
@@ -927,10 +890,8 @@ var modsTab = (function () {
     function mapUses(b) { return mapEntry(model.map, b); }
     function editorOnly(b) { return !!(b && b.facts && b.facts.editorOnly); }
     function stateOf(b) { return mapState(loaded ? model.map : null, b); }
-    /* The details pane's In this map block, in the same place for every mod: the state in plain words, what it
-       means, and the one action that state allows (Use in this map for a mod with nothing to place, Remove from
-       map once the map uses the mod); a map's own published copy of the mod says so, with Update when another
-       version is installed. */
+    /* The details pane's In this map block: the state in plain words, what it means, and the one action it allows
+       (Use in this map, or Remove from map once the map uses the mod); a published copy says so, with Update. */
     function renderInMap() {
       var box = byId('modsInMap'), b = selectedMod(), s, line, acts, btn, e;
       if (!box) return;
@@ -1047,11 +1008,8 @@ var modsTab = (function () {
       } else renderContent();
     }
 
-    /* ---- the list: two kinds of groups, every row shown mounted. "Your mods" holds the player's
-       own mods, an organizing folder of mods\ under its own caret row (the Prefabs tab's caret and
-       count), folders first; then one group per downloaded map, titled with the map's name, holding
-       the mods that map brought. A closed group hides its rows for the session. view is the rows
-       shown, in the order the arrow keys walk. */
+    /* ---- the list: "Your mods" (organizing folders first), then one group per downloaded map holding the mods
+       it brought; a closed group hides its rows for the session. view is the rows shown, in arrow-key order. */
     function computeView() {
       var shown = filterMods(model.mods, filter);
       if (attnOnly) shown = shown.filter(needsAttention);
@@ -1335,11 +1293,9 @@ var modsTab = (function () {
       }
     }
 
-    /* ---- the script log: the selected mod's lines of the current or last Play and its scripts'
-       state, asked for every SCRIPT_POLL_MS while the tab shows and a mod has scripts (the host's
-       modsScripts: read only, answered at once, during a Play too). The answer updates the rows'
-       states and the log in place; the details pane is drawn again only when the selected mod's
-       state changed. */
+    /* ---- the script log: the selected mod's lines of the current or last Play, asked for every SCRIPT_POLL_MS
+       while the tab shows a mod with scripts (modsScripts, read only). The answer updates the rows and log in
+       place; the details pane is drawn again only when the selected mod's state changed. */
     var sl = {visible: false, timer: null, salt: '', lines: [], total: 0, box: null, stateNode: null, copy: null, copyWanted: ''};
     function firstScript(b) { return 'scripts/'; }
     function logLines(b) { return sl.salt && b && sl.salt.toLowerCase() === b.salt.toLowerCase() ? sl.lines : null; }
@@ -1633,11 +1589,8 @@ var modsTab = (function () {
       else if (!e.shiftKey && (at === last || !host.contains(at))) { e.preventDefault(); first.focus(); }
     }
 
-    /* ---- the Files modal (read-only): the standard modal at the expanded Decl Text editor's size.
-       Left, the mod folder as a tree with a filter; right, the selected file: its path once, what
-       it is, then its text in the Decl Text editor primitive (read-only), and the cause that
-       names it in the Entity State problem strip. The two reads (modFiles, modFileText) go to the
-       host without the page's busy state: they change nothing and no fresh document follows. */
+    /* ---- the Files modal (read-only): the mod folder as a tree with a filter, and the selected file's path, kind
+       and text. Its two reads (modFiles, modFileText) skip the page's busy state: they change nothing. */
     function filesOverlay(on) {
       var ov = byId('modsFilesModal');
       if (!ov) return;
@@ -1752,7 +1705,7 @@ var modsTab = (function () {
       if (!inside(byId('modsFilesModal'), doc.activeElement)) focusIn(fm.closeBtn);
     }
     /* A render rebuilds the node that had focus, which then falls to the page's body, outside the
-       modal, where Escape and Tab no longer reach the modal's own listener. So focus is put back:
+       modal, where Escape and Tab do not reach the modal's own listener. So focus is put back:
        on the selected file when it was in the tree, else on the close button. */
     function inside(node, n) {
       for (; node && n; n = n.parentNode) if (n === node) return true;
@@ -2061,13 +2014,8 @@ var modsTab = (function () {
       env.post(m);
       return true;
     }
-    /* Refresh, the one rescan: every changed folder is built again and the change brought into the
-       game; the host follows it with a fresh document. Quiet: its result shows only when it failed
-       or when a change still needs something (a restart, the next map open). A running action
-       already ends with a fresh document. */
     /* The editor's limits moved (an object or module placed, deleted or undone): ask for the document again, at
-       most every 400 ms, while the tab or the This map window shows. The backend's own poll moves it for every
-       change of what the map places of mods; this covers what that poll cannot read (module instances). */
+       most every 400 ms, while the tab or the This map window shows; this covers what the backend's poll cannot read. */
     var mapChangeTimer = null;
     function mapChanged() {
       if (!loaded || waiting || mapChangeTimer !== null || !(sl.visible || modal.open)) return false;
@@ -2078,6 +2026,8 @@ var modsTab = (function () {
       if (!env.after && !busy) { waiting = true; env.post({cmd: 'modsList'}); }
       return true;
     }
+    /* Refresh, the one rescan: every changed folder is built again and the host follows with a fresh document. Quiet:
+       its result shows only when it failed or a change still needs a restart or the next map open. */
     function refresh() {
       if (busy || waiting) return false;
       waiting = true;

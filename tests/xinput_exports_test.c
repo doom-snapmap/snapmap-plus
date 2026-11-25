@@ -2,16 +2,10 @@
  *
  *   xinput_exports_test <build-dir> [<DOOM image> ...]
  *
- * build-dir must hold XINPUT1_4.dll. Its exports must be exactly the System32
- * XINPUT1_4.dll ordinal set (named exports under the same names, unnamed ones
- * without a name; DllMain excluded), or for a diagnostic build (build.ps1
- * -Diag) that set plus exactly the diagnostic exports, and nothing else, with
- * XInputGetState/XInputSetState at ordinals 2/3. When the system DLL cannot be
- * read, its documented export map is used instead. The diagnostic exports are
- * the entries of src/backend/xinput1_4_diag.def (beside build-dir's parent)
- * that xinput1_4.def lacks; when those files cannot be read, k_diag below.
- *
- * Each DOOM image argument must import XINPUT1_4.dll by ordinals 2 and 3 only. */
+ * build-dir's XINPUT1_4.dll must export exactly the System32 ordinal set (DllMain excluded), or for a diagnostic
+ * build (build.ps1 -Diag) that set plus the entries of xinput1_4_diag.def that xinput1_4.def lacks (k_diag when the
+ * files cannot be read), with XInputGetState/XInputSetState at ordinals 2/3. Each DOOM image argument must import
+ * XINPUT1_4.dll by ordinals 2 and 3 only. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -153,10 +147,8 @@ static int diag_exports(const char *build_dir, export_row *out, int cap)
 #define SHAPE_RELEASE 0
 #define SHAPE_DIAG    1
 
-/* Problems with `ours` against the system set `sys` (DllMain excluded) and
- * the diagnostic set `diag`: every system ordinal under its name, any other
- * export one of the diagnostic set at its ordinal and name, and either none
- * or all of that set. *shape says which of the two shapes was found. */
+/* Problems with `ours` against the system set `sys` (DllMain excluded) and the diagnostic set `diag`: every other
+ * export must be a diagnostic one, and none or all of that set must be present. *shape reports which was found. */
 static int compare_exports(const export_row *ours, int n_ours, const export_row *sys, int n_sys,
                            const export_row *diag, int n_diag, int verbose, int *shape)
 {

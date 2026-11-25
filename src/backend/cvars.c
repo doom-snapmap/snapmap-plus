@@ -1,7 +1,5 @@
-/* Register the supported Snapmap+ cvars and insert them into engine lookup tables.
- * CvarRegister takes an embedded idCVar, name, default, flags, description, and
- * completion callback. Call the outer registration function so it initializes
- * the engine globals. Type bits are combined with NOCHEAT to allow console writes. */
+/* Registers the supported Snapmap+ cvars through the outer registration function (which initializes the
+ * engine globals) and inserts them into the lookup tables. Type bits are ORed with NOCHEAT to allow console writes. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -21,18 +19,15 @@ typedef void (*cvar_register_fn)(void *self, const char *name, const char *def,
 /* Use the engine name hash so insertion and FindCvar choose the same bucket. */
 typedef int (*name_hash_fn)(const char *name);
 
-/* Full-table offsets follow RegisterStaticVars. The developer-table alias exposes
- * this same list to the console. Resolve the singleton from CmdSystemLea +0x10,
- * then an independent global anchor, then the recorded slot RVA, which is applied
- * only to an executable whose SHA-256 is a supported build's. */
-#define CVARSYS_LIST_PTR_OFF      0x08    /* idList<idCVar*> base: list-ptr */
-#define CVARSYS_LIST_COUNT_OFF    0x10    /* idList count (int) */
-#define CVARSYS_LIST_CAP_OFF      0x14    /* idList capacity (int) -- count==cap => engine grows */
-#define CVARSYS_HASH_OFF          0x38    /* idHashIndex hash[] (bucket heads, int*) */
-#define CVARSYS_CHAIN_OFF         0x40    /* idHashIndex indexChain[] (int*) */
-#define CVARSYS_INDEXCHAINSZ_OFF  0x4c    /* idHashIndex indexChainSize (int) -- chain[] length */
-#define CVARSYS_HASHMASK_OFF      0x54    /* idHashIndex hashMask (uint) */
-#define CVARSYS_LOOKUPMASK_OFF    0x58    /* idHashIndex lookupMask (uint) */
+/* Full-table offsets used by RegisterStaticVars; the developer-table alias exposes this list to the console. */
+#define CVARSYS_LIST_PTR_OFF      0x08    /* idList<idCVar*> array */
+#define CVARSYS_LIST_COUNT_OFF    0x10    /* int count */
+#define CVARSYS_LIST_CAP_OFF      0x14    /* int capacity */
+#define CVARSYS_HASH_OFF          0x38    /* idHashIndex bucket heads */
+#define CVARSYS_CHAIN_OFF         0x40    /* idHashIndex indexChain */
+#define CVARSYS_INDEXCHAINSZ_OFF  0x4c    /* indexChain length */
+#define CVARSYS_HASHMASK_OFF      0x54    /* uint hashMask */
+#define CVARSYS_LOOKUPMASK_OFF    0x58    /* uint lookupMask */
 
 /* Registered name in the embedded idCVar; it matches the table string we hash. */
 #define IDCVAR_NAME_OFF           SH_IDCVAR_NAME
@@ -116,10 +111,8 @@ int sh_cvar_table_row(int index, const char **name, const char **def, const char
     return 1;
 }
 
-/* Late registration misses RegisterStaticVars, so explicitly append to the full
- * list and hash chain. Do not rerun RegisterStaticVars: its duplicate guard exits
- * the process. Refuse insertion if there is no spare capacity; do not reallocate
- * engine-owned tables. Return 1 for this inserted row, otherwise 0. */
+/* Appends one row to the full list and hash chain (RegisterStaticVars cannot be rerun: its duplicate
+ * guard exits the process). Never reallocates engine tables; returns 1 inserted, -1 no spare capacity, 0 fault. */
 static int cvar_findable_insert_one(uint8_t *cvarSys, name_hash_fn hashfn, int i)
 {
     __try {

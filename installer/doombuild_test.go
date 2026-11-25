@@ -167,7 +167,7 @@ func TestInstallRefusalsDownloadNothing(t *testing.T) {
 	}
 }
 
-// A local build targets the supported build only; a pre-port bundle without XINPUT1_4.dll is refused.
+// A local build targets the supported build only; a bundle without XINPUT1_4.dll is refused.
 func TestLocalBundleRouting(t *testing.T) {
 	syntheticProcessGuard(t, false)
 	tmp := t.TempDir()

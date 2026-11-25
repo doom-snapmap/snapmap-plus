@@ -66,14 +66,8 @@ int sh_decl_text_well_formed(const unsigned char *text, size_t length)
     return seen_brace && depth == 0 && !in_quote && !escaped && !block_comment;
 }
 
-/* ---- own state of a placed entity: its prepared text less what its inherit says ----
- *
- * The engine prepares a placed entity's text as its inherit chain merged root
- * first, then its own members. Reading a saved entity drops every own leaf
- * whose key and value equal its inherit's prepared text, so the entity's own
- * state is that prepared text with those leaves removed, and with the blocks
- * left empty by it. This applies the same rule to show and save an entity's
- * own decl text. */
+/* Own state of a placed entity: its prepared text (inherit chain merged root first, then its own
+ * members) less every leaf whose key and value equal its inherit's, and the blocks that leaves empty. */
 
 typedef struct strip_node {
     const unsigned char *key;

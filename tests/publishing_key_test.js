@@ -1,7 +1,5 @@
-/* Settings' publishing key (publishing_key.js): the offer after the first publish (shown once, Not now answers it),
- * a backup's passphrase typed twice and checked before anything is sent, a restore's once, the backend's sentences
- * shown in the dialog, the fields cleared when it closes, and the Mods tab's results left alone. Run against a small
- * stand-in DOM. Pure ASCII. */
+/* Settings' publishing key (publishing_key.js) on a small stand-in DOM: the one-time offer, backup and restore
+ * passphrase checks, the backend's sentences in the dialog, and the Mods tab's results left alone. Pure ASCII. */
 'use strict';
 const path = require('path');
 const pk = require(path.join(__dirname, '..', 'src', 'ui', 'webview', 'publishing_key.js'));
@@ -114,7 +112,7 @@ check(pk.checkPassphrase('restore', 'longenough', '') === '', 'a restore needs n
 }
 
 /* every request names the host's route as the window reads it ("cmd", mods_message.h): a message routed any other
- * way is dropped by the host without a word (R-LB1: Not now never reached the backend) */
+ * way is dropped by the host without a word */
 check(posts.length > 0 && posts.every(function (m) { return m.cmd === 'modsAction' && !('kind' in m); }),
       'every request is routed by cmd: modsAction');
 

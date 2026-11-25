@@ -1,10 +1,6 @@
 /* sdk_test.c -- the Graphics SDK's effects, particles, environments and values that change (sdk.h, modeffect.h,
- * modenv.h, sdkvalues.h, docs/graphics-sdk.md).
- *
- * Every item and field of an effect compiled and read back as the game's fx decl; the particle decl and material a
- * particles item derives; an environment's decl and the fx it plays; values over time in a material; the emitter
- * served from its path; each mistake's sentence; determinism. No game needed.
- *
+ * modenv.h, sdkvalues.h): every effect item compiled and read back as the game's fx decl, the derived particle decl
+ * and material, environments, values over time, the served emitter, each mistake's sentence and determinism. No game.
  *   sdk_test.exe */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
@@ -34,7 +30,7 @@ static int g_failed, g_checks;
 
 void backend_log(const char *message) { (void)message; }
 
-/* ------------------------------------------------------------------------------------- registration ---- */
+/* registration */
 
 /* The decls the compilers register, captured (the default registry is used where a test says so). */
 typedef struct reg { char type[32]; char name[80]; char *text; } reg;
@@ -67,7 +63,7 @@ static int count_type(const char *type)
     return n;
 }
 
-/* --------------------------------------------------------------------------------------- helpers ---- */
+/* helpers */
 
 typedef struct res { int r; char *out; size_t n; char why[400]; char *notes, *needs; } res;
 
@@ -118,7 +114,7 @@ static int count(const char *text, const char *s)
 #define ENV "generated/decls/env/mods/abcdefgh/hell_red.decl"
 #define MAT "generated/decls/material/mods/abcdefgh/rune.decl"
 
-/* --------------------------------------------------------------------------------------- the tests ---- */
+/* the tests */
 
 static void test_parse(void)
 {

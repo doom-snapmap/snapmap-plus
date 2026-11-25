@@ -1,11 +1,8 @@
-/* cmd_lists_test.c - the engine's command lists get their room off the calling
- * thread and the backfill never grows a list (src/backend/cmd_lists.h).
- *
- * The fake command system has the engine's layout: two lists of command
- * pointers at +0x08 and +0x20 (array, count +8, capacity +0xC). The fake growth
- * helper doubles a list and records the thread it ran on: growth on the
- * caller's thread is the defect this guards against, because in the game that
- * thread allocates from a heap the next level load destroys. */
+/* cmd_lists_test.c - the engine's command lists get their room off the calling thread and the backfill never grows a
+ * list (src/backend/cmd_lists.h). The fake command system has the engine's layout: two lists of command pointers at
+ * +0x08 and +0x20 (array, count +8, capacity +0xC), and its growth helper doubles a list and records its thread.
+ * Growth on the caller's thread is the defect guarded against, since in the game that thread allocates from a heap
+ * the next level load destroys. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdint.h>

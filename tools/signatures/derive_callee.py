@@ -134,8 +134,7 @@ if __name__ == '__main__':
                     continue
                 rec['derivations'].append({
                     'vk_site': hex(vk_call),
-                    # Decode pattern_start + rel_slot + 4 + rel32. The measured slot may
-                    # follow
+                    # Decode pattern_start + rel_slot + 4 + rel32; the slot may follow
                     # other instructions in the pattern.
                     'disp_slot': rel_slot,
                     'mnemonic': 'call rel32',

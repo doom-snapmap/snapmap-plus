@@ -1,16 +1,6 @@
-/* script_hooks_test.c -- the mod-script hooks' pure parts
- * (src/backend/script/script_queue.c, script_handles.c and the decisions of
- * script_hooks.c, built with SH_SCRIPT_PURE):
- *   - the queues: many threads enqueue, one thread drains, each producer's
- *     records arrive in order with increasing sequence numbers, a queue grows
- *     with what arrives and drops nothing, only the drain thread may drain, a
- *     closed queue refuses;
- *   - the handle table: add, find, duplicates, the reserved spawn ids, the
- *     sweep's spawn, removal and gone reports, a record released with its
- *     entity and its slot reused under a new generation, staleness after a
- *     map change, growth far past any old bound;
- *   - the mod table (it grows) and the owner match of entityDef names;
- *   - the tick's guards and the gates that open a map. */
+/* script_hooks_test.c -- the mod-script hooks' pure parts (src/backend/script/script_queue.c, script_handles.c and the
+ * decisions of script_hooks.c, built with SH_SCRIPT_PURE): the queues, the handle table, the mod table and owner
+ * match, the tick's guards and the gates that open a map. */
 #include <windows.h>
 #include <process.h>
 #include <stdint.h>
@@ -123,7 +113,7 @@ static void test_queue_bounds(void)
     CHECK(sh_script_queue_post(-1, SH_SCRIPT_EV_ANIM, 1, 0, 0, 0, "x", NULL) == -1);
     CHECK(sh_script_queue_post(100000, SH_SCRIPT_EV_ANIM, 1, 0, 0, 0, "x", NULL) == -1);   /* never opened */
     CHECK(sh_script_queue_open(1) == 1);
-    /* One frame's records: far past the old 1,024, nothing is dropped. */
+    /* One frame's records: far past 1,024, nothing is dropped. */
     for (i = 0; i < 50000; i++)
         CHECK(sh_script_queue_post(1, SH_SCRIPT_EV_ANIM, (sh_script_handle)(i + 1), 0, 0, 0, "step", NULL) == 1);
     CHECK(sh_script_queue_pending(1) == 50000);
@@ -149,10 +139,10 @@ static void test_queue_bounds(void)
     /* A queue far above the first ones: the queues grow with the mods. */
     CHECK(sh_script_queue_open(300) == 1);
     CHECK(sh_script_queue_post(300, SH_SCRIPT_EV_ANIM, 1, 0, 0, 0, "x", NULL) == 1);
-    CHECK(sh_script_queue_post(1, SH_SCRIPT_EV_ANIM, 2, 0, 0, 0, "y", NULL) == 1);   /* the earlier one still works */
+    CHECK(sh_script_queue_post(1, SH_SCRIPT_EV_ANIM, 2, 0, 0, 0, "y", NULL) == 1);   /* the first one still works */
     CHECK(sh_script_queue_drain(300, out, 4) == 1 && out[0].self == 1);
     CHECK(sh_script_queue_drain(1, out, 4) == 1 && out[0].self == 2);
-    /* Strings are copied whole, of any length (the old record cut them at 127 bytes). */
+    /* Strings are copied whole, of any length. */
     memset(long_text, 'a', sizeof long_text - 1);
     long_text[sizeof long_text - 1] = 0;
     sh_script_queue_close(1);
@@ -183,10 +173,8 @@ static void *fake_resolve(uint32_t spawn_id)
     return spawn_id < FAKE_MAX && g_present[spawn_id] ? (void *)(uintptr_t)(0x10000 + spawn_id) : NULL;
 }
 
-/* Records come and go with their entities: projectiles launched and gone,
- * a million over a map, never more than a few hundred alive. The table
- * stays small, every handle of a gone one stays dead, and the gone callback
- * hears each exactly once. */
+/* Records come and go with their entities (a million projectiles over a map, a few hundred alive): the table stays
+ * small, a gone handle stays dead, and the gone callback hears each exactly once. */
 static long g_gone_calls;
 static void count_gone(sh_script_handle h, uint32_t id) { (void)h; (void)id; g_gone_calls++; }
 
@@ -268,7 +256,7 @@ static void test_handles(void)
     for (i = 100; i < 105; i++) { g_present[i] = 1; CHECK(sh_script_handles_add(2, (uint32_t)i, NULL)); }
     CHECK(sh_script_handles_sweep(ch, 2) == 2);
     CHECK(sh_script_handles_sweep(ch, 16) == 3);
-    /* A map change: old handles name nothing. */
+    /* A map change: handles of the last map name nothing. */
     old = a;
     sh_script_handles_reset();
     CHECK(sh_script_handle_mod(old) == -1 && sh_script_handle_entity(old) == NULL && !sh_script_handle_alive(old));

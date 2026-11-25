@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// The 2018 release's files as v0.2.1-beta.19 publishes them (synthetic bytes in these tests).
+// Synthetic bytes for the 2018 build's files, which this release does not ship.
 const (
 	legacyBackendBytes = "beta.19 XINPUT1_3.dll"
 	legacyUIBytes      = "beta.19 snapmap-plus-ui.dll"
@@ -48,8 +48,7 @@ func zipFiles(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-// universalRelease is a release whose bundle carries the 2024 files and the 2018 release's files, as
-// the bundles of v0.2.1-beta.20 and the releases after it did.
+// universalRelease is a release whose bundle carries the 2024 files and the 2018 build's files.
 func universalRelease(t *testing.T, tag string) *mockRelease {
 	t.Helper()
 	z := zipFiles(t, map[string]string{
@@ -83,7 +82,7 @@ func TestBundlePathsAgreeAcrossBackendPackagingAndInstaller(t *testing.T) {
 	if !strings.Contains(pkg, `$uiRel = "`+currentUIDll+`"`) {
 		t.Errorf("package.ps1 does not package the frontend as %s", currentUIDll)
 	}
-	// The bundle carries only the April 2024 pair: the 2018 release's files are no longer packaged.
+	// The bundle carries only the April 2024 pair; package.ps1 does not mention the 2018 files.
 	for _, gone := range []string{"LegacyBundle", "$legacyRels", legacyProxy} {
 		if strings.Contains(pkg, gone) {
 			t.Errorf("package.ps1 still mentions %q", gone)
@@ -138,8 +137,7 @@ func TestUniversalBundleInstallsOnlyTheSupportedBuild(t *testing.T) {
 	}
 }
 
-// After an earlier installer's blind update put all four files on the supported build, the next
-// update removes the 2018 files: recorded ones, and unrecorded ones whose bytes are the bundle's.
+// When all four files are on the supported build, the next update removes the 2018 files: recorded ones, and unrecorded ones whose bytes are the bundle's.
 // A different file at a 2018 path is not the release's and stays.
 func TestUpdateRemovesThe2018FilesAnEarlierInstallerLeft(t *testing.T) {
 	for _, c := range []struct {

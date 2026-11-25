@@ -1,11 +1,6 @@
-/* XInput proxy exports keep controllers working while the backend loads in DOOM.
- * The backend ships as XINPUT1_4.dll, the name the supported DOOM build imports.
- * Calls resolve the system implementation lazily from the system directory
- * (LOAD_LIBRARY_SEARCH_SYSTEM32: wherever Windows is installed), so a forward
- * can never reach this proxy itself.
- * Export through xinput1_4.def only; do not add __declspec(dllexport). DOOM imports
- * GetState and SetState by ordinals 2 and 3, so automatic ordinal assignment can
- * dispatch a controller poll to an incompatible function and corrupt memory. */
+/* XInput proxy: the backend ships as XINPUT1_4.dll and forwards to the system DLL, loaded lazily with
+ * LOAD_LIBRARY_SEARCH_SYSTEM32 so a forward never reaches this proxy. Export through xinput1_4.def
+ * only (no __declspec(dllexport)): DOOM imports ordinals 2 and 3, and automatic numbering would corrupt memory. */
 #include <windows.h>
 
 #define ERR_DEV_NOT_CONNECTED 1167u   /* ERROR_DEVICE_NOT_CONNECTED -- benign "no controller" fallback */
@@ -64,11 +59,8 @@ DWORD WINAPI XInputGetAudioDeviceIds(DWORD i, WCHAR *render, UINT *render_count,
         i, render, render_count, capture, capture_count) : ERR_DEV_NOT_CONNECTED;
 }
 
-/* The system DLL's unnamed exports (100 XInputGetStateEx, 101 WaitForGuideButton,
- * 102 CancelGuideButtonWait, 103 PowerOffController, 104 GetBaseBusInformation,
- * 108 GetCapabilitiesEx, 109) take at most four integer or pointer arguments, which
- * the x64 convention passes in registers; forwarding four register-sized values
- * reaches each one with its own arguments intact. */
+/* The system DLL's unnamed exports (100-104, 108, 109) take at most four integer or pointer arguments,
+ * passed in registers on x64, so forwarding four register-sized values preserves each call's arguments. */
 typedef UINT_PTR (WINAPI *ordinal_fn)(UINT_PTR, UINT_PTR, UINT_PTR, UINT_PTR);
 static UINT_PTR forward_ordinal(WORD ordinal, FARPROC *cache,
                                 UINT_PTR a, UINT_PTR b, UINT_PTR c, UINT_PTR d)

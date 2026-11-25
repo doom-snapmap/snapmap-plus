@@ -1,13 +1,8 @@
-/* maprows_cli: read a map file's Snapmap+ mod rows the way a load does, for the research benches' map writers
- * (snaphak-re tools/snapmap_contract/maprows.py and its test). It answers the earlier-shape check a load asks first
- * (sh_map_old_shape: a map in an earlier shape is refused), then every row of the member's "mods" part
- * (sh_modmanifest_read), one line each.
- *
- *   maprows_cli <map.json>
- *
- * Output: "shape <none|variables|rows>", "rows <read> rejected <n>", then per row
+/* maprows_cli <map.json> -- reads a map file's Snapmap+ mod rows the way a load does (sh_map_old_shape first, then
+ * sh_modmanifest_read on the member's "mods" part), for the research benches' map writers (snaphak-re
+ * tools/snapmap_contract/maprows.py). Output: "shape <none|variables|rows>", "rows <read> rejected <n>", then per row
  * "row <salt> <local|pinned> names <count> choices <0|1> attached <0|1>". Exit 0 when the map would load with every
- * row read (no earlier shape, nothing rejected), 1 when it would not, 2 on a usage or file error. */
+ * row read, 1 when it would not, 2 on a usage or file error. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>

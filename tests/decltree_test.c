@@ -1,14 +1,6 @@
-/* decltree_test.c -- the structural decl model behind derived edits
- * (decl_tree.c, DESIGN-additive 2.4): the grammar and its token-preserving
- * round trip, each kind of member a diff records, the apply of several
- * sources (identical edits merge, additions union, a named entry two mods add
- * merges its rows, a clash served by row order or by the map's choice), and,
- * when the game is installed, the game's own texts of the files mods edit and
- * the real edited copies found in the mods folders given.
- *
- *   decltree_test.exe [doom=<install root>] [mods=<folder>]...
- *
- * Without an install the real cases print one line and are skipped. */
+/* decltree_test.c -- tests the decl_tree.c grammar round trip, the diff, and applying several sources.
+ * With an install (decltree_test.exe [doom=<root>] [mods=<folder>]...) it also checks the game's own texts
+ * and the real mod copies; without one those cases print one line and are skipped. */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
 #include <windows.h>
@@ -102,8 +94,7 @@ static void line_cb(void *c, const char *t)
 static char *apply_copies(const char *request, const char *stock, const char *const *copies, int n, const sh_dt_choice *ch,
                           int nch, sh_dt_report *rep_out)
 {
-    /* As many copies as find_copies collects (16): the installed mods and
-     * SNAPMAP_EDITS_ROOT each give a body per campaign pack. */
+    /* As many copies as find_copies collects (16). */
     sh_dt_source src[16];
     char *arr[16], who[16][16], *text = NULL;
     sh_dt_report rep;
@@ -144,7 +135,7 @@ static void test_grammar(void)
     CHECK(round_trips("{\n\tinit {\n\t\tmesh \"md6/x.md6mesh\"\n\t}\n\tevents {\n\t\tanim \"md6/a.md6anim\" {\n"
                       "\t\t\tevent \"ae_x\" {\n\t\t\t\tframe 1\n\t\t\t}\n\t\t\tevent \"ae_x\" {\n\t\t\t\tframe 2\n\t\t\t}\n\t\t}\n\t}\n"
                       "\taliases {\n\t\talias { name \"m/x\" anim \"md6/x.md6anim\" }\n\t}\n}\n"));
-    /* md6Def bare members on their own lines, multi-word values, a named statement with '=' */
+    /* md6Def: bare members, multi-word values, a named statement with '=' */
     CHECK(round_trips("{\n\tgroup \"legs\" {\n\t\tLeftFoot\n\t\tLeftToeBase\n\t}\n\ttags far scramble p/far\n"
                       "\tpainGroup \"head\" = damageGroup \"head\"\n\tmodel box( ( -5, -6.5, -5 ), ( 5, 6.5, 5 ) )\n}\n"));
     CHECK(round_trips("{ { 0, 1 } }"));                         /* a table's anonymous block */
@@ -393,7 +384,7 @@ static void test_real(const char *const *mods, int nmods)
             if (!strcmp(requests[r], R_COOP))   /* bare-hands: field sets, removed blocks, the added damageGroups block */
                 CHECK(c.set >= 4 && c.remove >= 6 && c.list == 0 && c.bag == 0 && strstr(e, "\"path\":[\"edit\",\"damageGroups\"]") &&
                       strstr(e, "\"op\":\"remove\",\"path\":[\"edit\",\"masterWeaponList\"]"));
-            if (!strcmp(requests[r], R_BODY))   /* a campaign pack's body: only additions */
+            if (!strcmp(requests[r], R_BODY))   /* a pack's body: only additions */
                 CHECK(c.set == 0 && c.remove == 0 && c.drop == 0 && c.bag > 0);
             if (!strcmp(requests[r], R_CONDUCTOR))   /* a boss pack's conductor: items added */
                 CHECK(c.list > 0 && c.set == 0 && c.remove == 0 && c.keyed == 0 && c.bag == 0 && c.drop == 0);

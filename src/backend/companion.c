@@ -1,5 +1,5 @@
 /* companion.c -- the companions table: parse, validate, look up, compose.
- * Pure C; see companion.h for the schema. */
+ * Pure C; see companion.h. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

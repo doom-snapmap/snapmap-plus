@@ -8,11 +8,9 @@ import (
 	"strings"
 )
 
-// The DOOM folder contract: after any install, update or migration the folder holds exactly the pair
-// for the detected build and nothing else of ours. Neither XINPUT1_4.dll nor XINPUT1_3.dll exists in a
-// vanilla DOOM folder, so no backup is made of a file of ours; the only file ever backed up is one that
-// is not ours and is replaced by the pair, and that backup is kept in the data folder's
-// cache\installer\backup, never in DOOM.
+// The DOOM folder contract: after any install or update the folder holds exactly the detected build's
+// pair and nothing else of ours. The only file ever backed up is one that is not ours and that the
+// pair replaces; it is kept in the data folder's cache\installer\backup, never in DOOM.
 
 // legacyProxy and legacyUIDll are the 2018 build's pair (v0.2.1-beta.19).
 const (
@@ -31,7 +29,7 @@ func buildPair(build string) []string {
 // ourDoomNames are the DOOM-relative paths any Snapmap+ release placed: both builds' pairs.
 var ourDoomNames = []string{currentProxy, currentUIDll, legacyProxy, legacyUIDll}
 
-// ourBackupSuffixes are the suffixes earlier installers gave the backups they kept in DOOM.
+// ourBackupSuffixes are the suffixes of backups a previous install placed in DOOM, which this release does not ship.
 var ourBackupSuffixes = []string{".snapmap-plus-bak", ".snaphak-bak"}
 
 // runtimeDirs are the folders under DOOM\snapmap-plus the DLLs write while the game runs.
@@ -141,11 +139,9 @@ func containsRel(list []string, rel string) bool {
 	return false
 }
 
-// cleanDoomFolder brings doom to the contract for the pair keep (nil for uninstall): every file of
-// ours outside keep is removed, wherever an earlier release put it; backups of our own files are
-// deleted; backups of files that were not ours move into cache\installer and stay recorded in rec so
-// uninstall restores them; files that are not ours stay and are listed. rec.Files and rec.Backups
-// are updated to match.
+// cleanDoomFolder brings doom to the contract for the pair keep (nil for uninstall): files of ours
+// outside keep and backups of them are removed, backups of files that were not ours move into
+// cache\installer (recorded in rec for uninstall), and other files stay and are listed.
 func cleanDoomFolder(doom string, keep []string, own doomOwnership, rec *installRecord) doomTidy {
 	var t doomTidy
 	gone := func(rel string) {
@@ -162,7 +158,7 @@ func cleanDoomFolder(doom string, keep []string, own doomOwnership, rec *install
 		if err := os.Remove(filepath.Join(doom, rel)); err == nil {
 			gone(rel)
 			if dir := filepath.Dir(rel); dir != "." && !strings.EqualFold(dir, "snapmap-plus") {
-				removeIfEmpty(filepath.Join(doom, dir)) // a folder an earlier release created, now empty
+				removeIfEmpty(filepath.Join(doom, dir)) // a folder a previous install placed that this release does not ship, once empty
 			}
 		} else if !os.IsNotExist(err) {
 			ui.Warn("couldn't remove %s (%v) -- is DOOM still running?", rel, err)
@@ -195,8 +191,8 @@ func cleanDoomFolder(doom string, keep []string, own doomOwnership, rec *install
 	}
 	rec.Files = kept
 
-	// 2) Backups earlier installers kept in DOOM, at the top level and under snapmap-plus\, and the
-	// temporary files of an install that was stopped.
+	// 2) Backups a previous install kept in DOOM (top level and snapmap-plus\), and the temporary
+	// files of an install that was stopped.
 	for _, dir := range []string{"", "snapmap-plus"} {
 		entries, _ := os.ReadDir(filepath.Join(doom, dir))
 		for _, e := range entries {

@@ -7,8 +7,6 @@
 
 #include "sdkparse.h"
 
-/* ------------------------------------------------------------------------------------------- buffers ---- */
-
 void sdk_put(sdk_buf *b, const char *s, size_t n)
 {
     if (b->oom) return;
@@ -59,8 +57,6 @@ void sdk_fmt(char *out, size_t cap, double v)
     }
 }
 
-/* ------------------------------------------------------------------------------------------- arena ---- */
-
 typedef struct ar_block { struct ar_block *next; size_t used, cap; double align[1]; } ar_block;
 
 static void *ar_alloc(sdk_doc *d, size_t n)
@@ -95,7 +91,7 @@ void sdk_doc_free(sdk_doc *doc)
     doc->root = NULL;
 }
 
-/* Grows an array held in the arena (old storage is left in the arena). */
+/* Grows an array held in the arena (the previous storage stays in the arena). */
 static int ar_grow(sdk_doc *d, void **arr, size_t *cap, size_t count, size_t elem)
 {
     size_t nc;
@@ -108,8 +104,6 @@ static int ar_grow(sdk_doc *d, void **arr, size_t *cap, size_t count, size_t ele
     *cap = nc;
     return 1;
 }
-
-/* -------------------------------------------------------------------------------------------- lexer ---- */
 
 typedef struct lx { const char *t; size_t len, pos, line; sdk_doc *d; char *why; size_t why_len; int bad; } lx;
 
@@ -223,7 +217,7 @@ static int lx_atom(lx *x, sdk_atom *a)
             x->bad = 1;
             return -1;
         }
-        /* native:name (R-NM1's name rule: DOOM's own name, where it begins like one of the mod's folders) */
+        /* native:name, DOOM's own name */
         if (a->n > 7 && !_strnicmp(a->p, "native:", 7)) {
             a->kind = SDK_A_STRING;
             a->game = 1;
@@ -346,8 +340,6 @@ int sdk_parse(const char *path, const char *text, size_t len, sdk_doc *doc, char
     }
     return 1;
 }
-
-/* ------------------------------------------------------------------------------------------ helpers ---- */
 
 int sdk_is(const sdk_atom *a, const char *w)
 {

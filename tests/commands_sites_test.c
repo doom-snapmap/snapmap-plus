@@ -1,11 +1,7 @@
-/* commands_sites_test.c -- the console install's byte decoders (commands_decode.c, the code the DLL runs) against
- * each build 13954591 executable given on the command line:
- *   - AddCommand: sh_decode_idlist_grow finds the LEA RCX,[RSI+8]; CALL in its body and the target lies in the
- *     image's code;
- *   - CmdSystemLea: sh_decode_rip_slot decodes a pointer slot in the image's data;
- *   - SessionDevModeGetter: its head bytes are the ones sh_disable_devmode patches over, and its displacement is
- *     SH_SESSION_DEVMODE_FIELD.
- * Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
+/* commands_sites_test.c -- the console install's byte decoders (commands_decode.c) against each build 13954591
+ * executable named on the command line: sh_decode_idlist_grow finds AddCommand's LEA RCX,[RSI+8]; CALL with its target
+ * in the image's code, sh_decode_rip_slot decodes the CmdSystemLea pointer slot in its data, and SessionDevModeGetter's
+ * head bytes are those sh_disable_devmode patches over, with the displacement SH_SESSION_DEVMODE_FIELD. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

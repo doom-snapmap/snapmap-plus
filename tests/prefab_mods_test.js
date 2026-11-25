@@ -1,7 +1,5 @@
-/* The Prefabs tab's mods: the status a prefab's snapmapPlus block records (backend/prefab_mods.c),
-   the list pill, the Prefab Details rows, the Load / Place answers about mods and the Export and
-   Import buttons, lifted from the shipped HTML; and the host's side of each message: the block
-   read for the list and details, stripped before the engine, and no sidecar written. Pure ASCII. */
+/* The Prefabs tab's mod status (backend/prefab_mods.c), list pill, details rows, Load / Place answers and Export / Import
+   buttons, lifted from the shipped HTML, plus the host's side of each message. Pure ASCII. */
 'use strict';
 const fs = require('fs');
 const path = require('path');

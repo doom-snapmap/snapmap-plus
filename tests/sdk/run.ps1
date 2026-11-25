@@ -1,12 +1,6 @@
-# Run the script SDK's Lua library tests (src\sdk\lua) with a standalone Lua 5.4 host.
-#
-#   tests\sdk\run.ps1 -Lua C:\path\to\lua54.exe
-#
-# The product builds no standalone Lua host of its own (its Lua is the sandboxed interpreter inside
-# the backend), so the host is a parameter: -Lua, else the SNAPMAP_LUA environment variable, else
-# lua54 or lua on PATH. The tests are self-contained (each carries the small simulated engine it
-# needs) and load the libraries from src\sdk\lua, or from the folder SNAPMAP_SDK_LUA names.
-# Exit 0 means every file passed.
+# Run the script SDK's Lua library tests (src\sdk\lua) with a standalone Lua 5.4 host: -Lua, else SNAPMAP_LUA, else
+# lua54 or lua on PATH (tests\sdk\run.ps1 -Lua C:\path\to\lua54.exe). The tests carry their own simulated engine
+# and load src\sdk\lua, or the folder SNAPMAP_SDK_LUA names; exit 0 means every file passed.
 param([string]$Lua = "")
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path

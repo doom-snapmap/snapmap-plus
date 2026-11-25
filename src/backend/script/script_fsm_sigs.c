@@ -1,9 +1,7 @@
 /* script_fsm_sigs.c -- the game function the state-machine class bridge detours (script_fsm.h).
  *
- * Build 13954591 (shared Ghidra, snaphak-re reports R-M6-engine-fsm section 2.6; the pattern is
- * the only match in each executable, tests/script_combat_sigs_test.c): the type lookup by name,
- * VK 0x141583B20 / GL 0x141584BB0. Its first 15 bytes are three whole register saves
- * (mov [rsp+8],rbx; mov [rsp+0x10],rbp; mov [rsp+0x18],rsi), position-independent. */
+ * Build 13954591: the type lookup by name, VK 0x141583B20 / GL 0x141584BB0, matched uniquely in each
+ * executable; its first 15 bytes are three whole position-independent register saves. */
 #include "../signatures.h"
 #include "script_fsm.h"
 

@@ -1,14 +1,8 @@
-/* The Mods tab (mods_tab.js): the payload model (v4), the two row states, the list's groups (Your
-   mods with its organizing folders, then Maps on this computer from the content answer), the one
-   glyph per row, the filter and the attention filter, the details sections (the In this map block,
-   what a mod adds, changes and borrows, its console settings and files, the plain cause, the
-   same-files hint), each state of a mod and the open map and its one action, the vocabulary rule
-   over every text a player reads, the empty state and New mod saying Refresh picks up edits, the map
-   modal and the dry-run-driven confirmations, the Files view, the Settings menu's scripts setting,
-   and the page and host contract around
-   it. tests/fixtures/mods_tab_payload_v4.json is the
-   document the backend writes (its keys are checked by modui_test.c against the backend) and the
-   browser preview's sample data. A minimal DOM stands in for the browser. Pure ASCII. */
+/* The Mods tab (mods_tab.js): the payload model (v4), the two row states, the list's groups, the details sections,
+   each state of a mod and the open map and its one action, the vocabulary rule over every text a player reads, the map
+   modal and its dry-run confirmations, the Files view, the Settings menu's scripts setting, and the page and host
+   contract. tests/fixtures/mods_tab_payload_v4.json is the document the backend writes (its keys are checked by
+   modui_test.c) and the browser preview's sample data. A minimal DOM stands in for the browser. Pure ASCII. */
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -84,8 +78,8 @@ const IDS = ['modsList', 'modsStatus', 'modsBadge', 'modsAttnBtn', 'modsRoot', '
              'modsMapBtn', 'modsMapModal', 'modsMapHost', 'modsFilesBtn', 'modsFilesModal', 'modsFilesHost',
              'modsNewModal', 'modsNewName', 'modsNewNote', 'modsNewCancel', 'modsNewCreate',
              'menuScriptedMaps', 'menuScriptedMapsLabel', 'menuScriptedMapsNote'];
-/* The ids of the old markup: the tab's own controls that moved (the folder button, the Use button, the scripts
-   checkbox and the content box) and every control retired before them. #modsInMap is built by the tab. */
+/* Ids the tab no longer carries: its controls that moved (the folder button, the Use button, the scripts checkbox and
+   the content box) and every control removed before them. #modsInMap is built by the tab. */
 const GONE = ['modsRebuildBtn', 'modsRemoveBtn', 'modsMap', 'modsMapHead', 'modsDetailHead', 'modsRescanBtn', 'modsVerifyOneBtn', 'modsPaletteBtn',
               'modsPruneBtn', 'modsShadows', 'modsRemoved', 'modsRemovedText', 'modsEmptyBtn', 'modsMigrateBtn', 'modsVerifyBtn',
               'modsFolderBtn', 'modsUseBtn', 'modsScriptedMaps', 'modsScriptedMapsLabel', 'modsScriptedMapsNote', 'modsContent', 'modsInMap'];
@@ -95,15 +89,10 @@ const arr = v => Array.isArray(v) ? v : [];
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 const plural = (n, one, many) => n + ' ' + (n === 1 ? one : (many || one + 's'));
 const READS = {modFiles: true, modFileText: true};
-/* ---- a fake host ---------------------------------------------------------------------------- */
-
-/* The tests' backend: it holds a copy of a document, answers each modsAction as the host does
-   (the action's result, then a fresh document) and changes its copy the way the backend would, so
-   the page is exercised by the same render-from-the-document path as in the game. handle(message)
-   returns the messages the host would post. folders (optional): {key: {files: [modFiles entries],
-   texts: {path: text}}}, the files of some mods; any other mod lists mod.json. kept (optional): the
-   content answer, {storage, lines, rows}: one row per kept map's mod, its token in rows parallel to
-   lines ("" for the storage line); without it the host answers content with no lines. */
+/* The tests' backend: it holds a copy of a document, answers each modsAction as the host does (the action's result,
+   then a fresh document) and changes its copy as the backend would. handle(message) returns the messages the host would
+   post. folders (optional): {key: {files, texts}}, the files of some mods; kept (optional): the content answer
+   {storage, lines, rows}, one row per kept map's mod; without it the host answers content with no lines. */
 function standIn(initial, folders, kept) {
   var docu = JSON.parse(JSON.stringify(initial || {}));
   var disk = JSON.parse(JSON.stringify(folders || {}));
@@ -397,7 +386,7 @@ test('normalize: the v4 fixture', () => {
   assert.equal(imp.salt, 'alexrimp');
   assert.deepEqual(imp.borrows, {count: 2, paths: ['models/monsters/imp/imp.lwo', 'generated/decls/material/models/monsters/imp/imp.decl']});
   assert.equal(imp.facts.edits.length, 2);
-  /* places are retired: a mod row names no place, and every row counts its modules */
+  /* a mod row names no place, and every row counts its modules */
   assert.ok(m.mods.every(b => !('place' in b) && !('placeTitle' in b)), 'the model has no place');
   assert.ok(v4.mods.every(b => !('place' in b) && !('placeTitle' in b) && b.modules === 0), 'the document sends none, and modules 0');
   assert.ok(m.mods.every(b => b.modules === 0));
@@ -1613,7 +1602,7 @@ test('the setting: Play Maps Whose Mods Include Scripts is a checkbox item of th
   /* a setting that was never saved is on */
   h.ui.setScriptedMaps(undefined);
   assert.equal(item.getAttribute('aria-checked'), 'true');
-  /* the tab's own page no longer carries the setting */
+  /* the tab's own code carries no setting id */
   assert.ok(!/modsScripted/.test(source), 'no modsScriptedMaps id in the tab\'s code');
 });
 

@@ -222,7 +222,7 @@ static void test_open_close_order(void)
      * in place for the first frame, the clone at the original last row. */
     CHECK(*(float*)(movie_entries[11]+0x1c)==-221.0f);
     CHECK(*(float*)(movie_entries[13]+0x1c)==150.0f && *(float*)(movie_entries[13]+0x2c)==0.25f);
-    /* The native screen update now finds the panel already shown. */
+    /* The native screen update finds the panel already shown. */
     movie_visible(movie_widget,1);CHECK(order_step==3);
     /* The roll-on settles: the next think extends the panel. */
     movie_parent[0x40]=0;menu_think(state,ed);
@@ -234,7 +234,7 @@ static void test_open_close_order(void)
     CHECK(plays_off==1 && last_play_sprite==movie_sprites[7]);
     CHECK(*(unsigned*)(movie_rows[7]+0x1b0)==0x10 && !g_layout_parent);
     CHECK(*(float*)(movie_entries[11]+0x1c)==-168.0f);
-    /* A clone that is no longer attached is never addressed. */
+    /* A clone that is not attached is never addressed. */
     *(int*)(movie_parent+0x88)=13;plays_total=0;
     menu_end(state,ed);CHECK(plays_total==0);
     /* A re-show the native think requests is rolled on, and the clone
@@ -300,8 +300,7 @@ static void test_exit_dialog(void)
     /* Should a think still run in the state, nothing re-presents the clone:
      * not before the screen update hides the widget... */
     menu_think(state,ed);CHECK(row_calls==0 && g_clone_hidden);
-    /* ...nor while the roll-off plays; the stock rows keep the timeline's
-     * values and the clone entry follows them as before. */
+    /* ...nor while the roll-off plays; the stock rows keep the timeline's values and the clone entry follows them. */
     movie_visible(movie_widget,0);movie_parent[0x40]=1;
     *(float*)(movie_entries[5]+0x1c)=20.0f;*(float*)(movie_entries[6]+0x1c)=0.0f;
     *(float*)(movie_entries[5]+0x2c)=0;
@@ -432,7 +431,7 @@ static void test_install_refuses_before_patching(void)
     memcpy(before,code,sizeof before);
     CHECK(!sh_nav_menu_install(r,22));
     CHECK(!memcmp(before,code,sizeof before) && hook_owned_count()==0);
-    /* A late code-write failure rolls back earlier bounds and all trampolines. */
+    /* A late code-write failure rolls back every bound already patched and all trampolines. */
     memcpy((void*)(r[21].addr+0x6c),"\x83\xfe\x06",3);
     memcpy(before,code,sizeof before);
     sh_patch_test_faults(0,1ULL<<2,1);

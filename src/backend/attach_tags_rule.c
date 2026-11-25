@@ -1,14 +1,11 @@
 /* attach_tags_rule.c -- the pure half of attachment tags (attach_tags.h): names, the md6Def props reader, the
- * build's registries rows and the per-Play registry. No engine, no global state. The name equality, the
- * namespace test of a decl name and the chain rule are clip events' (clip_events_rule.c). */
+ * build's registries rows and the per-Play registry. */
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include "attach_tags.h"
 #include "mp_json.h"
 #include "../common/text.h"
-
-/* ------------------------------------------------------------------ names */
 
 static char at_fold(char c)
 {
@@ -35,12 +32,10 @@ int sh_at_prop_of_mod(const char *prop, const char *salt)
     return sh_ce_def_of_mod(prop, salt);
 }
 
-/* ------------------------------------------------------------ md6Def text */
-
 enum { T_END, T_WORD, T_STR, T_LB, T_RB, T_OTHER };
 typedef struct at_tok { int k; const char *p; size_t n; } at_tok;
 
-/* The engine's own lexing of a decl text: whitespace, // and block comments skipped, quoted text one token. */
+/* Lexes a decl text as the engine does: whitespace and comments skipped, quoted text one token. */
 static at_tok at_next(const char *t, size_t len, size_t *pos)
 {
     at_tok k = { T_END, NULL, 0 };
@@ -104,7 +99,7 @@ int sh_at_md6_read(const char *text, size_t len, sh_at_md6 *out)
     size_t pos = 0;
     int depth = 0, in_init = 0, in_props = 0, cap = 0;
     at_tok prev = { T_END, NULL, 0 }, prev2 = { T_END, NULL, 0 };
-    /* the prop block being read: its name and whether a tag was seen */
+    /* The prop block being read: its name, and a flag for a tag seen. */
     const char *prop = NULL;
     size_t prop_n = 0;
     int prop_depth = -1, prop_tags = 0;
@@ -115,7 +110,7 @@ int sh_at_md6_read(const char *text, size_t len, sh_at_md6 *out)
         if (t.k == T_END) break;
         if (t.k == T_LB) {
             depth++;
-            /* `init {` and `props {` directly inside the decl's own braces */
+            /* `init {` and `props {` directly inside the decl's own braces. */
             if (depth == 2 && at_word(&prev, "init")) in_init = 1;
             if (depth == 2 && at_word(&prev, "props")) in_props = 1;
             if (depth == 3 && in_props && prev.k == T_STR && at_word(&prev2, "prop")) {
@@ -150,8 +145,6 @@ int sh_at_md6_read(const char *text, size_t len, sh_at_md6 *out)
     return 1;
 }
 
-/* ------------------------------------------------------------- the build */
-
 typedef struct at_buf { char *p; size_t n, cap; int oom; } at_buf;
 
 static void at_put(at_buf *b, const char *s, size_t n)
@@ -173,7 +166,7 @@ static void at_put(at_buf *b, const char *s, size_t n)
 
 static void at_puts(at_buf *b, const char *s) { at_put(b, s, strlen(s)); }
 
-/* A JSON string; names carry no quote or backslash (the entries are checked before), but escape them anyway. */
+/* Writes a JSON string, escaping quote and backslash. */
 static void at_put_str(at_buf *b, const char *s)
 {
     at_put(b, "\"", 1);
@@ -297,11 +290,9 @@ char *sh_at_build_registry(const char *salt, const char *const *names, int n, sh
     return out.p;
 }
 
-/* ---------------------------------------------------------- the registry */
-
 static char *at_dup(const char *s) { return s ? at_ndup(s, strlen(s)) : NULL; }
 
-/* A JSON string body as the builder writes names (no escapes); NULL for anything else. */
+/* Returns a JSON string's text when it has no escapes, NULL for anything else. */
 static const char *at_plain(const mpj *v)
 {
     if (!v || v->type != MPJ_STR || !v->text || !v->text[0] || strchr(v->text, '\\')) return NULL;

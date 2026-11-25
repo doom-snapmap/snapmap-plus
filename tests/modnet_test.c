@@ -1,9 +1,5 @@
-/* modnet_test -- the WinHTTP store client against a loopback stub of the
- * store (mod_store_stub.h): base URL rules, argument rules, a unit's archive
- * request (the whole archive, or the files a mask names), a store address of
- * any length, injected 5xx, 429 and 451, a refused connection, cancel, and the
- * job helper's progress, cancel and one-job rule. No real store is contacted.
- */
+/* modnet_test -- the WinHTTP store client against a loopback stub of the store (mod_store_stub.h): URL and argument
+ * rules, a unit's archive request, injected failures, cancel, and the job helper. No real store is contacted. */
 #include "heap_out.h"
 #include "mod_store_stub.h"
 #include "../src/backend/modnet.h"
@@ -100,7 +96,7 @@ int main(void)
     }
     CHECK(modnet_set_base_url(url));
 
-    /* ---- a unit's archive (R-DS6): one request, every file, or the files a mask names as ?want=<base64url> ---- */
+    /* ---- a unit's archive: one request, every file, or the files a mask names as ?want=<base64url> ---- */
     {
         static const unsigned char mask[2] = { 0x05, 0x80 };   /* files 0, 2 and 15 */
         static const char unit[] = "abababababababababababababababababababababababababababababababab";

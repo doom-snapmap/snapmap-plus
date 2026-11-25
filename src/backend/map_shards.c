@@ -1,7 +1,5 @@
 #include <limits.h>
-/* Shared bounded JSON shard scanning and splicing; payload families supply
- * grammar and policy.
- */
+/* Shared bounded JSON shard scanning and splicing; payload families supply grammar and policy. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdint.h>
@@ -12,9 +10,6 @@
 #include "map_shards.h"
 #include "sha256.h"
 
-/* ==================================================================== */
-/* shard digests: the first 16 hex characters of SHA-256 (sha256.h) */
-/* ==================================================================== */
 
 void sh_shard_digest16(const unsigned char *payload, size_t len,
                        char out[SH_SHARD_DIGEST_CHARS + 1])
@@ -25,9 +20,6 @@ void sh_shard_digest16(const unsigned char *payload, size_t len,
     sh_sha256_hex(&h, out, SH_SHARD_DIGEST_CHARS);
 }
 
-/* ==================================================================== */
-/* small text helpers                                                    */
-/* ==================================================================== */
 
 const char *sh_shard_find(const char *hay, size_t n, const char *needle, size_t m)
 {
@@ -47,9 +39,6 @@ int sh_shard_is_digit(char c) { return c >= '0' && c <= '9'; }
 int sh_shard_is_hex(char c) { return sh_shard_is_digit(c) || (c >= 'a' && c <= 'f'); }
 
 
-/* ==================================================================== */
-/* base64                                                                */
-/* ==================================================================== */
 
 static const char SHARD_B64[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -165,9 +154,6 @@ bad:
     return NULL;
 }
 
-/* ==================================================================== */
-/* document structure                                                    */
-/* ==================================================================== */
 
 int sh_shard_doc_build(const char *json, size_t len, sh_shard_doc *doc)
 {

@@ -1,23 +1,7 @@
-/* script_source.h -- where mod scripts come from: the serving index.
- *
- * At the Play gate the runtime asks which of the open map's mods carry
- * scripts (sh_script_set_map_provider). The answer is the serving layer's: the
- * builds the map scope declares for this Play (sh_modserve_scope_hashes: the
- * builds that serve the map's rows, then the placed names' closure), each
- * mod's scripts as the index serves them for the open map
- * (sh_modserve_script_files: the map's own place for a stranger's map, the
- * root folder for the author's own). Every script is read then, once, through
- * sh_modserve_open_disk (the folder's bytes now, not the index's cache) and
- * kept in memory with the SHA-256 its build recorded; a
- * file whose bytes are not the built ones (edited since the last Refresh) is
- * not kept, so the runtime refuses it by name ("could not be read ... Press
- * Refresh"). The file source then answers lists and reads, require included,
- * from that copy: a Play runs exactly the built scripts it started with, and
- * nothing reads a mod folder while it runs. A Refresh during Play applies at
- * the next Play.
- *
- * Main thread: the provider runs at the gate, the reads at the first frame
- * and inside require. */
+/* script_source.h -- where mod scripts come from: the serving index. At the Play gate the provider names the open
+ * map's scripted mods, reads each script once from disk with the SHA-256 its build recorded, and answers every
+ * list and read (require included) from that copy, so a Play runs exactly the scripts it started with.
+ * A file edited since the last Refresh is refused by name. Main thread. */
 #ifndef SH_SCRIPT_SOURCE_H
 #define SH_SCRIPT_SOURCE_H
 #include "script_runtime.h"
@@ -26,42 +10,32 @@
 extern "C" {
 #endif
 
-/* Register the provider with the runtime. Called by sh_script_hooks_install.
- * Not in a SH_SCRIPT_PURE build (it reads the serving layer). */
-/* Install the provider. `foreign_allowed` is the player's setting for scripts in content that came from elsewhere
- * (modui.h sh_modui_scripted_maps_allowed, the gates' own predicate; NULL: allowed): with it off, the map's
- * compositions (its pinned rows: a published map's, a downloaded copy's, an import's) run no script, whatever path
- * opened the map, while the player's own local rows always do. */
+/* Register the provider with the runtime (called by sh_script_hooks_install; not in a SH_SCRIPT_PURE build).
+ * `foreign_allowed` is the player's setting for scripts in content from elsewhere (modui.h
+ * sh_modui_scripted_maps_allowed; NULL: allowed): off, the map's pinned rows run no script, while the player's
+ * own local rows always do. */
 void sh_script_source_install(int (*foreign_allowed)(void));
-/* The same policy alone (a test's, or NULL). */
+/* The same policy alone. */
 void sh_script_source_set_policy(int (*foreign_allowed)(void));
 
-/* The served mods of the open map that carry scripts, as the next Play would
- * prepare them (the console's check outside Play), their scripts read again.
- * Returns the count written to out (strings valid until the next call), -1
- * when the map's builds could not be read. Main thread. */
+/* The served mods of the open map that carry scripts, as the next Play would prepare them, their scripts read
+ * again. Returns the count written to out (strings valid until the next call), -1 when unreadable. Main thread. */
 int sh_script_source_map_mods(sh_script_mod_desc *out, int cap);
 
-/* The file source over the scripts the last provider call or
- * sh_script_source_map_mods read: list gives "x.lua" and "lib/x.lua" in
- * request order, read a malloc'd copy (release frees it); read answers -1 for
- * a file whose built bytes could not be read. */
+/* The file source over the scripts the last provider call or sh_script_source_map_mods read: list gives "x.lua"
+ * and "lib/x.lua" in request order, read a malloc'd copy (release frees it) or -1 for an unreadable file. */
 const sh_script_source *sh_script_source_files(void);
 
-/* The first script file of `salt` (as listed: "x.lua", "lib/x.lua") whose
- * built bytes were not kept because they are not the bytes its build recorded
- * (edited since the last Refresh) or could not be read, NULL when every file
- * was kept. *count (optional) receives how many files are so. The text is
- * valid until the next read of the map's scripts. Main thread. */
+/* The first script file of `salt` (as listed) whose built bytes were not kept (they differ from the build's
+ * recorded bytes, or could not be read), NULL when every file was kept; *count (optional) gets how many such
+ * files. The text is valid until the next read of the map's scripts. Main thread. */
 const char *sh_script_source_stale(const char *salt, int *count);
 
 /* Forget every mod's scripts. */
 void sh_script_source_clear(void);
 
 #ifdef SH_SCRIPT_PURE
-/* The tests' stand-in for the index: read `scripts_dir` (<mod folder>\assets\
- * mods\<salt>\scripts: *.lua and lib\*.lua) as `salt`'s served scripts. 1 when
- * set. */
+/* The tests' stand-in for the index: serves `scripts_dir` (*.lua and lib\*.lua) as `salt`'s scripts. 1 when set. */
 int  sh_script_source_set_folder(const char *salt, const char *name, const char *scripts_dir);
 #endif
 

@@ -1,7 +1,5 @@
-// gen_script_sdk.js -- embed the script SDK's Lua libraries (src/sdk/lua/*.lua) in the backend.
-//   node tools/gen_script_sdk.js           write src/backend/script/script_sdk_lua.c
-//   node tools/gen_script_sdk.js --check   exit 1 when that file is not what the sources give
-// The libraries ship inside the DLL, so a mod requires them by name and carries no copy.
+// gen_script_sdk.js -- embeds src/sdk/lua/*.lua in the DLL as src/backend/script/script_sdk_lua.c.
+// Run with no argument to write it, or --check to exit 1 when the file is stale.
 const fs = require('fs');
 const path = require('path');
 const root = path.resolve(__dirname, '..');

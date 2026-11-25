@@ -1,17 +1,6 @@
-/* script_console.h -- the sh_scripts console command.
- *
- *   sh_scripts               each mod with scripts in this map (or the last):
- *                            running, waiting for Play, stopped (with the stop
- *                            line) or ended, its files and handlers
- *   sh_scripts log [mod]     the script log of every mod, or of one (its name
- *                            or its salt): prints, warnings, the stop line
- *   sh_scripts reload        during Play: the scripts end and start again
- *                            from their files at the next frame; outside Play:
- *                            every script of the open map's mods is compiled
- *                            and any error is printed, and the files run at
- *                            the next Play
- *
- * Lines are plain sentences; nothing here runs inside the game frame. */
+/* script_console.h -- the sh_scripts console command: `sh_scripts` lists each mod's script state, `log [mod]`
+ * prints its script log, and `reload` restarts the scripts in Play or compiles them outside Play.
+ * Nothing here runs inside the game frame. */
 #ifndef SH_SCRIPT_CONSOLE_H
 #define SH_SCRIPT_CONSOLE_H
 

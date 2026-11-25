@@ -1,16 +1,5 @@
-/* webview_profile.h -- where the companion window's WebView2 profile lives.
- *
- * The profile (cookies, caches, local storage of the embedded page) is
- * regenerable: WebView2 rebuilds it when it is missing. It lives under
- * %LOCALAPPDATA%\snapmap-plus\cache\webview2, and the installer never backs
- * up or copies the cache folder. Releases before this one kept it at
- * %LOCALAPPDATA%\snapmap-plus\webview2; the first start moves that folder into
- * the cache folder by renaming it (same volume, nothing copied, nothing
- * deleted). When the rename fails (a file in it is held open), this start
- * keeps using the old folder and the next start tries again. When both
- * folders exist the new one is used and the old one is left as it is.
- *
- * Kernel32 only, header-only, so the frontend and its test share it.
+/* webview_profile.h -- chooses the regenerable WebView2 profile folder, %LOCALAPPDATA%\snapmap-plus\cache\webview2.
+ * Kernel32 only and header-only, so the frontend and its test share it.
  */
 #ifndef SNAPMAP_PLUS_WEBVIEW_PROFILE_H
 #define SNAPMAP_PLUS_WEBVIEW_PROFILE_H
@@ -21,10 +10,10 @@
 namespace sh_webview_profile {
 
 enum outcome {
-    created = 0,    /* no profile yet: cache\webview2 was created */
+    created = 0,    /* cache\webview2 was created */
     existing = 1,   /* cache\webview2 already there */
-    moved = 2,      /* the old webview2 folder was renamed into the cache folder */
-    kept_old = 3    /* the rename failed: the old folder is used this time */
+    moved = 2,      /* the webview2 folder was renamed into cache */
+    kept_old = 3    /* the rename failed: webview2 is used */
 };
 
 inline bool is_dir(const std::wstring &path)
@@ -33,8 +22,8 @@ inline bool is_dir(const std::wstring &path)
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-/* `local` is %LOCALAPPDATA%. Returns the user-data folder to hand WebView2;
- * *how and *error (the rename's GetLastError on kept_old) are optional. */
+/* `local` is %LOCALAPPDATA%. Returns the user-data folder to hand WebView2, renaming a webview2 folder
+ * into cache when only it exists; *how and *error (the rename's GetLastError) are optional. */
 inline std::wstring choose(const std::wstring &local, int *how = nullptr, DWORD *error = nullptr)
 {
     const std::wstring root = local + L"\\snapmap-plus";

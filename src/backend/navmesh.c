@@ -1,7 +1,5 @@
-/* Read, validate and serve map-scoped baked navigation payloads. Keep SEH inside the
- * table lock so error handling still releases it. Header paths and payload
- * sizes are bounded before native parsing.
- */
+/* Reads, validates and serves map-scoped baked navigation payloads. SEH stays inside the table lock so error
+ * handling still releases it, and header paths and payload sizes are bounded before native parsing. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdint.h>
@@ -17,20 +15,13 @@
 #include "config.h"
 #include "backend_log.h"
 
-/* Persistent navigation configuration keys registered in config.c. */
+/* Navigation configuration keys registered in config.c. */
 #define NAV_CONFIG_ENABLED  "navmesh.enabled"
 #define NAV_CONFIG_EMBED    "navmesh.embed_in_saved_maps"
 
-/* ==================================================================== */
-/* state                                                                 */
-/* ==================================================================== */
-
-/* One (module, class) shard set, and its payload if it survived delivery.
- *
- * `payload` is RETAINED whenever the shards reassembled and the digest matched,
- * even when the module is refused for serving -- that is what lets a save
- * preserve a bake this client will not itself serve, instead of quietly
- * deleting the author's work. `served` is the narrower question. */
+/* One (module, class) shard set and its payload. `payload` is retained whenever the shards reassembled and the
+ * digest matched, even when the module is refused for serving, so a save preserves the bake; `served` is the
+ * narrower question. */
 typedef struct nav_set {
     char     module[SH_SMNAV_MODULE_CAP];
     char     cls[SH_SMNAV_CLASS_CAP];
@@ -39,13 +30,13 @@ typedef struct nav_set {
     unsigned total;
     unsigned present;
     int      consistent;         /* headers agree, no duplicate or out-of-range index */
-    sh_shard_chunk *chunks;      /* [total], pointers INTO the map buffer; scan-time only */
+    sh_shard_chunk *chunks;      /* [total], pointers into the map buffer; scan-time only */
     unsigned char  *payload;     /* process-heap buffer, never engine map-heap storage */
     size_t          payload_len;
     int      valid;              /* passed the structural gate */
-    int      served;             /* ...and its module was accepted */
-    char     res_name[SH_SMNAV_RESNAME_CAP];    /* maps/modules/.../<m>.aas_<class> */
-    char     cook_name[SH_SMNAV_RESNAME_CAP];   /* generated/maps/.../<m>.baas_<class> */
+    int      served;             /* valid, and its module is accepted */
+    char     res_name[SH_SMNAV_RESNAME_CAP];    /* .../<m>.aas_<class> */
+    char     cook_name[SH_SMNAV_RESNAME_CAP];   /* .../<m>.baas_<class> */
     char     reason[SH_SMNAV_REASON_CAP];       /* why it is not served */
 } nav_set;
 
@@ -65,20 +56,17 @@ static nav_module g_modules[SH_SMNAV_MAX_MODULES];
 static size_t     g_module_count;
 static size_t     g_held_bytes;
 static volatile LONG g_serve_count;
-/* Advance on every deserialize, including disabled and empty maps, to expose
- * table reset activity in diagnostics.
- */
+/* Advances on every deserialize, including disabled and empty maps, to expose table resets in diagnostics. */
 static volatile LONG g_build_count;
 static size_t     g_last_build_sets;
 static char       g_last_refusal[SH_SMNAV_REASON_CAP];
 
-/* A map's member "nav" part as it was read, so a save carries it back
- * unchanged when nothing is held to re-embed: the feature was off at load, or
- * turned off since (process heap; NULL when none). Under g_nav_lock. */
+/* A map's member "nav" part as read, written back unchanged on save when nothing is held to re-embed (process
+ * heap; NULL when none). Under g_nav_lock. */
 static char      *g_raw_nav;
 static size_t     g_raw_nav_len;
 
-/* Disable serving after the first fault to avoid repeated partial opens. */
+/* Serving is disabled after the first fault to avoid repeated partial opens. */
 static volatile LONG g_faulted;
 static volatile LONG g_installed;
 
@@ -108,8 +96,7 @@ static void nav_refuse(const char *fmt, ...)
 
 static int nav_config_on(const char *key)
 {
-    /* Both keys default ON: an unreadable config must not silently change what
-     * a map does. */
+    /* Both keys default on, so an unreadable config does not change what a map does. */
     int on = 1;
     (void)sh_config_get_bool(key, &on, NULL);
     return on;
@@ -120,10 +107,6 @@ int sh_navmesh_enabled(void)
     if (InterlockedCompareExchange(&g_faulted, 0, 0) != 0) return 0;
     return nav_config_on(NAV_CONFIG_ENABLED);
 }
-
-/* ==================================================================== */
-/* the header grammar                                                    */
-/* ==================================================================== */
 
 typedef struct nav_hdr {
     char     module[SH_SMNAV_MODULE_CAP];
@@ -144,10 +127,8 @@ static int nav_is_module_char(char c)
            c == '_' || c == '-' || c == '/';
 }
 
-/* The module field is `category/module`, and may carry further '/' segments.
- * It must not be able to construct a path: no '.', no backslash, no empty
- * segment, no leading or trailing '/', and at least one '/' -- a bare module
- * name cannot reconstruct the resource names. */
+/* The module field is `category/module` and may carry further '/' segments. It cannot construct a path: no '.',
+ * backslash, empty segment or leading or trailing '/', and at least one '/'. */
 static int nav_copy_module(const char *p, size_t n, char *out, size_t cap)
 {
     size_t i;
@@ -187,10 +168,6 @@ static int nav_copy_hex(const char *p, size_t n, char *out, size_t want)
     return 1;
 }
 
-/* ==================================================================== */
-/* the structural AAS gate                                               */
-/* ==================================================================== */
-
 static uint32_t nav_be32(const unsigned char *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
@@ -224,9 +201,8 @@ static void nav_verr(char *err, size_t cap, const char *fmt, ...)
 
 #define NAV_REC(a, lump, i) ((a)->p + (a)->off[lump] + (size_t)(i) * SH_AAS_LUMP_DEFS[lump].record)
 
-/* Require every BSP node to be reachable once from a root within the native
- * depth limit. Reject cycles, multiple parents and unreachable nodes.
- */
+/* Requires every BSP node to be reachable once from a root within the native depth limit, rejecting cycles,
+ * multiple parents and unreachable nodes. */
 static int nav_walk_bsp(const nav_aas *a, char *err, size_t err_cap)
 {
     enum { ST_REF = 1, ST_REFMANY = 2, ST_SEEN = 4 };
@@ -236,9 +212,8 @@ static int nav_walk_bsp(const nav_aas *a, char *err, size_t err_cap)
     unsigned char *state;
     uint32_t visited = 0, n;
     int rc = 0;
-    /* Depth is capped before children are pushed, and a binary tree holds at
-     * most one pending sibling per level, so the stack cannot outgrow the depth
-     * limit. It is checked anyway. */
+    /* Depth is capped before children are pushed and a binary tree holds at most one pending sibling per level,
+     * so the stack is bounded by the depth limit; it is still checked. */
     struct { uint32_t node; uint32_t depth; } stack[SH_AAS_MAX_DEPTH + 4];
 
     if (num_nodes == 0) return 1;
@@ -249,8 +224,7 @@ static int nav_walk_bsp(const nav_aas *a, char *err, size_t err_cap)
         return 0;
     }
 
-    /* Pass 1: every plane index and every child is in range, and no node is
-     * claimed by two parents. */
+    /* Pass 1: every plane index and child is in range, and no node has two parents. */
     for (n = 0; n < num_nodes; n++) {
         const unsigned char *rec = NAV_REC(a, SH_AAS_L_NODES, n);
         uint32_t plane = nav_be32(rec);
@@ -276,7 +250,7 @@ static int nav_walk_bsp(const nav_aas *a, char *err, size_t err_cap)
                     goto done;
                 }
             }
-            /* child == 0 is "no child"; node 0 is never anybody's child */
+            /* child == 0 is no child; node 0 is never anybody's child. */
         }
     }
     for (n = 0; n < num_nodes; n++) {
@@ -337,10 +311,8 @@ done:
     return rc;
 }
 
-/* Validate per-area from/to chains against repeated reachabilities and
- * unbounded walks. Unlisted records are checked separately because the engine
- * rebuilds these lists.
- */
+/* Validates per-area from/to chains against repeated reachabilities and unbounded walks; unlisted records are
+ * checked separately because the engine rebuilds these lists. */
 static int nav_walk_reach_chains(const nav_aas *a, char *err, size_t err_cap)
 {
     uint32_t num_reach = a->count[SH_AAS_L_REACHABILITIES];
@@ -364,8 +336,7 @@ static int nav_walk_reach_chains(const nav_aas *a, char *err, size_t err_cap)
         nav_verr(err, err_cap, "out of memory validating outgoing reachabilities");
         goto done;
     }
-    /* Load rebuilds these lists from the records. An omitted list head must
-     * not hide an overflow from this gate. Cross-indices were checked above. */
+    /* Load rebuilds these lists from the records, so an omitted list head must not hide an overflow. */
     for (area = 0; area < num_reach; area++) {
         unsigned from = nav_be16(NAV_REC(a, SH_AAS_L_REACHABILITIES, area) + 6);
         if (++degrees[from] > SH_AAS_MAX_AREA_REACHABILITIES) {
@@ -448,7 +419,7 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
     a.p = p;
     a.len = len;
 
-    /* Require 22 bounded count-prefixed lumps ending exactly at EOF. */
+    /* 22 bounded count-prefixed lumps must end exactly at EOF. */
     for (i = 0; i < SH_AAS_LUMPS; i++) {
         uint64_t bytes;
         if (len - off < 4) {
@@ -498,7 +469,7 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
         return 0;
     }
 
-    /* edge -> vertex */
+    /* Edge to vertex. */
     for (n = 0; n < a.count[SH_AAS_L_EDGES]; n++) {
         const unsigned char *rec = NAV_REC(&a, SH_AAS_L_EDGES, n);
         uint32_t v0 = nav_be32(rec), v1 = nav_be32(rec + 4);
@@ -509,8 +480,7 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
         }
     }
 
-    /* edgeIndex -> edges. The value is signed: the sign carries the traversal
-     * direction, so the magnitude is what has to be in range. */
+    /* edgeIndex to edges; the sign carries the traversal direction, so the magnitude must be in range. */
     for (n = 0; n < a.count[SH_AAS_L_EDGEINDEX]; n++) {
         int32_t v = nav_be32s(NAV_REC(&a, SH_AAS_L_EDGEINDEX, n));
         int64_t mag = (v < 0) ? -(int64_t)v : (int64_t)v;
@@ -521,7 +491,7 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
         }
     }
 
-    /* areaCoverIndex -> cover */
+    /* areaCoverIndex to cover. */
     for (n = 0; n < a.count[SH_AAS_L_AREACOVERINDEX]; n++) {
         uint32_t v = nav_be32(NAV_REC(&a, SH_AAS_L_AREACOVERINDEX, n));
         if (v >= a.count[SH_AAS_L_COVER]) {
@@ -531,7 +501,7 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
         }
     }
 
-    /* areas: the spans they own, and the cluster they belong to */
+    /* Areas: the spans they own and the cluster they belong to. */
     for (n = 0; n < a.count[SH_AAS_L_AREAS]; n++) {
         const unsigned char *rec = NAV_REC(&a, SH_AAS_L_AREAS, n);
         uint32_t num_edges   = nav_be16(rec + 0x06);
@@ -569,7 +539,7 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
         }
     }
 
-    /* reachabilities: the areas they join */
+    /* Reachabilities: the areas they join. */
     for (n = 0; n < a.count[SH_AAS_L_REACHABILITIES]; n++) {
         const unsigned char *rec = NAV_REC(&a, SH_AAS_L_REACHABILITIES, n);
         uint32_t from = nav_be16(rec + 0x06), to = nav_be16(rec + 0x08);
@@ -585,14 +555,8 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
     return 1;
 }
 
-/* ==================================================================== */
-/* the map's own module placements                                       */
-/* ==================================================================== */
-
-/* Count module placements for payloads served under the module's shared
- * name. Repeated instances cannot receive distinct bytes through that name. Unknown spellings count
- * as zero; the engine will not request an unplaced module.
- */
+/* Counts module placements, since repeated instances cannot receive distinct bytes through the module's shared
+ * name. Unknown spellings count as zero; the engine will not request an unplaced module. */
 static unsigned nav_count_instances(const char *json, size_t len, const char *module)
 {
     char want[SH_SMNAV_RESNAME_CAP];
@@ -620,10 +584,6 @@ static unsigned nav_count_instances(const char *json, size_t len, const char *mo
     }
     return found;
 }
-
-/* ==================================================================== */
-/* the serving table                                                     */
-/* ==================================================================== */
 
 /* Caller holds the lock exclusively. */
 static void nav_clear_locked(void)
@@ -657,18 +617,15 @@ static nav_module *nav_find_module(const char *name)
     return NULL;
 }
 
-/* The last path segment of `category/module` is the module, and the files
- * inside the module folder carry that same name. */
+/* The last path segment of `category/module`, which names the files inside the module folder. */
 static const char *nav_leaf(const char *module)
 {
     const char *slash = strrchr(module, '/');
     return slash ? slash + 1 : module;
 }
 
-/* Serve source .aas_<class> and cooked .baas_<class> aliases. The engine
- * tries cooked first, so a wrong or truncated alias silently falls back to
- * stock data; reject truncated names.
- */
+/* Builds the source .aas_<class> and cooked .baas_<class> aliases. The engine tries cooked first, so a truncated
+ * alias silently falls back to stock data and is rejected. */
 static int nav_build_names(nav_set *s)
 {
     const char *leaf = nav_leaf(s->module);
@@ -679,8 +636,7 @@ static int nav_build_names(nav_set *s)
     return 1;
 }
 
-/* Pass 1, one chunk: group it with its (module, class) set. Returns 0 when
- * the table is full. */
+/* Pass 1, one chunk: groups it with its (module, class) set. Returns 0 when the table is full. */
 static int nav_collect_one(const nav_hdr *hp, const char *chunk, size_t chunk_len)
 {
     const nav_hdr h = *hp;
@@ -742,7 +698,7 @@ static void nav_overflow(void)
                "the surplus is ignored", (int)SH_SMNAV_MAX_SETS);
 }
 
-/* One string member of a member set object, copied with the grammar's checks. */
+/* One string member of a set object, copied with the grammar's checks. */
 static int nav_member_field(const char *obj, const char *end, const char *key, char *out, size_t cap,
                             int (*copy)(const char *, size_t, char *, size_t))
 {
@@ -764,9 +720,8 @@ static int nav_copy_geom(const char *p, size_t n, char *out, size_t cap)
     return nav_copy_hex(p, n, out, SH_SMNAV_GEOM_CHARS);
 }
 
-/* Pass 1 from the member's "nav" part [from, to) (map_carrier.h): one object
- * per set, its "data" the base64 chunks in order. A set object that does not
- * read is refused by name when it has one. */
+/* Pass 1 over the member's "nav" part [from, to) (map_carrier.h): one object per set, its "data" the base64
+ * chunks in order. A set object that does not read is refused by name when it has one. */
 static void nav_collect_member(const char *from, const char *to)
 {
     const char *cursor = from, *set;
@@ -786,7 +741,7 @@ static void nav_collect_member(const char *from, const char *to)
             nav_refuse("a navigation set in the map's member does not read; it is ignored");
             continue;
         }
-        /* The "data" array: find it, count it, then collect it. */
+        /* Find and count the "data" array, then collect it. */
         {
             const char *v = NULL;
             size_t vn = 0;
@@ -812,8 +767,8 @@ static void nav_collect_member(const char *from, const char *to)
     if (overflow) nav_overflow();
 }
 
-/* Pass 2: reassemble and verify the digest. A set that survives is HELD -- so a
- * save preserves it -- whether or not it ends up served. */
+/* Pass 2: reassembles and verifies the digest. A surviving set is held, so a save preserves it, whether or not
+ * it is served. */
 static void nav_reassemble(void)
 {
     size_t i;
@@ -867,8 +822,7 @@ static void nav_reassemble(void)
     }
 }
 
-/* Pass 3: validate, then decide per MODULE. All or nothing: a carrier that
- * produced one bad payload is not trusted for its siblings. */
+/* Pass 3: validates, then decides per module, all or nothing: one bad payload distrusts its siblings. */
 static void nav_accept(const char *json, size_t len)
 {
     size_t i;
@@ -931,8 +885,7 @@ static void nav_accept(const char *json, size_t len)
     }
 }
 
-/* The scan itself, guarded, with the lock already held: the member's "nav"
- * part. */
+/* The guarded scan of the member's "nav" part, with the lock already held. */
 static void nav_build_locked(const char *json, size_t len)
 {
     __try {
@@ -960,10 +913,8 @@ void sh_navmesh_build_from_map(const char *json, size_t len)
     nav_clear_locked();
     g_last_refusal[0] = '\0';
     if (g_raw_nav) { HeapFree(GetProcessHeap(), 0, g_raw_nav); g_raw_nav = NULL; g_raw_nav_len = 0; }
-    /* Off means off, including the table: a map loaded while the feature is
-     * disabled must not leave the previous map's navigation live. Its member
-     * part is kept as text so a save does not drop the author's bake, whether
-     * the feature is still off at save time or has been turned on since. */
+    /* When off, the table stays empty so the previous map's navigation is not left live; the member part is kept
+     * as text so a save does not drop the bake. */
     if (on) nav_build_locked(json, len);
     else if (json && len) {
         size_t from = 0, to = 0;
@@ -989,7 +940,7 @@ void sh_navmesh_build_from_map(const char *json, size_t len)
     g_last_build_sets = sets;
     ReleaseSRWLockExclusive(&g_nav_lock);
 
-    if (sets == 0) return;   /* No detailed report for a map without saved navigation. */
+    if (sets == 0) return;   /* No report for a map without saved navigation. */
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "NAV: this map carries %zu baked module/class set(s); serving %zu of them for "
@@ -997,14 +948,9 @@ void sh_navmesh_build_from_map(const char *json, size_t len)
     backend_log(line);
 }
 
-/* ==================================================================== */
-/* embed                                                                 */
-/* ==================================================================== */
-
 /* The member's "nav" value for every held set (map_carrier.h): an array of
- * {"module","class","digest","geom","data":[chunks]} in table order. Process
- * heap, or NULL with the reason in err. *sets_out counts the sets written; a
- * set that cannot be written is logged and left out. */
+ * {"module","class","digest","geom","data":[chunks]} in table order, on the process heap, or NULL with the
+ * reason in err. *sets_out counts the sets written. */
 static char *nav_part_locked(size_t *out_len, size_t *sets_out, char *err, size_t err_cap)
 {
     size_t i, need = 2, w = 0, sets = 0;
@@ -1030,15 +976,14 @@ static char *nav_part_locked(size_t *out_len, size_t *sets_out, char *err, size_
         if (!s->payload) continue;
         b64 = (char *)HeapAlloc(GetProcessHeap(), 0, ((s->payload_len + 2) / 3) * 4 + 1);
         if (!b64) {
-            /* All or nothing: a save never silently drops one set of several. */
+            /* All or nothing, so a save never drops one set of several. */
             HeapFree(GetProcessHeap(), 0, out);
             _snprintf_s(err, err_cap, _TRUNCATE,
                         "there was no memory to encode the navigation of '%s' (%s)", s->module, s->cls);
             return NULL;
         }
         b64_len = sh_shard_b64_encode(s->payload, s->payload_len, b64);
-        /* A held payload is at most SH_SMNAV_MAX_PAYLOAD, which fits well within
-         * SH_SMNAV_MAX_SHARDS chunks. */
+        /* A held payload is at most SH_SMNAV_MAX_PAYLOAD, well within SH_SMNAV_MAX_SHARDS chunks. */
         chunks = (b64_len + SH_SMNAV_CARRIER_CHUNK - 1) / SH_SMNAV_CARRIER_CHUNK;
         if (chunks == 0) chunks = 1;
         n = _snprintf_s(out + w, need + 1 - w, _TRUNCATE,
@@ -1072,8 +1017,7 @@ static char *nav_part_locked(size_t *out_len, size_t *sets_out, char *err, size_
     return out;
 }
 
-/* Guarded, with the lock already held: the member's "nav" part put (removed
- * when nothing is held). */
+/* Guarded, with the lock already held: puts the member's "nav" part, removing it when nothing is held. */
 static char *nav_embed_locked(const char *json, size_t len,
                               size_t *cur_len_out, size_t *embedded_out)
 {
@@ -1124,8 +1068,7 @@ char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len, int *f
     if (failed) *failed = 0;
     if (!json || len == 0) return NULL;
     if (nav_held_count() == 0 || !nav_config_on(NAV_CONFIG_EMBED)) {
-        /* Nothing held (the feature was off when the map loaded): the member part the map
-         * arrived with goes back as it was read, whatever the setting is now. */
+        /* Nothing is held, so the member part the map arrived with goes back as read. */
         char err[160] = "";
         size_t w = 0;
         AcquireSRWLockShared(&g_nav_lock);
@@ -1152,12 +1095,7 @@ char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len, int *f
     return cur;
 }
 
-/* ==================================================================== */
-/* serve                                                                 */
-/* ==================================================================== */
-
-/* Path-tolerant compare: case-insensitive, '/' == '\\'. The engine asks with
- * forward slashes; be robust to either. */
+/* Path-tolerant compare: case-insensitive, with '/' equal to '\\'. */
 static int nav_name_eq(const char *a, const char *b)
 {
     if (!a || !b) return 0;
@@ -1187,9 +1125,7 @@ static int nav_open_locked(const char *name, unsigned char **out_bytes, size_t *
             if (nav_name_eq(name, s->res_name)) *which = "module";
             else if (nav_name_eq(name, s->cook_name)) *which = "cooked";
             else continue;
-            /* Return a copy: a later map load can rebuild the table while the
-             * engine still owns the stream.
-             */
+            /* A copy is returned because a map load can rebuild the table while the engine owns the stream. */
             copy = (unsigned char *)HeapAlloc(GetProcessHeap(), 0,
                                               s->payload_len ? s->payload_len : 1);
             if (!copy) break;
@@ -1235,16 +1171,12 @@ int sh_navmesh_open(const char *name, unsigned char **out_bytes, size_t *out_len
     return 1;
 }
 
-/* ==================================================================== */
-/* report + install                                                      */
-/* ==================================================================== */
-
 void sh_navmesh_report(void (*out)(const char *fmt, ...))
 {
     size_t i;
     if (!out) return;
 
-    /* Always report the last map-load scan before current serving state. */
+    /* The last map-load scan comes before the current serving state. */
     out("navigation: %lu map load(s) this session; the last found %zu baked set(s)\n",
         (unsigned long)InterlockedCompareExchange(&g_build_count, 0, 0), g_last_build_sets);
 
@@ -1293,10 +1225,6 @@ void sh_navmesh_install(void)
         : "NAV: baked-navigation serving OFF by config; maps keep their baked navigation and the engine "
           "serves its own navigation");
 }
-
-/* ==================================================================== */
-/* internal + test seams                                                 */
-/* ==================================================================== */
 
 static int nav_held_count(void)
 {

@@ -1,50 +1,8 @@
-/* modui.h -- the WebView Mods tab's backend (the `mods` interface slot).
- *
- * One JSON document (payload v4, docs/webview-ui.md) describes what a player
- * needs to see:
- *   mods      one row per mod folder of the store (modstore enumeration):
- *             the player's own mods at the root of mods\ (with their
- *             organizing folders as "group"). A map's content is not a mod
- *             folder: it is the content cache's, listed by the content action
- *             (modcache.h) with Add to my mods. A row is "ready" when its build serves, else
- *             "attention" with one plain sentence saying what is wrong and
- *             what to do ("cause"). It carries what the details pane shows:
- *             the Toybox rows the mod adds, what it changes in the game (its
- *             derived edits, editor tweaks, replacements), what it borrows
- *             from the game, its console settings, the builder's warnings in
- *             plain words, and the informational same-files hint (another of
- *             the player's mods carries at least half of its files). "salt"
- *             is the mod's identity for the Files view; no sentence names a
- *             salt, a hash or a build number.
- *   map       the manifest rows the last map load carried (modmanifest's
- *             current record), each with its state under the asset rule
- *             (modserve.h sh_modserve_row_served: active, incomplete,
- *             skipped, missing) and the refusal sentence, and the builds the
- *             placed entities resolve to now (the save-time closure,
- *             modserve_bundles_for_names_visit); with the map's JSON bound
- *             also its name, last save, published and uploaded state (the
- *             record's links and claims), the search tag, and one entry per
- *             mod it uses with the entities that use it and the wires and
- *             Timelines pointing at them (modmap.h)
- * The actions are install, uninstall one folder (the open map cleaned of it
- * first), attach a mod to the open map (a map-level row, modmanifest.h) and
- * remove a mod from it, their dry runs, the registry choice, Refresh (the one
- * rescan: there is no folder watcher, so Refresh builds every changed folder
- * and brings the change into the game), New mod, the read-only Files view,
- * and the palette rebuild. What the tab does not show (every folder's state,
- * conflicts with their winners, the game files mods replace, verification)
- * is printed by sh_modui_doctor, the `sh_mods doctor` verb.
- *
- * Threads: every operation except FETCH and ROOT runs on DOOM's main thread
- * (the frontend calls the slot inside run_on_main), except the file part of
- * Install, New mod and Refresh: the window runs those on its own worker, so a
- * build never holds the game, and then asks for SH_MODS_ACT_APPLY on the main
- * thread. The store lock serializes their file work with the sh_mods console
- * command and the map-load conversion that also use the store. The document
- * and the action result are kept in one buffer that FETCH copies on any
- * thread.
- *
- * File work only, apart from the bound engine operations below. */
+/* modui.h -- the WebView Mods tab's backend (the `mods` interface slot): one JSON document (payload v4,
+ * docs/webview-ui.md) of the store's mod rows and the open map's manifest rows, plus the tab's actions and the
+ * `sh_mods` console verbs. Every operation except FETCH and ROOT runs on DOOM's main thread, except the file part of
+ * Install, New mod and Refresh (the window's worker, finished by SH_MODS_ACT_APPLY on the main thread), which the
+ * store lock serializes with the sh_mods command; FETCH copies the shared buffer on any thread. */
 #ifndef SNAPMAP_PLUS_MODUI_H
 #define SNAPMAP_PLUS_MODUI_H
 
@@ -76,96 +34,72 @@ typedef struct sh_modui_script_info {
     char *stop;           /* the stop line while status is STOPPED (malloc'd, whole; the reader frees it), else NULL */
 } sh_modui_script_info;
 
-/* Engine operations, bound by iface_engine.c in the product and by fakes in
- * tests. A NULL member takes the product default where there is one (rescan,
- * palette rebuild and the stock reader; none in a SH_MODUI_PURE build) and is
- * otherwise unavailable: the matching part of the document is omitted or the
- * action refuses. */
+/* Engine operations, bound by iface_engine.c and by fakes in tests. A NULL member takes the product default where
+ * there is one (rescan, palette rebuild, stock reader; none in a SH_MODUI_PURE build), else the matching part of
+ * the document is omitted or the action refuses. */
 struct sh_modserve_refresh;
 struct sh_modui_map_info;
 
 typedef struct sh_modui_engine {
     int (*on_main_thread)(void);        /* 1 main, 0 other, negative unknown */
-    /* Emit every placed name of the open editor map: each entity's inherit
-     * and the string values of its decl text. Returns the number of entities
-     * read, or -1 when no editor map is open. Main thread only. */
+    /* Emit every placed name of the open editor map (each entity's inherit and its decl text's string values).
+     * Returns the entities read, or -1 when no editor map is open. Main thread only. */
     int (*placed_names)(sh_modui_name_fn emit, void *context);
     int (*rescan)(void);                /* sh_modserve_index_rescan */
-    /* Propagate what the rescan changed into the running game
-     * (sh_modserve_refresh_after_rescan): 0 nothing changed, 1 applied,
-     * 2 deferred. Main thread, after rescan. */
+    /* Propagate the rescan's changes into the running game (sh_modserve_refresh_after_rescan): 0 nothing changed,
+     * 1 applied, 2 deferred. Main thread, after rescan. */
     int (*refresh)(struct sh_modserve_refresh *out);
     int (*palette_rebuild)(void);       /* modserve_palette_rebuild_requested: 1 ran, 0 refused */
-    /* Existence of an installed game resource: 1 present, 0 absent, -1 the
-     * reader is unavailable (stock shadows and needs cannot be checked). */
+    /* An installed game resource: 1 present, 0 absent, -1 reader unavailable. */
     int (*stock_exists)(const char *request);
-    /* The open editor map serialized as a save would (no save side effects),
-     * in a process-heap buffer the caller frees with HeapFree. 1 with *out,
-     * 0 no editor map, -1 failed. Main thread only. */
+    /* The open editor map serialized as a save would, in a process-heap buffer the caller frees with HeapFree.
+     * 1 with *out, 0 no editor map, -1 failed. Main thread only. */
     int (*map_json)(char **out, size_t *len);
-    /* The open map's saved-map ids and search tag (the editor's own model,
-     * which the next local save writes). 1 when a map is open; tagged is 1,
-     * 0, or -1 unknown. Main thread only. */
+    /* The open map's saved-map ids and search tag (what the next local save writes). 1 when a map is open;
+     * tagged is 1, 0, or -1 unknown. Main thread only. */
     int (*map_info)(struct sh_modui_map_info *out);
-    /* Delete editor entities (uniqueIds) through DOOM's own Delete Selection
-     * in one undo step (sh_editor_delete_batch). Returns its status
-     * (SH_EDITOR_DELETE_*: 1 dispatched). Main thread only. */
+    /* Delete editor entities (uniqueIds) through DOOM's own Delete Selection in one undo step
+     * (sh_editor_delete_batch); returns SH_EDITOR_DELETE_* (1 dispatched). Main thread only. */
     int (*delete_entities)(const int *ids, int count);
     /* Remove `tag` from the open map's tags. 1 removed, 0 absent, -1 failed. */
     int (*remove_tag)(const char *tag);
-    /* 1 with the cause when the game cannot take a change now (Play is
-     * running, a map is loading), else 0. */
+    /* 1 with the cause when the game cannot take a change (Play is running, a map is loading), else 0. */
     int (*busy)(char *cause, size_t cap);
     /* The editor toast with a title and literal text; nothing outside the editor. */
     void (*toast)(const char *title, const char *text);
     /* One line in the game console (no newline). */
     void (*print)(const char *line);
-    /* Bring a map-scope change into the running game (modserve.h,
-     * sh_modserve_scope_apply; none in a SH_MODUI_PURE build): 1 applied,
-     * 0 nothing pending, -1 refused. Main thread. */
+    /* Bring a map-scope change into the running game (sh_modserve_scope_apply): 1 applied, 0 nothing pending,
+     * -1 refused. Main thread. */
     int (*scope_apply)(const char *phase);
-    /* The same for a declared set the author changed (map add, upgrade):
-     * the declared builds' decls are registered first, as a map load does
-     * (modserve.h sh_modserve_scope_activate). Unbound: scope_apply. */
+    /* The same for a declared set the author changed (map add, upgrade): the declared builds' decls are registered
+     * first, as a map load does (sh_modserve_scope_activate). Unbound: scope_apply. */
     int (*scope_activate)(const char *phase);
-    /* Whether the editor has left the map it had open, asked when the editor
-     * screen is down (map_info 0): 1 left (no editor state runs: the hub or
-     * the map browser, or the editor is exiting or shutting down), 0 a menu
-     * screen over the open map (the Start menu's Settings), -1 unknown. The
-     * map scope's exit waits for 1 (or -1, or no op bound). Main thread. */
+    /* Asked when the editor screen is down (map_info 0): 1 the editor has left the map (no editor state runs),
+     * 0 a menu screen is over the open map (the Start menu's Settings), -1 unknown. The map scope's exit waits for
+     * 1 (or -1, or no op bound). Main thread. */
     int (*map_left)(void);
-    /* Empty the open map's undo and redo history to the current state
-     * (editor_undo.h sh_editor_undo_clear; none in a SH_MODUI_PURE build).
-     * probe 1: 1 possible, 0 no editor map, -1 unavailable; probe 0: 1
-     * cleared, 0 no editor map, -1 failed. Main thread. */
+    /* Empty the open map's undo and redo history to the current state (sh_editor_undo_clear). probe 1: 1 possible,
+     * 0 no editor map, -1 unavailable; probe 0: 1 cleared, 0 no editor map, -1 failed. Main thread. */
     int (*clear_undo)(int probe);
-    /* Mark the open map modified, as a placed entity does: one undo step
-     * named `label` through the editor's own commit (editor_undo.h
-     * sh_editor_mark_modified; none in a SH_MODUI_PURE build), so leaving the
-     * editor asks to save and the map's next save writes the change. 1
-     * marked, 0 no editor map, -1 unavailable. Main thread. */
+    /* Mark the open map modified as a placed entity does: one undo step named `label` through the editor's own
+     * commit (sh_editor_mark_modified). 1 marked, 0 no editor map, -1 unavailable. Main thread. */
     int (*mark_modified)(const char *label);
     /* 1 while a native editor action has not committed yet
      * (sh_editor_delete_native_pending): the Uninstall's undo clear waits for
      * the delete's own commit. */
     int (*undo_pending)(void);
-    /* A hub launch's pre-load pass (modserve.h sh_modserve_launch_preload):
-     * called once per launch by sh_modui_scope_launch, before the launched
-     * map's listing and the PLAY mode are set, while the game is still at
-     * the hub. Unbound: nothing (the level load's own passes parse). */
+    /* A hub launch's pre-load pass (sh_modserve_launch_preload), called once per launch by sh_modui_scope_launch
+     * while the game is still at the hub. Unbound: nothing. */
     int (*launch_preload)(const char *why);
-    /* Mod scripts (script_runtime.h; none in a SH_MODUI_PURE build). Any
-     * thread. script_info: 1 with *out when `salt` has scripts in the current
-     * or last Play, else 0. script_log: each line of `salt`'s log, oldest
-     * first (prints, warnings, the stop line); returns the count. script_mods:
-     * each salt with a log or a state, once; returns the count. */
+    /* Mod scripts (script_runtime.h; none in a SH_MODUI_PURE build). Any thread. script_info: 1 with *out when
+     * `salt` has scripts in the current or last Play, else 0. script_log: each line of `salt`'s log, oldest first;
+     * returns the count. script_mods: each salt with a log or a state, once; returns the count. */
     int (*script_info)(const char *salt, sh_modui_script_info *out);
     int (*script_log)(const char *salt, sh_modui_line_fn fn, void *context);
     int (*script_mods)(sh_modui_name_fn fn, void *context);
-    /* The sound banks whose file changed after the game loaded them this
-     * session (modsound.h sh_modsound_restart_banks; none in a SH_MODUI_PURE
-     * build): fn(context, the bank's file name) once each, then `owner` the
-     * salt of the mod serving the new bytes. Returns the count. Main thread. */
+    /* The sound banks whose file changed after the game loaded them (sh_modsound_restart_banks): fn(context, bank
+     * file name, owner salt) once each; returns the count. Main thread. */
     int (*restart_banks)(void (*fn)(void *context, const char *bank, const char *owner), void *context);
 } sh_modui_engine;
 
@@ -173,9 +107,8 @@ typedef struct sh_modui_map_info {
     char local_id[64];     /* the saved-map id, "" before the first save */
     char cloud_id[64];     /* its cloud-saved item id, "" when none */
     int  tagged;           /* the search tag "mods": 1, 0, or -1 unknown */
-    /* The rawmap file the open map was opened from, while no save has named
-     * it (sh_rawmap_open_unsaved), else "". The edit's ids then still name
-     * the saved map the reload borrowed, so they are not the open map's. */
+    /* The rawmap file the open map was opened from while no save has named it (sh_rawmap_open_unsaved), else "";
+     * the edit's ids then name the saved map the reload borrowed, not the open map's. */
     char opened_from[260];
 } sh_modui_map_info;
 
@@ -187,107 +120,45 @@ void sh_modui_bind(const sh_modui_engine *engine);
  * refused (off the main thread) or out of memory. */
 int  sh_modui_list(void);
 
-/* Run one action (SH_MODS_ACT_*) and keep its result document
- * {"action","ok","message",...} in the shared buffer. `arg` is the folder for
- * INSTALL (absolute; several separated by newlines), a row's key (its folder
- * name under mods\) for UNINSTALL and the map actions. INSTALL, NEW_MOD and
- * RESCAN may be called off the main thread: their file work runs there and
- * their result carries "apply": true until SH_MODS_ACT_APPLY, on the main
- * thread, brings the change into the game and answers the finished result
- * (its message ends with the one sentence a change still needs: a restart,
- * the next map open, or the return to the editor). UNINSTALL, in
- * order: the open map's
- * entities of the mod through the native delete (refused, with nothing
- * deleted, while Play runs, a map loads or the editor is busy), the open
- * map's undo and redo history cleared to the current state (after the
- * delete's own commit, on the tick), the folder moved to the Windows Recycle
- * Bin (sh_ms_delete_mod_folder; deleted outright, and the result says so,
- * when the bin cannot take it), the rescan. The product never brings a
- * folder back; the player can restore one from the bin by hand. An action
- * number the slot does not know answers "Unknown action.". Returns the
- * result length, or -1 when refused before the action ran.
- *
- * MAP_ADD (arg: a key) attaches that mod to the open map: the current
- * manifest gets a map-level row for the mod's build, the map scope is
- * recomputed and applied at once, and the next save writes the row (so the
- * map publishes, downloads and lists the mod); MAP_REMOVE drops the row
- * again, deleting nothing when no entity uses the mod. A folder a downloaded
- * map or a prefab brought names its mod: the root folder of its salt is
- * attached, and without one the answer sends the player to Add to my mods.
- *
- * Map scope: binding also registers the manifest's scope hook, its row
- * resolver and the serving layer's scope source. At every load the listing is
- * the rows and the placed names, applied at once; at every save the rows
- * written, applied on the next editor tick; at the editor's Play entry the
- * current rows and the live placed names; at a hub launch the launched map's
- * rows alone (sh_modui_scope_launch). The tick (sh_modui_poll_main) clears
- * the listing and the current rows when the editor that had the map open is
- * gone (the hub) or a hub launch's Play has run and is over (its Play began
- * and the game was busy with it, then idle; an idle poll before that, such
- * as the gap between the gate and the level load, keeps them), and sets the
- * listing again when an editor map is open without one. A load activates
- * its rows and the builds its placed names list beyond them
- * (sh_modmanifest_set_listed).
- *
- * The uninstall's dry run reports, with the consequences, how many local
- * saves (My Maps, savegame.user\<profile>\SNAPMAPS<id>\map.decl) carry a
- * row of the mod ("savedMaps") and whether the undo history is cleared
- * ("undoCleared": a map is open).
- *
- * FILES (arg: a key) lists the mod folder's files and the game files its
- * build reads from the install: {key, name, cause, files: [{path, size,
- * kind, class, game, container, inFolder, cause}], truncated}. FILE_TEXT
- * (arg: "<key>\t<path below the folder>") answers one text file, at most
- * 1 MiB of UTF-8 ({key, path, size, text, productBlock, cause}; mod.json
- * without the part Snapmap+ writes); a path outside the folder, a binary
- * kind and a file the folder does not hold are refused. Both read only and
- * change nothing. NEW_MOD (arg: a display name) makes a mod folder with a
- * working example (sh_ms_new_mod_example) and rescans, so its first build
- * runs: {key, file: the example Toybox row's path}. */
+/* Run one action (SH_MODS_ACT_*), keeping its result document {"action","ok","message",...} in the shared buffer.
+ * `arg` is a folder for INSTALL (absolute; several separated by newlines) or a row's key (its folder name under
+ * mods\) for UNINSTALL and the map actions. INSTALL, NEW_MOD and RESCAN may run off the main thread; their result
+ * carries "apply": true until SH_MODS_ACT_APPLY finishes it. Returns the result length, or -1 when refused first. */
+/* UNINSTALL deletes the mod's entities from the open map through the native delete (refused while Play runs, a map
+ * loads or the editor is busy), clears the undo history once that delete commits, recycles the folder (deleted
+ * outright when the bin cannot take it) and rescans. MAP_ADD attaches a mod to the open map as a row the next save
+ * writes; MAP_REMOVE drops the row and deletes nothing. */
+/* FILES (arg: a key) lists the mod folder's and the game's files its build reads; FILE_TEXT (arg: "<key>\t<path>")
+ * answers one text file up to 1 MiB; NEW_MOD (arg: a display name) makes a mod folder with a working example. */
 int  sh_modui_run(int action, const char *arg);
 
-/* The console verbs that share the tab's dry runs and actions:
+/* The console verbs sharing the tab's dry runs and actions (argv[0] is the verb; lines start "MODS: "):
  *   map                         the open map: details, then each mod it uses
- *                               with its placed entities and references and
- *                               whether the whole map uses it
  *   map add "<mod>"             attach the mod to the open map (a map-level row)
  *   map remove "<mod>" [--yes]  the dry run; with --yes it is performed
  *   uninstall "<mod>" [--yes]   the dry run; with --yes it is performed
- * where <mod> is a mod's folder (its path under mods\, or a nested folder's
- * own name). Lines name mods by their names and folders.
- * argv[0] is the verb. Lines start "MODS: ". Returns 1 when the verb was
- * handled (whatever its outcome), 0 for a verb that is not one of these, -1
- * off the main thread. */
+ * <mod> is a mod's folder (its path under mods\, or a nested folder's own name). Returns 1 when the verb was
+ * handled, 0 for another verb, -1 off the main thread. */
 int  sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, void *context);
 
-/* The main-thread tick after each native frame: sh_modui_poll_due is cheap
- * (nothing owed, or under 250 ms since the last map-scope tick: 0; every
- * frame while an Uninstall's undo clear is owed); when it returns 1 the
- * caller runs sh_modui_poll_main inside the process heap scope its
- * main-thread calls use. The tick waits out Play and loads, then clears an
- * owed undo history once the editor's delete has committed, and runs the map
- * scope's part. */
+/* The main-thread tick after each native frame: sh_modui_poll_due is cheap (0 when nothing is owed or under 250 ms
+ * since the last map-scope tick; every frame while an Uninstall's undo clear is owed). When it returns 1 the
+ * caller runs sh_modui_poll_main inside the process heap scope its main-thread calls use. */
 int  sh_modui_poll_due(void);
 int  sh_modui_poll_main(void *context);
 
-/* A hub launch (a My Maps play, a published launch) passed its gate: the map
- * scope declares exactly the launched map's rows (its parse made them the
- * current manifest; the editor's exit cleared the editor map's), and the
- * serving mode is Play. The Play entry then keeps this listing instead of
- * reading the editor, and the tick clears it once that Play has run and is
- * over (launched, loading, playing, running, ended: modui.c). Main thread.
- * Returns the builds whose serving changed. */
 /* The names the open editor map places now (live, not its last save): *names malloc'd, each freed with free(), as
  * sh_modmanifest_names_free does. The count, -1 outside the editor or on failure. Main thread. */
 int  sh_modui_placed_names(char ***names, size_t *count);
+/* A hub launch (a My Maps play, a published launch) passed its gate: the map scope declares exactly the launched
+ * map's rows and the serving mode is Play, kept until the tick clears it once that Play has run and ended.
+ * Main thread. Returns the builds whose serving changed. */
 int  sh_modui_scope_launch(const char *why);
 
-/* A hub launch the published-map gate refused (denied, or dropped from its
- * hold): nothing was launched, so its parse's rows are not declared. With
- * the editor still showing a map, that map's rows come back
- * (sh_modmanifest_current_restore_previous); elsewhere the current manifest
- * is closed and nothing is declared. The serving mode returns to EDITOR.
- * Main thread. Returns the bundles whose serving changed. */
+/* A hub launch the published-map gate refused: nothing was launched, so its parse's rows are not declared. A
+ * map still showing in the editor gets its rows back (sh_modmanifest_current_restore_previous); elsewhere the
+ * current manifest is closed. The serving mode returns to EDITOR. Main thread. Returns the bundles whose serving
+ * changed. */
 int  sh_modui_scope_launch_refused(const char *why);
 
 /* What the tick reads (sh_modui_poll_main): 1 while the editor shows a map (map_info), 0 not, -1 unbound; and 1 while
@@ -305,26 +176,18 @@ int  sh_modui_doctor(int verify, sh_modui_line_fn line, void *context);
  * (*needed set), 0 when nothing has been built. */
 int  sh_modui_fetch(char *out, int out_cap, int *needed, unsigned *generation);
 
-/* The script log op (SH_MODS_SCRIPTS), on any thread, read only: copies into
- * out {"mods":[{"salt","status","stop","lines"}],"salt","total","full","log":[...]}:
- * every mod whose scripts ran in the current or last Play with its state
- * ("none", "running", "stopped", "ended", "waiting") and stop line, and
- * `salt`'s log ("" or NULL: none): its line count in total, and its last
- * SH_MODUI_SCRIPT_TAIL lines (the tail the window shows, asked every second),
- * or every line when the salt is prefixed SH_MODS_SCRIPTS_FULL (Copy log).
- * The log itself keeps every line. Returns 1 copied, -1 when out is NULL or
- * too small (*needed set), 0 when out of memory. It never touches the shared
- * buffer, so a page may ask while a job runs. */
+/* The script log op (SH_MODS_SCRIPTS), any thread, read only: copies into out {"mods":[{"salt","status","stop",
+ * "lines"}],"salt","total","full","log":[...]}, the log being `salt`'s last SH_MODUI_SCRIPT_TAIL lines (all with
+ * the SH_MODS_SCRIPTS_FULL prefix). Returns 1 copied, -1 when out is NULL or too small (*needed set), 0 when out of
+ * memory; it never touches the shared buffer. */
 #define SH_MODUI_SCRIPT_TAIL  1000
 int  sh_modui_scripts(const char *salt, char *out, int out_cap, int *needed);
 
 /* Bumped by every action that can change the store or the serving index. */
 unsigned sh_modui_generation(void);
 
-/* A change the tab did not make (a console verb: sh_mods build, rebuild,
- * install, rescan): bumps the generation, so the window pushes a fresh
- * document to an open Mods tab, as after the tab's own actions. The verbs
- * the tab shares (map, uninstall, choose) bump it themselves. Any thread. */
+/* A change the tab did not make (a console verb: sh_mods build, rebuild, install, rescan): bumps the generation
+ * so the window pushes a fresh document to an open Mods tab. Any thread. */
 void sh_modui_note_changed(void);
 /* The publishing key's Settings requests (SH_MODS_ACT_KEY) and its state in the list document ("publishingKey"),
  * modclaim.h modclaim_key_action and modclaim_key_status_json: each answer malloc'd. Unbound, neither is offered. */
@@ -336,13 +199,9 @@ int  sh_modui_scope_refresh(const char *why);
 /* The interface slot body (see snapmap_plus_iface.h, `mods`). */
 int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
 
-/* Scripts from downloaded maps (the player's setting). While
- * sh_modui_scripted_maps_allowed() is 0, a map whose served content carries
- * scripts is not played (modpublished.c, at the launch and after its content
- * is fetched), with SH_MODUI_SCRIPTS_OFF. A rawmap or prefab ZIP import (modexport.c)
- * whose mods carry scripts is refused with the same sentence while the
- * setting is off, and installs nothing. The Snapmap+ window's Settings menu offers the setting
- * ("mods.scripted_maps", on by default). */
+/* The player's setting "mods.scripted_maps" (on by default): while sh_modui_scripted_maps_allowed() is 0, a map
+ * whose served content carries scripts is not played, and a rawmap or prefab ZIP import whose mods carry scripts
+ * is refused and installs nothing, both with SH_MODUI_SCRIPTS_OFF. */
 #define SH_MODUI_SCRIPTS_OFF \
     "This map's mods include scripts, which you turned off. To play it, turn on " \
     "\"Play Maps Whose Mods Include Scripts\" in the Settings menu of the Snapmap+ window."

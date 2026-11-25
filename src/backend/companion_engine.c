@@ -1,6 +1,5 @@
-/* companion_engine.c -- the engine side of owner-bound companions.
- * See companion_engine.h for the hook, addresses and offsets, and companion.h
- * for the schema. Runs on the game thread inside the spawn chain. */
+/* companion_engine.c -- the engine side of owner-bound companions (hook, addresses and offsets in
+ * companion_engine.h, schema in companion.h). Runs on the game thread inside the spawn chain. */
 #include <windows.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -69,10 +68,8 @@ static find_decl_fn  g_decl;
 static create_fn     g_create;   /* idGameLocal vtable +0x448, modscene_sigs.c */
 static finish_fn     g_finish;   /* +0x458: register, then CallSpawn */
 
-/* One companions table per admitted build that declares any: a salt can be
- * installed twice (the root folder and a map's own copy), and an owner's
- * companions come from the build that serves the owner's entityDef for the
- * open map. */
+/* One companions table per admitted build that declares any; an owner's companions come from the build that serves
+ * its entityDef for the open map. */
 typedef struct cl_build { char hash[SH_MODSERVE_HASH_HEX + 1]; sh_companion_table table; } cl_build;
 static cl_build *g_builds;
 static int g_nbuilds, g_owners;
@@ -135,8 +132,8 @@ static void read_bundle(void *context, const char *id, const char *hash, int pla
     g_nbuilds++;
 }
 
-/* Replace the tables. Only where no spawn iterates them: a gate on the main
- * thread, or the outermost spawn before it reads them (after_spawn). */
+/* Replaces the tables, only where no spawn iterates them: a main-thread gate, or the outermost spawn before it
+ * reads them. */
 static int build_table(void)
 {
     int oom = 0;
@@ -150,8 +147,7 @@ static int build_table(void)
     return g_owners;
 }
 
-/* The owner named `name` in the build that serves its entityDef for the
- * open map, or NULL. */
+/* Returns the companion owner named `name` in the build that serves its entityDef for the open map, or NULL. */
 static const sh_companion_owner *find_owner(const char *name)
 {
     char request[SH_COMPANION_NAME_CAP + 48];
@@ -165,8 +161,7 @@ static const sh_companion_owner *find_owner(const char *name)
     return NULL;
 }
 
-/* Only access violations are contained; an engine idException (a C++ throw)
- * must reach the engine's own handler. */
+/* Only access violations are contained; an engine idException (a C++ throw) must reach the engine's handler. */
 static int av_only(DWORD code)
 {
     return code == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH;
@@ -220,8 +215,8 @@ static const char *decl_str(void *decl, size_t off)
     return probe ? s : NULL;
 }
 
-/* The owner for `decl`: its own name, then each inherited name while it
- * stays in the mods namespace. */
+/* Returns the companion owner for `decl`: its own name, then each inherited name while it stays in the mods
+ * namespace. */
 static const sh_companion_owner *owner_for(void *decl, void *manager)
 {
     int depth;
@@ -257,13 +252,9 @@ static int owner_frame(void *owner, float origin[3], float axis[9])
     return 1;
 }
 
-/* Spawn `decl` at a world pose the way idTarget_Spawn::SpawnSingleEntity does
- *: create it, write spawnPosition and spawnOrientation,
- * then finish, whose CallSpawn runs the class's Spawn with that pose. The
- * class places itself, which is the only placement an idProp_Coop keeps
- *. NULL when the route is unavailable, or when the created object
- * is not an entity (it is still finished, and returned in *loose). */
-
+/* Spawns `decl` at a world pose as idTarget_Spawn::SpawnSingleEntity does: create it, write spawnPosition and
+ * spawnOrientation, then finish, whose CallSpawn runs the class's Spawn with that pose. Returns NULL when the
+ * route is unavailable or the created object is not an entity (it is still finished and returned in *loose). */
 static void *spawn_posed(void *gm, void *decl, const float pose[SH_COMPANION_SPAWN_POSE_FLOATS], void **loose)
 {
     uint8_t edit_args[32];
@@ -286,10 +277,8 @@ static void *spawn_posed(void *gm, void *decl, const float pose[SH_COMPANION_SPA
     return ent;
 }
 
-/* The fallback when the create and finish calls did not resolve: spawn, then
- * move. Entity SetOrigin and SetAxis write the physics only; the engine's own
- * setOrigin event follows them with UpdateVisuals, so this does too. A class
- * that stops presenting after its spawn can still keep its spawn placement. */
+/* The fallback when the create and finish calls did not resolve: spawns, then moves. SetOrigin and SetAxis write
+ * the physics only, so UpdateVisuals follows them as in the engine's setOrigin event. */
 static void *spawn_then_move(void *gm, void *decl, const float pose[SH_COMPANION_SPAWN_POSE_FLOATS])
 {
     void *child = g_spawn_def(gm, decl, -1, SPAWN_ID_NONE, 0);
@@ -325,9 +314,8 @@ static void spawn_companions(void *owner, const sh_companion_owner *o, void *gm,
             cl_log("COMPANIONS: %s: companion %d '%s' is not a known entityDef; skipped", o->owner, i, e->entitydef);
             continue;
         }
-        /* SpawnEntityDef constructs the decl's parsed class. A decl whose load
-         * failed (an unknown inherit, say) is a default that would spawn as a
-         * bare idEntity, and an unloaded one has no class yet. */
+        /* A decl whose load failed is a default that would spawn as a bare idEntity, and an unloaded one has no
+         * class yet. */
         state = read_u8(decl, RES_STATE);
         if (state & 3) {
             g_failed++;
@@ -358,7 +346,7 @@ static void spawn_companions(void *owner, const sh_companion_owner *o, void *gm,
            o->owner, made, o->count, first_class[0] ? first_class : "-", posed, made - posed);
 }
 
-/* A rescan publishes a new serving table; its build stats tell it apart. */
+/* Rebuilds the tables when a rescan published a new serving table, told apart by its build stats. */
 static void refresh_if_changed(void)
 {
     sh_modserve_stats now;
@@ -380,9 +368,8 @@ static void after_spawn(void *obj)
     if (!sh_companion_owner_namespace(decl_str(decl, DECL_NAME)) &&
         !sh_companion_owner_namespace(decl_str(decl, DECL_INHERIT)))
         return;
-    /* A new index (an install or a download that finished on another thread)
-     * is read at the outermost spawn only: a companion's own spawn runs inside
-     * the loop that iterates its owner's entries. */
+    /* A new index is read at the outermost spawn only: a companion's own spawn runs inside the loop that iterates
+     * its owner's entries. */
     if (g_depth == 1) refresh_if_changed();
     if (!g_owners) return;
     manager = entitydef_manager();
@@ -399,10 +386,8 @@ static void after_spawn(void *obj)
     spawn_companions(ent, o, gm, manager);
 }
 
-/* The spawn subscriber's view of an idEntity: the entityDef's name, then
- * each inherit while it stays in the mods namespace (the walk owner_for
- * makes). Returns the names written, 0 when neither the entityDef nor its
- * first inherit is in that namespace. */
+/* Writes the entityDef's name, then each inherit while it stays in the mods namespace. Returns the names written,
+ * 0 when neither the entityDef nor its first inherit is in that namespace. */
 static int def_chain(void *ent, const char **names, int cap)
 {
     void *decl, *manager = NULL;
@@ -568,7 +553,7 @@ int sh_companions_install(const sig_result *results, size_t count, const uint8_t
     if (g_orig && hook_is_installed((void *)g_orig)) return 1;
     if (!g_resolved) {
         if (!module_base || !resolve(results, count, module_base, &g_target)) return 0;
-        /* For the runtime arm: only DOOM's main thread runs CallSpawn. */
+        /* Only DOOM's main thread runs CallSpawn, which the runtime arm checks. */
         g_main_thread_at = (const uint32_t *)glb_resolve(module_base, "main_thread_id", NULL);
         g_resolved = 1;
     }
@@ -595,8 +580,8 @@ static int on_main_thread(void)
     return id == GetCurrentThreadId() ? 1 : 0;
 }
 
-/* A new serving index since the table was built: the index listener's mark,
- * or other build stats (the test the live detour makes at each owner spawn). */
+/* Returns whether the serving index changed after the last table build: the index listener's mark or other build
+ * stats. */
 static int index_changed(void)
 {
     sh_modserve_stats now;
@@ -606,8 +591,8 @@ static int index_changed(void)
            now.files != g_built_from.files;
 }
 
-/* Runtime arming (companion_engine.h). Every check comes before the table is
- * read again, so a session without companions costs a stats compare per gate. */
+/* Runtime arming (companion_engine.h). Every check comes before the table is read again, so a session without
+ * companions costs a stats compare per gate. */
 int sh_companions_ensure(const char *phase)
 {
     sh_companion_arm a;
@@ -616,7 +601,7 @@ int sh_companions_ensure(const char *phase)
     memset(&a, 0, sizeof a);
     a.resolved = g_resolved;
     a.installed = g_orig && hook_is_installed((void *)g_orig);
-    /* Mod scripts watch the spawn chain too: armed for them without an owner. */
+    /* Mod scripts watch the spawn chain too, so it is armed for them without an owner. */
     if (a.resolved && !a.installed && g_spawn_wanted && g_spawn_wanted() && on_main_thread() == 1) {
         if (prologue_ok()) return commit_detour(at);
         cl_log("COMPANIONS: CallSpawn's prologue is not the expected one (another detour?); not installed at the %s", at);

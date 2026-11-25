@@ -23,7 +23,7 @@ func TestOurMarkerAnywhereInTheFile(t *testing.T) {
 	for _, c := range ourMarker {
 		wide = append(wide, c, 0)
 	}
-	big := 300 << 20 // past the 256 MiB the search used to stop at
+	big := 300 << 20 // past 256 MiB
 	if !carriesOurMarker(write("late.dll", big, big-len(ourMarker), ourMarker)) {
 		t.Error("a marker past 256 MiB was not found")
 	}

@@ -1,15 +1,6 @@
-/* companion_test.c -- owner-bound companions (companion.c, companion_sigs.c).
- *
- * Offline: the "companions" grammar and its refusals, the namespace rule, the
- * first-bundle-wins rule, lookup, and the owner-local to world transform. With
- * build 13954591 executables as arguments: every private signature resolves
- * uniquely at its recorded RVA for that renderer, CallSpawn starts with the 14
- * whole position-independent bytes the detour steals, the SpawnEntityDef
- * wrapper's second call is the idEntity cast, and Bind names its
- * "Tried to bind an object to itself." error. The spawn pose (ADD-L6 G): the
- * twelve floats written at spawnPosition are the composed world transform,
- * the create and finish calls resolve, finish reaches CallSpawn, and entity
- * SetOrigin is the physics-only tail jump that never updates the visuals. */
+/* companion_test.c -- owner-bound companions (companion.c, companion_sigs.c): offline, the grammar, refusals, namespace
+ * and first-bundle-wins rules, lookup and the owner-local to world transform. Given build 13954591 executables, it
+ * also checks that every private signature resolves at its recorded RVA and that the spawn-pose route holds. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -84,8 +75,7 @@ static void test_refusals(void)
         CHECK(r == -1 && t.count == 0 && g_lines == before + 1);
         sh_companion_table_free(&t);
     }
-    /* Any number of companions per owner and of owners in all (no count of the product's own): 40 companions of one
-     * owner (the former limit was 16) and 300 owners (the former limit was 256). */
+    /* No count limit on companions per owner or on owners: 40 companions of one owner and 300 owners. */
     {
         static char json[65536];
         size_t n;
@@ -158,8 +148,7 @@ static void test_compose(void)
     e.axis[1] = 1.0f; e.axis[3] = -1.0f; e.axis[8] = 1.0f;
     sh_companion_compose(origin, axis, &e, at, rot);
     CHECK(close_to(rot[0], -1) && close_to(rot[1], 0) && close_to(rot[4], -1) && close_to(rot[8], 1));
-    /* R245's left Olivia display: its panel-local rows and the source panel basis
-     * give back the source GUI basis. */
+    /* A left-hand display's panel-local rows and the source panel basis give back the source GUI basis. */
     {
         const float panel[9] = { 5.96e-08f, -1.0f, 0.0f,  1.0f, 5.96e-08f, 0.0f,  0.0f, 0.0f, 1.0f };
         const float zero[3] = { 0, 0, 0 };
@@ -175,8 +164,7 @@ static void test_compose(void)
 }
 
 /* The spawn pose block: spawnPosition (+0x3A8), then spawnOrientation rows
- * (+0x3B4), as compose gives them. The v3-companions case: an owner yawed
- * +90 at (200, 0, 16), its companion 64 above it. */
+ * (+0x3B4), as compose gives them: an owner yawed +90 at (200, 0, 16), its companion 64 above it. */
 static void test_spawn_pose(void)
 {
     const float origin[3] = { 200.0f, 0.0f, 16.0f };
@@ -197,7 +185,6 @@ static void test_spawn_pose(void)
     CHECK(close_to(pose[3], 0) && close_to(pose[4], 1) && close_to(pose[6], -1) && close_to(pose[11], 1));
 }
 
-/* ---- runtime arming (sh_companions_ensure's checks) -------------------- */
 
 static int arm(int resolved, int on_main, int installed, int changed, int owners, int prologue_ok)
 {
@@ -218,7 +205,7 @@ static void test_arm(void)
     /* Off DOOM's main thread, or the main thread unknown: never armed, not even read. */
     CHECK(arm(1, 0, 0, 1, -1, -1) == SH_COMPANION_ARM_OFF_MAIN);
     CHECK(arm(1, -1, 0, 1, 2, 1) == SH_COMPANION_ARM_OFF_MAIN);
-    /* The index unchanged since the table was built: nothing to do. */
+    /* The index is unchanged since the table was built: nothing to do. */
     CHECK(arm(1, 1, 0, 0, -1, -1) == SH_COMPANION_ARM_UNCHANGED);
     /* Changed: rebuild the table first. */
     CHECK(arm(1, 1, 0, 1, -1, -1) == SH_COMPANION_ARM_BUILD);
@@ -230,7 +217,6 @@ static void test_arm(void)
     CHECK(!strcmp(sh_companion_arm_name(SH_COMPANION_ARM_FOREIGN), "prologue changed"));
 }
 
-/* ---- images ---------------------------------------------------------- */
 
 static uint8_t *map_pe_by_rva(const char *path)
 {

@@ -22,10 +22,9 @@ static float site_reads(const unsigned char *site)
     int32_t disp;memcpy(&disp,site+5,4);
     return *(const volatile float*)(site+9+disp);
 }
-/* The solver's descent (VK FUN_1412b3780) over a column of surfaces given
- * top-down: start 100 above the map top, segments of `drop`, restart 1 below
- * each hit, stop at the first miss. Returns the index of the surface it keeps,
- * or -1 when the first segment misses (the previous FPS position is kept). */
+/* The solver's descent (VK FUN_1412b3780) over surfaces given top-down: start 100 above the map top, segments
+ * of `drop`, restart 1 below each hit, stop at the first miss. Returns the kept surface's index, or -1 when
+ * the first segment misses (the previous FPS position is kept). */
 static int descend(float map_top,const float *surface,int n,float drop)
 {
     float z=map_top+100.0f;int i=0,kept=-1;

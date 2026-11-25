@@ -1,5 +1,5 @@
-/* Keep the agent box and door clearance fixed while resizing the room floor.
- * BuildAAS still performs the native placement and cross-module merge. */
+/* Resizes the room floor's AAS while the agent box and door clearance stay fixed; BuildAAS still performs the native
+ * placement and cross-module merge. */
 #include "grid_room_nav.h"
 #include <math.h>
 #include <stdlib.h>
@@ -60,9 +60,8 @@ static int position(unsigned char *p,const nav_axis a[3],int shorts)
     }
     return 1;
 }
-/* The supported modules have one tree and no inter-cluster portals or
- * traversal records. Compact vanished narrow strips, all area references,
- * cover membership, visibility rows and native route chains together. */
+/* The supported modules have one tree and no inter-cluster portals or traversal records. Compacts vanished narrow
+ * strips, all area references, cover membership, visibility rows and native route chains together. */
 static int compact(sh_aas *a,const unsigned *remap,unsigned old,unsigned count)
 {
     unsigned i,j,k,nc=sh_aas_count(a,SH_AAS_L_COVER),out=1,first;
@@ -207,8 +206,8 @@ int sh_grid_nav_resize(sh_aas *a,const sh_grid_size *size)
     }
     for(i=1;i<sh_aas_count(a,SH_AAS_L_COVER);i++){
         unsigned char *p=sh_aas_rec(a,SH_AAS_L_COVER,i);
-        /* Cover is a world point/direction, not an agent inset boundary.
-         * These blank-room markers retain their radius and direction. */
+        /* Cover is a world point and direction, not an agent inset boundary; these markers keep their radius and
+         * direction. */
         for(j=0;j<3;j++){
             float v=sh_aas_get_f32(p,j*4);if(!isfinite(v))goto done;
             sh_aas_put_f32(p,j*4,sh_grid_coordinate(&shell,j,v));

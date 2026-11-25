@@ -7,8 +7,6 @@
 
 #include "modlobby.h"
 
-/* ------------------------------------------------------------ the state codes */
-
 unsigned sh_modlobby_progress_code(unsigned long long done, unsigned long long total)
 {
     /* In steps of 5 %: one message per step at most. */
@@ -38,8 +36,6 @@ int sh_modlobby_decode(unsigned code, int *state, int *percent)
     if (percent) *percent = p;
     return 1;
 }
-
-/* ------------------------------------------------------------ the host's table */
 
 #define LB_MEMBERS 16   /* a SnapMap lobby holds four players; the table outlives a few who came and went */
 
@@ -81,8 +77,6 @@ int sh_modlobby_state_of(uint64_t user, int *percent)
     ReleaseSRWLockShared(&g_table_lock);
     return state;
 }
-
-/* ------------------------------------------------------------ the host's gate */
 
 /* One pending member as the sentences say it: "Sam (42%)", "Sam (could not get it)", or "Sam". */
 static void lb_member_text(const sh_modlobby_member *m, int with_parens, char *out, size_t cap)
@@ -177,10 +171,8 @@ int sh_modlobby_waiting_line(const sh_modlobby_member *members, size_t count, ch
     return 1;
 }
 
-/* ================================================================== engine
- * Build 13954591, both renderers: the sites are located by signature and their
- * offsets are equal on both (read in Ghidra on each, R-CO1). Every engine read
- * and call is SEH-guarded; a failed bind installs nothing. */
+/* Engine side (build 13954591, both renderers): the sites are located by signature and their offsets are equal on
+ * both. Every engine read and call is SEH-guarded; a failed bind installs nothing. */
 
 /* The target of a RIP-relative operand whose opcode bytes are `opcode` at p, else NULL. */
 static void *lb_rip(const uint8_t *p, const char *opcode, size_t n)
@@ -206,7 +198,7 @@ static int lb_has(const uint8_t *from, size_t span, const char *bytes, size_t n)
     return 0;
 }
 
-/* Every offset the detours and the sender rely on, in the bytes of both renderers' functions (R-CO1, R-LB1). */
+/* Every offset the detours and the sender rely on, in the bytes of both renderers' functions. */
 const char *sh_modlobby_check_sites(const sh_modlobby_sites *s, void ***session_slot, const void **acting_lobby)
 {
     void **session;
@@ -221,9 +213,8 @@ const char *sh_modlobby_check_sites(const sh_modlobby_sites *s, void ***session_
     if (memcmp(s->send + 0x179, "\xba\xb6\x00\x00\x00", 5)) return "sender +0x179: the ready command";
     if (memcmp(s->send + 0x146, "\x48\x8d\x8f\x18\x09\x00\x00", 7)) return "sender +0x146: the host's own apply";
     /* The controller's start step reads the same session, then its game lobby (session vtable +0x210) and that
-     * lobby's parameters (LB_PARAMETERS, lobby vtable +0x2B8, the same slot CacheReady calls): call [rax+0x210];
-     * mov rcx, rax; mov rdx, [rax]; call [rdx+0x2B8]. The lobby's vtable is in rdx (R-LB1: a check reading the call
-     * through rax could never match, and turned the lobby off on both renderers). */
+     * lobby's parameters (LB_PARAMETERS, lobby vtable +0x2B8, the slot CacheReady calls): call [rax+0x210];
+     * mov rcx, rax; mov rdx, [rax]; call [rdx+0x2B8]. The lobby's vtable is in rdx, not rax. */
     if (lb_rip(s->controller + 0x10, "\x48\x8b\x0d", 3) != (void *)session) return "controller +0x10: the session global";
     if (memcmp(s->controller + 0xF6, "\xff\x90\x10\x02\x00\x00\x48\x8b\xc8\x48\x8b\x10\xff\x92\xb8\x02\x00\x00", 18))
         return "controller +0xF6: the game lobby's parameters";
@@ -366,7 +357,7 @@ static size_t lb_members(void *lobby, sh_modlobby_member *out, char (*names)[64]
     return n;
 }
 
-/* The host's decision now: 1 when the start may run (not a modded map's lobby we host, or everyone answered). */
+/* The host's decision: 1 when the start may run (not a modded map's lobby we host, or everyone answered). */
 static int lb_host_may_start(const char *where)
 {
     sh_modlobby_member members[8];
@@ -376,8 +367,8 @@ static int lb_host_may_start(const char *where)
     int content;
     if (!lb_hosting_modded(lobby, item, sizeof item, rev, sizeof rev)) return 1;
     /* Every player plays the same bytes. A host whose copy stands in for content some player could get waits for it
-     * (its cause's sentence); one that stands in only for content nobody can get (S3, S5, S4b) starts, solo or with
-     * joiners that compose the same stand-ins (R-LB1 F5; every published play is a lobby the player hosts). */
+     * (its cause's sentence); one that stands in only for content nobody can get starts, solo or with joiners that
+     * compose the same stand-ins. */
     content = sh_modpub_lobby_host_content(item, rev, sentence, sizeof sentence);
     if (content == SH_MODPUB_HOST_REFUSED) {
         lb_logf("MODS: lobby: the %s of '%s' waits: this computer lacks content a player could get", where, item);
@@ -494,8 +485,6 @@ void sh_modlobby_poll(void)
         g_lb.line[0] = 0;
     }
 }
-
-/* ------------------------------------------------------------ install */
 
 static const uint8_t *lb_site(const sig_result *results, size_t count, const uint8_t *base, const char *name)
 {

@@ -1,8 +1,6 @@
-// programs_rp_test.js -- the product's render programs have ONE source each (src/backend/programs/shaders/*.rp), and both
-// renderers get the same rule from it: the OpenGL texts are the .rp sections as written, the Vulkan stage text and
-// SPIR-V are tools/gen_programs.js's translation of the same functions. This checks (a) the translation compiles and
-// its rules do what they say, (b) the call blocks load exactly what modprog.c's SPIR-V splice loads, in its order,
-// (c) the generated files are what the sources give.
+// programs_rp_test.js -- each render program has one source (src/backend/programs/shaders/*.rp): OpenGL gets the .rp
+// text, Vulkan the translation by tools/gen_programs.js. Checks the translation compiles and obeys its rules, the call
+// blocks load what modprog.c's SPIR-V splice loads in its order, and the generated files match the sources.
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { spawnSync } = require('node:child_process');

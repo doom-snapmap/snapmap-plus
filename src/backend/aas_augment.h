@@ -1,21 +1,14 @@
-/* Add walkable surfaces, BSP leaves and reachabilities to shipped AAS.
- *
- * Step-height differences receive reciprocal walk links. Larger changes use
- * per-demon traversal animations from nav_traversal; downward walk-off links
- * follow maxFallHeight. An area can remain a valid island when no route is
- * available. Tests use synthetic payloads.
- */
+/* Adds walkable surfaces, BSP leaves and reachabilities to shipped AAS: reciprocal walk links for step-height
+ * differences, per-demon traversal animations (nav_traversal) for larger ones, and walk-off links by
+ * maxFallHeight. */
 #ifndef SNAPMAP_PLUS_AAS_AUGMENT_H
 #define SNAPMAP_PLUS_AAS_AUGMENT_H
 
 #include <stddef.h>
 #include "aas_edit.h"
 
-/* Ceiling on the boxes one module copy offers and on the walkable pieces they
- * cut into, per demon class. Scratch is about 3 KB per piece plus a 300-byte
- * report entry, 1.5 KB of clip polygons and an 850 KB side buffer, so the
- * ceiling bounds one bake at roughly 11 MB (edge strips aside, see
- * nav_geometry.h). A box past it is left out and reported; it never refuses
+/* Ceiling on the boxes one module copy offers and on the walkable pieces they cut into, per demon class,
+ * bounding one bake's scratch at roughly 11 MB. A box past it is left out and reported; it never refuses
  * the module. */
 #define SH_AUG_MAX_PLATFORMS   2048
 #define SH_AUG_NAME_CAP        64
@@ -24,17 +17,15 @@
 #define SH_AUG_MAX_BLAMED      8
 #define SH_AUG_MAX_DROPPED     16
 
-/* A convex surface in module-local coordinates, wound clockwise from +Z.
- * Input boxes use four corners; prepared geometry may have more. n is its
- * outward normal and face its OBB face index (4 is an upright box's top).
- */
+/* A convex surface in module-local coordinates, wound clockwise from +Z. Input boxes use four corners (corners
+ * is zero); n is its outward normal and face its OBB face index (4 is an upright box's top). */
 typedef struct sh_aug_platform {
     float c[SH_AUG_MAX_CORNERS][3];      /* convex boundary, CW seen from +Z */
-    float n[3];                         /* unit outward normal */
+    float n[3];
     int   face;                         /* OBB face index; 4 == upright top */
     float depth;                        /* the solid's extent along -n behind the face */
-    char  name[SH_AUG_NAME_CAP];        /* for the report only */
-    int   corners;                      /* zero means four input box corners */
+    char  name[SH_AUG_NAME_CAP];
+    int   corners;
     int   prepared;                     /* clearance already applied to the union */
     int   obstacle_only;                /* collide, but never create support */
     float support[4][3];                /* original box face behind a prepared cell */
@@ -51,43 +42,41 @@ enum { SH_AUG_TRAVERSAL_AUTO = 0, SH_AUG_TRAVERSAL_NEVER = 1 };
 typedef struct sh_aug_opts {
     int   fall;             /* SH_AUG_FALL_* */
     int   inset;            /* inset by the agent radius; 1 unless testing */
-    int   traversal;        /* SH_AUG_TRAVERSAL_* */
-    /* Outgoing routes one area may keep, shipped ones included; 0 means the
-     * engine's 256. An area whose own shipped routes already pass it keeps
-     * those and gains nothing. Lowered only to fit the payload cap. */
+    int   traversal;
+    /* Outgoing routes one area may keep, shipped ones included; 0 means the engine's 256. An area whose own
+     * shipped routes already pass it keeps those and gains nothing. */
     int   route_budget;
 } sh_aug_opts;
 
 /* Per-class outcome for one emitted or refused surface. */
 typedef struct sh_aug_platform_result {
     char     name[SH_AUG_NAME_CAP];
-    int      emitted;                   /* 1 if an area was added */
+    int      emitted;
     int      area;                      /* the new area index, or -1 */
     int      carrier;                   /* the area the platform sits over */
     int      leaf_slots_carved;
     int      links;                     /* reachabilities touching this area */
     int      climbs;                    /* baked traversals touching it */
     int      demons;                    /* distinct demons offered a climb */
-    int      island;                    /* 1 if nothing links it */
+    int      island;
     float    tilt_degrees;              /* the chosen face's angle from horizontal */
     int      side_face;                 /* 1 if that face is not the box's top */
     int      neighbours;                /* distinct areas this platform links to */
-    int      leaps;                     /* gap links touching it */
+    int      leaps;
     float    centre[3];                 /* emitted piece centre, used to verify BSP lookup */
-    int      source;                    /* which requested volume this came from */
+    int      source;
     int      pieces;                    /* walkable pieces from the source volume; 1 if unsplit */
-    char     reason[SH_AUG_REASON_CAP]; /* why it was not emitted */
+    char     reason[SH_AUG_REASON_CAP]; /* why it is not emitted */
 } sh_aug_platform_result;
 
-/* Why a floor-side climb onto one face of a box was not placed, most
- * frequent first in the report. */
+/* Why a floor-side climb onto one face of a box is not placed, most frequent first in the report. */
 enum {
     SH_AUG_FACE_BLOCKED = 0,    /* another solid overhangs or stands in the run-up */
-    SH_AUG_FACE_NO_FLOOR,       /* the run-up point is not on walkable floor */
+    SH_AUG_FACE_NO_FLOOR,
     SH_AUG_FACE_NO_TOP,         /* the landing is not on the box's own top */
     SH_AUG_FACE_HEIGHT,         /* no animation of that demon fits the rise */
     SH_AUG_FACE_INSIDE,         /* the edge is a cut inside the box, not a face */
-    SH_AUG_FACE_NO_EDGE,        /* no edge of the top faces the floor there */
+    SH_AUG_FACE_NO_EDGE,
     SH_AUG_FACE_REASONS
 };
 
@@ -107,17 +96,13 @@ typedef struct sh_aug_face {
 typedef struct sh_aug_route_drop { int source, area, routes; } sh_aug_route_drop;
 
 typedef struct sh_aug_report {
-    /* One entry per walkable piece, on the heap: sh_aug_report_free releases
-     * it. source identifies its requested volume; source_count counts
-     * requested volumes.
-     */
+    /* One entry per walkable piece, on the heap (sh_aug_report_free releases it); source identifies its
+     * requested volume and source_count counts them. */
     sh_aug_platform_result *platforms;
     int      platform_count;
     int      source_count;
-    int      pieces_truncated;          /* a box's geometry could not be cut;
-                                         * the whole candidate is refused */
-    /* Degraded, not refused: what was left out so the rest fits. */
-    int      pieces_dropped;            /* walkable faces past the piece ceiling */
+    int      pieces_truncated;          /* a box's geometry could not be cut; candidate refused */
+    int      pieces_dropped;            /* walkable faces past the ceiling: degraded, not refused */
     int      sources_dropped;           /* boxes that lost a face that way */
     int      dropped_sources[SH_AUG_MAX_BLAMED];
     int      dropped_source_count;
@@ -126,40 +111,33 @@ typedef struct sh_aug_report {
     sh_aug_route_drop dropped[SH_AUG_MAX_DROPPED];
     int      dropped_count;
     int      edges_skipped;             /* edges whose floor walk passed its budget */
-    int      file_full;                 /* the area table filled; later pieces skipped */
+    int      file_full;
     int      segments_failed;           /* an edge could not be measured; refused */
     int      dead_gaps;                 /* unlinked pairs beyond step range but below the shortest available jump */
     unsigned areas_before, areas_after;
     unsigned reach_before, reach_after;
     unsigned traversal_points_before;   /* the shipped traversalPoints */
     unsigned depth_before, depth_after;
-    int      depth_exceeded;            /* past the loader's 0x80 limit */
-    int      links_truncated;           /* traversal allocation failed;
-                                         * the whole candidate is refused */
-    int      reach_limit_exceeded;      /* the module's own routes already exceed
-                                         * 256 from one area, or a route names an
-                                         * area that does not exist; refused */
-    int      reach_limit_area;          /* that area, or -1 */
-    /* Requested volumes routing into the full area: the ones a mapper can
-     * move or delete to fit. Empty when the area is shipped floor whose own
-     * links already fill it. */
+    int      depth_exceeded;
+    int      links_truncated;           /* traversal allocation failed; candidate refused */
+    int      reach_limit_exceeded;      /* shipped routes over 256 from one area, or a missing area; refused */
+    int      reach_limit_area;
+    /* Requested volumes routing into the full area, which a mapper can move or delete to fit; empty when
+     * the area is shipped floor whose own links already fill it. */
     int      blamed[SH_AUG_MAX_BLAMED];
     int      blamed_count;
     int      anchors_reduced;           /* alternative basic/traversal samples removed */
-    /* Module floor areas cut around the boxes standing on them (or hanging
-     * lower over them than this class is tall), the areas their pieces added,
-     * floors left whole because their pieces did not fit, and shipped routes
-     * removed because an endpoint lay in the cut-out ground. */
+    /* Floor cuts: areas cut around boxes on or over them, pieces added, floors left whole because pieces did
+     * not fit, and shipped routes removed for an endpoint in cut-out ground. */
     int      floors_cut;
     int      floor_pieces_added;
     int      floors_left_whole;
     int      shipped_routes_removed;
     int      floors_covered;            /* floor areas wholly under boxes, closed to routes */
     int      floor_walks_capped;        /* floor-piece walk samples left out to keep a floor well under 256 */
-    /* Four per requested box (faces[source * 4 + edge]), on the heap with
-     * platforms; NULL when no traversal table was ready. */
+    /* faces[source * 4 + edge]: four per box, on the heap with platforms; NULL without a traversal table. */
     sh_aug_face *faces;
-    int      climbs_declined;           /* climbs/leaps omitted because a source area already owns traversal points */
+    int      climbs_declined;           /* omitted: the source area already owns traversal points */
     /* Climbs, drops and leaps refused because their path would pass through a
      * solid or start from a cut inside a box rather than a real edge. */
     int      through_solids;
@@ -168,19 +146,15 @@ typedef struct sh_aug_report {
     int      leaps_farther;
 } sh_aug_report;
 
-/* Augment a in place. Returns 1 if the model remains coherent, including when
- * individual platforms are refused. On 0, discard the model and serve shipped
- * bytes. The report records per-platform size, clearance and coordinate-range
- * refusals.
- */
+/* Augments a in place. Returns 1 if the model remains coherent, including when individual platforms are
+ * refused (the report records why); on 0, discard the model and serve shipped bytes. */
 int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                    const sh_aug_opts *opts, sh_aug_report *out);
 void sh_aug_report_free(sh_aug_report *out);
 
-/* The route budget (for sh_aug_opts.route_budget) that brings an augmented
- * model of `size` bytes under `cap`, judged from its generated routes per
- * area. Always below `current` (0 meaning 256). Returns 0 when no lower budget
- * can help: the budget is already 1, or the model has no generated route. */
+/* The route budget (for sh_aug_opts.route_budget) that brings an augmented model of `size` bytes under `cap`,
+ * judged from its generated routes per area; always below `current` (0 meaning 256). Returns 0 when no lower
+ * budget can help. */
 int sh_aug_route_budget_for(const sh_aas *a, const sh_aug_report *rep,
                             size_t size, size_t cap, int current);
 

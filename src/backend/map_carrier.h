@@ -1,58 +1,9 @@
-/* map_carrier.h -- the one place a saved map carries Snapmap+'s data.
- *
- * Snapmap+'s per-map data lives in the map's own file, in one root member the
- * engine does not declare, and never in the author's variable table:
- *
- *   "snapmap-plus":{"format":2,
- *       "mods":[<row>,...],
- *       "settings":{"render":"<text>","bounds":"<text>"},
- *       "nav":[{"module":"<category>/<module>","class":"<class>",
- *               "digest":"<16 hex>","geom":"<16 hex>",
+/* map_carrier.h -- the one place a saved map carries Snapmap+'s data: one compact root member the engine does
+ * not declare, appended last at the root, never in the author's variable table:
+ *   "snapmap-plus":{"format":2,"mods":[<row>,...],"settings":{"render":"<text>","bounds":"<text>"},
+ *       "nav":[{"module":"<category>/<module>","class":"<class>","digest":"<16 hex>","geom":"<16 hex>",
  *               "data":["<base64 chunk>",...]},...]}
- *
- *   format    the number 2 (1, before units, reads only for its settings and nav: its "<salt>@<build>" rows are an
- *             earlier shape, below). Any other value, or a member that is not an
- *             object, or a known part of the wrong type (mods and nav arrays,
- *             settings an object), makes the whole member
- *             malformed: it is logged, read as absent and removed, and the
- *             map loads without it.
- *   mods      one object per declared mod build, the manifest's row JSON
- *             (modmanifest.h: mod "<salt>@<build hash>", name, size, names,
- *             attached, choices). A row that does not read is dropped and
- *             counted.
- *   settings  "render" (Unlock View Distance, map_render.h encoding) and
- *             "bounds" (Unlock Map Bounds, map_bounds.h encoding); an absent
- *             key is that setting off (map_settings.h).
- *   nav       one object per baked (module, class) set; "data" is the
- *             payload's base64 split into chunks of SH_SMNAV_CARRIER_CHUNK
- *             characters, in order; "digest" is the sha256 prefix of the
- *             payload and "geom" that of its source geometry (navmesh.h).
- *
- * Every part is optional; parts are written in this order, the member is
- * written compact and appended last at the root, after "~type". Unknown parts
- * are ignored on read and not written back (the "place" of earlier versions,
- * a map's folder under mods\maps\, retired with D4, is one).
- *
- * Load: every parse the DeserializeFromJson detour sees (rawmap.c
- * prepare_map_buffer: My Maps, a published read, a lobby joiner's download, a
- * rawmap) first asks sh_map_old_shape whether the text is in an earlier shape
- * (below); such a map is refused with "This map was saved by an earlier
- * Snapmap+; run the Snapmap+ installer to update it." and its text is not
- * changed. Otherwise each
- * subsystem reads its part from the member, and the member itself is
- * stripped last, so the engine never sees it.
- *
- * Save: after the engine serializes (rawmap.c sh_ser_detour, and the rawmap
- * export), the settings, navigation and manifest steps each put their part
- * with sh_carrier_put. No variable row is written; variables.allocCount is
- * the engine's. A map with nothing to carry has no member, and its saved bytes
- * are exactly the engine's.
- *
- * The engine ignores an undeclared member on every parse (no log), never
- * writes one, and every transport (cloud save, publish, download, Save to My
- * Downloaded Maps, a lobby join) moves the saved bytes unchanged; a vanilla
- * editor save drops it.
- */
+ * Every part is optional and unknown parts are ignored; a map with nothing to carry has no member. */
 #ifndef SNAPMAP_PLUS_MAP_CARRIER_H
 #define SNAPMAP_PLUS_MAP_CARRIER_H
 
@@ -82,32 +33,24 @@ typedef struct sh_carrier_view {
     char   why[96];            /* MALFORMED: what did not read */
 } sh_carrier_view;
 
-/* Read the root of `json`. Returns 1 when the text is one JSON object (view
- * filled; state ABSENT when it has no member), 0 when it is not (view ABSENT).
- * A text that does not name the key is answered without walking it. Two
- * members with the key are MALFORMED. */
+/* Reads the root of `json`: 1 when it is one JSON object (view filled, ABSENT when it has no member), 0 when
+ * not. Two members with the key, a format other than 1 or 2, or a part of the wrong type are MALFORMED. */
 int sh_carrier_view_read(const char *json, size_t len, sh_carrier_view *view);
 
-/* The part's value span, from a fresh read: 1 present, 0 absent (no member,
- * or the member lacks it), -1 when the member is malformed. */
+/* The part's value span, from a fresh read: 1 present, 0 absent, -1 when the member is malformed. */
 int sh_carrier_part(const char *json, size_t len, const char *part, size_t *from, size_t *to);
 
-/* `json` without the member (every one): a process-heap buffer (HeapFree),
- * or NULL when it has none or the text does not read. */
+/* `json` without the member (every one) as a process-heap buffer (HeapFree); NULL when it has none or does not read. */
 char *sh_carrier_strip(const char *json, size_t len, size_t *out_len);
 
-/* `json` with the member carrying `part` ("mods", "settings" or "nav") set to
- * `value` (raw JSON of the right type; NULL removes the part) and its other
- * parts as they were, compact and last at the root; with no part left the
- * member is removed. A process-heap buffer (HeapFree), or NULL: with err ""
- * when the text is already that, with the reason in err on failure (the text
- * does not read, an unknown part, no memory). A malformed member is replaced. */
+/* `json` with the member's `part` ("mods", "settings" or "nav") set to `value` (raw JSON; NULL removes it),
+ * other parts kept; the member is removed when no part is left, and a malformed member is replaced. Returns a
+ * process-heap buffer (HeapFree), or NULL with err "" when the text is already that, else the failure reason. */
 char *sh_carrier_put(const char *json, size_t len, const char *part, const char *value, size_t value_len,
                      size_t *out_len, char *err, size_t err_cap);
 
-/* Iterate the elements of a JSON array span. *cursor starts at the '['
- * (whitespace before it allowed). 1 with the next element's span, 0 at the
- * end, -1 when malformed. */
+/* Iterates a JSON array span; *cursor starts at the '['. 1 with the next element's span, 0 at the end,
+ * -1 when malformed. */
 int sh_carrier_array_next(const char **cursor, const char *end, const char **elem, size_t *elem_len);
 
 /* The value span of member `key` directly inside the object span [obj, end):
@@ -115,25 +58,18 @@ int sh_carrier_array_next(const char **cursor, const char *end, const char **ele
 int sh_carrier_object_member(const char *obj, const char *end, const char *key, const char **value,
                              size_t *value_len);
 
-/* The string value body (no quotes, escapes left as written) of member `key`
- * directly inside the object span [obj, end). 1 found, 0 absent, -1 when the
- * member exists and is not a string or the object does not read. */
+/* The string body (no quotes, escapes as written) of member `key` directly inside [obj, end): 1 found,
+ * 0 absent, -1 when the member is not a string or the object does not read. */
 int sh_carrier_object_string(const char *obj, const char *end, const char *key, const char **body,
                              size_t *body_len);
 
-/* One line for the load log ("member: mods, settings, nav" or the reason it
- * was refused); empty when the text has no member. */
+/* One line for the load log ("member: mods, settings, nav" or the malformed reason); empty with no member. */
 void sh_carrier_describe(const sh_carrier_view *view, char *out, size_t cap);
 
-/* Earlier shapes. Builds before this one carried the same data as string
- * variables in the author's table (info.name smpkg., smpbind., smpref.,
- * smpmod1., smpprod1., smp.render.v1, smp.bounds.v1, smnav1.) or as member
- * rows naming the mod by an "id" and its build as a "bundle", or (format 1,
- * before units) as "mod": "<salt>@<build>". The game reads none of them: one
- * pass answers SH_MAP_OLD_VARIABLES for a variables.string name starting with
- * a family, SH_MAP_OLD_ROWS for such a member row, else
- * SH_MAP_OLD_NONE. A map in an earlier shape is refused with SH_MAP_OLD_REFUSAL;
- * converting it is the installer's, and not in this release. */
+/* Detects maps that carry Snapmap+ data in an unsupported shape: string variables in the author's table
+ * (smpkg., smpbind., smpref., smpmod1., smpprod1., smp.render.v1, smp.bounds.v1, smnav1. names), or member rows
+ * naming a mod by "id"/"bundle" or (format 1) "<salt>@<build>". Answers SH_MAP_OLD_VARIABLES, _ROWS or _NONE;
+ * such a map is refused with SH_MAP_OLD_REFUSAL and its text is not changed. */
 enum { SH_MAP_OLD_NONE = 0, SH_MAP_OLD_VARIABLES = 1, SH_MAP_OLD_ROWS = 2 };
 int sh_map_old_shape(const char *json, size_t len);
 #define SH_MAP_OLD_REFUSAL "This map was saved by an earlier Snapmap+; run the Snapmap+ installer to update it."

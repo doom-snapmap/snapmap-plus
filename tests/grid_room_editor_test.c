@@ -86,18 +86,11 @@ static void blueprint_tests(void)
     *((unsigned char*)normal+0x10)=0;*(int*)(editor+0x21078)=3;
     grid_blueprint_update(normal,mode,editor);assert(opened==2);
 }
-/* The open X/Y/Z sub-editor keeps its draft in the panel context
- * (panel+0x280: entries +0x58, count +0x60, capacity +0x64, stride 0x38, value
- * +0x30), with two snapshots in the same form: +0x70 (the value the row was
- * built with) and +0x88 (copied from the draft when the sub-editor opens).
- * Native accept (Esc) copies the draft into +0x100 and dispatches 100. Both
- * cancel routes restore the +0x88 snapshot into the draft and then apply the
- * draft: the sub-editor's Delete revert dispatches a per-press change, and the
- * Revert dialog's Yes runs the inspector cancel (+0xe8 into the row, context
- * cancel) and dispatches -100. The panel revert restores +0xf4. None may apply
- * a size the room had before an outside change (R-010 C4: the draft Z 3389
- * undid a console resize to 3000; R-014 S2: both cancel routes restored the
- * size the panel opened with). */
+/* The open X/Y/Z sub-editor keeps its draft in the panel context (panel+0x280: entries +0x58, count +0x60,
+ * capacity +0x64, stride 0x38, value +0x30), with snapshots +0x70 (the row's built value) and +0x88 (copied
+ * from the draft on open). Native accept (Esc) copies the draft into +0x100 and dispatches 100; both cancel
+ * routes restore +0x88 into the draft and apply it, and the panel revert restores +0xf4. None may apply a size
+ * the room had before an outside change. */
 static unsigned char draft[3*0x38],built[3*0x38],opened_draft[3*0x38];
 static float draft_value(int i){return *(float*)(draft+i*0x38+0x30);}
 static float entry(const unsigned char *list,int i){return *(float*)(list+i*0x38+0x30);}
@@ -147,7 +140,7 @@ static void redraw_checks(unsigned char *panel)
     /* A user step from the redrawn sub-editor applies and redraws its value. */
     *(float*)(draft+2*0x38+0x30)=2401;native_accept();grid_changed(panel,widget,1);
     assert(rooms[0].xyz[2]==2401&&redraws==before);
-    /* Back to the C4 sequence's state (5120 x 5120 x 3000, as the console set it). */
+    /* Back to the console-resize state (5120 x 5120 x 3000). */
     rooms[0].xyz[2]=3000;native_accept();grid_changed(panel,widget,-1);
     assert(redraws==before+1&&drawn[2]==3000&&widget[0xc8]==0);
 }
@@ -183,8 +176,7 @@ static void sub_editor_draft_checks(unsigned char *panel)
         assert(*(float*)(widget+0x100+4*i)==shown[i]&&*(float*)(widget+0xe8+4*i)==shown[i]);
         assert(*(float*)(widget+0xf4+4*i)==shown[i]&&entry(built,i)==shown[i]&&entry(opened_draft,i)==shown[i]);
         assert(drawn[i]==shown[i]);}
-    /* The open sub-editor was redrawn with the console size, and the row's
-     * dirty marker cleared, by that guard press. */
+    /* That guard press redraws the open sub-editor with the console size and clears the row's dirty marker. */
     assert(redraws==1&&widget[0xc8]==0);
     redraw_checks(panel);before=changes;
     /* After the guard, neither cancel route undoes the console resize. */

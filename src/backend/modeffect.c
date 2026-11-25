@@ -15,8 +15,6 @@
 #include "sdkvalues.h"
 #include "../common/text.h"
 
-/* ------------------------------------------------------------------------------------------ context ---- */
-
 typedef struct ectx {
     sdk_doc *d;
     char *why;
@@ -150,8 +148,6 @@ static int get_value(ectx *c, const sdk_group *g, sdk_word_id w, int dmin, int d
     return 1;
 }
 
-/* ------------------------------------------------------------------------------------- fx writing ---- */
-
 static void put_num(sdk_buf *b, int ind, const char *key, double v)
 {
     char n[32];
@@ -268,8 +264,6 @@ static void write_ev(sdk_buf *b, int index, const ev *e)
     if (e->parms.p) sdk_put(b, e->parms.p, e->parms.n);
     sdk_printf(b, "\t\t\t}\n");
 }
-
-/* ------------------------------------------------------------------------------- the common fields ---- */
 
 static const sdk_word_id COMMON[] = { SDK_F_STARTS, SDK_F_LASTS, SDK_F_FADEIN, SDK_F_FADEOUT, SDK_F_REPEATS,
                                       SDK_F_OFFSET, SDK_F_AT, SDK_F_WHEN, SDK_F_TURN, SDK_F_FOLLOWS, SDK_F_FACING,
@@ -392,8 +386,6 @@ static int fields(ectx *c, const sdk_group *g, const char *what, const sdk_word_
     int n = accepted(all, own, nown);
     return check_fields(c, g, what, all, n);
 }
-
-/* --------------------------------------------------------------------------------------- the items ---- */
 
 static int item_light(ectx *c, const sdk_group *g, ev *e)
 {
@@ -824,11 +816,9 @@ static void env_parms_block(sdk_buf *b, const sdk_env_parm *p, int n)
     put_close(b, 4);
 }
 
-/* ---------------------------------------------------------------------------------------- particles ---- */
-
 /* A value over the particle's life as a stage parm: a constant (val0 = val1), a range per particle (GENERIC), a fade
  * (PARAMETRIC_EVAL: val0 at birth to val1 at death), or a curve, pulse or flicker (CURVE_GENERIC: val0 x table(t) +
- * val1, the table the product derives; Doomforge fxbuild.py, read). `comp` picks the value's component. */
+ * val1, the table the product derives). `comp` picks the value's component. */
 static int life_parm(ectx *c, sdk_buf *b, int ind, const char *key, const sdk_value *v, int comp, double k,
                      double rlo, double rhi, int ranged, char tables[][96], int *ntables)
 {
@@ -1114,8 +1104,8 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
         }
         put_close(&s, 4);
         if (hs && mean != 0) {
-            /* 2016 multiplies the direction's x, y and z by speed[0], [1], [2] (Doomforge R-FXC, read): one speed on
-             * all three; a range per particle is Snapmap+'s launch speed factor (particlemotion.h) */
+            /* 2016 multiplies the direction's x, y, z by speed[0], [1], [2]: one speed on all three; a range per
+             * particle is Snapmap+'s launch speed factor (particlemotion.h) */
             put_open(&s, 4, "speed");
             put_open(&s, 5, "speed");
             for (q = 0; q < 3; q++) {
@@ -1127,7 +1117,7 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
             put_close(&s, 4);
         }
         if (fall && !simulate) {
-            /* 2016's origin function adds -gravity x age^2 (0x1419B8080, read): half the acceleration */
+            /* 2016's origin function adds -gravity x age^2 (0x1419B8080): half the acceleration */
             put_open(&s, 4, "gravity");
             put_range(&s, 5, "gravity", fall / 2, fall / 2, NULL);
             put_word(&s, 5, "world", "true");
@@ -1241,8 +1231,7 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
             }
             put_close(&s, 4);
         }
-        /* GPU stages: the product's choice (modeffect.h SH_EFFECT_GPU_COUNT); drawn on the CPU until the GPU path is
-         * read and measured (R-GS2) */
+        /* GPU stages are the product's choice (SH_EFFECT_GPU_COUNT); the stage is drawn on the CPU */
         if (count >= SH_EFFECT_GPU_COUNT)
             note(c, "particles: %g particles drawn on the CPU (the GPU stages are not yet chosen by the product)", count);
         if (s.oom) { free(s.p); c->oom = 1; return 0; }
@@ -1276,8 +1265,6 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
     }
     return 1;
 }
-
-/* ------------------------------------------------------------------------------------------ the file ---- */
 
 static const sdk_word_id ITEMS[] = { SDK_IT_LIGHT, SDK_IT_DECAL, SDK_IT_SHAKE, SDK_IT_FLASH, SDK_IT_SCREEN,
                                      SDK_IT_BLUR, SDK_IT_FOCUS, SDK_IT_FLARE, SDK_IT_TRAIL, SDK_IT_MODEL, SDK_IT_SOUND,

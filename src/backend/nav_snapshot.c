@@ -140,9 +140,7 @@ int sh_nav_snapshot_take(const sh_nav_snapshot_sources *src, sh_nav_map *out,
         if (navs_matches(src, out, why, sizeof why)) {
             result->source = src->edit == src->build ? SH_NAV_SNAPSHOT_EDITOR_SAME
                                                      : SH_NAV_SNAPSHOT_CONVERTED;
-            /* The pre-build pass has attached every entity to its module, so
-             * the converted copy carries world positions (live, both launch
-             * routes); the reader's tables are module-local. */
+            /* The converted copy carries world positions; the reader's tables are module-local. */
             if (result->source == SH_NAV_SNAPSHOT_CONVERTED) sh_nav_snapshot_map_to_local(out);
             return 1;
         }
@@ -151,10 +149,9 @@ int sh_nav_snapshot_take(const sh_nav_snapshot_sources *src, sh_nav_map *out,
     } else _snprintf_s(result->why, sizeof result->why, _TRUNCATE,
                        "the map being played could not be read");
 
-    /* The same object was just refused; reading it again cannot help. */
+    /* The same object was refused above; reading it again cannot help. */
     if (!src->edit || src->edit == src->build) return 0;
-    /* The map tables are heap-backed and a read never frees what `out`
-     * held: release the refused conversion's tables before reading again. */
+    /* A read never frees what `out` held, so release the refused tables first. */
     sh_nav_map_free(out);
     if (!src->read(src->edit, 1, out, src->ctx)) {
         _snprintf_s(result->why + strlen(result->why), sizeof result->why - strlen(result->why),
@@ -162,7 +159,7 @@ int sh_nav_snapshot_take(const sh_nav_snapshot_sources *src, sh_nav_map *out,
         return 0;
     }
     if (!navs_matches(src, out, why, sizeof why)) {
-        /* An earlier editor session's map: its boxes belong to another map. */
+        /* The edit map may hold another session's map, whose boxes belong elsewhere. */
         _snprintf_s(result->why + strlen(result->why), sizeof result->why - strlen(result->why),
                     _TRUNCATE, ", and the editor's map is a different map (%s)", why);
         sh_nav_map_free(out);

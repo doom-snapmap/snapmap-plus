@@ -1,21 +1,6 @@
-/* script_api_body.h -- script calls on an entity's body: the sync it is a
- * participant of, the gore wounds open on it, and its articulated figure.
- *
- *   e:sync_partner()              -> target, instigator, sync entity, or nil and why
- *   e:wounds_open()               -> { node, ... } the gore nodes open or about to open, or nil and why
- *   e:break_constraint(name, [impulse]) -> true, or false and why
- *
- * Each works on any entity of the map that has the part it reads (a sync
- * participant, a gore component, an articulated figure): a demon, a mod's
- * idGoreEntity, anything else. A receiver without the part, a name the
- * figure does not have or a sync that already ended answers nil or false
- * with a plain reason; only a wrong argument type raises. Nothing is kept
- * across frames and nothing of the game is changed but the receiver's own
- * figure, by the game's own constraint removal.
- *
- * The reads go through the game's type information (script_reflect.h); the
- * one engine call is idPhysics_AF::DeleteConstraint (script_api_sigs.c,
- * ScriptAfDeleteConstraint). */
+/* script_api_body.h -- script calls on an entity's body: e:sync_partner(), e:wounds_open() and
+ * e:break_constraint(name, [impulse]), each answering nil or false with a plain reason when the entity lacks the part.
+ * The reads go through the game's type information; the one engine call is idPhysics_AF::DeleteConstraint. */
 #ifndef SH_SCRIPT_API_BODY_H
 #define SH_SCRIPT_API_BODY_H
 

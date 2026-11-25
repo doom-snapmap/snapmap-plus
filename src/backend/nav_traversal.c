@@ -1,7 +1,5 @@
-/* Parse installed traversal declarations with bounded reads; input need not
- * be NUL-terminated. A rejected table leaves sh_trav_ready false and prevents
- * traversal emission.
- */
+/* Parses installed traversal declarations with bounded reads; input need not be NUL-terminated. A rejected table
+ * leaves sh_trav_ready false. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,9 +10,7 @@
 /* Ascending nominals make equal-distance ties select the smaller clip. */
 const int SH_TRAV_DISTANCE[SH_TRAV_DISTANCES] = { 64, 128, 192, 256, 384, 512 };
 
-/* Parse five families of six distances. The API exposes ledge up/down and
- * leaps; rail families are retained for format validation.
- */
+/* The five families of six distances; selection uses ledge up/down and leaps. */
 static const char *const TRAV_FAMILY[] = {
     "LEAP_ACROSS", "LEDGE_DOWN", "LEDGE_UP", "RAIL_DOWN", "RAIL_UP"
 };
@@ -23,10 +19,7 @@ static const char *const TRAV_FAMILY[] = {
 #define TRAV_FAM_LEDGE_DOWN  1
 #define TRAV_FAM_LEDGE_UP    2
 
-/* travel_time is a routing cost, not an animation-validity check. Use
- * measured medians by nominal distance instead of shipping a table keyed by
- * game animation paths.
- */
+/* travel_time is a routing cost, not an animation-validity check: the median per nominal distance. */
 static const int TRAV_MEDIAN_TIME[SH_TRAV_DISTANCES] = {
     136,    /*  64 */
     152,    /* 128 */
@@ -36,17 +29,11 @@ static const int TRAV_MEDIAN_TIME[SH_TRAV_DISTANCES] = {
     205     /* 512 */
 };
 
-/* ==================================================================== */
-/* the demons                                                            */
-/* ==================================================================== */
-
-/* Derive both flag words from the engine's traversal-monster mask. */
+/* Both flag words from the engine's traversal-monster mask. */
 #define TRAV_FLAGS(M)  ((unsigned)((((0x1000u | (((unsigned)(M)) << 7) | 1u)) << 16) & 0xFFFFFFFFu))
 #define TRAV_D30(M)    ((unsigned)(0x02000000u | (((unsigned)(M)) << 12) | 0x908u))
 
-/* Engine enum order, excluding MARINE and Cyberdemon. decl_name must match
- * the table's monster key exactly.
- */
+/* Engine enum order, excluding MARINE and Cyberdemon; decl_name must match the table's monster key exactly. */
 static const sh_trav_monster TRAV_MONSTER[] = {
     { "Imp",               "imp",               3,  TRAV_FLAGS(3),  TRAV_D30(3)  },
     { "Hellified Soldier", "hellified_soldier", 9,  TRAV_FLAGS(9),  TRAV_D30(9)  },
@@ -60,19 +47,13 @@ static const sh_trav_monster TRAV_MONSTER[] = {
 };
 #define TRAV_MONSTER_COUNT ((int)(sizeof TRAV_MONSTER / sizeof TRAV_MONSTER[0]))
 
-/* ==================================================================== */
-/* the parsed table                                                      */
-/* ==================================================================== */
-
 typedef struct trav_anim {
     char  path[SH_TRAV_PATH_CAP];
     float offset_x;
     int   have;
 } trav_anim;
 
-/* Bound installed declaration size, allowing headroom over the shipped ~90
- * KB.
- */
+/* Bound on installed declaration size, well over the shipped ~90 KB. */
 #define TRAV_TEXT_MAX  (4u * 1024u * 1024u)
 
 static SRWLOCK  g_trav_lock = SRWLOCK_INIT;
@@ -91,15 +72,9 @@ static void trav_clear_locked(void)
     g_ready = 0;
 }
 
-/* ==================================================================== */
-/* the decl scanner                                                      */
-/* ==================================================================== */
-
-/* The scanner expects generated idDeclFile syntax: one assignment per line
- * and braces on separate lines. offset may be absent; when present it
- * contains x. xScale can follow it. Accept integers, decimals, CRLF and an
- * unterminated final line.
- */
+/* The scanner expects generated idDeclFile syntax: one assignment per line and braces on separate lines. offset
+ * may be absent; when present it contains x, and xScale can follow it. Integers, decimals, CRLF and an
+ * unterminated final line are accepted. */
 
 static int trav_is_digit(char c) { return c >= '0' && c <= '9'; }
 
@@ -109,8 +84,7 @@ static int trav_is_word(char c)
            (c >= '0' && c <= '9') || c == '_';
 }
 
-/* Next line of `text`, trimmed of surrounding blanks and of the CR. Returns 0
- * at the end. Every index stays inside [0, len). */
+/* Next line of `text`, trimmed of surrounding blanks and the CR; returns 0 at the end. */
 static int trav_next_line(const char *text, size_t len, size_t *pos,
                           const char **out, size_t *out_n)
 {
@@ -127,9 +101,8 @@ static int trav_next_line(const char *text, size_t len, size_t *pos,
     return 1;
 }
 
-/* Index of the first character of `key`'s value on this line, or -1. The key
- * must be a whole word (so "x" never matches inside "xScale") and must be
- * outside any quoted run (so a path containing the letter is not a key). */
+/* Index of the first character of `key`'s value on this line, or -1. The key must be a whole word outside any
+ * quoted run. */
 static int trav_assign(const char *p, size_t n, const char *key)
 {
     size_t klen = strlen(key), i, j;
@@ -154,7 +127,7 @@ static int trav_assign(const char *p, size_t n, const char *key)
     return -1;
 }
 
-/* Read a bounded quoted value; refuse unclosed or oversized paths. */
+/* Reads a bounded quoted value, refusing unclosed or oversized ones. */
 static int trav_quoted(const char *p, size_t n, size_t at, char *out, size_t cap)
 {
     size_t i, w = 0;
@@ -193,8 +166,7 @@ static int trav_number(const char *p, size_t n, size_t at, float *out)
     return 1;
 }
 
-/* `traversal[<n>] = {` -- the line that opens one row. The container line
- * `traversal = {` deliberately does not match. */
+/* True for the `traversal[<n>] = {` line that opens one row, not the `traversal = {` container line. */
 static int trav_opens_row(const char *p, size_t n)
 {
     static const char K[] = "traversal[";
@@ -226,8 +198,7 @@ static int trav_brace_delta(const char *p, size_t n)
     return d;
 }
 
-/* "LEDGE_UP_128" -> family index + distance index. An unrecognised family or a
- * distance that is not one of the six is not a row we can use. */
+/* Splits "LEDGE_UP_128" into family and distance indices; an unknown family or distance is not usable. */
 static int trav_split_type(const char *type, int *fam, int *dist_idx)
 {
     const char *tail = strrchr(type, '_');
@@ -252,9 +223,7 @@ static int trav_split_type(const char *type, int *fam, int *dist_idx)
     return 0;
 }
 
-/* Refuse the whole table if monster slots run out; silently dropped rows
- * could misrepresent available animations.
- */
+/* Slot for a monster name; -2 when slots run out, which refuses the whole table. */
 static int trav_monster_slot(const char *name)
 {
     int i;
@@ -287,9 +256,7 @@ static void trav_commit_row(int monster, const char *type, const char *path, flo
     strncpy_s(slot->path, sizeof slot->path, path, _TRUNCATE);
 }
 
-/* Parse a complete table with at least one usable ledge or leap animation for
- * an offered demon.
- */
+/* Parses a complete table; succeeds when an offered demon has at least one usable ledge or leap animation. */
 static int trav_parse_locked(const char *text, size_t len)
 {
     size_t pos = 0, n = 0;
@@ -338,7 +305,7 @@ static int trav_parse_locked(const char *text, size_t len)
         }
     }
 
-    /* Open blocks at EOF indicate truncated input. */
+    /* Open blocks at EOF mean truncated input. */
     if (depth != 0 || in_row) return 0;
 
     for (i = 0; i < TRAV_MONSTER_COUNT; i++) {
@@ -354,10 +321,6 @@ static int trav_parse_locked(const char *text, size_t len)
     return 0;
 }
 
-/* ==================================================================== */
-/* loading                                                               */
-/* ==================================================================== */
-
 int sh_trav_load(sh_trav_reader read_decl)
 {
     unsigned char *bytes = NULL;
@@ -368,9 +331,7 @@ int sh_trav_load(sh_trav_reader read_decl)
     if (g_ready) { ReleaseSRWLockExclusive(&g_trav_lock); return 1; }
     if (!read_decl) { ReleaseSRWLockExclusive(&g_trav_lock); return 0; }
 
-    /* Contain faults from the provider callback or declaration parser during
-     * map load.
-     */
+    /* Contains faults from the provider callback or the parser during map load. */
     __try {
         bytes = read_decl(SH_TRAV_DECL_NAME, &len);
         trav_clear_locked();
@@ -412,10 +373,6 @@ const sh_trav_monster *sh_trav_monster_at(int i)
     return &TRAV_MONSTER[i];
 }
 
-/* ==================================================================== */
-/* selection                                                             */
-/* ==================================================================== */
-
 static int trav_slot_for(const sh_trav_monster *m)
 {
     int i;
@@ -424,10 +381,8 @@ static int trav_slot_for(const sh_trav_monster *m)
     return -1;
 }
 
-/* Select the nearest available nominal, ties to the smaller. The engine warps
- * the clip to the endpoints, so this minimizes nominal-distance error. Refuse
- * absent families and distances beyond the stretch/squash bounds.
- */
+/* Selects the nearest available nominal, ties to the smaller, refusing absent families and distances beyond the
+ * stretch/squash bounds. */
 int sh_trav_select(const sh_trav_monster *m, int direction, float drop,
                    char *out_path, size_t path_cap,
                    float *out_offset_x, int *out_distance, int *out_travel_time)
@@ -452,7 +407,7 @@ int sh_trav_select(const sh_trav_monster *m, int direction, float drop,
         max_stretch = SH_TRAV_LEAP_MAX_STRETCH;
     }
     else return 0;
-    /* A NaN fails both comparisons, which is the answer we want for it. */
+    /* A NaN fails both comparisons and is refused. */
     if (!(drop > 0.0f) || !(drop < 1.0e9f)) return 0;
 
     AcquireSRWLockShared(&g_trav_lock);

@@ -17,10 +17,9 @@ import (
 	"strings"
 )
 
-// The fake Releases API serves every subfolder of --root as a release whose tag is the folder name
-// and whose assets are the files in it, newest first, with the size and "sha256:" digest GitHub
-// publishes. The folder is read on every request, so the harness publishes a newer release by adding
-// a folder. A tag with a hyphen is a prerelease.
+// The fake Releases API serves every subfolder of --root as a release (tag = folder name, assets =
+// its files) with the size and "sha256:" digest GitHub publishes, read on every request. A tag with
+// a hyphen is a prerelease.
 
 const repoSlug = "doom-snapmap/snapmap-plus"
 

@@ -1,6 +1,5 @@
-/* The open map's settings (map_settings.h): read from the map's member at
- * load, written into the member at save, held between. The variables earlier
- * builds wrote are not read (map_carrier_test refuses them). */
+/* The open map's settings (map_settings.h): read from the map's member at load, written into the member at save, held
+ * between. Settings named in author variables are not read (map_carrier_test refuses such maps). */
 #include <windows.h>
 #include <assert.h>
 #include <stdio.h>
@@ -98,8 +97,7 @@ int main(void)
         assert(!r.member && !sh_map_render_unlocked(&s.render) && !sh_map_bounds_enabled(&s.bounds));
         take(MAPM("0", "", ",\"snapmap-plus\":{\"format\":1,\"settings\":[]}"), &s, &r);
         assert(!r.member && !sh_map_render_unlocked(&s.render));
-        /* A variable with an earlier build's name is the author's text here:
-         * nothing reads it (the game refuses such a map before this runs). */
+        /* A variable named like a setting is the author's text here: nothing reads it. */
         s = on;
         take(MAP("1", VAR("smp.render.v1", "4;0")), &s, &r);
         assert(!r.member && !sh_map_render_unlocked(&s.render) && !sh_map_bounds_enabled(&s.bounds));

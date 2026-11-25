@@ -1,33 +1,7 @@
-/* script_api_ai_test.c -- the AI calls of mod scripts
- * (src/backend/script/script_api_ai.c), with no engine: the runtime runs
- * real scripts and a fake engine stands behind the seam, recording every
- * event the calls send.
- *
- * Covers: the event catalogue against the build 13954591 event registry
- * (tests/fixtures/scripts/event_registry_13954591.txt, given on the command
- * line): every event the calls send exists there with the argument format
- * the calls build; argument fitting; move completion from the move FSM's
- * status word; angle and ring geometry; and, through scripts, what each call
- * sends (the park, the abort flags once, walk state, the move, facing,
- * enemy, animation, weapon, laser, focus tag), what each query answers
- * (enemy, sight, awareness, path length while searching and once found,
- * find_position, trigger state), the refusals (another mod's demon, an
- * entity that is not a demon, a bad position, an unknown option) as plain
- * stop lines, and a removed demon answering nil.
- *
- * The calls the Tyrant's brain needs: recoil, weapon_ready, aim_point,
- * animation_fits, force_animation_via, firing_position, path_points, spline_clear,
- * monster_type, pain_string, block_pain through scripts; their compositions
- * (sh_ai_firing_run, sh_ai_spline_run, sh_ai_anim_valid_run) over fake
- * primitives with a wall in the world; can_see and find_position against
- * that wall (the trace half of the sight); the pain-string stub run on a
- * synthetic pain request; the per-demon pain records.
- *
- * The engine's fire control calls (fire_mode, pull_trigger, release_trigger,
- * muzzle_on_target, focus, hold, tracking, body_rotation): the engine traffic
- * each one sends (the events, in order, with their arguments), what each reads
- * back from the engine's state, every refusal sentence, and the calls an
- * engine without the game parts refuses plainly. */
+/* script_api_ai_test.c -- the AI calls of mod scripts (src/backend/script/script_api_ai.c), with no engine: the runtime
+ * runs real scripts over a fake engine that records every event sent. Covers the event catalogue against the build
+ * 13954591 registry (tests/fixtures/scripts/event_registry_13954591.txt, given on the command line), what each call
+ * sends and each query answers, the engine's fire control calls, the Tyrant's brain calls, and every refusal sentence. */
 #include "heap_out.h"
 #include <windows.h>
 #include <math.h>
@@ -125,7 +99,7 @@ typedef struct fent {
     const char *item[4];
     int   item_hand[4];
     int   asked_hand;
-    const char *held;      /* the item the engine holds in the hand now (ai:held) */
+    const char *held;      /* the item the engine holds in the hand (ai:held) */
     /* the engine's fire control and aim focus (the fire calls) */
     int   sim;             /* the events change this state as the engine would */
     int   fire_state, fire_anim;
@@ -734,7 +708,7 @@ static void test_move_state(void)
     /* a script's pain request: only over a weaker pain (Eternal's wound pain), never PAIN_NONE or out of range */
     {
         const char *why = NULL;
-        CHECK(sh_ai_request_pain_admits(6, 0, &why) == 1 && why == NULL);          /* falter, no pain now */
+        CHECK(sh_ai_request_pain_admits(6, 0, &why) == 1 && why == NULL);          /* falter: no pain */
         CHECK(sh_ai_request_pain_admits(6, 1, &why) == 1);                         /* over a twitch */
         CHECK(sh_ai_request_pain_admits(6, 6, &why) == 0 && why != NULL);          /* already faltering */
         CHECK(sh_ai_request_pain_admits(6, 9, &why) == 0);                         /* staggered */
@@ -1104,7 +1078,7 @@ static void test_brain_pure(void)
     CHECK(fabsf(pts[1][0] - 25) < 1e-3f && fabsf(pts[1][1] - 20) < 1e-3f);   /* 0.2 x 100 to the left */
     CHECK(fabsf(pts[2][0] - 50) < 1e-3f && fabsf(pts[2][1] - 40) < 1e-3f);
     CHECK(pts[3][0] == 100 && pts[3][1] == 0);
-    /* 40 knots (the old table held 16): every one is a point of the curve */
+    /* 40 knots: every one is a point of the curve */
     for (k = 0; k < 40; k++) { tt[k] = (k + 1) / 41.0f; tv[k] = 0.1f; }
     tb.n = 40;
     n = sh_ai_spline_points(a, b, &tb, 90, many, tb.n + 2);
@@ -1186,14 +1160,14 @@ static void test_compositions(void)
     CHECK(sh_ai_firing_run(&g_fake, &g_ent[1], &q, 0, out) == 0 && (out[0] != 0 || out[1] != 0));
     q.kind = SH_AI_POS_SUPERIOR;
     CHECK(sh_ai_firing_run(&g_fake, &g_ent[1], &q, 0, out) == 2);
-    g_wall_x = 300;   /* the demon is blind now: any place that sees over the wall is superior */
+    g_wall_x = 300;   /* the demon is blind: any place that sees over the wall is superior */
     CHECK(sh_ai_firing_run(&g_fake, &g_ent[1], &q, 0, out) == 0 && out[0] > 300);
     q.kind = SH_AI_POS_REPOSITION;
     CHECK(sh_ai_firing_run(&g_fake, &g_ent[1], &q, 0, out) == 0 && out[0] > 600);   /* the far half */
-    q.count = 500;                                        /* the old ring held 16 candidates */
+    q.count = 500;                                        /* a ring of 500 candidates */
     g_ent[1].path_calls = 0;
     CHECK(sh_ai_firing_run(&g_fake, &g_ent[1], &q, 0, out) == 0 && out[0] > 599.9f);
-    CHECK(g_ent[1].path_calls > 16);                      /* every candidate past the old 16 was asked */
+    CHECK(g_ent[1].path_calls > 16);                      /* every candidate past 16 is asked */
     q.count = 8;
     g_wall_x = 0;
     g_ent[1].path_none = 1;
@@ -1332,19 +1306,15 @@ static void test_brain_calls(void)
     CHECK(strstr(log, "spline true 3 110 100\n") != NULL);                  /* the player one second ahead */
     CHECK(strstr(log, "spline2 true\n") != NULL);
     CHECK(strstr(log, "long splines true 62 true 32\n") != NULL);   /* never cut: every knot inside is a point */
-    CHECK(strstr(log, "many true\n") != NULL);                      /* 64 candidates, a max past the old 65,536 */
+    CHECK(strstr(log, "many true\n") != NULL);                      /* 64 candidates, a max above 65,536 */
     CHECK(strstr(g_events, "1:clearAimFocus()\n") != NULL);
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_RUNNING);
     if (g_fail) printf("brain log:\n%s", log);
     sh_script_map_end();
 }
 
-/* A long path: path_points answers every point the engine's path has (the old
- * buffer held 64). */
-/* trigger, trigger_pulled, weapon_ready and equip act on the same weapon:
- * the one in the hand a script names, else the demon's weapon hand; equip
- * takes the item by its decl and says where it went, and tells the author
- * once when the game would never fire it. */
+/* trigger, trigger_pulled, weapon_ready and equip act on the weapon in the hand a script names, else the demon's weapon
+ * hand; equip takes the item by its decl, says where it went, and warns once when the game would never fire it. */
 static void test_weapon_hands(void)
 {
     const char *log;
@@ -1437,6 +1407,7 @@ static void test_face_travel(void)
     sh_script_map_end();
 }
 
+/* path_points answers every point of a long engine path. */
 static void test_long_path(void)
 {
     const char *log;
@@ -1569,7 +1540,7 @@ static void test_fire_calls(void)
     CHECK(strstr(log, "why false body rotation is off\n") != NULL);
     sh_script_map_end();
 
-    /* a hold ends a move the script was waiting on */
+    /* a hold ends a move the script waits on */
     CHECK(start(
         "api = 1\n"
         "local step = 0\n"
@@ -1871,9 +1842,8 @@ static void test_brain_refusals(void)
     expect_stop("self:block_pain('falter', 9999)", "\"block_pain\" needs seconds from 0 to 600, got 9999");
 }
 
-/* force_animation_via: the via node is forced now; when the web has played it
- * and moved on, the destination is asked for; the observer reports the
- * via's blend in and out, then the destination. */
+/* force_animation_via: the via node is forced, then the destination is asked for once the web has played it; the
+ * observer reports the via's blend in and out, then the destination. */
 static void test_anim_force_via(void)
 {
     const char *log;
@@ -2115,7 +2085,7 @@ static void test_posed_legs(void)
     pose.lt = (uint8_t *)lt; pose.lt_stride = (int)sizeof lt[0];
     pose.lq = (uint8_t *)lq; pose.lq_stride = (int)sizeof lq[0];
     CHECK(sh_ai_posed_leg(&pose, &j, fake_leg_solve, &leg) == 1);
-    /* what the solve was asked: the hip's place, the parent's rotation and the foot's place, all in model space */
+    /* what the solve is asked: the hip's place, the parent's rotation and the foot's place, all in model space */
     CHECK(near3(g_leg_hip, 5, 16, 107));
     CHECK(near3(g_leg_parent_q, 0, 0, r) && fabsf(g_leg_parent_q[3] - r) < 1e-4f);
     CHECK(near3(g_leg_target, 5, 16, 27));
@@ -2464,7 +2434,7 @@ static void test_wound_damage_counts(void)
     g_ent[B].live = 0;
     (void)sh_script_handles_sweep(ch, 8);
     CHECK(!sh_wound_count_on(&g_ent[B], B));
-    /* a record whose demon is gone (the resolver no longer gives it for its spawn id) is reused for another; a
+    /* a record whose demon is gone (the resolver gives none for its spawn id) is reused for another; a
      * live demon's is not */
     {
         static fent gone1, gone2;
@@ -2549,7 +2519,7 @@ static void test_snapmap_order(void)
 }
 
 /* ai:release() hands the demon back to its own behaviour until the next command; ai:anim_variable(name, value)
- * sets a variable of its anim web by name (R-AR7). */
+ * sets a variable of its anim web by name. */
 static void test_release_and_anim_variable(void)
 {
     sh_ai_park_slot s;
@@ -2619,8 +2589,8 @@ static void test_release_and_anim_variable(void)
     }
 }
 
-/* The focus guard (R-LV8 lv8vk18: "has an NaN focus point!" every frame): an entity at no point of the world, or the
- * demon itself, is never handed to the engine as a focus; the aim focus is cleared and the call answers false. */
+/* The focus guard: an entity at no point of the world, or the demon itself, is never handed to the engine as a focus
+ * (it would log "has an NaN focus point!" every frame); the aim focus is cleared and the call answers false. */
 static void test_focus_guard(void)
 {
     static const float bad[3][3] = { { NAN, 0, 0 }, { 0, INFINITY, 0 }, { 0, 0, 2e19f } };

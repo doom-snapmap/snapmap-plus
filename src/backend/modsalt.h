@@ -1,14 +1,7 @@
-/* modsalt.h -- a mod's identity: its salt.
- *
- * Every mod gets eight random characters once, at its first scan, written in
- * the builder's part of mod.json ("snapmap-plus": {"salt": ...}). The salt is
- * the key everywhere: the mod's files live under mods/<salt>/, its strings
- * are prefixed by it, a map records <salt>@<build hash>. The folder name is
- * the author's and never carries identity.
- *
- * Grammar: [a-z][a-z0-9]{7}. The leading letter and the absence of '-' and
- * '_' keep the salt one spelling in decl words, bank stems (<salt>_<rest>)
- * and the engine's cooked names. Pure: no engine calls. */
+/* modsalt.h -- a mod's identity: its salt, eight random characters ([a-z][a-z0-9]{7}) drawn once at the mod's first
+ * scan and written in mod.json's "snapmap-plus" block. It is the key everywhere (mods/<salt>/, string prefixes,
+ * <salt>@<build hash> in a map; the folder name never carries identity), and the grammar keeps it one spelling in
+ * decl words, bank stems (<salt>_<rest>) and the engine's cooked names. Pure: no engine calls. */
 #ifndef SNAPMAP_PLUS_MODSALT_H
 #define SNAPMAP_PLUS_MODSALT_H
 

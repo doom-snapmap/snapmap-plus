@@ -29,11 +29,6 @@ typedef struct sub_impl {
     CRITICAL_SECTION lock;          /* guards both the map and the work-queue */
 } sub_impl;
 
-/* obj + 0x08 holds the vtable size marker; the remaining reserved bytes stay
- * zero. The subobject's critical section is the live guard for both registry
- * and queue. */
-
-
 static void iface_register_cmd(sh_iface *self, const char *name, sh_cmd_handler handler, void *ctx)
 {
     if (!self || !self->sub || !name) return;
@@ -83,10 +78,6 @@ static void iface_unregister_cmd(sh_iface *self, const char *name)
     LeaveCriticalSection(&si->lock);
 }
 
-/* Drain on the calling thread, normally the frontend UI worker. Engine-touch
- * command dispatch now runs inline on the engine main thread instead of
- * enqueueing here. Retain this ABI slot for queue consumers and the tick hook.
- * Detached work owns argv until its handler returns. */
 /* Optional drain callback; it runs on the drain caller's thread. */
 static void (*g_tick_hook)(void) = NULL;
 
@@ -95,6 +86,8 @@ void sh_iface_set_tick_hook(void (*fn)(void))
     g_tick_hook = fn;
 }
 
+/* Drain the queue on the calling thread (normally the frontend UI worker); detached work owns argv until its
+ * handler returns. */
 static void iface_drain_work_queue(sh_iface *self)
 {
     if (g_tick_hook) g_tick_hook();
@@ -246,9 +239,8 @@ static void iface_free_text(sh_iface *self, void *text)
     sh_iface_text_free(text);
 }
 
-/* One mutable shared vtable. Registry/drain slots and free_text bind
- * immediately; config and engine callbacks bind separately. Optional slots
- * may remain null. */
+/* The shared vtable: registry, drain and free_text slots bind here; config and engine slots bind separately and
+ * optional ones may stay null. */
 static sh_iface_vtbl g_iface_vtbl_live = {
     .register_cmd     = iface_register_cmd,     /* +0x188 */
     .unregister_cmd   = iface_unregister_cmd,   /* +0x190 */
@@ -256,8 +248,7 @@ static sh_iface_vtbl g_iface_vtbl_live = {
     .free_text        = iface_free_text,        /* +0x3a0 */
 };
 
-/* Config is available before engine installation. Keep its binding separate
- * so later engine binding does not overwrite these cells. */
+/* Config is available before engine installation, so its cells bind separately from the engine slots. */
 void sh_iface_bind_config_slots(const sh_iface_config_slots *slots)
 {
     if (!slots) return;
@@ -371,8 +362,7 @@ sh_iface *sh_iface_create(void)
     si->pinned.map_size = 0;
 
     obj->vtbl = &g_iface_vtbl_live;     /* +0x00 */
-    /* Publish the vtable size so a frontend never reads past an older table.
-     * The other reserved bytes stay zero; si->lock guards live state. */
+    /* Publish the vtable size so a frontend never reads past a shorter table; the other reserved bytes stay zero. */
     ((uint32_t *)(void *)obj->mtx)[0] = SH_IFACE_VTBL_MARK;
     ((uint32_t *)(void *)obj->mtx)[1] = (uint32_t)sizeof(sh_iface_vtbl);
     obj->sub  = (sh_iface_sub *)si;     /* +0x58: sub_impl starts with the fixed header. */

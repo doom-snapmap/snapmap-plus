@@ -31,8 +31,6 @@ static const char *value_words(lua_State *L, int arg)
     }
 }
 
-/* ------------------------------------------------------------- decls */
-
 typedef struct decl_ud {
     void *ptr;
     const char *type;   /* the type as the script named it, kept in the userdata after the struct */
@@ -146,8 +144,6 @@ static void open_decl(lua_State *L)
     lua_setfield(L, -2, "__metatable");
     lua_pop(L, 1);
 }
-
-/* ------------------------------------------------------------ events */
 
 static const char *arg_word(char t)
 {
@@ -373,11 +369,8 @@ static int l_event_args(lua_State *L)
     return 1;
 }
 
-/* ----------------------------------------------------------- signals */
-
 static int g_signals_wanted;   /* a script of this map handles a SnapMap event */
 
-/* Copy the event's key (lower case, without snap_event_). */
 /* The event's key: lower case, without snap_event_ (malloc'd, any length), or NULL without memory. */
 static char *signal_key(const char *s)
 {
@@ -428,14 +421,10 @@ static int l_signal(lua_State *L)
     return 1;
 }
 
-/* ------------------------------------------------------------- cvars */
-
-/* The cvars a script set this map: the value each had before the script's first set, and the value the script
- * last gave it (SPEC-distribution 5.23, who owns a cvar's restore). At the map's end a cvar still at the script's
- * value is put back; one changed since (by the player, the console or a mod's requirement) belongs to whoever changed
- * it and is left as it is. The outstanding restores are also kept in the journal (sh_script_game_ops cvar_journal)
- * while the map runs, so a value the game saved in its settings at a quit or a crash mid-map is put back at the next
- * start (sh_script_game_cvar_recover). */
+/* The cvars a script set this map: the value each had before the script's first set, and the value it last gave.
+ * At the map's end a cvar still at the script's value is put back; one changed since belongs to whoever changed it.
+ * The outstanding restores are also journaled (cvar_journal) while the map runs, so a value the game saved at a
+ * quit or crash mid-map is put back at the next start (sh_script_game_cvar_recover). */
 typedef struct cvar_undo { char *name, *was, *set; } cvar_undo;
 static cvar_undo *g_cvars;
 static int g_ncvars, g_ccvars;
@@ -620,9 +609,8 @@ int sh_script_game_cvar_recover(const char *journal)
         set = journal_value(p, end, "set");
         now = name ? g_ops.cvar_get(name) : NULL;
         def = name && OP(cvar_default) ? g_ops.cvar_default(name) : NULL;
-        /* The game kept the script's value through the quit or crash only when it saves that cvar in its settings: it
-         * reads the script's value now, which is not the cvar's default (a cvar the game does not save starts at its
-         * default). The value the script displaced is put back. */
+        /* The game kept the script's value through the quit or crash only when it saves that cvar: then it reads the
+         * script's value, not the default. The value the script displaced is put back. */
         if (name && was && set && now && def && !strcmp(now, set) && strcmp(set, def) && g_ops.cvar_set(name, was) == 1)
             restored++;
         free(name); free(was); free(set); free(now); free(def);
@@ -676,7 +664,7 @@ static int l_cvar(lua_State *L)
     }
 }
 
-/* entities() -> every entity of the map now, players first */
+/* entities() -> every entity of the map, players first */
 static int l_entities(lua_State *L)
 {
     const sh_script_engine *e = sh_script_api_engine();
@@ -716,7 +704,6 @@ void sh_script_api_game_register(void)
 }
 
 #ifndef SH_SCRIPT_PURE
-/* ============================================================ the engine */
 #include <windows.h>
 #include "../backend_log.h"
 #include "../hook.h"

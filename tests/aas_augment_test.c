@@ -1,6 +1,5 @@
-/* Tests AAS augmentation, BSP splicing, link selection and refusals using synthetic
- * geometry. A 16-unit rise admits walk links; a 128-unit rise without a traversal
- * table remains a reported island. See README.md for fixture provenance. */
+/* Tests AAS augmentation, BSP splicing, link selection and refusals using synthetic geometry: a 16-unit rise
+ * admits walk links, while a 128-unit rise without a traversal table remains a reported island. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,9 +43,7 @@ int sh_config_get_bool(const char *key, int *out_value, unsigned int *out_flags)
     }                                                                         \
 } while (0)
 
-/* ==================================================================== */
-/* a synthetic module: one flat floor slab, findable through the BSP     */
-/* ==================================================================== */
+/* a synthetic module: one flat floor slab, findable through the BSP */
 
 static const unsigned REC[22] = {
     16, 12, 12, 4, 40, 44, 16, 12, 4, 16, 1, 132, 128, 128, 128, 56, 4, 4, 60, 24, 24, 12
@@ -206,8 +203,6 @@ static void mkplat(sh_aug_platform *p, float x0, float y0, float x1, float y1,
     _snprintf_s(p->name, sizeof p->name, _TRUNCATE, "%s", name);
 }
 
-/* ==================================================================== */
-
 static void test_fixture_resolves(void)
 {
     sh_aas *a = load_module();
@@ -235,7 +230,7 @@ static void test_island_at_128(void)
     o.fall = SH_AUG_FALL_AUTO;
     o.inset = 1;
     /* Disable traversal explicitly: the process-wide table cache would make AUTO
-     * depend on which earlier test loaded a table. */
+     * depend on test order. */
     o.traversal = SH_AUG_TRAVERSAL_NEVER;
     mkplat(&p, -500.0f, -500.0f, 500.0f, 500.0f, 128.0f, "roof");
 
@@ -249,7 +244,7 @@ static void test_island_at_128(void)
               "128 is past maxStepHeight and no climb was offered");
     CHECK_MSG(rep.depth_exceeded == 0, "the tree must stay inside the loader limit");
 
-    /* The whole point of the splice: the engine can now find the area. */
+    /* The splice makes the area findable through the engine's BSP. */
     CHECK_MSG(sh_aas_point_area(a, 0.0f, 0.0f, 130.0f) == rep.platforms[0].area,
               "a point standing on the platform resolves to the new area");
 
@@ -465,9 +460,7 @@ static void test_traversal_anchor_pattern(void)
 }
 
 
-/* ==================================================================== */
-/* oriented geometry                                                     */
-/* ==================================================================== */
+/* oriented geometry */
 
 static int near_d(double a, double b) { double v = a - b; return v < 0.001 && v > -0.001; }
 static int near_f(float a, float b) { float v = a - b; return v < 0.001f && v > -0.001f; }
@@ -553,8 +546,8 @@ static void test_contains_is_true_inside(void)
     CHECK(sh_aug_test_quad_contains(q, 50.0, -50.0) == 0);
 }
 
-/* The inset of a ROTATED quad is the rotated inset. The axis-wise inset this
- * replaced would eat the corners and refuse platforms that are large enough. */
+/* The inset of a ROTATED quad is the rotated inset; an axis-wise inset would eat the corners and refuse
+ * platforms that are large enough. */
 static void test_inset_of_a_rotated_quad_stays_rotated(void)
 {
     unsigned char q[2048], in[2048];
@@ -662,9 +655,7 @@ static void test_a_yawed_area_resolves_through_the_bsp(void)
     sh_aas_free(a);
 }
 
-/* ==================================================================== */
-/* chaining: volumes standing together link to EACH OTHER                */
-/* ==================================================================== */
+/* chaining: volumes standing together link to EACH OTHER */
 
 /* Does any reachability join these two areas, and how many? */
 static int reach_count(sh_aas *a, int from, int to)
@@ -740,8 +731,8 @@ static void test_two_abutting_platforms_link_to_each_other(void)
     sh_aas_free(a);
 }
 
-/* A neighbour abutting only PART of an edge. The single midpoint probe this
- * replaced landed past it and answered with the floor. */
+/* A neighbour abutting only PART of an edge must still link; a single midpoint probe would land past it and
+ * answer with the floor. */
 static void test_a_partially_abutting_neighbour_is_found(void)
 {
     sh_aas *a = load_module();
@@ -783,9 +774,7 @@ static void test_a_pair_is_not_emitted_twice(void)
     sh_aas_free(a);
 }
 
-/* ==================================================================== */
-/* leaps: crossing a gap                                                 */
-/* ==================================================================== */
+/* leaps: crossing a gap */
 
 /* Load a synthetic LEDGE/LEAP table through the public loader. */
 static const char *TRAV_TABLE_TEXT =
@@ -913,9 +902,7 @@ static void test_a_steep_gap_is_refused(void)
     sh_aas_free(a);
 }
 
-/* ==================================================================== */
-/* direction: a neighbour ABOVE is a climb, never a step                 */
-/* ==================================================================== */
+/* direction: a neighbour ABOVE is a climb, never a step */
 
 /* Gate steps by absolute height change: a negative drop for a tall rise must
  * not pass a positive maxStepHeight limit and become a plain walk link. */
@@ -1040,12 +1027,9 @@ static void test_a_leap_through_a_third_volume_is_dropped(void)
     sh_aas_free(a);
 }
 
-/* The nearest-leap rule on bare leaps. Area 1 stands at x = 0; tops 2-5 lie
- * east at 300, 450, 600 and 750. 2 and 3 are too close to leap between, so
- * from 1 the demon keeps 2 and 3; 4 and 5 are relayed through 2 (2 -> 4 and
- * 2 -> 5 are shorter than 1 -> 4 and 1 -> 5). A second, farther leap 1 -> 2
- * from another edge goes, another demon keeps its own leap, and a leap north
- * with no relay stays. */
+/* The nearest-leap rule on bare leaps: tops 2-5 lie east of area 1 at 300, 450, 600 and 750. From 1 the demon
+ * keeps 2 and 3, relays 4 and 5 through 2, drops a farther duplicate 1 -> 2, and keeps another demon's own leap
+ * and a leap north with no relay. */
 static void test_farther_leaps_are_relayed_through_the_nearer_box(void)
 {
     enum { N = 10 };
@@ -1074,10 +1058,8 @@ static void test_farther_leaps_are_relayed_through_the_nearer_box(void)
     CHECK_MSG(n == 6, "six of the ten are kept");
 }
 
-/* In a bake: four tops in a row with 300-unit gaps. The far leaps (800) are
- * relayed through the middle tops, each top still leaps to its neighbours,
- * the report counts them, and the payload validates. Without the middle tops
- * the same 800-unit leap is written. */
+/* In a bake of four tops in a row with 300-unit gaps, the far 800-unit leaps are relayed through the middle tops,
+ * the report counts them and the payload validates. Without the middle tops the 800-unit leap is written. */
 static void test_a_row_of_tops_leaps_only_to_its_neighbours(void)
 {
     sh_aas *a = load_module(), *b = load_module();
@@ -1129,11 +1111,9 @@ static void test_a_row_of_tops_leaps_only_to_its_neighbours(void)
     sh_aas_free(b);
 }
 
-/* The rebuilt tree is the spliced one rebalanced: a grid of boxes at four
- * heights, some stacked on others and some yawed, baked with and without the
- * rebuild. Every lump but the nodes is identical, every off-plane sample point
- * resolves to the same area through both trees, the rebuilt tree is
- * shallower, and both validate. */
+/* The rebuilt tree is the spliced one rebalanced: over a grid of boxes at four heights (some stacked, some yawed),
+ * every lump but the nodes is identical, every off-plane sample resolves to the same area through both trees,
+ * the rebuilt tree is shallower, and both validate. */
 static void test_the_rebuilt_tree_keeps_every_area_and_link(void)
 {
     enum { NP = 44 };
@@ -1283,9 +1263,8 @@ static void test_a_bake_at_the_platform_cap_completes(void)
     sh_aas_free(a);
 }
 
-/* Add climbs from a floor that already owns traversal points. Appending must
- * regroup points by from-area so each first_trav_point/num_trav_point range
- * stays contiguous. Index 0 is the dummy; index 1 is an existing floor point. */
+/* Add climbs from a floor that already owns traversal points; appending must regroup points by from-area so each
+ * first_trav_point/num_trav_point range stays contiguous. */
 static void test_existing_traversals_on_our_floor_are_regrouped_not_declined(void)
 {
     sh_aas *a = load_module();
@@ -1362,9 +1341,7 @@ static void test_a_module_without_traversals_still_gets_climbs(void)
     sh_aas_free(a);
 }
 
-/* ==================================================================== */
-/* the geometry matrix: every way two marked volumes can meet            */
-/* ==================================================================== */
+/* the geometry matrix: every way two marked volumes can meet */
 /* In these connected overlap arrangements, each emitted platform must have
  * a route. A refused platform is acceptable; an unexpected island is not. */
 
@@ -1741,8 +1718,7 @@ static void test_the_separated_control_arrangement_is_left_alone(void)
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("two volumes that share nothing are not cut at all\n");
     load_synthetic_traversal_table();
-    /* Caliban's RIGHT case, the control -- and the arrangement every earlier
-     * fixture used, which is why none of them caught any of this. */
+    /* The control: two disjoint boxes side by side. */
     mkbox(&p[0], -384.0f, -384.0f, -128.0f, 384.0f, 16.0f, 0.0f, "left");
     mkbox(&p[1],  128.0f, -384.0f,  384.0f, 384.0f, 16.0f, 0.0f, "right");
     CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
@@ -2244,10 +2220,8 @@ static int payload_validates(sh_aas *a)
     return ok;
 }
 
-/* The floor the box stands on already has its 256 routes. The engine would
- * refuse the map over a 257th, so the box gives up its routes out of that
- * area and keeps the rest of its navigation, instead of the module losing
- * all of it. */
+/* A floor that already has its 256 routes makes the box drop its routes out of that area and keep the rest of
+ * its navigation, since the engine refuses the map over a 257th. */
 static void test_required_routes_over_native_limit_drop_the_box_routes(void)
 {
     sh_aas *a = load_module();
@@ -2316,8 +2290,8 @@ static void test_shipped_routes_over_limit_refuse(void)
     sh_aas_free(a);
 }
 
-/* More boxes than the former 512 ceiling, all on one floor: the module bakes,
- * the floor sheds the routes it cannot hold, and the payload is valid. */
+/* More than 512 boxes on one floor: the module bakes, the floor sheds the routes it cannot hold, and the payload
+ * is valid. */
 static void test_more_than_512_boxes_bake_and_shed_routes(void)
 {
     static sh_aug_platform p[600];
@@ -2683,14 +2657,10 @@ static void test_climb_floor_endpoints_clear_rotated_solids(void)
     sh_trav_test_reset();
 }
 
-/* ==================================================================== */
-/* a module floor split into slabs, as the Grid Room's is                */
-/* ==================================================================== */
+/* a module floor split into slabs, as the Grid Room's is */
 
-/* Floor slabs spanning +/-2000 in y at z = 0, side by side in x, split at
- * `seams`. Areas 1..n carry the shipped floor flag 0x8 and a clockwise edge
- * loop, so the augmenter reads their polygons the way it reads a real module.
- * The BSP is the band -9.6 < z < 200, then one x-plane per seam. */
+/* Floor slabs spanning +/-2000 in y at z = 0, side by side in x, split at `seams`. Areas 1..n carry the shipped
+ * floor flag 0x8 and a clockwise edge loop; the BSP is the band -9.6 < z < 200, then one x-plane per seam. */
 static sh_aas *load_slabs(const float *seams, int nseams)
 {
     unsigned counts[22];
@@ -2955,11 +2925,9 @@ static double footprint_edge_distance(const sh_aug_platform *p, double x, double
     return best;
 }
 
-/* A step whose top is split by the next step standing on it has edges along
- * that cut, deep inside its own box. A floor climb must never arrive on one:
- * its run-up would be pushed out through the box's own face and stretched
- * across its top. Every floor climb lands within the body's clearance of a
- * real face, and no two are identical. */
+/* A step whose top is split by the next step standing on it has edges along that cut, deep inside its own box.
+ * Every floor climb lands within the body's clearance of a real face, never on such an edge, and no two are
+ * identical. */
 static void test_no_floor_climb_lands_on_a_cut_inside_its_own_box(void)
 {
     sh_aas *a = load_slabs(NULL, 0);
@@ -3060,12 +3028,10 @@ static int point_in_footprint(const sh_aug_platform *p, double x, double y, doub
     return 1;
 }
 
-/* The module floor under the first two steps of the user's staircase is cut
- * around them, as a box top is cut around a solid standing on it: no floor
- * area reaches under either step (step 2 hangs at 63, below the 80-unit
- * agent), the ground under them still resolves to a floor area, every floor
- * piece resolves at its centre and walks to the others, and the step keeps
- * its climbs. A box the agent walks under leaves the floor whole. */
+/* The floor under the first two steps of the staircase is cut around them: no floor area reaches under either
+ * (step 2 hangs at 63, below the 80-unit agent), the ground still resolves to a floor area, the pieces resolve at
+ * their centres and walk to each other, and the steps keep their climbs. A box the agent walks under leaves the
+ * floor whole. */
 static void test_the_floor_is_cut_around_the_boxes_on_it(void)
 {
     static const float seams[2] = { -168.0f, 168.0f };
@@ -3147,7 +3113,7 @@ static void test_the_floor_is_cut_around_the_boxes_on_it(void)
     sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
-/* ---- the native placement grid, cut where the floor was cut ------------- */
+/* the native placement grid, cut where the floor was cut */
 
 static unsigned ov_be32(const unsigned char *p)
 { return (unsigned)p[0] << 24 | (unsigned)p[1] << 16 | (unsigned)p[2] << 8 | p[3]; }
@@ -3491,15 +3457,11 @@ static int box_under(const sh_aug_platform *p, int n, double x, double y, double
     return -1;
 }
 
-/* A user's house: a ground slab, a second floor hanging over half of it high
- * enough to walk under, a wall rising through the second floor (so its top
- * is cut along lines deep inside it) and a step standing under its edge.
- * Traversal animations are never collision-checked, so no climb or drop may
- * pass through any of them: none may start on the ground under the second
- * floor and arrive on top of it, and every one must rise in front of the
- * higher box and step over its lip with the whole body in open air (a step's
- * height above the feet excepted, as standing space is cut). The second
- * floor stays reachable from the ground outside it and from the step. */
+/* A user's house: a ground slab, a second floor over half of it high enough to walk under, a wall rising through
+ * the second floor and a step under its edge. Traversal animations are never collision-checked, so no climb or
+ * drop may pass through these boxes or start under the second floor and arrive on top of it, and every one must
+ * rise in front of the higher box and step over its lip with the whole body in open air (a step's height above
+ * the feet excepted). The second floor stays reachable from the ground outside it and from the step. */
 static void test_no_traversal_passes_through_a_slab(void)
 {
     sh_aas *a = load_slabs(NULL, 0);
@@ -3554,11 +3516,8 @@ static void test_no_traversal_passes_through_a_slab(void)
     sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
-/* A box floating above the floor higher than the agent: the floor under it
- * is not cut, since a demon walks beneath it, but a demon rising to its lip
- * in front of a face passes the box's whole height, so every floor climb
- * starts where that body column clears the box -- moved out from under it,
- * not dropped. */
+/* A box floating higher than the agent leaves the floor under it uncut since a demon walks beneath it, but every
+ * floor climb starts where its body column clears the box (moved out from under it, not dropped). */
 static void test_a_climb_onto_a_floating_box_starts_outside_it(void)
 {
     sh_aas *a = load_slabs(NULL, 0);
@@ -3590,10 +3549,9 @@ static void test_a_climb_onto_a_floating_box_starts_outside_it(void)
     sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
-/* Walks between floor pieces are kept like shipped routes, so they must never
- * push a floor past the engine's 256: a floor that already ships 200 routes is
- * not cut and the class still bakes, and no pair of floor areas gets more than
- * four walks a way across one shared edge. */
+/* Walks between floor pieces are kept like shipped routes and must never push a floor past the engine's 256: a
+ * floor that already ships 200 routes is not cut and the class still bakes, and no pair of floor areas gets more
+ * than four walks a way across one shared edge. */
 static void test_floor_walks_stay_inside_the_route_limit(void)
 {
     static const float seams[2] = { -168.0f, 168.0f };

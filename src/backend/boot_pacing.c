@@ -1,29 +1,9 @@
-/* Boot pacing (see boot_pacing.h).
- *
- * Build 13954591:
- *   Load-screen video draw VK FUN_141901c80 / GL FUN_1418fab70, render thread:
- *     LEA RDI,[bink lock] (VK 0x146fd5228 / GL 0x1458dff48, a global holding a
- *     CRITICAL_SECTION pointer; enter = VK FUN_140324320 TryEnter-then-Enter,
- *     leave = FUN_140324370 LeaveCriticalSection); if the first handle
- *     (VK 0x146fd54b0) is open, upload and draw both handles, then
- *     CALL Sleep(10) at VK 0x141901e9b / GL 0x1418fad79 still holding the lock;
- *     after it, re-test the second handle (VK 0x146fd55a0) and read its frame
- *     number, then leave. Every other user of the lock (open VK FUN_141900d00,
- *     close FUN_141901600 which nulls both handles, decode FUN_141902780,
- *     BinkService FUN_1419015a0 on the stream thread, the done query
- *     FUN_141902b60) takes the same lock around its whole access. So the only
- *     state the draw uses after its sleep is re-read after the lock is
- *     re-taken, and releasing the lock for the sleep lets another thread run
- *     exactly what it could already run once the draw returns.
- *   UncachedBackgroundRead VK FUN_141938d70 / GL FUN_14192d6e0: queues one read
- *     with a stack completion byte ([rsp+0x70]), signals the stream thread,
- *     then `while (!done && !this->abort) Sleep(1)` with the call at
- *     VK 0x141938ebe / GL 0x14192d82e; RSI holds `this` throughout.
- *   Both Sleep calls go through the engine's Sleep thunk (REX JMP [IAT]), VK
- *     0x140324620 / GL 0x1403241b0. WinMain calls timeBeginPeriod(1), so each
- *     Sleep(1) costs one 1 ms timer tick or more.
- * Only the two calls' rel32 operands are changed; each points at a product
- * stub on a page within reach of the engine. */
+/* Boot pacing (see boot_pacing.h). Engine sites, build 13954591: the load-screen video draw (VK FUN_141901c80 / GL
+ * FUN_1418fab70, render thread) calls Sleep(10) at VK 0x141901e9b / GL 0x1418fad79 holding the Bink lock (VK
+ * 0x146fd5228 / GL 0x1458dff48, a CRITICAL_SECTION pointer; every other user takes it around its whole access, so
+ * state used after the sleep is re-read). UncachedBackgroundRead (VK FUN_141938d70 / GL FUN_14192d6e0) polls
+ * `while (!done && !this->abort) Sleep(1)` at VK 0x141938ebe / GL 0x14192d82e, RSI = this. Both Sleeps go through
+ * the Sleep thunk (VK 0x140324620 / GL 0x1403241b0); only the two calls' rel32 operands change, to product stubs. */
 #include "boot_pacing.h"
 #include <string.h>
 #include <windows.h>
@@ -71,7 +51,7 @@ int sh_boot_video_sleep_site(const unsigned char *site, uintptr_t *first, uintpt
     *first = rel_target(site, 0x12, 0x16);
     *second = rel_target(site, 0x27, 0x2b);
     *sleep = rel_target(site, SH_BOOT_SLEEP_CALL + 1, SH_BOOT_SLEEP_CALL + 5);
-    /* The CMP right after the sleep re-tests the second handle. */
+    /* The CMP after the sleep must re-test the second handle. */
     tested = rel_target(site, 0x40, 0x45);
     return tested == *second;
 }
@@ -138,7 +118,7 @@ size_t sh_boot_jump_stub(unsigned char *out, size_t cap, uintptr_t fn)
     return sizeof code;
 }
 
-/* The global that holds the Bink CRITICAL_SECTION pointer, set at install. */
+/* The global that holds the Bink CRITICAL_SECTION pointer; set at install. */
 static void *volatile *g_video_lock;
 static volatile LONG g_reads, g_spun, g_yielded, g_slept, g_video_sleeps, g_video_released;
 static LARGE_INTEGER g_qpf;
@@ -157,8 +137,7 @@ void sh_boot_read_wait(unsigned long ms, volatile const char *done, volatile con
     spin_ticks = g_qpf.QuadPart * SH_BOOT_POLL_SPIN_US / 1000000;
     yield_ticks = g_qpf.QuadPart * SH_BOOT_POLL_YIELD_US / 1000000;
     QueryPerformanceCounter(&t0);
-    /* The stream thread usually completes a read within microseconds once it
-     * runs; a short spin catches that without giving up the core. */
+    /* A short spin catches a read the stream thread completes within microseconds. */
     for (;;) {
         if (*done || *abort_flag) { InterlockedIncrement(&g_spun); return; }
         YieldProcessor();
@@ -171,7 +150,7 @@ void sh_boot_read_wait(unsigned long ms, volatile const char *done, volatile con
         QueryPerformanceCounter(&now);
         if (now.QuadPart - t0.QuadPart >= yield_ticks) break;
     }
-    /* A long read: back to the engine's own pacing. The caller re-tests. */
+    /* A long read falls back to the engine's own Sleep(1); the caller re-tests. */
     InterlockedIncrement(&g_slept);
     Sleep(1);
 }
@@ -181,8 +160,7 @@ void sh_boot_video_sleep(unsigned long ms)
     CRITICAL_SECTION *cs = NULL;
     InterlockedIncrement(&g_video_sleeps);
     if (g_video_lock) cs = (CRITICAL_SECTION *)*g_video_lock;
-    /* Release only a lock this thread holds exactly once, so the draw's own
-     * leave stays balanced and an outer holder keeps its lock. */
+    /* Releases only a lock this thread holds exactly once, so the draw's own leave stays balanced. */
     if (cs && (DWORD)(ULONG_PTR)cs->OwningThread == GetCurrentThreadId() && cs->RecursionCount == 1) {
         InterlockedIncrement(&g_video_released);
         LeaveCriticalSection(cs);
@@ -261,7 +239,7 @@ static const sig_result *binding(const sig_result *r, size_t n, const char *name
     return NULL;
 }
 
-/* One page within rel32 reach of every site in sites[]. */
+/* Allocates one page within rel32 reach of every site in sites[]. */
 static unsigned char *near_page(const uintptr_t *sites, size_t n)
 {
     SYSTEM_INFO info;
@@ -291,7 +269,7 @@ static unsigned char *near_page(const uintptr_t *sites, size_t n)
     return NULL;
 }
 
-/* Repoint the 4-byte operand at `at` (the instruction ends at next) to dest. */
+/* Repoints the 4-byte operand at `at` (the instruction ends at next) to dest. */
 static int repoint(uintptr_t at, uintptr_t next, uintptr_t dest, sh_patch_handle *h)
 {
     int32_t old_disp, new_disp;
@@ -338,8 +316,7 @@ unsigned sh_boot_pacing_install(const sig_result *results, size_t count, unsigne
         want = 0;
     }
     if (want) {
-        /* Fill the page completely, then make it read-only and executable
-         * before any operand points at it. */
+        /* The page is filled, then made read-only and executable before any operand points at it. */
         sh_boot_poll_stub(g_page + PAGE_POLL, PAGE_VIDEO - PAGE_POLL, (uintptr_t)sh_boot_read_wait);
         sh_boot_jump_stub(g_page + PAGE_VIDEO, PAGE_END - PAGE_VIDEO, (uintptr_t)sh_boot_video_sleep);
         g_video_lock = (void *volatile *)lock;

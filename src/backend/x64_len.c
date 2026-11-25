@@ -58,7 +58,7 @@ size_t sh_x64_insn_len(const uint8_t *code, size_t avail, unsigned *flags)
         if (op == 0x66) opsize16 = 1;
         else if (op == 0x67 || op == 0xF2 || op == 0xF3 || op == 0xF0 ||
                  op == 0x2E || op == 0x3E || op == 0x26 || op == 0x36 ||
-                 op == 0x64 || op == 0x65) { /* ignored legacy prefix */ }
+                 op == 0x64 || op == 0x65) { /* ignored prefix */ }
         else break;
         i++;
         prefixes++;

@@ -51,9 +51,8 @@ int sh_grid_maximum(sh_grid_kind kind,sh_grid_size *out)
 {
     if(!out||!sh_grid_stock_name(kind))return 0;
     out->kind=kind;
-    /* X is centered; modern Y is centered at 1280; Z starts at zero.
-     * AAS extends past the shell by the 64-unit agent radius, plus 32
-     * units on modern X. Include that margin in signed-short bounds. */
+    /* X is centered, modern Y is centered at 1280 and Z starts at zero. AAS extends past the shell by the 64-unit
+     * agent radius, plus 32 units on modern X; the margin is inside the signed-short bounds. */
     out->xyz[0]=kind==SH_GRID_MODERN?65342:65406;
     out->xyz[1]=kind==SH_GRID_MODERN?62846:65406;
     out->xyz[2]=32767;
@@ -219,9 +218,8 @@ int sh_grid_light_axes(const sh_grid_warp *warp, const float origin[3],
         if (fabsf(length-1) > .001f) return 0;
         o[i] = pivot[i] + (origin[i] - pivot[i]) * scale[i];
     }
-    /* Radius and center are expressed on the light's own axes. Scale each
-     * light axis by the room's per-axis scale along that direction; a
-     * quarter-turn light therefore swaps which room axis its extents follow. */
+    /* Radius and center are on the light's own axes: each is scaled by the room's per-axis scale along that
+     * direction, so a quarter-turn light swaps which room axis its extents follow. */
     for (i = 0; i < 3; ++i) {
         float sum=0;
         for (j = 0; j < 3; ++j) {float v=axis[3*i+j]*scale[j];sum+=v*v;}
@@ -232,8 +230,8 @@ int sh_grid_light_axes(const sh_grid_warp *warp, const float origin[3],
         for (i = 0; i < 3; ++i) module_center[j]+=center[i]*axis[3*i+j];
     }
     if (roof_anchor) {
-        /* The effective light point keeps its stock clearance below the
-         * ceiling, limited to a quarter of the room's interior height. */
+        /* The effective light point keeps its stock clearance below the ceiling, at most a quarter of the interior
+         * height. */
         gap = old_roof - origin[2] - module_center[2];
         for (j = 0; j < 2; ++j) module_center[j] *= scale[j];
         if (gap < 0) gap = 0;

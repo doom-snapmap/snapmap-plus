@@ -1,40 +1,22 @@
-/* editor_delete.c -- see editor_delete.h.
- *
- * Native boundaries, located independently in each executable (no address is
- * derived from the other renderer):
- *
+/* editor_delete.c -- see editor_delete.h. Native boundaries, located independently in each executable:
  *   Delete Selection action     Vulkan 0xCE3B60  OpenGL 0xCE3540
  *   Selection capabilities      Vulkan 0xCE5110  OpenGL 0xCE4AF0
- *   hover clear (decoded below) Vulkan 0x5224E0  OpenGL 0x521E20
- *   GridPropertiesBlocked       Vulkan 0x5AF830  OpenGL 0x5AEED0
- *
- * The Selection substate's tick (Vulkan 0xCE3F30, OpenGL 0xCE3910) dispatches
- * abstract action 0x5D, from the keyboard or the queue at EntityMode+0x420,
- * only while GridPropertiesBlocked(editor+0x20990, 4) is false, and only in
- * the substate's tick phase with a nonempty selection. Its first steps re-pick
- * the hovered entity, and the action adds that entity to the selection before
- * destroying it. A window request must not delete whatever the camera points
- * at, so this module does not queue 0x5D. It applies the same gates, makes the
- * selection exactly the targets, clears a non-target hover through the native
- * helper, rebuilds the native capability bits and calls the action itself.
- *
- * The action destroys the selection, clears the selected count, arms the
- * Selection substate's commit phase and rebuilds capabilities. The following
- * EntityMode updates finish the deletion natively: they wait for the wire
- * animation, commit the undo step "Delete Selection" and return to idle.
- *
- * Heap scope. The native key runs all of this inside the editor frame, which
- * has pushed heap 0 (the process heap). AddToSelection grows the selected-ID
- * array at selection+0x80 (idList growth through the current heap), and the
- * action grows the wire animation list at EntityMode+0x128+0x30 and the
- * editor's sound-event list; both outlive the call. Run from a console
- * command the current heap is the map heap: Play releases it, and the next
- * Ctrl+Z, whose undo step first frees selection+0x50/+0x68/+0x80/+0xA8
- * (13954591 Vulkan RVA 0x117E0C0, called from 0x1203DB0), frees the released array and the
- * allocator stops DOOM with "Memory corruption before block!". So every
- * native call from the selection setup to the action runs in a verified
- * process-heap scope, and a request without one is refused unchanged.
- */
+ *   hover clear                 Vulkan 0x5224E0  OpenGL 0x521E20
+ *   GridPropertiesBlocked       Vulkan 0x5AF830  OpenGL 0x5AEED0 */
+
+/* The Selection substate's tick (VK 0xCE3F30, GL 0xCE3910) dispatches action 0x5D only while
+ * GridPropertiesBlocked(editor+0x20990, 4) is false, in its tick phase with a nonempty selection, and
+ * the action first adds the re-picked hovered entity to the selection. So this module does not queue
+ * 0x5D: it applies the same gates, makes the selection exactly the targets, clears a non-target hover,
+ * rebuilds the capability bits and calls the action itself; the EntityMode updates then finish natively
+ * (wire animation, undo step "Delete Selection", idle). */
+
+/* Heap scope: the native key runs on heap 0 (the process heap), but from a console command the current
+ * heap is the map heap, which Play releases. AddToSelection and the action grow lists that outlive the
+ * call (selection+0x80, EntityMode+0x128+0x30, the sound-event list), and the next Ctrl+Z (its undo step
+ * frees selection+0x50/+0x68/+0x80/+0xA8, VK 0x117E0C0 from 0x1203DB0) frees the released array and DOOM
+ * stops with "Memory corruption before block!". So every native call runs in a verified process-heap
+ * scope, and a request without one is refused unchanged. */
 #include <windows.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,20 +29,18 @@
 #include "process_heap_scope.h"
 #endif
 
-/* Editor object. Field layouts are identical in both executables. */
-#define ED_MAP_OFF           0x204C8  /* loaded map; null outside an editor session */
+/* Editor object; field layouts are identical in both executables. */
+#define ED_MAP_OFF           0x204C8  /* loaded map; null outside a session */
 #define ED_SEL_OFF           0x204D0  /* selection object */
-#define ED_RESTRICT_OFF      0x20990  /* restriction set read by GridPropertiesBlocked */
-#define ED_SCREEN_OFF        0x21088  /* editor screen; null while the editor is hidden */
-#define ED_DEACT_OFF         0x2120D  /* byte: a deactivate is deferred to the frame loop */
-#define ED_TRANSITION_OFF    0x224DC  /* int: 5 while the editor changes state */
+#define ED_RESTRICT_OFF      0x20990  /* read by GridPropertiesBlocked */
+#define ED_SCREEN_OFF        0x21088  /* null while the editor is hidden */
+#define ED_DEACT_OFF         0x2120D  /* byte: deactivate deferred to the frame loop */
+#define ED_TRANSITION_OFF    0x224DC  /* int: 5 while changing state */
 #define ED_MODE_OFF          0x22330  /* inline EntityMode */
-#define ED_STATE_OFF         0x23618  /* int: editor state, 2 = EntityMode */
+#define ED_STATE_OFF         0x23618  /* int: 2 = EntityMode */
 
-/* EntityMode. Its update runs Exit(prev) and Enter(cur) when the two differ,
- * then the current substate's update, then clears the queued action. The
- * substates are inline; GetSubstate's jump table gives idle at +0x1B0 and
- * Selection at +0x1F8 in both executables. */
+/* EntityMode: its update runs Exit(prev) and Enter(cur) when they differ, then the current substate's
+ * update, then clears the queued action. Substates are inline (idle +0x1B0, Selection +0x1F8, both executables). */
 #define MODE_PREV_OFF        0x1A8
 #define MODE_CUR_OFF         0x1AC
 #define MODE_IDLE_OFF        0x1B0
@@ -102,9 +82,8 @@ static const short k_clear_site[] = {
     0x49,0x8B,0xCD, 0xE8,-1,-1,-1,-1, 0x84,0xC0, 0x74,0x08, 0x49,0x8B,0xCD, 0xE8,-1,-1,-1,-1,
     0x4D,0x8B,0xA5,0xD0,0x04,0x02,0x00, 0x49,0x63,0x9C,0x24,0x88,0x00,0x00,0x00 };
 #define CLEAR_SITE_CALL      15       /* offset of the second E8 */
-/* ClearHover: set the hovered entity to -1, then clear screen+0xA28 bit 0x400.
- * An adjacent twin differs only in its callee, which is why this shape only
- * validates a decoded target. */
+/* ClearHover: set the hovered entity to -1, then clear screen+0xA28 bit 0x400. An adjacent twin differs
+ * only in its callee, so this shape only validates a decoded target. */
 static const short k_clear_shape[] = {
     0x40,0x53, 0x48,0x83,0xEC,0x20, 0x48,0x8B,0xD9, 0x83,0xCA,0xFF, 0x48,0x8B,0x89,0xD0,0x04,0x02,0x00,
     0xE8,-1,-1,-1,-1, 0x48,0x8B,0x83,0x88,0x10,0x02,0x00,
@@ -320,10 +299,8 @@ static int batch(const int *ids, int count, sh_editor_delete_result *r)
     }
     r->targets = ntargets;
 
-    /* Slot release does not edit the portal door/frame lists, and module
-     * collision dereferences every listed entity. A window request must never
-     * leave such a reference behind, whatever the entity's declaration flags
-     * say, so portal entities are refused before anything changes. */
+    /* Slot release does not edit the portal door/frame lists and module collision dereferences every
+     * listed entity, so portal entities are refused before anything changes. */
     for (int i = 0; i < ntargets; i++)
         if (portal_owned(c.map, MAP_DOORS_OFF, targets[i]) ||
             portal_owned(c.map, MAP_FRAMES_OFF, targets[i])) {
@@ -383,10 +360,8 @@ static int batch(const int *ids, int count, sh_editor_delete_result *r)
         ok = call_clear_hover(c.ed);
         r->hover_cleared = ok;
     }
-    /* Entering Selection natively requires hovering an entity, which drops a
-     * hovered connection. Idle's Enter later reads both connection ends, so a
-     * connection touching a target is dropped here with the store the native
-     * setter performs (it is a plain compare-and-store in both executables). */
+    /* Entering Selection natively drops a hovered connection, and Idle's Enter later reads both of its
+     * ends, so a connection touching a target is dropped here with the native setter's plain store. */
     if (ok && c.wire != -1 &&
         (in_bits(bits, c.ent_count, (int)(c.wire & 0xffffffff)) || in_bits(bits, c.ent_count, (int)(c.wire >> 32)))) {
         ok = wr_s64(c.sel + SEL_WIRE_OFF, -1);

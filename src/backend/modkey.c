@@ -224,8 +224,6 @@ modnet_signer sh_key_signer(sh_key *k)
     return s;
 }
 
-/* ------------------------------------------------------------ the file */
-
 static char *mk_fingerprint_path(const sh_key *k, const char *folder)
 {
     unsigned char d[32];
@@ -390,8 +388,6 @@ int sh_key_load_or_create(const char *folder, sh_key **out, char **why)
     return 1;
 }
 
-/* ------------------------------------------------------------ which key is active, and the others */
-
 void sh_key_claim_id(const sh_key *k, char out[17])
 {
     unsigned char d[32];
@@ -475,8 +471,6 @@ int sh_key_find(const char *folder, const char *claim_id, sh_key **out, char **w
     if (h != INVALID_HANDLE_VALUE) FindClose(h);
     return found ? 1 : mk_fail(why, "no publishing key on this computer made that claim");
 }
-
-/* ------------------------------------------------------------ the passphrase backup (SPEC 4.2) */
 
 static int mk_pbkdf2(const char *passphrase, const unsigned char *salt, size_t salt_len, unsigned long long rounds,
                      unsigned char out[32])

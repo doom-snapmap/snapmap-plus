@@ -1,14 +1,9 @@
-/* served_cli.c -- builds every mod folder of a mods root and lists what the serving index gives the engine.
- *
- *   served_cli root=<mods root> out=<list file> [doom=<install root>]
- *
- * Each folder below the root (a dot folder is skipped) is built by the product's builder with the Graphics SDK's
- * compiler and the script check installed, as dllmain.c installs them, and its block written; then the serving index
- * is built over the root and every request a built folder serves is opened through the provider. The list holds one
- * line per request, sorted: "<request>\t<sha256 of the bytes the engine is handed>\t<size>", a sound bank under the
- * stem the index serves it as; and one line "!<folder>\t<cause>" per folder that does not build. Two lists compare the
- * engine's view of two folders (the served-bytes proof of a translated mod, R-NM1). Exit 0, 1 when a folder failed
- * or a request did not open. Nothing outside the root is written. */
+/* served_cli.c -- builds every mod folder of a mods root (dot folders skipped) with the builder, the Graphics SDK's
+ * compiler and the script check as dllmain.c installs them, builds the serving index over the root, and lists what the
+ * engine is handed.   served_cli root=<mods root> out=<list file> [doom=<install root>]
+ * The list has one sorted line per request, "<request>\t<sha256 of the served bytes>\t<size>" (a sound bank under the
+ * stem the index serves it as), and "!<folder>\t<cause>" per folder that does not build; two lists compare the engine's
+ * view of two folders. Exit 0, 1 when a folder failed or a request did not open; nothing outside the root is written. */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
 #include <windows.h>

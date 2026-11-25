@@ -1,8 +1,6 @@
-/* XInput backend bootstrap. A worker identifies the host image, resolves the
- * engine signatures at their recorded RVAs, checks the patch primitives,
- * installs feature hooks, starts the frontend, and arms the fault shield
- * compiled into this same DLL. A feature that cannot install is recorded in
- * feature_health.h by the name the player knows it by. */
+/* XInput backend bootstrap: a worker identifies the host image, resolves engine signatures, installs
+ * feature hooks, starts the frontend and arms the fault shield. A feature that cannot install is
+ * recorded in feature_health.h by the name the player knows it by. */
 #include <windows.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -218,17 +216,15 @@ static void install_features(const sig_result *results, size_t db)
     /* and its "attachment_tags" likewise (attach_tags.h) */
     sh_mb_set_attach_tags(sh_at_build_registry);
 
-    /* Nothing of an earlier shape is converted here (that is the installer's,
-     * and not in this release). A folder a crash took away mid-replacement is put back
-     * first, so it serves on this boot, and the work folders a crash left are
-     * removed. */
+    /* A folder a crash took away mid-replacement is put back first, so it serves on this boot, and
+     * the work folders a crash left are removed. */
     (void)sh_ms_recover_work();
     /* A mod's material, effect and environment are served as the Graphics SDK compiles them (sdk.h): a look, values
      * that change, an effect's fx decl, an environment's env decl. */
     sh_modserve_set_material_filter(sh_sdk_serve_compile);
-    /* What the product derives itself is registered by every pass as a mod's own decl is (R-GS3). */
+    /* What the product derives itself is registered by every pass as a mod's own decl is. */
     sh_modserve_set_product_owner(sh_modprog_owns);
-    /* and a look's derived images are served wherever their material has compiled, with no pointer (R-HD1) */
+    /* and a look's derived images are served wherever their material has compiled, with no pointer */
     sh_modserve_set_product_reader(sh_modprog_read);
     sh_mb_set_look_compiler(sh_look_compile_notes);
     sh_mb_set_sdk_compiler(sh_sdk_compile);           /* the build refuses a mistake in any of them */
@@ -245,7 +241,7 @@ static void install_features(const sig_result *results, size_t db)
         boot_r.stock = boot_stock_exists;
         (void)sh_ms_boot_sync(&boot_r, sh_modserve_index_rescan, 1);
         /* The map content cache (modcache.h): compositions build as the store builds, the index admits them, and
-         * every load composes its rows' units; at start the cache drops what no kept map names (5.17). */
+         * every load composes its rows' units; at start the cache drops what no kept map names. */
         sh_cache_set_store_root(sh_ms_root);
         sh_cache_set_resolver(&boot_r);
         sh_cache_set_rescan(sh_modserve_index_rescan);
@@ -271,10 +267,8 @@ static void install_features(const sig_result *results, size_t db)
              "the language table cannot be extended", SH_FEATURE_TEXT, NULL, NULL);
     }
 
-    /* Replace resource-provider open-by-name slot +0x148 after validating the
-     * provider ABI. It serves map navigation, Grid Room variants, mods,
-     * built-in defaults and otherwise the engine's own resources. All three
-     * idStr helpers must be intact. */
+    /* Replace resource-provider open-by-name slot +0x148 after validating the provider ABI and all three
+     * idStr helpers. It serves map navigation, Grid Room variants, mods and defaults, else the engine's resources. */
     int ctor_clean = 0, read_clean = 0, compare_clean = 0, write_clean = 0;
     void *res_ctor = sig_fn(results, db, "ResProviderCtor", &ctor_clean);
     void *read_string = sig_fn(results, db, "IdFileReadString", &read_clean);
@@ -447,10 +441,9 @@ static void install_features(const sig_result *results, size_t db)
     if (overrides_installed) (void)sh_sync_clock_install(g_doom_base);
     else sh_feature_off(SH_FEATURE_SYNC_CLOCK, "mods are not served");
 
-    /* Mod scripts (script/script_hooks.h): the frame hook, the spawn subscriber
-     * on the companions' CallSpawn chain and the map-end subscriber; the frame
-     * hook is committed only at a Play whose mods carry scripts. An install that
-     * fails records mod scripts off with its reason (feature_health.h). */
+    /* Mod scripts (script/script_hooks.h): the frame hook (committed only at a Play whose mods carry
+     * scripts), the CallSpawn-chain spawn subscriber and the map-end subscriber. A failed install records
+     * mod scripts off with its reason. */
     if (overrides_installed) (void)sh_script_hooks_install(results, db, g_doom_base);
     /* before any mod decl is parsed: a graph's script classes resolve at its parse */
     if (overrides_installed) (void)sh_script_fsm_install(g_doom_base);
@@ -515,8 +508,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             "game: unsupported executable %s (%s); Snapmap+ is off and only forwards controller input",
             sh_host_image_name(), sh_host_executable_hash8()[0] ? sh_host_executable_hash8() : "unhashed");
         backend_log(line);
-        /* The player hears it too, once at boot, on this thread (the game is
-         * not waiting on it): a log line alone left a DOOM update silent. */
+        /* The player is told too, once at boot, on this thread (the game is not waiting on it). */
         MessageBoxW(NULL,
                     L"This copy of DOOM is not the build this Snapmap+ release supports (the April 2024 "
                     L"update, Steam build 13954591), so Snapmap+ is off for this session and the game "
@@ -567,8 +559,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         backend_log(line);
     }
 
-    /* The patch primitive and a scratch detour are checked before any engine
-     * code is touched; a failure leaves the game exactly as it was. */
+    /* The patch primitive and a scratch detour are checked before any engine code is touched. */
     int patching_ok = sh_patch_selftest();
 #ifdef SH_DIAG
     if (!sh_algo_selftest()) backend_log("algo: the math override self-test failed");

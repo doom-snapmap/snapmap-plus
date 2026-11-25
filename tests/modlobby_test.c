@@ -90,7 +90,7 @@ static void gate(void)
     }
 }
 
-/* R-LB1 F5: every player plays the same bytes; stand-ins for content nobody can get are the same everywhere. */
+/* Every player plays the same bytes; stand-ins for content nobody can get are the same everywhere. */
 static void standins(void)
 {
     char out[256];

@@ -23,7 +23,7 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 	writeF(t, filepath.Join(doom, "DOOMx64vk.exe"), "exe")
 	writeF(t, filepath.Join(doom, "XINPUT1_4.dll"), "ORIGINAL")
 
-	// a legacy root-level logs dir from an older install -- install must fold it into snapmap-plus\logs\
+	// a legacy root-level logs dir from a previous install -- install must fold it into snapmap-plus\logs\
 	writeF(t, filepath.Join(doom, "snaphak_logs", "old_backend.log"), "old log")
 
 	// a synthetic dist with a MANIFEST.sha256 (matches package.ps1's "hash  relpath" format)

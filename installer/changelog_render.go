@@ -236,9 +236,8 @@ func renderIndex(b *strings.Builder, rows []indexRow, width int) {
 }
 
 // selectRelease resolves the user's version argument against the published releases. An empty
-// argument means the newest release of any kind; "latest" means the newest STABLE one, matching
-// what `snapmap-plus update` installs. Matching is exact on the tag (with an optional leading v and
-// case-insensitively), never a prefix -- "v0.2.1" must not resolve to "v0.2.1-beta.6".
+// argument means the newest release of any kind; "latest" the newest stable one. A tag matches
+// exactly (optional leading v, case-insensitive), never by prefix.
 func selectRelease(list []ghRelease, arg string) (ghRelease, error) {
 	if len(list) == 0 {
 		return ghRelease{}, fmt.Errorf("no releases have been published yet")

@@ -1,11 +1,5 @@
-/* modledger_test.c -- the served-bytes ledger (modledger.c) and the refresh
- * decision it feeds: identities, records and updates, binding, growth past
- * level 0, concurrent serves and first serves, the KEEP / REFRESH / GAME rule, and, against a fixture
- * mods tree served by modserve.c, the anim refresh kind: one key at two
- * hashes marks the anim whose bytes differ and not the one both builds carry,
- * a rescan counts a changed anim as reloadable and a changed skeleton as a
- * restart, and the ledger's record of a serve matches what the index serves
- * until another build is declared. */
+/* modledger_test.c -- the served-bytes ledger (modledger.c) and the refresh decision it feeds, including the
+ * anim refresh kinds against a fixture mods tree served by modserve.c. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdint.h>
@@ -108,8 +102,8 @@ static void name_ident(const char *name, sh_modledger_ident *out)
     (void)sh_modledger_ident_of(BUNDLE_1, NULL, (const unsigned char *)name, strlen(name), out);
 }
 
-/* No fixed bound: past level 0's half (16384 paths) the next level takes
- * new paths, and every record stays where it was published. */
+/* No fixed bound: past level 0's half (16384 paths) the next level takes new paths, and every earlier record
+ * stays in place. */
 #define GROW_N 100000u
 static void test_growth(void)
 {
@@ -495,10 +489,8 @@ static void test_anim_kind(const char *top)
     sh_modserve_set_serve_listener(NULL);
 }
 
-/* The re-parse log's per-type tally (ADD-L6 I). An anim dependent's type is
- * a stack buffer filled from its request path; V3's line printed the bytes
- * that buffer held later ("re-parsed 1 0;>5 decl(s)"). The tally keeps its
- * own copy. */
+/* The re-parse log's per-type tally keeps its own copy of an anim dependent's type, not the stack buffer filled
+ * from its request path. */
 static void tally_one(sh_modledger_tally *t, const char *request)
 {
     char type[64];

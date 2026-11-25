@@ -1,7 +1,6 @@
-/* Reading and writing the game's objects by field name from a mod script
- * (script_api_reflect.h). The first half is values and the Lua calls, over a
- * host (the game's types and memory, or a test's); the second half, without
- * SH_SCRIPT_PURE, binds them to the engine. */
+/* Reading and writing the game's objects by field name from a mod script (script_api_reflect.h). The first half is
+ * values and the Lua calls over a host (the game's types and memory, or a test's); the second binds them to the
+ * engine without SH_SCRIPT_PURE. */
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,10 +61,8 @@ static int rd(const void *addr, void *out, size_t n)
 }
 
 /* What a script changed in an object that outlives the map (a decl, reached directly or through a pointer from an
- * entity): put back at the map's end, newest first (SPEC-distribution 5.23, the restore rule). Each record names the
- * object by its class and name, never by an address a re-parse can free, and the field by its path from that object;
- * the restore finds both again. A field whose value is no longer what the script wrote belongs to whoever wrote it
- * since, and is left as it is. */
+ * entity): put back at the map's end, newest first. A record names the object by class and name, never by an address
+ * a re-parse can free, and the field by its path from it; a field no longer holding the script's value is left. */
 typedef struct undo {
     char *cls, *name;          /* the anchor: the object's class and name (name NULL: an unnamed object, by address) */
     const void *object;        /* the anchor's address, used only when it has no name */
@@ -517,8 +514,6 @@ int sh_script_reflect_store(lua_State *L, const sh_rf_loc *loc, int idx, char *e
     return 0;
 }
 
-/* ------------------------------------------------------------ the calls */
-
 static const char *kind_name(int kind)
 {
     switch (kind) {
@@ -613,7 +608,7 @@ int sh_script_reflect_set(lua_State *L, void *object, const char *cls, const cha
     if (g_at.on) {
         g_at.name = g_ops.resource_name ? g_ops.resource_name(g_ops.ctx, g_at.object) : NULL;
         /* By name only when the name finds this very object again; else (a type whose name does not round-trip) by
-         * its address, as before. */
+         * its address. */
         if (g_at.name && (!g_ops.resource_find || g_ops.resource_find(g_ops.ctx, g_at.cls, g_at.name) != g_at.object))
             g_at.name = NULL;
         if (!ok) say(err, sizeof err, "there was not enough memory");
@@ -752,7 +747,6 @@ void sh_script_api_reflect_register(void)
 }
 
 #ifndef SH_SCRIPT_PURE
-/* ============================================================ the engine */
 #include <windows.h>
 #include "../typeinfo.h"
 

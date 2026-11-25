@@ -1,9 +1,6 @@
-/* Offline data-global resolution and layout checks on an RVA-mapped PE.
- * Run both build 13954591 renderers: each global must resolve to the RVA recorded
- * for that renderer; portable mode checks resolution and relative layout only.
- *
- *   globals_test <DOOMx64vk.exe | DOOMx64.exe>
- *   globals_test <image> portable */
+/* Offline data-global resolution and layout checks on an RVA-mapped PE: each global must resolve to its
+ * recorded RVA for the renderer; portable mode checks resolution and relative layout only.
+ * Usage: globals_test <DOOMx64vk.exe | DOOMx64.exe>, or globals_test <image> portable. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -166,8 +163,7 @@ int main(int argc, char **argv)
     }
 
     {
-        /* GetGameSystemInterface is no longer exported. The object is behind a
-         * relocated data pointer: apply that one relocation to the RVA-mapped copy
+        /* The object is behind a relocated data pointer: apply that one relocation to the RVA-mapped copy
          * as the loader would, then read through the slot like the runtime. */
         {
             IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;

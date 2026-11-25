@@ -1,25 +1,13 @@
-/* Object Mode entry drop length.
- *
- * Entering Object Mode (TAB in Blueprint) places the FPS camera by tracing a
- * player-sized box straight down the hovered column, starting 100 units above
- * the top of the whole map, in segments of at most 18364 units: each hit
- * restarts the descent just below it, and the descent ends at the first
- * segment that hits nothing, on the last surface it found. A vertical gap
- * taller than 18364 therefore ends it early: inside a Grid Room taller than
- * that the camera stays under the roof, and when the first segment finds
- * nothing (every module in the column lies more than 18364 below the map's
- * top) the camera keeps its previous Object Mode position. Every map built
- * from stock modules fits inside one segment, so a segment as long as the
- * whole coordinate range changes nothing for them and lets tall rooms reach
- * their floor. */
+/* Object Mode entry drop length. Entering Object Mode traces a player-sized box down the hovered column in
+ * segments of at most 18364 units, ending at the first segment that hits nothing; a segment spanning the whole
+ * coordinate range lets tall rooms reach their floor. */
 #ifndef SH_OBJECT_ENTRY_H
 #define SH_OBJECT_ENTRY_H
 #include <stdint.h>
 #include "signatures.h"
 
-/* The native segment length, and the length Snapmap+ publishes: from 100
- * above the highest possible module top (+32671) past the lowest possible
- * module bottom (-32671), rounded up. */
+/* The native segment length, and the length Snapmap+ uses: from 100 above the highest possible module top
+ * (+32671) past the lowest possible module bottom (-32671), rounded up. */
 #define SH_OBJECT_ENTRY_NATIVE_DROP 18364.0f
 #define SH_OBJECT_ENTRY_DROP 66048.0f
 /* MOVSS xmm9,[rip+disp32]; XORPS xmm7,xmm7; MOVSS xmm8,[rip+disp32]. */
@@ -37,7 +25,7 @@ int sh_object_entry_disp(uintptr_t site,uintptr_t dest,int32_t *disp);
 const char *sh_object_entry_check(const unsigned char *site,uintptr_t *constant);
 int sh_object_entry_install(const sig_result *results,size_t count);
 int sh_object_entry_live(void);
-/* The segment length the entry trace reads now (18364 when not live). */
+/* The segment length the entry trace reads (18364 when not live). */
 float sh_object_entry_drop(void);
 #endif
 #endif

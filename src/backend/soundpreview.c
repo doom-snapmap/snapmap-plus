@@ -32,23 +32,15 @@ static void            *g_cmdsys;
 static int              g_installed;
 static int              g_stop_bound;  /* 0 = not tried, 1 = bound, -1 = tried and refused */
 
-/* All sound-world mutations run on the DOOM main thread through the command
- * buffer. The native start path publishes an emitter before initializing its
- * shader at +0x20a0; an audio-worker update can dereference that field during
- * an off-thread start.
- *
- * Pinned Vulkan audit anchors: StartSound_wwise 0x1854600, emitter
- * initialization 0x1846900, world update 0x1857270 and emitter update
- * 0x1847670. Queue through the same main-thread route as native console
- * auditioning; SEH around the caller cannot repair a fault in the audio job.
- */
+/* All sound-world mutations run on the main thread through the command buffer: the native start path
+ * publishes an emitter before initializing its shader at +0x20a0, so an audio-worker update can fault
+ * during an off-thread start. Vulkan anchors: StartSound_wwise 0x1854600, emitter init 0x1846900,
+ * world update 0x1857270, emitter update 0x1847670. */
 #define SP_CMD_NAME "sh_sndprev"
 
 typedef enum { SP_OP_PLAY = 0, SP_OP_STOP, SP_OP_SESSION_ON, SP_OP_SESSION_OFF } sp_op;
 
-/* Preserve operation order in an eight-entry ring. On overflow, drop and log
- * the oldest pending operation to retain the latest user action.
- */
+/* Eight-entry ring in operation order; on overflow the oldest pending operation is dropped and logged. */
 #define SP_QUEUE_MAX 8
 #define SP_NAME_CAP 512
 typedef struct { sp_op op; unsigned long sequence; char name[SP_NAME_CAP]; } sp_item;
@@ -60,17 +52,13 @@ static volatile LONG    g_post_sequence;
 static snd_buffer_cmd_fn  g_buffer_cmd;
 static snd_add_command_fn g_add_command;
 
-/* Sound-world vtable slots, both decompile-verified on the pinned build.
- *   +0x30 the PREVIEW entry point -- also resolved by signature, which is what lets us prove the
- *         vtable layout is what we think it is before trusting any other slot in it.
- *   +0x98 StopSound(handle). */
+/* Sound-world vtable slots: +0x30 is the PREVIEW entry point (also resolved by signature, which validates the
+ * vtable layout before any other slot is trusted); +0x98 is StopSound(handle). */
 #define SP_VSLOT_PREVIEW 0x30
 #define SP_VSLOT_STOP    0x98
 
-/* Verify StopSound at vtable +0x98 with its prologue and packed-handle
- * decode. Do not scan for it: slot +0xa0 has a byte-identical twin using
- * different globals.
- */
+/* Prologue of StopSound at vtable +0x98, with its packed-handle decode. It is checked, never scanned
+ * for, because slot +0xa0 holds a byte-identical twin using different globals. */
 static const uint8_t SP_STOP_PROLOGUE[] = {
     0x48,0x8B,0xC4, 0x48,0x89,0x50,0x10, 0x57, 0x48,0x83,0xEC,0x60,
     0x48,0xC7,0x40,0xC8,0xFE,0xFF,0xFF,0xFF, 0x48,0x89,0x58,0x08, 0x48,0x89,0x70,0x18,
@@ -81,12 +69,8 @@ static const uint8_t SP_STOP_PROLOGUE[] = {
 static unsigned long long g_handle;    /* the one live preview, 0 = nothing playing */
 static void              *g_handle_world;   /* the sound world that handle belongs to */
 
-/* Preview mode enables background audio plus the native solo/forced-listener
- * settings. g_session holds the mode while the browser is open; g_mode_on
- * records whether it is active. Without a session, play enters the mode and
- * stop leaves it. Entering saves the player's own three settings and leaving
- * puts exactly those back.
- */
+/* Preview mode: background audio plus solo/forced-listener. g_session holds it while the browser is
+ * open (else play enters and stop leaves it); entering saves the player's three settings, leaving restores them. */
 static int g_session;
 static int g_mode_on;
 
@@ -129,10 +113,8 @@ char *sh_soundpreview_refusal(void)
     return out;
 }
 
-/* Decode RIP-relative loads for any destination register: ModRM must satisfy
- * (modrm & 0xc7) == 0x05. The shared command helper accepts fewer destination
- * registers.
- */
+/* Decode RIP-relative loads into any destination register (ModRM & 0xc7 == 0x05); the shared command
+ * helper accepts fewer registers. */
 #define SP_SCAN_WINDOW 64
 static const uint8_t *sp_decode_rip_any(const uint8_t *fn)
 {
@@ -163,10 +145,8 @@ static void *sp_world(void)
 
 /* cmdSystem vtbl +0x48, the same slot and the same byte offset sh_spawninfo uses for `getviewpos`. */
 #define SP_VSLOT_EXEC_CMD_TEXT 0x48
-/* Bind StopSound from the live vtable on first use. Require +0x30 to equal
- * the resolved SoundPreview entry before validating +0x98. Returns 1 when
- * bound.
- */
+/* Bind StopSound from the live vtable on first use, once +0x30 equals the resolved preview entry and
+ * +0x98 validates. Returns 1 when bound. */
 static int sp_bind_stop(void *world)
 {
     if (g_stop_bound) return g_stop_bound > 0;
@@ -384,10 +364,9 @@ static int sp_cvar_text(const char *name, char *out, size_t cap)
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* Save the player's background, solo and forced-listener settings, then raise background audio.
- * The engine's preview call writes s_soloSound/s_forceListener itself, so entering the mode only
- * has to do the half the engine does not. Returns 0, changing nothing, when the settings cannot
- * be read: leaving the mode could not put them back. Idempotent. */
+/* Save the player's background, solo and forced-listener settings, then raise background audio (the
+ * engine's preview call sets solo and listener itself). Returns 0, changing nothing, when the settings
+ * cannot be read; idempotent. */
 static int sp_enter_mode(void)
 {
     if (g_mode_on) return 1;
@@ -405,9 +384,8 @@ static int sp_enter_mode(void)
     return 1;
 }
 
-/* Put the player's own settings back: the solo/forced-listener pair the engine set while
- * previewing, and the background raise. Restoring solo matters even if nothing was playing --
- * leave a preview's solo set and every other sound in the editor stays muted. */
+/* Put the player's saved settings back and drop the background raise. Solo is restored even when nothing
+ * is playing, since a leftover preview solo mutes every other sound in the editor. */
 static void sp_leave_mode(void)
 {
     char line[SP_SOLO_CAP + 32];
@@ -511,10 +489,8 @@ static void sp_do_play(const char *name)
     }
 }
 
-/* Public, any thread: validate the name and world availability, then queue
- * playback. A return of 1 means accepted; later native refusal is logged on
- * the main thread.
- */
+/* Any thread: validate the name and world, then queue playback. Returns 1 when accepted; a later
+ * native refusal is logged on the main thread. */
 int sh_soundpreview_play(const char *name)
 {
     if (!name || !name[0]) return 0;

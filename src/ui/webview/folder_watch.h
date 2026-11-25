@@ -1,14 +1,6 @@
-/* folder_watch.h -- the debounce behind the window's prefabs folder watcher.
- *
- * The window watches %LOCALAPPDATA%\snapmap-plus\prefabs\ (one
- * ReadDirectoryChangesW thread, subtree, file and folder names, writes and
- * sizes) so the Prefabs list follows the disk. The watcher thread notes each
- * change here; the window's think loop asks whether a refresh is due, once
- * 300 ms pass without a change (a burst of writes is one list refresh).
- *
- * The mods folder is not watched: the store is scanned at boot, on Refresh,
- * and after an install, a download or New mod. Pure C, no Windows calls: the
- * caller passes the time, so the native tests run it with a fake clock. */
+/* folder_watch.h -- the debounce behind the prefabs folder watcher: the watcher thread notes each change and
+ * the think loop refreshes the Prefabs list once 300 ms pass without one, so a burst of writes is one refresh.
+ * Pure C with no Windows calls; the caller passes the time. */
 #ifndef SNAPMAP_PLUS_FOLDER_WATCH_H
 #define SNAPMAP_PLUS_FOLDER_WATCH_H
 
@@ -29,7 +21,6 @@ static __inline void sh_fw_init(sh_fw_debounce *d, unsigned long long quiet_ms)
     d->pending = 0;
 }
 
-/* One change at `now`. */
 static __inline void sh_fw_note(sh_fw_debounce *d, unsigned long long now)
 {
     d->last = now;
@@ -37,8 +28,7 @@ static __inline void sh_fw_note(sh_fw_debounce *d, unsigned long long now)
     d->pending = 1;
 }
 
-/* 1 when the refresh is due at `now`: a change is pending and the quiet time
- * has passed since the last one. */
+/* 1 when a change is pending and the quiet time has passed since the last one. */
 static __inline int sh_fw_due(const sh_fw_debounce *d, unsigned long long now)
 {
     return d->pending && now >= d->last + d->quiet_ms;

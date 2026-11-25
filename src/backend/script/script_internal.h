@@ -59,8 +59,7 @@ typedef struct shs_mod {
     int       last_line;
     char     *err_file;      /* where the current error was raised, by the message handler; malloc'd or NULL */
     int       err_line;
-    /* the API guard: the name an unknown-call stop names, and the last global the scripts read that is not set
-     * (its chunk and line), which names the nothing a pcall is handed */
+    /* the API guard: the name an unknown-call stop reports, and the last unset global read (chunk and line) */
     char      stop_call[96];
     char      miss_name[96];
     const char *miss_src;
@@ -99,18 +98,16 @@ shs_mod *shs_mod_of(lua_State *L);
 const sh_script_limits *shs_limits(void);
 double shs_now(void);
 
-/* Read the clock before C work the clock hook cannot see (a sort): past the
- * wall-clock stop the mod is marked stopped and an error is raised at the
- * calling line. */
+/* Read the clock before C work the clock hook cannot see (a sort); past the wall-clock stop the mod is
+ * marked stopped and an error is raised at the calling line. */
 void shs_check_clock(lua_State *L);
 /* Raise the error of a marked stop (never returns). */
 int  shs_raise_stop(lua_State *L, int level);
-/* The API guard: stop the mod for a call to `name`, which does not exist
- * (stop: SH_SCRIPT_STOP_UNKNOWN_CALL for a global, _METHOD for an entity's),
- * at the script line `level` up the stack. A pcall cannot catch it. */
+/* The API guard: stop the mod for a call to the missing `name` (stop: SH_SCRIPT_STOP_UNKNOWN_CALL for a
+ * global, _METHOD for an entity's) at script line `level` up the stack; a pcall cannot catch it. */
 int  shs_stop_unknown_call(lua_State *L, int stop, const char *name, int level);
-/* The global the script read last at the line `level` up the stack when it
- * was not set, else NULL (the guard's pcall check). */
+/* The unset global the script last read at the line `level` up the stack, else NULL (the guard's pcall
+ * check). */
 const char *shs_missing_global_here(lua_State *L, int level);
 /* One pattern step (script_lstrlib.c). */
 void shs_match_step(lua_State *L);
@@ -128,17 +125,16 @@ int  shs_load_file(lua_State *L, shs_mod *m, const char *relpath);
 void shs_timers_run(shs_mod *m);
 void shs_timers_free(shs_mod *m);
 
-/* Run the C job `job` with light userdata `ud` as one protected delivery.
- * Returns 1 when it returned, 0 when the mod stopped (the stop line is
- * written and the state closed). Top level only: never from inside Lua. */
+/* Run the C job `job` with light userdata `ud` as one protected delivery: 1 when it returned, 0 when the
+ * mod stopped (stop line written, state closed). Top level only, never from inside Lua. */
 int  shs_run_job(shs_mod *m, lua_CFunction job, void *ud);
 /* Inside a job: call the function below `nargs` values as one handler call
  * (the per-call bounds start again). Errors propagate to the job. */
 void shs_call_handler(lua_State *L, int nargs);
 /* Reset the per-call bounds (before a coroutine resume). */
 void shs_call_reset(shs_mod *m);
-/* Record the innermost script line on L's stack, from `first` up, as where
- * the current error was raised (unless one is recorded already). */
+/* Record the innermost script line on L's stack, from `first` up, as where the current error was raised
+ * (unless one is recorded already). */
 void shs_where_from(shs_mod *m, lua_State *L, int first);
 /* m->err_file from a Lua message's "scripts\x.lua:N:" when it names the file whole. */
 void shs_where_msg(shs_mod *m, const char *msg);

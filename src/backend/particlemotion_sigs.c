@@ -1,6 +1,5 @@
-/* particlemotion_sigs.c -- the private signatures of particlemotion.c (the particle vertex writer and the
- * stage's origin function). Kept apart so sig_test and detour_windows_test link the table without the engine
- * side. Order matches particlemotion.c. */
+/* particlemotion_sigs.c -- the signatures of particlemotion.c's engine functions, in a file of their own so tests
+ * link the table without the engine side. */
 #include <stddef.h>
 #include "particlemotion.h"
 

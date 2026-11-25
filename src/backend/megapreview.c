@@ -1,7 +1,5 @@
-/* Read .vmtr tables and _vmtr_sq*.mega2 shards from virtualtextures, decode
- * selected pages with the native codec, then publish preview pixels.
- * Installed files remain read-only.
- */
+/* Read .vmtr tables and _vmtr_sq*.mega2 shards from virtualtextures, decode selected pages with the native codec,
+ * then publish preview pixels. Installed files remain read-only. */
 
 #include <windows.h>
 #include <stdio.h>
@@ -26,9 +24,8 @@ typedef void (*decode_fn)(const unsigned char *hdr, const unsigned char *payload
 #define PAGE_SLACK   SH_MEGA2_PAGE_SLACK
 #define PAGE_MAX     SH_MEGA2_PAGE_MAX
 
-/* ------------------------------------------------------------------------ the atlas --------------
- * The atlas is 245760 x 245760 px = 2048 x 2048 pages of 120 px, split into a 4x4 grid of shards
- * each covering 512 x 512 pages. */
+/* The atlas is 245760 x 245760 px = 2048 x 2048 pages of 120 px, split into a 4x4 grid of shards each covering
+ * 512 x 512 pages. */
 #define ATLAS_PAGE_PX 120u
 #define SHARD_PAGES   512u
 #define MAX_LEVELS    10         /* 512x512, 256x256, ... 1x1                                      */
@@ -93,7 +90,6 @@ static int megapreview_alloc_scratch(void)
     return 1;
 }
 
-/* ---------------------------------------------------------------------- file plumbing -----------*/
 
 static int megapreview_vt_dir(void)
 {
@@ -104,10 +100,8 @@ static int megapreview_vt_dir(void)
     return (a != INVALID_FILE_ATTRIBUTES) && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-/* `.vmtr` rows are CRLF text: line 1 version, line 2 count, line 3 a column comment, then
- *     x y width height flags timeStamp mtrCheck "name"
- * with mtrCheck frequently negative. Anything that does not match that shape is skipped, which
- * covers the header lines without needing to count them. */
+/* `.vmtr` rows are CRLF text of the form `x y width height flags timeStamp mtrCheck "name"` (mtrCheck is often
+ * negative); lines that do not match, including the three header lines, are skipped. */
 static void megapreview_load_one_vmtr(const wchar_t *path)
 {
     FILE *f = _wfopen(path, L"r");
@@ -238,8 +232,7 @@ const char *sh_megapreview_name_at(int i)
     return out;
 }
 
-/* Open a shard and retain only its header metadata. The layout follows idMegaTexture2::Load
- * (FUN_140e10bf0) and was verified against every shipped shard:
+/* Open a shard and retain only its header metadata. The layout follows idMegaTexture2::Load (FUN_140e10bf0):
  *
  *     0x000        0x170-byte header (magic 0xA63FBB21, version 2)
  *     0x170        page payloads, contiguous
@@ -321,7 +314,6 @@ static int megapreview_page_entry(shard_t *s, unsigned cell,
     return 1;
 }
 
-/* -------------------------------------------------------------------------- decoding ------------*/
 
 void sh_mega2_swap_page_header(unsigned char *p)
 {
@@ -403,8 +395,7 @@ static int megapreview_page_core(int level, unsigned px, unsigned py, unsigned c
     if (!parent) return 0;
     if (!megapreview_page_core(level + 1, px / 2, py / 2, parent)) return 0;
 
-    /* Point-sample the parent's quadrant. 60x60 -> 120x120, so every source pixel becomes a 2x2
-     * block; this is a fallback for detail that does not exist, not a resampling problem. */
+    /* Point-sample the parent's quadrant: 60x60 -> 120x120, each source pixel becoming a 2x2 block. */
     unsigned qx = (px & 1u) * (PAGE_CORE / 2), qy = (py & 1u) * (PAGE_CORE / 2);
     for (unsigned row = 0; row < PAGE_CORE; ++row) {
         const unsigned char *src = parent + ((size_t)(qy + row / 2) * PAGE_CORE + qx) * 4;
@@ -415,7 +406,6 @@ static int megapreview_page_core(int level, unsigned px, unsigned py, unsigned c
     return 1;
 }
 
-/* --------------------------------------------------------------------------- produce ------------*/
 
 /* Limit previews to a 2x2-page budget (240x240 pixels); choose the finest mip
  * that fits.
@@ -474,9 +464,8 @@ static int megapreview_produce(const char *name, unsigned long generation)
         return SH_PREVIEW_FAILED;
     }
 
-    /* The pages cover at least the material's rect and often more, because the rect need not be
-     * page-aligned at the chosen level. Crop to the material itself so the preview never shows a
-     * neighbour's pixels. Offsets are exact: the atlas is a plain grid. */
+    /* The pages cover at least the material's rect and often more, because the rect need not be page-aligned at the
+     * chosen level. Crop to the material itself so the preview never shows a neighbour's pixels. */
     unsigned sx = (r->x - px0 * ps) * PAGE_CORE / ps;
     unsigned sy = (r->y - py0 * ps) * PAGE_CORE / ps;
     unsigned sw = r->w * PAGE_CORE / ps, sh = r->h * PAGE_CORE / ps;
@@ -509,12 +498,9 @@ static int megapreview_produce(const char *name, unsigned long generation)
     return published;
 }
 
-/* ---------------------------------------------------------------------------- worker ------------*/
 
-/* One event-driven worker owns the decode scratch. Allocate only for atlas
- * requests and release after 30 seconds idle. Returns SH_PREVIEW_* and, on
- * failure, the plain reason the Assets tab shows in *why.
- */
+/* The one event-driven worker owns the decode scratch, allocating it per atlas request and releasing it after 30 s
+ * idle. Returns SH_PREVIEW_* and, on failure, the reason the Assets tab shows in *why. */
 static int megapreview_service_request(const char *want, unsigned long generation, int kind,
                                        const char **why)
 {

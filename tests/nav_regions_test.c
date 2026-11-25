@@ -57,9 +57,7 @@ static float quad_extent_y(const sh_nav_region *r) { return quad_max_y(r) - quad
 /* The face is planar, so any corner's z is the surface height for a level one. */
 static float quad_top_z(const sh_nav_region *r) { return r->c[0][2]; }
 
-/* ==================================================================== */
-/* building a map                                                        */
-/* ==================================================================== */
+/* building a map */
 
 typedef struct blob { char *p; size_t len, cap; } blob;
 
@@ -163,14 +161,10 @@ static char *map_of(const char *instances, const char *entities,
     return b.p;
 }
 
-/* ==================================================================== */
-/* the volume an author ticked                                           */
-/* ==================================================================== */
+/* the volume an author ticked */
 
-/* One instance, one ticked box. The rectangle is centred on spawnPosition in x
- * and y, and its z is the TOP of the box -- spawnPosition.z is the bottom. */
-/* Build one attributed, marked Blocking Box. orient supplies optional raw
- * spawnOrientation JSON. The caller owns the completed document. */
+/* Builds one instance with one attributed, ticked Blocking Box, centred on spawnPosition in x and y; z is the
+ * box top (spawnPosition.z is the bottom). orient is optional raw spawnOrientation JSON; the caller frees. */
 static char *map_with_volume(double sx, double sy, double sz,
                              double px, double py, double pz,
                              const char *orient, size_t *out_n)
@@ -332,9 +326,7 @@ static void test_box_shape(void)
     bclose(&ents);
 }
 
-/* ==================================================================== */
-/* whose volume is it                                                    */
-/* ==================================================================== */
+/* whose volume is it */
 
 /* Identical local geometry in two module instances must remain distinct.
  * Match instance order to the instanceEntities buckets. */
@@ -387,8 +379,7 @@ static void test_two_instances_of_one_module(void)
     }
     free(json);
 
-    /* Incomplete ownership refuses the snapshot, including an earlier bucket
-     * that happened to be readable. No partial per-module bake is published. */
+    /* Incomplete ownership refuses the snapshot even when a preceding bucket is readable; no partial bake. */
     json = map_of(inst.p, ents.p, "0,1", "11,22", &n);
     CHECK(sh_nav_regions_read(json, n, &m) == 1);
     CHECK(m.invalid_geometry == 1);
@@ -490,14 +481,11 @@ static void test_unnameable_instance(void)
     bclose(&ents);
 }
 
-/* ==================================================================== */
-/* the caps                                                              */
-/* ==================================================================== */
+/* the caps */
 
 static void test_truncation(void)
 {
-    /* Ceilings lowered so the test reaches them in milliseconds; the growth
-     * test below covers the old fixed caps with the real ones. */
+    /* Ceilings are lowered so the test reaches them quickly; the growth test below uses the real ones. */
     const int volumes = 64 + 8;
     const int placed  = 16 + 4;
     blob inst, ents, kv, vals;
@@ -561,7 +549,7 @@ static void test_truncation(void)
     sh_nav_map_free(&m);
     free(json);
 
-    /* A box in a room past the ceiling is left out; earlier rooms keep theirs. */
+    /* A box in a room past the ceiling is left out; the rooms before it keep theirs. */
     {
         blob ents2, kv2, vals2;
         bopen(&ents2); bopen(&kv2); bopen(&vals2);
@@ -584,8 +572,8 @@ static void test_truncation(void)
     bclose(&inst);
 }
 
-/* The tables grow past the former fixed caps (512 boxes, 256 rooms) with the
- * production ceilings, and copy, compare and free as values. */
+/* The tables grow past 512 boxes and 256 rooms under the production ceilings, and copy, compare and free
+ * as values. */
 static void test_growth_past_old_caps(void)
 {
     const int rooms = 300, per_room = 2;
@@ -726,9 +714,7 @@ static void test_map_text_defaults_from_the_entitydef(void)
     bclose(&inst); bclose(&ents);
 }
 
-/* ==================================================================== */
-/* a stranger's map                                                      */
-/* ==================================================================== */
+/* a stranger's map */
 
 /* A refused document must overwrite out with an empty result. */
 static void refused(const char *json, size_t len)
@@ -820,14 +806,10 @@ static void test_malformed(void)
     bclose(&ents);
 }
 
-/* ==================================================================== */
-/* the live editor                                                       */
-/* ==================================================================== */
+/* the live editor */
 
-/* Simulate unsaved editor state with synthetic entity documents. The live
- * table is sparse and indexed by uniqueId, not the map JSON array position.
- * Documents are placed at IDs 11 and 22 and may omit their own uniqueId member;
- * the callback address supplies identity. */
+/* Simulates unsaved editor state: a sparse table indexed by uniqueId, not by map JSON array position.
+ * A document may omit its own uniqueId; the callback address supplies identity. */
 
 #define LIVE_MAX 640
 
@@ -835,7 +817,7 @@ typedef struct live_editor {
     const char *json[LIVE_MAX];     /* what the engine would hand back; NULL: no such entity */
     int         refuse[LIVE_MAX];   /* live, but serializing it fails */
     int         overrun[LIVE_MAX];  /* ...and one that reports more than it wrote */
-    int         queried[LIVE_MAX];  /* how many times get_json was asked for this id */
+    int         queried[LIVE_MAX];  /* get_json calls for this id */
     int         valid_calls;
 } live_editor;
 
@@ -1013,9 +995,8 @@ static void test_inherited_box_dimensions(void)
                 CHECK(near_f(quad_extent_y(r), cases[c].y));
                 CHECK(near_f(quad_top_z(r), 32 + cases[c].z));
                 CHECK(r->instance == 0);
-                /* A failed current entity read cannot reuse an earlier size.
-                 * It reads as unmeasured, which refuses this read and asks for
-                 * another rather than condemning the box. */
+                /* A failed read of the entity cannot reuse a size from a preceding read: it is unmeasured,
+                 * which refuses this read and asks for another instead of condemning the box. */
                 CHECK(sh_nav_regions_read_resolved(json, n, &m, resolved_size, NULL));
                 CHECK(m.unmeasured && !m.invalid_geometry);
                 CHECK(m.dropped_by[SH_NAVR_DROP_UNMEASURED] == 1);
@@ -1030,8 +1011,7 @@ static void test_inherited_box_dimensions(void)
     }
 }
 
-/* The map every test below starts from: one instance, two blocking boxes, and
- * only the first of them ticked when it was read. */
+/* The map the tests below start from: one instance, two blocking boxes, only the first ticked. */
 static char *two_box_map(sh_nav_map *m)
 {
     blob inst, ents;
@@ -1054,9 +1034,8 @@ static char *two_box_map(sh_nav_map *m)
     return json;
 }
 
-/* An editor that has moved and turned the boxes since they were serialized.
- * A live transform is what the editor is showing; the entity's own
- * spawnPosition is what it was created with. */
+/* An editor that has moved and turned the boxes since serialization: the live transform is what the editor
+ * shows, spawnPosition is the creation value. */
 typedef struct live_moves {
     float origin[LIVE_MAX][3];
     float m[LIVE_MAX][3][3];
@@ -1091,8 +1070,7 @@ static void moves_put(int id, float x, float y, float z,
         for (c = 0; c < 3; c++) g_moves.m[id][r][c] = (r == c) ? 1.0f : 0.0f;
 }
 
-/* A dragged box has to come back where the editor has it, not where it was
- * created, and that has to happen without a complete snapshot. */
+/* A dragged box comes back where the editor has it, not where it was created, without a complete snapshot. */
 static void test_live_transform_places_a_moved_box(void)
 {
     sh_nav_map m;
@@ -1142,9 +1120,7 @@ static void test_live_transform_places_a_moved_box(void)
     free(json); free(live0); free(live1);
 }
 
-/* ==================================================================== */
-/* orientation: the quad is the box's real walkable face                 */
-/* ==================================================================== */
+/* orientation: the quad is the box's real walkable face */
 
 /* Sparse spawnOrientation matrices inherit missing rows from identity.
  * Zero defaults would collapse corners when mat[2] is omitted. */
@@ -1457,7 +1433,7 @@ static void test_same_shapes_ignores_order_and_entities(void)
     make_shapes(&b, 7, 1, 40, 0);
     CHECK(!sh_nav_map_equal(&a, &b));
     CHECK(sh_nav_map_same_shapes(&a, &b));
-    /* b now lists a's boxes in a's order, keeping its own entity indices. */
+    /* b lists a's boxes in a's order, keeping its own entity indices. */
     for (i = 0; i < 7; i++) {
         CHECK(b.regions[i].c[0][0] == a.regions[i].c[0][0]);
         CHECK(b.regions[i].entity == 40u + 6u - (unsigned)i);

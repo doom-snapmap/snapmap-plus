@@ -2,10 +2,9 @@
  *
  *   look_cli <in.decl> <out_dir>
  *
- * Writes <out_dir>\<name>.decl, the compiled text (the original text when the material is served as it is), and each
- * image the compile registered (the layered parameter image, the constant colour images) as <path with / replaced by
- * _>. Exit 0 on success, 2 with the sentence on stderr when the look has a mistake, 1 otherwise. The notes of a
- * compile (what did not fit the game's shared texture places) go to stdout. */
+ * Writes <out_dir>\<name>.decl (the compiled text, or the original when the material is served as it is) and each
+ * image the compile registered, named by its path with / replaced by _. Exit 0 on success, 2 with the sentence on
+ * stderr when the look has a mistake, 1 otherwise; compile notes go to stdout. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>

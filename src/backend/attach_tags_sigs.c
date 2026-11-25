@@ -1,11 +1,6 @@
-/* attach_tags_sigs.c -- the private signature of attach_tags.c (the engine's tag-info lookup), kept apart so
- * the two-image test (tests/attach_tags_sigs_test.c) and detour_windows_test link it without the engine side.
- *
- * Build 13954591 (paired with tools/re/site_pair.py): the lookup AddAttachment calls with the host model's props
- * table (idList at md6Def + 0x210), the attached md6Def's name and the tag's name; it returns a tag record whose
- * int16 at +0x1C is the joint index, -1 for no tag. The 48-byte pattern is the only match in each executable;
- * its 15-byte window (mov [rsp+8],rbx; mov [rsp+0x10],rbp; mov [rsp+0x18],rsi) holds no relative operand. A
- * single site, so no call-target check is needed. */
+/* attach_tags_sigs.c -- the signature of the engine's tag-info lookup (build 13954591), the function
+ * AddAttachment calls with the host model's props table (idList at md6Def + 0x210). The 48-byte pattern is the
+ * only match in each executable and its 15-byte detour window holds no relative operand. */
 #include <stddef.h>
 #include "attach_tags.h"
 

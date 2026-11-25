@@ -1,11 +1,5 @@
-/* mp_json.h -- a small JSON tree for the module prefab cut and merge.
- *
- * Parses a complete document into nodes and writes it back compactly. Object
- * members keep their order, strings keep their exact escaped spelling and
- * numbers keep their source text, so an untouched value round-trips byte for
- * byte. Values created here are written in the engine's map spelling (integers
- * plain, floats with a fractional part). Pure C, no engine dependency.
- * Nesting is limited to MPJ_MAX_DEPTH; input past that is refused. */
+/* mp_json.h -- a small JSON tree for the module prefab cut and merge. Members, escaped strings and number text
+ * round-trip byte for byte; new values use the engine's map spelling. Pure C; nesting past MPJ_MAX_DEPTH is refused. */
 #ifndef SH_MP_JSON_H
 #define SH_MP_JSON_H
 

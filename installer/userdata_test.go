@@ -17,7 +17,7 @@ func newDataDirs(t *testing.T) (string, string) {
 	return la, up
 }
 
-// TestMigrateUserData_scaffolds: a fresh profile with no old content still gets the empty content tree created.
+// TestMigrateUserData_scaffolds: a fresh profile still gets the empty content tree created.
 func TestMigrateUserData_scaffolds(t *testing.T) {
 	la, _ := newDataDirs(t)
 	migrateUserData()
@@ -28,7 +28,7 @@ func TestMigrateUserData_scaffolds(t *testing.T) {
 	}
 }
 
-// Migrate legacy content into app data and retire the verified source.
+// Content in %USERPROFILE%\snaphak is copied into app data and the verified source is removed.
 func TestMigrateUserData_foldsOldContentForward(t *testing.T) {
 	la, up := newDataDirs(t)
 	oldPrefab := filepath.Join(up, "snaphak", "prefabs", "arena.json")
@@ -45,14 +45,14 @@ func TestMigrateUserData_foldsOldContentForward(t *testing.T) {
 	if err != nil || string(got) != "MY PREFAB" {
 		t.Fatalf("content not migrated to the new location: %q, %v", got, err)
 	}
-	// The old folder is removed after migration.
+	// The source folder is removed after the copy.
 	if _, err := os.Stat(filepath.Join(up, "snaphak")); !os.IsNotExist(err) {
 		t.Errorf("the old %%USERPROFILE%%\\snaphak folder should be removed after a full migration, but it still exists")
 	}
 }
 
-// The retired package folders are neither copied nor created, and an old one is left
-// in place for the player to deal with; everything else still moves.
+// The retired package folders are neither copied nor created, and one in the source stays in place;
+// everything else still moves.
 func TestMigrateUserData_leavesRetiredPackageFolders(t *testing.T) {
 	la, up := newDataDirs(t)
 	oldPackage := filepath.Join(up, "snaphak", "overrides", "boss", "package.json") // retired package folder
@@ -78,7 +78,7 @@ func TestMigrateUserData_leavesRetiredPackageFolders(t *testing.T) {
 	}
 }
 
-// The cache folder (the WebView2 profile) and an old top-level webview2 folder are regenerable:
+// The cache folder (the WebView2 profile) and a top-level webview2 folder are regenerable:
 // never copied and not required at the destination, so the rest still moves and they stay put.
 func TestMigrateUserData_skipsRegenerableCache(t *testing.T) {
 	la, up := newDataDirs(t)
@@ -120,8 +120,8 @@ func TestMigrateUserData_skipsRegenerableCache(t *testing.T) {
 	}
 }
 
-// TestMigrateUserData_neverClobbersNewer: if the user already has a file at the new location, an old-location
-// file of the same name must NOT overwrite it (and re-running is a no-op).
+// TestMigrateUserData_neverClobbersNewer: a file already at the destination is not overwritten by a source
+// file of the same name, and re-running is a no-op.
 func TestMigrateUserData_neverClobbersNewer(t *testing.T) {
 	la, up := newDataDirs(t)
 	name := filepath.Join("prefabs", "keep.json")
@@ -146,8 +146,8 @@ func TestMigrateUserData_neverClobbersNewer(t *testing.T) {
 	}
 }
 
-// TestLoadRecord_fallsBackToOldLocation: a record written by a pre-rename install (at %LOCALAPPDATA%\open-snaphak)
-// is found by loadRecord and migrated forward to the new location.
+// TestLoadRecord_fallsBackToOldLocation: a record at %LOCALAPPDATA%\open-snaphak is found by loadRecord and
+// copied to the data folder.
 func TestLoadRecord_fallsBackToOldLocation(t *testing.T) {
 	la, _ := newDataDirs(t)
 	oldDir := filepath.Join(la, "open-snaphak")
@@ -166,7 +166,7 @@ func TestLoadRecord_fallsBackToOldLocation(t *testing.T) {
 	}
 }
 
-// TestResolveToken_fallsBackToOldLocation: a token saved by a pre-rename install is still honored.
+// TestResolveToken_fallsBackToOldLocation: a token at %LOCALAPPDATA%\open-snaphak is still honored.
 func TestResolveToken_fallsBackToOldLocation(t *testing.T) {
 	la, _ := newDataDirs(t)
 	oldDir := filepath.Join(la, "open-snaphak")

@@ -25,8 +25,6 @@ static unsigned g_nevents;
 static char *g_names;
 static double g_load_ms;
 
-/* ------------------------------------------------------------ pure rules */
-
 static char mbi_lc(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c; }
 
 int sh_mbi_snapmap_loads(const char *leaf)
@@ -44,8 +42,6 @@ int sh_mbi_snapmap_loads(const char *leaf)
     if (!strcmp(stem, "init") || !strcmp(stem, "doom_initial")) return 1;
     return !strstr(stem, "_sp") && !strstr(stem, "initial");
 }
-
-/* ------------------------------------------------------------ the parse */
 
 static const char *mbi_find(const char *p, const char *end, const char *needle)
 {
@@ -200,8 +196,6 @@ int sh_mbi_load_text(const char *xml, size_t len)
     return r;
 }
 
-/* ------------------------------------------------------------ the file */
-
 static void mbi_default_root(char *out, size_t cap)
 {
     wchar_t exe[MAX_PATH * 2], *slash;
@@ -285,8 +279,6 @@ void sh_mbi_set_install(const char *doom_root)
     InterlockedExchange(&g_state, MBI_NEW);
     ReleaseSRWLockExclusive(&g_lock);
 }
-
-/* ------------------------------------------------------------ questions */
 
 static const mbi_event *mbi_lookup(const char *lower)
 {
@@ -402,8 +394,6 @@ void sh_mbi_get_stats(sh_mbi_stats *out)
     }
     ReleaseSRWLockShared(&g_lock);
 }
-
-/* ------------------------------------------------------------ stock-bank states */
 
 typedef struct mbi_st { char leaf[SH_MBI_LEAF_MAX]; int state, result; double ms; char key[96]; } mbi_st;
 static SRWLOCK g_st_lock = SRWLOCK_INIT;

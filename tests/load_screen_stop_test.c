@@ -1,16 +1,9 @@
-/* load_screen_stop_test.c -- the engine sites the load-screen stop
- * (src/fault_shield/load_screen_stop.c) depends on, checked on each build
- * 13954591 executable given on the command line:
- *   - CancelMapChange and LevelLoadCompleted resolve to unique signatures at the
- *     recorded RVAs;
- *   - CancelMapChange's first 15 bytes are the stolen window the installer
- *     verifies, whole and position-independent instructions;
- *   - CancelMapChange is idCommonLocal's vtable slot +0x28, the slot Frame's
- *     catch calls (Frame itself is slot +0x68);
- *   - the engine calls LevelLoadCompleted with the load_screen global in RCX,
- *     the argument the detour passes.
- * Run via run-tests.ps1 with -Doom / -DoomAlt. Each image is checked in its own
- * process because glb_resolve caches the first image's globals. */
+/* load_screen_stop_test.c -- the engine sites the load-screen stop (src/fault_shield/load_screen_stop.c) depends on,
+ * checked on each build 13954591 executable given on the command line: CancelMapChange and LevelLoadCompleted resolve
+ * to unique signatures at their recorded RVAs; CancelMapChange's first 15 bytes are whole, position-independent
+ * instructions; CancelMapChange is idCommonLocal's vtable slot +0x28 (Frame is +0x68); and the engine calls
+ * LevelLoadCompleted with the load_screen global in RCX. Run via run-tests.ps1 with -Doom / -DoomAlt; each image runs
+ * in its own process because glb_resolve caches the first image's globals. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

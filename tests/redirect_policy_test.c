@@ -1,7 +1,5 @@
-/* redirect_policy_test.c -- when the fault shield may redirect a fault into
- * Error(6) (src/fault_shield/redirect_policy.h). Pure; no game needed.
- * Argument order: on_main, load_screen_running, load_screen_stop_armed,
- * redirected_this_frame, frame_on_stack. */
+/* redirect_policy_test.c -- when the fault shield may redirect a fault into Error(6) (redirect_policy.h); pure.
+ * Arguments: on_main, load_screen_running, load_screen_stop_armed, redirected_this_frame, frame_on_stack. */
 #include <stdio.h>
 #include <string.h>
 #include "../src/fault_shield/redirect_policy.h"
@@ -13,18 +11,16 @@ int main(void)
 {
     int a, b, s, c, d;
     /* An ordinary editor-frame fault: main thread, no loading screen, first
-     * redirect of the frame, Frame on the stack. Redirected as before. */
+     * redirect of the frame, Frame on the stack. Redirected. */
     CHECK(shield_redirect_policy(1, 0, 0, 0, 1) == SHIELD_REDIRECT_OK);
     CHECK(shield_redirect_policy(1, 0, 1, 0, 1) == SHIELD_REDIRECT_OK);
-    /* Unknown inputs never decline: the behaviour before each input existed. */
+    /* Unknown inputs never decline. */
     CHECK(shield_redirect_policy(-1, -1, 0, -1, -1) == SHIELD_REDIRECT_OK);
     CHECK(shield_redirect_policy(1, -1, 0, 0, 1) == SHIELD_REDIRECT_OK);
     CHECK(shield_redirect_policy(1, 0, 0, -1, 1) == SHIELD_REDIRECT_OK);
     CHECK(shield_redirect_policy(1, 0, 0, 0, -1) == SHIELD_REDIRECT_OK);
-    /* issue 132: the shell-map load faulted in idMenuShellLocal::SetupModelList
-     * with the loading-screen thread running. Declined without the load-screen
-     * stop; recovered when it is armed, because CancelMapChange then stops the
-     * thread before the menu load. */
+    /* A fault in idMenuShellLocal::SetupModelList with the loading-screen thread running is declined unless
+     * the stop is armed, since CancelMapChange then stops the thread before the menu load. */
     CHECK(shield_redirect_policy(1, 1, 0, 0, 1) == SHIELD_DECLINE_LOAD_SCREEN);
     CHECK(shield_redirect_policy(1, 1, 1, 0, 1) == SHIELD_REDIRECT_OK);
     /* the loading-screen thread's own SWF flush fault is off the main thread,
