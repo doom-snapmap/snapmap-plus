@@ -1,5 +1,6 @@
 /* Registers console commands and implements dispatch, resource listings, developer utilities, and command
  * exposure. Entity, reflection, and math handlers live in their own modules. */
+#include "safe_read.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -442,16 +443,6 @@ static void h_sh_rawmaps(idCmdArgs *a)
 #define LISTRES_NAME_OFF    0x08
 #define LISTRES_COUNT_CAP   (1u << 20)
 
-static int lr_read_ptr(const void *src, void **out)
-{
-    __try { *out = *(void *const *)src; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
-static int lr_read_u32(const void *src, uint32_t *out)
-{
-    __try { *out = *(const uint32_t *)src; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
 /* Reads the decl name (*decl + 8), SEH-guarded; returns NULL if either hop is unreadable. */
 static const char *lr_decl_name(const void *decl)
 {
@@ -545,8 +536,8 @@ static void h_sh_listres(idCmdArgs *a)
 
     void    *array = NULL;
     uint32_t count = 0;
-    if (!lr_read_ptr((const uint8_t *)list + LISTRES_ARRAY_OFF, &array) ||
-        !lr_read_u32((const uint8_t *)list + LISTRES_COUNT_OFF, &count)) {
+    if (!sh_read_ptr((const uint8_t *)list + LISTRES_ARRAY_OFF, &array) ||
+        !sh_read_u32((const uint8_t *)list + LISTRES_COUNT_OFF, &count)) {
         sh_printf("sh_listres: decl list array/count unreadable.\n");
         return;
     }
@@ -565,7 +556,7 @@ static void h_sh_listres(idCmdArgs *a)
     uint32_t printed = 0;
     for (uint32_t i = 0; i < count; i++) {
         void *decl = NULL;
-        if (!lr_read_ptr((const uint8_t *)array + (size_t)i * 8, &decl)) break;
+        if (!sh_read_ptr((const uint8_t *)array + (size_t)i * 8, &decl)) break;
         if (decl == NULL) continue;
 
         const char *name = lr_decl_name(decl);

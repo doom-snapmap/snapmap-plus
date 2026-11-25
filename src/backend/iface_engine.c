@@ -1,5 +1,6 @@
 /* Editor operations behind the shared UI interface. Field offsets are build-dependent; SEH contains access
  * faults, but a readable incompatible layout can still produce incorrect engine state. */
+#include "safe_read.h"
 #include <windows.h>
 #include <shlobj.h>
 #include <knownfolders.h>
@@ -152,21 +153,6 @@ const uint8_t *sh_iface_engine_editor_base(void)
 }
 
 /* Guarded primitive reads. */
-static int ie_read_ptr(const void *src, void **out)
-{
-    __try { *out = *(void *const *)src; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
-static int ie_read_s32(const void *src, int *out)
-{
-    __try { *out = *(const int *)src; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
-static int ie_read_u32(const void *src, uint32_t *out)
-{
-    __try { *out = *(const uint32_t *)src; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
 
 /* Return the editor when its loaded-map pointer is readable and nonnull.
  * This pointer can persist in the HUB; it is not a visibility/readiness gate. */
@@ -174,7 +160,7 @@ static const uint8_t *editor_session(void)
 {
     if (!g_editor) return NULL;
     void *mapObj = NULL;
-    if (!ie_read_ptr(g_editor + ED_MAP_OBJ_OFF, &mapObj) || mapObj == NULL) return NULL;
+    if (!sh_read_ptr(g_editor + ED_MAP_OBJ_OFF, &mapObj) || mapObj == NULL) return NULL;
     return g_editor;
 }
 
@@ -186,7 +172,7 @@ static int slot_editor_ready(sh_iface *self)
     (void)self;
     if (!g_editor) return 0;
     void *screen = NULL;
-    if (!ie_read_ptr(g_editor + ED_SCREEN_OFF, &screen)) return 0;
+    if (!sh_read_ptr(g_editor + ED_SCREEN_OFF, &screen)) return 0;
     return screen != NULL ? 1 : 0;
 }
 
@@ -198,7 +184,7 @@ static int slot_is_entity_mode(sh_iface *self)
     const uint8_t *ed = editor_session();
     if (!ed) return 0;
     int m = 0;
-    if (!ie_read_s32(ed + ED_ENTITY_MODE_OFF, &m)) return 0;
+    if (!sh_read_i32(ed + ED_ENTITY_MODE_OFF, &m)) return 0;
     return m == 2 ? 1 : 0;
 }
 
@@ -208,7 +194,7 @@ static void *selection_object(void)
     const uint8_t *ed = editor_session();
     if (!ed) return NULL;
     void *sel = NULL;
-    if (!ie_read_ptr(ed + ED_SEL_OBJ_OFF, &sel)) return NULL;
+    if (!sh_read_ptr(ed + ED_SEL_OBJ_OFF, &sel)) return NULL;
     return sel;
 }
 
@@ -242,11 +228,11 @@ static int entity_array(void **out_array, uint32_t *out_count)
     const uint8_t *ed = editor_session();
     if (!ed) return 0;
     void *arrObj = NULL;
-    if (!ie_read_ptr(ed + ED_MAP_OBJ_OFF, &arrObj) || arrObj == NULL) return 0;
+    if (!sh_read_ptr(ed + ED_MAP_OBJ_OFF, &arrObj) || arrObj == NULL) return 0;
     void    *array = NULL;
     uint32_t count = 0;
-    if (!ie_read_ptr((const uint8_t *)arrObj + ARR_ENT_ARRAY_OFF, &array)) return 0;
-    if (!ie_read_u32((const uint8_t *)arrObj + ARR_ENT_COUNT_OFF, &count)) return 0;
+    if (!sh_read_ptr((const uint8_t *)arrObj + ARR_ENT_ARRAY_OFF, &array)) return 0;
+    if (!sh_read_u32((const uint8_t *)arrObj + ARR_ENT_COUNT_OFF, &count)) return 0;
     if (array == NULL || count > ENT_COUNT_CAP) return 0;
     *out_array = array;
     *out_count = count;
@@ -258,7 +244,7 @@ static void *entity_ptr(void *array, uint32_t count, int id)
 {
     if (id < 0 || (uint32_t)id >= count) return NULL;
     void *e = NULL;
-    if (!ie_read_ptr((const uint8_t *)array + (size_t)id * 8, &e)) return NULL;
+    if (!sh_read_ptr((const uint8_t *)array + (size_t)id * 8, &e)) return NULL;
     return e;
 }
 
@@ -271,16 +257,16 @@ static int slot_get_selection(sh_iface *self, int *out_ids, int max)
     void *sel = selection_object();
     if (!sel || !out_ids || max <= 0) return 0;
     int count = 0;
-    if (!ie_read_s32((const uint8_t *)sel + SEL_COUNT_OFF, &count)) return 0;
+    if (!sh_read_i32((const uint8_t *)sel + SEL_COUNT_OFF, &count)) return 0;
     if (count <= 0 || count > SEL_MAX_IDS) return 0;
     void *arr = NULL;
-    if (!ie_read_ptr((const uint8_t *)sel + SEL_IDS_OFF, &arr) || arr == NULL) return 0;
+    if (!sh_read_ptr((const uint8_t *)sel + SEL_IDS_OFF, &arr) || arr == NULL) return 0;
     int n = count < max ? count : max;
     int written = 0;
     for (int i = 0; i < n; i++) {
 
         uint32_t id = 0;
-        if (!ie_read_u32((const uint8_t *)arr + (size_t)i * 4, &id)) break;
+        if (!sh_read_u32((const uint8_t *)arr + (size_t)i * 4, &id)) break;
         out_ids[written++] = (int)id;
     }
     return written;
@@ -297,26 +283,26 @@ static int manipulation_in_progress(void)
     const uint8_t *ed = editor_session();
     if (!ed) return 1;                       /* Unknown editor: refuse mutation. */
     void *mapObj = NULL, *sel = NULL;
-    if (!ie_read_ptr(ed + ED_MAP_OBJ_OFF, &mapObj) || !mapObj) return 1;
-    if (!ie_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || !sel) return 1;
+    if (!sh_read_ptr(ed + ED_MAP_OBJ_OFF, &mapObj) || !mapObj) return 1;
+    if (!sh_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || !sel) return 1;
 
     int count = 0;
-    if (!ie_read_s32((const uint8_t *)sel + SEL_COUNT_OFF, &count)) return 1;
+    if (!sh_read_i32((const uint8_t *)sel + SEL_COUNT_OFF, &count)) return 1;
     if (count < 0) return 1;
     if (count == 0) return 0;
     if (count > SEL_MAX_IDS) return 1;
 
     void *ids = NULL, *layers = NULL;
-    if (!ie_read_ptr((const uint8_t *)sel + SEL_IDS_OFF, &ids) || !ids) return 1;
-    if (!ie_read_ptr((const uint8_t *)mapObj + MAP_ENT_LAYER_ARR_OFF, &layers) || !layers) return 1;
+    if (!sh_read_ptr((const uint8_t *)sel + SEL_IDS_OFF, &ids) || !ids) return 1;
+    if (!sh_read_ptr((const uint8_t *)mapObj + MAP_ENT_LAYER_ARR_OFF, &layers) || !layers) return 1;
     int scratch = 0;
-    if (!ie_read_s32((const uint8_t *)mapObj + MAP_SCRATCH_LAYER_OFF, &scratch)) return 1;
+    if (!sh_read_i32((const uint8_t *)mapObj + MAP_SCRATCH_LAYER_OFF, &scratch)) return 1;
 
     for (int i = 0; i < count; i++) {
         uint32_t id = 0;
-        if (!ie_read_u32((const uint8_t *)ids + (size_t)i * 4, &id)) return 1;
+        if (!sh_read_u32((const uint8_t *)ids + (size_t)i * 4, &id)) return 1;
         int layer = 0;
-        if (!ie_read_s32((const uint8_t *)layers + (size_t)id * 4, &layer)) return 1;
+        if (!sh_read_i32((const uint8_t *)layers + (size_t)id * 4, &layer)) return 1;
         if (layer == scratch) return 1;
     }
     return 0;
@@ -538,13 +524,13 @@ static void mode_set_selection_state(int state)
     const uint8_t *ed = editor_session();
     if (!ed) return;
     int editor_state = 0;
-    if (!ie_read_s32(ed + ED_ENTITY_MODE_OFF, &editor_state)) return;
+    if (!sh_read_i32(ed + ED_ENTITY_MODE_OFF, &editor_state)) return;
     if (editor_state != 2) return;
 
     /* Only transition between idle and selected. Other substates own gesture
  * or screen bookkeeping that a direct state write would bypass. */
     int cur = 0;
-    if (!ie_read_s32(ed + ED_MODE_OBJ_OFF + MODE_SEL_STATE_OFF, &cur)) return;
+    if (!sh_read_i32(ed + ED_MODE_OBJ_OFF + MODE_SEL_STATE_OFF, &cur)) return;
     if (cur != MODE_STATE_IDLE && cur != MODE_STATE_SELECTED) return;
     if (cur == state) return;
 
@@ -584,7 +570,7 @@ static int slot_hovered_id(sh_iface *self)
     void *sel = selection_object();
     if (!sel) return -1;
     int hovered = -1;
-    if (!ie_read_s32((const uint8_t *)sel + SEL_HOVERED_OFF, &hovered)) return -1;
+    if (!sh_read_i32((const uint8_t *)sel + SEL_HOVERED_OFF, &hovered)) return -1;
     return hovered;
 }
 
@@ -597,7 +583,7 @@ static int slot_is_valid_id(sh_iface *self, int id)
     void *ent = entity_ptr(array, count, id);
     if (!ent) return 0;
     void *vflag = NULL;
-    if (!ie_read_ptr((const uint8_t *)ent + ENT_VALID_OFF, &vflag)) return 0;
+    if (!sh_read_ptr((const uint8_t *)ent + ENT_VALID_OFF, &vflag)) return 0;
     return vflag != NULL;
 }
 
@@ -615,9 +601,9 @@ static int slot_entity_count(sh_iface *self)
 static int id_module_index(const uint8_t *lm, uint32_t id)
 {
     void *idxArr = NULL; int instIdx = 0, modCnt = 0;
-    if (!ie_read_ptr(lm + LM_ENTINST_ARR_OFF, &idxArr) || idxArr == NULL)  return -1;
-    if (!ie_read_s32((const uint8_t *)idxArr + (size_t)id * 4, &instIdx))  return -1;
-    if (!ie_read_s32(lm + LM_INSTANCES_CNT_OFF, &modCnt) || modCnt <= 0)   return -1;
+    if (!sh_read_ptr(lm + LM_ENTINST_ARR_OFF, &idxArr) || idxArr == NULL)  return -1;
+    if (!sh_read_i32((const uint8_t *)idxArr + (size_t)id * 4, &instIdx))  return -1;
+    if (!sh_read_i32(lm + LM_INSTANCES_CNT_OFF, &modCnt) || modCnt <= 0)   return -1;
     return (instIdx >= 0 && instIdx < modCnt) ? instIdx : -1;   /* instIdx == modCnt => global/no-module */
 }
 
@@ -655,14 +641,14 @@ static char *ie_module_of(int id, int *index)
     void *lm = NULL, *modTable = NULL, *modObj = NULL, *np = NULL;
     int modIdx;
     /* Module table stride 0x98 and name +0x48 (build 13954591). */
-    if (!ed || !ie_read_ptr(ed + ED_MAP_OBJ_OFF, &lm) || !lm) return NULL;
+    if (!ed || !sh_read_ptr(ed + ED_MAP_OBJ_OFF, &lm) || !lm) return NULL;
     __try { modIdx = id_module_index((const uint8_t *)lm, (uint32_t)id); }
     __except (EXCEPTION_EXECUTE_HANDLER) { modIdx = -1; }
     if (modIdx < 0) return NULL;
     /* Dereference the table entry, then its module-name pointer. */
-    if (!ie_read_ptr((const uint8_t *)lm + LM_MODTABLE_OFF, &modTable) || !modTable ||
-        !ie_read_ptr((const uint8_t *)modTable + (size_t)modIdx * MOD_STRIDE, &modObj) || !modObj ||
-        !ie_read_ptr((const uint8_t *)modObj + MOD_NAME_OFF, &np))
+    if (!sh_read_ptr((const uint8_t *)lm + LM_MODTABLE_OFF, &modTable) || !modTable ||
+        !sh_read_ptr((const uint8_t *)modTable + (size_t)modIdx * MOD_STRIDE, &modObj) || !modObj ||
+        !sh_read_ptr((const uint8_t *)modObj + MOD_NAME_OFF, &np))
         return NULL;
     *index = modIdx;
     return ie_owned_cstr((const char *)np);
@@ -679,9 +665,9 @@ static char *slot_id_to_string(sh_iface *self, int id)
     int modIdx = -1;
     (void)self;
     if (entity_array(&array, &count)) ent = entity_ptr(array, count, id);
-    if (ent && ie_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) && defsub) {
-        if (ie_read_ptr((const uint8_t *)defsub + DEFSUB_CLASS_OFF, &p) && p) cls = ie_owned_cstr((const char *)p);
-        if (ie_read_ptr((const uint8_t *)defsub + DEFSUB_INHERIT_OFF, &p) && p) inh = ie_owned_cstr((const char *)p);
+    if (ent && sh_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) && defsub) {
+        if (sh_read_ptr((const uint8_t *)defsub + DEFSUB_CLASS_OFF, &p) && p) cls = ie_owned_cstr((const char *)p);
+        if (sh_read_ptr((const uint8_t *)defsub + DEFSUB_INHERIT_OFF, &p) && p) inh = ie_owned_cstr((const char *)p);
     }
     mod = ie_module_of(id, &modIdx);
     if (mod && mod[0])
@@ -709,7 +695,7 @@ static void *defsub_for_id(int id)
     void *ent = entity_ptr(array, count, id);
     if (!ent) return NULL;
     void *defsub = NULL;
-    if (!ie_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) return NULL;
+    if (!sh_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) return NULL;
     return defsub;
 }
 
@@ -720,7 +706,7 @@ static char *slot_get_classname(sh_iface *self, int id)
     void *defsub = defsub_for_id(id), *p = NULL;
     (void)self;
     if (!defsub) return NULL;
-    if (!ie_read_ptr((const uint8_t *)defsub + DEFSUB_CLASS_OFF, &p) || !p) return sh_iface_text("");
+    if (!sh_read_ptr((const uint8_t *)defsub + DEFSUB_CLASS_OFF, &p) || !p) return sh_iface_text("");
     return ie_owned_cstr((const char *)p);
 }
 
@@ -731,7 +717,7 @@ static char *slot_get_inherit(sh_iface *self, int id)
     void *defsub = defsub_for_id(id), *p = NULL;
     (void)self;
     if (!defsub) return NULL;
-    if (!ie_read_ptr((const uint8_t *)defsub + DEFSUB_INHERIT_OFF, &p) || !p) return sh_iface_text("");
+    if (!sh_read_ptr((const uint8_t *)defsub + DEFSUB_INHERIT_OFF, &p) || !p) return sh_iface_text("");
     return ie_owned_cstr((const char *)p);
 }
 
@@ -749,7 +735,7 @@ static void slot_toast(sh_iface *self, const char *title, const char *text)
     const uint8_t *ed = editor_session();
     if (!ed) return;
     void *screen = NULL;
-    if (!ie_read_ptr(ed + ED_SCREEN_OFF, &screen) || screen == NULL) return;
+    if (!sh_read_ptr(ed + ED_SCREEN_OFF, &screen) || screen == NULL) return;
 
     uint8_t tStr[IDSTR_SIZE], xStr[IDSTR_SIZE];
     memset(tStr, 0, sizeof tStr);
@@ -776,8 +762,8 @@ static char *slot_get_displayname(sh_iface *self, int id)
     if (!ent) return NULL;
     uint32_t len = 0;
     void *data = NULL;
-    if (!ie_read_u32((const uint8_t *)ent + ENT_DISPLAYNAME_LEN_OFF, &len) ||
-        !ie_read_ptr((const uint8_t *)ent + ENT_DISPLAYNAME_PTR_OFF, &data) || data == NULL || len > INT_MAX)
+    if (!sh_read_u32((const uint8_t *)ent + ENT_DISPLAYNAME_LEN_OFF, &len) ||
+        !sh_read_ptr((const uint8_t *)ent + ENT_DISPLAYNAME_PTR_OFF, &data) || data == NULL || len > INT_MAX)
         return sh_iface_text("");
     return ie_owned_bytes(data, len);
 }
@@ -818,8 +804,8 @@ static char *slot_get_declsource(sh_iface *self, int id)
     int len = 0;
     void *data = NULL;
     char *buf;
-    if (!ie_read_s32((const uint8_t *)defsub + DEFSUB_SRC_LEN_OFF, &len) ||
-        !ie_read_ptr((const uint8_t *)defsub + DEFSUB_SRC_PTR_OFF, &data) || data == NULL || len <= 0)
+    if (!sh_read_i32((const uint8_t *)defsub + DEFSUB_SRC_LEN_OFF, &len) ||
+        !sh_read_ptr((const uint8_t *)defsub + DEFSUB_SRC_PTR_OFF, &data) || data == NULL || len <= 0)
         return sh_iface_text("");
     if ((buf = ie_owned_bytes(data, (size_t)len)) != NULL) declsource_own_state(defsub, buf, len);
     return buf;
@@ -1153,14 +1139,14 @@ static int slot_id_dev_layer_hidden(sh_iface *self, int id)
     if (id < 0) return 0;
     void *cv = resolve_devlayer_cvar();
     int enabled = 0;
-    if (!cv || !ie_read_s32((const uint8_t *)cv + DEVL_CVAR_VALUE_OFF, &enabled) || enabled != 0) return 0;
+    if (!cv || !sh_read_i32((const uint8_t *)cv + DEVL_CVAR_VALUE_OFF, &enabled) || enabled != 0) return 0;
     void    *array = NULL;
     uint32_t count = 0;
     if (!entity_array(&array, &count)) return 0;
     void *ent = entity_ptr(array, count, id);
     if (ent == NULL) return 0;
     uint32_t bits = 0;
-    if (!ie_read_u32((const uint8_t *)ent + ENT_LAYER_BITS_OFF, &bits)) return 0;
+    if (!sh_read_u32((const uint8_t *)ent + ENT_LAYER_BITS_OFF, &bits)) return 0;
     return (bits & 1u) == 0 ? 1 : 0;   /* No base-layer bit. */
 }
 
@@ -1192,7 +1178,7 @@ static const uint8_t *g_mods_main_thread_at;
 static int ie_mods_on_main(void)
 {
     int id = 0;
-    if (!g_mods_main_thread_at || !ie_read_s32(g_mods_main_thread_at, &id) || id == 0) return -1;
+    if (!g_mods_main_thread_at || !sh_read_i32(g_mods_main_thread_at, &id) || id == 0) return -1;
     return (DWORD)id == GetCurrentThreadId() ? 1 : 0;
 }
 
@@ -1220,9 +1206,9 @@ static int ie_mods_placed_names(sh_modui_name_fn emit, void *context)
         void *ent = entity_ptr(array, count, (int)id), *vflag = NULL, *defsub = NULL, *blob = NULL;
         char name[512];
         const char *p;
-        if (!ent || !ie_read_ptr((const uint8_t *)ent + ENT_VALID_OFF, &vflag) || !vflag) continue;
-        if (!ie_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || !defsub) continue;
-        if (!ie_read_ptr((const uint8_t *)defsub + DECL_BLOB_B_OFF, &blob) || !blob) continue;
+        if (!ent || !sh_read_ptr((const uint8_t *)ent + ENT_VALID_OFF, &vflag) || !vflag) continue;
+        if (!sh_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || !defsub) continue;
+        if (!sh_read_ptr((const uint8_t *)defsub + DECL_BLOB_B_OFF, &blob) || !blob) continue;
         if (ie_mods_copy_text(blob, text, IE_MODS_DECL_MAX) < 0) continue;
         read++;
         for (p = text; (p = strchr(p, '"')) != NULL;) {
@@ -1261,7 +1247,7 @@ static void *ie_mods_edit(void)
 {
     const uint8_t *ed = editor_session();
     void *edit = NULL;
-    if (!ed || !ie_read_ptr(ed + ED_MAP_OBJ_OFF, &edit)) return NULL;
+    if (!ed || !sh_read_ptr(ed + ED_MAP_OBJ_OFF, &edit)) return NULL;
     return edit;
 }
 
@@ -1271,7 +1257,7 @@ static int ie_mods_map_json(char **out, size_t *len)
     if (out) *out = NULL;
     if (len) *len = 0;
     /* The map is the editor's while its screen is up; in the hub the pointer can persist. */
-    if (!edit || !g_editor || !ie_read_ptr(g_editor + ED_SCREEN_OFF, &screen) || !screen) return 0;
+    if (!edit || !g_editor || !sh_read_ptr(g_editor + ED_SCREEN_OFF, &screen) || !screen) return 0;
     if (!sh_rawmap_live_serialize_ready()) return -1;
     return sh_rawmap_serialize_live_copy(edit, out, len) ? 1 : -1;
 }
@@ -1281,7 +1267,7 @@ static void ie_mods_idstr(const uint8_t *s, char *out, size_t cap)
     int length = 0;
     void *data = NULL;
     out[0] = 0;
-    if (!ie_read_s32(s + 8, &length) || !ie_read_ptr(s + 0x10, &data)) return;
+    if (!sh_read_i32(s + 8, &length) || !sh_read_ptr(s + 0x10, &data)) return;
     if (length <= 0 || (size_t)length >= cap || !data) return;
     __try { memcpy(out, data, (size_t)length); out[length] = 0; }
     __except (EXCEPTION_EXECUTE_HANDLER) { out[0] = 0; }
@@ -1305,7 +1291,7 @@ static int ie_mods_map_info(sh_modui_map_info *out)
     if (!out) return 0;
     memset(out, 0, sizeof *out);
     out->tagged = -1;
-    if (!edit || !ie_read_ptr(g_editor + ED_SCREEN_OFF, &screen) || !screen) return 0;
+    if (!edit || !sh_read_ptr(g_editor + ED_SCREEN_OFF, &screen) || !screen) return 0;
     ie_mods_idstr(edit + IE_EDIT_LOCAL_ID, out->local_id, sizeof out->local_id);
     ie_mods_idstr(edit + IE_EDIT_CLOUD_ID, out->cloud_id, sizeof out->cloud_id);
     out->tagged = sh_modpublish_edit_tag(edit, "mods", 0);
@@ -1360,7 +1346,7 @@ static int ie_mods_busy(char *cause, size_t cap)
         } __except (EXCEPTION_EXECUTE_HANDLER) { active = 1; reason = 0; }
         if (!active && reason == 3) { strncpy_s(cause, cap, "Play is running; return to the editor first", _TRUNCATE); return 1; }
     }
-    if (g_mods_load_state_at && ie_read_s32(g_mods_load_state_at, &state) && state != 0 && state != IE_LOAD_STATE_RUNNING) {
+    if (g_mods_load_state_at && sh_read_i32(g_mods_load_state_at, &state) && state != 0 && state != IE_LOAD_STATE_RUNNING) {
         strncpy_s(cause, cap, "a map is loading; try again when it has loaded", _TRUNCATE);
         return 1;
     }
@@ -1389,12 +1375,12 @@ static int ie_mods_map_left(void)
     void *map = NULL;
     int state = 0;
     if (!g_editor) return -1;
-    if (!ie_read_ptr(g_editor + ED_MAP_OBJ_OFF, &map)) return -1;
+    if (!sh_read_ptr(g_editor + ED_MAP_OBJ_OFF, &map)) return -1;
     if (!map) return 1;
-    if (!ie_read_s32(g_editor + ED_ENTITY_MODE_OFF, &state)) return -1;
+    if (!sh_read_i32(g_editor + ED_ENTITY_MODE_OFF, &state)) return -1;
     if (state == IE_EDITOR_STATE_EXITING) {
         int reason = 0;
-        if (!ie_read_s32(g_editor + ED_DEACT_REASON_OFF, &reason)) return -1;
+        if (!sh_read_i32(g_editor + ED_DEACT_REASON_OFF, &reason)) return -1;
         return reason == IE_DEACT_REASON_SETTINGS ? 0 : 1;
     }
     return state == 0 ? 1 : 0;

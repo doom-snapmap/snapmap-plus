@@ -1,4 +1,5 @@
 /* budget_table.c -- see budget_table.h. */
+#include "safe_read.h"
 #include "../common/text.h"
 #include <stdlib.h>
 #include <string.h>
@@ -375,8 +376,6 @@ static const void *g_built_entries, *g_built_pool;
 static int g_built_count = -1, g_built_pool_count = -1;
 static int g_logged;
 
-static int rd_ptr(const void *p, void **v) { __try { *v = *(void *const *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }
-static int rd_i32(const void *p, int *v) { __try { *v = *(const int *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }
 
 static int rd_block(const void *p, int out[SH_BT_FIELDS])
 {
@@ -419,7 +418,7 @@ static void bt_rows_add(bt_row_models *rows, const char *inherit, const char *na
     int have_size, i, printable = 1;
     bt_row_model *r;
     model[0] = 0;
-    if (rd_ptr(sedef + SEDEF_RENDERINFO_OFF + RI_MODEL_DATA_OFF, &mp) && mp)
+    if (sh_read_ptr(sedef + SEDEF_RENDERINFO_OFF + RI_MODEL_DATA_OFF, &mp) && mp)
         (void)rd_str(mp, model, sizeof model);
     for (i = 0; model[i]; ++i)
         if ((unsigned char)model[i] < 0x21 || (unsigned char)model[i] > 0x7e) { printable = 0; break; }
@@ -507,13 +506,13 @@ static void bt_sum_templates(const unsigned char *list, unsigned filter, int vie
 {
     void *data = NULL;
     int count = 0, i;
-    if (!rd_ptr(list, &data) || !rd_i32(list + TB_LIST_COUNT, &count) || !data || count <= 0 || count > LIST_MAX)
+    if (!sh_read_ptr(list, &data) || !sh_read_i32(list + TB_LIST_COUNT, &count) || !data || count <= 0 || count > LIST_MAX)
         return;
     for (i = 0; i < count; ++i) {
         const unsigned char *t = (const unsigned char *)data + (size_t)i * PAL_STRIDE;
         void *sedef = NULL;
         int mask = 0, l[SH_BT_FIELDS];
-        if (!rd_ptr(t, &sedef) || !sedef || !rd_i32(t + TEMPLATE_MASK_OFF, &mask)) continue;
+        if (!sh_read_ptr(t, &sedef) || !sedef || !sh_read_i32(t + TEMPLATE_MASK_OFF, &mask)) continue;
         if (!rd_block((const unsigned char *)sedef + SEDEF_LIMITS_OFF, l)) continue;
         /* VIEW templates become room entities, counted with the network-static byte; GAME templates never subtract
          * it. */
@@ -538,7 +537,7 @@ static void bt_build(unsigned char *ed, sh_bt_table *t, sh_bt_head *head, int li
     head->auto_view_mask = have_layers ? auto_view : 0xffffffffu;
     head->sound_mask = have_layers ? sound : 0xffffffffu;
     head->layers_source = have_layers ? "decl" : "fallback";
-    if (!rd_ptr(pal + PAL_ENTRIES_OFF, &entries) || !rd_i32(pal + PAL_COUNT_OFF, &count) ||
+    if (!sh_read_ptr(pal + PAL_ENTRIES_OFF, &entries) || !sh_read_i32(pal + PAL_COUNT_OFF, &count) ||
         !entries || count <= 0 || count > PAL_MAX) { *error = "entity palette unreadable"; return; }
     g_built_entries = entries; g_built_count = count;
     for (i = 0; i < count; ++i) {
@@ -546,18 +545,18 @@ static void bt_build(unsigned char *ed, sh_bt_table *t, sh_bt_head *head, int li
         void *sedef = NULL, *np = NULL, *rec = NULL, *ip = NULL;
         char name[NAME_CAP], inherit[NAME_CAP];
         int l[SH_BT_FIELDS], automation = 0;
-        if (!rd_ptr(e, &sedef) || !sedef || !rd_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &np) ||
+        if (!sh_read_ptr(e, &sedef) || !sedef || !sh_read_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &np) ||
             !rd_str(np, name, sizeof name) || !name[0])
             continue;
         if (!rd_block((unsigned char *)sedef + SEDEF_LIMITS_OFF, l)) continue;
-        (void)rd_i32((unsigned char *)sedef + SEDEF_AUTO_OFF, &automation);
+        (void)sh_read_i32((unsigned char *)sedef + SEDEF_AUTO_OFF, &automation);
         inherit[0] = 0;
-        if (rd_ptr(e + ENTRY_RECORD_OFF, &rec) && rec && rd_ptr((unsigned char *)rec + RECORD_INHERIT_OFF, &ip))
+        if (sh_read_ptr(e + ENTRY_RECORD_OFF, &rec) && rec && sh_read_ptr((unsigned char *)rec + RECORD_INHERIT_OFF, &ip))
             (void)rd_str(ip, inherit, sizeof inherit);
         if (sh_bt_table_add_sedef(t, name, inherit, l, automation, e[ENTRY_STATIC_OFF] != 0))
             bt_rows_add(rows, inherit, name, (const unsigned char *)sedef);
     }
-    if (!rd_ptr(mp + MP_POOL_OFF, &pool) || !rd_i32(mp + MP_POOL_COUNT_OFF, &pool_count) ||
+    if (!sh_read_ptr(mp + MP_POOL_OFF, &pool) || !sh_read_i32(mp + MP_POOL_COUNT_OFF, &pool_count) ||
         pool_count < 0 || pool_count > WRAPPER_MAX) { *error = "module palette unreadable"; return; }
     g_built_pool = pool; g_built_pool_count = pool_count;
     for (i = 0; pool && i < pool_count; ++i) {
@@ -568,16 +567,16 @@ static void bt_build(unsigned char *ed, sh_bt_table *t, sh_bt_head *head, int li
         int own[SH_BT_FIELDS], templ[SH_BT_FIELDS], view[SH_BT_FIELDS];
         static sh_bt_parts parts;   /* game thread only; too large for the stack */
         unsigned filter;
-        if (!rd_ptr(w, &decl) || !decl || !rd_ptr((unsigned char *)decl + DECL_NAME_OFF, &np) ||
+        if (!sh_read_ptr(w, &decl) || !decl || !sh_read_ptr((unsigned char *)decl + DECL_NAME_OFF, &np) ||
             !rd_str(np, name, sizeof name) || !name[0])
             continue;
-        if (!rd_ptr(w + WRAPPER_CARD_OFF, &card) || !card || !rd_ptr(w + WRAPPER_TEMPL_OFF, &tb) || !tb) continue;
-        if (!rd_i32((unsigned char *)card + CARD_FLOORS_OFF, &floors) ||
-            !rd_i32((unsigned char *)card + CARD_WALLS_OFF, &walls) ||
-            !rd_i32((unsigned char *)decl + DECL_PORTALS_OFF, &portals) ||
-            !rd_i32((unsigned char *)decl + DECL_LAYERS_OFF, &decl_mask))
+        if (!sh_read_ptr(w + WRAPPER_CARD_OFF, &card) || !card || !sh_read_ptr(w + WRAPPER_TEMPL_OFF, &tb) || !tb) continue;
+        if (!sh_read_i32((unsigned char *)card + CARD_FLOORS_OFF, &floors) ||
+            !sh_read_i32((unsigned char *)card + CARD_WALLS_OFF, &walls) ||
+            !sh_read_i32((unsigned char *)decl + DECL_PORTALS_OFF, &portals) ||
+            !sh_read_i32((unsigned char *)decl + DECL_LAYERS_OFF, &decl_mask))
             continue;
-        for (k = 0; k < 3; ++k) (void)rd_i32((unsigned char *)card + CARD_KB_OFF + 4 * k, &kb[k]);
+        for (k = 0; k < 3; ++k) (void)sh_read_i32((unsigned char *)card + CARD_KB_OFF + 4 * k, &kb[k]);
         sh_bt_module_own(floors, walls, portals, kb[0], kb[1], kb[2], own);
         filter = have_layers ? sh_bt_filter_mask((unsigned)decl_mask, sound, auto_view) : 0xffffffffu;
         sh_bt_base(templ);
@@ -585,12 +584,12 @@ static void bt_build(unsigned char *ed, sh_bt_table *t, sh_bt_head *head, int li
         parts.count = parts.overflow = 0;
         bt_sum_templates((unsigned char *)tb + TB_GAME_OFF, filter, 0, templ, &parts);
         bt_sum_templates((unsigned char *)tb + TB_VIEW_OFF, filter, 1, view, &parts);
-        if (rd_ptr((unsigned char *)tb + TB_MISS_OFF, &misses) &&
-            rd_i32((unsigned char *)tb + TB_MISS_OFF + TB_LIST_COUNT, &nmiss) && misses && nmiss > 0 && nmiss <= LIST_MAX) {
+        if (sh_read_ptr((unsigned char *)tb + TB_MISS_OFF, &misses) &&
+            sh_read_i32((unsigned char *)tb + TB_MISS_OFF + TB_LIST_COUNT, &nmiss) && misses && nmiss > 0 && nmiss <= LIST_MAX) {
             for (k = 0; k < nmiss; ++k) {
                 int mask = 0;
                 int one[SH_BT_FIELDS];
-                if (!rd_i32((unsigned char *)misses + (size_t)k * MISS_STRIDE + MISS_MASK_OFF, &mask)) continue;
+                if (!sh_read_i32((unsigned char *)misses + (size_t)k * MISS_STRIDE + MISS_MASK_OFF, &mask)) continue;
                 memset(one, 0, sizeof one);
                 sh_bt_add_miss(one);
                 sh_bt_parts_add(&parts, (unsigned)mask, SH_BT_PART_MISS, one);
@@ -617,8 +616,8 @@ static int bt_palette_moved(unsigned char *ed)
 {
     void *entries = NULL, *pool = NULL;
     int count = 0, pool_count = 0;
-    if (!rd_ptr(ed + ED_PALETTE_OFF + PAL_ENTRIES_OFF, &entries) || !rd_i32(ed + ED_PALETTE_OFF + PAL_COUNT_OFF, &count) ||
-        !rd_ptr(ed + ED_MODULES_OFF + MP_POOL_OFF, &pool) || !rd_i32(ed + ED_MODULES_OFF + MP_POOL_COUNT_OFF, &pool_count))
+    if (!sh_read_ptr(ed + ED_PALETTE_OFF + PAL_ENTRIES_OFF, &entries) || !sh_read_i32(ed + ED_PALETTE_OFF + PAL_COUNT_OFF, &count) ||
+        !sh_read_ptr(ed + ED_MODULES_OFF + MP_POOL_OFF, &pool) || !sh_read_i32(ed + ED_MODULES_OFF + MP_POOL_COUNT_OFF, &pool_count))
         return 0;
     return entries != g_built_entries || count != g_built_count || pool != g_built_pool || pool_count != g_built_pool_count;
 }
