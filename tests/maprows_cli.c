@@ -1,6 +1,6 @@
 /* maprows_cli <map.json> -- reads a map file's Snapmap+ mod rows the way a load does (sh_map_old_shape first, then
  * sh_modmanifest_read on the member's "mods" part), for the research benches' map writers (snaphak-re
- * tools/snapmap_contract/maprows.py). Output: "shape <none|variables|rows>", "rows <read> rejected <n>", then per row
+ * tools/snapmap_contract/maprows.py). Output: "shape <none|variables|rows|format>", "rows <read> rejected <n>", then per row
  * "row <salt> <local|pinned> names <count> choices <0|1> attached <0|1>". Exit 0 when the map would load with every
  * row read, 1 when it would not, 2 on a usage or file error. */
 #include <windows.h>
@@ -50,7 +50,13 @@ int main(int argc, char **argv)
     fclose(f);
     text[len] = 0;
     shape = sh_map_old_shape(text, (size_t)len);
-    printf("shape %s\n", shape == SH_MAP_OLD_NONE ? "none" : shape == SH_MAP_OLD_ROWS ? "rows" : "variables");
+    switch (shape) {
+    case SH_MAP_OLD_NONE:      puts("shape none"); break;
+    case SH_MAP_OLD_VARIABLES: puts("shape variables"); break;
+    case SH_MAP_OLD_ROWS:      puts("shape rows"); break;
+    case SH_MAP_OLD_FORMAT:    puts("shape format"); break;
+    default:                   puts("shape unknown"); break;
+    }
     read = shape == SH_MAP_OLD_NONE ? sh_modmanifest_read(text, (size_t)len, &list, &rejected) : 0;
     printf("rows %u rejected %u\n", (unsigned)read, rejected);
     for (i = 0; i < list.count; i++) {
