@@ -1203,6 +1203,36 @@ static void vr_open(const char *map, size_t map_len, int root_has_imp, int carri
     g_note[0] = 0;
 }
 
+static int resolve_installed_root(const char *build, const char *salt, sh_modmanifest_row *out)
+{
+    (void)build;
+    return fake_resolve(HASH_A, salt, out);
+}
+
+static void attached_pin_keeps_one_row(void)
+{
+    static const char *placed[] = { "mods/alexpink/imp" };
+    sh_modmanifest_list cur = {0}, rows = {0};
+    size_t length = 0;
+    char *saved;
+    vr_open(VR_MAP1, sizeof VR_MAP1 - 1, 0, 1);
+    CHECK(sh_modmanifest_current(&cur) == 1);
+    CHECK(sh_modmanifest_current_attach(&cur.rows[0]) == 1);
+    sh_modmanifest_set_resolver(resolve_installed_root);
+    CHECK(sh_modmanifest_rows_for(placed, 1, &rows) == 1);
+    CHECK(rows.count && rows.rows[0].pinned && rows.rows[0].attached && !strcmp(rows.rows[0].build, g_vr_comp));
+    saved = sh_modmanifest_on_save(VR_MAP1, sizeof VR_MAP1 - 1, &length);
+    if (saved) {
+        const char *first = strstr(saved, "\"mod\":\"alexpink\"");
+        CHECK(first && !strstr(first + 1, "\"mod\":\"alexpink\""));
+    } else CHECK(0);
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    sh_modmanifest_list_free(&rows);
+    sh_modmanifest_list_free(&cur);
+    sh_modmanifest_set_resolver(NULL);
+    sh_modmanifest_reset();
+}
+
 static void version_rule(void)
 {
     static const char *NAMES2[] = { "mods/alexpink/imp", "mods/alexpink/extra" };
@@ -1417,6 +1447,7 @@ int main(void)
     map_level();
     choices();
     standin_pins();
+    attached_pin_keeps_one_row();
     version_rule();
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;

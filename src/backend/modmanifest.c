@@ -1440,7 +1440,7 @@ static void mm_current_rename(const char *from, const sh_modmanifest_row *to)
     if (!mm_list_find(&g_current, to->salt, to->build))
         for (i = 0; i < g_current.count; i++) {
             sh_modmanifest_row *r = &g_current.rows[i];
-            if (strcmp(r->build, from)) continue;
+            if (r->pinned || strcmp(r->salt, to->salt) || strcmp(r->build, from)) continue;
             strcpy_s(r->salt, sizeof r->salt, to->salt);
             (void)sh_modmanifest_row_set_name(r, to->name);
             strcpy_s(r->build, sizeof r->build, to->build);
@@ -2074,7 +2074,7 @@ static int mm_save_attached(mm_save_ctx *ctx, const sh_modmanifest_list *attache
         memset(&served, 0, sizeof served);
         row.names = NULL;
         row.name_count = 0;
-        if (resolve && resolve(row.build, row.salt, &served) == 1 && !strcmp(served.salt, row.salt) &&
+        if (!row.pinned && resolve && resolve(row.build, row.salt, &served) == 1 && !strcmp(served.salt, row.salt) &&
             sh_modmanifest_valid_hash(served.build, strlen(served.build))) {
             mm_current_rename(row.build, &served);
             row.name = served.name;
