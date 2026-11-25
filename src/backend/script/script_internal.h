@@ -97,6 +97,8 @@ typedef struct shs_mod {
 shs_mod *shs_mod_of(lua_State *L);
 const sh_script_limits *shs_limits(void);
 double shs_now(void);
+int shs_after(lua_State *L, double seconds, int callback);
+void shs_cancel_timer(lua_State *L, int id);
 
 /* Read the clock before C work the clock hook cannot see (a sort); past the wall-clock stop the mod is
  * marked stopped and an error is raised at the calling line. */

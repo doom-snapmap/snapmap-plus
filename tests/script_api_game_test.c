@@ -51,6 +51,7 @@ static uint32_t f_spawn_id(void *ent) { return ent == &g_own ? ID_OWN : ent == &
 static int f_slots(void) { return 2; }
 static uint32_t f_slot_spawn_id(int n) { return n == 0 ? ID_OWN : n == 1 ? ID_OTHER : SH_SCRIPT_SPAWN_ID_NONE; }
 static int f_kind(void *ent) { (void)ent; return SH_SCRIPT_KIND_AI; }
+static int f_hud_kind(void *ent) { return ent == &g_own ? SH_SCRIPT_KIND_PLAYER : SH_SCRIPT_KIND_AI; }
 
 static const struct { const char *name, *format; } k_formats[] = {
     { "setOrigin", "v" }, { "activate", "e" }, { "damage", "daffeb" }, { "getHealth", "" }, { "getName", "" },
@@ -103,6 +104,8 @@ static int f_event(void *ent, const char *name, const sh_script_earg *a, int n, 
         else if (!strcmp(name, "getDamageDecl")) { ret->type = 'd'; ret->p = &g_enc2; }
         else if (!strcmp(name, "getAngles")) { ret->type = 'a'; ret->v[0] = 1; ret->v[1] = 90; ret->v[2] = 0; }
         else if (!strcmp(name, "isOn")) { ret->type = 'i'; ret->i = 1; }
+        else if (!strcmp(name, "getViewWidth")) { ret->type = 'f'; ret->f = 1600; }
+        else if (!strcmp(name, "getViewHeight")) { ret->type = 'f'; ret->f = 900; }
     }
     return 1;
 }
@@ -240,6 +243,32 @@ static void refused(const char *body, const char *want)
     run(body);
     CHECK(sh_script_status(SALT) == SH_SCRIPT_STOPPED);
     CHECK(has(stop_now(), want));
+}
+
+static void test_hud_text(void)
+{
+    g_engine_fake.kind = f_hud_kind;
+    sh_script_api_set_engine(&g_engine_fake);
+    run("api = 1\n"
+        "print('placed', show_text(ent(0), 'bottom', 'First', nil, 8))\n"
+        "print('updated', show_text(ent(0), 'bottom', 'Second', {0.2, 0.5, 1}, 1))\n"
+        "print('stays', show_text(ent(0), 'top right', 'Right'))\n"
+        "show_text(ent(0), 'top left', 'Short', nil, 5)\n"
+        "print('cleared', show_text(ent(0), 'top left', ''))\n");
+    CHECK(has(log_now(), "placed\ttrue") && has(log_now(), "updated\ttrue") && has(log_now(), "stays\ttrue"));
+    CHECK(has(g_events, "'Second'") && has(g_events, "setHUDElementColor@own(s'smp_" SALT "_text_2',0.2,0.5,1,1)"));
+    CHECK(has(log_now(), "cleared\ttrue") && has(g_events, "destroyHUDElement@own(s'smp_" SALT "_text_0')"));
+    g_events[0] = 0;
+    sh_script_tick(10, 0.1);
+    CHECK(has(g_events, "destroyHUDElement@own(s'smp_" SALT "_text_2')"));
+    CHECK(!strstr(g_events, "_text_1"));
+    g_events[0] = 0;
+    sh_script_map_end();
+    CHECK(has(g_events, "destroyHUDElement@own(s'smp_" SALT "_text_1')"));
+    CHECK(!strstr(g_events, "_text_2"));
+    refused("api = 1\nshow_text(ent(1), 'bottom', 'Hello')\n", "needs a player as its first value");
+    g_engine_fake.kind = f_kind;
+    sh_script_api_set_engine(&g_engine_fake);
 }
 
 static void test_events(void)
@@ -482,6 +511,7 @@ int main(void)
     sh_script_handles_set_resolver(h_resolve);
 
     test_events();
+    test_hud_text();
     test_signals();
     test_cvars();
     test_decls();

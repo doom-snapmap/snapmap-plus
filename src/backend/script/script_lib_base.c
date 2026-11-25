@@ -375,6 +375,17 @@ static void add_timer(lua_State *L, const char *call, int kind, double due, doub
     push_timer(L, id);
 }
 
+int shs_after(lua_State *L, double seconds, int callback)
+{
+    add_timer(L, "after", SHS_TIMER_AFTER, shs_now() + seconds, 0, callback);
+    return ((shs_timer_ud *)lua_touserdata(L, -1))->id;
+}
+
+void shs_cancel_timer(lua_State *L, int id)
+{
+    if (id) timer_drop(L, shs_mod_of(L), id);
+}
+
 static double check_seconds(lua_State *L, int arg, const char *call)
 {
     double s;
@@ -398,7 +409,7 @@ static int sb_after(lua_State *L)
 {
     double s = check_seconds(L, 1, "after");
     check_fn(L, 2, "after", "second");
-    add_timer(L, "after", SHS_TIMER_AFTER, shs_now() + s, 0, 2);
+    shs_after(L, s, 2);
     return 1;
 }
 

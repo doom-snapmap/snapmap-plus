@@ -318,6 +318,17 @@ blends back to the level's own. An effect's `environment` item does the same for
 undone when the map ends. A value that changes over time is held at its middle by `set_environment` (the build log
 says so); the environment itself, used for an area, draws it changing.
 
+## Screen text
+
+Use `show_text(player, place, text, [colour], [seconds])` to put a message on a player's HUD. The places are
+`"top left"`, `"top right"` and `"bottom"`. Each mod can update its own text in each place. An empty string clears
+it. A positive duration clears the message after that many seconds. With no duration, it stays until the mod
+replaces it or the map ends.
+
+```lua
+show_text(player, "bottom", "Door unlocked", {1, 0.8, 0.2}, 3)
+```
+
 ## Wounds
 
 A wound is a file in the mod's `decls/gorewounds/` folder (`decls/gorewounds/<name>.decl`) whose first key is
