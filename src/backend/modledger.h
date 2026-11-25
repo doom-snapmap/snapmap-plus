@@ -30,7 +30,7 @@ typedef struct sh_modledger_ident {
 } sh_modledger_ident;
 
 typedef struct sh_modledger_rec {
-    const char *request;  /* as recorded; must live for the process (the index's strings do) */
+    const char *request;  /* owned by the ledger until reset */
     sh_modledger_ident id;
     void *obj;            /* the engine object a map pass found holding it, or NULL */
     long serves;          /* serves recorded for this path */

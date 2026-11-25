@@ -1,6 +1,7 @@
 /* modledger.c -- the served-bytes ledger (modledger.h). */
 #include <windows.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include "modledger.h"
@@ -9,7 +10,7 @@ typedef struct ml_slot {
     volatile LONG state;       /* 0 empty, 1 published (its request, hash and first serve written) */
     volatile LONG ver;         /* odd while the fields below change */
     uint32_t hash;
-    const char *request;
+    char *request;
     sh_modledger_ident id;
     void *obj;
     LONG serves;
@@ -172,10 +173,9 @@ static int ml_insert(const char *request, uint32_t h, const sh_modledger_ident *
     *found = ml_probe(request, h);
     if (!*found) {
         if (ml_insert_level(&k)) (void)ml_probe_level(k, request, h, &s);
-        if (!s) r = -1;
+        if (!s || !(s->request = _strdup(request))) r = -1;
         else {
             s->hash = h;
-            s->request = request;
             s->id = *id;
             s->serves = 1;
             s->seq = InterlockedIncrement(&g_seq);
@@ -305,6 +305,9 @@ void sh_modledger_reset(void)
 {
     int k, levels = ml_count();
     for (k = 0; k < levels; ++k) {
+        ml_slot *slots = ml_level(k);
+        uint32_t i, count = ml_level_slots(k);
+        for (i = 0; i < count; ++i) free(slots[i].request);
         VirtualFree(ml_level(k), 0, MEM_RELEASE);
         g_levels[k] = NULL;
     }

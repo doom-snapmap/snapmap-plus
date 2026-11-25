@@ -88,7 +88,7 @@ static void test_records(void)
 static int g_each;
 static void count_each(void *context, const sh_modledger_rec *rec) { (void)context; if (rec->request) g_each++; }
 
-/* Generated request paths; the ledger keeps the pointers, so they outlive the records. */
+/* Generate distinct paths with a fixed stride for the growth and concurrency tests. */
 #define NAME_LEN 48
 static char *make_names(unsigned n, const char *fmt)
 {
@@ -123,7 +123,7 @@ static void test_growth(void)
             /* Level 0 is half full: still one level, and the first path as published. */
             sh_modledger_get_stats(&st);
             CHECK(st.records == SH_MODLEDGER_SLOTS / 2 && st.cap == SH_MODLEDGER_SLOTS / 2);
-            CHECK(sh_modledger_find(names, &first) && first.request == names && first.serves == 1 && first.seq == 1);
+            CHECK(sh_modledger_find(names, &first) && !strcmp(first.request, names) && first.serves == 1 && first.seq == 1);
         } else if (i == SH_MODLEDGER_SLOTS / 2) {
             sh_modledger_get_stats(&st);   /* one more: level 1 */
             CHECK(st.records == SH_MODLEDGER_SLOTS / 2 + 1 && st.cap == SH_MODLEDGER_SLOTS / 2 * 3);
@@ -135,7 +135,7 @@ static void test_growth(void)
     for (i = 0; i < GROW_N; ++i) {
         const char *n = names + (size_t)i * NAME_LEN;
         name_ident(n, &a);
-        if (!sh_modledger_find(n, &r) || r.request != n || !sh_modledger_same(&r.id, &a) || r.serves != 1) all = 0;
+        if (!sh_modledger_find(n, &r) || strcmp(r.request, n) || !sh_modledger_same(&r.id, &a) || r.serves != 1) all = 0;
     }
     CHECK(all);
     g_each = 0;
@@ -143,7 +143,7 @@ static void test_growth(void)
     /* A path recorded before growth updates in place. */
     (void)sh_modledger_ident_of(BUNDLE_2, SHA_B, NULL, 7, &b);
     CHECK(sh_modledger_record(names, &b) == 1);
-    CHECK(sh_modledger_find("GENERATED\\image\\mods\\k\\000000.bimage", &r) && r.request == names && r.serves == 2);
+    CHECK(sh_modledger_find("GENERATED\\image\\mods\\k\\000000.bimage", &r) && r.request == first.request && r.serves == 2);
     CHECK(sh_modledger_same(&r.id, &b) && r.seq == GROW_N + 1);
     sh_modledger_get_stats(&st);
     CHECK(st.records == GROW_N && st.serves == GROW_N + 1);
@@ -217,10 +217,14 @@ static unsigned char g_seen[NEW_N];
 static int g_seen_bad;
 static void seen_each(void *context, const sh_modledger_rec *rec)
 {
-    size_t at = (size_t)(rec->request - g_new_names);
+    unsigned index;
     (void)context;
-    if (rec->request < g_new_names || at % NAME_LEN || at / NAME_LEN >= NEW_N) { g_seen_bad++; return; }
-    g_seen[at / NAME_LEN]++;
+    if (sscanf_s(rec->request, "cooked/anim/mods/n/%6u", &index) != 1 || index >= NEW_N ||
+        strcmp(rec->request, g_new_names + (size_t)index * NAME_LEN)) {
+        g_seen_bad++;
+        return;
+    }
+    g_seen[index]++;
 }
 
 static void test_threads_new(void)
@@ -247,7 +251,7 @@ static void test_threads_new(void)
     for (i = 0; i < NEW_N; ++i) {
         const char *n = g_new_names + (size_t)i * NAME_LEN;
         if (g_seen[i] != 1) once = 0;
-        if (!sh_modledger_find(n, &r) || r.request != n || r.serves != TH_N) all = 0;
+        if (!sh_modledger_find(n, &r) || strcmp(r.request, n) || r.serves != TH_N) all = 0;
         else serves += r.serves;
     }
     CHECK(once && all && serves == (long)TH_N * NEW_N);
@@ -558,6 +562,17 @@ int main(void)
     _snprintf_s(top, sizeof top, _TRUNCATE, "%smodledger_test_%lu", tmp, (unsigned long)GetCurrentProcessId());
     mkdirs(top);
     test_identity();
+    {
+        char path[] = "mods/bench/test.decl";
+        sh_modledger_ident id;
+        sh_modledger_rec record;
+        sh_modledger_reset();
+        name_ident(path, &id);
+        CHECK(sh_modledger_record(path, &id));
+        path[0] = 'X';
+        CHECK(sh_modledger_find("mods/bench/test.decl", &record));
+        sh_modledger_reset();
+    }
     test_records();
     test_growth();
     test_threads();
