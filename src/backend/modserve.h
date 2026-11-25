@@ -347,7 +347,8 @@ typedef struct sh_modserve_attrib {
 } sh_modserve_attrib;
 /* The keepability rule: nothing raises a resource to level 4 except sh_modserve_keep, and only what
  * sh_modserve_keepable allows. A resource whose last load ran with a map's heap selected is never kept, since
- * raising its level keeps the object but not what that heap held for it. `keepable` counts and names each refusal
+ * raising its level keeps the object but not its backing data. Renderer-owned decal atlas entries stay at their
+ * native lifetime. `keepable` counts and names refusals caused by the map heap
  * for sh_modserve_left_to_map; `keep` raises `resource` to 4 and adds it to the kept set (1 kept or already at 4,
  * 0 left at the engine's level). Main thread. */
 int  sh_modserve_keepable(const void *resource);
