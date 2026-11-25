@@ -190,7 +190,7 @@ void  sh_cache_sweep_async(void);
 
 /* Map content on disk: one call per kept map with what its rows hold, then the storage line ("Map content: 1.3
  * GB for 14 maps."). Lines are plain text, never a hash, salt or path. `row` is the line's row, its composition
- * hash, which Add to my mods takes (sh_cache_stage_copy); NULL for the storage line. Returns the lines. */
+ * hash for Add to my mods, "" when it cannot be copied, or NULL for the storage line. Returns the lines. */
 typedef void (*sh_cache_line_fn)(void *context, const char *line, const char *row);
 int   sh_cache_report(sh_cache_line_fn fn, void *context);
 

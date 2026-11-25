@@ -366,7 +366,10 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   rename at any time. Your own folders sit at the root of the mods folder, one build per mod; the
   content of a map that came from elsewhere (a published map, a map or prefab ZIP) does not: its
   units are kept in the content cache (`cache\content\`), which the map reads and the Mods tab
-  reports as "Map content on disk". Nothing reads or writes `mods\maps\`, where earlier versions
+  reports under **Maps on this computer**. A mod appears when at least one
+  of its pieces is available. Each distinct file counts once toward storage.
+  **Add to my mods** appears when all the mod's pieces are available and the
+  copy contains files or settings you can edit. Nothing reads or writes `mods\maps\`, where earlier versions
   kept the mods of downloaded maps; "maps" stays a reserved name at the top of `mods\`, and a mod
   folder given by hand inside it is refused with "This folder is in the "maps" folder of your mods, where earlier
   versions kept the mods of downloaded maps; this version does not read it. Move it to the top of

@@ -4926,21 +4926,23 @@ static void mu_remove_tree(const wchar_t *dir)
 /* content: the map content on disk, one line per kept or played map's mod and a storage line, from this computer
  * alone: "lines" the texts and "rows" the token Add to my mods takes per line ("" for storage). With arg
  * "removePlayed", the content of maps only played is removed first. */
-typedef struct mu_lines { mu_buf *b, *rows; int n; } mu_lines;
+typedef struct mu_lines { mu_buf text, rows; char *storage; int n; } mu_lines;
 static void mu_content_line(void *context, const char *line, const char *row)
 {
     mu_lines *l = (mu_lines *)context;
-    if (l->n++) { mu_putn(l->b, ",", 1); mu_putn(l->rows, ",", 1); }
-    mu_str(l->b, line);
-    mu_str(l->rows, row ? row : "");
+    if (l->n++) { mu_putn(&l->text, ",", 1); mu_putn(&l->rows, ",", 1); }
+    mu_str(&l->text, line);
+    if (row && !*row) mu_puts(&l->rows, "null");
+    else mu_str(&l->rows, row ? row : "");
+    if (!row) l->storage = sh_text(line);
 }
 
 static int mu_content(const char *arg)
 {
     const int action = SH_MODS_ACT_CONTENT;
-    char *storage, *message = NULL;
-    mu_buf b, rows;
-    mu_lines lines;
+    char *message = NULL;
+    mu_buf b;
+    mu_lines lines = {0};
     int swept = arg && !strcmp(arg, "removePlayed");
     if (swept) {
         sh_cache_sweep_stats st;
@@ -4951,24 +4953,22 @@ static int mu_content(const char *arg)
         message = st.bytes_removed ? sh_textf("Removed %.1f MB of content of maps you only played; playing one of them again gets it back.", mb)
                                    : sh_text("No map you only played had content to remove.");
     }
-    storage = sh_cache_storage_line();
+    (void)sh_cache_report(mu_content_line, &lines);
     memset(&b, 0, sizeof b);
-    mu_result_head(&b, action, 1, message ? message : storage ? storage : "");
-    mu_kstr(&b, "storage", storage ? storage : "", 0);
+    mu_result_head(&b, action, 1, message ? message : lines.storage ? lines.storage : "");
+    mu_kstr(&b, "storage", lines.storage ? lines.storage : "", 0);
     mu_key(&b, "lines", 0);
     mu_putn(&b, "[", 1);
-    memset(&rows, 0, sizeof rows);
-    lines.b = &b;
-    lines.rows = &rows;
-    lines.n = 0;
-    (void)sh_cache_report(mu_content_line, &lines);
+    if (lines.text.len) mu_putn(&b, lines.text.p, lines.text.len);
     mu_putn(&b, "]", 1);
     mu_key(&b, "rows", 0);
     mu_putn(&b, "[", 1);
-    if (rows.len) mu_putn(&b, rows.p, rows.len);
+    if (lines.rows.len) mu_putn(&b, lines.rows.p, lines.rows.len);
     mu_putn(&b, "]", 1);
-    free(rows.p);
-    free(storage);
+    if (lines.text.oom || lines.rows.oom) b.oom = 1;
+    free(lines.text.p);
+    free(lines.rows.p);
+    free(lines.storage);
     free(message);
     return mu_result_tail(&b);
 }

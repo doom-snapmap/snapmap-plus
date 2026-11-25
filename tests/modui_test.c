@@ -1256,11 +1256,14 @@ int main(int argc, char **argv)
         g_cache_row[1] = "99887766ff55ee44dd33cc22bb11aa00";
         g_cache_line[2] = "Map content: 1.6 MB for 2 maps.";
         g_cache_row[2] = NULL;
-        g_cache_lines_n = 3;
+        g_cache_line[3] = "Part of another mod is here.";
+        g_cache_row[3] = "";
+        g_cache_lines_n = 4;
         doc = run_doc(SH_MODS_ACT_CONTENT, NULL);
         CHECK(has(doc, "\"lines\":[\"Imp Arena: R2 Imp copy, 2 objects, 1.2 MB\",\"Solo Arena: Solo, 0.4 MB\","
-                       "\"Map content: 1.6 MB for 2 maps.\"]"));
-        CHECK(has(doc, "\"rows\":[\"00aa11bb22cc33dd44ee55ff66778899\",\"99887766ff55ee44dd33cc22bb11aa00\",\"\"]"));
+                       "\"Map content: 1.6 MB for 2 maps.\",\"Part of another mod is here.\"]"));
+        CHECK(has(doc, "\"rows\":[\"00aa11bb22cc33dd44ee55ff66778899\",\"99887766ff55ee44dd33cc22bb11aa00\",\"\",null]"));
+        CHECK(has(doc, "\"storage\":\"Map content: 1.6 MB for 2 maps.\""));
         free(doc);
         g_cache_lines_n = 0;
         doc = run_doc(SH_MODS_ACT_CONTENT, NULL);
