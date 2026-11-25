@@ -9,6 +9,7 @@
 
 #include "modlook.h"
 #include "modprog.h"
+#include "sdkwords.h"
 #include "text.h"
 
 typedef struct lk_buf { char *p; size_t n, cap; int oom; } lk_buf;
@@ -870,13 +871,101 @@ static int lk_ribbon(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *out
     return *out ? SH_LOOK_CHANGED : SH_LOOK_OOM;
 }
 
+static int lk_recolourable(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *out_len)
+{
+    enum { REGIONS, PRIMARY, SECONDARY, PATTERN, PATTERN_COLOURS, SCRATCHES, DIRT, GLOW, DETAIL, SHINE, COUNT };
+    static const sdk_word_id words[COUNT] = { SDK_R_REGIONS, SDK_R_PRIMARY, SDK_R_SECONDARY, SDK_R_PATTERN,
+        SDK_R_PATTERN_COLOURS, SDK_R_SCRATCHES, SDK_R_DIRT, SDK_R_GLOW, SDK_R_DETAIL, SDK_R_SHINE };
+    lk_set fields[COUNT] = { 0 };
+    lk_buf gen = { 0 };
+    const char *drop[20], *eol = d->eol;
+    size_t ndrop = 0;
+    for (size_t i = first + 1; i < d->n; i++) {
+        lk_ln *line = &d->l[i];
+        if (!line->key) continue;
+        for (unsigned k = 0; k < COUNT; k++) {
+            const char *key = sdk_word(words[k]);
+            if (!lk_ieq(line->a + line->ks, line->kn, key)) continue;
+            lk_val *v = &fields[k].v;
+            if (fields[k].has) { lk_fail(c, i, "write '%s' once in this material.", key); return SH_LOOK_MISTAKE; }
+            fields[k].has = 1;
+            lk_parse(line->a + line->v0, line->vn, v);
+            const char *expects = NULL;
+            if (k == REGIONS || k == PATTERN || k == DETAIL) {
+                if (v->kind != K_IMG) expects = "an image path";
+            } else if (k == SHINE) {
+                if (v->kind != K_NUM || v->v[0] < 0 || v->v[0] > 1) expects = "a number from 0 to 1";
+            } else {
+                int n = k == PATTERN_COLOURS ? 6 : 3;
+                if (v->kind != K_VEC || v->n != n) expects = n == 6 ? "two RGB colours in one set of braces" : "an RGB colour in braces";
+                for (int j = 0; !expects && j < n; j++)
+                    if (v->v[j] < 0 || v->v[j] > 1) expects = "colour channels from 0 to 1";
+            }
+            if (expects) { lk_fail(c, i, "'%s' needs %s.", key, expects); return SH_LOOK_MISTAKE; }
+            line->skip = 1;
+            break;
+        }
+    }
+    drop[ndrop++] = "ambientprogram";
+    lk_key(&gen, eol, "ambientprogram", fields[REGIONS].has ? "snapmapplus/recolourable/skinvmtr_custom" : "skinvmtr_custom");
+    static const struct { int field; const char *key; } images[] = {
+        { REGIONS, "recolourmask" }, { PATTERN, "tilingpatternmap" }, { DETAIL, "tilingnormalmap" }, { DETAIL, "tilingnormalmap2" }
+    };
+    for (unsigned i = 0; i < sizeof images / sizeof *images; i++) {
+        const lk_set *f = &fields[images[i].field];
+        if (f->has) { drop[ndrop++] = images[i].key; lk_key_q(&gen, eol, images[i].key, f->v.s, f->v.sn); }
+    }
+    static const struct { int field; const char *key; unsigned offset; } colours[] = {
+        { PRIMARY, "customprimaryalbedo", 0 }, { SECONDARY, "customsecondaryalbedo", 0 },
+        { PATTERN_COLOURS, "custompatternalbedo0", 0 }, { PATTERN_COLOURS, "custompatternalbedo1", 3 },
+        { SCRATCHES, "customscratchalbedo", 0 }, { DIRT, "customdirtalbedo", 0 }, { GLOW, "custombloomalbedo", 0 }
+    };
+    for (unsigned i = 0; i < sizeof colours / sizeof *colours; i++) {
+        int k = colours[i].field, pigment = i < 4;
+        const char *key = colours[i].key;
+        if (!fields[k].has && (!pigment || !fields[SHINE].has)) {
+            if (!pigment && !lk_has_key(d, key)) lk_key(&gen, eol, key, "0");
+            continue;
+        }
+        float rgba[4] = { 1, 1, 1, 1 };
+        if (fields[k].has) memcpy(rgba, fields[k].v.v + colours[i].offset, 3 * sizeof(float));
+        else if (lk_has_key(d, key)) {
+            for (size_t j = 0; j < d->n; j++) {
+                const lk_ln *line = &d->l[j];
+                if (!line->key || !lk_ieq(line->a + line->ks, line->kn, key)) continue;
+                lk_val v;
+                lk_parse(line->a + line->v0, line->vn, &v);
+                if (v.kind == K_NUM) rgba[0] = rgba[1] = rgba[2] = v.v[0];
+                else if (v.kind == K_VEC && v.n >= 3) memcpy(rgba, v.v, 3 * sizeof(float));
+                else {
+                    free(gen.p);
+                    lk_fail(c, j, "write '%s' as an RGB colour to set its shine.", sdk_word(words[k]));
+                    return SH_LOOK_MISTAKE;
+                }
+            }
+        }
+        if (pigment && fields[SHINE].has) rgba[3] = fields[SHINE].v.v[0];
+        drop[ndrop++] = key;
+        lk_key_vec(&gen, eol, key, rgba);
+    }
+    if (fields[DETAIL].has && !lk_has_key(d, "tilingsmoothnessuvscale")) lk_key(&gen, eol, "tilingsmoothnessuvscale", "1");
+    if (!fields[PATTERN].has && !fields[PATTERN_COLOURS].has && !lk_has_key(d, "tilingpatternmap") && !lk_has_key(d, "tilingpatternuvscale"))
+        lk_key(&gen, eol, "tilingpatternuvscale", "0");
+    if ((fields[SCRATCHES].has || fields[DIRT].has) && !lk_has_key(d, "tilingscratchdirtmap"))
+        lk_key_q(&gen, eol, "tilingscratchdirtmap", "models/characters/mp/mp_masks/utilitarian_dirtscratches.tga",
+                 sizeof "models/characters/mp/mp_masks/utilitarian_dirtscratches.tga" - 1);
+    if (!gen.oom) *out = lk_assemble(d, first, gen.p, drop, ndrop, out_len);
+    free(gen.p);
+    return *out ? SH_LOOK_CHANGED : SH_LOOK_OOM;
+}
+
 int sh_look_compile_notes(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
                           size_t why_len, char **notes)
 {
     lk_ctx c;
     lk_doc d;
     size_t i, first = (size_t)-1;
-    int r, layered, ribbon;
+    int r, layered, ribbon, recolourable;
     if (out) *out = NULL;
     if (out_len) *out_len = 0;
     if (notes) *notes = NULL;
@@ -903,13 +992,15 @@ int sh_look_compile_notes(const char *path, const char *text, size_t len, char *
         lk_word(&d.l[first], word, sizeof word);
         layered = lk_ieq(word, strlen(word), "layered");
         ribbon = lk_ieq(word, strlen(word), "ribbon");
-        if (!layered && !ribbon && !lk_ieq(word, strlen(word), "particle")) {
-            lk_fail(&c, first, "'type' is '%s'; write layered, particle or ribbon.", word);
+        recolourable = lk_ieq(word, strlen(word), "recolourable");
+        if (!layered && !ribbon && !recolourable && !lk_ieq(word, strlen(word), "particle")) {
+            lk_fail(&c, first, "'type' is '%s'; write layered, particle, ribbon or recolourable.", word);
             lk_doc_free(&d);
             return SH_LOOK_MISTAKE;
         }
     }
     if (ribbon) r = lk_ribbon(&c, &d, first, out, out_len);
+    else if (recolourable) r = lk_recolourable(&c, &d, first, out, out_len);
     else if (layered) r = lk_layered(&c, &d, first, out, out_len);
     else r = lk_particle(&c, &d, first, out, out_len);
     lk_doc_free(&d);

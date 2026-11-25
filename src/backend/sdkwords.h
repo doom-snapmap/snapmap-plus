@@ -54,6 +54,7 @@
     /* recolouring */                                                                                              \
     X(R_PRIMARY, "primary") X(R_SECONDARY, "secondary") X(R_PATTERN, "pattern") X(R_SCRATCHES, "scratches")        \
     X(R_DIRT, "dirt") X(R_GLOW, "glow") X(R_SECONDS, "seconds")                                                    \
+    X(R_REGIONS, "regions") X(R_PATTERN_COLOURS, "patterncolours") X(R_DETAIL, "detail") X(R_SHINE, "shine")       \
     /* script calls */                       \
     X(C_PLAY_EFFECT, "play_effect") X(C_SET_ENVIRONMENT, "set_environment") X(C_CLEAR_ENVIRONMENT, "clear_environment")     \
     X(C_SHOW_TEXT, "show_text")                                                                                            \
