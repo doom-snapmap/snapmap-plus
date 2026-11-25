@@ -697,9 +697,24 @@ static int count_closure(const sh_mb_bundle *b, const char *prefix)
     return n;
 }
 
-/* An effect, an environment and a material with a changing value, built and served: the build compiles each through
- * the SDK and carries what they derive as pointers, the server serves the compiled and derived decls, and a
- * misspelt field fails the build with the compiler's sentence. */
+/* Historical units keep their original material text. */
+static void test_pinned_particle(void)
+{
+    const char *req = "generated/decls/material/mods/abcdefgh/fire.decl";
+    const char native[] = "{\n\tstageprogram \"snapmapplus/eternal/uberparticles\"\n\teternalparticle {1,2,3,4}\n}\n";
+    const char authored[] = "{\n\tlook particle\n\tlighting lit\n\tnearfade {16, 8}\n}\n";
+    const char *samples[] = { native, authored };
+    for (size_t i = 0; i < 2; i++) {
+        char *out = NULL, why[256];
+        size_t n = 0;
+        CHECK(sh_sdk_compile(req, samples[i], strlen(samples[i]), &out, &n, why, sizeof why, NULL, NULL) == SH_LOOK_SAME);
+        CHECK(sh_sdk_serve_compile(req, samples[i], strlen(samples[i]), &out, &n, why, sizeof why) == SH_LOOK_CHANGED);
+        CHECK(out && n && strstr(out, "snapmapplus/particles/uberparticles") && !strstr(out, "eternal"));
+        CHECK(out && strstr(out, "particleuberparms1"));
+        free(out);
+    }
+}
+
 static void test_sdk(const char *tmp)
 {
     char root[MAX_PATH], folder[MAX_PATH], src[MAX_PATH], *cause = NULL;
@@ -855,6 +870,7 @@ int main(int argc, char **argv)
         sh_modstock_register();
         g_doom_registered = 1;
     }
+    test_pinned_particle();
     test_sdk(tmp);
     test_tyrant(tmp);
     sh_modserve_set_material_filter(NULL);

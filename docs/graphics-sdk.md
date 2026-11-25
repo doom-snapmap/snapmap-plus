@@ -94,8 +94,7 @@ A value or a colour where an image is expected (`layer3 { 0.35, 0.05, 0.03 }`, `
 colour; the product makes the image from it. Images for specular, glow, the base height and the burn (`burn`,
 `burnglow`, `burnblood`, `baseheight`, then each layer's specular and glow in layer order) share two places; a surface
 that asks for more than fits draws the ones that come last as their default: no blood, a flat base height of 0.5,
-black specular or glow (the build log says which). Of the 190 layered and burning materials of DOOM Eternal's demons,
-one asks for more.
+black specular or glow. The build log names the fields that use a default.
 
 ## A particle material
 

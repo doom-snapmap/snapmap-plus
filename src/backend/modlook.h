@@ -3,7 +3,7 @@
  * A material whose first key is `look` (value `layered` or `particle`) is compiled by sh_look_compile into the
  * material text the engine reads (storage in modprog.h): the game's own render program where one draws the picture,
  * else the product's two general programs; a value where an image is expected becomes a registered constant image.
- * A non-look material using the superseded layered or eternalparticle* vectors is read as the look those keys say.
+ * The installer updates earlier material sources. The serving entry point also handles historical pinned bytes.
  * A mistake is one sentence naming the file, line and field; what exceeds the game's limits is drawn as a constant
  * and noted. Pure: no engine access.
  */

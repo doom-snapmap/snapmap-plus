@@ -803,7 +803,8 @@ static int lk_particle(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *o
             sb[1] = p[P_FARFADE].v.v[0];
             sb[2] = p[P_FARFADE].v.v[1];
         }
-        lk_key(&gen, eol, "stageprogram", "\"snapmapplus/particles/uberparticles\"");
+        lk_key(&gen, eol, "stageprogram", (p[P_FARFADE].has || sb[3] != 0)
+               ? "\"" SH_MODPROG_EP_EXT_PREFIX "uberparticles\"" : "\"" SH_MODPROG_EP_PREFIX "uberparticles\"");
         lk_key_vec(&gen, eol, "particleuberparms1", u1);
         lk_key_vec(&gen, eol, "particleuberparms2", u2);
         lk_key_vec(&gen, eol, "particleuberparms3", u3);

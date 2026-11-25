@@ -33,7 +33,7 @@ typedef struct mp_family {
 typedef struct mp_base { const char *name; int family; } mp_base;
 static const mp_base MP_BASES[] = {
     { "skinvmtr", 0 }, { "skinvmtrwounds", 0 }, { "uberparticles", 1 },
-    { "hairprez", 2 }, { "hairshadow", 2 }, { "hairblending", 2 },
+    { "hairprez", 2 }, { "hairshadow", 2 }, { "hairblending", 2 }, { "uberparticles", 3 },
 };
 #define MP_NBASES (sizeof MP_BASES / sizeof MP_BASES[0])
 
@@ -86,32 +86,6 @@ static const char *const MP_EMISSIVE[] = { "bloommaskscale", "colorscale", "colo
 static const char *const MP_INOUT[] = { "albedo", "specular", "smoothness", "normal", "lightmap", "emissive",
                                          "thickness" };
 #define MP_NINOUT 7
-
-/* The particle program (programs/shaders/particles.rp): the parameters appended to the fragment stage's material
- * uniforms, its added texture, the module's samplers (the first three bound to the program's own textures), the stage
- * inputs and the program's own uniforms it reads ('h' the material block, 'l' the view block). */
-/* The particle program's old constant keys, mapped by the serve filter to the stock keys (particles.rp). */
-const char *const SH_MODPROG_EP_PARMS[] = {
-    "eternalparticle", "eternalparticlefade", "eternalparticlecolor", "eternalparticlecolor2",
-};
-const unsigned SH_MODPROG_EP_PARM_COUNT = sizeof SH_MODPROG_EP_PARMS / sizeof SH_MODPROG_EP_PARMS[0];
-const char *const SH_MODPROG_EP_TEXTURES[] = { "particleemissivemap" };
-const unsigned SH_MODPROG_EP_TEXTURE_COUNT = sizeof SH_MODPROG_EP_TEXTURES / sizeof SH_MODPROG_EP_TEXTURES[0];
-static const char *const EP_BLOCK_PARMS[] = { "smokebrightness", "projectionmatrixz", "globalvieworigin" };
-#define EP_NBLOCK_PARMS (sizeof EP_BLOCK_PARMS / sizeof EP_BLOCK_PARMS[0])
-static const char *const EP_SAMPLERS[] = { "ep_trans", "ep_depth", "ep_atlas", "ep_emissive" };
-static const char *const EP_SAMPLER_STOCK[] = { "samp_transmap", "samp_viewdepthmap", "samp_particleslightatlasmap", NULL };
-#define EP_NSAMPLERS (sizeof EP_SAMPLERS / sizeof EP_SAMPLERS[0])
-static const char *const EP_VARYINGS[] = {
-    "vofi_Color", "vofi_TexCoord0", "vofi_TexCoord1", "vofi_TexCoord2", "vofi_TexCoord4", "vofi_TexCoord6", "gl_FragCoord",
-};
-#define EP_NVARYINGS (sizeof EP_VARYINGS / sizeof EP_VARYINGS[0])
-static const char *const EP_UNIFORMS[] = {
-    "hrenderpositiontoviewtexture", "lparticleatlasparms", "lfoglightinscattercolor", "lfoglightinscatterintensity",
-    "lfoglightoppositecolor", "lfogcolor", "ltransparencylightmult",
-    "hparticleuberparms1", "hparticleuberparms2", "hparticleuberparms3", "hemissive",
-};
-#define EP_NUNIFORMS (sizeof EP_UNIFORMS / sizeof EP_UNIFORMS[0])
 
 /* The hair programs' death fade (programs/shaders/hair.rp): the deathfadeopacity parameter appended to the material
  * uniforms, the magnificationclouds noise texture it adds, the module's sampler for it and the stage input it reads. */
@@ -396,93 +370,6 @@ char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsi
     for (k = 0; k < 4; k++) mp_printf(&b, "%sfreqHigh_fragmentUniforms.%s", k ? ", " : "", MP_EMISSIVE[k]);
     mp_puts(&b, " ) );\n");
     mp_put(&b, a, (size_t)(end - a));
-    free(t1);
-    return mp_take(&b, out_len);
-}
-
-char *sh_modprog_ep_patch_decl(const char *text, size_t len, size_t *out_len)
-{
-    static const char anchor[] = "PREMULTIPLY_ALPHA_BLENDED( result );";
-    const char *nl = mp_find(text, len, "\r\n") ? "\r\n" : "\n", *end = text + len;
-    const char *fp = mp_find(text, len, "hlsl_fp {"), *call, *eol, *ls;
-    mp_buf b = { 0 };
-    char *prefix, *t;
-    size_t n;
-    if (!fp) return NULL;
-    call = mp_find(fp, (size_t)(end - fp), anchor);
-    if (!call || mp_find(call + 1, (size_t)(end - call - 1), anchor)) return NULL;
-    if (!(eol = mp_find(call, (size_t)(end - call), nl))) return NULL;
-    for (ls = call; ls > fp && ls[-1] != '\n'; ) ls--;
-    eol += strlen(nl);
-    /* the call after the premultiply, at its indentation */
-    if (!(prefix = (char *)malloc((size_t)(call - ls) + 1))) return NULL;
-    memcpy(prefix, ls, (size_t)(call - ls));
-    prefix[call - ls] = 0;
-    mp_put(&b, text, (size_t)(eol - text));
-    mp_put_lines(&b, SH_MODPROG_EP_CALL, prefix, nl, 0);
-    mp_put(&b, eol, (size_t)(end - eol));
-    free(prefix);
-    if (!(t = mp_take(&b, &n))) return NULL;
-    /* the functions, in the header section */
-    prefix = mp_add_header(t, n, SH_MODPROG_EP_HEADER, nl, out_len);
-    free(t);
-    return prefix;
-}
-
-char *sh_modprog_ep_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len)
-{
-    static const char bind[] = "layout( binding = ";
-    static const char ubo[] = "uniform freqHigh_fragmentUniforms_ubo {";
-    mp_buf b = { 0 }, s = { 0 };
-    const char *p = text, *end = text + len, *u, *close, *first, *mainp, *last;
-    unsigned k;
-    char *t1;
-    size_t n1;
-    while (p < end) {
-        const char *q = mp_find(p, (size_t)(end - p), bind);
-        if (!q) { mp_put(&s, p, (size_t)(end - p)); break; }
-        q += sizeof bind - 1;
-        mp_put(&s, p, (size_t)(q - p));
-        {
-            unsigned v = 0;
-            const char *d = q;
-            while (d < end && *d >= '0' && *d <= '9') v = v * 10 + (unsigned)(*d++ - '0');
-            if (d == q) { p = q; continue; }
-            mp_printf(&s, "%u", v >= tex_end ? v + shift : v);
-            p = d;
-        }
-    }
-    if (s.oom) { free(s.p); return NULL; }
-    t1 = s.p;
-    n1 = s.n;
-    end = t1 + n1;
-    if (!(u = mp_find(t1, n1, ubo)) || !(close = memchr(u, '}', (size_t)(end - u)))) { free(t1); return NULL; }
-    first = mp_find(t1, n1, "layout( location");
-    mainp = mp_find(t1, n1, "void main() {");
-    /* the end of main: its closing brace, the text's last */
-    last = end;
-    while (last > t1 && (last[-1] == '\n' || last[-1] == '\r' || last[-1] == ' ' || last[-1] == '\t')) last--;
-    if (!first || !mainp || last <= mainp || last[-1] != '}' || first < close || mainp < first) { free(t1); return NULL; }
-    last--;
-    mp_put(&b, t1, (size_t)(close - t1));
-    for (k = 0; k < EP_NBLOCK_PARMS; k++) mp_printf(&b, "\tvec4 %s;\n", EP_BLOCK_PARMS[k]);
-    mp_put(&b, close, (size_t)(first - close));
-    for (k = 0; k < SH_MODPROG_EP_TEXTURE_COUNT; k++)
-        mp_printf(&b, "layout( binding = %u ) uniform sampler2D samp_%s;\n", tex_end + k, SH_MODPROG_EP_TEXTURES[k]);
-    mp_put(&b, first, (size_t)(mainp - first));
-    mp_puts(&b, SH_MODPROG_EP_GLSL);
-    mp_put(&b, mainp, (size_t)(last - mainp));
-    mp_puts(&b, "\tep_shade( out_FragColor0, vec4[");
-    mp_printf(&b, "%u]( ", (unsigned)EP_NVARYINGS);
-    for (k = 0; k < EP_NVARYINGS; k++) mp_printf(&b, "%s%s", k ? ", " : "", EP_VARYINGS[k]);
-    mp_printf(&b, " ), vec4[%u]( ", (unsigned)EP_NBLOCK_PARMS);
-    for (k = 0; k < EP_NBLOCK_PARMS; k++) mp_printf(&b, "%sfreqHigh_fragmentUniforms.%s", k ? ", " : "", EP_BLOCK_PARMS[k]);
-    mp_printf(&b, " ), vec4[%u]( ", (unsigned)EP_NUNIFORMS);
-    for (k = 0; k < EP_NUNIFORMS; k++)
-        mp_printf(&b, "%s%s_fragmentUniforms.%s", k ? ", " : "", EP_UNIFORMS[k][0] == 'h' ? "freqHigh" : "freqLow",
-                  EP_UNIFORMS[k] + 1);
-    mp_puts(&b, " ) );\n");
-    mp_put(&b, last, (size_t)(end - last));
     free(t1);
     return mp_take(&b, out_len);
 }
@@ -1421,97 +1308,7 @@ done:
     return out;
 }
 
-uint32_t *sh_modprog_ep_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
-                               size_t *out_words, const char **why)
-{
-    mp_ctx c;
-    mp_import_spec sp;
-    mp_blocks bk;
-    uint32_t *out = NULL;
-    size_t i, k;
-    uint32_t entry = 0, frag = 0, v4ptr_out = 0, params[4], temps[4], vals[16];
-    size_t s_main = 0, s_main_end = 0, anchor = 0, var_end = 0;
-    mp_list code = { 0 }, heads = { 0 }, funcs = { 0 };
-    memset(&c, 0, sizeof c);
-    if (out_words) *out_words = 0;
-    (void)shift;
-    if (!mp_parse(&c.S, stock, stock_words)) MP_FAIL(&c, "the program's fragment module is not SPIR-V");
-    sp.words = SH_MODPROG_EP_SPIRV; sp.nwords = SH_MODPROG_EP_SPIRV_WORDS; sp.entry = "ep_shade(";
-    sp.samplers = EP_SAMPLERS; sp.stock = EP_SAMPLER_STOCK; sp.nsamplers = EP_NSAMPLERS; sp.what = "particle";
-    if (!mp_import(&c, &sp, tex_end, &entry, &funcs)) goto done;
-    if (!mp_shift_bindings(&c, tex_end, shift)) goto done;
-    if (!mp_grow_block(&c, EP_BLOCK_PARMS, EP_NBLOCK_PARMS, &bk)) goto done;
-    if (!mp_main(&c, &s_main, &s_main_end)) MP_FAIL(&c, "the program's fragment module has no main");
-    /* the anchor: the instruction before main's last return (the stock shading has written its colour) */
-    for (i = s_main_end; i > s_main; i--) if (MP_OP(&c.S.ins[i]) == OpReturn) { anchor = i - 1; break; }
-    if (!anchor) MP_FAIL(&c, "the program's main does not end in a return");
-    frag = mp_named(&c.S, "out_FragColor0", 0);
-    if (!frag) MP_FAIL(&c, "the program writes no colour");
-    if (!mp_entry_params(&funcs, entry, params, 4)) MP_FAIL(&c, "ep_shade does not take the parameters the splice passes");
-    if (!mp_temps(&c, s_main, s_main_end, params, temps, 4, &heads, &var_end)) MP_FAIL(&c, "out of memory");
-    {
-        /* frag in */
-        const mp_ins *pp = mp_def_any(&c, params[0]), *fv = mp_def(&c.S, frag), *fp = fv ? mp_def(&c.S, fv->w[1]) : NULL;
-        uint32_t o[3], v;
-        if (!pp || !fp || pp->w[3] != fp->w[3]) MP_FAIL(&c, "the program's colour is not a vector");
-        v4ptr_out = fp->w[3];
-        v = c.S.bound++;
-        o[0] = v4ptr_out; o[1] = v; o[2] = frag;
-        if (!mp_emit(&c.S, &code, OpLoad, o, 3)) MP_FAIL(&c, "out of memory");
-        o[0] = temps[0]; o[1] = v;
-        if (!mp_emit(&c.S, &code, OpStore, o, 2)) MP_FAIL(&c, "out of memory");
-    }
-    {
-        /* V: the stage inputs */
-        for (k = 0; k < EP_NVARYINGS; k++) {
-            uint32_t var = mp_named(&c.S, EP_VARYINGS[k], 0), o[3];
-            const mp_ins *d = var ? mp_def(&c.S, var) : NULL, *p = d ? mp_def(&c.S, d->w[1]) : NULL;
-            if (!d || MP_OP(d) != OpVariable || d->w[3] != 1 || !p || p->w[3] != v4ptr_out)
-                MP_FAIL(&c, "the program's fragment stage lacks an input the particle shading reads");
-            vals[k] = c.S.bound++;
-            o[0] = v4ptr_out; o[1] = vals[k]; o[2] = var;
-            if (!mp_emit(&c.S, &code, OpLoad, o, 3)) MP_FAIL(&c, "out of memory");
-        }
-        if (!mp_store_array(&c, &code, params[1], temps[1], vals, EP_NVARYINGS)) MP_FAIL(&c, "ep_shade's input array has no type");
-    }
-    {
-        /* P: the parameters the block grew by */
-        for (k = 0; k < EP_NBLOCK_PARMS; k++)
-            if (!(vals[k] = mp_load_member(&c, &code, bk.fh, bk.v4, (int)(bk.n0 + k)))) MP_FAIL(&c, "out of memory");
-        if (!mp_store_array(&c, &code, params[2], temps[2], vals, EP_NBLOCK_PARMS)) MP_FAIL(&c, "ep_shade's parameter array has no type");
-    }
-    {
-        /* U: the program's own uniforms */
-        for (k = 0; k < EP_NUNIFORMS; k++) {
-            int high = EP_UNIFORMS[k][0] == 'h';
-            const char *name = EP_UNIFORMS[k] + 1;
-            int mem = mp_member(&c.S, high ? bk.fh_struct : bk.fl_struct, name);
-            if (mem < 0) MP_FAIL(&c, "the program lacks a uniform the particle shading reads");
-            if (!(vals[k] = mp_load_member(&c, &code, high ? bk.fh : bk.fl, bk.v4, mem))) MP_FAIL(&c, "out of memory");
-        }
-        if (!mp_store_array(&c, &code, params[3], temps[3], vals, EP_NUNIFORMS)) MP_FAIL(&c, "ep_shade's uniform array has no type");
-    }
-    {
-        uint32_t o[7], t_void, v;
-        { uint32_t ov[1] = { 0 }; t_void = mp_find_or_add(&c, OpTypeVoid, ov, 1, 1); }
-        o[0] = t_void; o[1] = c.S.bound++; o[2] = entry;
-        memcpy(o + 3, temps, sizeof temps);
-        if (!mp_emit(&c.S, &code, OpFunctionCall, o, 7)) MP_FAIL(&c, "out of memory");
-        v = c.S.bound++;
-        o[0] = v4ptr_out; o[1] = v; o[2] = temps[0];
-        if (!mp_emit(&c.S, &code, OpLoad, o, 3)) MP_FAIL(&c, "out of memory");
-        o[0] = frag; o[1] = v;
-        if (!mp_emit(&c.S, &code, OpStore, o, 2)) MP_FAIL(&c, "out of memory");
-    }
-    if (c.S.oom) MP_FAIL(&c, "out of memory");
-    out = mp_reassemble(&c, var_end, &heads, anchor, &code, &funcs, out_words);
-done:
-    if (why) *why = c.why;
-    free(code.v); free(heads.v); free(funcs.v);
-    mp_ctx_free(&c);
-    if (c.why) { free(out); return NULL; }
-    return out;
-}
+#include "programs/particles_splice.inc"
 
 uint32_t *sh_modprog_hr_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
                                size_t *out_words, const char **why)
@@ -1582,11 +1379,14 @@ static const mp_family MP_FAMILIES[] = {
       &SH_MODPROG_ML_TEXTURE_COUNT, sh_modprog_patch_decl, sh_modprog_patch_glsl, sh_modprog_splice,
       "its decl has no single CUSTOM_TEXTURE_INPUTS template, or no hlsl_fp section for the functions" },
     { SH_MODPROG_EP_PREFIX, "particle version", EP_BLOCK_PARMS, &EP_BIN_PARM_COUNT, SH_MODPROG_EP_TEXTURES,
-      &SH_MODPROG_EP_TEXTURE_COUNT, sh_modprog_ep_patch_decl, sh_modprog_ep_patch_glsl, sh_modprog_ep_splice,
+      &SH_MODPROG_EP_TEXTURE_COUNT, ep_base_patch_decl, ep_base_patch_glsl, ep_base_splice,
       "its decl's fragment stage has no single PREMULTIPLY_ALPHA_BLENDED( result ) statement, or no hlsl_fp section for the functions" },
     { SH_MODPROG_HR_PREFIX, "hair version", HR_BLOCK_PARMS, &HR_BIN_PARM_COUNT, SH_MODPROG_HR_TEXTURES,
       &SH_MODPROG_HR_TEXTURE_COUNT, sh_modprog_hr_patch_decl, sh_modprog_hr_patch_glsl, sh_modprog_hr_splice,
       "its decl has no single hlsl_fp section closing on a line of its own" },
+    { SH_MODPROG_EP_EXT_PREFIX, "particle version", EP_BLOCK_PARMS, &EP_BIN_PARM_COUNT, SH_MODPROG_EP_TEXTURES,
+      &SH_MODPROG_EP_TEXTURE_COUNT, sh_modprog_ep_patch_decl, sh_modprog_ep_patch_glsl, sh_modprog_ep_splice,
+      "its decl's fragment stage has no single PREMULTIPLY_ALPHA_BLENDED( result ) statement, or no hlsl_fp section for the functions" },
 };
 #define MP_NFAMILIES (sizeof MP_FAMILIES / sizeof MP_FAMILIES[0])
 
@@ -2316,23 +2116,22 @@ static int mp_base_of(const char *path)
     return -1;
 }
 
-/* The alternate prefixes (SH_MODPROG_OLD_PREFIX, SH_MODPROG_EP_OLD_PREFIX): a path under one of them, after any head, is
- * rewritten to the same path under the new name (malloc'd). NULL when the path names neither. */
-static char *mp_canonical(const char *path)
+#define MP_EARLIER_PARTICLE_PREFIX "snapmapplus/eternal/"
+
+static char *mp_reprefix(const char *path, const char *old, const char *current)
 {
-    static const char *const OLD[2] = { SH_MODPROG_OLD_PREFIX, SH_MODPROG_EP_OLD_PREFIX };
-    static const char *const NEW[2] = { SH_MODPROG_PREFIX, SH_MODPROG_EP_PREFIX };
-    size_t h, k;
+    size_t h, n = strlen(old);
     for (h = 0; h < MP_NHEADS; h++) {
-        size_t hn = strlen(MP_HEADS[h]);
-        if (_strnicmp(path, MP_HEADS[h], hn)) continue;
-        for (k = 0; k < 2; k++) {
-            size_t on = strlen(OLD[k]);
-            if (_strnicmp(path + hn, OLD[k], on)) continue;
-            return sh_textf("%.*s%s%s", (int)hn, path, NEW[k], path + hn + on);
-        }
+        size_t head = strlen(MP_HEADS[h]);
+        if (!_strnicmp(path, MP_HEADS[h], head) && !_strnicmp(path + head, old, n))
+            return sh_textf("%.*s%s%s", (int)head, path, current, path + head + n);
     }
     return NULL;
+}
+
+char *sh_modprog_pinned_path(const char *path)
+{
+    return path ? mp_reprefix(path, MP_EARLIER_PARTICLE_PREFIX, SH_MODPROG_EP_PREFIX) : NULL;
 }
 
 int sh_modprog_owns(const char *path)
@@ -2351,7 +2150,7 @@ int sh_modprog_owns(const char *path)
         ReleaseSRWLockExclusive(&g_lock);
         return r;
     }
-    c = mp_canonical(path);
+    c = mp_reprefix(path, SH_MODPROG_OLD_PREFIX, SH_MODPROG_PREFIX);
     r = mp_base_of(c ? c : path) >= 0;
     free(c);
     return r;
@@ -2373,7 +2172,7 @@ int sh_modprog_read(const char *path, unsigned char **bytes, size_t *len)
     if (bytes) *bytes = NULL;
     if (len) *len = 0;
     if (!path || !bytes || !len) return SH_MB_STOCK_ABSENT;
-    c = mp_canonical(path);
+    c = mp_reprefix(path, SH_MODPROG_OLD_PREFIX, SH_MODPROG_PREFIX);
     r = mp_read_new(c ? c : path, bytes, len);
     free(c);
     return r;
@@ -2682,10 +2481,27 @@ static int mp_legacy_particle(mp_mat *m)
     static const float z4[4] = { 0, 0, 0, 0 }, o4[4] = { 1, 1, 1, 1 };
     float ep[4], fade[4], col[4], col2[4], u1[4], u2[4], u3[4], em[4], sb[4];
     long first = -1, sheet = mp_key_at(m, "eternalparticleemissivemap");
+    long stage = mp_key_at(m, "stageprogram");
+    int renamed = 0;
     size_t k;
+    if (stage >= 0) {
+        const mp_ln *line = &m->l[stage];
+        const char *v = line->a + line->v0;
+        size_t n = line->vn;
+        static const char old_stage[] = MP_EARLIER_PARTICLE_PREFIX "uberparticles";
+        static const char new_stage[] = "\"" SH_MODPROG_EP_PREFIX "uberparticles\"";
+        if (n && *v == '"') { v++; n--; }
+        size_t token = 0;
+        while (token < n && !mp_blank(v[token]) && v[token] != '"') token++;
+        n = token;
+        if (n == sizeof old_stage - 1 && !_strnicmp(v, old_stage, n)) {
+            if (!mp_set_text(m, (size_t)stage, "stageprogram", new_stage, sizeof new_stage - 1)) return -1;
+            renamed = 1;
+        }
+    }
     for (k = 0; k < 4; k++) first = mp_first(first, mp_key_at(m, old[k]));
     first = mp_first(first, sheet);
-    if (first < 0) return 0;
+    if (first < 0) return renamed;
     mp_get_vec(m, "eternalparticle", z4, ep);
     mp_get_vec(m, "eternalparticlefade", z4, fade);
     mp_get_vec(m, "eternalparticlecolor", o4, col);
@@ -2699,6 +2515,7 @@ static int mp_legacy_particle(mp_mat *m)
     em[1] = fade[1]; em[2] = fade[2]; em[3] = col2[3];
     mp_get_vec(m, "smokebrightness", z4, sb);
     sb[0] = ep[2];
+    sb[1] = sb[2] = sb[3] = 0;
     for (k = 0; k < 4; k++) mp_drop_key(m, old[k]);
     if (sheet >= 0) {
         mp_ln *x = &m->l[sheet];
@@ -2795,7 +2612,7 @@ static int mp_legacy_layered(mp_mat *m)
     return mp_set_text(m, (size_t)first, "layerparms", name, strlen(name)) ? 1 : -1;
 }
 
-int sh_modprog_legacy_material(const char *text, size_t len, char **out, size_t *out_len)
+static int mp_earlier_material(const char *text, size_t len, char **out, size_t *out_len, int particle_only)
 {
     mp_mat m;
     mp_buf b = { 0 };
@@ -2806,7 +2623,7 @@ int sh_modprog_legacy_material(const char *text, size_t len, char **out, size_t 
     if (!text || !out) return -1;
     if (!mp_split(&m, text, len)) return -1;
     p = mp_legacy_particle(&m);
-    ml = p < 0 ? -1 : mp_legacy_layered(&m);
+    ml = particle_only || p < 0 ? 0 : mp_legacy_layered(&m);
     if (p < 0 || ml < 0) { mp_mat_free(&m); return -1; }
     if (!p && !ml) { mp_mat_free(&m); return 0; }
     for (i = 0; i <= m.n; i++) {
@@ -2819,4 +2636,48 @@ int sh_modprog_legacy_material(const char *text, size_t len, char **out, size_t 
     mp_mat_free(&m);
     *out = mp_take(&b, out_len);
     return *out ? 1 : -1;
+}
+
+int sh_modprog_legacy_material(const char *text, size_t len, char **out, size_t *out_len)
+{
+    return mp_earlier_material(text, len, out, out_len, 0);
+}
+
+int sh_modprog_pinned_material(const char *text, size_t len, char **out, size_t *out_len)
+{
+    const char *end = text + len, *p = text;
+    *out = NULL;
+    *out_len = 0;
+    while (p < end) {
+        const char *next = memchr(p, '\n', (size_t)(end - p));
+        const char *line = next ? next : end, *key = p, *value;
+        while (key < line && (mp_blank(*key) || *key == '{')) key++;
+        value = key;
+        while (value < line && !mp_blank(*value)) value++;
+        size_t n = (size_t)(value - key);
+        while (value < line && mp_blank(*value)) value++;
+        if (n == 4 && !_strnicmp(key, "look", n)) {
+            size_t size = 0;
+            while (value + size < line && !mp_blank(value[size]) && value[size] != '}') size++;
+            if ((size == 8 && !_strnicmp(value, "particle", size)) || (size == 7 && !_strnicmp(value, "layered", size))) {
+                char *copy = (char *)malloc(len + 1);
+                if (!copy) return -1;
+                memcpy(copy, text, len);
+                memcpy(copy + (key - text), "type", 4);
+                copy[len] = 0;
+                *out = copy;
+                *out_len = len;
+                return 1;
+            }
+        }
+        if (n >= 15 && !_strnicmp(key, "eternalparticle", 15)) return mp_earlier_material(text, len, out, out_len, 1);
+        if (n == 12 && !_strnicmp(key, "stageprogram", n)) {
+            if (value < line && *value == '"') value++;
+            if (line - value >= sizeof MP_EARLIER_PARTICLE_PREFIX - 1 &&
+                !_strnicmp(value, MP_EARLIER_PARTICLE_PREFIX, sizeof MP_EARLIER_PARTICLE_PREFIX - 1))
+                return mp_earlier_material(text, len, out, out_len, 1);
+        }
+        p = next ? next + 1 : end;
+    }
+    return 0;
 }

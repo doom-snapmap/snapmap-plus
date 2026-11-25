@@ -205,7 +205,7 @@ static void check_module(const uint32_t *w, size_t n, const uint32_t *stock, siz
     for (k = 0; k < 4; k++) (void)k;
 }
 
-/* An old-name path (SH_MODPROG_OLD_PREFIX / SH_MODPROG_EP_OLD_PREFIX) is owned and reads the bytes of the new-name path. */
+/* The original layered path resolves to the same bytes. */
 static void alias_same(const char *head, const char *new_prefix, const char *old_prefix, const char *tail)
 {
     char *np = sh_textf("%s%s%s", head, new_prefix, tail), *op = sh_textf("%s%s%s", head, old_prefix, tail);
@@ -217,6 +217,25 @@ static void alias_same(const char *head, const char *new_prefix, const char *old
     if (nb) HeapFree(GetProcessHeap(), 0, nb);
     if (ob) HeapFree(GetProcessHeap(), 0, ob);
     free(np); free(op);
+}
+
+static void pinned_particle(const char *head, const char *tail)
+{
+    char *current = sh_textf("%s" SH_MODPROG_EP_PREFIX "%s", head, tail);
+    char *old = sh_textf("%ssnapmapplus/eternal/%s", head, tail);
+    char sha[65];
+    unsigned long long size = 0;
+    size_t n = 0;
+    unsigned char *bytes = NULL;
+    CHECK(!sh_modprog_owns(old) && sh_modprog_read(old, &bytes, &n) == SH_MB_STOCK_ABSENT);
+    CHECK(sh_modstock_identify(current, sha, &size) == SH_MB_STOCK_OK && size);
+    CHECK(sh_modstock_verify(old, sha, &size) == SH_MB_STOCK_OK);
+    CHECK(sh_modstock_read(old, sha, &bytes, &n) == SH_MB_STOCK_OK && bytes && n == size);
+    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+    sha[0] = sha[0] == '0' ? '1' : '0';
+    CHECK(sh_modstock_verify(old, sha, &size) == SH_MB_STOCK_MISMATCH);
+    free(current);
+    free(old);
 }
 
 /* dump=<dir>: write each derived decl there (<program>[.perm].decl), to read it with another compiler. */
@@ -753,7 +772,7 @@ out:
 }
 
 /* The particle program derived from the installed uberparticles and its permutation. */
-static void test_real_ep(void)
+static void test_real_ep(const char *prefix)
 {
     static const char *const masks[] = { NULL, "0000000000000001" };
     int i;
@@ -762,12 +781,12 @@ static void test_real_ep(void)
         char *sd = masks[i] ? sh_textf("generated/renderprogs/permutations/uberparticles_%s.decl", masks[i]) : NULL;
         char *sv = masks[i] ? sh_mb_spirv_request(sd, ".vspv") : sh_mb_spirv_request("uberparticles", ".vspv");
         char *sf = masks[i] ? sh_mb_spirv_request(sd, ".fspv") : sh_mb_spirv_request("uberparticles", ".fspv");
-        char *d = masks[i] ? sh_textf("generated/renderprogs/permutations/" SH_MODPROG_EP_PREFIX "uberparticles_%s.decl", masks[i])
-                           : sh_textf("generated/decls/renderprog/" SH_MODPROG_EP_PREFIX "uberparticles.decl");
-        char *b = masks[i] ? sh_textf("generated/renderprogs/permutations/" SH_MODPROG_EP_PREFIX "uberparticles_%s_pc_vulkan.bin", masks[i])
-                           : sh_textf("generated/renderprogs/" SH_MODPROG_EP_PREFIX "uberparticles_pc_vulkan.bin");
-        char *v = masks[i] ? sh_mb_spirv_request(d, ".vspv") : sh_textf("generated/spirv/" SH_MODPROG_EP_PREFIX "uberparticles.vspv");
-        char *f = masks[i] ? sh_mb_spirv_request(d, ".fspv") : sh_textf("generated/spirv/" SH_MODPROG_EP_PREFIX "uberparticles.fspv");
+        char *d = masks[i] ? sh_textf("generated/renderprogs/permutations/%suberparticles_%s.decl", prefix, masks[i])
+                           : sh_textf("generated/decls/renderprog/%suberparticles.decl", prefix);
+        char *b = masks[i] ? sh_textf("generated/renderprogs/permutations/%suberparticles_%s_pc_vulkan.bin", prefix, masks[i])
+                           : sh_textf("generated/renderprogs/%suberparticles_pc_vulkan.bin", prefix);
+        char *v = masks[i] ? sh_mb_spirv_request(d, ".vspv") : sh_textf("generated/spirv/%suberparticles.vspv", prefix);
+        char *f = masks[i] ? sh_mb_spirv_request(d, ".fspv") : sh_textf("generated/spirv/%suberparticles.fspv", prefix);
         char sha[SH_MB_HASH_HEX + 1];
         unsigned long long sz = 0;
         unsigned char *svb = NULL, *sfb = NULL;
@@ -780,9 +799,9 @@ static void test_real_ep(void)
         if (sfb) HeapFree(GetProcessHeap(), 0, sfb);
         free(sd); free(sv); free(sf); free(d); free(b); free(v); free(f);
     }
-    alias_same("generated/decls/renderprog/", SH_MODPROG_EP_PREFIX, SH_MODPROG_EP_OLD_PREFIX, "uberparticles.decl");
-    alias_same("generated/renderprogs/", SH_MODPROG_EP_PREFIX, SH_MODPROG_EP_OLD_PREFIX, "uberparticles_pc_vulkan.bin");
-    alias_same("generated/spirv/", SH_MODPROG_EP_PREFIX, SH_MODPROG_EP_OLD_PREFIX, "uberparticles.fspv");
+    pinned_particle("generated/decls/renderprog/", "uberparticles.decl");
+    pinned_particle("generated/renderprogs/", "uberparticles_pc_vulkan.bin");
+    pinned_particle("generated/spirv/", "uberparticles.fspv");
     /* the sheet is the product's texture parm; every vector the shading reads is the game's */
     CHECK(sh_modprog_owns("generated/decls/renderparm/particleemissivemap.decl"));
     CHECK(!sh_modprog_owns("generated/decls/renderparm/eternalparticle.decl"));
@@ -1313,7 +1332,8 @@ static void test_real(const char *doom)
     }
     sh_modstock_list("generated/renderprogs/permutations/" SH_MODPROG_PREFIX, count, &s);
     CHECK(s.files == 4);      /* each base's permutation decl and cooked program */
-    test_real_ep();
+    test_real_ep(SH_MODPROG_EP_PREFIX);
+    test_real_ep(SH_MODPROG_EP_EXT_PREFIX);
     s.files = 0;
     sh_modstock_list("generated/renderprogs/permutations/" SH_MODPROG_EP_PREFIX, count, &s);
     CHECK(s.files == 2);

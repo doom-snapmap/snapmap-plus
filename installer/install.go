@@ -156,6 +156,9 @@ func cmdInstall(f flags) error {
 		if err := upgradeModLayout(appDataDir()); err != nil {
 			return fmt.Errorf("Snapmap+ is installed, but updating your mod data could not finish (%w). Run the same install or update command again", err)
 		}
+		if err := upgradeGraphicsFolders(appDataDir()); err != nil {
+			return fmt.Errorf("Snapmap+ is installed, but updating older materials could not finish: %w", err)
+		}
 	}
 	ui.Blank()
 	ui.OK("Snapmap+ %s installed.", b.version)

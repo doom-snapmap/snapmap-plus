@@ -36,7 +36,7 @@
 // (ep_srgb, EP_MIN_ALPHA).
 //
 // The stage's constants are not render parms of the product's own: they are kept in keys the game's particle program
-// already holds, by what they mean (modprog.c's table SH_MODPROG_EP_PARMS names the old keys they replace):
+// already holds, by what they mean:
 //   particleuberparms1  x, y 0 (left for the game's own code, which still runs: x picks its unlit vertex path, y its gun
 //                       soft scale); z the mode (0 unlit, 1 lit, 4 explosion) + 16 when the emissive mask sheet is bound;
 //                       w the depth offset scale
@@ -87,12 +87,12 @@ hlsl_fp_header {
 	// V: 0 colour, 1 texcoord0 (current and next frame uv), 2 texcoord1 (x 1 + 10 gp0, z frame blend, w gp3),
 	//    3 texcoord2 (xyz world position), 4 texcoord4 (xy light atlas uv, z 1 + 10 gp1), 5 texcoord6 (fog), 6 the
 	//    fragment position
-	// P: 0 smokebrightness (x mask strength, yz far fade, w use the second mask colour), 1 projectionmatrixz, 2 globalvieworigin
+	// P: 0 smokebrightness (x the emissive mask's multiplier), 1 projectionmatrixz, 2 globalvieworigin
 	// U: 0 renderpositiontoviewtexture, 1 particleatlasparms, 2 foglightinscattercolor, 3 foglightinscatterintensity,
 	//    4 foglightoppositecolor, 5 fogcolor, 6 transparencylightmult, 7 particleuberparms1 (z the mode, + 16 when the
 	//    emissive mask sheet is bound: 0 unlit, 1 lit, 4 explosion; w depthOffsetScale, units), 8 particleuberparms2 (xyz
 	//    the emissive mask colour, or the explosion's gradient2; w the near fade's begin), 9 particleuberparms3 (xyz the
-	//    second mask or explosion colour; w emissiveMultiplier), 10 emissive (y the near fade's end, z the soft distance, units;
+	//    explosion's gradient3; w emissiveMultiplier), 10 emissive (y the near fade's end, z the soft distance, units;
 	//    w a lit stage's scale, 1 for a CPU stage: a stage lit per vertex draws (L + k)(1 + k))
 	void ep_shade( inout float4 frag, float4 V[7], float4 P[3], float4 U[11] )
 	{
@@ -129,7 +129,9 @@ hlsl_fp_header {
 	    float2 tc = V[6].xy * U[0].zw + U[0].xy;
 	    float zs = P[1].w / ( tex2Dlod( $viewDepthMap, float4( tc, 0.0, 0.0 ) ).x + P[1].z );
 	    float zf = P[1].w / ( V[6].z + P[1].z );
+#ifdef PARTICLE_DISTANCE_MASK
 	    if ( P[0].z > P[0].y ) ca *= 1.0 - saturate( ( zf - P[0].y ) / ( P[0].z - P[0].y ) );
+#endif
 	    float soft = saturate( ( zs - zf - saturate( 1.0 - G ) * depthScale ) / max( softDist, 1e-3 ) );
 
 	    float m = 1.0;
@@ -141,10 +143,14 @@ hlsl_fp_header {
 	    if ( mode == 1.0 ) {
 	        float3 L = ep_bicubic( $particlesLightAtlasMap, V[4].xy, U[1].xy );
 	        rgb = R * c * ( L + 200.0 * gp0 ) * litScale;
+#ifdef PARTICLE_DISTANCE_MASK
 	        if ( maskMul != 0.0 ) {
 	            float3 tint = P[0].w > 0.0 ? lerp( maskColour, gradient3, m ) : maskColour * m;
 	            rgb += tint * maskMul * m;
 	        }
+#else
+	        if ( maskMul != 0.0 ) rgb += maskColour * maskMul * m * m;
+#endif
 	        a = curve * ca * ( 1.0 + 10.0 * gp1 );
 	    } else if ( mode == 4.0 ) {
 	        float3 L = ep_bicubic( $particlesLightAtlasMap, V[4].xy, U[1].xy );
