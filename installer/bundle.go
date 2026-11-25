@@ -151,6 +151,15 @@ type ghRelease struct {
 	Assets      []ghAsset `json:"assets"`
 }
 
+func (r *ghRelease) asset(name string) *ghAsset {
+	for i := range r.Assets {
+		if r.Assets[i].Name == name {
+			return &r.Assets[i]
+		}
+	}
+	return nil
+}
+
 type ghAsset struct {
 	Name               string `json:"name"`
 	URL                string `json:"url"`                  // API URL (token-authed private download)
@@ -177,13 +186,7 @@ func downloadRelease(f flags) (dir string, tag string, cleanup func(), err error
 			return "", "", noop, err
 		}
 	}
-	var asset *ghAsset
-	for i := range rel.Assets {
-		if rel.Assets[i].Name == releaseAsset {
-			asset = &rel.Assets[i]
-			break
-		}
-	}
+	asset := rel.asset(releaseAsset)
 	if asset == nil {
 		return "", "", noop, fmt.Errorf("release %s is missing its download -- it may still be publishing, so try again in a minute", rel.TagName)
 	}
@@ -334,6 +337,10 @@ var downloadClient = func() *http.Client {
 }()
 
 func apiGet(url, token string, out interface{}) error {
+	return apiGetWith(apiClient, url, token, out)
+}
+
+func apiGetWith(client *http.Client, url, token string, out interface{}) error {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return err
@@ -343,7 +350,7 @@ func apiGet(url, token string, out interface{}) error {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := apiClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("couldn't reach GitHub (%v) -- check your internet connection and try again", err)
 	}

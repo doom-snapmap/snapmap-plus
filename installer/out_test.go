@@ -263,7 +263,7 @@ func TestRunCommandAcceptsPlain(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("LOCALAPPDATA", filepath.Join(tmp, "appdata"))
 	out := captureStdout(t, func() {
-		if err := runCommand("version", []string{"--plain"}); err != nil {
+		if err := runCommand("version", []string{"--plain"}, false); err != nil {
 			t.Error(err)
 		}
 	})

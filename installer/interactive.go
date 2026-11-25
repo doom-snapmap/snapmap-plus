@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -40,7 +39,7 @@ func interactiveMain() {
 	enter := enterDefault(installed, installedVersion, latest)
 	legacyFix := false
 	if installed {
-		if b, err := detectDoomBuild(rec.DoomPath); err == nil && legacyNeedsUpdate(b, installedVersion) {
+		if b, err := scanDoomExes(rec.DoomPath).identify(rec.DoomPath); err == nil && legacyNeedsUpdate(b, installedVersion) {
 			enter, legacyFix = "update", true
 		}
 	}
@@ -110,7 +109,7 @@ func commandLoop(enterCmd string) {
 		if cmd == "quit" || cmd == "exit" || cmd == "q" {
 			return
 		}
-		if err := runCommand(cmd, fields[1:]); err != nil {
+		if err := runCommand(cmd, fields[1:], false); err != nil {
 			if errors.Is(err, errUnknownCommand) {
 				ui.Warn("Unknown command %q -- type help for the list, or quit to close.", cmd)
 				continue
@@ -151,25 +150,8 @@ var noticeClient = &http.Client{Timeout: 5 * time.Second}
 // latestDefaultTag returns the default release tag, or an empty string when
 // the bounded update check fails. Failure suppresses only the notice.
 func latestDefaultTag() string {
-	req, err := http.NewRequest("GET", releasesURL()+"?per_page=100", nil)
-	if err != nil {
-		return ""
-	}
-	req.Header.Set("User-Agent", "snapmap-plus-installer")
-	req.Header.Set("Accept", "application/vnd.github+json")
-	if t := resolveToken(flags{}); t != "" {
-		req.Header.Set("Authorization", "Bearer "+t)
-	}
-	resp, err := noticeClient.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return ""
-	}
 	var list []ghRelease
-	if json.NewDecoder(resp.Body).Decode(&list) != nil {
+	if apiGetWith(noticeClient, releasesURL()+"?per_page=100", resolveToken(flags{}), &list) != nil {
 		return ""
 	}
 	sortReleases(list)

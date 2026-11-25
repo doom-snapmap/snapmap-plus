@@ -64,7 +64,8 @@ func main() {
 	// Remove replaced installer images and remove bookkeeping files a previous install placed that this release does not ship, at every start.
 	startupCleanup()
 	// A stale installer updates itself before it touches the game, and the new image does the work.
-	if relaunched, code := selfUpdateFirst(os.Args[1:]); relaunched {
+	relaunched, code, checked := selfUpdateFirst(os.Args[1:])
+	if relaunched {
 		restoreConsole()
 		os.Exit(code)
 	}
@@ -75,7 +76,7 @@ func main() {
 		return
 	}
 	cmd := args[0]
-	err := runCommand(cmd, args[1:])
+	err := runCommand(cmd, args[1:], checked)
 	if errors.Is(err, errUnknownCommand) {
 		ui.Fail("unknown command %q", cmd)
 		ui.Blank()
@@ -96,7 +97,7 @@ var errUnknownCommand = errors.New("unknown command")
 
 // runCommand dispatches one command; shared by the CLI entry point and the interactive prompt so both
 // surfaces stay identical.
-func runCommand(cmd string, args []string) error {
+func runCommand(cmd string, args []string, installerChecked bool) error {
 	args, plain := stripPlain(args)
 	ui.setPlain(plain)
 	for _, arg := range args {
@@ -110,6 +111,7 @@ func runCommand(cmd string, args []string) error {
 	case "install":
 		return cmdInstall(f)
 	case "update":
+		f.noSelf = f.noSelf || installerChecked
 		return cmdUpdate(f)
 	case "uninstall":
 		return cmdUninstall(f)

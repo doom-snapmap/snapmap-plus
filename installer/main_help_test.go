@@ -10,7 +10,7 @@ func TestCommandHelpDoesNotPerformAction(t *testing.T) {
 		for _, option := range []string{"--help", "-h"} {
 			t.Run(command+"/"+option, func(t *testing.T) {
 				root := t.TempDir()
-				if err := runCommand(command, []string{"--doom", root, option}); err != nil {
+				if err := runCommand(command, []string{"--doom", root, option}, false); err != nil {
 					t.Fatalf("help attempted the command: %v", err)
 				}
 				entries, err := os.ReadDir(root)
