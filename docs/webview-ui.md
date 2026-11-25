@@ -22,7 +22,7 @@ operations use the interface in `src/common/snapmap_plus_iface.h`.
 | `src/ui/webview/mods_tab.js` | The Mods tab: payload model, the list (Your mods, and Maps on this computer), the selected mod's details with its In this map block, the one rule for a mod and the open map (`mapState`), the map modal and its confirmations, and the action messages. |
 | `src/ui/webview/prefab_budget.js` | What a prefab adds to the editor's limits: block sums, the five HUD meter ratios, the reached rule, the meter colour levels and a bounded memo. No DOM. |
 | `src/ui/webview/prefab_host.h` | The host's Prefabs tab decisions: Create's precheck, a prefab's kind by its file's `~type`, and the live usage gate. Pure; `tests/prefab_host_test.cpp`. |
-| `src/ui/webview/player_text.h` | The description text a player sees from the generated entity and event tables: study notes (addresses, offsets, handler and decompile wording, runtime class and field lists) and name-only entries are left out. Pure; `tests/player_text_test.cpp`. |
+| `src/ui/sh_entity_desc.h`, `src/ui/sh_event_docs.h` | Compiled entity and Timeline descriptions. The generators remove research notes and name-only entries before these tables are built. |
 | `src/ui/webview/report_scrub.h` | Crash-report attachments: the account, profile-folder and machine names scrubbed as UTF-8, ANSI, UTF-16LE and short-path text; whole-line log tails; the logs trimmed oldest-first to fit the relay's 64 KB cap. `tests/report_scrub_test.c`. |
 | `src/ui/webview/game_identity.h` | The game identity (`--game=`) and the backend's release (`--version=`) from the startup arguments. `tests/game_identity_arg_test.cpp`. |
 | `src/ui/webview/folder_watch.h` | The debounce behind the prefabs folder watcher. `tests/folder_watch_test.c`. |

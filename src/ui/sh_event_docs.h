@@ -84,7 +84,7 @@ static const ShEvtArgDoc SH_ED_A_77[] = { {"blendFramesIn","Frames to blend into
 static const ShEvtArgDoc SH_ED_A_78[] = { {"activator","The entity credited as causing the activation."} };
 static const ShEvtArgDoc SH_ED_A_79[] = { {"assignmentDelaySec","Delay (seconds) before AI are assigned into the grouping."}, {"combatGrouping","The combat-grouping entity to activate and assign AI to."}, {"groupLabel","Label selecting which AI are placed into the grouping."} };
 static const ShEvtArgDoc SH_ED_A_80[] = { {"declName","Decl name of the perk to activate."} };
-static const ShEvtArgDoc SH_ED_A_81[] = { {"designComment","An author-facing label/comment for the wire; not used by the handler logic (carried only for design readability)."}, {"target","The target slot to activate, resolved by index into this entity's target list; -1 means activate self, an invalid index is rejected with a logged error."} };
+static const ShEvtArgDoc SH_ED_A_81[] = { {"designComment",""}, {"target","The target slot to activate, resolved by index into this entity's target list; -1 means activate self, an invalid index is rejected with a logged error."} };
 static const ShEvtArgDoc SH_ED_A_82[] = { {"activator","The entity credited as causing the targets to fire."} };
 static const ShEvtArgDoc SH_ED_A_84[] = { {"mask","The clip mask bits to add to what this entity collides against."} };
 static const ShEvtArgDoc SH_ED_A_85[] = { {"codex","The codex-entry decl to unlock for the player."} };
@@ -103,7 +103,7 @@ static const ShEvtArgDoc SH_ED_A_98[] = { {"anim","The animation that fired the 
 static const ShEvtArgDoc SH_ED_A_99[] = { {"anim","The animation that fired the event; identifies the firing anim. Effect detail not visible in this fragment."}, {"checkValid","When set, the AI validates it has a usable target/line-of-fire before pulling the trigger. (Behavior inferred from name; not visible in this fragment.)"}, {"slotName","Names the weapon slot whose trigger to pull; an empty slot produces a logged error."} };
 static const ShEvtArgDoc SH_ED_A_100[] = { {"anim","The animation that fired the event; identifies the firing anim. Effect detail not visible in this fragment."}, {"slotName","Names the weapon slot whose trigger to release; an invalid slot produces a logged error."} };
 static const ShEvtArgDoc SH_ED_A_101[] = { {"anim","The animation asset firing this frame event."}, {"chance","Probability (0..1) that the trigger release actually occurs."}, {"slotName","Equip slot name of the weapon whose trigger may be released."} };
-static const ShEvtArgDoc SH_ED_A_102[] = { {"anim","The animation that fired the event; identifies the firing anim. Effect detail not visible in this decompile fragment."}, {"slotName","Names the weapon/inventory slot to reload; an empty slot produces a logged error."} };
+static const ShEvtArgDoc SH_ED_A_102[] = { {"anim","The animation that fired the event; identifies the firing anim."}, {"slotName","Names the weapon/inventory slot to reload; an empty slot produces a logged error."} };
 static const ShEvtArgDoc SH_ED_A_103[] = { {"anim","The animation instance firing this frame event."} };
 static const ShEvtArgDoc SH_ED_A_104[] = { {"animHandle","the MD6 animation firing this frame event"} };
 static const ShEvtArgDoc SH_ED_A_105[] = { {"anim","The animation that fired this event."}, {"targetIndex","Which wired target to activate; -1 activates the entity itself."} };
@@ -261,7 +261,7 @@ static const ShEvtArgDoc SH_ED_A_256[] = { {"anim","The animation that fired the
 static const ShEvtArgDoc SH_ED_A_257[] = { {"anim","The animation this frame-event is attached to."}, {"useAF","If true, use the articulated-figure (ragdoll) path when detonating."} };
 static const ShEvtArgDoc SH_ED_A_258[] = { {"anim","The animation instance firing this frame event."} };
 static const ShEvtArgDoc SH_ED_A_259[] = { {"anim","The animation handle firing this frame event."} };
-static const ShEvtArgDoc SH_ED_A_260[] = { {"anim","The owning animation event context (not used; the handler operates on the entity's collision)."} };
+static const ShEvtArgDoc SH_ED_A_260[] = { {"anim","The owning animation event context."} };
 static const ShEvtArgDoc SH_ED_A_261[] = { {"anim","The animation instance firing this frame event."} };
 static const ShEvtArgDoc SH_ED_A_262[] = { {"anim","The animation instance firing this frame event."} };
 static const ShEvtArgDoc SH_ED_A_263[] = { {"anim","The animation instance firing this frame event."} };
@@ -275,7 +275,7 @@ static const ShEvtArgDoc SH_ED_A_270[] = { {"anim","The animation instance firin
 static const ShEvtArgDoc SH_ED_A_271[] = { {"anim","The animation instance firing this frame event."} };
 static const ShEvtArgDoc SH_ED_A_272[] = { {"anim","The firing animation; not used -- the event acts on the owning entity."} };
 static const ShEvtArgDoc SH_ED_A_273[] = { {"anim","The animation instance firing this frame event."} };
-static const ShEvtArgDoc SH_ED_A_274[] = { {"animHandle","The animation that fired this event; only used to route to a type-specific handler in certain cases, not used by the IK logic itself."} };
+static const ShEvtArgDoc SH_ED_A_274[] = { {"animHandle",""} };
 static const ShEvtArgDoc SH_ED_A_275[] = { {"anim","The animation instance firing this frame event."} };
 static const ShEvtArgDoc SH_ED_A_276[] = { {"anim","The MD6 animation handle this frame-event is bound to; supplied by the animation system."} };
 static const ShEvtArgDoc SH_ED_A_277[] = { {"anim","The animation that fired the event; resolved to the attachment slot to drop."}, {"slotName","Names the attachment slot to drop; an unrecognized slot is rejected with a logged error."} };
@@ -312,7 +312,7 @@ static const ShEvtArgDoc SH_ED_A_307[] = { {"anim","The animation instance firin
 static const ShEvtArgDoc SH_ED_A_308[] = { {"anim","The animation instance firing this frame event."} };
 static const ShEvtArgDoc SH_ED_A_309[] = { {"anim","The firing animation; not otherwise used."} };
 static const ShEvtArgDoc SH_ED_A_310[] = { {"anim","The animation instance firing this frame event."} };
-static const ShEvtArgDoc SH_ED_A_311[] = { {"animHandle","The animation that fired this event; used only by a type-specific variant of the handler, otherwise unused."} };
+static const ShEvtArgDoc SH_ED_A_311[] = { {"animHandle",""} };
 static const ShEvtArgDoc SH_ED_A_312[] = { {"anim","The animation instance firing this frame event."} };
 static const ShEvtArgDoc SH_ED_A_313[] = { {"anim","The animation that fired this event."}, {"lerpTime","Time in milliseconds to fade the blur back out."} };
 static const ShEvtArgDoc SH_ED_A_314[] = { {"anim","The animation that fired this event."}, {"lerpTime","Time in milliseconds to fade the depth-of-field effect back out."} };
@@ -365,7 +365,7 @@ static const ShEvtArgDoc SH_ED_A_360[] = { {"anim","The animation this event fir
 static const ShEvtArgDoc SH_ED_A_361[] = { {"anim","The animation that fired this event; if it is missing or out of sync with the actor the gore enable is skipped."}, {"goreName","The name of the gore zone or piece to activate on the actor."} };
 static const ShEvtArgDoc SH_ED_A_362[] = { {"anim","The MD6 animation firing the event."}, {"goreName","Name of the full-body gore setup to enable."}, {"timeMS","Transition/enable time in milliseconds."} };
 static const ShEvtArgDoc SH_ED_A_363[] = { {"anim","The animation this frame-event is attached to."}, {"animAlias","Animation alias applied to / associated with the spawned gore entity."}, {"def","Entity def to spawn for the gore piece."}, {"tagName","Tag/attach point on the model where the gore entity is spawned."} };
-static const ShEvtArgDoc SH_ED_A_364[] = { {"anim","The MD6 animation instance firing the event; not author-set."}, {"transcode","Enum transcode value routed to the FSM handler."} };
+static const ShEvtArgDoc SH_ED_A_364[] = { {"anim","The MD6 animation instance firing the event; not author-set."}, {"transcode",""} };
 static const ShEvtArgDoc SH_ED_A_365[] = { {"anim","The animation context firing the event; used only for the debug trace log."} };
 static const ShEvtArgDoc SH_ED_A_366[] = { {"anim","The animation context firing the event; used only for the debug trace log."}, {"item","The inventory-item declaration to equip; if null nothing is equipped."} };
 static const ShEvtArgDoc SH_ED_A_367[] = { {"anim","The animation this event fires from; logged by name only."} };
@@ -379,7 +379,7 @@ static const ShEvtArgDoc SH_ED_A_374[] = { {"anim","The MD6 animation this event
 static const ShEvtArgDoc SH_ED_A_375[] = { {"anim","The animation context firing the event; used only for the debug-log name."} };
 static const ShEvtArgDoc SH_ED_A_376[] = { {"anim","The animation handle firing this frame event."}, {"val","Amount of health to add."} };
 static const ShEvtArgDoc SH_ED_A_377[] = { {"anim","The firing animation; used only for the diagnostic log line."}, {"increaseDelay","Scales the time over which the healing is applied (multiplied by a fixed rate constant to set the heal interval)."} };
-static const ShEvtArgDoc SH_ED_A_378[] = { {"anim","The animation that fired this event; not used."}, {"milliseconds","Intended hide/fade duration, but ignored by this handler."} };
+static const ShEvtArgDoc SH_ED_A_378[] = { {"anim","The animation that fired this event; not used."}, {"milliseconds",""} };
 static const ShEvtArgDoc SH_ED_A_379[] = { {"animHandle","The animation that fired this event; not used by the slot logic."}, {"slotName","Name of the equip slot whose equipped item's attachment is hidden."} };
 static const ShEvtArgDoc SH_ED_A_380[] = { {"anim","The entity to hide (when the global gate allows it)."} };
 static const ShEvtArgDoc SH_ED_A_381[] = { {"anim","The animation this event fires from; logged by name only."} };
@@ -408,7 +408,7 @@ static const ShEvtArgDoc SH_ED_A_403[] = { {"animHandle","The animation that rai
 static const ShEvtArgDoc SH_ED_A_404[] = { {"animHandle","The animation that fired this event; provides context only and does not affect which slot is used."}, {"condition","Which conditioned effect to stop on that item."}, {"slotName","The equip slot whose attached item should have its effects stopped."} };
 static const ShEvtArgDoc SH_ED_A_405[] = { {"anim","The animation this frame-event is attached to."}, {"flags","Joint-keyframe flag bitfield controlling how the keyframe is applied."}, {"jointName","The joint this keyframe applies to."} };
 static const ShEvtArgDoc SH_ED_A_406[] = { {"anim","The animation firing the event; used only to print the event's diagnostic name."}, {"damageType","The damage declaration applied as the kill's damage type/cause; passed into the lethal-damage call."} };
-static const ShEvtArgDoc SH_ED_A_407[] = { {"animHandle","The animation that fired this event; not used by the handler."} };
+static const ShEvtArgDoc SH_ED_A_407[] = { {"animHandle",""} };
 static const ShEvtArgDoc SH_ED_A_408[] = { {"anim","The animation that fired the event; the anim name appears in error logs and supplies projectile-info context."}, {"itemKey","Names the stored blackboard item to launch; a missing item or non-projectile aborts with a logged error."}, {"locationKey","Names the stored blackboard location to launch from; an unknown key aborts with a logged error."}, {"resetGravity","When set, the item's gravity/physics is reset before launch so it follows a fresh trajectory."} };
 static const ShEvtArgDoc SH_ED_A_409[] = { {"anim","The animation that fired the event; identifies the firing anim, named in the error log."}, {"jointName","The skeleton joint the item is launched from. (Usage not visible in this fragment.)"} };
 static const ShEvtArgDoc SH_ED_A_410[] = { {"anim","The animation that fired the event; the anim name appears in error logs and supplies the projectile-info context."}, {"key","Names the stored blackboard location to launch the item from; an unknown or invalid key aborts with a logged error."} };
@@ -416,11 +416,11 @@ static const ShEvtArgDoc SH_ED_A_411[] = { {"anim","The animation that fired the
 static const ShEvtArgDoc SH_ED_A_412[] = { {"anim","The animation asset firing this frame event."}, {"jointName","Skeleton joint associated with the launch loop."} };
 static const ShEvtArgDoc SH_ED_A_413[] = { {"anim","The firing entity; its skeleton supplies the spawn point for the projectile."}, {"declProjectile","The projectile definition used to create the projectile."}, {"jointName","Name of the bone whose position is the projectile's spawn point."}, {"targetEntityName","Name of the entity to aim the projectile at."}, {"targetHead","If set, aims at the target's head instead of its center."} };
 static const ShEvtArgDoc SH_ED_A_414[] = { {"animHandle","The firing animation; not directly consumed -- the event operates on the entity."} };
-static const ShEvtArgDoc SH_ED_A_415[] = { {"anim","The animation firing this event; the handler triggers a left-foot footstep on the owning entity."} };
+static const ShEvtArgDoc SH_ED_A_415[] = { {"anim",""} };
 static const ShEvtArgDoc SH_ED_A_416[] = { {"anim","The firing animation; used only for the diagnostic log line."} };
-static const ShEvtArgDoc SH_ED_A_417[] = { {"animHandle","The animation that fired this event; not used by the handler (the left hand is fixed)."} };
-static const ShEvtArgDoc SH_ED_A_418[] = { {"animHandle","The animation that fired this event; not used by the handler (the left-rear foot is fixed)."} };
-static const ShEvtArgDoc SH_ED_A_419[] = { {"anim","The animation firing this event; the handler acts on the owning entity rather than reading it directly."} };
+static const ShEvtArgDoc SH_ED_A_417[] = { {"animHandle",""} };
+static const ShEvtArgDoc SH_ED_A_418[] = { {"animHandle",""} };
+static const ShEvtArgDoc SH_ED_A_419[] = { {"anim",""} };
 static const ShEvtArgDoc SH_ED_A_420[] = { {"anim","The animation firing the event; used to iterate the sync participants."}, {"jointName","Names the joint/participant to scale; matched against each participant's joint id to pick the target."}, {"lerpAccelDeccelTimeMS","The ease-in/ease-out (acceleration/deceleration) time in milliseconds for the interpolation."}, {"lerpTimeMS","Total interpolation time in milliseconds for the scale change."}, {"scaleFactor","The target render-scale (a 3-component scale) to interpolate toward."} };
 static const ShEvtArgDoc SH_ED_A_421[] = { {"anim","The entity firing the event; the actual target is always the local player's camera."}, {"goalFov","The field-of-view value to smoothly zoom toward."}, {"timeSec","How long the FOV change takes, in seconds."} };
 static const ShEvtArgDoc SH_ED_A_422[] = { {"anim","The MD6 animation firing the event."}, {"damageType","Damage decl applied as the glory-kill damage."} };
@@ -507,10 +507,10 @@ static const ShEvtArgDoc SH_ED_A_502[] = { {"anim","The animation this frame-eve
 static const ShEvtArgDoc SH_ED_A_503[] = { {"anim","The animation this frame-event is attached to."} };
 static const ShEvtArgDoc SH_ED_A_504[] = { {"animHandle","the MD6 animation firing this frame event"}, {"cond","FX condition gating whether the effect plays"} };
 static const ShEvtArgDoc SH_ED_A_505[] = { {"animHandle","the MD6 animation firing this frame event"}, {"shader","sound shader to play"} };
-static const ShEvtArgDoc SH_ED_A_506[] = { {"anim","The animation firing this event; the handler triggers a right-foot footstep on the owning entity."} };
+static const ShEvtArgDoc SH_ED_A_506[] = { {"anim",""} };
 static const ShEvtArgDoc SH_ED_A_507[] = { {"anim","The firing animation; used only for the diagnostic log line."} };
-static const ShEvtArgDoc SH_ED_A_508[] = { {"animHandle","The animation that fired this event; not used by the handler (the right hand is fixed)."} };
-static const ShEvtArgDoc SH_ED_A_509[] = { {"animHandle","The animation that fired this event; not used by the handler (the right-rear foot is fixed)."} };
+static const ShEvtArgDoc SH_ED_A_508[] = { {"animHandle",""} };
+static const ShEvtArgDoc SH_ED_A_509[] = { {"animHandle",""} };
 static const ShEvtArgDoc SH_ED_A_510[] = { {"activate","True to switch the sweep beam on, false to switch it off."}, {"anim","Handle to the Spider Mastermind animation firing this frame event."} };
 static const ShEvtArgDoc SH_ED_A_511[] = { {"activate","True to enable ranged mine deployment, false to disable it."}, {"anim","Handle to the Spider Mastermind animation firing this frame event."} };
 static const ShEvtArgDoc SH_ED_A_512[] = { {"anim","Handle to the Spider Mastermind animation firing this frame event."} };
@@ -607,7 +607,7 @@ static const ShEvtArgDoc SH_ED_A_602[] = { {"anim","The animation firing this ev
 static const ShEvtArgDoc SH_ED_A_603[] = { {"anim","The animation firing this event."}, {"shader","The sound shader to play on the second body channel."} };
 static const ShEvtArgDoc SH_ED_A_604[] = { {"anim","The animation firing this event."}, {"shader","The sound shader to play on the third body channel."} };
 static const ShEvtArgDoc SH_ED_A_605[] = { {"anim","The animation this event fires from; only logged by name, not otherwise used."} };
-static const ShEvtArgDoc SH_ED_A_606[] = { {"anim","The animation this event fires from; used to detect when the anim ends so the looping sound is stopped, and only logged by name."}, {"shader","The sound shader played as the looping body sound; the handler reads its name and uses it as the loop source."} };
+static const ShEvtArgDoc SH_ED_A_606[] = { {"anim","The animation this event fires from; used to detect when the anim ends so the looping sound is stopped, and only logged by name."}, {"shader",""} };
 static const ShEvtArgDoc SH_ED_A_607[] = { {"anim","The animation firing the event; used for the optional debug log line."}, {"shader","The sound shader to loop on the body channel; if null, the currently looping body sound is stopped instead."} };
 static const ShEvtArgDoc SH_ED_A_608[] = { {"anim","The animation firing this event."}, {"shader","The sound shader to play on the item channel."} };
 static const ShEvtArgDoc SH_ED_A_609[] = { {"anim","The owning animation event context (not directly used)."}, {"shader","The sound shader to play on the music channel."} };
@@ -619,7 +619,7 @@ static const ShEvtArgDoc SH_ED_A_614[] = { {"anim","The owning animation event c
 static const ShEvtArgDoc SH_ED_A_615[] = { {"anim","The animation firing this event."}, {"shader","The sound shader to play on the weapon channel."} };
 static const ShEvtArgDoc SH_ED_A_616[] = { {"animHandle","The entity that spawns and owns the breakable, and supplies the attach point."}, {"breakable","The breakable entity definition to spawn; if empty the event does nothing."}, {"tagName","The tag/joint on the source model the breakable is attached to."} };
 static const ShEvtArgDoc SH_ED_A_617[] = { {"anim","The owning animation event context (not directly used)."}, {"entDef","The entity definition to spawn."}, {"slaveAnimator","Whether the spawned entity slaves its animation to this entity's animator."}, {"tagName","Name of the tag/joint where the new entity is positioned."} };
-static const ShEvtArgDoc SH_ED_A_618[] = { {"anim","The animation that fired the event; supplies the AI context. Not used to pick the location."}, {"ignoreGravity","Whether the spawned projectile should ignore gravity. (Inferred from signature; exact use not isolated in this fragment.)"}, {"itemOutKey","The output key under which the spawned projectile is stored; an invalid out key aborts with a logged error. (Note: the visible decompile uses one key lookup; mapping of the two string args is partly inferred.)"}, {"locationKey","Names the stored blackboard location where the projectile is spawned; an unresolved key aborts the event."} };
+static const ShEvtArgDoc SH_ED_A_618[] = { {"anim","The animation that fired the event; supplies the AI context. Not used to pick the location."}, {"ignoreGravity","Whether the spawned projectile should ignore gravity. (Inferred from signature; exact use not isolated in this fragment.)"}, {"itemOutKey","The output key under which the spawned projectile is stored; an invalid out key aborts with a logged error."}, {"locationKey","Names the stored blackboard location where the projectile is spawned; an unresolved key aborts the event."} };
 static const ShEvtArgDoc SH_ED_A_619[] = { {"anim","The animation clip this frame-event is bound to."}, {"heightOffset","Vertical offset applied to the telegraph placement."}, {"sphereName","Named sphere/blast definition being telegraphed."}, {"tagName","Model tag the telegraph originates from."} };
 static const ShEvtArgDoc SH_ED_A_620[] = { {"anim","The animation asset firing this frame event."} };
 static const ShEvtArgDoc SH_ED_A_621[] = { {"anim","The animation asset firing this frame event."} };
@@ -726,7 +726,7 @@ static const ShEvtArgDoc SH_ED_A_721[] = { {"anim","The animation context firing
 static const ShEvtArgDoc SH_ED_A_722[] = { {"anim","The animation context firing the event; used only for the debug-log name."} };
 static const ShEvtArgDoc SH_ED_A_723[] = { {"anim","The animation firing the event; used only for debug logging."}, {"show","True shows the weapon's GUI, false hides it."} };
 static const ShEvtArgDoc SH_ED_A_724[] = { {"anim","The animation context firing the event; used only for the debug-log name."}, {"flag","Boolean toggle written into the weapon's requires-reload state bit: true marks the weapon as needing a reload, false clears it."} };
-static const ShEvtArgDoc SH_ED_A_725[] = { {"anim","The animation context firing the event; used only for the debug-log name."}, {"shader","Declared sound-shader parameter; not referenced by the handler's actual switch logic."} };
+static const ShEvtArgDoc SH_ED_A_725[] = { {"anim","The animation context firing the event; used only for the debug-log name."}, {"shader",""} };
 static const ShEvtArgDoc SH_ED_A_726[] = { {"anim","The animation context firing the event; used only for the debug-log name."} };
 static const ShEvtArgDoc SH_ED_A_727[] = { {"anim","The animation firing the event; used only for the debug trace line."} };
 static const ShEvtArgDoc SH_ED_A_728[] = { {"anim","The animation firing the event; used only for the debug trace line."} };
@@ -750,11 +750,11 @@ static const ShEvtArgDoc SH_ED_A_745[] = { {"eventId","Unique id identifying thi
 static const ShEvtArgDoc SH_ED_A_746[] = { {"eventId","Completion-event identifier for routing the callback."}, {"stateIndex","Index of the hide state that ended."}, {"subWebIndex","Index of the sub-web within that web."}, {"webHandle","Handle of the animation web that raised the event."} };
 static const ShEvtArgDoc SH_ED_A_747[] = { {"eventId","identifier of the fired anim-web event"}, {"stateIndex","index of the state that ended"}, {"subWebIndex","index of the sub-web within the anim web"}, {"webHandle","handle of the anim web (animation graph)"} };
 static const ShEvtArgDoc SH_ED_A_748[] = { {"eventId","Event id used together with the handle to resolve the animation event."}, {"stateIndex","The animation state/event index that selects which frame's hand-offset data to use."}, {"subWebIndex","Sub-web index; not clearly used beyond the animation lookup."}, {"webHandle","The animation-web handle identifying the source ledge-grab animation."} };
-static const ShEvtArgDoc SH_ED_A_749[] = { {"eventId","Event id (not used by this handler)."}, {"stateIndex","State index (not used by this handler)."}, {"subWebIndex","Sub-web index (not used by this handler)."}, {"webHandle","Animation-web identifier (not used by this handler)."} };
+static const ShEvtArgDoc SH_ED_A_749[] = { {"eventId","Event id."}, {"stateIndex","State index."}, {"subWebIndex","Sub-web index."}, {"webHandle","Animation-web identifier."} };
 static const ShEvtArgDoc SH_ED_A_750[] = { {"eventId","Identifier of the specific web event."}, {"stateIndex","Index of the state that ended."}, {"subWebIndex","Index of the sub-web within the animation web."}, {"webHandle","Handle of the animation web that produced the event."} };
 static const ShEvtArgDoc SH_ED_A_751[] = { {"eventId","Identifier of the specific web event."}, {"stateIndex","Index of the state involved in the transition."}, {"subWebIndex","Index of the sub-web within the animation web."}, {"webHandle","Handle of the animation web that produced the event."} };
 static const ShEvtArgDoc SH_ED_A_752[] = { {"eventParm","Generic integer parameter for the event."}, {"stateIndex","Index of the anim-web reload state that finished."}, {"subWebIndex","Index of the sub-web within that web."}, {"webHandle","Handle identifying the target animation web."} };
-static const ShEvtArgDoc SH_ED_A_753[] = { {"eventId","Event id (not used by this handler)."}, {"stateIndex","State index (not used by this handler)."}, {"subWebIndex","Sub-web index (not used by this handler)."}, {"webHandle","Animation-web identifier (not used by this handler)."} };
+static const ShEvtArgDoc SH_ED_A_753[] = { {"eventId","Event id."}, {"stateIndex","State index."}, {"subWebIndex","Sub-web index."}, {"webHandle","Animation-web identifier."} };
 static const ShEvtArgDoc SH_ED_A_754[] = { {"eventParm","The blend-variable value being set."}, {"stateIndex","Index of the state being targeted."}, {"subWebIndex","Index of the sub-web within that web."}, {"webHandle","Handle of the animation web (state machine) to address."} };
 static const ShEvtArgDoc SH_ED_A_755[] = { {"eventId","Identifier of the specific web event."}, {"stateIndex","Index of the shoot state that ended."}, {"subWebIndex","Index of the sub-web within the animation web."}, {"webHandle","Handle of the animation web that produced the event."} };
 static const ShEvtArgDoc SH_ED_A_756[] = { {"eventId","Identifier of the specific web event."}, {"stateIndex","Index of the state involved in the transition."}, {"subWebIndex","Index of the sub-web within the animation web."}, {"webHandle","Handle of the animation web that produced the event."} };
@@ -895,10 +895,10 @@ static const ShEvtArgDoc SH_ED_A_1012[] = { {"eventClass","Integer identifying t
 static const ShEvtArgDoc SH_ED_A_1013[] = { {"index","Index of the deferred damage-parameter record to apply."} };
 static const ShEvtArgDoc SH_ED_A_1014[] = { {"index","Index/slot of the queued message to process."}, {"type","Integer message-type identifier of the queued reliable message."} };
 static const ShEvtArgDoc SH_ED_A_1016[] = { {"eventId","Identifier of the specific anim-web event firing."}, {"stateIndex","Index of the alt state that was entered."}, {"subWebIndex","Index of the sub-web within the animation web."}, {"webHandle","Handle identifying the animation web instance."} };
-static const ShEvtArgDoc SH_ED_A_1017[] = { {"eventId","Event id (not used by this handler)."}, {"stateIndex","State index (not used by this handler)."}, {"subWebIndex","Sub-web index (not used by this handler)."}, {"webHandle","Animation-web identifier (not used by this handler)."} };
-static const ShEvtArgDoc SH_ED_A_1018[] = { {"eventId","Event id (not used by this handler)."}, {"stateIndex","State index (not used by this handler)."}, {"subWebIndex","Sub-web index (not used by this handler)."}, {"webHandle","Animation-web identifier (not used by this handler)."} };
+static const ShEvtArgDoc SH_ED_A_1017[] = { {"eventId","Event id."}, {"stateIndex","State index."}, {"subWebIndex","Sub-web index."}, {"webHandle","Animation-web identifier."} };
+static const ShEvtArgDoc SH_ED_A_1018[] = { {"eventId","Event id."}, {"stateIndex","State index."}, {"subWebIndex","Sub-web index."}, {"webHandle","Animation-web identifier."} };
 static const ShEvtArgDoc SH_ED_A_1019[] = { {"eventId","Identifier of the triggering anim event."}, {"stateIndex","Index of the state that ended."}, {"subWebIndex","Index of the sub-web within the web."}, {"webHandle","Handle of the animation web."} };
-static const ShEvtArgDoc SH_ED_A_1020[] = { {"eventId","Event id (not used by this handler)."}, {"stateIndex","State index (not used by this handler)."}, {"subWebIndex","Sub-web index (not used by this handler)."}, {"webHandle","Animation-web identifier (not used by this handler)."} };
+static const ShEvtArgDoc SH_ED_A_1020[] = { {"eventId","Event id."}, {"stateIndex","State index."}, {"subWebIndex","Sub-web index."}, {"webHandle","Animation-web identifier."} };
 static const ShEvtArgDoc SH_ED_A_1023[] = { {"slotName","Name of the equip slot whose equipped item's attachment is hidden."} };
 static const ShEvtArgDoc SH_ED_A_1027[] = { {"modelIndex","Index of the sub-model to hide."} };
 static const ShEvtArgDoc SH_ED_A_1028[] = { {"immediateStopFx","If true, cut those effects off instantly instead of letting them fade out or finish."}, {"stopFx","If true, also stop any effects/particles attached to the entity when it is hidden."} };
@@ -942,7 +942,7 @@ static const ShEvtArgDoc SH_ED_A_1090[] = { {"acceltime","Acceleration ramp-up t
 static const ShEvtArgDoc SH_ED_A_1092[] = { {"checkpoint","Checkpoint identifier within the next map to start at."}, {"getInitialLayersIfFirstLoad","If true, applies the map's initial active-layer set when this is its first load."}, {"mapName","Name of the map to load next."} };
 static const ShEvtArgDoc SH_ED_A_1093[] = { {"enable","true makes the player undying (death suppressed); false restores normal death."} };
 static const ShEvtArgDoc SH_ED_A_1094[] = { {"permanent","If true, the notice-on-approach behavior persists rather than being temporary."} };
-static const ShEvtArgDoc SH_ED_A_1096[] = { {"(float)","The damage amount included in the event."}, {"(idEventReceiver*)","Handler context."}, {"(int)","The damaged (victim) entity, validated before the event is reported."} };
+static const ShEvtArgDoc SH_ED_A_1096[] = { {"(float)","The damage amount included in the event."}, {"(idEventReceiver*)",""}, {"(int)","The damaged (victim) entity, validated before the event is reported."} };
 static const ShEvtArgDoc SH_ED_A_1098[] = { {"(idEventReceiver*)","The receiver being notified of the AI state change."}, {"(int)","The other FSM state identifier (e.g. new state)."} };
 static const ShEvtArgDoc SH_ED_A_1099[] = { {"(entityIndex)","Integer index/handle of the entity that was perceived."}, {"(receiver)","The event receiver (AI) gaining awareness."} };
 static const ShEvtArgDoc SH_ED_A_1100[] = { {"idDamageParms*","Details of the kill; its kill-flags and victim type select which music/announcer cue plays."}, {"idPlayerMetrics*","The metrics/game-state object whose current game mode can cause this to be skipped."}, {"int","A flag/count passed with the kill."} };
@@ -953,7 +953,7 @@ static const ShEvtArgDoc SH_ED_A_1106[] = { {"(entity)","The entity initiating/b
 static const ShEvtArgDoc SH_ED_A_1107[] = { {"idPlayerMetrics*","Metrics object for the awarded player."}, {"int","Index/ID of the player receiving the medal."} };
 static const ShEvtArgDoc SH_ED_A_1108[] = { {"idPlayerMetrics*","Metrics object for the awarded player."}, {"int","Index/ID of the player receiving the medal."} };
 static const ShEvtArgDoc SH_ED_A_1109[] = { {"idEventReceiver*","The game/session context whose per-player tracking structure is reset for the new game."} };
-static const ShEvtArgDoc SH_ED_A_1113[] = { {"(idEventReceiver*)","The handler context; unused by this stub."}, {"(int)","Unused by this stub (likely a flag or team id by name)."} };
+static const ShEvtArgDoc SH_ED_A_1113[] = { {"(idEventReceiver*)",""}, {"(int)","Unused by this stub (likely a flag or team id by name)."} };
 static const ShEvtArgDoc SH_ED_A_1114[] = { {"bool","Whether the entity is now shown (true) or hidden (false)."}, {"entity","The entity whose visibility changed."}, {"int","A target/channel identifier for the hide-show change."} };
 static const ShEvtArgDoc SH_ED_A_1115[] = { {"entity","The entity that caused/instigated the change."}, {"int","The new variable value (or value identifier)."}, {"snapVarType_t","The type/category of the SnapMap variable that changed."} };
 static const ShEvtArgDoc SH_ED_A_1116[] = { {"idPlayerMetrics*","Metrics object for the awarded player."}, {"int","Index/ID of the player receiving the medal."} };
@@ -964,17 +964,17 @@ static const ShEvtArgDoc SH_ED_A_1121[] = { {"(entity)","The instigator/activato
 static const ShEvtArgDoc SH_ED_A_1122[] = { {"bool","A third damage-context flag."}, {"float","A scalar damage value or fraction applied."}, {"idDecl*","The damage declaration describing the damage type applied."}, {"idEventReceiver*","The listener the notice is dispatched to."}, {"int","A second identifier/index (e.g. damage amount or secondary handle)."} };
 static const ShEvtArgDoc SH_ED_A_1123[] = { {"bool","Flag qualifying the hit (e.g. whether it was a killing/critical or lethal hit)."}, {"float","Amount of damage applied."}, {"idPlayerMetrics*","Pointer to the metrics object for the player who dealt the damage (the scoring context)."}, {"int","Second integer, likely the damaged AI's index/ID or a damage-type code."} };
 static const ShEvtArgDoc SH_ED_A_1125[] = { {"idPlayerMetrics*","Metrics object for the player who made the kill."}, {"int","Index/ID of the killed AI, or a context/count code."} };
-static const ShEvtArgDoc SH_ED_A_1126[] = { {"idEventReceiver*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
+static const ShEvtArgDoc SH_ED_A_1126[] = { {"idEventReceiver*",""}, {"int",""} };
 static const ShEvtArgDoc SH_ED_A_1127[] = { {"idDamageParms*","Details of the demon kill, forwarded to the recording routine."}, {"idPlayerMetrics*","The metrics object whose killer identity is updated and that records the demon kill."}, {"int","A flag/count passed along with the record."} };
 static const ShEvtArgDoc SH_ED_A_1129[] = { {"idDamageParms*","Pointer to the full damage parameters describing the hit."}, {"idPlayerMetrics*","Metrics object for the demon-player who took the damage."}, {"int","Damage amount or remaining-health value."} };
-static const ShEvtArgDoc SH_ED_A_1130[] = { {"(idEventReceiver*)","The handler context this notification runs on."}, {"(int)","The player index of the demon player whose ghost spawned."} };
-static const ShEvtArgDoc SH_ED_A_1131[] = { {"(idEventReceiver*)","The handler context this notification runs on."}, {"(int)","The player index of the demon player whose time ran out."} };
+static const ShEvtArgDoc SH_ED_A_1130[] = { {"(idEventReceiver*)",""}, {"(int)","The player index of the demon player whose ghost spawned."} };
+static const ShEvtArgDoc SH_ED_A_1131[] = { {"(idEventReceiver*)",""}, {"(int)","The player index of the demon player whose time ran out."} };
 static const ShEvtArgDoc SH_ED_A_1133[] = { {"idDamageParms*","Details of the hit that caused the demon's suicide."}, {"idPlayerMetrics*","The player-metrics object that records the demon suicide."}, {"int","A flag/count passed along with the record."} };
 static const ShEvtArgDoc SH_ED_A_1134[] = { {"idEventReceiver*","The receiver/listener object the notice is dispatched to."}, {"idPlayer*","The player who used the demonic chain."} };
 static const ShEvtArgDoc SH_ED_A_1135[] = { {"idPlayerMetrics*","Metrics object for the awarded player."}, {"int","Index/ID of the player receiving the medal."} };
 static const ShEvtArgDoc SH_ED_A_1136[] = { {"idEventReceiver*","Event-receiver handling the notification."}, {"string","Name/identifier of the checkpoint to set."} };
-static const ShEvtArgDoc SH_ED_A_1137[] = { {"idPlayerMetrics*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
-static const ShEvtArgDoc SH_ED_A_1138[] = { {"idPlayerMetrics*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
+static const ShEvtArgDoc SH_ED_A_1137[] = { {"idPlayerMetrics*",""}, {"int",""} };
+static const ShEvtArgDoc SH_ED_A_1138[] = { {"idPlayerMetrics*",""}, {"int",""} };
 static const ShEvtArgDoc SH_ED_A_1139[] = { {"(entity)","The other participant entity (the killer/attacker)."}, {"(idEventReceiver*)","The receiver being notified of the kill."} };
 static const ShEvtArgDoc SH_ED_A_1140[] = { {"bool","A hack-state on/off flag passed into the hack-response logic."}, {"idEventReceiver*","The hacking source entity that sent the notification."} };
 static const ShEvtArgDoc SH_ED_A_1141[] = { {"idEventReceiver*","The watched/upstream entity whose state change triggered this notification."} };
@@ -992,26 +992,26 @@ static const ShEvtArgDoc SH_ED_A_1161[] = { {"(entity)","The echo entity affecte
 static const ShEvtArgDoc SH_ED_A_1162[] = { {"(entity)","The echo entity affected."}, {"(float)","Fade/transition time for the opacity change."}, {"(int)","An echo index/handle identifying the instance."} };
 static const ShEvtArgDoc SH_ED_A_1168[] = { {"float","A secondary progress value (e.g. previous percentage or remaining)."}, {"idEventReceiver*","The listener the notice is dispatched to."} };
 static const ShEvtArgDoc SH_ED_A_1172[] = { {"idEventReceiver*","The game/session context whose per-player tracking structure is reset at game end."} };
-static const ShEvtArgDoc SH_ED_A_1174[] = { {"bool","A success/completion flag stored as a field on the scoreboard report."}, {"idEventReceiver*","The challenge event context; the handler mainly reads global session state rather than this directly."} };
-static const ShEvtArgDoc SH_ED_A_1177[] = { {"idEventReceiver*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
+static const ShEvtArgDoc SH_ED_A_1174[] = { {"bool","A success/completion flag stored as a field on the scoreboard report."}, {"idEventReceiver*",""} };
+static const ShEvtArgDoc SH_ED_A_1177[] = { {"idEventReceiver*",""}, {"int",""} };
 static const ShEvtArgDoc SH_ED_A_1178[] = { {"idEventReceiver*","The listener the notice is dispatched to."}, {"int","The index/handle of the frozen player that hit the kill trigger."} };
 static const ShEvtArgDoc SH_ED_A_1179[] = { {"idEventReceiver*","The listener the notice is dispatched to."}, {"int","The index/handle of the frozen player whose prop was destroyed."} };
 static const ShEvtArgDoc SH_ED_A_1180[] = { {"(idEventReceiver*)","The receiver object being notified that the game is over; the entity that handles the event."} };
 static const ShEvtArgDoc SH_ED_A_1181[] = { {"idPlayerMetrics*","The metrics/game-state object whose current game mode gates whether the music cue plays."}, {"int","The victim's entity index, used to resolve which entity was glory-killed."} };
 static const ShEvtArgDoc SH_ED_A_1182[] = { {"idEventReceiver*","Event-receiver handling the notification."}, {"int","Index/ID of the player who scored the headshot kill."} };
-static const ShEvtArgDoc SH_ED_A_1183[] = { {"idPlayerMetrics*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
+static const ShEvtArgDoc SH_ED_A_1183[] = { {"idPlayerMetrics*",""}, {"int",""} };
 static const ShEvtArgDoc SH_ED_A_1184[] = { {"idPlayerMetrics*","Metrics object for the incapacitated player."}, {"int","Index/ID of the player who was incapacitated."} };
-static const ShEvtArgDoc SH_ED_A_1185[] = { {"idPlayerMetrics*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
-static const ShEvtArgDoc SH_ED_A_1188[] = { {"idPlayerMetrics*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
+static const ShEvtArgDoc SH_ED_A_1185[] = { {"idPlayerMetrics*",""}, {"int",""} };
+static const ShEvtArgDoc SH_ED_A_1188[] = { {"idPlayerMetrics*",""}, {"int",""} };
 static const ShEvtArgDoc SH_ED_A_1189[] = { {"idEventReceiver*","The listener the notice is dispatched to."} };
-static const ShEvtArgDoc SH_ED_A_1191[] = { {"(idEventReceiver*)","Handler context; ignored."}, {"(int)","Ignored by the stub."} };
+static const ShEvtArgDoc SH_ED_A_1191[] = { {"(idEventReceiver*)",""}, {"(int)","Ignored by the stub."} };
 static const ShEvtArgDoc SH_ED_A_1192[] = { {"attribute","The modifier attribute to apply; -1 deactivates the modifier, otherwise selects which attribute entry is applied."}, {"modifier","The actor-modifier subsystem on the entity being turned on or off."} };
 static const ShEvtArgDoc SH_ED_A_1193[] = { {"entity","The entity associated with the lockdown ending."}, {"idEventReceiver*","The listener the notice is dispatched to."}, {"int","The module index/identifier whose lockdown finished."} };
 static const ShEvtArgDoc SH_ED_A_1194[] = { {"entity","The entity that initiated/triggered the lockdown."}, {"idEventReceiver*","The listener the notice is dispatched to."}, {"int","The module index/identifier being locked down."} };
-static const ShEvtArgDoc SH_ED_A_1196[] = { {"idEventReceiver*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
-static const ShEvtArgDoc SH_ED_A_1197[] = { {"(entity)","The entity that dropped the item (or the drop target), included in the notification and the follow-up action."}, {"(idEventReceiver*)","Handler context."} };
+static const ShEvtArgDoc SH_ED_A_1196[] = { {"idEventReceiver*",""}, {"int",""} };
+static const ShEvtArgDoc SH_ED_A_1197[] = { {"(entity)","The entity that dropped the item (or the drop target), included in the notification and the follow-up action."}, {"(idEventReceiver*)",""} };
 static const ShEvtArgDoc SH_ED_A_1198[] = { {"entity (droppable)","The droppable item entity that was picked up."}, {"entity (picker)","The entity that picked it up."}, {"idEventReceiver*","The listener the notice is dispatched to."} };
-static const ShEvtArgDoc SH_ED_A_1199[] = { {"(entity)","The entity that took hazard damage."}, {"(idEventReceiver*)","Handler context."} };
+static const ShEvtArgDoc SH_ED_A_1199[] = { {"(entity)","The entity that took hazard damage."}, {"(idEventReceiver*)",""} };
 static const ShEvtArgDoc SH_ED_A_1200[] = { {"entity","The entity killed by the hazard."}, {"idEventReceiver*","The listener the notice is dispatched to."} };
 static const ShEvtArgDoc SH_ED_A_1201[] = { {"idEventReceiver*","The listener the notice is dispatched to."}, {"int","The index/handle of the player who left the safe zone."} };
 static const ShEvtArgDoc SH_ED_A_1202[] = { {"idEventReceiver*","The listener the notice is dispatched to."} };
@@ -1020,21 +1020,21 @@ static const ShEvtArgDoc SH_ED_A_1204[] = { {"entity","The entity that used the 
 static const ShEvtArgDoc SH_ED_A_1205[] = { {"idEventReceiver*","Event-receiver handling the notification."}, {"string","Name/identifier of the audiolog to play."} };
 static const ShEvtArgDoc SH_ED_A_1206[] = { {"(entity)","The entity holding the player's music state."}, {"(int)","Player id; the music only plays when it matches this entity's player."}, {"(snapMusicType_t)","The music type/track to play."} };
 static const ShEvtArgDoc SH_ED_A_1207[] = { {"entity","The speaker entity to play."}, {"int","A further playback parameter (e.g. loop/volume setting)."} };
-static const ShEvtArgDoc SH_ED_A_1208[] = { {"idDamageParms*","Damage details; ignored by the handler."}, {"idPlayerMetrics*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
+static const ShEvtArgDoc SH_ED_A_1208[] = { {"idDamageParms*",""}, {"idPlayerMetrics*",""}, {"int",""} };
 static const ShEvtArgDoc SH_ED_A_1209[] = { {"damage","The damage parameters of the killing blow, used to record the kill."}, {"flag","An additional flag/index passed into death processing."}, {"session","The game/session object holding the player tables and scoreboard state that gets updated."} };
 static const ShEvtArgDoc SH_ED_A_1211[] = { {"idEventReceiver*","The notifying player source; not passed onward."}, {"int","The health amount forwarded to the response logic."} };
-static const ShEvtArgDoc SH_ED_A_1212[] = { {"float","The heal amount; not used by the handler."}, {"idEventReceiver*","The notice target; unused beyond the log line."} };
-static const ShEvtArgDoc SH_ED_A_1213[] = { {"idEventReceiver*","The game/session context whose per-player slot for the downed player is released and cleared."}, {"int","A second value that this handler ignores."} };
+static const ShEvtArgDoc SH_ED_A_1212[] = { {"float",""}, {"idEventReceiver*","The notice target; unused beyond the log line."} };
+static const ShEvtArgDoc SH_ED_A_1213[] = { {"idEventReceiver*","The game/session context whose per-player slot for the downed player is released and cleared."}, {"int",""} };
 static const ShEvtArgDoc SH_ED_A_1214[] = { {"entity","The player entity whose combat intensity changed."}, {"idEventReceiver*","The listener the notice is dispatched to."}, {"intensityType_t (new)","The new combat-intensity level."}, {"intensityType_t (old)","The previous combat-intensity level."} };
 static const ShEvtArgDoc SH_ED_A_1215[] = { {"idEventReceiver*","The game/session context holding the per-player tracking slots."}, {"int","The joining player index; selects which slot is marked active."} };
-static const ShEvtArgDoc SH_ED_A_1216[] = { {"float","Declared but not used by this handler."}, {"idDamageParms*","Declared but not used by this handler."}, {"idPlayerMetrics*","The metrics object that supplies the kill counter/limit and fires the kill notifications; the only input the handler actually uses."}, {"int","Declared but not used by this handler."} };
+static const ShEvtArgDoc SH_ED_A_1216[] = { {"float",""}, {"idDamageParms*",""}, {"idPlayerMetrics*",""}, {"int",""} };
 static const ShEvtArgDoc SH_ED_A_1218[] = { {"idEventReceiver*","The game/session context whose per-player slot for the leaving player is released and cleared."}, {"int","The leaving player index; selects which slot is released and zeroed."} };
 static const ShEvtArgDoc SH_ED_A_1219[] = { {"idEventReceiver*","The listener the notice is dispatched to."}, {"int","The module index/identifier entered."} };
 static const ShEvtArgDoc SH_ED_A_1220[] = { {"idEventReceiver*","The listener the notice is dispatched to."}, {"int","The module index/identifier exited."} };
-static const ShEvtArgDoc SH_ED_A_1221[] = { {"idPlayerMetrics*","The metrics object that handles the point capture."}, {"int","A capture-related value passed to the capture handler."} };
+static const ShEvtArgDoc SH_ED_A_1221[] = { {"idPlayerMetrics*","The metrics object that handles the point capture."}, {"int",""} };
 static const ShEvtArgDoc SH_ED_A_1222[] = { {"(idPlayerMetrics*)","The player metrics object receiving the assist credit."}, {"(int)","Scoring value forwarded to the metrics system."} };
-static const ShEvtArgDoc SH_ED_A_1223[] = { {"idEventReceiver*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
-static const ShEvtArgDoc SH_ED_A_1224[] = { {"idEventReceiver*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
+static const ShEvtArgDoc SH_ED_A_1223[] = { {"idEventReceiver*",""}, {"int",""} };
+static const ShEvtArgDoc SH_ED_A_1224[] = { {"idEventReceiver*",""}, {"int",""} };
 static const ShEvtArgDoc SH_ED_A_1225[] = { {"entity","The respawned player entity; its player index selects which slot to mark active."}, {"idEventReceiver*","The game/session context whose per-player slot is marked active."} };
 static const ShEvtArgDoc SH_ED_A_1226[] = { {"idEventReceiver*","The game/session context that tracks each player's slot; the revived player's slot is flagged active here."}, {"int","The reviving player; recorded alongside the revived player in the telemetry event when present."} };
 static const ShEvtArgDoc SH_ED_A_1227[] = { {"(idDamageParms*)","Damage parameters describing how the kill was dealt."}, {"(idEventReceiver*)","The receiver being notified of the kill."}, {"(int)","A further kill-related code/flag."} };
@@ -1042,18 +1042,18 @@ static const ShEvtArgDoc SH_ED_A_1228[] = { {"entity","The capture-point entity 
 static const ShEvtArgDoc SH_ED_A_1229[] = { {"entity","The entity the point warning concerns."}, {"idMetrics*","The metrics object dispatching the warning."} };
 static const ShEvtArgDoc SH_ED_A_1231[] = { {"(entity)","The prop entity that has become available."}, {"(idEventReceiver*)","The receiver being notified."} };
 static const ShEvtArgDoc SH_ED_A_1233[] = { {"(entity)","The prop's new owner entity (or the prop whose ownership changed)."}, {"(idEventReceiver*)","The receiver being notified; no author value."} };
-static const ShEvtArgDoc SH_ED_A_1234[] = { {"entity","The entity (player) doing the pickup; not used by the handler."}, {"idEventReceiver*","The notice target; unused beyond the log line."} };
+static const ShEvtArgDoc SH_ED_A_1234[] = { {"entity",""}, {"idEventReceiver*","The notice target; unused beyond the log line."} };
 static const ShEvtArgDoc SH_ED_A_1236[] = { {"idPlayerMetrics*","Metrics object for the awarded player."}, {"int","Index/ID of the player receiving the medal."} };
-static const ShEvtArgDoc SH_ED_A_1237[] = { {"idPlayerMetrics*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
-static const ShEvtArgDoc SH_ED_A_1238[] = { {"idPlayerMetrics*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
-static const ShEvtArgDoc SH_ED_A_1239[] = { {"(idEventReceiver*)","The handler context; unused by this stub."}, {"(int)","Unused by this stub."} };
-static const ShEvtArgDoc SH_ED_A_1240[] = { {"idPlayerMetrics*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
+static const ShEvtArgDoc SH_ED_A_1237[] = { {"idPlayerMetrics*",""}, {"int",""} };
+static const ShEvtArgDoc SH_ED_A_1238[] = { {"idPlayerMetrics*",""}, {"int",""} };
+static const ShEvtArgDoc SH_ED_A_1239[] = { {"(idEventReceiver*)",""}, {"(int)","Unused by this stub."} };
+static const ShEvtArgDoc SH_ED_A_1240[] = { {"idPlayerMetrics*",""}, {"int",""} };
 static const ShEvtArgDoc SH_ED_A_1241[] = { {"idPlayerMetrics*","Metrics object associated with the revive (typically the reviver's scoring context)."}, {"int","Index/ID of the player being revived."} };
 static const ShEvtArgDoc SH_ED_A_1242[] = { {"gameTeam_t","The team that discovered the secret."}, {"idEventReceiver*","Event-receiver handling the notification."}, {"int","Index/ID of the secret that was found."} };
 static const ShEvtArgDoc SH_ED_A_1246[] = { {"entity (instigator)","The entity that caused/triggered the destruction."}, {"entity (prop)","The explodeable prop entity that was destroyed."} };
 static const ShEvtArgDoc SH_ED_A_1247[] = { {"idEventReceiver*","The listener the notice is dispatched to."}, {"int","The new score value."} };
 static const ShEvtArgDoc SH_ED_A_1250[] = { {"(idEventReceiver*)","The receiver being notified; no author value."} };
-static const ShEvtArgDoc SH_ED_A_1252[] = { {"(idEventReceiver*)","The handler context; unused by this stub."}, {"(int)","Unused by this stub."} };
+static const ShEvtArgDoc SH_ED_A_1252[] = { {"(idEventReceiver*)",""}, {"(int)","Unused by this stub."} };
 static const ShEvtArgDoc SH_ED_A_1253[] = { {"idPlayerMetrics*","Metrics object for the player who made the kill."}, {"int","Index/ID of the killed AI, or a kill-count/type code."} };
 static const ShEvtArgDoc SH_ED_A_1254[] = { {"entity","The entity/source whose music to stop."}, {"int","The music channel/identifier to stop."} };
 static const ShEvtArgDoc SH_ED_A_1255[] = { {"entity","The speaker entity to stop."}, {"int","The channel/sound identifier to stop."} };
@@ -1062,12 +1062,12 @@ static const ShEvtArgDoc SH_ED_A_1259[] = { {"gameTeam_t","The team whose combat
 static const ShEvtArgDoc SH_ED_A_1260[] = { {"idDamageParms*","Details of the team-kill hit; when present, drives the recorded penalty entry."}, {"idPlayerMetrics*","The player-metrics object that takes the team-kill penalty and records the event."}, {"int","A flag/count that forms part of the kill data."} };
 static const ShEvtArgDoc SH_ED_A_1261[] = { {"entity","The entity associated with the score change (e.g. scorer or score source)."}, {"gameTeam_t","The team whose score changed."}, {"idEventReceiver*","The listener the notice is dispatched to."}, {"int","The new/changed score value."} };
 static const ShEvtArgDoc SH_ED_A_1262[] = { {"idEventReceiver*","Event-receiver handling the notification."}, {"int","Index/ID of the teammate who was thawed."} };
-static const ShEvtArgDoc SH_ED_A_1263[] = { {"idPlayerMetrics*","Declared but ignored; the handler does nothing."}, {"int","Declared but ignored; the handler does nothing."} };
+static const ShEvtArgDoc SH_ED_A_1263[] = { {"idPlayerMetrics*",""}, {"int",""} };
 static const ShEvtArgDoc SH_ED_A_1264[] = { {"(idEventReceiver*)","The receiver object being notified of the input update."}, {"(int)","Third unnamed integer input/state value."} };
 static const ShEvtArgDoc SH_ED_A_1265[] = { {"entity","The speaker entity to update."}, {"int","A further playback parameter to update."} };
 static const ShEvtArgDoc SH_ED_A_1266[] = { {"(entity)","The entity that caused/triggered the change."}, {"(int)","The new (int-encoded) value of the variable."}, {"(snapVarType_t)","The type of the SnapMap variable that changed."} };
 static const ShEvtArgDoc SH_ED_A_1267[] = { {"idDeclMetric*","The metric key identifying which record's XP counter to increase."}, {"idPlayerMetrics*","The metrics context used to look up which record to credit."}, {"int","Extra payload; not used in the XP accumulation."} };
-static const ShEvtArgDoc SH_ED_A_1268[] = { {"collider","The colliding entity; unused by the base no-op handler."} };
+static const ShEvtArgDoc SH_ED_A_1268[] = { {"collider",""} };
 static const ShEvtArgDoc SH_ED_A_1271[] = { {"subStr","Text to look for; any in-volume entity whose name contains this substring is counted."} };
 static const ShEvtArgDoc SH_ED_A_1272[] = { {"declName","Name of the inventory item to count."} };
 static const ShEvtArgDoc SH_ED_A_1278[] = { {"activator","The entity on which the 'message finished' notification fires."} };
@@ -1261,7 +1261,7 @@ static const ShEvtArgDoc SH_ED_A_1531[] = { {"duration","How long the slow-motio
 static const ShEvtArgDoc SH_ED_A_1532[] = { {"channel","The sound channel to play it on."}, {"shader","The sound-shader sound to play; must be a valid sound shader or the play is rejected."} };
 static const ShEvtArgDoc SH_ED_A_1533[] = { {"splineEntity","The spline path entity to attach to and start following; if empty, nothing happens."} };
 static const ShEvtArgDoc SH_ED_A_1534[] = { {"clipModelId","Identifier of the contact's collision shape; unused by this trigger."}, {"other","The entity that started touching the trigger; only counts if it passes the filters and is a player."} };
-static const ShEvtArgDoc SH_ED_A_1535[] = { {"playInCombat","Whether the voice-over may play during combat; not used by this handler."}, {"talkingTo","The entity the voice-over is directed at; not used by this handler."}, {"vo","The voice-over to play; if empty, an error is logged and it returns false."} };
+static const ShEvtArgDoc SH_ED_A_1535[] = { {"playInCombat",""}, {"talkingTo",""}, {"vo","The voice-over to play; if empty, an error is logged and it returns false."} };
 static const ShEvtArgDoc SH_ED_A_1536[] = { {"decl","The status-effect declaration to terminate on this entity."} };
 static const ShEvtArgDoc SH_ED_A_1537[] = { {"decl","The status-effect declaration to begin applying to this entity."} };
 static const ShEvtArgDoc SH_ED_A_1538[] = { {"immediateStop","True stops all effects immediately; false lets them finish/fade out gracefully."} };
@@ -1286,7 +1286,7 @@ static const ShEvtArgDoc SH_ED_A_1567[] = { {"keyName","The temp-memory key to r
 static const ShEvtArgDoc SH_ED_A_1569[] = { {"weaponEnt","The weapon entity context for the throw; used in the debug log of which entity fired the event."} };
 static const ShEvtArgDoc SH_ED_A_1570[] = { {"time","Move duration in seconds; clamped to an engine minimum. Switches the mover out of speed-based mode."} };
 static const ShEvtArgDoc SH_ED_A_1574[] = { {"clipModelId","Identifier of the touched collision surface."}, {"toucher","The entity that touched this one."} };
-static const ShEvtArgDoc SH_ED_A_1575[] = { {"bouncePadDestinationEntity","The destination the toucher is launched toward."}, {"bouncePadEntity","The bounce-pad entity; not used by the handler."} };
+static const ShEvtArgDoc SH_ED_A_1575[] = { {"bouncePadDestinationEntity","The destination the toucher is launched toward."}, {"bouncePadEntity",""} };
 static const ShEvtArgDoc SH_ED_A_1576[] = { {"teleporterDestinationEntity","The destination whose target node supplies the teleport position and orientation."}, {"teleporterEntity","The teleporter entity; not used in the active path."} };
 static const ShEvtArgDoc SH_ED_A_1577[] = { {"ent","The other entity to test for overlap against. Null returns false."} };
 static const ShEvtArgDoc SH_ED_A_1578[] = { {"entity","The entity to track."}, {"percent","Normalized 0-1 value controlling tracking strength/blend or progress along the track."} };
@@ -1327,16 +1327,16 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "action_ClearLookFocus", "Clears the AI's look (head/eye-tracking) focus, so it stops looking at any previously set focus target.", "high", "generated", 1, SH_ED_A_10 },
     { "action_ClearScriptFlag", "Clears one or more AI action script flags on the entity, turning off scripted-behavior bits previously set.", "medium", "generated", 2, SH_ED_A_11 },
     { "action_ClearWorldState", "Clears the AI's accumulated world-state/blackboard knowledge, resetting the planner facts it has gathered about its surroundings.", "medium", "generated", 1, SH_ED_A_12 },
-    { "action_Done", "SnapMap action-node handler representing the Done/completed outcome branch; fired on the entity to signal the action finished, routing logic down the done branch.", "low", "generated", 1, SH_ED_A_13 },
+    { "action_Done", "", "low", "generated", 1, SH_ED_A_13 },
     { "action_DropAttachment", "Detaches and drops a named attachment from the entity, releasing the prop from its slot.", "high", "handler", 2, SH_ED_A_14 },
-    { "action_Empty", "SnapMap action-node handler representing an Empty outcome branch (no result/empty condition); fired on the entity to route logic down the empty branch.", "low", "generated", 1, SH_ED_A_15 },
+    { "action_Empty", "", "low", "generated", 1, SH_ED_A_15 },
     { "action_EnableAutoFocus", "Toggles the AI's automatic targeting/focus acquisition, controlling whether it independently picks and faces targets; permanent controls persistence.", "medium", "generated", 3, SH_ED_A_16 },
     { "action_EnableBodyRotation", "Toggles whether the AI's body can rotate (turn in place to face its target/direction); disabling locks the body's facing.", "medium", "generated", 2, SH_ED_A_17 },
     { "action_EnableDamage", "Toggles whether the AI entity can take damage; the permanent flag controls whether the setting persists or is a temporary scripted override.", "high", "generated", 3, SH_ED_A_18 },
     { "action_EnableHeadTracking", "Toggles whether the AI's head turns to track its focus/target, controlling the look-at head movement independent of body orientation.", "high", "generated", 2, SH_ED_A_19 },
     { "action_EnablePain", "Turns the AI's pain reactions on or off, controlling whether it flinches/reacts when hurt.", "high", "handler", 2, SH_ED_A_20 },
     { "action_EnableWalkIK", "Turns the AI's foot/leg inverse-kinematics on or off, which controls whether its feet adapt to the ground surface while walking.", "high", "handler", 2, SH_ED_A_21 },
-    { "action_Error", "SnapMap action-node handler representing the Error outcome branch; fired on the entity to drive the action node's error path. Effect is to route logic down the error branch.", "low", "generated", 1, SH_ED_A_22 },
+    { "action_Error", "Effect is to route logic down the error branch.", "low", "generated", 1, SH_ED_A_22 },
     { "action_ForceAnimState", "Forces the AI's animation web directly to a destination state node, blending over a given duration, with a wait policy.", "high", "generated", 5, SH_ED_A_23 },
     { "action_ForceAwarenessByDistance", "Forces the AI to immediately notice any valid targets within a given radius, even if it would not normally see them.", "high", "handler", 4, SH_ED_A_24 },
     { "action_GiveItem", "Grants an inventory item to a target entity, adding the specified inventory decl to that entity's inventory as a scripted action.", "high", "generated", 3, SH_ED_A_25 },
@@ -1384,7 +1384,7 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "action_TakeItem", "Removes an inventory item from a target entity, taking the specified inventory decl out of that entity's inventory.", "high", "generated", 3, SH_ED_A_67 },
     { "action_Trigger", "Triggers (activates) a target entity, with the acting AI counted as the activator. If no target is given, nothing happens.", "high", "handler", 2, SH_ED_A_68 },
     { "action_UseZipline", "Commands an AI entity to use a zipline, traveling toward the given destination entity at the far end.", "high", "handler", 2, SH_ED_A_69 },
-    { "action_Void", "SnapMap action-node handler representing a Void/no-op outcome branch; fired on the entity with no substantive effect beyond routing the void branch.", "low", "generated", 1, SH_ED_A_70 },
+    { "action_Void", "", "low", "generated", 1, SH_ED_A_70 },
     { "action_Wait", "Makes an AI entity wait/idle for a set duration, halting its movement until the timer expires. A negative time waits indefinitely.", "high", "handler", 2, SH_ED_A_71 },
     { "action_WaitForAnim", "Blocks the AI's action sequence until the specified animation (a node in the anim web) completes/plays through.", "high", "generated", 2, SH_ED_A_72 },
     { "action_WaitForAnimForce", "Forces the specified animation to play and blocks the action sequence until it finishes.", "high", "generated", 2, SH_ED_A_73 },
@@ -1401,7 +1401,7 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "addClipMaskFlag", "Adds bits to this entity's clip mask so it collides against additional contents, without removing existing ones.", "high", "handler", 1, SH_ED_A_84 },
     { "addCodexEntry", "Unlocks/adds the specified codex (lore database) entry for the player, making it available in the codex menu.", "high", "generated", 1, SH_ED_A_85 },
     { "addContentsFlag", "Adds collision-contents bits to this entity without removing any existing ones.", "high", "handler", 1, SH_ED_A_86 },
-    { "addProxyAnimator", "Attaches a proxy animator to the entity. The exact behavior of the proxy-animator setup is opaque from the handler alone.", "medium", "handler", 0, 0 },
+    { "addProxyAnimator", "Attaches a proxy animator to the entity.", "medium", "handler", 0, 0 },
     { "addSoundStimulus", "Adds an audible-sound stimulus to the AI's hearing perception at a world position with a given loudness and source entity, potentially drawing the AI's attention to investigate.", "high", "generated", 3, SH_ED_A_88 },
     { "addSpline", "Adds a spline to this mover's list of splines to follow. The referenced entity must be a valid spline.", "high", "handler", 2, SH_ED_A_89 },
     { "addTarget", "Adds an entity to this entity's target list. Does nothing if that entity is already a target.", "high", "handler", 1, SH_ED_A_90 },
@@ -1413,10 +1413,10 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "ae_aFStart", "Activates the entity's articulated-figure (ragdoll) physics, switching it over to physics-driven motion.", "high", "handler", 1, SH_ED_A_96 },
     { "ae_aIEvent", "Broadcasts an AI event from the entity's position so nearby AI can sense and react to it.", "high", "handler", 2, SH_ED_A_97 },
     { "ae_aIFireWeapon", "An AI animation event that fires the weapon held in the named inventory slot at the AI's current target: it aims toward the target if within range, then triggers the weapon's fire action. Logs an error if the slot is empty or the item there is not a weapon.", "high", "handler", 2, SH_ED_A_98 },
-    { "ae_aIPullTrigger", "An AI animation event that pulls the trigger on the weapon in the named slot to begin firing, optionally validating the target first. (Only the empty-slot error path is visible in this decompile.)", "low", "handler", 3, SH_ED_A_99 },
-    { "ae_aIReleaseTrigger", "An AI animation event that releases the trigger on the weapon in the named slot (stops sustained/charged firing). (Only the invalid-slot error path is visible in this decompile.)", "low", "handler", 2, SH_ED_A_100 },
+    { "ae_aIPullTrigger", "An AI animation event that pulls the trigger on the weapon in the named slot to begin firing, optionally validating the target first.", "low", "handler", 3, SH_ED_A_99 },
+    { "ae_aIReleaseTrigger", "An AI animation event that releases the trigger on the weapon in the named slot (stops sustained/charged firing).", "low", "handler", 2, SH_ED_A_100 },
     { "ae_aIReleaseTriggerChance", "Animation-frame event that releases the AI weapon's trigger with a probability; the trigger is released only on a random roll passing the given chance.", "medium", "generated", 3, SH_ED_A_101 },
-    { "ae_aIReloadWeapon", "An AI animation event that reloads the weapon in the named inventory slot. (Only the empty-slot error path is visible in this decompile, which logs that it tried to reload from an empty slot.)", "low", "handler", 2, SH_ED_A_102 },
+    { "ae_aIReloadWeapon", "An AI animation event that reloads the weapon in the named inventory slot.", "low", "handler", 2, SH_ED_A_102 },
     { "ae_activateLootDropForEnemy", "Animation-frame event that flags the enemy carrying this animation to drop its loot/pickup reward. Typically fired on a death or finisher animation frame so the drop spawns at the right moment.", "medium", "generated", 1, SH_ED_A_103 },
     { "ae_activateReviveItem", "Animation-frame event that activates the attached revive item, triggering its revive effect at this frame of the animation.", "medium", "generated", 1, SH_ED_A_104 },
     { "ae_activateTarget", "Activates one of the entity's wired targets by index, or self-activates if the index is -1; an out-of-range index does nothing and logs an error.", "high", "handler", 2, SH_ED_A_105 },
@@ -1565,7 +1565,7 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "ae_damageHealth", "Animation-frame event that subtracts the given amount directly from the actor's health.", "medium", "generated", 2, SH_ED_A_248 },
     { "ae_damagePlayer", "Animation event that damages a specific player down to a target fraction of their maximum health, then applies a directional kick. Only deals damage if the player currently has more health than that target fraction.", "high", "handler", 4, SH_ED_A_249 },
     { "ae_declParticle", "Animation event that spawns a particle effect attached to a named joint on the entity, positioned and oriented at that joint.", "high", "handler", 3, SH_ED_A_250 },
-    { "ae_default", "Diagnostic animation event that does nothing but print a warning that an anim event was left at its default value, naming the decl and anim involved. Used as a placeholder/fallback handler.", "high", "handler", 1, SH_ED_A_251 },
+    { "ae_default", "Diagnostic animation event that does nothing but print a warning that an anim event was left at its default value, naming the decl and anim involved.", "high", "handler", 1, SH_ED_A_251 },
     { "ae_detachCamera", "Detaches the game camera that was previously attached to this entity, returning camera control to normal.", "high", "handler", 1, SH_ED_A_252 },
     { "ae_detachEntity", "Animation event that detaches a previously-attached child entity, found by name, from this entity.", "high", "handler", 2, SH_ED_A_253 },
     { "ae_detachItem", "Detaches a previously attached item from a named hand slot (right hand or left hand). It validates the slot name, checks an item is actually attached, and detaches it, logging an error for a null/invalid slot name or when nothing is attached.", "high", "handler", 2, SH_ED_A_254 },
@@ -1720,7 +1720,7 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "ae_itemStartFX", "Starts the effects on the item attached in a named slot, for a given effect condition. Logs an error if the slot is empty or its attachment can't be found.", "high", "handler", 3, SH_ED_A_403 },
     { "ae_itemStopFX", "Stops the visual/sound effects playing on the item attached to a given equip slot. The companion to ae_itemStartFX -- it cancels effects for the chosen FX condition instead of starting them.", "high", "handler", 3, SH_ED_A_404 },
     { "ae_jointKeyframe", "Animation-frame event that marks a keyframe for a specific joint at this point in the animation, applying the given joint-keyframe flags (e.g. how that joint's transform is captured or overridden) for that joint.", "medium", "generated", 3, SH_ED_A_405 },
-    { "ae_kill", "Kills the entity playing this animation, applying the given damage type as the cause of death. The handler resolves the killer/source, deals lethal damage, and (when applicable) triggers a brief post-death effect on the player.", "high", "handler", 2, SH_ED_A_406 },
+    { "ae_kill", "Kills the entity playing this animation, applying the given damage type as the cause of death.", "high", "handler", 2, SH_ED_A_406 },
     { "ae_land", "Animation-event that plays the landing impact (both feet) effect and sound, signalling the actor has landed after a jump or fall.", "high", "handler", 1, SH_ED_A_407 },
     { "ae_launchExistingItemFromLocation", "An AI animation event that launches an already-existing item, identified by an item key, from a named blackboard location. It looks up both the location and the item entry, verifies the item is a projectile, optionally resets gravity, then launches it; mismatched keys, a missing item, or a non-projectile each log an error and abort.", "medium", "handler", 4, SH_ED_A_408 },
     { "ae_launchItem", "An AI animation event that launches a held item/projectile from the named joint on the AI's body. (Only the error path is visible, which logs an invalid projectile-info for the anim.)", "low", "handler", 2, SH_ED_A_409 },
@@ -1778,7 +1778,7 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "ae_pause", "Pauses the entity's animation, recording the moment it was paused so playback can be held.", "high", "handler", 1, SH_ED_A_461 },
     { "ae_phaseMarker", "Animation-frame event that tags this frame as a named phase boundary within the animation, letting AI/gameplay logic key off a specific phase of the move (e.g. windup, hit, recovery).", "medium", "generated", 2, SH_ED_A_462 },
     { "ae_phaseShift", "Toggles the AI actor into or out of a 'phase shift' state at this frame (a teleport/dematerialize-style transition used by certain demons).", "low", "generated", 2, SH_ED_A_463 },
-    { "ae_pitchedSound", "Plays a sound with a pitch adjustment applied. The handler is partly opaque in the decompile but seeds the pitch value and dispatches the sound unless globally muted.", "medium", "handler", 3, SH_ED_A_464 },
+    { "ae_pitchedSound", "Plays a sound with a pitch adjustment applied.", "medium", "handler", 3, SH_ED_A_464 },
     { "ae_playAIVO", "Animation event that plays an AI voice-over line. If the entity has an AI speaker component it dispatches through that; otherwise it falls back to playing the per-category sound shader from the voice-over decl directly on the entity.", "high", "handler", 3, SH_ED_A_465 },
     { "ae_playVoice", "Animation-frame event that plays an AI voice message of the given category on the actor.", "medium", "generated", 2, SH_ED_A_466 },
     { "ae_playerControllerShake", "Triggers gamepad rumble on the local player's controller, driving both the strong (high-frequency) and weak (low-frequency) motors with their own intensities and durations.", "high", "handler", 5, SH_ED_A_467 },
@@ -1959,7 +1959,7 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "ae_startSlowMotion", "Triggers a slow-motion effect, scaling game time by the given factor with eased ramp-in and ramp-out over the specified durations.", "high", "handler", 4, SH_ED_A_642 },
     { "ae_startSphereModelTrace", "Starts a sphere-based collision trace anchored to the named joint group, applying the given damage decl to whatever it hits (a melee/attack hit volume that begins on this frame).", "medium", "generated", 4, SH_ED_A_643 },
     { "ae_startSphereModelTraceWithAutoStop", "Starts a sphere-based attack trace on the named joint group applying the given damage decl, which auto-stops itself (e.g. when the relevant animation segment ends).", "medium", "generated", 4, SH_ED_A_644 },
-    { "ae_startSphereModelTraceWithLifetime", "An animation event that starts a time-limited spherical damage hit-trace originating from a joint group, dealing the given damage decl to whatever it overlaps. (Only stub calls are visible in this decompile, so parameter handling is inferred from the event signature.)", "low", "handler", 5, SH_ED_A_645 },
+    { "ae_startSphereModelTraceWithLifetime", "An animation event that starts a time-limited spherical damage hit-trace originating from a joint group, dealing the given damage decl to whatever it overlaps.", "low", "handler", 5, SH_ED_A_645 },
     { "ae_startTeamFXAtOwnerPos", "Spawns the given FX effect at the owning player's position, played as a team/networked effect so other players see it.", "medium", "handler", 2, SH_ED_A_646 },
     { "ae_startThrowItem", "Begins the throw-item action: builds the throwable from the currently equipped item, positions it at the player's hands, and spawns/launches it into the world. Aborts with a warning if there is no throw item or if the throw was already interrupted.", "medium", "handler", 2, SH_ED_A_647 },
     { "ae_startWeaponFX", "Animation-frame event that starts weapon-bound effects (muzzle/charge FX) matching the given condition.", "medium", "generated", 2, SH_ED_A_648 },
@@ -2031,7 +2031,7 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "ae_waveBlast", "Animation-frame event that fires the actual wave-blast attack at this frame (the damaging follow-up to the wave-blast telegraph).", "medium", "generated", 1, SH_ED_A_714 },
     { "ae_waveBlastTelegraph", "Animation-frame event that spawns a telegraph (warning effect) for a wave-blast attack at this frame, of a named wave type, offset vertically and emitted from a model tag.", "medium", "generated", 4, SH_ED_A_715 },
     { "ae_waveShield", "Animation-frame event that activates a wave-shield defensive effect at this frame.", "low", "generated", 1, SH_ED_A_716 },
-    { "ae_weaponAdvanceCylinder", "Apart from the diagnostic log, this handler performs no action in this build; advancing the weapon cylinder is effectively a no-op here.", "medium", "handler", 1, SH_ED_A_717 },
+    { "ae_weaponAdvanceCylinder", "", "medium", "handler", 1, SH_ED_A_717 },
     { "ae_weaponAnimFireAmmo", "Drives the equipped weapon's fire-related ammo animation, decrementing/consuming the visible round on the weapon model for the active hand slot. Logs a warning if no weapon is equipped.", "high", "handler", 1, SH_ED_A_718 },
     { "ae_weaponAnimReloadAmmo", "Drives the equipped weapon's reload ammo animation, refilling the visible rounds on the weapon model for the active hand slot. Logs a warning if no weapon is equipped.", "high", "handler", 1, SH_ED_A_719 },
     { "ae_weaponAnimResetAmmo", "Resets the equipped weapon's visible ammo display back to its baseline state for the active hand slot. Logs a warning if no weapon is equipped.", "high", "handler", 1, SH_ED_A_720 },
@@ -2177,7 +2177,7 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "doMapTransition", "Triggers a campaign map transition, loading the next map (as a dev/transition map) using the entity's stored destination map names and returning the player to the previous spawn point.", "high", "handler", 1, SH_ED_A_860 },
     { "doTransition", "Performs a level transition: it finalizes each player's state, then issues a next-map command to load the configured next map.", "high", "handler", 0, 0 },
     { "doesPlayerHavePerk", "Returns whether the player owns/has been granted the named perk (regardless of whether it is currently active).", "high", "generated", 1, SH_ED_A_862 },
-    { "dropAttachment", "An animation event that detaches and drops whatever is attached in the named slot. An unrecognized slot name is logged as an error. (Same handler as ae_dropAttachment.)", "high", "handler", 1, SH_ED_A_863 },
+    { "dropAttachment", "An animation event that detaches and drops whatever is attached in the named slot. An unrecognized slot name is logged as an error.", "high", "handler", 1, SH_ED_A_863 },
     { "dropEntity", "Spawns a new entity near the firing entity; if a target user is given it is thrown toward that user with randomized spread, otherwise it is simply placed, and it can be set to auto-remove after a delay.", "high", "handler", 6, SH_ED_A_864 },
     { "dropLootEntity", "Spawns and drops a loot entity from an entity def into the world at a given origin, launching it with a power impulse and optionally auto-removing it and delaying pickup.", "high", "generated", 6, SH_ED_A_865 },
     { "dropProjectiles", "Causes the AI to drop its in-flight or staged projectiles into the world (e.g. releasing held/charged projectiles).", "low", "generated", 0, 0 },
@@ -2329,7 +2329,7 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "handleAIEvent", "Makes the AI process an AI event of the given class, triggering its reaction/response logic for that event category.", "medium", "generated", 1, SH_ED_A_1012 },
     { "handleDeferredDamageParms", "Applies a previously deferred set of damage parameters (stored at the given index) to this entity, completing a damage application that was postponed.", "low", "generated", 1, SH_ED_A_1013 },
     { "handleQueuedReliableMessage", "Processes a previously queued reliable network message of the given type at the given index for this entity. Internal networking dispatch, not a typical authoring effect.", "low", "generated", 2, SH_ED_A_1014 },
-    { "handleUpgrades", "A per-tick handler that checks the entity's upgrade conditions and, when triggered, sets an upgrade flag and/or spawns and links a related entity (orienting and velocity-matching it to this entity) before clearing the trigger.", "high", "handler", 0, 0 },
+    { "handleUpgrades", "", "high", "handler", 0, 0 },
     { "handsEnvironmentalReactions_EnteredAltState", "An animation-web callback signalling that the first-person hands' environmental-reaction layer has entered its alternate state. Drives hands reaction animation flow.", "medium", "generated", 4, SH_ED_A_1016 },
     { "handsEnvironmentalReactions_EnteredBaseState", "On entering the base state, schedules the next hands environmental reaction by picking a random delay within the reaction's frame range and advancing to the next queued reaction.", "high", "handler", 4, SH_ED_A_1017 },
     { "handsEnvironmentalReactions_EnteredDefaultState", "Resets the hands environmental-reaction state machine back to its default state and clears any pending reaction.", "high", "handler", 4, SH_ED_A_1018 },
@@ -2423,11 +2423,11 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "notice_AISummonInitiated", "AI notification fired when an AI summon/spawn-in is initiated, reporting the summoning entity and the spawn type used. A perception hook for encounter spawn-ins.", "medium", "generated", 2, SH_ED_A_1106 },
     { "notice_Afterlife", "Fires to award an 'Afterlife' medal, typically for a player scoring a kill in the brief window after their own death. Records the medal in scoring.", "medium", "generated", 2, SH_ED_A_1107 },
     { "notice_AirMail", "Fires to award the 'Air Mail' medal, typically for killing an airborne enemy or landing a projectile on a mid-air target. Records the medal in scoring.", "medium", "generated", 2, SH_ED_A_1108 },
-    { "notice_BeginGame", "Fires at match start and initializes/resets the per-player game-state tracking structure for the new game. (Uses the same handler as End Game.)", "high", "handler", 1, SH_ED_A_1109 },
+    { "notice_BeginGame", "Fires at match start and initializes/resets the per-player game-state tracking structure for the new game.", "high", "handler", 1, SH_ED_A_1109 },
     { "notice_BeginPointCapture", "Drives the start of a capture-point contest: it goes through the actors this entity is tracking, finds those on the same team contesting the point, and fires a capture/notify event for each match.", "high", "handler", 0, 0 },
     { "notice_BotRegressionError", "Logs a diagnostics telemetry record when a bot AI regression is detected, capturing a human-readable regression name, a supplied message, the bot's position, and the current frame. Diagnostics telemetry only.", "high", "handler", 0, 0 },
     { "notice_CancelSpawnRequest", "Cancels a pending spawn request that matches the given request, marking it cancelled and notifying the spawn manager so the spawn no longer happens.", "medium", "handler", 0, 0 },
-    { "notice_CaptureFlag", "Inert in this build: the flag-capture notification has no handler behavior and does nothing observable (stubbed or handled elsewhere).", "medium", "handler", 2, SH_ED_A_1113 },
+    { "notice_CaptureFlag", "", "medium", "handler", 2, SH_ED_A_1113 },
     { "notice_ClientSnapHideShow", "SnapMap perception event fired when a client-side hide/show visibility change is applied to an entity. Listeners react to the entity being shown or hidden.", "medium", "generated", 3, SH_ED_A_1114 },
     { "notice_ClientVariableChanged", "SnapMap perception event fired when a client-side SnapMap variable changes value. Listeners (wired logic) react to the variable change, with its type and new value.", "medium", "generated", 3, SH_ED_A_1115 },
     { "notice_CloseCall", "Fires to award a 'Close Call' medal, typically for surviving a fight at critically low health. Records the medal in scoring.", "medium", "generated", 2, SH_ED_A_1116 },
@@ -2467,10 +2467,10 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "notice_EV_Show", "Notifies the prop-spawner that a tracked pickup or prop entity has become visible, removing it from the spawner's pending/incoming list. Does nothing if the spawner is inactive or the entity is unknown.", "high", "handler", 0, 0 },
     { "notice_EV_StartGloryDeath", "AI/event-receiver notification fired when this entity begins a glory-kill death sequence. A perception hook signaling the start of a glory-kill finisher.", "medium", "generated", 1, SH_ED_A_1151 },
     { "notice_EV_StartGloryKill", "When a glory kill is permitted/available, sets a flag marking that a glory kill has started/is in progress.", "high", "handler", 0, 0 },
-    { "notice_EV_StartTouch", "Internal handler that runs the moment something starts touching this trigger: it checks the toucher against the trigger's filter, runs the StartTouch script action, and (if not already consumed) fires the trigger's target event, with a cooldown so it can't re-fire too rapidly.", "high", "handler", 0, 0 },
+    { "notice_EV_StartTouch", "", "high", "handler", 0, 0 },
     { "notice_EV_StatusRemoved", "Listener notice fired when a status effect is removed from an actor; carries the affected player, the status-effect decl and a count/stack so listeners can react.", "medium", "generated", 3, SH_ED_A_1154 },
-    { "notice_EV_Touch", "Internal handler that runs each frame while something is touching this trigger: it filter-checks the toucher, runs the Touch script action, and fires the trigger's target event only once per touch.", "high", "handler", 0, 0 },
-    { "notice_EV_Untouch", "Internal handler that runs when something stops touching this trigger: it filter-checks the leaver, runs the Untouch script action, and resets the latch so the next touch can fire again.", "high", "handler", 0, 0 },
+    { "notice_EV_Touch", "", "high", "handler", 0, 0 },
+    { "notice_EV_Untouch", "", "high", "handler", 0, 0 },
     { "notice_EV_VolumeMemberAdded", "Fires when an entity enters this volume trigger, adding it to the volume's tracked-member list (or bumping its count if already inside) and notifying downstream listeners on first entry.", "high", "handler", 2, SH_ED_A_1157 },
     { "notice_EV_VolumeMemberRemoved", "Fires when an entity leaves this volume trigger, removing it from the tracked-member list and notifying downstream listeners once it has fully left (matching nested enter/leave counts).", "high", "handler", 2, SH_ED_A_1158 },
     { "notice_EV_WeaponDropped", "Handles an enemy or AI dropping its weapon by spawning a physical, pickable dropped-weapon item near the entity with a thrown impulse. Active only in certain game modes; if the dropper lacks enough ammo the drop is logged but no pickup spawns.", "high", "handler", 0, 0 },
@@ -2486,7 +2486,7 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "notice_EncounterResolved", "Notifies the encounter that it has been resolved/completed.", "high", "handler", 0, 0 },
     { "notice_EncounterSpawningFailed", "Reacts to a spawn failure: only for one specific failure reason it schedules a short retry after a brief delay; all other failure reasons are ignored.", "high", "handler", 0, 0 },
     { "notice_EncounterSpawningSucceeded", "Notification that an encounter's AI spawning attempt succeeded, identified by request/count ids. Confirms requested demons were placed.", "medium", "generated", 0, 0 },
-    { "notice_EndGame", "Fires at match end and resets/clears the per-player game-state tracking structure. (Uses the identical handler as Begin Game.)", "high", "handler", 1, SH_ED_A_1172 },
+    { "notice_EndGame", "Fires at match end and resets/clears the per-player game-state tracking structure.", "high", "handler", 1, SH_ED_A_1172 },
     { "notice_EndRound", "Event-receiver notification fired when the round ends; authors hook it to trigger end-of-round logic.", "medium", "generated", 0, 0 },
     { "notice_End_DynamicChallenge", "Fires when a dynamic challenge ends and submits a challenge scoreboard telemetry report containing the challenge name, display text, map name, two challenge stats, and a computed score.", "high", "handler", 2, SH_ED_A_1174 },
     { "notice_End_SnapMapChallenge", "Fires at the end of a SnapMap challenge and submits a scoreboard telemetry report. For each valid player it records their name, the map name, a normalized score, the elapsed match time, and the difficulty/mode. Telemetry only, no gameplay effect.", "high", "handler", 0, 0 },
@@ -2500,11 +2500,11 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "notice_Impressive", "Registered but does nothing in this build -- the 'Impressive' medal/metric notify has no observable effect.", "high", "handler", 2, SH_ED_A_1183 },
     { "notice_Incapacitated", "Fires when a player becomes incapacitated (downed but not fully dead, awaiting revive). Notifies scoring/perception that a player has gone down.", "medium", "generated", 2, SH_ED_A_1184 },
     { "notice_KillingSpree", "Registered but does nothing in this build -- a killing-spree notify with no effect.", "high", "handler", 2, SH_ED_A_1185 },
-    { "notice_KillingSpree_20", "Inert in this build: the 20-kill killing-spree notification has no handler behavior and does nothing observable.", "medium", "handler", 0, 0 },
-    { "notice_KillingSpree_30", "Inert in this build: the 30-kill killing-spree notification has no handler behavior and does nothing observable.", "medium", "handler", 0, 0 },
+    { "notice_KillingSpree_20", "", "medium", "handler", 0, 0 },
+    { "notice_KillingSpree_30", "", "medium", "handler", 0, 0 },
     { "notice_LeaderKill", "Registered but does nothing in this build -- a placeholder notify with no effect.", "high", "handler", 2, SH_ED_A_1188 },
     { "notice_MapFadeInBegin", "Perception event fired when the map's screen fade-in begins, letting wired logic react to the visual fade-up at map start.", "high", "generated", 1, SH_ED_A_1189 },
-    { "notice_MapFinish", "A thin handler: when a particular sub-system is in a specific state it clears one internal counter/flag on the receiver; otherwise it does nothing. The actual map-finish processing is not in this handler.", "medium", "handler", 0, 0 },
+    { "notice_MapFinish", "", "medium", "handler", 0, 0 },
     { "notice_MedalScoredGeneric", "Does nothing in this build -- the generic 'medal scored' notification is a stub with no observable effect.", "medium", "handler", 2, SH_ED_A_1191 },
     { "notice_ModifierEvent", "Activates or deactivates an actor modifier on the entity. A value of -1 deactivates it; any other value activates it and applies the selected modifier attribute.", "high", "handler", 2, SH_ED_A_1192 },
     { "notice_ModuleLockdownFinished", "SnapMap perception event fired when a module lockdown ends (the room is unsealed, typically after its encounter completes). Listeners react to the lockdown finishing.", "high", "generated", 3, SH_ED_A_1193 },
@@ -2524,14 +2524,14 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "notice_PlaySnapSpeaker", "SnapMap event instructing a placed SnapMap speaker to begin playing a sound. Used by authored audio logic to start speaker playback.", "high", "generated", 2, SH_ED_A_1207 },
     { "notice_PlayerDamageTaken", "Registered but does nothing in this build -- a damage-taken notify with no observable effect, despite carrying damage details.", "high", "handler", 3, SH_ED_A_1208 },
     { "notice_PlayerDeath", "Handles a player's death: updates kill/death tallies, records the killer and assist/credit attribution, and notifies scoreboard and objective listeners.", "high", "handler", 3, SH_ED_A_1209 },
-    { "notice_PlayerFiringShot", "A thin forwarder that hands the firing-shot event off to a virtual method which does the real work of registering/processing the player's fired shot. This handler itself only forwards.", "medium", "handler", 0, 0 },
+    { "notice_PlayerFiringShot", "A thin forwarder that hands the firing-shot event off to a virtual method which does the real work of registering/processing the player's fired shot.", "medium", "handler", 0, 0 },
     { "notice_PlayerFullHealth", "Runs when notified that the player reached full health, forwarding the health amount to the entity's full-health response logic.", "high", "handler", 2, SH_ED_A_1211 },
     { "notice_PlayerHealed", "A diagnostic-only event in this build: it just writes a developer log line when a player is healed and otherwise does nothing. No gameplay effect.", "high", "handler", 2, SH_ED_A_1212 },
     { "notice_PlayerIncapacitated", "Fires when a player goes down (incapacitated). Tears down and clears that player's tracking slot, and (when match metrics are being recorded) logs a Player Incapacitated telemetry event for the downed player.", "high", "handler", 2, SH_ED_A_1213 },
     { "notice_PlayerIntensityChanged", "Perception event fired when a player's combat-intensity level transitions from one value to another. Listeners use it to react to a player heating up or cooling down in combat.", "high", "generated", 4, SH_ED_A_1214 },
     { "notice_PlayerJoin", "Fires when a player joins. Marks that player's tracking slot as live/tracked (when match metrics are being recorded).", "high", "handler", 2, SH_ED_A_1215 },
     { "notice_PlayerKill", "Fires combat or script callbacks for a player kill, notifying script and stat targets about the kill (using a fixed key and a per-kill entry) when an internal kill counter is within range.", "high", "handler", 4, SH_ED_A_1216 },
-    { "notice_PlayerKillAssist", "Inert in this build: this kill-assist notification has no handler behavior and does nothing observable (it is either stubbed or handled elsewhere).", "medium", "handler", 0, 0 },
+    { "notice_PlayerKillAssist", "", "medium", "handler", 0, 0 },
     { "notice_PlayerLeave", "Fires when a player leaves. Tears down and clears that player's tracking slot (the same cleanup as incapacitation, but without logging any telemetry event).", "high", "handler", 2, SH_ED_A_1218 },
     { "notice_PlayerModuleEnter", "SnapMap perception event fired when a player enters a module (a SnapMap room/section). Listeners react to the player entering the module.", "high", "generated", 2, SH_ED_A_1219 },
     { "notice_PlayerModuleExit", "SnapMap perception event fired when a player exits a module. Listeners react to the player leaving the module.", "high", "generated", 2, SH_ED_A_1220 },
@@ -2553,7 +2553,7 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "notice_Pull", "Fires to award a 'Pull' medal (a specific multiplayer-feat medal). Records the medal in the scoring system. Exact qualifying feat not determinable from name alone.", "low", "generated", 2, SH_ED_A_1236 },
     { "notice_QuadKill", "Registered but does nothing in this build -- a quad-kill notify with no effect.", "high", "handler", 2, SH_ED_A_1237 },
     { "notice_Rampage", "Registered but does nothing in this build -- a rampage notify with no observable effect.", "high", "handler", 2, SH_ED_A_1238 },
-    { "notice_ReturnFlag", "Inert in this build: the flag-return notification has no handler behavior and does nothing observable.", "medium", "handler", 2, SH_ED_A_1239 },
+    { "notice_ReturnFlag", "", "medium", "handler", 2, SH_ED_A_1239 },
     { "notice_Revenge", "Registered but does nothing in this build -- the 'Revenge' metric notify has no observable effect.", "high", "handler", 2, SH_ED_A_1240 },
     { "notice_Revive", "Fires when a downed/incapacitated player is revived. Reports the revive to the scoring system so authors can react to a teammate being brought back up.", "medium", "generated", 2, SH_ED_A_1241 },
     { "notice_SecretFound", "Fires when a hidden secret is discovered in the level. Notifies authors that a secret was found, with the secret's identifier and the team that found it.", "high", "generated", 3, SH_ED_A_1242 },
@@ -2566,7 +2566,7 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "notice_StartEndOfRound", "Fires when the end-of-round sequence begins, running the entity's round-end behavior, but only if that entity is flagged to participate. Otherwise it does nothing.", "high", "handler", 0, 0 },
     { "notice_StartGameOver", "Listener notice fired at the start of the game-over sequence; listeners react to begin game-over handling.", "medium", "generated", 1, SH_ED_A_1250 },
     { "notice_StartRound", "Handles round start: gated on an active session and round-counter checks, it validates every connection/wire slot's referenced entities, bailing out if any reference is invalid or fails its type check; only if all validate does it actually start/advance the round. Performs real round-start state advancement.", "high", "handler", 0, 0 },
-    { "notice_StealFlag", "Inert in this build: the flag-steal notification has no handler behavior and does nothing observable.", "medium", "handler", 2, SH_ED_A_1252 },
+    { "notice_StealFlag", "", "medium", "handler", 2, SH_ED_A_1252 },
     { "notice_StealthAIKill", "Fires when a player kills an AI demon via a stealth (undetected) kill. Awards/records the stealth-kill medal in the scoring system.", "medium", "generated", 2, SH_ED_A_1253 },
     { "notice_StopSnapMusic", "SnapMap event that stops the currently playing SnapMap music on the given channel/source.", "high", "generated", 2, SH_ED_A_1254 },
     { "notice_StopSnapSpeaker", "SnapMap event instructing a placed SnapMap speaker to stop its current playback.", "high", "generated", 2, SH_ED_A_1255 },
@@ -2666,7 +2666,7 @@ static const ShEvtDoc SH_EVENT_DOCS[] = {
     { "restartFSM", "Restarts this AI entity's finite-state-machine behavior controller from its initial state, resetting current behavior logic.", "medium", "generated", 0, 0 },
     { "restoreArcadeFuse", "Restores/sets an arcade-mode \"fuse\" (a scoring or life resource) on the target to the given level, using a base value as the floor or starting point. Used in arcade-style game modes to reset the fuse meter.", "low", "generated", 2, SH_ED_A_1350 },
     { "restoreDefaultPerception", "Reverts AI perception back to its normal default behavior after it was overridden (e.g. by a forced-awareness command), for the given spawn type and label.", "high", "generated", 2, SH_ED_A_1351 },
-    { "restorePosition", "Returns the entity to its previously saved position. The restore logic lives in an internal helper, so exactly what gets restored is not fully visible from the handler.", "medium", "handler", 0, 0 },
+    { "restorePosition", "Returns the entity to its previously saved position.", "medium", "handler", 0, 0 },
     { "resumeLiving", "Returns the target player from an incapacitated/downed state back to a living, controllable state.", "medium", "generated", 0, 0 },
     { "rift_Cleanup", "Performs full cleanup/teardown of this entity's rift subsystem, releasing rift resources and any associated spawned entities. The terminal counterpart to rift creation.", "low", "generated", 0, 0 },
     { "rift_ClearRift", "Clears the active rift effect/state on this entity (a rift being a teleport or summoning portal in DOOM 2016), removing the visual and any pending rift spawns without a full teardown.", "low", "generated", 0, 0 },

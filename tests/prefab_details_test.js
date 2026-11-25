@@ -10,22 +10,9 @@ const budget = require(path.join(root, 'src', 'ui', 'webview', 'prefab_budget.js
 let failures = 0;
 function check(ok, message) { if (!ok) { console.error('[FAIL] ' + message); failures++; } }
 
-/* A top-level page function's source, by brace matching from its declaration. */
-function lift(name) {
-  const at = html.indexOf('  function ' + name + '(');
-  if (at < 0) throw new Error('no function ' + name);
-  let i = html.indexOf('{', at), depth = 0;
-  for (; i < html.length; i++) {
-    if (html[i] === '{') depth++;
-    else if (html[i] === '}' && --depth === 0) break;
-  }
-  return html.slice(at, i + 1);
-}
-function between(begin, end) {
-  const b = html.indexOf(begin), e = html.indexOf(end);
-  check(b > 0 && e > b, begin + ' is marked for extraction');
-  return html.slice(b, e);
-}
+const page = require('./page_fixture.js');
+const lift = name => page.lift(html, name);
+const between = (begin, end) => page.between(html, begin, end);
 
 /* Create follows the live selection */
 {
@@ -140,9 +127,9 @@ function between(begin, end) {
   check(render.includes('var held = pfBudgetIsHeld(pfBudgetHeld, pfBudgetSel);') &&
         render.includes('prefabBudget.meters(s.block, live.usage, live.limits, held)'), 'the rows use the held rule');
   check(lift('pfLimitsBar').includes('!v.held'), 'a held prefab draws no extra sliver past the bar');
-  check(host.includes('ui_budget_usage_poll();') && host.includes('g_usage_gate.changed(body, sh_webview_json::to_utf8(held))'),
+  check(host.includes('ui_send_budget_usage(watch, false);') && host.includes('g_usage_gate.changed(body, sh_webview_json::to_utf8(held))'),
         'the host re-posts usage from the think loop only when it or the held prefab changed');
-  check(!/SetTimer|setInterval/.test(host.slice(host.indexOf('static void ui_budget_usage_poll()'), host.indexOf('static void ui_budget_usage_poll()') + 600)),
+  check(!/SetTimer|setInterval/.test(host.slice(host.indexOf('static void ui_send_budget_usage('), host.indexOf('static void ui_send_budget_usage(') + 600)),
         'no fixed timer posts unchanged values');
 }
 

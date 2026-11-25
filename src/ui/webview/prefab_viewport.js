@@ -269,7 +269,7 @@ var prefabViewport = (function () {
 
   function entityRole(className, inherit, edit) {
     var c=String(className||'').toLowerCase(), h=String(inherit||'').toLowerCase();
-    if (c.indexOf('volume_blocking') !== -1 || h === 'snapmaps/volume/blocking') return 'blocker';
+    if (prefabTransform.isBlockingVolume(c, h)) return 'blocker';
     /* Most saved entities have isVisible=false, so it is not a hidden-volume flag. Inheritance separates an
        interactable whose class is idVolume_Trigger_Editable from an actual trigger volume. */
     if (c.indexOf('interactable') !== -1 || h.indexOf('snapmaps/interactibles/') === 0) return 'interactable';
