@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "script/script_runtime.h"
+
 #include "script/script_hooks.h"
 #include "script/script_api_common.h"
 #include "script/script_api_ai.h"
@@ -100,7 +101,8 @@ static fent *by_id(uint32_t id)
 static void *f_resolve(uint32_t id) { return by_id(id); }
 static uint32_t f_spawn_id(void *ent) { return ent ? ((fent *)ent)->id : SH_SCRIPT_SPAWN_ID_NONE; }
 static int g_room_used;   /* entity slots the rest of the game holds, past the fake's own */
-static int f_slots(void) { return g_nents + g_room_used; }
+static int g_slot_scans;
+static int f_slots(void) { g_slot_scans++; return g_nents + g_room_used; }
 static uint32_t f_slot_spawn_id(int n)
 {
     if (n >= g_nents && n < g_nents + g_room_used) return 0x7000000u + (uint32_t)n;   /* the game's own entities */
@@ -786,6 +788,13 @@ int main(void)
     sh_script_api_install(NULL, 0, NULL);
     sh_script_api_register();   /* idempotent */
     sh_script_handles_set_resolver(h_resolve);
+
+    sh_script_api_frame();
+    CHECK(g_slot_scans == 0);
+    CHECK(sh_script_api_has_room() && sh_script_api_has_room() && g_slot_scans == 1);
+    sh_script_api_frame();
+    CHECK(g_slot_scans == 1);
+    CHECK(sh_script_api_has_room() && g_slot_scans == 2);
 
     test_reads();
     test_writes();

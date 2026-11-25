@@ -492,7 +492,7 @@ int sh_script_api_has_room(void)
 void sh_script_api_frame(void)
 {
     int i;
-    read_room();
+    g_room = -1;   /* Count free slots on the first spawn request this frame. */
     for (i = 0; i < g_nanim; i++) {
         anim_row *r = &g_anim[i];
         void *ent;
