@@ -703,8 +703,7 @@ static const char STOCK_SINGLE_LIST[] =
     "{\n\tedit = {\n\t\tvalidEncounters = {\n\t\t\tnum = 2;\n\t\t\titem[0] = \"single_imp\";\n"
     "\t\t\titem[1] = \"single_baron\";\n\t\t}\n\t}\n}\n";
 
-/* A ported demon's edits as Doomforge writes them: its conductor row (the stand-in's flag beside its own
- * number) and its globalAIMods row, and the stock group encounter's Imp member offered as the port too. */
+/* Explicit changes to a stock encounter are normal game-file edits; the two conductor rows alone never request one. */
 static char *port_edits(unsigned authored, const char *standin, const char *def)
 {
     char conductor[2048], e2[1024], *a, *b, *out;
@@ -983,6 +982,55 @@ static int member_type(const char *request, const char *bit)
     return open_text(request, text, sizeof text) == 1 && strstr(text, want) != NULL;
 }
 
+/* A single folder as Doomforge emits it. Both the twelfth and the owner of its shared
+ * class must still select their own declared actor; all 39 owned files must be rewritten. */
+static void test_large_pack(void)
+{
+    enum { PORTS = 39 };
+    fx files[PORTS + 1];
+    char root[MAX_PATH], hash[65], generated[24000], extra[18000] = "", chosen[80];
+    char names[PORTS][64], requests[PORTS][128], bodies[PORTS][200];
+    const char *row[] = { hash };
+    int i;
+    size_t at = 0;
+    set_ops();
+    sprintf_s(root, sizeof root, "%s\\large\\mods", g_top);
+    for (i = 0; i < PORTS; ++i) {
+        unsigned authored = i < 11 ? 1u << (19 + i) : (1u << 29) | ((unsigned)(i - 10) << 19);
+        sprintf_s(names[i], sizeof names[i], "mods/largepak/single_%02d", i);
+        sprintf_s(requests[i], sizeof requests[i], "generated/decls/snapaiencounter/%s.decl", names[i]);
+        sprintf_s(bodies[i], sizeof bodies[i], "{ edit = { memberList = { num = 1; item[0] = { memberType = \"%u\"; } } } }", authored);
+        files[i + 1] = (fx){ requests[i], "snapAiEncounter", names[i], bodies[i] };
+        at += sprintf_s(extra + at, sizeof extra - at,
+                        "\t\t\titem[%d] = { aiType = \"SPAWN_AI_TYPE_BARON %u\"; entityDef = \"mods/largepak/actor_%02d\"; }\r\n",
+                        i + 2, authored, i);
+    }
+    sprintf_s(generated, sizeof generated, BOSS_CONDUCTOR("41", "%s"), extra);
+    files[0] = (fx){ REQ_CONDUCTOR, "entityDef", "ai/conductor/coop/snapmap_default", generated };
+    make_mod(root, "large", "largepak", 'a', NULL, files, PORTS + 1, 0);
+    hash_of('a', hash);
+    sh_modserve_scope_enable(1);
+    sh_modmanifest_reset();
+    CHECK(sh_modserve_index_build(root) >= 1);
+    CHECK(sh_modserve_scope_set(row, 1, 1) >= 1);
+    for (i = 0; i < PORTS; ++i) {
+        char number[24], *actor = sh_modserve_shared_actor(names[i]);
+        unsigned bit = i < 11 ? 1u << (19 + i) : 1u << 19;
+        sprintf_s(number, sizeof number, "%u", bit);
+        CHECK(member_type(requests[i], number));
+        sprintf_s(chosen, sizeof chosen, "mods/largepak/actor_%02d", i);
+        if (i == 0 || i >= 11) CHECK(actor && !strcmp(actor, chosen));
+        else CHECK(!actor);
+        free(actor);
+    }
+    CHECK(!sh_modserve_shared_actor("single_imp"));
+    CHECK(sh_modserve_scope_set(NULL, 0, 1) >= 0);
+    CHECK(!sh_modserve_shared_actor(names[0]) && !sh_modserve_shared_actor(names[38]));
+    sh_modmanifest_reset();
+    sh_modserve_scope_enable(0);
+    sh_mb_set_stock_ops(NULL);
+}
+
 static char *save_map(size_t *len)
 {
     static const char MAPJ[] = "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
@@ -1113,6 +1161,7 @@ int main(int argc, char **argv)
     test_pins_and_flags();
     test_body_clip_count();
     test_generation();
+    test_large_pack();
     test_pins_kept_absent();
     test_map_add_remove();
     test_leftovers();

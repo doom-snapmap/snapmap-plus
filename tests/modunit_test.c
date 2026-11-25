@@ -399,9 +399,12 @@ static void test_registry_edits(const char *top)
     mt_write(folder, "native\\generated\\decls\\entitydef\\ai\\conductor\\coop\\snapmap_default.decl",
              "{\n\tinherit = \"ai/base/conductor\";\n\tedit = {\n\t\taiTypeList = {\n\t\t\tnum = 3;\n"
              "\t\t\titem[0] = {\n\t\t\t\taiType = \"1\";\n\t\t\t\tentityDef = \"ai/demon/imp\";\n\t\t\t}\n"
-             "\t\t\titem[1] = {\n\t\t\t\taiType = \"2\";\n\t\t\t\tentityDef = \"mods/" SALT "/crate\";\n\t\t\t}\n"
-             "\t\t\titem[2] = {\n\t\t\t\taiType = \"4\";\n\t\t\t\tentityDef = \"mods/" SALT "/barrel\";\n\t\t\t}\n"
+             "\t\t\titem[1] = {\n\t\t\t\taiType = \"SPAWN_AI_TYPE_BARON 524288\";\n\t\t\t\tentityDef = \"mods/" SALT "/crate\";\n\t\t\t}\n"
+             "\t\t\titem[2] = {\n\t\t\t\taiType = \"SPAWN_AI_TYPE_BARON 524289\";\n\t\t\t\tentityDef = \"mods/" SALT "/barrel\";\n\t\t\t}\n"
              "\t\t}\n\t}\n}\n");
+    mt_write(folder, "decls\\snapaiscore\\crate_score.decl", "{ edit = { aiType = \"524288\"; } }");
+    mt_write(folder, "decls\\snapaiencounter\\barrel_single.decl",
+             "{ edit = { memberList = { num = 1; item[0] = { memberType = \"524289\"; } } } }");
     sh_mb_set_stock_ops(&g_conductor_ops);
     if (!build(folder, &b)) { sh_mb_set_stock_ops(NULL); return; }
     if (!b.edits) fprintf(stderr, "  pack edits: none (%s)\n", sh_mb_first_warning(&b) ? sh_mb_first_warning(&b) : "-");
@@ -409,6 +412,8 @@ static void test_registry_edits(const char *top)
     CHECK(b.edits && strstr(b.edits, "mods/" SALT "/crate") && strstr(b.edits, "mods/" SALT "/barrel"));
     if (unit(&b, folder, "mods/" SALT "/crate", &u)) {
         CHECK(kept(&b, &u, "native/" CONDUCTOR) == 1);
+        CHECK(kept(&b, &u, "decls/snapaiscore/crate_score.decl") == 1);
+        CHECK(kept(&b, &u, "decls/snapaiencounter/barrel_single.decl") == 0);
         manifests[0] = u.manifest;
         lens[0] = u.manifest_len;
         ctx.folder = folder;
@@ -421,6 +426,11 @@ static void test_registry_edits(const char *top)
         CHECK(out.edits && strstr(out.edits, "\"counts\":{\"set\":0,\"remove\":0,\"list\":1,"));
         if (out.edits && strstr(out.edits, "barrel")) fprintf(stderr, "  composed edits: %s\n", out.edits);
         sh_mb_free(&out);
+        sh_unit_free(&u);
+    }
+    if (unit(&b, folder, "mods/" SALT "/barrel", &u)) {
+        CHECK(kept(&b, &u, "decls/snapaiscore/crate_score.decl") == 0);
+        CHECK(kept(&b, &u, "decls/snapaiencounter/barrel_single.decl") == 1);
         sh_unit_free(&u);
     }
     sh_mb_free(&b);

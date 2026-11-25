@@ -3041,6 +3041,8 @@ typedef struct ms_reg_memo {
     int nlines, nsources;
     int *gate;                            /* per registry file: the source bundle whose requirement gates gate its text, or -1 */
     unsigned standin[32];                 /* per spawn-type bit assigned to a ported demon: the stock bits it stands in for */
+    int nsingles;
+    sh_mr_single *singles;
     int npins;                            /* the types it gave, to pin on a save (sh_modserve_spawn_pins) */
     const char **pin_salt, **pin_slot;
     struct ms_reg_memo *next;
@@ -3487,6 +3489,16 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
         int b;
         for (b = 19; b < 32; ++b) if (bit == (1u << b) && !m->standin[b]) m->standin[b] = r.entries[i].standin;
     }
+    if (r.nsingles) {
+        m->singles = (sh_mr_single *)ms_alloc(x, sizeof *m->singles * (size_t)r.nsingles);
+        if (!m->singles) { m = NULL; goto done; }
+        for (i = 0; i < r.nsingles; ++i) {
+            m->singles[i].file = r.singles[i].file;
+            m->singles[i].actor = ms_strdup(x, r.singles[i].actor);
+            if (!m->singles[i].actor) { m = NULL; goto done; }
+        }
+        m->nsingles = r.nsingles;
+    }
     if (r.nentries) {
         m->pin_salt = (const char **)ms_alloc(x, sizeof(char *) * (size_t)r.nentries);
         m->pin_slot = (const char **)ms_alloc(x, sizeof(char *) * (size_t)r.nentries);
@@ -3593,6 +3605,28 @@ static void ms_spawn_type_members(void)
     if (r > 0) ms_log("registry: spawnAIType_t holds %d member(s) for ported demons' types (SPAWN_AI_TYPE_MOD_%d .. %d)",
                       r, SH_MR_BIT_FIRST, SH_MR_BIT_LAST);
     else ms_log("registry: spawnAIType_t takes no member for ported demons' types (it holds them already, or its record is not writable)");
+}
+
+char *sh_modserve_shared_actor(const char *encounter)
+{
+    char *actor = NULL;
+    const ms_reg_memo *m;
+    ms_index *x;
+    int i, file;
+    if (!encounter || _strnicmp(encounter, "mods/", 5)) return NULL;
+    InterlockedIncrement(&g_readers);
+    x = g_index;
+    m = x ? (const ms_reg_memo *)InterlockedCompareExchangePointer((PVOID volatile *)&x->reg_cur, NULL, NULL) : NULL;
+    if (m && m->nsingles && (file = ms_provider(x, "snapAiEncounter", encounter)) >= 0) {
+        file = ms_scoped(x, file);
+        for (i = 0; file >= 0 && i < m->nsingles; ++i) {
+            if (m->singles[i].file != file || x->files[file].withdrawn) continue;
+            actor = _strdup(m->singles[i].actor);
+            break;
+        }
+    }
+    InterlockedDecrement(&g_readers);
+    return actor;
 }
 
 int sh_modserve_spawn_pins(void (*fn)(void *context, const char *salt, const char *slot), void *context)

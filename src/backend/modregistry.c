@@ -723,7 +723,10 @@ static int mr_only_member(const sh_mr_decl *d, unsigned bit)
         mr_tok t = mr_next(d->text, d->len, &pos);
         if (t.kind == MT_END) return seen;
         if (t.kind == MT_STR && prev.kind == MT_EQ && mr_word_is(d->text, &field, "memberType")) {
-            if (t.n != (size_t)len + 2 || memcmp(d->text + t.at + 1, value, (size_t)len)) return 0;
+            const char *s = d->text + t.at + 1, *end = s + t.n - 2;
+            while (s < end && isspace((unsigned char)*s)) ++s;
+            while (s < end && isspace((unsigned char)end[-1])) --end;
+            if (end - s != len || memcmp(s, value, (size_t)len)) return 0;
             seen = 1;
         }
         field = prev; prev = t;
@@ -877,7 +880,7 @@ static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, const sh_mr_ch
         e->bit = r->entries[with].bit;
         e->shared = 1;
         mr_line(r, "conductor: a map gives at most %d ported demons a spawn type of their own; %s (%s) of %s shares the "
-                "type of %s, so the AI Filter, the kill score and the encounters do not tell the two apart",
+                "type of %s, so the AI Filter and type-based modifiers use the shared class",
                 SH_MR_BIT_LAST - SH_MR_BIT_FIRST + 1, e->encounter ? e->encounter : "its encounter", e->def,
                 src[e->source].who, r->entries[with].def);
     }
@@ -908,30 +911,57 @@ static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, const sh_mr_ch
                 r->entries[i].authored, like ? ", stands in for " : "", like ? like : "",
                 r->entries[i].pinned ? ", pinned by the map" : "");
     }
-    /* Each source's encounters and scores, rewritten to the bits assigned. */
+    return 1;
+}
+
+static int mr_remap_sources(const sh_mr_source *src, int n, sh_dt_source *ds, char **rewritten, sh_mr_result *r)
+{
+    unsigned *from, *to, shared = 0;
+    int i, s, ok = 0;
+    if (!r->nentries) return 1;
+    from = (unsigned *)calloc((size_t)r->nentries, 2 * sizeof *from);
+    if (!from) return 0;
+    to = from + r->nentries;
+    for (i = 0; i < r->nentries; ++i)
+        if (r->entries[i].shared) shared |= r->entries[i].bit;
     for (s = 0; s < n; ++s) {
-        unsigned from[SH_MR_BIT_LAST - SH_MR_BIT_FIRST + 1], to[SH_MR_BIT_LAST - SH_MR_BIT_FIRST + 1];
         int m = 0, d;
-        for (i = 0; i < r->nentries; ++i)
-            if (r->entries[i].source == s && m < (int)(sizeof from / sizeof from[0])) {
-                from[m] = r->entries[i].authored;
-                to[m++] = r->entries[i].bit;
+        size_t len;
+        for (i = 0; i < r->nentries; ++i) {
+            const sh_mr_entry *e = &r->entries[i];
+            if (e->source != s) continue;
+            from[m] = e->authored;
+            to[m++] = e->bit;
+            if (!(e->bit & shared)) continue;
+            /* Only a member that names one actor can select that actor ahead of the native type draw. */
+            for (d = 0; d < src[s].ndecls; ++d) {
+                const sh_mr_decl *decl = &src[s].decls[d];
+                if (decl->score || !mr_only_member(decl, e->authored)) continue;
+                if (!mr_grow((void **)&r->singles, r->nsingles, sizeof *r->singles)) goto done;
+                r->singles[r->nsingles].file = decl->id;
+                r->singles[r->nsingles++].actor = e->def;
             }
+        }
         if (!m) continue;
+        if (src[s].edits) {
+            rewritten[s] = sh_modregistry_rewrite_edits(src[s].edits, src[s].edits_len, from, to, m, &len);
+            if (rewritten[s]) { ds[s].edits = rewritten[s]; ds[s].edits_len = len; }
+        }
         for (d = 0; d < src[s].ndecls; ++d) {
-            size_t len = 0;
             char *tx = sh_modregistry_rewrite_bits(src[s].decls[d].text, src[s].decls[d].len, from, to, m, &len);
             if (!tx) continue;
-            if (!mr_grow((void **)&r->rewrites, r->nrewrites, sizeof *r->rewrites)) { free(tx); return 0; }
+            if (!mr_grow((void **)&r->rewrites, r->nrewrites, sizeof *r->rewrites)) { free(tx); goto done; }
             r->rewrites[r->nrewrites].id = src[s].decls[d].id;
             r->rewrites[r->nrewrites].text = tx;
-            r->rewrites[r->nrewrites].len = len;
-            r->nrewrites++;
+            r->rewrites[r->nrewrites++].len = len;
             mr_line(r, "conductor: %s's %s %s served with the assigned bit", src[s].who,
                     src[s].decls[d].score ? "score" : "encounter", src[s].decls[d].name);
         }
     }
-    return 1;
+    ok = 1;
+done:
+    free(from);
+    return ok;
 }
 
 /* The conductor as served: each aiTypeList item a source added holds its
@@ -1045,17 +1075,7 @@ int sh_modregistry_generate(const sh_mr_source *src, int n, const sh_mr_target *
         if (t && !mr_conductor(t, src, n, choices, nchoices, out)) { sh_dt_free(t); goto oom; }
         sh_dt_free(t);
     }
-    /* Then every source's edits speak of the types assigned to the numbers it wrote. */
-    for (i = 0; i < n && out->nentries; ++i) {
-        unsigned from[SH_MR_BIT_LAST - SH_MR_BIT_FIRST + 2], to[SH_MR_BIT_LAST - SH_MR_BIT_FIRST + 2];
-        int m = 0, e;
-        size_t len = 0;
-        for (e = 0; e < out->nentries && m < (int)(sizeof from / sizeof from[0]); ++e)
-            if (out->entries[e].source == i) { from[m] = out->entries[e].authored; to[m++] = out->entries[e].bit; }
-        if (!m || !src[i].edits) continue;
-        rewritten[i] = sh_modregistry_rewrite_edits(src[i].edits, src[i].edits_len, from, to, m, &len);
-        if (rewritten[i]) { ds[i].edits = rewritten[i]; ds[i].edits_len = len; }
-    }
+    if (!mr_remap_sources(src, n, ds, rewritten, out)) goto oom;
     for (k = 0; k < ntargets; ++k) {
         mr_apply_ctx ctx;
         sh_dt_report rep;
@@ -1145,7 +1165,7 @@ void sh_modregistry_result_free(sh_mr_result *r)
     for (i = 0; i < r->nentries; ++i) { free(r->entries[i].def); free(r->entries[i].encounter); }
     for (i = 0; i < r->nclashes; ++i) free(r->clashes[i].slot);
     free(r->text); free(r->len); free(r->used);
-    free(r->entries); free(r->rewrites); free(r->clashes); free(r->lines);
+    free(r->entries); free(r->singles); free(r->rewrites); free(r->clashes); free(r->lines);
     memset(r, 0, sizeof *r);
 }
 
