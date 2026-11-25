@@ -16,5 +16,5 @@
 #define ENT_COUNT_CAP         1000000u      /* sanity cap on the entity array count */
 
 const char *sh_editor_module_name(const uint8_t *records, int index);
-/* Emit the placed entities and modules from the live edit. A failed read leaves the existing scope in force. */
-int sh_editor_placed_names(const uint8_t *map, sh_modui_name_fn emit, void *context);
+/* Emit the placed entities and modules from the last committed edit. A failed read leaves the existing scope in force. */
+int sh_editor_placed_names(const uint8_t *editor, sh_modui_name_fn emit, void *context);

@@ -18,6 +18,9 @@
 #define SH_EDITOR_UNDO_CURSOR_OFF  0x18
 #define SH_EDITOR_UNDO_COMMIT_CALL 0x20    /* EditorCommitEdit: E8 rel32 to the push wrapper */
 
+/* Borrow the current undo snapshot on the editor thread. Toybox and Blueprint previews exist only in the live edit. */
+void *sh_editor_committed_map(const uint8_t *editor);
+
 /* The push: (list, editor). */
 typedef void (*sh_editor_undo_push_fn)(void *list, void *editor);
 

@@ -32,6 +32,7 @@
 #include "rawmap.h"
 #include "grid_room_native.h"
 #include "editor_delete.h"
+#include "editor_undo.h"
 #include "module_prefab.h"
 #include "timeline_tile.h"
 #include "budget_table.h"
@@ -1169,9 +1170,7 @@ static int ie_mods_on_main(void)
 
 static int ie_mods_placed_names(sh_modui_name_fn emit, void *context)
 {
-    void *map = NULL;
-    if (!g_editor || !sh_read_ptr(g_editor + ED_MAP_OBJ_OFF, &map)) return -1;
-    return sh_editor_placed_names((const uint8_t *)map, emit, context);
+    return sh_editor_placed_names(editor_session(), emit, context);
 }
 
 /* The Mods tab's map operations (modui.h). The open edit is editor+0x204c8 (idSnapMapEdit); its saved-map
@@ -1203,7 +1202,8 @@ static int ie_mods_map_json(char **out, size_t *len)
     if (len) *len = 0;
     /* The map is the editor's while its screen is up; in the hub the pointer can persist. */
     if (!edit || !g_editor || !sh_read_ptr(g_editor + ED_SCREEN_OFF, &screen) || !screen) return 0;
-    if (!sh_rawmap_live_serialize_ready()) return -1;
+    edit = sh_editor_committed_map(g_editor);
+    if (!edit || !sh_rawmap_live_serialize_ready()) return -1;
     return sh_rawmap_serialize_live_copy(edit, out, len) ? 1 : -1;
 }
 

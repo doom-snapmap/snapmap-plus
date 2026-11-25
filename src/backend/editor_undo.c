@@ -47,6 +47,17 @@ static int eu_header(uint8_t *list, uint8_t **data, int *count, int *cap, uint8_
     return 1;
 }
 
+void *sh_editor_committed_map(const uint8_t *editor)
+{
+    void *list = NULL, *snapshot = NULL;
+    uint8_t *data, *cursor;
+    int count, cap;
+    if (!editor || !eu_read_ptr(editor + SH_EDITOR_UNDO_LIST_OFF, &list) ||
+        !eu_header((uint8_t *)list, &data, &count, &cap, &cursor) || !count ||
+        !eu_read_ptr(cursor, &snapshot)) return NULL;
+    return snapshot;
+}
+
 int sh_editor_undo_truncate(uint8_t *editor, sh_editor_undo_push_fn push, int *before, int *after)
 {
     void *l = NULL;

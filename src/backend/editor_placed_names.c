@@ -1,5 +1,6 @@
 #include "editor_placed_names.h"
 #include "safe_read.h"
+#include "editor_undo.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -31,8 +32,9 @@ static int placed_copy(placed_text *text, const char *source)
     return 1;
 }
 
-int sh_editor_placed_names(const uint8_t *map, sh_modui_name_fn emit, void *context)
+int sh_editor_placed_names(const uint8_t *editor, sh_modui_name_fn emit, void *context)
 {
+    const uint8_t *map = (const uint8_t *)sh_editor_committed_map(editor);
     void *array = NULL, *modules = NULL;
     uint32_t count = 0, id;
     int read = 0, mod_count = 0, i;
