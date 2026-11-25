@@ -1744,10 +1744,14 @@ static void test_lasers_and_rear_feet(void)
         "  if step ~= 1 then return end\n"
         "  print('hides ' .. tostring(self:wound_hides('wounds/brute/chest', { 'body$2@chest', 'body$3@chest' })))\n"
         "  print('none ' .. tostring(self:wound_hides('wounds/brute/armor', {})))\n"
+        "  local names = {}\n"
+        "  for i = 1, 48 do names[i] = 'm' .. i end\n"
+        "  print('all ' .. tostring(self:wound_hides('wounds/brute/chest', names)))\n"
         "end)\n"));
     tick();
     log = log_of("aaaaaaaa");
-    CHECK(strstr(log, "hides true\nnone true\n") != NULL);
+    CHECK(strstr(log, "hides true\nnone true\nall true\n") != NULL);
+    CHECK(strstr(g_events, " m46 m47 m48\n") != NULL);
     CHECK(strstr(g_events, "wound_hides mods/aaaaaaaa/wounds/brute/chest: body$2@chest body$3@chest\n"
                            "wound_hides mods/aaaaaaaa/wounds/brute/armor:\n") != NULL);
     sh_script_map_end();

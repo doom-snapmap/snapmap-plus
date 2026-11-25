@@ -764,8 +764,6 @@ static const unsigned char k_ai_daw_prologue[SH_AI_DAW_STOLEN] = {
 #define SH_AI_MESH_SITE_INDEX     11u     /* call index-by-name (model, name) */
 #define SH_AI_MESH_SITE_HIDE      107u    /* call hide (model, index) */
 #define SH_AI_OFF_MODEL           0x3DB0u /* entity: its md6 model */
-#define SH_AI_WOUND_MESHES        24      /* meshes one wound can hide */
-#define SH_AI_WOUND_ROWS          32      /* wounds of one demon that hide meshes */
 #define SH_AI_BEHAVIOR_MONSTER    0x120u  /* behaviour decl: aiMonsterType_t */
 #define SH_AI_MONSTER_GENERIC     1
 

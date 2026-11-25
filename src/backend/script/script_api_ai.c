@@ -462,7 +462,10 @@ int sh_ai_posed_leg(const sh_ai_leg_pose *p, const sh_ai_leg_joints *j, sh_ai_le
 }
 
 static void force_via_reset(void);
-static void wound_count_gone(sh_script_handle h, uint32_t spawn_id);
+static void wound_owner_gone(sh_script_handle h, uint32_t spawn_id);
+#ifndef SH_SCRIPT_PURE
+static void wound_meshes_remove(uint32_t spawn_id);
+#endif
 static void anim_wait_drop(ai_rec *r)
 {
     free(r->wait_dest);
@@ -477,6 +480,9 @@ void sh_script_ai_reset(void)
         anim_wait_drop(g_recs[i]);
         memset(g_recs[i], 0, sizeof *g_recs[i]);
     }
+#ifndef SH_SCRIPT_PURE
+    wound_meshes_remove(SH_SCRIPT_SPAWN_ID_NONE);
+#endif
     force_via_reset();
     sh_ai_pain_records_reset();
     sh_wound_count_reset();
@@ -1835,9 +1841,12 @@ void sh_wound_count_gone(uint32_t id)
     ReleaseSRWLockExclusive(&g_wcount_lock);
 }
 
-static void wound_count_gone(sh_script_handle h, uint32_t spawn_id)
+static void wound_owner_gone(sh_script_handle h, uint32_t spawn_id)
 {
     (void)h;
+#ifndef SH_SCRIPT_PURE
+    if (spawn_id != SH_SCRIPT_SPAWN_ID_NONE) wound_meshes_remove(spawn_id);
+#endif
     sh_wound_count_gone(spawn_id);
 }
 
@@ -2685,47 +2694,38 @@ void sh_script_ai_set_gore_owner_test(int (*fn)(void *ent)) { g_gore_owner_test 
  * wound, after the demon spawned. Answers true, or false and why. */
 static int l_wound_hides(lua_State *L)
 {
-    const char *wound, *names[SH_AI_WOUND_MESHES];
-    char *keep;
+    sh_script_handle h = (sh_script_handle)sh_script_check_entity(L, 1, "wound_hides");
+    const char *wound = sh_script_check_name(L, 2, "wound_hides", 1, NULL);
+    const char **names;
+    lua_Unsigned count;
     void *ai;
-    int st, n = 0, i, top;
-    wound = sh_script_check_name(L, 2, "wound_hides", 1, NULL);
-    keep = _strdup(wound);                 /* the buffer is the name checker's */
-    if (g_engine && !g_engine->wound_hides) {
-        free(keep);
-        NEED_OP(L, wound_hides, "wound_hides");
-    }
-    if (lua_type(L, 3) != LUA_TTABLE) {
-        free(keep);
+    int st, i;
+
+    NEED_OP(L, wound_hides, "wound_hides");
+    if (!g_engine)
+        sh_script_refuse(L, "\"wound_hides\" is not available in this session (Snapmap+ could "
+                            "not find the game's AI functions; see the backend log)");
+    if (lua_type(L, 3) != LUA_TTABLE)
         return luaL_error(L, "\"wound_hides\" needs a list of mesh names here, got %s", luaL_typename(L, 3));
+    wound = lua_pushstring(L, wound);
+    count = lua_rawlen(L, 3);
+    if (count > INT_MAX - 2 || count > SIZE_MAX / sizeof *names)
+        return luaL_error(L, "\"wound_hides\" mesh list is too large");
+    luaL_checkstack(L, (int)count + 2, "wound_hides mesh list");
+    names = (const char **)lua_newuserdatauv(L, (size_t)count * sizeof *names, 0);
+    for (i = 0; i < (int)count; i++) {
+        lua_rawgeti(L, 3, i + 1);
+        if (lua_type(L, -1) != LUA_TSTRING)
+            return luaL_error(L, "\"wound_hides\" needs mesh names in its list, got %s at %d", luaL_typename(L, -1), i + 1);
+        names[i] = lua_tostring(L, -1);
     }
-    top = (int)lua_rawlen(L, 3);
-    if (top > SH_AI_WOUND_MESHES) {
-        free(keep);
-        return luaL_error(L, "\"wound_hides\" takes at most %d meshes for one wound, got %d", SH_AI_WOUND_MESHES, top);
-    }
-    for (i = 1; i <= top; i++) {
-        lua_rawgeti(L, 3, i);
-        if (lua_type(L, -1) != LUA_TSTRING) {
-            free(keep);
-            return luaL_error(L, "\"wound_hides\" needs mesh names in its list, got %s at %d", luaL_typename(L, -1), i);
-        }
-        names[n++] = lua_tostring(L, -1);  /* kept on the stack until the call returns */
-    }
-    {
-        uint64_t h = sh_script_check_entity(L, 1, "wound_hides");
-        if (!g_engine) { free(keep); sh_script_refuse(L, "\"wound_hides\" is not available in this session (Snapmap+ could "
-                                                      "not find the game's AI functions; see the backend log)"); }
-        ai = h ? g_engine->entity((sh_script_handle)h) : NULL;
-    }
+    ai = h ? g_engine->entity(h) : NULL;
     if (ai && !g_engine->is_ai(ai) && !(g_gore_owner_test && g_gore_owner_test(ai))) {
-        free(keep);
         lua_pushboolean(L, 0);
         lua_pushstring(L, "this entity is neither a demon nor an entity with a gore component");
         return 2;
     }
-    st = (ai && keep) ? g_engine->wound_hides(ai, keep, names, n) : -1;
-    free(keep);
+    st = ai ? g_engine->wound_hides(ai, wound, names, (int)count) : -1;
     lua_pushboolean(L, st == 1);
     if (st == 1) return 1;
     lua_pushstring(L, st == -2 ? "the wound is not a loaded gorewounds decl"
@@ -3876,7 +3876,7 @@ int sh_script_ai_register(void)
     sh_script_api_on_spawn(sh_script_ai_spawned);
     sh_script_api_on_frame(force_via_step);
     sh_script_api_on_frame(anim_wait_step);
-    sh_script_handles_on_gone(wound_count_gone);
+    sh_script_handles_on_gone(wound_owner_gone);
     for (i = 0; i < (int)(sizeof k_calls / sizeof k_calls[0]); i++)
         n += sh_script_api_add(SH_SCRIPT_API_METHOD, k_calls[i].name, k_calls[i].fn);
     n += sh_script_api_add(SH_SCRIPT_API_GLOBAL, "destructible", l_destructible);
@@ -5649,22 +5649,53 @@ static ai_mesh_index_fn g_mesh_index;
 static ai_mesh_hide_fn g_mesh_hide;
 static int g_wound_failed;
 
-/* One record per demon that named hides, found by the demon and its spawn
- * id; a row is a wound decl (decls outlive the map) and mesh indices of the
- * demon's model. The detour reads it on the game's threads without a lock,
- * so it never moves; a row is complete before its wound pointer is set. */
-typedef struct {
-    void *volatile wound;
-    volatile LONG n;
-    int index[SH_AI_WOUND_MESHES];
+/* A game thread retains a complete row while displaying the wound. */
+typedef struct ai_wound_row {
+    struct ai_wound_row *next;
+    void *ai, *wound;
+    uint32_t spawn_id;
+    LONG refs;
+    int n;
+    int index[];
 } ai_wound_row;
-typedef struct {
-    void *volatile ai;
-    volatile LONG spawn_id;
-    ai_wound_row row[SH_AI_WOUND_ROWS];
-} ai_wound_rec;
-static ai_wound_rec g_wound[AI_PARKED_MAX];
-static volatile LONG g_wound_used;
+
+static SRWLOCK g_wound_lock = SRWLOCK_INIT;
+static ai_wound_row *g_wounds;
+
+static void wound_meshes_release(ai_wound_row *row)
+{
+    if (row && InterlockedDecrement(&row->refs) == 0) free(row);
+}
+
+static void wound_meshes_remove(uint32_t spawn_id)
+{
+    ai_wound_row **link, *row;
+    AcquireSRWLockExclusive(&g_wound_lock);
+    link = &g_wounds;
+    while ((row = *link) != NULL) {
+        if (spawn_id == SH_SCRIPT_SPAWN_ID_NONE || row->spawn_id == spawn_id) {
+            *link = row->next;
+            wound_meshes_release(row);
+        } else {
+            link = &row->next;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_wound_lock);
+}
+
+static ai_wound_row *wound_meshes_find(void *owner, uint32_t id, void *wound)
+{
+    ai_wound_row *row;
+    AcquireSRWLockShared(&g_wound_lock);
+    for (row = g_wounds; row; row = row->next) {
+        if (row->ai == owner && row->spawn_id == id && row->wound == wound) {
+            InterlockedIncrement(&row->refs);
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_wound_lock);
+    return row;
+}
 
 /* The owner of the gore component whose ShowWound runs on this thread: the
  * breakables the wound spawns are thrown in its frame (destructible). */
@@ -5673,6 +5704,7 @@ static __declspec(thread) void *t_wound_owner;
 static void show_wound_detour(void *gore, void **row)
 {
     void *wound = NULL, *owner = NULL, *was = t_wound_owner;
+    ai_wound_row *meshes = NULL;
     __try { t_wound_owner = gore ? *(void * const *)((const uint8_t *)gore + SH_AI_GORE_OWNER) : NULL; }
     __except (av_only(GetExceptionCode())) { t_wound_owner = NULL; }
     g_wound_orig(gore, row);
@@ -5686,70 +5718,52 @@ static void show_wound_detour(void *gore, void **row)
             owner = *(void * const *)((const uint8_t *)gore + SH_AI_GORE_OWNER);
         }
         if (wound && owner) {
-            int i, k, j, used = (int)g_wound_used;
-            for (i = 0; i < used; i++) {
-                void *model;
-                if (g_wound[i].ai != owner) continue;
-                if (spawn_id_of(owner) != (uint32_t)g_wound[i].spawn_id) break;
-                model = *(void * const *)((const uint8_t *)owner + SH_AI_OFF_MODEL);
-                if (!model) break;
-                for (k = 0; k < SH_AI_WOUND_ROWS; k++) {
-                    int n;
-                    if (g_wound[i].row[k].wound != wound) continue;
-                    n = (int)g_wound[i].row[k].n;
-                    for (j = 0; j < n && j < SH_AI_WOUND_MESHES; j++) g_mesh_hide(model, g_wound[i].row[k].index[j]);
-                    break;
-                }
-                break;
-            }
+            int i;
+            void *model = *(void * const *)((const uint8_t *)owner + SH_AI_OFF_MODEL);
+            if (model) meshes = wound_meshes_find(owner, spawn_id_of(owner), wound);
+            if (meshes) for (i = 0; i < meshes->n; i++) g_mesh_hide(model, meshes->index[i]);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
+    wound_meshes_release(meshes);
 }
 
 static int e_wound_hides(void *ai, const char *wound, const char *const *meshes, int n)
 {
     void *decl = sh_script_combat_decl("gorewounds", wound);
     uint32_t id = spawn_id_of(ai);
-    int i, k, slot = -1, used = (int)g_wound_used, index[SH_AI_WOUND_MESHES];
+    ai_wound_row *row, *old, **link;
     void *model = NULL;
+    int i;
     if (!decl) return -2;
-    if (id == SH_SCRIPT_SPAWN_ID_NONE || !g_mesh_index || !g_mesh_hide || n < 0 || n > SH_AI_WOUND_MESHES) return -1;
+    if (id == SH_SCRIPT_SPAWN_ID_NONE || !g_mesh_index || !g_mesh_hide || n < 0 ||
+        (size_t)n > (SIZE_MAX - sizeof *row) / sizeof row->index[0]) return -1;
     __try { model = *(void * const *)((const uint8_t *)ai + SH_AI_OFF_MODEL); }
     __except (EXCEPTION_EXECUTE_HANDLER) { model = NULL; }
     if (!model) return -1;
+    row = (ai_wound_row *)malloc(sizeof *row + (size_t)n * sizeof row->index[0]);
+    if (!row) return -1;
+    row->ai = ai;
+    row->spawn_id = id;
+    row->wound = decl;
+    row->refs = 1;
+    row->n = n;
     for (i = 0; i < n; i++) {
-        int at = -1;
-        __try { at = g_mesh_index(model, meshes[i]); } __except (EXCEPTION_EXECUTE_HANDLER) { at = -1; }
-        if (at < 0) return -3;
-        index[i] = at;
+        __try { row->index[i] = g_mesh_index(model, meshes[i]); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { row->index[i] = -1; }
+        if (row->index[i] < 0) { free(row); return -3; }
     }
     if (!commit_hook((void *)g_wound_target, (void *)show_wound_detour, k_ai_wound_prologue, SH_AI_WOUND_STOLEN,
-                     (void **)&g_wound_orig, &g_wound_failed, "wound_hides"))
+                     (void **)&g_wound_orig, &g_wound_failed, "wound_hides")) {
+        free(row);
         return -1;
-    for (i = 0; i < used; i++) {
-        void *p = g_wound[i].ai;
-        if (p == ai && (uint32_t)g_wound[i].spawn_id == id) { slot = i; break; }
-        if (slot < 0 && (!p || spawn_id_of(p) != (uint32_t)g_wound[i].spawn_id)) slot = i;
     }
-    if (i == used && slot < 0 && used < AI_PARKED_MAX) slot = used;
-    if (slot < 0) return -1;
-    if (g_wound[slot].ai != ai || (uint32_t)g_wound[slot].spawn_id != id) {
-        g_wound[slot].ai = NULL;
-        for (k = 0; k < SH_AI_WOUND_ROWS; k++) {
-            g_wound[slot].row[k].wound = NULL;
-            InterlockedExchange(&g_wound[slot].row[k].n, 0);
-        }
-        InterlockedExchange(&g_wound[slot].spawn_id, (LONG)id);
-    }
-    for (k = 0; k < SH_AI_WOUND_ROWS; k++)
-        if (g_wound[slot].row[k].wound == decl || !g_wound[slot].row[k].wound) break;
-    if (k == SH_AI_WOUND_ROWS) return -1;
-    InterlockedExchangePointer((PVOID volatile *)&g_wound[slot].row[k].wound, NULL);
-    for (i = 0; i < n; i++) g_wound[slot].row[k].index[i] = index[i];
-    InterlockedExchange(&g_wound[slot].row[k].n, (LONG)n);
-    InterlockedExchangePointer((PVOID volatile *)&g_wound[slot].row[k].wound, decl);
-    InterlockedExchangePointer((PVOID volatile *)&g_wound[slot].ai, ai);
-    if (slot >= used) InterlockedExchange(&g_wound_used, slot + 1);
+    AcquireSRWLockExclusive(&g_wound_lock);
+    for (link = &g_wounds; (old = *link) != NULL; link = &old->next)
+        if (old->ai == ai && old->spawn_id == id && old->wound == decl) break;
+    row->next = old ? old->next : NULL;
+    *link = row;
+    ReleaseSRWLockExclusive(&g_wound_lock);
+    wound_meshes_release(old);
     return 1;
 }
 
