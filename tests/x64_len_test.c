@@ -87,33 +87,7 @@ static void check_cases(void)
     }
 }
 
-static uint8_t *map_pe_by_rva(const char *path)
-{
-    FILE *f = fopen(path, "rb");
-    long fsz;
-    uint8_t *file, *img;
-    IMAGE_DOS_HEADER *dos;
-    IMAGE_NT_HEADERS *nt;
-    IMAGE_SECTION_HEADER *sec;
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END); fsz = ftell(f); fseek(f, 0, SEEK_SET);
-    file = (uint8_t *)malloc(fsz);
-    if (!file || fread(file, 1, fsz, f) != (size_t)fsz) { fclose(f); free(file); return NULL; }
-    fclose(f);
-    dos = (IMAGE_DOS_HEADER *)file;
-    nt = (IMAGE_NT_HEADERS *)(file + dos->e_lfanew);
-    img = (uint8_t *)calloc(1, nt->OptionalHeader.SizeOfImage);
-    if (!img) { free(file); return NULL; }
-    memcpy(img, file, nt->OptionalHeader.SizeOfHeaders);
-    sec = IMAGE_FIRST_SECTION(nt);
-    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-        uint32_t va = sec[i].VirtualAddress, rs = sec[i].SizeOfRawData, po = sec[i].PointerToRawData;
-        if (rs && va + rs <= nt->OptionalHeader.SizeOfImage && po + rs <= (uint32_t)fsz)
-            memcpy(img + va, file + po, rs);
-    }
-    free(file);
-    return img;
-}
+#include "image_map.h"
 
 /* Boundaries and RIP-relative flags from capstone on both 13954591 images. */
 static const struct { const char *name; size_t boundary; int rip; } ALGO[] = {
@@ -126,7 +100,7 @@ static const struct { const char *name; size_t boundary; int rip; } ALGO[] = {
 static void check_image(const char *path)
 {
     wchar_t wide[MAX_PATH];
-    uint8_t *base = map_pe_by_rva(path);
+    uint8_t *base = test_image_read(path, NULL, NULL);
     const sh_build_identity *identity;
     if (!base) { printf("FAIL cannot map %s\n", path); g_fail = 1; return; }
     MultiByteToWideChar(CP_ACP, 0, path, -1, wide, MAX_PATH);

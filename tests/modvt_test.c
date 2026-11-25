@@ -916,34 +916,7 @@ static void detours(void)
 
 /* ------------------------------------------------------------------ executables */
 
-static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
-{
-    FILE *f = NULL;
-    long fsz;
-    uint8_t *file, *img;
-    IMAGE_DOS_HEADER *dos;
-    IMAGE_NT_HEADERS *nt;
-    IMAGE_SECTION_HEADER *sec;
-    int i;
-    if (fopen_s(&f, path, "rb") || !f) return NULL;
-    fseek(f, 0, SEEK_END); fsz = ftell(f); fseek(f, 0, SEEK_SET);
-    file = (uint8_t *)malloc(fsz);
-    if (!file || fread(file, 1, fsz, f) != (size_t)fsz) { fclose(f); free(file); return NULL; }
-    fclose(f);
-    dos = (IMAGE_DOS_HEADER *)file;
-    nt = (IMAGE_NT_HEADERS *)(file + dos->e_lfanew);
-    img = (uint8_t *)calloc(1, nt->OptionalHeader.SizeOfImage);
-    if (!img) { free(file); return NULL; }
-    memcpy(img, file, nt->OptionalHeader.SizeOfHeaders);
-    sec = IMAGE_FIRST_SECTION(nt);
-    for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
-        if (sec[i].SizeOfRawData && sec[i].VirtualAddress + sec[i].SizeOfRawData <= nt->OptionalHeader.SizeOfImage &&
-            sec[i].PointerToRawData + sec[i].SizeOfRawData <= (uint32_t)fsz)
-            memcpy(img + sec[i].VirtualAddress, file + sec[i].PointerToRawData, sec[i].SizeOfRawData);
-    *image_sz = nt->OptionalHeader.SizeOfImage;
-    free(file);
-    return img;
-}
+#include "image_map.h"
 
 /* A RIP-relative LEA in code[0..len) (at rva) whose target is `target`. */
 static int lea_to(const uint8_t *code, size_t len, uint32_t rva, uint32_t target)
@@ -969,7 +942,7 @@ static const sig_result *find_sig(sig_result *results, size_t total, const char 
 static void image(const char *path)
 {
     size_t sz = 0, total;
-    uint8_t *base = map_pe_by_rva(path, &sz);
+    uint8_t *base = test_image_read(path, &sz, NULL);
     wchar_t wide[MAX_PATH];
     const sh_build_identity *id;
     static sig_result results[SIG_RESULTS_MAX];

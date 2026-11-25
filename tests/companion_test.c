@@ -185,7 +185,6 @@ static void test_spawn_pose(void)
     CHECK(close_to(pose[3], 0) && close_to(pose[4], 1) && close_to(pose[6], -1) && close_to(pose[11], 1));
 }
 
-
 static int arm(int resolved, int on_main, int installed, int changed, int owners, int prologue_ok)
 {
     sh_companion_arm a;
@@ -217,34 +216,7 @@ static void test_arm(void)
     CHECK(!strcmp(sh_companion_arm_name(SH_COMPANION_ARM_FOREIGN), "prologue changed"));
 }
 
-
-static uint8_t *map_pe_by_rva(const char *path)
-{
-    FILE *f = fopen(path, "rb");
-    long fsz;
-    uint8_t *file, *img;
-    IMAGE_DOS_HEADER *dos;
-    IMAGE_NT_HEADERS *nt;
-    IMAGE_SECTION_HEADER *sec;
-    int i;
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END); fsz = ftell(f); fseek(f, 0, SEEK_SET);
-    file = (uint8_t *)malloc(fsz);
-    if (!file || fread(file, 1, fsz, f) != (size_t)fsz) { fclose(f); free(file); return NULL; }
-    fclose(f);
-    dos = (IMAGE_DOS_HEADER *)file;
-    nt = (IMAGE_NT_HEADERS *)(file + dos->e_lfanew);
-    img = (uint8_t *)calloc(1, nt->OptionalHeader.SizeOfImage);
-    if (!img) { free(file); return NULL; }
-    memcpy(img, file, nt->OptionalHeader.SizeOfHeaders);
-    sec = IMAGE_FIRST_SECTION(nt);
-    for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
-        if (sec[i].SizeOfRawData && sec[i].VirtualAddress + sec[i].SizeOfRawData <= nt->OptionalHeader.SizeOfImage &&
-            sec[i].PointerToRawData + sec[i].SizeOfRawData <= (DWORD)fsz)
-            memcpy(img + sec[i].VirtualAddress, file + sec[i].PointerToRawData, sec[i].SizeOfRawData);
-    free(file);
-    return img;
-}
+#include "image_map.h"
 
 static void test_image(const char *path)
 {
@@ -253,7 +225,7 @@ static void test_image(const char *path)
                                            0x74, 0x21, 0x48, 0x8B, 0x01, 0xFF, 0x10, 0x8B, 0x48, 0x68 };
     wchar_t wide[MAX_PATH];
     const sh_build_identity *id;
-    uint8_t *base = map_pe_by_rva(path);
+    uint8_t *base = test_image_read(path, NULL, NULL);
     sig_result r[8];
     int i, n = 0, bad = 0;
     CHECK(base != NULL);

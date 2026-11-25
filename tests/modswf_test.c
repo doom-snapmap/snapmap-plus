@@ -252,33 +252,7 @@ static void test_builder(void)
     }
 }
 
-static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
-{
-    FILE *f = fopen(path, "rb");
-    long fsz;
-    uint8_t *file, *img;
-    IMAGE_DOS_HEADER *dos;
-    IMAGE_NT_HEADERS *nt;
-    IMAGE_SECTION_HEADER *sec;
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END); fsz = ftell(f); fseek(f, 0, SEEK_SET);
-    file = (uint8_t *)malloc(fsz);
-    if (!file || fread(file, 1, fsz, f) != (size_t)fsz) { fclose(f); free(file); return NULL; }
-    fclose(f);
-    dos = (IMAGE_DOS_HEADER *)file;
-    nt = (IMAGE_NT_HEADERS *)(file + dos->e_lfanew);
-    img = (uint8_t *)calloc(1, nt->OptionalHeader.SizeOfImage);
-    if (!img) { free(file); return NULL; }
-    memcpy(img, file, nt->OptionalHeader.SizeOfHeaders);
-    sec = IMAGE_FIRST_SECTION(nt);
-    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-        uint32_t va = sec[i].VirtualAddress, rs = sec[i].SizeOfRawData, po = sec[i].PointerToRawData;
-        if (rs && va + rs <= nt->OptionalHeader.SizeOfImage && po + rs <= (uint32_t)fsz) memcpy(img + va, file + po, rs);
-    }
-    *image_sz = nt->OptionalHeader.SizeOfImage;
-    free(file);
-    return img;
-}
+#include "image_map.h"
 
 typedef struct expect { uint32_t load, state, alloc, ctor, open, slot; } expect;
 static const expect VK = { 0x172B3B0u, 0x282140u, 0x1B2BD1Cu, 0x29F950u, 0x16C66A0u, 0x2868BB8u };
@@ -287,7 +261,7 @@ static const expect GL = { 0x172C040u, 0x282360u, 0x1B4623Cu, 0x29FB50u, 0x16C73
 static void test_image(const char *path)
 {
     size_t size = 0, i;
-    uint8_t *base = map_pe_by_rva(path, &size);
+    uint8_t *base = test_image_read(path, &size, NULL);
     wchar_t wide[MAX_PATH];
     const sh_build_identity *id;
     const sig_entry *entry = NULL;

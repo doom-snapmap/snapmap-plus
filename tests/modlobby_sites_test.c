@@ -15,33 +15,7 @@
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
 
-static uint8_t *map_pe_by_rva(const char *path)
-{
-    FILE *f = fopen(path, "rb");
-    long fsz;
-    uint8_t *file, *img;
-    IMAGE_DOS_HEADER *dos;
-    IMAGE_NT_HEADERS *nt;
-    IMAGE_SECTION_HEADER *sec;
-    int i;
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END); fsz = ftell(f); fseek(f, 0, SEEK_SET);
-    file = (uint8_t *)malloc(fsz);
-    if (!file || fread(file, 1, fsz, f) != (size_t)fsz) { fclose(f); free(file); return NULL; }
-    fclose(f);
-    dos = (IMAGE_DOS_HEADER *)file;
-    nt = (IMAGE_NT_HEADERS *)(file + dos->e_lfanew);
-    img = (uint8_t *)calloc(1, nt->OptionalHeader.SizeOfImage);
-    if (!img) { free(file); return NULL; }
-    memcpy(img, file, nt->OptionalHeader.SizeOfHeaders);
-    sec = IMAGE_FIRST_SECTION(nt);
-    for (i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-        uint32_t va = sec[i].VirtualAddress, rs = sec[i].SizeOfRawData, po = sec[i].PointerToRawData;
-        if (rs && va + rs <= nt->OptionalHeader.SizeOfImage && po + rs <= (uint32_t)fsz) memcpy(img + va, file + po, rs);
-    }
-    free(file);
-    return img;
-}
+#include "image_map.h"
 
 static const uint8_t *site(const uint8_t *base, const sig_result *results, size_t n, const char *name, int vulkan)
 {
@@ -67,7 +41,7 @@ static void write_over(uint8_t *at, size_t stolen)
 static void check_image(const char *path)
 {
     wchar_t wide[MAX_PATH];
-    uint8_t *base = map_pe_by_rva(path);
+    uint8_t *base = test_image_read(path, NULL, NULL);
     const sh_build_identity *identity;
     sig_result *results;
     size_t n, cap = sig_db_count();

@@ -18,35 +18,7 @@
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
 
-static uint8_t *map_pe_by_rva(const char *path, size_t *size, uint64_t *image_base)
-{
-    FILE *f = fopen(path, "rb");
-    long fsz;
-    uint8_t *file, *img;
-    IMAGE_DOS_HEADER *dos;
-    IMAGE_NT_HEADERS *nt;
-    IMAGE_SECTION_HEADER *sec;
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END); fsz = ftell(f); fseek(f, 0, SEEK_SET);
-    file = (uint8_t *)malloc(fsz);
-    if (!file || fread(file, 1, fsz, f) != (size_t)fsz) { fclose(f); free(file); return NULL; }
-    fclose(f);
-    dos = (IMAGE_DOS_HEADER *)file;
-    nt = (IMAGE_NT_HEADERS *)(file + dos->e_lfanew);
-    img = (uint8_t *)calloc(1, nt->OptionalHeader.SizeOfImage + 64);
-    if (!img) { free(file); return NULL; }
-    memcpy(img, file, nt->OptionalHeader.SizeOfHeaders);
-    sec = IMAGE_FIRST_SECTION(nt);
-    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-        uint32_t va = sec[i].VirtualAddress, rs = sec[i].SizeOfRawData, po = sec[i].PointerToRawData;
-        if (rs && va + rs <= nt->OptionalHeader.SizeOfImage && po + rs <= (uint32_t)fsz)
-            memcpy(img + va, file + po, rs);
-    }
-    *size = nt->OptionalHeader.SizeOfImage;
-    *image_base = nt->OptionalHeader.ImageBase;
-    free(file);
-    return img;
-}
+#include "image_map.h"
 
 /* Primary vtable of an MSVC class: type descriptor name -> complete object
  * locator (signature 1, offset 0, self RVA) -> the qword that points at it. */
@@ -104,7 +76,7 @@ static void check_image(const char *path)
     wchar_t wide[MAX_PATH];
     size_t size = 0, n;
     uint64_t image_base = 0;
-    uint8_t *img = map_pe_by_rva(path, &size, &image_base);
+    uint8_t *img = test_image_read(path, &size, &image_base);
     const sh_build_identity *identity;
     sig_result results[SIG_RESULTS_MAX];
     uint32_t vt, readfile, slots[64];

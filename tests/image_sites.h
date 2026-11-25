@@ -15,39 +15,13 @@
 static int g_image_fail = 0;
 #define IMG_CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_image_fail = 1; } } while (0)
 
-static uint8_t *map_pe_by_rva(const char *path)
-{
-    FILE *f = fopen(path, "rb");
-    long fsz;
-    uint8_t *file, *img;
-    IMAGE_DOS_HEADER *dos;
-    IMAGE_NT_HEADERS *nt;
-    IMAGE_SECTION_HEADER *sec;
-    int i;
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END); fsz = ftell(f); fseek(f, 0, SEEK_SET);
-    file = (uint8_t *)malloc(fsz);
-    if (!file || fread(file, 1, fsz, f) != (size_t)fsz) { fclose(f); free(file); return NULL; }
-    fclose(f);
-    dos = (IMAGE_DOS_HEADER *)file;
-    nt = (IMAGE_NT_HEADERS *)(file + dos->e_lfanew);
-    img = (uint8_t *)calloc(1, nt->OptionalHeader.SizeOfImage);
-    if (!img) { free(file); return NULL; }
-    memcpy(img, file, nt->OptionalHeader.SizeOfHeaders);
-    sec = IMAGE_FIRST_SECTION(nt);
-    for (i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-        uint32_t va = sec[i].VirtualAddress, rs = sec[i].SizeOfRawData, po = sec[i].PointerToRawData;
-        if (rs && va + rs <= nt->OptionalHeader.SizeOfImage && po + rs <= (uint32_t)fsz) memcpy(img + va, file + po, rs);
-    }
-    free(file);
-    return img;
-}
+#include "image_map.h"
 
 /* Map the executable and bind its identity; NULL (after a FAIL line) when it is not a supported build. */
 static uint8_t *image_open(const char *path, const sh_build_identity **identity)
 {
     wchar_t wide[MAX_PATH];
-    uint8_t *base = map_pe_by_rva(path);
+    uint8_t *base = test_image_read(path, NULL, NULL);
     if (!base) { printf("FAIL cannot map %s\n", path); g_image_fail = 1; return NULL; }
     MultiByteToWideChar(CP_ACP, 0, path, -1, wide, MAX_PATH);
     *identity = sh_host_test_bind_image(base, wide);

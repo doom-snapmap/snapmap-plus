@@ -10,36 +10,7 @@
 #include "host_image.h"
 #include "engine_build.h"
 
-static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "open %s failed\n", path); return NULL; }
-    fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
-    uint8_t *file = (uint8_t *)malloc(fsz);
-    if (!file || fread(file, 1, fsz, f) != (size_t)fsz) { fclose(f); free(file); return NULL; }
-    fclose(f);
-
-    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)file;
-    IMAGE_NT_HEADERS *nt  = (IMAGE_NT_HEADERS *)(file + dos->e_lfanew);
-    uint32_t image_size = nt->OptionalHeader.SizeOfImage;
-    uint32_t hdr_size   = nt->OptionalHeader.SizeOfHeaders;
-
-    uint8_t *img = (uint8_t *)calloc(1, image_size);
-    if (!img) { free(file); return NULL; }
-    memcpy(img, file, hdr_size);
-
-    IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
-    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-        uint32_t va = sec[i].VirtualAddress;
-        uint32_t rs = sec[i].SizeOfRawData;
-        uint32_t po = sec[i].PointerToRawData;
-        if (rs && va + rs <= image_size && po + rs <= (uint32_t)fsz)
-            memcpy(img + va, file + po, rs);
-    }
-    free(file);
-    *image_sz = image_size;
-    return img;
-}
+#include "image_map.h"
 
 static uint32_t rva_of(const uint8_t *base, const char *name, int *bad)
 {
@@ -104,7 +75,7 @@ int main(int argc, char **argv)
         return 2;
     }
     size_t image_sz = 0;
-    uint8_t *base = map_pe_by_rva(argv[1], &image_sz);
+    uint8_t *base = test_image_read(argv[1], &image_sz, NULL);
     if (!base) return 2;
 
     wchar_t wide[MAX_PATH];
