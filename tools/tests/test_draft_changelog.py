@@ -251,10 +251,6 @@ class TestScrub(unittest.TestCase):
         self.assertLessEqual(len(dc.scrub_body("x" * 5000)), dc.MAX_BODY_CHARS)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestGoldenFixtureSharedWithTheCli(unittest.TestCase):
     """Keep the rendered entry equal to the fixture consumed by the Go parser.
     After an intended format change, regenerate with:
@@ -416,3 +412,7 @@ class TestBudgets(unittest.TestCase):
         self.assertNotIn("{MAX_ITEMS}", text)
         self.assertNotIn("{MAX_SUMMARY}", text)
         self.assertNotIn("At most 6 ", dc.SYSTEM)
+
+
+if __name__ == "__main__":
+    unittest.main()

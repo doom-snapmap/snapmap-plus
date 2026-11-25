@@ -413,9 +413,7 @@ workflow refuses to draft from the entire history. Pass the last beta as the bas
 tag. The release is created as a draft, every asset is uploaded and read back unchanged, and only then is
 it published, so the newest release never lacks its downloads.
 
-Release binaries are not code-signed. `release.yml` holds a disabled signing step after compilation and
-before packaging, hashing and attestation, naming the repository variables and secrets it needs; enabling
-it is a change to that step's condition once a signing account exists (see [services](services.md)).
+Release binaries use the bundle manifest and GitHub artifact attestations. See [services](services.md).
 
 Before merging, the maintainer reads the complete pull request: its description, every commit message, the
 full diff, review discussion, linked issues, and reported validation. Coherent commits are rebased and
