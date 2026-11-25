@@ -1,6 +1,7 @@
 /* Injects bundle and baked #str_ mappings, then sorts the live dictionary by hash; install injects, the sort
  * hook is a fallback. Native 32-byte record: +0x00 lowercased FNV-1a hash, +0x08 interned key handle,
  * +0x10 interned value handle, value lengths at +0x18/+0x1c; the engine owns the string pool and list. */
+#include "rip_slot.h"
 #include "safe_read.h"
 #include <windows.h>
 #include <stdint.h>
@@ -46,25 +47,6 @@ static volatile LONG g_injected      = 0;      /* one-shot latch (0 = not yet in
 static volatile LONG g_in_sort       = 0;      /* recursion guard (>0 = inside the sort already) */
 static volatile LONG g_inject_count  = 0;      /* rows appended (observability) */
 static int g_table_changed;                     /* the last pass wrote to the live table */
-
-/* Decode the first LEA RCX,[rip+disp32] in StridsTableLea to find the dictionary descriptor; a later
- * matching LEA references the error string. */
-#define LEA_SCAN_WINDOW 0x40
-
-static void *decode_table_global(const uint8_t *table_lea_fn)
-{
-    uint8_t b[LEA_SCAN_WINDOW];
-    if (!sh_safe_read(table_lea_fn, b, sizeof b)) return NULL;
-    for (int i = 0; i + 7 <= LEA_SCAN_WINDOW; i++) {
-        if (b[i] == 0x48 && b[i + 1] == 0x8D && b[i + 2] == 0x0D) {     /* LEA RCX,[rip+disp32] */
-            int32_t disp;
-            memcpy(&disp, &b[i + 3], 4);
-            const uint8_t *rip_next = table_lea_fn + i + 7;
-            return (void *)(rip_next + disp);
-        }
-    }
-    return NULL;
-}
 
 /* Keys deduplicate case-insensitively within a pass (the native hash lowercases; duplicate rows would make
  * lookup ambiguous): first writer wins, admitted bundles in modserve's order, then baked defaults. */
@@ -838,7 +820,7 @@ static void sh_sort_detour(void *ctx, void *arr, uint32_t count, uint32_t radix)
     InterlockedDecrement(&g_in_sort);
 }
 
-int sh_strids_install(void *sort_body_fn, int sort_status_ok,
+int sh_strids_install(void *sort_body_fn,
                       void *table_lea_fn, void *insert_fn, void *hash_fn, void *idstr_ctor_fn)
 {
     char line[256];
@@ -853,11 +835,6 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
         backend_log("STRINGS: injector SKIPPED -- StridsSortBody not resolved");
         return 0;
     }
-    if (!sort_status_ok) {
-        backend_log("STRINGS: injector SKIPPED -- StridsSortBody resolved via hook-tolerant fallback "
-                    "(prologue already hooked); not installing over an existing detour");
-        return 0;
-    }
     if (table_lea_fn == NULL || insert_fn == NULL || hash_fn == NULL || idstr_ctor_fn == NULL) {
         _snprintf_s(line, sizeof line, _TRUNCATE,
             "STRINGS: injector SKIPPED -- missing engine fn (lea=%p insert=%p hash=%p ctor=%p)",
@@ -866,7 +843,7 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
         return 0;
     }
 
-    g_table_desc = decode_table_global((const uint8_t *)table_lea_fn);
+    g_table_desc = (void *)sh_rip_slot((const uint8_t *)table_lea_fn, SH_RIP_RCX, SH_RIP_LEA);
     if (g_table_desc == NULL) {
         backend_log("STRINGS: injector SKIPPED -- could not decode the table-global LEA "
                     "(StridsTableLea layout shifted?)");
@@ -979,7 +956,7 @@ int sh_strids_refresh_pending(void)
 /* The table-global decode the install runs, for the image-backed test. */
 void *sh_strids_test_decode_table_global(const uint8_t *table_lea_fn)
 {
-    return decode_table_global(table_lea_fn);
+    return (void *)sh_rip_slot(table_lea_fn, SH_RIP_RCX, SH_RIP_LEA);
 }
 
 /* Bind doubles for the four native helpers and inspect the rows requested by

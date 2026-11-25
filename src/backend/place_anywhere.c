@@ -69,5 +69,4 @@ int sh_place_anywhere_install(const sig_result *results,size_t count)
     backend_log(line);
     return 1;
 }
-int sh_place_anywhere_live(void){return g_live;}
 #endif

@@ -9,6 +9,7 @@
 #include "saved_maps.h"
 #include "raw_deflate.h"
 
+#ifdef SH_SAVED_MAP_FIXTURE
 static SRWLOCK g_lock = SRWLOCK_INIT;
 static char *g_root;   /* an override (tests, tools), malloc'd; NULL: the game's folder */
 
@@ -19,6 +20,7 @@ void sh_saved_maps_set_root(const char *path)
     g_root = path ? sh_text(path) : NULL;
     ReleaseSRWLockExclusive(&g_lock);
 }
+#endif
 
 static wchar_t *sm_wide(const char *utf8)
 {
@@ -40,10 +42,13 @@ char *sh_saved_maps_root(void)
 {
     PWSTR saved = NULL;
     char *utf8, *out = NULL;
+#ifdef SH_SAVED_MAP_FIXTURE
     AcquireSRWLockShared(&g_lock);
     if (g_root) out = sh_text(g_root);
     ReleaseSRWLockShared(&g_lock);
     if (out) return out;
+#endif
+
     if (FAILED(SHGetKnownFolderPath(&FOLDERID_SavedGames, 0, NULL, &saved)) || !saved) {
         if (saved) CoTaskMemFree(saved);
         return NULL;

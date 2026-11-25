@@ -139,7 +139,8 @@ int main(int argc, char **argv)
         {
             IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
             IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
-            uintptr_t slot = sh_engine_game_system_slot(base);
+            uint32_t slot_rva = sh_host_image_rva(base, 0x2F48600u, 0x2F905D8u);
+            uintptr_t slot = slot_rva ? (uintptr_t)base + slot_rva : 0;
             /* idGameSystemLocal: Vulkan 0x2F48970, OpenGL 0x2F90970 (build 13954591). */
             uintptr_t system = (uintptr_t)base + (identity->vulkan ? 0x2F48970u : 0x2F90970u);
             uint64_t va = 0;

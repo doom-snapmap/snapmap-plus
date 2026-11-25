@@ -1558,7 +1558,7 @@ static void test_local_standins(const char *top)
         CreateDirectoryA(saves, NULL);
         sh_cache_set_map_folders(saved, played);
         sh_saved_maps_set_root(saves);
-        (void)sh_modmanifest_prepare_load(map, sizeof map - 1, NULL);
+        sh_modmanifest_prepare_load(map, sizeof map - 1);
         CHECK(sh_cache_sweep(0, NULL, 0, &st) && st.unreadable == 0);
         CHECK(sh_cache_composed(none, NULL));
         sh_modmanifest_reset();

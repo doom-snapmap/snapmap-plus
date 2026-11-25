@@ -554,21 +554,6 @@ static int dt_same(const sh_dt_node *a, const sh_dt_node *b, int with_key)
     return eq;
 }
 
-int sh_dt_equal(const sh_dt *a, const sh_dt *b)
-{
-    if (!a || !b || !a->root || !b->root) return 0;
-    return dt_same(a->root, b->root, 0);
-}
-
-int sh_dt_texts_equal(const char *a, size_t alen, const char *b, size_t blen)
-{
-    sh_dt *x = sh_dt_parse(a, alen, NULL, 0), *y = x ? sh_dt_parse(b, blen, NULL, 0) : NULL;
-    int eq = x && y && sh_dt_equal(x, y);
-    sh_dt_free(x);
-    sh_dt_free(y);
-    return eq;
-}
-
 /* The canonical head of a member: its key, plus ` <name>` for a named block. */
 static char *dt_head(const sh_dt_node *n)
 {
@@ -1098,14 +1083,6 @@ int sh_dt_counts_total(const sh_dt_counts *c)
 }
 
 /* The SHA-256 is the caller's (modbundle has it); here a stable digest of the stock text. */
-static unsigned long long dt_fnv(const char *s, size_t n)
-{
-    unsigned long long h = 1469598103934665603ull;
-    size_t i;
-    for (i = 0; i < n; ++i) { h ^= (unsigned char)s[i]; h *= 1099511628211ull; }
-    return h;
-}
-
 char *sh_dt_diff(const char *request, const char *stock, size_t stock_len, const char *copy, size_t copy_len,
                  sh_dt_counts *counts, char *cause, size_t cap)
 {
@@ -1128,7 +1105,7 @@ char *sh_dt_diff(const char *request, const char *stock, size_t stock_len, const
     if (d.failed || d.out.oom) { free(d.out.p); dt_cause(cause, cap, "out of memory"); return NULL; }
     sh_text_append_str(&o, "{\"file\":");
     dt_jcstr(&o, request ? request : "");
-    _snprintf_s(tmp, sizeof tmp, _TRUNCATE, ",\"stock\":\"%016llx\"", dt_fnv(stock, stock_len));
+    _snprintf_s(tmp, sizeof tmp, _TRUNCATE, ",\"stock\":\"%016llx\"", sh_text_hash(stock, stock_len));
     sh_text_append_str(&o, tmp);
     _snprintf_s(tmp, sizeof tmp, _TRUNCATE, ",\"counts\":{\"set\":%d,\"remove\":%d,\"list\":%d,\"keyed\":%d,\"bag\":%d,\"drop\":%d}",
                 d.counts.set, d.counts.remove, d.counts.list, d.counts.keyed, d.counts.bag, d.counts.drop);
@@ -1267,7 +1244,7 @@ static unsigned long long dt_op_digest(const dt_op *op)
     char *txt;
     if (op->kind == OP_REMOVE || op->kind == OP_UNKEY || !op->entry) return 0x52454d4f564544ull;
     t = sh_dt_parse("{}", 2, NULL, 0);
-    h = dt_fnv(op->entry, strlen(op->entry));
+    h = sh_text_hash(op->entry, strlen(op->entry));
     if (t) {
         sh_text_buf w = { NULL, 0, 0, 0 };
         sh_dt_node *root;
@@ -1277,7 +1254,7 @@ static unsigned long long dt_op_digest(const dt_op *op)
         sh_text_append_str(&w, "\n}");
         in = w.p ? dt_copy(t, w.p, w.n) : NULL;
         root = in ? dt_parse_into(t, in, w.n, NULL, 0) : NULL;
-        if (root && root->nkids == 1 && (txt = dt_sorted_text(root->kids[0], 1)) != NULL) { h = dt_fnv(txt, strlen(txt)); free(txt); }
+        if (root && root->nkids == 1 && (txt = dt_sorted_text(root->kids[0], 1)) != NULL) { h = sh_text_hash(txt, strlen(txt)); free(txt); }
         free(w.p);
         sh_dt_free(t);
     }

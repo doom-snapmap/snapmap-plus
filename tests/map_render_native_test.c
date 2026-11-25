@@ -5,6 +5,15 @@
 #include <string.h>
 #include <math.h>
 #include "image_sites.h"
+#include "map_carrier.h"
+
+static void prepare_map_settings(const char *json, size_t len)
+{
+    sh_carrier_view view;
+    sh_carrier_view_read(json, len, &view);
+    sh_map_settings_prepare_load(view.settings.present ? json + view.settings.from : NULL, view.settings.to - view.settings.from);
+}
+
 static int no_metadata_logs,unlocked_logs,stored_logs,off_logs;
 void backend_log(const char *s)
 {
@@ -51,15 +60,14 @@ static void unlocked_block(const float *values,float native)
  * it as "render" (an unreadable array part when broken is set): the open map's settings are then that map's. */
 static void parse_map(const char *value,int broken)
 {
-    char json[1024];size_t n=0;char *out;
+    char json[1024];
     _snprintf_s(json,sizeof json,_TRUNCATE,
         "{\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
         "{\"info\":{\"name\":\"author\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"x\",\"~type\":\"snapVarString_t\"}"
         "],\"~type\":\"idSnapVariables\"}%s%s%s}",
         value?(broken?",\"snapmap-plus\":{\"format\":2,\"settings\":[\"":",\"snapmap-plus\":{\"format\":2,\"settings\":{\"render\":\""):"",
         value?value:"",value?(broken?"\"]}":"\"}}"):"");
-    out=sh_map_settings_prepare_load(json,strlen(json),&n);
-    assert(!out);
+    prepare_map_settings(json,strlen(json));
     sh_map_settings_loaded(1);
 }
 static int synthetic_main(void)

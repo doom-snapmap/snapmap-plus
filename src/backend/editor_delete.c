@@ -17,6 +17,7 @@
  * frees selection+0x50/+0x68/+0x80/+0xA8, VK 0x117E0C0 from 0x1203DB0) frees the released array and DOOM
  * stops with "Memory corruption before block!". So every native call runs in a verified process-heap
  * scope, and a request without one is refused unchanged. */
+#include "image_view.h"
 #include "safe_read.h"
 #include <windows.h>
 #include <stdlib.h>
@@ -480,17 +481,6 @@ static int on_main_thread(void)
     return (DWORD)id == GetCurrentThreadId() ? 1 : 0;
 }
 
-static size_t image_size(const uint8_t *base)
-{
-    __try {
-        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
-        const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
-        return nt->OptionalHeader.SizeOfImage;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
-
 int sh_editor_delete_install(const sig_result *results, size_t n, const uint8_t *module_base,
                              const uint8_t *editor, int (*manipulation_in_progress)(void))
 {
@@ -498,7 +488,7 @@ int sh_editor_delete_install(const sig_result *results, size_t n, const uint8_t 
     char line[256];
     memset(&e, 0, sizeof e);
     uintptr_t action = sig_addr_by_name(results, n, "SelectionDeleteAction");
-    size_t span = module_base ? image_size(module_base) : 0;
+    size_t span = sh_pe_image_size(module_base);
     uintptr_t clear = span ? sh_editor_delete_decode_clear_hover((const uint8_t *)action, module_base, span) : 0;
     e.editor = (uint8_t *)editor;
     e.clear_selection = (void (*)(void *))sig_addr_by_name(results, n, "ClearSelection");

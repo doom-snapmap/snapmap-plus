@@ -72,19 +72,19 @@ static char *build(const fake_def *defs, int ndefs, const char *const *names, in
 
 static void test_names(void)
 {
-    CHECK(sh_at_under_mods("mods/x/y.md6"));
-    CHECK(sh_at_under_mods("MODS\\x\\y.md6"));
-    CHECK(!sh_at_under_mods("player/mp/tp_body_mp.md6"));
-    CHECK(!sh_at_under_mods("mod/x"));
-    CHECK(!sh_at_under_mods("mods"));
-    CHECK(!sh_at_under_mods(NULL));
-    CHECK(sh_at_prop_of_mod(GUN, SALT));
-    CHECK(sh_at_prop_of_mod("MODS\\ABCD1234\\Gun.md6", SALT));
-    CHECK(!sh_at_prop_of_mod("mods/abcd12345/gun.md6", SALT));   /* a longer salt is another mod */
-    CHECK(!sh_at_prop_of_mod("mods/zzzz9999/gun.md6", SALT));
-    CHECK(!sh_at_prop_of_mod("mods/" SALT "/", SALT));
-    CHECK(!sh_at_prop_of_mod("weapons/shotgun/shotgun.md6", SALT));
-    CHECK(!sh_at_prop_of_mod(NULL, SALT));
+    CHECK(sh_ce_decl_under_mods("mods/x/y.md6"));
+    CHECK(sh_ce_decl_under_mods("MODS\\x\\y.md6"));
+    CHECK(!sh_ce_decl_under_mods("player/mp/tp_body_mp.md6"));
+    CHECK(!sh_ce_decl_under_mods("mod/x"));
+    CHECK(!sh_ce_decl_under_mods("mods"));
+    CHECK(!sh_ce_decl_under_mods(NULL));
+    CHECK(sh_ce_def_of_mod(GUN, SALT));
+    CHECK(sh_ce_def_of_mod("MODS\\ABCD1234\\Gun.md6", SALT));
+    CHECK(!sh_ce_def_of_mod("mods/abcd12345/gun.md6", SALT));   /* a longer salt is another mod */
+    CHECK(!sh_ce_def_of_mod("mods/zzzz9999/gun.md6", SALT));
+    CHECK(!sh_ce_def_of_mod("mods/" SALT "/", SALT));
+    CHECK(!sh_ce_def_of_mod("weapons/shotgun/shotgun.md6", SALT));
+    CHECK(!sh_ce_def_of_mod(NULL, SALT));
 }
 
 static void test_md6_read(void)
@@ -181,8 +181,8 @@ static void test_build(void)
 
 static void test_registry(void)
 {
-    sh_at_registry r;
-    sh_at_row *w;
+    sh_md6_registry r;
+    sh_md6_row *w;
     const char *reg = "{\"banks\":[\"x\"],\"attachmentTags\":[{\"md6Def\":\"mods/" SALT "/player/tags.md6\","
                       "\"base\":\"player/mp/tp_body_mp.md6\",\"props\":[\"" GUN2 "\",\"" GUN "\","
                       "\"weapons/shotgun/shotgun.md6\"]},"
@@ -192,30 +192,30 @@ static void test_registry(void)
                         "\"props\":[\"mods/zzzz9999/a.md6\",\"" GUN "\"]}]}";
     memset(&r, 0, sizeof r);
     g_nlines = 0;
-    CHECK(sh_at_registry_add(&r, SALT, "Guns (mods\\guns)", reg, collect, NULL) == 2);
+    CHECK(sh_md6_registry_add(&r, SH_MD6_ATTACHMENT_TAGS, SALT, "Guns (mods\\guns)", reg, collect, NULL) == 2);
     /* a stock prop and a carrier that is a game model are never registered, whatever a build says */
     CHECK(g_nlines == 2);
     CHECK(said("gives tag info for an md6Def that is not its own"));
     CHECK(said("is not one of its own md6Defs"));
     /* another mod cannot register this mod's prop */
-    CHECK(sh_at_registry_add(&r, "zzzz9999", NULL, other, collect, NULL) == 1);
-    CHECK(sh_at_registry_add(&r, SALT, NULL, "{\"banks\":[]}", collect, NULL) == 0);
-    CHECK(sh_at_registry_add(&r, SALT, NULL, NULL, collect, NULL) == 0);
+    CHECK(sh_md6_registry_add(&r, SH_MD6_ATTACHMENT_TAGS, "zzzz9999", NULL, other, collect, NULL) == 1);
+    CHECK(sh_md6_registry_add(&r, SH_MD6_ATTACHMENT_TAGS, SALT, NULL, "{\"banks\":[]}", collect, NULL) == 0);
+    CHECK(sh_md6_registry_add(&r, SH_MD6_ATTACHMENT_TAGS, SALT, NULL, NULL, collect, NULL) == 0);
     g_nlines = 0;
-    CHECK(sh_at_registry_add(&r, SALT, NULL, "{\"attachmentTags\":[", collect, NULL) == 0);
+    CHECK(sh_md6_registry_add(&r, SH_MD6_ATTACHMENT_TAGS, SALT, NULL, "{\"attachmentTags\":[", collect, NULL) == 0);
     CHECK(said("its build's record could not be read"));
-    sh_at_registry_seal(&r);
+    sh_md6_registry_seal(&r);
     CHECK(r.n == 3 && r.mods == 2);
-    w = sh_at_registry_find(&r, "MODS\\" SALT "\\WEAPONS\\GUN.MD6");
+    w = sh_md6_registry_find(&r, "MODS\\" SALT "\\WEAPONS\\GUN.MD6");
     CHECK(w && !strcmp(w->carrier, "mods/" SALT "/player/tags.md6") && !strcmp(w->base, "player/mp/tp_body_mp.md6"));
-    CHECK(w && !strcmp(w->label, "Guns (mods\\guns)") && w->state == SH_AT_ROW_NEW && !w->model && !w->answered);
-    CHECK(sh_at_registry_find(&r, GUN2) != NULL);
-    w = sh_at_registry_find(&r, "mods/zzzz9999/a.md6");
+    CHECK(w && !strcmp(w->label, "Guns (mods\\guns)") && w->state == SH_MD6_ROW_NEW && !w->model && !w->answered);
+    CHECK(sh_md6_registry_find(&r, GUN2) != NULL);
+    w = sh_md6_registry_find(&r, "mods/zzzz9999/a.md6");
     CHECK(w && !strcmp(w->salt, "zzzz9999") && !strcmp(w->label, "zzzz9999"));
-    CHECK(!sh_at_registry_find(&r, "weapons/shotgun/shotgun.md6"));
-    CHECK(!sh_at_registry_find(&r, "mods/" SALT "/weapons/gu"));
-    CHECK(!sh_at_registry_find(&r, NULL));
-    sh_at_registry_free(&r);
+    CHECK(!sh_md6_registry_find(&r, "weapons/shotgun/shotgun.md6"));
+    CHECK(!sh_md6_registry_find(&r, "mods/" SALT "/weapons/gu"));
+    CHECK(!sh_md6_registry_find(&r, NULL));
+    sh_md6_registry_free(&r);
     CHECK(!r.n && !r.rows);
 }
 

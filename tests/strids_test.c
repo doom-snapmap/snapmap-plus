@@ -738,14 +738,14 @@ static void test_sort_hook_recovery(void)
     g_hook_mode = 1;
 
     g_hook_prepare_fail = 1;
-    CHECK(sh_strids_install(fake_sort, 1, table_lea, fake_insert,
+    CHECK(sh_strids_install(fake_sort, table_lea, fake_insert,
                            fake_hash, fake_idstr_ctor) == 0);
     CHECK(g_hook_prepares == 1 && g_hook_commits == 0 && g_hook_owned == NULL);
     CHECK(rearm_strings() == 0);
 
     g_hook_prepare_fail = 0;
     g_hook_commit_result = B2_PATCH_FAIL_SEH;
-    CHECK(sh_strids_install(fake_sort, 1, table_lea, fake_insert,
+    CHECK(sh_strids_install(fake_sort, table_lea, fake_insert,
                            fake_hash, fake_idstr_ctor) == 0);
     CHECK(g_hook_prepares == 2 && g_hook_commits == 1 && g_hook_unpatches == 1);
     CHECK(g_hook_owned == NULL && rearm_strings() == 0);
@@ -753,7 +753,7 @@ static void test_sort_hook_recovery(void)
     g_hook_commit_result = B2_PATCH_FAIL_ROLLBACK;
     g_hook_unpatch_fail = 1;
     g_hook_invoke_on_commit = 1;
-    CHECK(sh_strids_install(fake_sort, 1, table_lea, fake_insert,
+    CHECK(sh_strids_install(fake_sort, table_lea, fake_insert,
                            fake_hash, fake_idstr_ctor) == 0);
     CHECK(g_hook_prepares == 3 && g_hook_commits == 2 && g_hook_unpatches == 2);
     CHECK(g_hook_owned != NULL && !hook_is_installed(g_hook_owned));
@@ -763,7 +763,7 @@ static void test_sort_hook_recovery(void)
     CHECK(g_dictionary.count == rows && count_key("hook_recovery_key") == 0);
     CHECK(rearm_strings() == 0);
     prepares = g_hook_prepares;
-    CHECK(sh_strids_install(fake_sort, 1, table_lea, fake_insert,
+    CHECK(sh_strids_install(fake_sort, table_lea, fake_insert,
                            fake_hash, fake_idstr_ctor) == 0);
     CHECK(g_hook_prepares == prepares && g_hook_owned != NULL);
 
@@ -778,7 +778,7 @@ static void test_sort_hook_recovery(void)
         set_bundles(boot, 1);
     }
     g_log[0] = '\0';
-    CHECK(sh_strids_install(fake_sort, 1, table_lea, fake_insert,
+    CHECK(sh_strids_install(fake_sort, table_lea, fake_insert,
                            fake_hash, fake_idstr_ctor) == 1);
     CHECK(g_hook_prepares == prepares + 1 && hook_is_installed(g_hook_owned));
     CHECK(count_key("hook_recovery_key") == 1);
@@ -832,7 +832,7 @@ static void test_sort_hook_recovery(void)
         CHECK(sh_strids_refresh_pending() == 1 && count_key("later_name") == 0);
     }
     prepares = g_hook_prepares;
-    CHECK(sh_strids_install(fake_sort, 1, table_lea, fake_insert,
+    CHECK(sh_strids_install(fake_sort, table_lea, fake_insert,
                            fake_hash, fake_idstr_ctor) == 1);
     CHECK(g_hook_prepares == prepares);
 }
@@ -955,7 +955,7 @@ static int synthetic_main(void)
     test_sort_hook_recovery();
     test_native_table_extent();
     g_hook_installed = 0; /* simulate a removal that still owns its record */
-    CHECK(sh_strids_install(NULL, 0, NULL, NULL, NULL, NULL) == 0);
+    CHECK(sh_strids_install(NULL, NULL, NULL, NULL, NULL) == 0);
     CHECK(g_hook_owned == NULL && rearm_strings() == 0);
 
     remove_tree(root);

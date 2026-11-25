@@ -174,7 +174,11 @@ static void layout_checks(void)
         assert(loads==prior_loads); /* Spatial fitting must not consume asset variants. */
         memset(moves,0,sizeof moves);
         assert(plan_size(local_map,0,&before,&requested,moves,3,links,6,&reason));
-        assert(inside_environment(moves,3)&&moves[0].bounds[1]==-16000);
+        for (int m=0;m<3;m++) for (int axis=0;axis<3;axis++) {
+            assert(moves[m].bounds[axis]>=-grid_world_limit());
+            assert(moves[m].bounds[axis+3]<=grid_world_limit());
+        }
+        assert(moves[0].bounds[1]==-16000);
         /* The current cvar is read for each edit, with no 16384 size cap. */
         environment_limit=30000;
         requested.xyz[0]=requested.xyz[1]=requested.xyz[2]=30000;
@@ -326,7 +330,7 @@ static void area_rule_checks(void)
     unsigned char map[0x800]={0},records[1][0x98]={0};
     int keys1[]={0,2},links1[]={-1,-1};
     sh_grid_size room={SH_GRID_MODERN,{32000,32000,1000}},r;const char *reason;
-    sh_render_area_count count;float box[1][6];
+    sh_render_cell_choice count;float box[1][6];
     environment_limit=32671;
     *(void**)records[0]=sh_grid_native_wrapper(&room);
     *(void**)(map+0x750)=records;*(int*)(map+0x758)=1;*(void**)(map+0x7d8)=keys1;*(int*)(map+0x7e0)=2;
@@ -356,7 +360,7 @@ static void area_rule_checks(void)
     /* The reported room: a map already over the limit may shrink, never grow. */
     {sh_grid_size big={SH_GRID_MODERN,{64062,62846,32671}};*(void**)records[0]=sh_grid_native_wrapper(&big);
         assert(world_bounds(records[0],box[0],(float*)(*(unsigned char**)sh_grid_native_wrapper(&big)+0xa0)));
-        assert(sh_render_areas((const float(*)[6])box,1,1,&count)&&count.areas==16512);
+        assert(sh_render_area_cell_choose((const float(*)[6])box,1,1,SH_RENDER_AREA_CELL,&count)&&count.native.areas==16512);
         r=big;r.xyz[2]=30000;assert(fit(map,&big,&r,&reason)&&r.xyz[2]==30000);
         assert(strstr(g_note,"already has 16512 world areas and 16511 area nodes"));
         r=big;r.xyz[1]=40000;assert(fit(map,&big,&r,&reason)&&r.xyz[1]==40000);

@@ -1,6 +1,7 @@
 /* commands_decode.c -- the byte decoders the console install and its handlers run on engine code: the guarded
  * reader, the RIP-slot decode of an accessor, the idList-grow call out of AddCommand, and the dev-mode getter's
  * field. */
+#include "rip_slot.h"
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
@@ -11,19 +12,7 @@
  * the object it contains. */
 const uint8_t *sh_decode_rip_slot(const uint8_t *accessor_fn)
 {
-    uint8_t b[B2_RIP_SCAN_WINDOW];
-    if (!sh_safe_read(accessor_fn, b, sizeof b)) return NULL;
-    for (int i = 0; i + 7 <= B2_RIP_SCAN_WINDOW; i++) {
-        /* 48 = REX.W; 8B = MOV r64,r/m64; 8D = LEA; modrm 0x0D = [rip+disp32]->RCX, 0x05 = ->RAX */
-        if (b[i] == 0x48 && (b[i + 1] == 0x8B || b[i + 1] == 0x8D) &&
-            (b[i + 2] == 0x0D || b[i + 2] == 0x05)) {
-            int32_t disp;
-            memcpy(&disp, &b[i + 3], 4);
-            const uint8_t *rip_next = accessor_fn + i + 7;
-            return rip_next + disp;
-        }
-    }
-    return NULL;
+    return sh_rip_slot(accessor_fn, SH_RIP_RAX | SH_RIP_RCX, SH_RIP_MOV_OR_LEA);
 }
 
 /* Decodes the idList-grow callee out of AddCommand's body. Returns NULL if the call site is not found in the

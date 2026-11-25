@@ -26,27 +26,9 @@ typedef struct sh_aug_platform {
     float depth;                        /* the solid's extent along -n behind the face */
     char  name[SH_AUG_NAME_CAP];
     int   corners;
-    int   prepared;                     /* clearance already applied to the union */
     int   obstacle_only;                /* collide, but never create support */
     float support[4][3];                /* original box face behind a prepared cell */
 } sh_aug_platform;
-
-/* Walk-off links: AUTO follows settings.maxFallHeight (zero in shipped
- * monster modules); ALWAYS overrides that limit for testing.
- */
-enum { SH_AUG_FALL_AUTO = 0, SH_AUG_FALL_NEVER, SH_AUG_FALL_ALWAYS };
-
-/* Traversal AUTO selects available demon animations; NEVER omits climbs. */
-enum { SH_AUG_TRAVERSAL_AUTO = 0, SH_AUG_TRAVERSAL_NEVER = 1 };
-
-typedef struct sh_aug_opts {
-    int   fall;             /* SH_AUG_FALL_* */
-    int   inset;            /* inset by the agent radius; 1 unless testing */
-    int   traversal;
-    /* Outgoing routes one area may keep, shipped ones included; 0 means the engine's 256. An area whose own
-     * shipped routes already pass it keeps those and gains nothing. */
-    int   route_budget;
-} sh_aug_opts;
 
 /* Per-class outcome for one emitted or refused surface. */
 typedef struct sh_aug_platform_result {
@@ -147,12 +129,12 @@ typedef struct sh_aug_report {
 } sh_aug_report;
 
 /* Augments a in place. Returns 1 if the model remains coherent, including when individual platforms are
- * refused (the report records why); on 0, discard the model and serve shipped bytes. */
+ * refused (the report records why). A zero route budget uses the engine limit of 256. On failure discard the model and serve shipped bytes. */
 int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
-                   const sh_aug_opts *opts, sh_aug_report *out);
+                   int route_budget, sh_aug_report *out);
 void sh_aug_report_free(sh_aug_report *out);
 
-/* The route budget (for sh_aug_opts.route_budget) that brings an augmented model of `size` bytes under `cap`,
+/* The route budget that brings an augmented model of `size` bytes under `cap`,
  * judged from its generated routes per area; always below `current` (0 meaning 256). Returns 0 when no lower
  * budget can help. */
 int sh_aug_route_budget_for(const sh_aas *a, const sh_aug_report *rep,
@@ -175,8 +157,6 @@ int sh_aug_test_trav_anchors(double lo, double hi, double *out, int cap);
 int sh_aug_test_set_floor_piece_cap(int cap);
 /* Corners of `area` as the augmenter reads its floor polygon, or -1. */
 int sh_aug_test_floor_corners(const sh_aas *a, unsigned area);
-/* Set the per-demon anchor cap; 0 is uncapped. Returns the previous cap. */
-int sh_aug_test_set_anchor_cap(int n);
 /* Lower the tree-depth limit the report checks; 0 restores 128. */
 unsigned sh_aug_test_set_depth_limit(unsigned limit);
 /* Turn the balanced rebuild of the generated tree on or off (on by default).
@@ -194,9 +174,7 @@ int sh_aug_test_nearest_leaps(const int *from, const int *to, const unsigned *fl
 size_t sh_aug_test_quad_size(void);
 int    sh_aug_test_quad_init(void *quad, const double corners[4][3]);
 double sh_aug_test_z_at(const void *quad, double x, double y);
-int    sh_aug_test_quad_inset(const void *quad, double r, void *out);
 int    sh_aug_test_quad_contains(const void *quad, double x, double y);
-void   sh_aug_test_quad_corner(const void *quad, int i, double out[3]);
 double sh_aug_test_quad_normal_z(const void *quad);
 int    sh_aug_test_node_field4(double plane_c);
 #endif

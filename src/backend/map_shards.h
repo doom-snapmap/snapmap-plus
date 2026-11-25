@@ -33,7 +33,6 @@ size_t sh_shard_b64_encode(const unsigned char *p, size_t len, char *out);
 typedef struct sh_shard_chunk {
     const char *p;
     size_t      n;
-    unsigned    filled;
 } sh_shard_chunk;
 
 enum {
@@ -66,16 +65,5 @@ typedef struct sh_shard_doc {
  * for malformed or over-capacity input. */
 int  sh_shard_doc_build(const char *json, size_t len, sh_shard_doc *doc);
 void sh_shard_doc_free(sh_shard_doc *doc);
-
-/* The innermost container holding `off`, or -1. */
-int  sh_shard_doc_innermost(const sh_shard_doc *doc, size_t off);
-
-/* The container that is the value of member `key` DIRECTLY inside `parent`; a map has more than one member called
- * "string", and only the one whose parent is the variables object is the bucket wanted. */
-int  sh_shard_doc_member(const char *json, size_t len, const sh_shard_doc *doc,
-                         int parent, const char *key);
-
-/* Count the direct elements of an array container. */
-unsigned sh_shard_doc_array_count(const char *json, const sh_shard_doc *doc, int arr);
 
 #endif /* SNAPMAP_PLUS_MAP_SHARDS_H */

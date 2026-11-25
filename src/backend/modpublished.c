@@ -2278,11 +2278,8 @@ static int eng_resume(void *c, const sh_modpub_resume *r)
         /* The launch boundary held a map whose parse already ran: its map is
          * in the cache. Bring the manifest's scope and activation up as that
          * parse would have with the mods installed, then launch. */
-        size_t n = 0;
-        char *stripped = NULL;
-        __try { stripped = sh_modmanifest_prepare_load(r->text, r->length, &n); }
+        __try { sh_modmanifest_prepare_load(r->text, r->length); }
         __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: the held launch's manifest step faulted"); }
-        if (stripped) HeapFree(GetProcessHeap(), 0, stripped);
     }
     if (r && (r->hook == SH_MODPUB_LOBBY_LAUNCH || r->hook == SH_MODPUB_LOCAL_OFFLINE))
         eng_scope_play(r->hook == SH_MODPUB_LOBBY_LAUNCH ? "published launch" : "My Maps play");

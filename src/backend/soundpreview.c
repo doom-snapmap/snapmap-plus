@@ -1,5 +1,6 @@
 /* Main-thread sound auditioning with one retained, stoppable emitter. */
 
+#include "rip_slot.h"
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
@@ -111,24 +112,6 @@ char *sh_soundpreview_refusal(void)
     if (g_why[0]) out = sh_iface_text(g_why);
     ReleaseSRWLockShared(&g_why_lock);
     return out;
-}
-
-/* Decode RIP-relative loads into any destination register (ModRM & 0xc7 == 0x05); the shared command
- * helper accepts fewer registers. */
-#define SP_SCAN_WINDOW 64
-static const uint8_t *sp_decode_rip_any(const uint8_t *fn)
-{
-    uint8_t b[SP_SCAN_WINDOW];
-    __try { for (int i = 0; i < SP_SCAN_WINDOW; i++) b[i] = fn[i]; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
-    for (int i = 0; i + 7 <= SP_SCAN_WINDOW; i++) {
-        if (b[i] == 0x48 && (b[i + 1] == 0x8B || b[i + 1] == 0x8D) && (b[i + 2] & 0xC7) == 0x05) {
-            int32_t disp;
-            memcpy(&disp, &b[i + 3], 4);
-            return fn + i + 7 + disp;
-        }
-    }
-    return NULL;
 }
 
 /* Read the world slot on each use; map loads and s_restart replace the
@@ -315,7 +298,7 @@ int sh_soundpreview_install(const sig_result *results, size_t n,
     g_cvar_slot = module_base ? (const uint8_t *)glb_resolve(module_base, "cvar_system_slot", NULL) : NULL;
 
     const uint8_t *acc = (const uint8_t *)sig_addr_by_name(results, n, "SoundWorldLea");
-    if (acc) g_slot = sp_decode_rip_any(acc);
+    if (acc) g_slot = (void *)sh_rip_slot(acc, SH_RIP_ANY_REG, SH_RIP_MOV_OR_LEA);
     g_preview = (snd_preview_fn)sig_addr_by_name(results, n, "SoundPreview");
     /* Require both command-buffer entry points before arming playback. */
     g_buffer_cmd  = (snd_buffer_cmd_fn) sig_addr_by_name(results, n, "BufferCommandText");

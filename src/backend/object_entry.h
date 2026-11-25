@@ -10,9 +10,6 @@
  * (+32671) past the lowest possible module bottom (-32671), rounded up. */
 #define SH_OBJECT_ENTRY_NATIVE_DROP 18364.0f
 #define SH_OBJECT_ENTRY_DROP 66048.0f
-/* MOVSS xmm9,[rip+disp32]; XORPS xmm7,xmm7; MOVSS xmm8,[rip+disp32]. */
-#define SH_OBJECT_ENTRY_SITE_LEN 17
-
 /* Check the site's bytes; on success *constant is the address its disp32
  * reads. Does not read the constant. */
 int sh_object_entry_site(const unsigned char *site,uintptr_t *constant);
@@ -24,7 +21,5 @@ int sh_object_entry_disp(uintptr_t site,uintptr_t dest,int32_t *disp);
 /* The install's byte checks (load decoded, constant 18364); NULL when they hold, else the reason. */
 const char *sh_object_entry_check(const unsigned char *site,uintptr_t *constant);
 int sh_object_entry_install(const sig_result *results,size_t count);
-/* The segment length the entry trace reads (18364 when not live). */
-float sh_object_entry_drop(void);
 #endif
 #endif

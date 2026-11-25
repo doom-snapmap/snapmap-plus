@@ -13,14 +13,8 @@
 extern "C" {
 #endif
 
-/* The mod.json author key and the registries member the builder writes. */
-#define SH_AT_AUTHOR_KEY    "attachment_tags"
+/* The registries member the builder writes. */
 #define SH_AT_REGISTRY_KEY  "attachmentTags"
-
-/* 1 when `prop` starts with mods/ (any case, either slash): the detour's one test for a stock prop. */
-int sh_at_under_mods(const char *prop);
-/* 1 when `prop` is an md6Def name under mods/<salt>/ and names something below it. */
-int sh_at_prop_of_mod(const char *prop, const char *salt);
 
 typedef struct sh_at_md6 {
     char  *base;       /* init { inherit "<base>" }, malloc'd; NULL when it has none */
@@ -38,40 +32,6 @@ void sh_at_md6_free(sh_at_md6 *m);
  * compact JSON array (malloc'd), NULL when nothing registers; *oom is set when memory ran out. */
 char *sh_at_build_registry(const char *salt, const char *const *names, int n, sh_ce_text_fn text, void *text_ctx,
                            sh_ce_line_fn warn, void *warn_ctx, int *oom);
-
-/* Row states, written by the engine side; every row starts at SH_AT_ROW_NEW. */
-#define SH_AT_ROW_NEW       0   /* the carrier has not been looked for in this Play */
-#define SH_AT_ROW_READY     1
-#define SH_AT_ROW_MISSING   2   /* the carrier did not load */
-
-typedef struct sh_at_row {
-    char *prop;               /* mods/<salt>/....md6 */
-    char *carrier;            /* mods/<salt>/....md6 */
-    char *base;               /* the model the carrier inherits */
-    char *salt;
-    char *label;              /* the mod as lines name it */
-    void *volatile model;     /* the carrier's md6Def in this Play, or NULL */
-    volatile long state;
-    volatile long answered;   /* lookups the carrier answered this Play */
-    volatile long logged;     /* the first answer's line is written */
-} sh_at_row;
-
-typedef struct sh_at_registry {
-    sh_at_row *rows;          /* sorted by prop (sh_at_registry_seal) */
-    int n, cap;
-    int mods;                 /* mods that registered at least one prop */
-} sh_at_registry;
-
-/* Adds one mod's rows from its build's registries object text (or NULL). A carrier or prop outside mods/<salt>/
- * is dropped with one line, and a prop already registered keeps its first rows. Returns the rows added, -1 out of
- * memory. */
-int  sh_at_registry_add(sh_at_registry *r, const char *salt, const char *label, const char *registries,
-                        sh_ce_line_fn line, void *line_ctx);
-/* Sorts the rows for sh_at_registry_find; call once after the last add. */
-void sh_at_registry_seal(sh_at_registry *r);
-/* Returns the row of `prop`, or NULL. Lock-free; allocates nothing. */
-sh_at_row *sh_at_registry_find(const sh_at_registry *r, const char *prop);
-void sh_at_registry_free(sh_at_registry *r);
 
 /* The tag-info lookup, build 13954591: `const void *f(const void *props, const char *prop, const char *tag)`.
  * `props` is the idList at host md6Def + 0x210 (0x148-byte rows, prop name char* at +0x10); the answer's int16 at

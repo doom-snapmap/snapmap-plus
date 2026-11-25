@@ -15,7 +15,6 @@ extern "C" {
 
 typedef uint32_t sh_script_handle;   /* 0 = no entity */
 
-#define SH_SCRIPT_HANDLES_MAX   262143u      /* the handle format's slot range (records alive at once) */
 #define SH_SCRIPT_SPAWN_ID_NONE  0x1FFFFFEu  /* the engine's unset spawn id */
 #define SH_SCRIPT_SPAWN_ID_WORLD 0x1FFFFFDu  /* the world entity's spawn id */
 
@@ -47,9 +46,8 @@ void sh_script_handles_reset(void);
 
 /* Record a spawned entity of `mod`: its handle (the existing one when already recorded for that mod), or 0 for
  * the none or world id, another mod's entity, or no room (then *full is set to 1 unless NULL). */
-sh_script_handle sh_script_handles_add(int mod, uint32_t spawn_id, int *full);
 
-/* The same, keeping the entity's entityDef chain with the record: `names`
+/* Also keeps the entity's entityDef chain with the record: `names`
  * is its entityDef's name then the names it inherits, a newline between them, as
  * the runtime dispatches on it (copied; NULL keeps none). */
 sh_script_handle sh_script_handles_add_named(int mod, uint32_t spawn_id, const char *names, int *full);
@@ -82,19 +80,21 @@ uint32_t sh_script_handle_spawn_id(sh_script_handle h);
  * spawned, or gone. Main thread. */
 void *sh_script_handle_entity(sh_script_handle h);
 
-/* 1 when h is live (reported as spawned and not yet removed), else 0. */
-int sh_script_handle_alive(sh_script_handle h);
 
 /* The tick's check: resolve every pending and live entry once, in spawn order, and write each change to out[]
  * (up to cap; the rest wait for the next sweep). Returns the number written; removed or gone records are
  * released, and a pending entry already gone is reported as gone. */
 int sh_script_handles_sweep(sh_script_handle_change *out, int cap);
 
+#ifdef SH_SCRIPT_HANDLE_FIXTURE
+int sh_script_handle_alive(sh_script_handle h);
 /* Live entries of `mod` (-1: all mods). */
 int sh_script_handles_live(int mod);
 
 /* Records held (pending and live, references included). */
 int sh_script_handles_count(void);
+
+#endif
 
 #ifdef __cplusplus
 }

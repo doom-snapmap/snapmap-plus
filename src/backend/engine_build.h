@@ -36,18 +36,6 @@
 /* Validator-manager reflection getter slot. */
 #define SH_VALIDATOR_REFLECT_SLOT    0x258u
 
-/* GetGameSystemInterface is not exported; the idGameSystemLocal object is reached through a statically
- * initialised, relocated pointer at these RVAs. */
-#define SH_GAME_SYSTEM_SLOT_RVA_VK   0x2F48600u
-#define SH_GAME_SYSTEM_SLOT_RVA_GL   0x2F905D8u
-
-/* Address of the game-system pointer slot in a supported image, or 0. */
-static __inline uintptr_t sh_engine_game_system_slot(const uint8_t *base)
-{
-    uint32_t rva = sh_host_image_rva(base, SH_GAME_SYSTEM_SLOT_RVA_VK, SH_GAME_SYSTEM_SLOT_RVA_GL);
-    return rva ? (uintptr_t)base + rva : 0;
-}
-
 /* Layout constants bound without a gate on both renderers: editor paste arming (+0x209E0/+0x209E4, mode +0x420/+0x424
  * = 0x5C), decl server outputs count +0x448, native dialog params +0x98, grid-room properties action 0x50 (+0xAC),
  * module name stride 0x98 (name +0x48), Start menu row stride 0x58, SWF field cap +0x280, fault shield exit flag

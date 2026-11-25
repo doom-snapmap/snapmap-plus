@@ -3,19 +3,6 @@
 #define SNAPMAP_PLUS_NAV_GEOMETRY_H
 #include "aas_augment.h"
 
-/* Boxes are one face plus its extrusion; all upward faces are considered and agent clearance applies once across
- * support unions and step-height contacts. Returns -1 for invalid geometry or exhausted capacity (discard the bake). */
-int sh_nav_geometry_build(const sh_aug_platform *boxes, int count,
-    double radius, double height, double floor_cos, double step, sh_aug_platform *out,
-    int *source, int *pieces, unsigned char *buried, int capacity);
-
-/* Existing module floors contribute support at contacts within step height.
- * These convex polygons are neither emitted again nor treated as solid boxes. */
-int sh_nav_geometry_build_supported(const sh_aug_platform *boxes, int count,
-    const sh_aug_platform *support, int support_count,
-    double radius, double height, double floor_cos, double step, sh_aug_platform *out,
-    int *source, int *pieces, unsigned char *buried, int capacity);
-
 /* Ceiling on the agent-footprint strips cut along exposed edges: 200 bytes
  * each, so about 26 MB at worst. */
 #define SH_NAV_GEOMETRY_MAX_STRIPS 131072
@@ -26,9 +13,7 @@ typedef struct sh_nav_geometry_stats {
     unsigned char *source_dropped;  /* optional, one per box: 1 when it lost a face */
 } sh_nav_geometry_stats;
 
-/* As sh_nav_geometry_build_supported, but a face whose pieces, clip polygons or edge strips do not fit is dropped
- * whole and counted, never emitted partly cut; its boxes still subtract from other faces. Returns -1 only for
- * invalid input. */
+/* Clip walkable faces against solid boxes and existing floor polygons. Count and drop an entire face when its pieces or edge strips do not fit. */
 int sh_nav_geometry_build_budget(const sh_aug_platform *boxes, int count,
     const sh_aug_platform *support, int support_count,
     double radius, double height, double floor_cos, double step, sh_aug_platform *out,

@@ -25,13 +25,6 @@ typedef struct sh_render_cell_choice {
     sh_render_area_count coarsest;  /* at the largest size tried */
 } sh_render_cell_choice;
 
-/* bounds holds one world box per placed module, in map order (min xyz, then max xyz, as GridWorldBounds returns it).
- * cull is the engine cvar sm_testPortalSystem (default 1), which drops pieces outside the owning module. Returns 1
- * and fills *out, or 0 for invalid input or a tree the engine could not build. */
-int sh_render_areas(const float (*bounds)[6], int n, int cull, sh_render_area_count *out);
-/* The same count with cell size `size` (512 .. SH_RENDER_AREA_CELL_MAX). */
-int sh_render_areas_cell(const float (*bounds)[6], int n, int cull, float size, sh_render_area_count *out);
-
 /* Whether a count loads: at most 8192 areas and 8192 nodes. */
 int sh_render_areas_fit(const sh_render_area_count *count);
 /* Whether a count at a coarser size loads with SH_RENDER_AREA_HEADROOM to spare. */

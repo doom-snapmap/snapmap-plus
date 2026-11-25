@@ -481,8 +481,8 @@ static void bind_fakes(void)
 static int load_rows(const char *const *salts, const char *const *builds, const char *const *names, int n)
 {
     sh_modmanifest_list rows;
-    char err[256], *text, *loaded;
-    size_t len = 0, tl = 0, ll = 0;
+    char err[256], *text;
+    size_t len = 0, tl = 0;
     const char *map;
     int i;
     memset(&rows, 0, sizeof rows);
@@ -501,9 +501,8 @@ static int load_rows(const char *const *salts, const char *const *builds, const 
     sh_modmanifest_list_free(&rows);
     if (!text) { printf("    write: %s\n", err); return 0; }
     sh_modmanifest_set_editor_load(1);
-    loaded = sh_modmanifest_prepare_load(text, tl, &ll);
+    sh_modmanifest_prepare_load(text, tl);
     sh_modmanifest_set_editor_load(0);
-    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
     HeapFree(GetProcessHeap(), 0, text);
     return 1;
 }
@@ -749,8 +748,8 @@ static void load_map_naming(const char *salt, const char *build, const char *nam
 {
     sh_modmanifest_list rows;
     sh_modmanifest_row row;
-    char err[256], *text, *loaded;
-    size_t tl = 0, ll = 0;
+    char err[256], *text;
+    size_t tl = 0;
     memset(&rows, 0, sizeof rows);
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, salt);
@@ -763,8 +762,7 @@ static void load_map_naming(const char *salt, const char *build, const char *nam
     text = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &tl, err, sizeof err);
     CHECK(text != NULL);
     if (text) {
-        loaded = sh_modmanifest_prepare_load(text, tl, &ll);
-        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+        sh_modmanifest_prepare_load(text, tl);
         HeapFree(GetProcessHeap(), 0, text);
     }
     sh_modmanifest_list_free(&rows);
@@ -1390,8 +1388,8 @@ int main(int argc, char **argv)
         sh_modmanifest_list prow;
         sh_modmanifest_row pr;
         const char *roots[1] = { "entities/imp_copy" }, *units[1] = { UNIT };
-        char err[256], *ptext, *ploaded;
-        size_t ptl = 0, pll = 0;
+        char err[256], *ptext;
+        size_t ptl = 0;
         sh_modmanifest_list now;
         int marks;
         memset(&prow, 0, sizeof prow);
@@ -1410,8 +1408,7 @@ int main(int argc, char **argv)
             g_placed_count = 1;
             g_map_on = 1;
             open_test_map();
-            ploaded = sh_modmanifest_prepare_load(ptext, ptl, &pll);
-            if (ploaded) HeapFree(GetProcessHeap(), 0, ploaded);
+            sh_modmanifest_prepare_load(ptext, ptl);
             memset(&now, 0, sizeof now);
             CHECK(sh_modmanifest_current(&now) == 1 && now.rows[0].pinned);
             sh_modmanifest_list_free(&now);
@@ -1465,8 +1462,7 @@ int main(int argc, char **argv)
             CHECK(sh_modmanifest_current(&now) == 1 && !now.rows[0].pinned && !strcmp(now.rows[0].build, hash1));
             sh_modmanifest_list_free(&now);
             /* Pin the row again (the map is loaded afresh). */
-            ploaded = sh_modmanifest_prepare_load(ptext, ptl, &pll);
-            if (ploaded) HeapFree(GetProcessHeap(), 0, ploaded);
+            sh_modmanifest_prepare_load(ptext, ptl);
             memset(&now, 0, sizeof now);
             CHECK(sh_modmanifest_current(&now) == 1 && now.rows[0].pinned);
             sh_modmanifest_list_free(&now);

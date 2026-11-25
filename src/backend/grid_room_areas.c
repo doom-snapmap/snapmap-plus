@@ -162,21 +162,6 @@ static int valid_size(float size)
 {
     return isfinite(size) && size >= SH_RENDER_AREA_CELL && size <= SH_RENDER_AREA_CELL_MAX;
 }
-int sh_render_areas_cell(const float (*bounds)[6], int n, int cull, float size, sh_render_area_count *out)
-{
-    area_layout layout;
-    int ok;
-    if (!out || !valid_size(size)) return 0;
-    memset(out, 0, sizeof *out);
-    if (!prepare(bounds, n, &layout)) return 0;
-    ok = count_layout(&layout, bounds, n, cull, size, out);
-    free(layout.tree.nodes);
-    return ok;
-}
-int sh_render_areas(const float (*bounds)[6], int n, int cull, sh_render_area_count *out)
-{
-    return sh_render_areas_cell(bounds, n, cull, SH_RENDER_AREA_CELL, out);
-}
 int sh_render_areas_fit(const sh_render_area_count *count)
 {
     return count && count->areas <= SH_RENDER_AREA_MAX && count->nodes <= SH_RENDER_NODE_MAX;

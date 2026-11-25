@@ -11,7 +11,7 @@
 #define NG_MIN_PIECE_AREA  64.0
 #define NG_MIN_PIECE_WIDTH 4.0
 typedef struct ng_poly { int n; double p[NG_MAX][3]; } ng_poly;
-typedef struct ng_box { double c[3], axis[3][3], half[3]; int solid; } ng_box;
+typedef struct ng_box { double c[3], axis[3][3], half[3]; } ng_box;
 typedef struct ng_face { ng_poly p; double normal[3]; int source, face; } ng_face;
 typedef struct ng_interval { double lo, hi; } ng_interval;
 
@@ -113,9 +113,9 @@ static int ng_box_read(const sh_aug_platform *p, ng_box *b)
         for(k=0;k<3;k++)b->axis[a][k]/=len;
     }
     b->half[2]=p->depth*0.5;
-    if(p->depth<0.0f || !isfinite(p->depth))return 0;
+    if(p->depth<=0.0f || !isfinite(p->depth))return 0;
     for(a=0;a<3;a++) if(fabs(ng_dot(b->axis[a],b->axis[(a+1)%3]))>0.001)return 0;
-    b->solid=p->depth>0.0f; return 1;
+    return 1;
 }
 
 static void ng_make_face(const ng_box *b,int axis,int sign,ng_face *f)
@@ -180,7 +180,7 @@ int sh_nav_geometry_path_clear(const sh_aug_platform *src,int count,
     for(k=0;k<3;k++)delta[k]=end[k]-start[k];
     for(i=0;i<count;i++) {
         ng_box b;double lo=0.0,hi=1.0;
-        if(i==skip_a||i==skip_b||src[i].depth==0.0f)continue;
+        if(i==skip_a||i==skip_b)continue;
         if(!ng_box_read(&src[i],&b))return 0;
         if(ng_body_interval(&b,start,delta,radius,height,&lo,&hi))return 0;
     }
@@ -196,7 +196,6 @@ int sh_nav_geometry_ray_exit(const sh_aug_platform *src,const double start[3],
     for(k=0;k<3;k++)if(!isfinite(start[k])||!isfinite(direction[k]))return 0;
     if(ng_dot(direction,direction)<1e-12)return 0;
     *distance=0.0;
-    if(!box.solid)return 1;
     if(ng_body_interval(&box,start,direction,radius,height,&lo,&hi)) {
         if(hi>=1e9)return 0;
         *distance=hi;
@@ -384,11 +383,13 @@ static void ng_strip_poly(const ng_strip *s, ng_poly *out)
     for (i = 0; i < s->n; i++) memcpy(out->p[i], s->p[i], sizeof s->p[i]);
 }
 
-static int ng_build(const sh_aug_platform *src,int count,
+int sh_nav_geometry_build_budget(const sh_aug_platform *src,int count,
     const sh_aug_platform *support,int support_count,double radius,
     double height,double floor_cos,double step,sh_aug_platform *out,int *source,int *pieces,
     unsigned char *buried,int capacity,sh_nav_geometry_stats *stats)
 {
+    sh_nav_geometry_stats ignored = {0};
+    if (!stats) stats = &ignored;
     ng_box *boxes=NULL;ng_face *faces=NULL;ng_poly *mem=NULL,*a,*b;
     ng_interval *iv=NULL,*next=NULL;
     ng_strip *boundaries=NULL;
@@ -409,16 +410,11 @@ static int ng_build(const sh_aug_platform *src,int count,
     for(i=0;i<count;i++) {
         if(!ng_box_read(&src[i],&boxes[i]))goto done;
         if(src[i].obstacle_only)continue;
-        for(j=0;j<(boxes[i].solid?6:1);j++) {
+        for(j=0;j<6;j++) {
             ng_face face;int axis=j/2,sign=(j&1)?-1:1;
-            if(boxes[i].solid)ng_make_face(&boxes[i],axis,sign,&face);
-            else {
-                face.p.n=4;
-                for(k=0;k<3;k++)face.normal[k]=src[i].n[k];
-                for(k=0;k<4;k++){int x;for(x=0;x<3;x++)face.p.p[k][x]=src[i].c[k][x];}
-            }
+            ng_make_face(&boxes[i],axis,sign,&face);
             if(face.normal[2]+1e-7<floor_cos)continue;
-            face.source=i;face.face=boxes[i].solid?(axis==2?src[i].face:j):src[i].face;
+            face.source=i;face.face=axis==2?src[i].face:j;
             faces[nf++]=face;
         }
     }
@@ -460,7 +456,6 @@ static int ng_build(const sh_aug_platform *src,int count,
                         if(!grown) {
                             /* Without its strips this face could be stood on
                              * too close to its exposed edge: leave it out. */
-                            if(!stats)goto done;
                             stats->strips_dropped++;strip_missing[i]=1;any_missing=1;
                             continue;
                         }
@@ -493,7 +488,7 @@ static int ng_build(const sh_aug_platform *src,int count,
             if(!ng_cut_all(&a,&b,&np,&faces[j].p,capacity))goto fail_face;
         /* Subtract occupied standing space, including the actual underside of
          * an elevated box. Steep boxes remain obstacles even with no nav face. */
-        for(j=0;j<count&&np;j++)if(j!=face->source&&boxes[j].solid)
+        for(j=0;j<count&&np;j++)if(j!=face->source)
             if(!ng_cut_solid(face,&src[j],&boxes[j],radius,height,floor_cos,step,
                              &a,&b,&np,capacity))goto fail_face;
         for(i=0;i<nb&&np;i++)if(ng_coplanar(face,&faces[boundaries[i].face])) {
@@ -504,12 +499,11 @@ static int ng_build(const sh_aug_platform *src,int count,
         ng_merge_all(a,&np);
         /* All of this face's pieces fit, or none of them is emitted. */
         if(nout+np>capacity) {
-            if(!stats)goto done;
             goto drop_face;
         }
         for(i=0;i<np;i++) {
             sh_aug_platform *dst;
-            dst=&out[nout];*dst=src[face->source];dst->corners=a[i].n;dst->prepared=1;
+            dst=&out[nout];*dst=src[face->source];dst->corners=a[i].n;
             dst->depth=0.0f;dst->face=face->face;
             for(k=0;k<3;k++)dst->n[k]=(float)face->normal[k];
             for(j=0;j<a[i].n;j++)for(k=0;k<3;k++)dst->c[j][k]=(float)a[i].p[j][k];
@@ -519,7 +513,6 @@ static int ng_build(const sh_aug_platform *src,int count,
         for(i=start;i<nout;i++)pieces[i]=nout-start;
         continue;
 fail_face:
-        if(!stats)goto done;
 drop_face:
         stats->faces_dropped++;
         if(stats->source_dropped)stats->source_dropped[face->source]=1;
@@ -532,9 +525,8 @@ drop_face:
         if(found)continue;
         /* A face left out at the ceiling is reported by the caller, not
          * as buried. */
-        if(stats&&stats->source_dropped&&stats->source_dropped[i])continue;
+        if(stats->source_dropped&&stats->source_dropped[i])continue;
         if(nout==capacity) {
-            if(!stats)goto done;
             break;
         }
         out[nout]=src[i];source[nout]=i;pieces[nout]=0;buried[nout]=1;nout++;
@@ -575,7 +567,7 @@ int sh_nav_geometry_cut_support(const sh_aug_platform *src,int count,
         a=mem;b=mem+per_support;a[0]=face.p;
         for(j=0;j<count&&np&&ok;j++) {
             const ng_box *bx=&boxes[j];double ext[3];int axis,m;
-            if(!bx->solid||src[j].obstacle_only)continue;
+            if(src[j].obstacle_only)continue;
             /* Cheap reject: the solid's bounds against the support's, grown
              * by the agent's square body and height. */
             for(axis=0;axis<3;axis++) {
@@ -624,7 +616,7 @@ int sh_nav_geometry_cut_support(const sh_aug_platform *src,int count,
             while(corners>1&&fabs(dst->c[0][0]-dst->c[corners-1][0])<0.01&&
                   fabs(dst->c[0][1]-dst->c[corners-1][1])<0.01)corners--;
             if(corners<3)continue;
-            dst->corners=corners;dst->prepared=1;dst->face=4;
+            dst->corners=corners;dst->face=4;
             for(k=0;k<3;k++)dst->n[k]=support[i].n[k];
             owner[nout++]=i;
         }
@@ -633,32 +625,4 @@ int sh_nav_geometry_cut_support(const sh_aug_platform *src,int count,
     rc=nout;
 done:
     free(mem);free(boxes);return rc;
-}
-
-int sh_nav_geometry_build_supported(const sh_aug_platform *src,int count,
-    const sh_aug_platform *support,int support_count,double radius,
-    double height,double floor_cos,double step,sh_aug_platform *out,int *source,int *pieces,
-    unsigned char *buried,int capacity)
-{
-    return ng_build(src,count,support,support_count,radius,height,floor_cos,step,
-                    out,source,pieces,buried,capacity,NULL);
-}
-
-int sh_nav_geometry_build_budget(const sh_aug_platform *src,int count,
-    const sh_aug_platform *support,int support_count,double radius,
-    double height,double floor_cos,double step,sh_aug_platform *out,int *source,int *pieces,
-    unsigned char *buried,int capacity,sh_nav_geometry_stats *stats)
-{
-    sh_nav_geometry_stats ignored;
-    if(!stats){memset(&ignored,0,sizeof ignored);stats=&ignored;}
-    return ng_build(src,count,support,support_count,radius,height,floor_cos,step,
-                    out,source,pieces,buried,capacity,stats);
-}
-
-int sh_nav_geometry_build(const sh_aug_platform *src,int count,double radius,
-    double height,double floor_cos,double step,sh_aug_platform *out,int *source,int *pieces,
-    unsigned char *buried,int capacity)
-{
-    return sh_nav_geometry_build_supported(src,count,NULL,0,radius,height,floor_cos,
-                                           step,out,source,pieces,buried,capacity);
 }

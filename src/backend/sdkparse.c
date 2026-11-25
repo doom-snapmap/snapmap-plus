@@ -7,22 +7,6 @@
 
 #include "sdkparse.h"
 
-void sdk_put(sdk_buf *b, const char *s, size_t n)
-{
-    if (b->oom) return;
-    if (b->n + n + 1 > b->cap) {
-        size_t cap = b->cap ? b->cap : 256;
-        char *p;
-        while (cap < b->n + n + 1) cap *= 2;
-        if (!(p = (char *)realloc(b->p, cap))) { b->oom = 1; return; }
-        b->p = p;
-        b->cap = cap;
-    }
-    memcpy(b->p + b->n, s, n);
-    b->n += n;
-    b->p[b->n] = 0;
-}
-
 void sdk_printf(sdk_buf *b, const char *fmt, ...)
 {
     char small[512];
@@ -32,14 +16,14 @@ void sdk_printf(sdk_buf *b, const char *fmt, ...)
     n = vsnprintf(small, sizeof small, fmt, ap);
     va_end(ap);
     if (n < 0) { b->oom = 1; return; }
-    if ((size_t)n < sizeof small) { sdk_put(b, small, (size_t)n); return; }
+    if ((size_t)n < sizeof small) { sh_text_append(b, small, (size_t)n); return; }
     {
         char *big = (char *)malloc((size_t)n + 1);
         if (!big) { b->oom = 1; return; }
         va_start(ap, fmt);
         vsnprintf(big, (size_t)n + 1, fmt, ap);
         va_end(ap);
-        sdk_put(b, big, (size_t)n);
+        sh_text_append(b, big, (size_t)n);
         free(big);
     }
 }

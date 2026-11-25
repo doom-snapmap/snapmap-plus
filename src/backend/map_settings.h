@@ -22,10 +22,8 @@ typedef struct sh_map_settings_report {
     int failed;        /* the map text did not read; nothing changed */
 } sh_map_settings_report;
 
-/* Load: read both settings from the member's "settings" part (absent is off). Returns NULL; the parse detour strips
- * the member afterwards. */
-char *sh_map_settings_take(const char *json, size_t len, sh_map_settings *out, size_t *out_len,
-                           sh_map_settings_report *report);
+/* Read both fields of the carrier settings object. Missing or invalid settings are off. */
+void sh_map_settings_read(const char *json, size_t len, sh_map_settings *out, sh_map_settings_report *report);
 /* Save: return the text carrying exactly `settings` in the member, as a
  * process-heap buffer, or NULL when the input already does (or on failure,
  * report.failed). */
@@ -33,9 +31,9 @@ char *sh_map_settings_put(const char *json, size_t len, const sh_map_settings *s
                           size_t *out_len, sh_map_settings_report *report);
 
 
-/* Before the engine parses a map: take() into the settings of the map being parsed. sh_map_settings_loaded(1) makes
+/* Read pending settings before the engine parses a map. sh_map_settings_loaded(1) makes
  * them current after a successful parse; a failed parse keeps the current map's. */
-char *sh_map_settings_prepare_load(const char *json, size_t len, size_t *out_len);
+void sh_map_settings_prepare_load(const char *json, size_t len);
 void sh_map_settings_loaded(int ok);
 void sh_map_settings_current(sh_map_settings *out);
 void sh_map_settings_set_render(const sh_map_render *render);

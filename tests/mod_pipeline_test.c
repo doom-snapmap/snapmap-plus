@@ -249,8 +249,8 @@ static void fresh_mod(const char *fixture, const char *root)
     sh_modserve_plan plan;
     visit_rec v;
     const char *names[2] = { "mods/alexrimp/imp_copy", "snapmaps/visblockers/industrial/cap_01" };
-    char *saved, *loaded;
-    size_t saved_len = 0, loaded_len = 0;
+    char *saved;
+    size_t saved_len = 0;
     sh_modmanifest_list rows = {0};
     int i, sedefs = 0;
 
@@ -306,15 +306,13 @@ static void fresh_mod(const char *fixture, const char *root)
         g_nregistered = 0;
         g_pal_built = 0;
         g_rebuilds = 0;
-        loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
-        CHECK(loaded == NULL);
+        sh_modmanifest_prepare_load(saved, saved_len);
         CHECK(g_activations == 1 && g_last_steps > 0 && g_last_ready == g_last_steps);
         CHECK(registered("mods/alexrimp/imp_copy") && registered("mods/alexrimp/imp_copy.md6") &&
               registered("mods/alexrimp/imp_copy_b.md6"));
         CHECK(!registered_as("snapEditorEntityDef", "mods/alexrimp/imp_copy") &&
               !registered_as("snapEditorEntityDef", "mods/alexrimp/imp_copy_b"));
         CHECK(g_last_sync_r == 0 && g_last_sync.rows == 2 && g_last_sync.missing == 0 && g_rebuilds == 0);
-        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
 
         /* The palette lacks both rows, but the editor holds an entity: the rebuild is refused and reported, and the
          * rows stay unvisited, so each later load asks again, once. */
@@ -322,36 +320,32 @@ static void fresh_mod(const char *fixture, const char *root)
         g_pal_built = 1;
         g_pal_count = 0;
         g_rebuild_result = -1;
-        loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
-        CHECK(loaded == NULL && g_last_sync_r == 1 && g_last_sync.rebuild == -1 && g_last_sync.missing == 2 &&
+        sh_modmanifest_prepare_load(saved, saved_len);
+        CHECK(g_last_sync_r == 1 && g_last_sync.rebuild == -1 && g_last_sync.missing == 2 &&
               g_last_sync.registered == 0 && g_rebuilds == 1);
         CHECK(!registered_as("snapEditorEntityDef", "mods/alexrimp/imp_copy"));
-        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
-        loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
-        CHECK(loaded == NULL && g_last_sync_r == 1 && g_rebuilds == 2);
-        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+        sh_modmanifest_prepare_load(saved, saved_len);
+        CHECK(g_last_sync_r == 1 && g_rebuilds == 2);
         g_rebuild_result = 1;
 
         /* Released: the same load registers them through one rebuild. */
         printf("-- a map naming a bundle whose editor rows the built palette lacks registers them by one rebuild\n");
         g_activations = 0;
         g_rebuilds = 0;
-        loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
-        CHECK(loaded == NULL && g_activations == 1);
+        sh_modmanifest_prepare_load(saved, saved_len);
+        CHECK(g_activations == 1);
         CHECK(g_last_sync_r == 1 && g_rebuilds == 1 && g_last_sync.rebuild == 1);
         CHECK(g_last_sync.rows == 2 && g_last_sync.missing == 2 && g_last_sync.registered == 2 &&
               g_last_sync.admitted == 2 && g_last_sync.rows_after == g_last_sync.rows_before + 2);
         CHECK(registered_as("snapEditorEntityDef", "mods/alexrimp/imp_copy") &&
               registered_as("snapEditorEntityDef", "mods/alexrimp/imp_copy_b"));
         CHECK(pal_has(NULL, "mods/alexrimp/imp_copy") && pal_has(NULL, "mods/alexrimp/imp_copy_b"));
-        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
 
         /* The palette already holds them: nothing is requested. */
         printf("-- the same map again: the palette holds its rows, nothing is requested\n");
         g_rebuilds = 0;
-        loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
-        CHECK(loaded == NULL && g_last_sync_r == 0 && g_last_sync.missing == 0 && g_rebuilds == 0);
-        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+        sh_modmanifest_prepare_load(saved, saved_len);
+        CHECK(g_last_sync_r == 0 && g_last_sync.missing == 0 && g_rebuilds == 0);
 
         HeapFree(GetProcessHeap(), 0, saved);
     }
@@ -359,8 +353,8 @@ static void fresh_mod(const char *fixture, const char *root)
     g_activations = 0;
     g_rebuilds = 0;
     g_last_sync_r = -7;
-    loaded = sh_modmanifest_prepare_load(MAP, sizeof MAP - 1, &loaded_len);
-    CHECK(loaded == NULL && g_activations == 0 && g_rebuilds == 0 && g_last_sync_r == -7);
+    sh_modmanifest_prepare_load(MAP, sizeof MAP - 1);
+    CHECK(g_activations == 0 && g_rebuilds == 0 && g_last_sync_r == -7);
     /* The check itself asks nothing for an empty list. */
     {
         sh_modserve_rows_sync res;

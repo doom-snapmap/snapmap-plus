@@ -270,7 +270,7 @@ static void write_ev(sdk_buf *b, int index, const ev *e)
         put_num(b, 5, "roll", e->turn[2]);
         put_close(b, 4);
     }
-    if (e->parms.p) sdk_put(b, e->parms.p, e->parms.n);
+    if (e->parms.p) sh_text_append(b, e->parms.p, e->parms.n);
     sdk_printf(b, "\t\t\t}\n");
 }
 
@@ -1252,11 +1252,11 @@ static int item_particles(ectx *c, const sdk_group *g, ev *e)
         sdk_printf(&decl, "{\n\tedit = {\n\t\tstages = {\n\t\t\tnum = %d;\n", stages);
         for (q = 0; q < stages; q++) {
             sdk_printf(&decl, "\t\t\titem[%d] = {\n", q);
-            sdk_put(&decl, s.p, count_offset);
+            sh_text_append(&decl, s.p, count_offset);
             put_num(&decl, 5, "totalParticles", quads / stages + (q < quads % stages));
             /* Stage diversity seeds the native random stream. Equal seeds draw the same particles twice. */
             if (q) put_num(&decl, 5, "diversity", (q * 1031) & 0x7fff);
-            sdk_put(&decl, s.p + count_offset, s.n - count_offset);
+            sh_text_append(&decl, s.p + count_offset, s.n - count_offset);
             sdk_printf(&decl, "\t\t\t}\n");
         }
         sdk_printf(&decl, "\t\t}\n");

@@ -24,7 +24,6 @@ typedef struct global_entry {
 typedef enum glb_status {
     GLB_OK = 0,
     GLB_ANCHOR_NOT_FOUND,   /* the code site's bytes differ -- another program patched it */
-    GLB_ANCHOR_AMBIGUOUS,   /* matched more than once: not an identity, refuse rather than guess */
     GLB_UNKNOWN_NAME,
     GLB_OUT_OF_RANGE,       /* decoded address is outside the host image -- a bad decode, not a global */
     GLB_UNREADABLE          /* faulted reading the displacement */

@@ -1,5 +1,7 @@
 /* Resource-provider open hook and native idFile streams, which own copies of the bytes they serve. See
  * overrides.h for the resource ordering; each provider path has an SEH boundary. */
+#include "image_view.h"
+#include "rip_slot.h"
 #include "../common/text.h"
 #include "safe_read.h"
 #include <windows.h>
@@ -22,20 +24,11 @@
 #include "engine_build.h"
 #include "modserve.h"             /* installed mod bundles, after every product source */
 
-/* Provider open slot offset: +0x148 on build 13954591; the provider vtable is at OV_PINNED_PROVIDER_VTABLE_RVA. */
 #define OPEN_SLOT_OFFSET SH_OVERRIDES_OPEN_SLOT
 
-/* Pinned RVAs for audit and signature repair; they do not gate installation, which requires clean SIG_OK
- * matches, host-image containment and a decoded read-only provider vtable. The stream below implements the
- * 34-slot idFile ABI of build 13954591. */
-#define OV_PINNED_RES_PROVIDER_CTOR_RVA SH_RVA(0x2A28C0u, 0x2A2A90u)
-#define OV_PINNED_IDFILE_READSTR_RVA    SH_RVA(0x299850u, 0x299AB0u)
-#define OV_PINNED_IDFILE_COMPARE_RVA    SH_RVA(0x2996D0u, 0x299930u)
-#define OV_PINNED_IDFILE_WRITESTR_RVA   SH_RVA(0x29A0B0u, 0x29A310u)
 /* Base idFile implementation of slot +0x50. */
 #define OV_BASE_HELPER_RVA_VK           0x2997D0u
 #define OV_BASE_HELPER_RVA_GL           0x299A30u
-#define OV_PINNED_PROVIDER_VTABLE_RVA   SH_RVA(0x1FF4CA0u, 0x200EA70u)
 
 /* Engine ABI: idFile* open(self, name, uint8 b1, uint8 b2, uint mode). Mode >= 2 bypasses shadowing; both byte
  * arguments are passed through when chaining. */
@@ -251,13 +244,12 @@ static volatile LONG g_stream_helpers_state = OV_STREAM_HELPERS_NEW;
 
 /* Configures all three native idStr slots before the provider hook is published; missing or hooked helpers
  * leave a terminal refusal state. */
-static int ov_stream_helpers_install(void *read_string, int read_clean,
-                                     void *compare, int compare_clean,
-                                     void *write_string, int write_clean)
+static int ov_stream_helpers_install(void *read_string,
+                                     void *compare,
+                                     void *write_string)
 {
     LONG state;
-    if (!read_string || !compare || !write_string || read_clean != 1 ||
-        compare_clean != 1 || write_clean != 1) {
+    if (!read_string || !compare || !write_string) {
         if (InterlockedCompareExchange(&g_stream_helpers_state,
                                        OV_STREAM_HELPERS_FAILED,
                                        OV_STREAM_HELPERS_NEW) == OV_STREAM_HELPERS_NEW)
@@ -335,48 +327,6 @@ void *sh_overrides_test_memory_stream(const unsigned char *body, size_t length)
     return stream;
 }
 
-long long sh_overrides_test_stream_read(void *stream, void *buffer, uint64_t length)
-{
-    return ov_read((ov_stream *)stream, buffer, length);
-}
-
-long long sh_overrides_test_stream_read_at(void *stream, long long offset,
-                                            void *buffer, uint64_t length)
-{
-    return ov_seekread((ov_stream *)stream, offset, buffer, length);
-}
-
-long long sh_overrides_test_stream_write(void *stream, const void *buffer, uint64_t length)
-{
-    return ov_write((ov_stream *)stream, buffer, length);
-}
-
-long long sh_overrides_test_stream_write_at(void *stream, long long offset,
-                                             const void *buffer, uint64_t length)
-{
-    return ov_seekwrite((ov_stream *)stream, offset, buffer, length);
-}
-
-int sh_overrides_test_stream_seek(void *stream, long long offset, int origin)
-{
-    return ov_seek((ov_stream *)stream, offset, origin);
-}
-
-long long sh_overrides_test_stream_length(void *stream)
-{
-    return ov_length_byseek((ov_stream *)stream);
-}
-
-int sh_overrides_test_stream_true_flag(void *stream)
-{
-    return (int)((long long(*)(ov_stream *))g_stream_vtable[SH_IDFILE_SLOT_TRUE_FLAG])((ov_stream *)stream);
-}
-
-int sh_overrides_test_stream_set_length(void *stream, long long length)
-{
-    return ((int(*)(ov_stream *, long long))g_stream_vtable[SH_IDFILE_SLOT_SET_LENGTH])((ov_stream *)stream, length);
-}
-
 size_t sh_overrides_test_stream_vtable_slots(void)
 {
     return sizeof g_stream_vtable / sizeof g_stream_vtable[0];
@@ -388,12 +338,12 @@ void *sh_overrides_test_stream_vtable_slot(size_t index)
            g_stream_vtable[index] : NULL;
 }
 
-int sh_overrides_test_stream_helpers_configure(void *read_string, int read_clean,
-                                                void *compare, int compare_clean,
-                                                void *write_string, int write_clean)
+int sh_overrides_test_stream_helpers_configure(void *read_string,
+                                                void *compare,
+                                                void *write_string)
 {
-    return ov_stream_helpers_install(read_string, read_clean, compare, compare_clean,
-                                     write_string, write_clean);
+    return ov_stream_helpers_install(read_string, compare,
+                                     write_string);
 }
 
 int sh_overrides_test_stream_helpers_ready(void)
@@ -433,24 +383,7 @@ void *sh_overrides_test_stream_open_file(const char *path)
     return stream;
 }
 
-void sh_overrides_test_stream_close(void *stream)
-{
-    ov_dtor((ov_stream *)stream);
-}
 #endif
-
-/* Path-tolerant name compare for the baked table: case-insensitive, with '/' equal to '\\'. */
-/* Case- and separator-tolerant prefix test; returns the text after it, or NULL. */
-static const char *ov_after_prefix(const char *name, const char *prefix)
-{
-    for (; *prefix; name++, prefix++) {
-        char ca = *name, cb = *prefix;
-        if (ca == '\\') ca = '/';
-        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
-        if (ca != cb) return NULL;
-    }
-    return name;
-}
 
 /* Decls DOOM never shipped. A runtime registration loads them from the loose source tree
  * (decltree/<type>/<name>.decl) rather than generated/decls/, so these also answer that spelling. */
@@ -463,12 +396,12 @@ static const ov_baked_decl_t *find_baked(const char *name)
     if (!name) return NULL;
     for (size_t i = 0; i < sizeof g_ov_baked_decls / sizeof g_ov_baked_decls[0]; i++)
         if (sh_path_eq(name, g_ov_baked_decls[i].name)) return &g_ov_baked_decls[i];
-    tree = ov_after_prefix(name, "decltree/");
+    tree = sh_path_after_prefix(name, "decltree/");
     if (!tree) return NULL;
     for (size_t i = 0; i < sizeof g_ov_baked_decls / sizeof g_ov_baked_decls[0]; i++) {
-        const char *rel = ov_after_prefix(g_ov_baked_decls[i].name, "generated/decls/");
+        const char *rel = sh_path_after_prefix(g_ov_baked_decls[i].name, "generated/decls/");
         for (size_t k = 0; rel && k < sizeof g_ov_product_decls / sizeof g_ov_product_decls[0]; k++)
-            if (ov_after_prefix(rel, g_ov_product_decls[k]) && sh_path_eq(tree, rel)) return &g_ov_baked_decls[i];
+            if (sh_path_after_prefix(rel, g_ov_product_decls[k]) && sh_path_eq(tree, rel)) return &g_ov_baked_decls[i];
     }
     return NULL;
 }
@@ -758,50 +691,12 @@ void *sh_overrides_test_open(const char *name, unsigned int mode)
 }
 #endif
 
-/* Scan window for decoding the first LEA RAX,[rip+disp32] in the provider constructor, which names its vtable. */
-#define LEA_SCAN_WINDOW 0x40
-
-static void *decode_vtable_global(const uint8_t *ctor_fn)
-{
-    uint8_t b[LEA_SCAN_WINDOW];
-    if (!sh_safe_read(ctor_fn, b, sizeof b)) return NULL;
-    for (int i = 0; i + 7 <= LEA_SCAN_WINDOW; i++) {
-        if (b[i] == 0x48 && b[i + 1] == 0x8D && b[i + 2] == 0x05) {     /* LEA RAX,[rip+disp32] */
-            int32_t disp;
-            memcpy(&disp, &b[i + 3], 4);
-            const uint8_t *rip_next = ctor_fn + i + 7;
-            return (void *)(rip_next + disp);
-        }
-    }
-    return NULL;
-}
-
-/* SizeOfImage from the host's optional header; 0 on failure. SEH-guarded, and invalid or unreadable PE headers
- * refuse installation. */
-static int ov_image_size(const uint8_t *module_base, uint32_t *out_size)
-{
-    __try {
-        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)module_base;
-        const IMAGE_NT_HEADERS64 *nt;
-        if (!module_base || !out_size) return 0;
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
-        nt = (const IMAGE_NT_HEADERS64 *)(module_base + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
-        if (nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return 0;
-        *out_size = nt->OptionalHeader.SizeOfImage;
-        return *out_size != 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
-
 /* Checks host-image containment; it does not identify the function. */
 static int ov_address_in_image(const uint8_t *module_base, const void *address)
 {
     uintptr_t base = (uintptr_t)module_base;
     uintptr_t value = (uintptr_t)address;
-    uint32_t size = 0;
-    if (!module_base || !address || value < base) return 0;
-    if (!ov_image_size(module_base, &size)) return 0;
-    return value - base < (uintptr_t)size;
+    return address && value >= base && value - base < sh_pe_image_size(module_base);
 }
 
 /* Requires READ with neither WRITE nor EXECUTE on the containing section, which makes a decoded vtable address
@@ -809,20 +704,17 @@ static int ov_address_in_image(const uint8_t *module_base, const void *address)
 static int ov_address_in_readonly_section(const uint8_t *module_base, const void *address)
 {
     __try {
-        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)module_base;
-        const IMAGE_NT_HEADERS64 *nt;
+        const IMAGE_NT_HEADERS64 *nt = sh_pe_headers(module_base);
         const IMAGE_SECTION_HEADER *sec;
         uintptr_t rva;
         unsigned int i;
         if (!module_base || !address || (uintptr_t)address < (uintptr_t)module_base) return 0;
         rva = (uintptr_t)address - (uintptr_t)module_base;
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
-        nt = (const IMAGE_NT_HEADERS64 *)(module_base + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+        if (!nt) return 0;
         sec = (const IMAGE_SECTION_HEADER *)IMAGE_FIRST_SECTION(nt);
         for (i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
             uintptr_t start = (uintptr_t)sec->VirtualAddress;
-            uintptr_t span  = sec->Misc.VirtualSize ? sec->Misc.VirtualSize : sec->SizeOfRawData;
+            uintptr_t span  = sh_pe_section_span(sec);
             if (rva < start || rva >= start + span) continue;
             return (sec->Characteristics & IMAGE_SCN_MEM_READ) != 0 &&
                    (sec->Characteristics & (IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE)) == 0;
@@ -831,17 +723,14 @@ static int ov_address_in_readonly_section(const uint8_t *module_base, const void
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* Requires clean SIG_OK matches for the constructor and all three native helpers, plus host-image containment;
- * hook-tolerant fallbacks are refused because the constructor is decoded and helpers become vtable entries. */
+/* Only use resolved helpers and a constructor inside this host image. */
 static int ov_supported_build_abi(const uint8_t *module_base,
-                                  const void *ctor_fn, int ctor_status_ok,
-                                  const void *read_string_fn, int read_string_status_ok,
-                                  const void *compare_fn, int compare_status_ok,
-                                  const void *write_string_fn, int write_string_status_ok)
+                                  const void *ctor_fn,
+                                  const void *read_string_fn,
+                                  const void *compare_fn,
+                                  const void *write_string_fn)
 {
-    return ctor_status_ok == 1 && read_string_status_ok == 1 &&
-           compare_status_ok == 1 && write_string_status_ok == 1 &&
-           ov_address_in_image(module_base, ctor_fn) &&
+    return ov_address_in_image(module_base, ctor_fn) &&
            ov_address_in_image(module_base, read_string_fn) &&
            ov_address_in_image(module_base, compare_fn) &&
            ov_address_in_image(module_base, write_string_fn);
@@ -849,15 +738,15 @@ static int ov_supported_build_abi(const uint8_t *module_base,
 
 #ifdef SH_OVERRIDES_TESTING
 int sh_overrides_test_supported_build_abi(const uint8_t *module_base,
-                                          const void *ctor, int ctor_status_ok,
-                                          const void *read_string, int read_string_status_ok,
-                                          const void *compare, int compare_status_ok,
-                                          const void *write_string, int write_string_status_ok)
+                                          const void *ctor,
+                                          const void *read_string,
+                                          const void *compare,
+                                          const void *write_string)
 {
-    return ov_supported_build_abi(module_base, ctor, ctor_status_ok,
-                                  read_string, read_string_status_ok,
-                                  compare, compare_status_ok,
-                                  write_string, write_string_status_ok);
+    return ov_supported_build_abi(module_base, ctor,
+                                  read_string,
+                                  compare,
+                                  write_string);
 }
 
 int sh_overrides_test_address_in_readonly_section(const uint8_t *module_base, const void *address)
@@ -891,7 +780,7 @@ const char *sh_overrides_check_sites(const uint8_t *module_base, const void *cto
                "not at its recorded address on this executable";
     if (helper_out) *helper_out = helper;
 
-    vtable = decode_vtable_global((const uint8_t *)ctor_fn);
+    vtable = (void *)sh_rip_slot((const uint8_t *)ctor_fn, SH_RIP_RAX, SH_RIP_LEA);
     if (vtable == NULL)
         return "B1: overrides file-shadow SKIPPED -- could not decode the vtable LEA "
                "(ResProviderCtor layout shifted?)";
@@ -905,10 +794,10 @@ const char *sh_overrides_check_sites(const uint8_t *module_base, const void *cto
 }
 
 int sh_overrides_install(const uint8_t *module_base,
-                         void *ctor_fn, int ctor_status_ok,
-                         void *read_string_fn, int read_string_status_ok,
-                         void *compare_fn, int compare_status_ok,
-                         void *write_string_fn, int write_string_status_ok)
+                         void *ctor_fn,
+                         void *read_string_fn,
+                         void *compare_fn,
+                         void *write_string_fn)
 {
     char line[MAX_PATH + 128];
 
@@ -916,25 +805,17 @@ int sh_overrides_install(const uint8_t *module_base,
         backend_log("B1: overrides file-shadow SKIPPED -- ResProviderCtor not resolved");
         return 0;
     }
-    if (!ctor_status_ok) {
-        /* A hooked constructor may obscure the vtable LEA, so fallback matches are refused. */
-        backend_log("B1: overrides file-shadow SKIPPED -- ResProviderCtor via hook-tolerant fallback "
-                    "(prologue may be hooked); not decoding the vtable LEA from a detoured prologue");
-        return 0;
-    }
-    if (!read_string_fn || !compare_fn || !write_string_fn ||
-        read_string_status_ok != 1 || compare_status_ok != 1 ||
-        write_string_status_ok != 1) {
-        ov_stream_helpers_install(read_string_fn, read_string_status_ok,
-                                  compare_fn, compare_status_ok,
-                                  write_string_fn, write_string_status_ok);
+    if (!read_string_fn || !compare_fn || !write_string_fn) {
+        ov_stream_helpers_install(read_string_fn,
+                                  compare_fn,
+                                  write_string_fn);
         backend_log("B1: overrides file-shadow SKIPPED -- idFile native idStr helpers did not all resolve cleanly");
         return 0;
     }
-    if (!ov_supported_build_abi(module_base, ctor_fn, ctor_status_ok,
-                                read_string_fn, read_string_status_ok,
-                                compare_fn, compare_status_ok,
-                                write_string_fn, write_string_status_ok)) {
+    if (!ov_supported_build_abi(module_base, ctor_fn,
+                                read_string_fn,
+                                compare_fn,
+                                write_string_fn)) {
         backend_log("B1: overrides file-shadow SKIPPED -- resolved engine locations are not clean unique "
                     "signature matches inside the host image");
         return 0;
@@ -944,9 +825,9 @@ int sh_overrides_install(const uint8_t *module_base,
         return 1;
     }
 
-    if (!ov_stream_helpers_install(read_string_fn, read_string_status_ok,
-                                   compare_fn, compare_status_ok,
-                                   write_string_fn, write_string_status_ok)) {
+    if (!ov_stream_helpers_install(read_string_fn,
+                                   compare_fn,
+                                   write_string_fn)) {
         backend_log("B1: overrides file-shadow SKIPPED -- idFile helper table publication refused");
         return 0;
     }

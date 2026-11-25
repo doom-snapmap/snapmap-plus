@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "signatures.h"
+#include "md6_registry.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,13 +21,10 @@ extern "C" {
 /* The namespace every mod decl lives under (an entityDef, an md6Def). */
 #define SH_CE_DECL_ROOT     "mods/"
 #define SH_CE_DECL_ROOT_LEN 5
-/* The mod.json author key and the registries member the builder writes. */
-#define SH_CE_AUTHOR_KEY    "animation_events"
+/* The registries member the builder writes. */
 #define SH_CE_REGISTRY_KEY  "clipEvents"
 /* The most parent pointers followed on a model chain. */
 #define SH_CE_CHAIN_MAX     32
-
-typedef void (*sh_ce_line_fn)(void *context, const char *line);
 
 /* 1 when `clip` starts with md6/mods/ (any case, either slash): the detour's one test for a stock clip. */
 int sh_ce_under_mods(const char *clip);
@@ -58,40 +56,6 @@ typedef int (*sh_ce_text_fn)(void *context, const char *name, char **text, size_
  * NULL when nothing registers; *oom is set when memory ran out. */
 char *sh_ce_build_registry(const char *salt, const char *const *names, int n, sh_ce_text_fn text, void *text_ctx,
                            sh_ce_line_fn warn, void *warn_ctx, int *oom);
-
-/* Row states, written by the engine side; every row starts at SH_CE_ROW_NEW. */
-#define SH_CE_ROW_NEW       0   /* the carrier has not been looked for in this Play */
-#define SH_CE_ROW_READY     1
-#define SH_CE_ROW_MISSING   2   /* the carrier did not load: its clip plays without the rows this Play */
-
-typedef struct sh_ce_row {
-    char *clip;               /* md6/mods/<salt>/....md6anim */
-    char *carrier;            /* mods/<salt>/....md6 */
-    char *base;               /* the model the carrier inherits */
-    char *salt;
-    char *label;              /* the mod as lines name it */
-    void *volatile model;     /* the carrier's md6Def in this Play, or NULL */
-    volatile long state;
-    volatile long answered;   /* lookups the carrier answered this Play */
-    volatile long logged;     /* the first answer's line is written */
-} sh_ce_row;
-
-typedef struct sh_ce_registry {
-    sh_ce_row *rows;          /* sorted by clip (sh_ce_registry_seal) */
-    int n, cap;
-    int mods;                 /* mods that registered at least one clip */
-} sh_ce_registry;
-
-/* Adds one mod's rows from its build's registries object text (or NULL). A carrier outside mods/<salt>/ or a clip
- * outside md6/mods/<salt>/ is dropped with one line, and a clip already registered keeps its first rows. Returns
- * the rows added, -1 out of memory. */
-int  sh_ce_registry_add(sh_ce_registry *r, const char *salt, const char *label, const char *registries,
-                        sh_ce_line_fn line, void *line_ctx);
-/* Sorts the rows for sh_ce_registry_find; call once after the last add. */
-void sh_ce_registry_seal(sh_ce_registry *r);
-/* Returns the row of `clip`, or NULL. Lock-free; allocates nothing. */
-sh_ce_row *sh_ce_registry_find(const sh_ce_registry *r, const char *clip);
-void sh_ce_registry_free(sh_ce_registry *r);
 
 /* Reads a model's parent (md6Def +0x98 under a fault guard) into *parent; returns 1 when read. */
 typedef int (*sh_ce_parent_fn)(void *context, const void *model, const void **parent);

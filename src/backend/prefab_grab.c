@@ -46,7 +46,7 @@ static int pg_box_valid(const sh_prefab_grab_box *box)
     return 1;
 }
 
-float sh_prefab_grab_outside(const sh_prefab_grab_box *box, const float p[3])
+static float sh_prefab_grab_outside(const sh_prefab_grab_box *box, const float p[3])
 {
     float d[3], worst = 0.0f;
     int i;

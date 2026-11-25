@@ -40,30 +40,4 @@ static __inline int sh_store_lock_name(const wchar_t *mods, wchar_t *out, size_t
     return _snwprintf_s(out, cap, _TRUNCATE, SH_STORE_LOCK_PREFIX L"%016llx", h) > 0;
 }
 
-/* Take the lock on `mods`, waiting up to `ms` milliseconds (INFINITE: no
- * limit). Returns the held mutex, or NULL when it could not be had in time
- * (GetLastError: WAIT_TIMEOUT) or opened. */
-static __inline HANDLE sh_store_lock_take(const wchar_t *mods, DWORD ms)
-{
-    wchar_t name[64];
-    HANDLE m;
-    DWORD w;
-    if (!sh_store_lock_name(mods, name, 64)) return NULL;
-    m = CreateMutexW(NULL, FALSE, name);
-    if (!m) return NULL;
-    w = WaitForSingleObject(m, ms);
-    if (w == WAIT_OBJECT_0 || w == WAIT_ABANDONED) return m;
-    CloseHandle(m);
-    SetLastError(WAIT_TIMEOUT);
-    return NULL;
-}
-
-/* Release a lock sh_store_lock_take returned. */
-static __inline void sh_store_lock_give(HANDLE m)
-{
-    if (!m) return;
-    ReleaseMutex(m);
-    CloseHandle(m);
-}
-
 #endif /* SNAPMAP_PLUS_STORE_LOCK_H */

@@ -21,7 +21,6 @@
 /* Decode the decl-manager accessor from a signed call site. Its own lazy-init
  * prologue is shared by other functions, so a prologue-only pattern is ambiguous. */
 typedef void *(*declmgr_getter_fn)(void);
-#define DECLMGR_ACCESSOR_KNOWN_RVA  SH_RVA(0x1565BD0u, 0x1566EB0u)   /* Pinned Vulkan audit reference only; resolved through a signed call site. */
 
 /* Decl-manager vtable +0x80 returns its reflection context. */
 #define VSLOT_REFLECT_ACCESSOR  0x80
@@ -177,7 +176,6 @@ static int ti_read_u32(const void *base, size_t off, uint32_t *out)
  * type, -1 when reflection is unavailable (callers must not reject on -1). */
 /* The validator reflects through manager vtable +0x258, which includes SnapMap classes declMgr +0x80 misses;
  * the slot resolves through its global anchor, falling back to the decl-manager context. */
-#define VALIDATOR_MGR_RVA         SH_RVA(0x35EB618u, 0x3633430u)   /* Pinned Vulkan audit reference; the global anchor locates the slot. */
 #define VSLOT_VALIDATOR_REFLECT   SH_VALIDATOR_REFLECT_SLOT
 static void *ti_get_validator_reflect(void)
 {
@@ -216,8 +214,6 @@ int sh_typeinfo_class_derives(const char *className, const char *baseName)
 
 /* Find the inherit declaration through the read-only hash lookup and copy className@+0x60; load-or-create is
  * avoided because unresolved names reach engine fatal paths. Returns NULL if unavailable (the compatibility guard then opens). */
-#define RESOURCE_MGR_CTX_RVA   SH_RVA(0x66C4980u, 0x4FC9F40u)   /* Pinned Vulkan audit reference from the validator call site. */
-#define DECL_PURE_FIND_RVA     SH_RVA(0x1572A80u, 0x1573C10u)   /* Pinned Vulkan audit reference; DeclPureFind resolves the function. */
 #define DECL_CLASSNAME_OFF     0x60u        /* idDeclEntityDef.className char* (vtbl+0xb0 = return *(this+0x60)) */
 const char *sh_typeinfo_inherit_base(const char *inheritName, char *buf, size_t cap)
 {
@@ -343,7 +339,6 @@ size_t sh_typeinfo_inherit_text(const char *inheritName, char *buf, size_t cap)
 #define REGISTRY_NAME_OFF       0x00      /* record -> className char* (NULL name terminates the array) */
 #define REGISTRY_SUPER_OFF      0x08      /* record -> superclass name char* ("" for a root) */
 #define REGISTRY_WALK_CAP       65536u    /* Bound invalid or unterminated arrays. */
-#define TYPE_CONTAINER_RVA      SH_RVA(0x2F5A940u, 0x2FA2900u) /* Pinned Vulkan audit reference; runtime uses the signed type_container anchor. */
 
 /* Prefer the reflection container. When the accessor is unavailable on the UI
  * thread, read the signed static container directly. Both yield array@P+0x20. */
@@ -867,7 +862,6 @@ static void vc_emit(const char *C, const char *Y, int *count, int *y_seen)
 
 /* List live types compatible with an inherit declaration, using the static candidate table only when the live
  * registry is unavailable. */
-#define SH_REGISTRY_MAX  16384   /* Candidate buffer cap. */
 void h_sh_validclasses(idCmdArgs *a)
 {
     const char *inherit = cmd_argv(a, 1);

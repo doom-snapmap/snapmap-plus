@@ -29,8 +29,8 @@ typedef struct sh_grid_builtin_light {
  * loaded one end with identical values. Authored map entities are never inputs. */
 int sh_grid_decl_lights(const sh_grid_size *size,const char *source,size_t length,
                        sh_grid_builtin_light *out,size_t capacity,size_t *count);
-/* The same built-in lights read without any transform, for inspecting a generated variant declaration. */
-int sh_grid_decl_light_values(const char *source,size_t length,
-                              sh_grid_builtin_light *out,size_t capacity,size_t *count);
+#ifdef SH_GRID_LIGHT_FIXTURE
+int sh_grid_decl_light_values(const char *source,size_t length,sh_grid_builtin_light *out,size_t capacity,size_t *count);
+#endif
 
 #endif

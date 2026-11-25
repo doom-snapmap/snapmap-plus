@@ -1,5 +1,6 @@
 /* Reports live signature resolution at startup, with expected and live bytes of each unresolved signature. The
  * diagnostic build (SH_DIAG) also tests the detour engine on scratch code; a release build allocates no RWX memory. */
+#include "../common/text.h"
 #include "safe_read.h"
 #include <windows.h>
 #include <stdint.h>
@@ -37,29 +38,6 @@ static const uint8_t SCRATCH_DETOUR_CODE[] = {
 #define SCRATCH_STOLEN 16
 #endif
 
-static const char *sig_status_str(sig_status s)
-{
-    switch (s) {
-        case SIG_OK:          return "OK";
-        case SIG_NOT_FOUND:   return "NOT_FOUND";
-        case SIG_AMBIGUOUS:   return "AMBIGUOUS";
-        case SIG_BAD_PATTERN: return "BAD_PATTERN";
-        case SIG_BAD_MODULE:  return "BAD_MODULE";
-        case SIG_CHANGED:     return "CHANGED";
-        default:              return "?";
-    }
-}
-
-/* Distinguish an unreadable page from differing bytes in failure diagnostics. */
-/* Append up to `n` bytes of `buf` as hex into `out` (out must hold 3*n+1). */
-static void hexdump(const uint8_t *buf, int n, char *out, size_t outcap)
-{
-    size_t p = 0;
-    for (int i = 0; i < n && p + 3 < outcap; i++)
-        p += (size_t)_snprintf_s(out + p, outcap - p, _TRUNCATE, "%02X ", buf[i]);
-    if (p && out[p - 1] == ' ') out[p - 1] = '\0';
-}
-
 /* Compare expected bytes with live bytes at the recorded RVA for diagnostics.
  * On other builds this location need not be the function. */
 #define DIAG_BYTES 16
@@ -82,17 +60,17 @@ static void log_sig_failure_diag(const uint8_t *doom_base, const sig_entry *e, s
         }
         while (*p && *p != ' ' && *p != '\t') p++;
     }
-    hexdump(exp, en, exp_hex, sizeof exp_hex);
+    sh_hex_bytes(exp, en, exp_hex, sizeof exp_hex);
 
 
     uint8_t got[DIAG_BYTES];
     uint32_t known_rva = sh_host_image_rva(doom_base, e->rva_vk, e->rva_gl);
     int readable = known_rva && sh_safe_read(doom_base + known_rva, got, en > 0 ? en : DIAG_BYTES);
-    if (readable) hexdump(got, en > 0 ? en : DIAG_BYTES, got_hex, sizeof got_hex);
+    if (readable) sh_hex_bytes(got, en > 0 ? en : DIAG_BYTES, got_hex, sizeof got_hex);
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "startup: sig %s unresolved, status=%s @recorded_rva=0x%x exp=[%s] got=[%s]",
-        e->name, sig_status_str(st), (unsigned)known_rva, exp_hex,
+        e->name, sig_status_name(st), (unsigned)known_rva, exp_hex,
         readable ? got_hex : "<unreadable page>");
     backend_log(line);
 }

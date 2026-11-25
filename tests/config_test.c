@@ -8,6 +8,16 @@
 
 #include "config.h"
 
+static int read_string(const char *key, char *out, int capacity)
+{
+    char *value = sh_config_get_text(key);
+    size_t n = value ? strlen(value) : 0;
+    if (!value || capacity <= 0 || n >= (size_t)capacity) { free(value); return -1; }
+    memcpy(out, value, n + 1);
+    free(value);
+    return (int)n;
+}
+
 static int g_failed;
 static unsigned long g_root_serial;
 
@@ -179,7 +189,7 @@ static void test_first_run_creates_defaults_and_getter_contract(void)
     CHECK(short_buffer[0] == 'X');
     CHECK(sh_config_get_json("theme", value, (int)sizeof(value), NULL) == 7);
     CHECK(strcmp(value, "\"light\"") == 0);
-    CHECK(sh_config_get_string("theme", value, (int)sizeof(value)) == 5);
+    CHECK(read_string("theme", value, (int)sizeof(value)) == 5);
     CHECK(strcmp(value, "light") == 0);
     CHECK(sh_config_get_json("entities.show_hidden", value,
                              (int)sizeof(value), NULL) == 5);
@@ -219,7 +229,7 @@ static void test_loads_existing_theme_without_rewriting(void)
     sh_config_test_set_local_appdata(root);
 
     CHECK(sh_config_init() == 1);
-    CHECK(sh_config_get_string("theme", value, (int)sizeof(value)) == 4);
+    CHECK(read_string("theme", value, (int)sizeof(value)) == 4);
     CHECK(strcmp(value, "dark") == 0);
     CHECK(read_file(path, &disk, &disk_length));
     CHECK(disk_length == sizeof(existing) - 1);
@@ -261,7 +271,7 @@ static void test_sets_valid_theme_and_preserves_unknown_values(void)
     CHECK(sh_config_init() == 1);
 
     CHECK(sh_config_set_json("theme", "\"dark\"") == SH_CONFIG_SET_PERSISTED);
-    CHECK(sh_config_get_string("theme", value, (int)sizeof(value)) == 4);
+    CHECK(read_string("theme", value, (int)sizeof(value)) == 4);
     CHECK(strcmp(value, "dark") == 0);
     CHECK(sh_config_set_json("missing", "\"dark\"") == SH_CONFIG_SET_REJECTED);
     CHECK(sh_config_set_json("theme", "true") == SH_CONFIG_SET_REJECTED);
@@ -343,7 +353,7 @@ static void test_repairs_missing_and_invalid_registered_values(void)
         sh_config_test_set_local_appdata(root);
 
         CHECK(sh_config_init() == 1);
-        CHECK(sh_config_get_string("theme", value, (int)sizeof(value)) == 5);
+        CHECK(read_string("theme", value, (int)sizeof(value)) == 5);
         CHECK(strcmp(value, "light") == 0);
         CHECK(sh_config_get_json("theme", NULL, 0, &flags) == 7);
         CHECK(sh_config_get_json("entities.show_hidden", value,
@@ -621,7 +631,7 @@ static void test_accepts_bom_and_canonicalizes_registered_strings(void)
     sh_config_test_reset();
     sh_config_test_set_local_appdata(root);
     CHECK(sh_config_init() == 1);
-    CHECK(sh_config_get_string("theme", value, (int)sizeof(value)) == 4);
+    CHECK(read_string("theme", value, (int)sizeof(value)) == 4);
     CHECK(strcmp(value, "dark") == 0);
     CHECK(read_file(path, &disk, NULL));
     CHECK(disk && memcmp(disk, bom_document, sizeof(bom_document) - 1) == 0);
@@ -1248,7 +1258,7 @@ static void test_process_writers_are_serialized(void)
     sh_config_test_reset();
     sh_config_test_set_local_appdata(root);
     CHECK(sh_config_init() == 1);
-    CHECK(sh_config_get_string("theme", value, (int)sizeof(value)) > 0);
+    CHECK(read_string("theme", value, (int)sizeof(value)) > 0);
     CHECK(strcmp(value, "light") == 0 || strcmp(value, "dark") == 0);
 
     sh_config_test_reset();

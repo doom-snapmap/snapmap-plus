@@ -57,7 +57,9 @@ size_t sig_resolve_all(const uint8_t *module_base, sig_result *results, size_t c
 
 /* Scan every executable section for the pattern: SIG_OK for exactly one
  * match, SIG_AMBIGUOUS, or SIG_NOT_FOUND. For deriving and auditing RVAs. */
+#ifdef SH_SIGNATURE_SCAN_TESTING
 sig_status sig_scan_one(const uint8_t *module_base, const sig_entry *sig, sig_result *out);
+#endif
 
 /* The result named name, or NULL. */
 static __inline const sig_result *sig_lookup(const sig_result *results, size_t n, const char *name)
@@ -85,5 +87,6 @@ uintptr_t sig_addr_by_name(const sig_result *results, size_t n, const char *name
 
 /* A short reason for a status, for logs and the feature-health table. */
 const char *sig_status_reason(sig_status status);
+const char *sig_status_name(sig_status status);
 
 #endif /* BACKEND_SIGNATURES_H */

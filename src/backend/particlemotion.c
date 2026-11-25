@@ -133,7 +133,7 @@ typedef struct pm_start {
  * child born at its parent's place), then the stage's simulated motion against the scene's planes. Returns 1 when
  * it died on a surface; *have says whether planes were used. */
 static int flight(void **context, const uint8_t *stage, const uint32_t *born, float age, float life,
-                  const float *from, const float *inherit, float p[3], float v[3], int *have, pm_start *start)
+                  const float *from, float p[3], float v[3], int *have, pm_start *start)
 {
     sh_motion m;
     sh_motion_frame fr;
@@ -152,7 +152,6 @@ static int flight(void **context, const uint8_t *stage, const uint32_t *born, fl
     if (model) for (i = 0; i < 3; i++) p0[i] = fr.origin[i] + (p0[i] - fr.origin[i]) * scale;
     sh_motion_launch(&m, born[5], v0);
     if (from) for (i = 0; i < 3; i++) p0[i] = from[i] + (p0[i] - fr.origin[i]);
-    if (inherit) for (i = 0; i < 3; i++) v0[i] += inherit[i];
     if (start) {
         memcpy(start->p0, p0, sizeof start->p0);
         memcpy(start->v0, v0, sizeof start->v0);
@@ -244,15 +243,15 @@ static void fold(float *verts)          /* a particle that is not there: its qua
         for (k = 0; k < 3; k++) ((float *)((uint8_t *)verts + VERT_STRIDE * (size_t)i))[k] = verts[k];
 }
 
-/* Finds where a child particle's parent was when the child was born (particlemotion.h). Returns 1 with the place and
- * the parent's velocity there, 0 when the parent did not yet exist (the child is not drawn), -1 for a non-family. */
-static int parent_place(void **context, const uint8_t *child, const uint32_t *born, float at[3], float vel[3])
+/* Finds where a child particle's parent was when the child was born (particlemotion.h). Returns 1 with the place,
+ * 0 when the parent did not yet exist (the child is not drawn), -1 for a non-family. */
+static int parent_place(void **context, const uint8_t *child, const uint32_t *born, float at[3])
 {
     const uint8_t *parent = sh_family_parent(child);
     uint8_t pctx[CTX_COPY];
     uint32_t prec[8];
     sh_motion_frame fr;
-    float delta, plife, x;
+    float delta, plife, x, vel[3];
     int p, have;
     if (!parent || sh_family_role(parent) != 1) return -1;          /* not a family: drawn as its own */
     if (!sh_family_link(child, parent, (int)born[0], &p, &delta)) return -1;
@@ -270,7 +269,7 @@ static int parent_place(void **context, const uint8_t *child, const uint32_t *bo
     memcpy(&prec[3], &x, sizeof x);
     memcpy(&prec[4], &x, sizeof x);
     prec[5] = prec[6] = sh_family_seed(sh_family_salt(fr.origin, parent), p);
-    p = flight((void **)pctx, parent, prec, delta, plife, NULL, NULL, at, vel, &have, NULL) ? 0 : 1;
+    p = flight((void **)pctx, parent, prec, delta, plife, NULL, at, vel, &have, NULL) ? 0 : 1;
     if (t_model_context == (void *)pctx) t_model_context = context;
     return p;
 }
@@ -280,21 +279,19 @@ static void move_quad(void **context, const uint8_t *stage, const uint32_t *born
     sh_motion m;
     sh_motion_frame fr;
     pm_start start;
-    float age, life, pe[3], p[3], v[3], eye[3], from[3], pvel[3], inherit[3];
-    int i, dead, have, role = sh_family_role(stage), parent = -1;
+    float age, life, pe[3], p[3], v[3], eye[3], from[3];
+    int dead, have, role = sh_family_role(stage), parent = -1;
     memcpy(&age, &born[1], sizeof age);
     memcpy(&life, &born[2], sizeof life);
     if (!(age > 0.0f) || !(life > 0.0f)) return;
     if (role == 2) {
-        parent = parent_place(context, stage, born, from, pvel);
+        parent = parent_place(context, stage, born, from);
         if (parent == 0) { fold(verts); return; }
-        for (i = 0; i < 3; i++) inherit[i] = pvel[i] * sh_family_inherit(stage);
     }
     sh_motion_read(stage, &m);
     read_frame(context, &fr, eye);
     origin_at(context, born, age, life, pe);
-    dead = flight(context, stage, born, age, life, parent == 1 ? from : NULL, parent == 1 ? inherit : NULL, p, v,
-                  &have, &start);
+    dead = flight(context, stage, born, age, life, parent == 1 ? from : NULL, p, v, &have, &start);
     if (g_trace > 0 && InterlockedDecrement(&g_trace) >= 0) {
         trace_line(stage, born, age, life, &start, pe, p, v, dead);
         if (g_trace_ctx > 0 && InterlockedDecrement(&g_trace_ctx) >= 0) trace_context(context);

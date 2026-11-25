@@ -18,8 +18,7 @@
 #include "veh.h"
 #pragma comment(lib, "user32.lib")   /* ClipCursor/ShowCursor -- free the captured mouse on a Class-B fault */
 
-extern uint8_t *g_doom_base;
-extern size_t   g_doom_size;
+#include "fault_shield.h"
 
 /* Derive [lo,hi) from resolved entries and measured spans; an unresolved
  * range cannot classify a fault. */
@@ -94,16 +93,6 @@ static void veh_resolve_globals(void)
     }
 }
 
-/* Clear suppressor B, resolved through the dispatcher's CMP anchor; callers guard the write with SEH. */
-static void write_suppressor_b(void)
-{
-    uintptr_t b;
-    if (g_doom_base == NULL) return;
-    b = glb_resolve(g_doom_base, "throw_suppressor_b", NULL);
-    if (!b) return;                     /* unlocatable on this build -- skip, never guess */
-    *(volatile int32_t *)b = 0;
-}
-
 static shield_incident g_incident;      /* Class-B redirects in the current incident (redirect_policy.h) */
 static volatile LONG g_classa_seen = 0;  /* Class-A in-editor recoveries (log rate-limit only; NOT capped) */
 static volatile LONG g_visleaf_seen = 0; /* vis-leaf micro-recoveries (log rate-limit only; NOT capped) */
@@ -154,27 +143,10 @@ static const char *exc_name(DWORD c)
     }
 }
 
-/* Resolve an address to "<module-basename>+0x<offset>". Best-effort; a failed lookup yields "?". Uses the
- * FROM_ADDRESS/UNCHANGED_REFCOUNT flags (no LoadLibrary side effect); called only on the rate-limited log path. */
 static void module_at(void *addr, char *out, size_t cap, uintptr_t *off)
 {
-    HMODULE h = NULL;
-    out[0] = '\0';
-    if (off) *off = 0;
-    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCWSTR)addr, &h) && h) {
-        char path[MAX_PATH];
-        const char *base = "?";
-        if (GetModuleFileNameA(h, path, MAX_PATH)) {
-            char *s = strrchr(path, '\\');
-            base = s ? s + 1 : path;
-        }
-        _snprintf_s(out, cap, _TRUNCATE, "%s", base);
-        if (off) *off = (uintptr_t)addr - (uintptr_t)h;
-    } else {
-        _snprintf_s(out, cap, _TRUNCATE, "?");
-    }
+    wchar_t path[MAX_PATH];
+    if (!shield_module_at(addr, path, MAX_PATH, out, cap, off)) strncpy_s(out, cap, "?", _TRUNCATE);
 }
 
 static int rip_in_doom(void *rip)
@@ -411,7 +383,7 @@ static void force_recovery_gate(void)
             *(volatile int32_t *)g_load_state_at = 0;
         if (g_suppr_a_at)
             *(volatile int32_t *)g_suppr_a_at = 0;
-        write_suppressor_b();
+        shield_clear_suppressor_b(g_doom_base);
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
 
@@ -785,7 +757,7 @@ static LONG redirect_to_error6(PEXCEPTION_POINTERS ep, DWORD code, uintptr_t rva
      * the redirect still proceeds because the gate may already be open. */
     __try {
         if (g_suppr_a_at) *(volatile int32_t *)g_suppr_a_at = 0;
-        write_suppressor_b();
+        shield_clear_suppressor_b(g_doom_base);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         shield_fault sf = { "sig", -1, "throw-gate suppressor write faulted", 0, 0 };
         shield_emit(&sf);

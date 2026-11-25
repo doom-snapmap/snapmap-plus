@@ -109,10 +109,9 @@ typedef int (*sh_planes_trace_fn)(const float from[3], const float to[3], float 
 /* Game thread, once a frame: trace up to `budget` asked places. Returns how many were traced. */
 int sh_planes_service(sh_planes_trace_fn trace, int budget);
 /* Forget every place (a new map). Game thread. */
+#ifdef SH_PARTICLE_FIXTURE
 void sh_planes_clear(void);
-/* The planes of one place by the trace (the service's own rule): the surface under it and, for an
- * emitter that does not face up, the one behind it. */
-void sh_planes_find(sh_planes_trace_fn trace, const float origin[3], const float zaxis[3], sh_motion_planes *out);
+#endif
 
 /* Move the four vertices of one particle's quad (stride bytes apart, position first) from the game's place
  * `engine_at` to `p`; `aimed` rebuilds the quad along `v` as the game's aimed builder lays it out (far - side,
@@ -148,9 +147,6 @@ float sh_family_life(const uint8_t *parent);
 /* The seed a family's particle p takes, and the place's salt (0 for a stage built in its model's axes). */
 uint32_t sh_family_seed(uint32_t salt, int p);
 uint32_t sh_family_salt(const float origin[3], const uint8_t *stage);
-/* The share of the parent's velocity a child takes at birth. */
-float sh_family_inherit(const uint8_t *child);
-
 /* Writes the next n particles the detour moves to the backend log, one "PARTICLES: trace" line each (at most 4,096;
  * 0 stops). */
 void sh_particlemotion_trace(long n);

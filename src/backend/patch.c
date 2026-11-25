@@ -1,6 +1,7 @@
 /* Guarded code patches with restore handles, plus wrappers for hook.c detours. Every write runs with the other
  * threads suspended and outside the changed bytes, after the expected bytes check; a failed write rolls back, and a
  * failed rollback keeps its handle. */
+#include "../common/text.h"
 #include "safe_read.h"
 #include <windows.h>
 #include <tlhelp32.h>
@@ -200,16 +201,6 @@ static sh_patch_status patch_failed(sh_patch_handle *handle, sh_patch_status rea
     return B2_PATCH_FAIL_ROLLBACK;
 }
 
-/* Append up to `n` bytes of `buf` as hex into `out` (out must hold ~3*n+1). For log diagnostics. */
-static void hexdump(const uint8_t *buf, size_t n, char *out, size_t outcap)
-{
-    size_t p = 0;
-    for (size_t i = 0; i < n && p + 3 < outcap; i++)
-        p += (size_t)_snprintf_s(out + p, outcap - p, _TRUNCATE, "%02X ", buf[i]);
-    if (p && out[p - 1] == ' ') out[p - 1] = '\0';
-    else if (!p && outcap) out[0] = '\0';
-}
-
 sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *new_bytes,
                            size_t len, sh_patch_handle *out_handle)
 {
@@ -234,8 +225,8 @@ sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *n
             char exp_hex[200], got_hex[200];
             uint8_t got[B2_PATCH_MAX_BYTES];
             int rd = sh_safe_read(t, got, len);
-            hexdump(expect, len, exp_hex, sizeof exp_hex);
-            if (rd) hexdump(got, len, got_hex, sizeof got_hex);
+            sh_hex_bytes(expect, len, exp_hex, sizeof exp_hex);
+            if (rd) sh_hex_bytes(got, len, got_hex, sizeof got_hex);
             _snprintf_s(line, sizeof line, _TRUNCATE,
                 "patch: bytes at %p differ (expected [%s], found [%s]); nothing written",
                 target, exp_hex, rd ? got_hex : "unreadable");

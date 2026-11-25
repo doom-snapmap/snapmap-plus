@@ -250,10 +250,3 @@ int sh_grid_light_axes(const sh_grid_warp *warp, const float origin[3],
     memcpy(new_origin, o, sizeof o); memcpy(new_radius, r, sizeof r); memcpy(new_center, c, sizeof c);
     return 1;
 }
-
-int sh_grid_light(const sh_grid_warp *warp, const float origin[3],
-                   const float radius[3], const float center[3], int roof_anchor,
-                   float new_origin[3], float new_radius[3], float new_center[3])
-{
-    return sh_grid_light_axes(warp,origin,radius,center,NULL,roof_anchor,new_origin,new_radius,new_center);
-}

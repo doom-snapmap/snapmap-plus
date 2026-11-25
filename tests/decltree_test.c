@@ -8,9 +8,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "decl_tree.h"
+#include "../src/backend/decl_tree.c"
 #include "modbundle.h"
 #include "modstock.h"
+
+/* Compare round trips with the same order-insensitive comparison used when applying edits. */
+static int texts_equal(const char *a, size_t alen, const char *b, size_t blen)
+{
+    sh_dt *x = sh_dt_parse(a, alen, NULL, 0), *y = sh_dt_parse(b, blen, NULL, 0);
+    int equal = x && y && dt_same(sh_dt_root(x), sh_dt_root(y), 0);
+    sh_dt_free(x);
+    sh_dt_free(y);
+    return equal;
+}
 
 static int g_failed, g_checks;
 #define CHECK(expr) do {                                                         \
@@ -63,7 +73,7 @@ static int round_trips(const char *text)
     size_t n = strlen(text), out_n = 0;
     sh_dt *t = sh_dt_parse(text, n, NULL, 0);
     char *out = t ? sh_dt_text(t, &out_n) : NULL;
-    int ok = out && sh_dt_texts_equal(text, n, out, out_n) && same_tokens(text, n, out, out_n);
+    int ok = out && texts_equal(text, n, out, out_n) && same_tokens(text, n, out, out_n);
     if (!ok && out) fprintf(stderr, "  round trip of:\n%s\n  gave:\n%s\n", text, out);
     free(out);
     sh_dt_free(t);
@@ -147,10 +157,10 @@ static void test_grammar(void)
     CHECK(!sh_dt_parse("edit = { }", 10, cause, sizeof cause) && strstr(cause, "is not one { ... } decl body"));
     CHECK(!sh_dt_parse("{ } x", 5, cause, sizeof cause) && strstr(cause, "text after the decl's closing brace"));
     /* Semantic equality: fields in any order, list items in order. */
-    CHECK(sh_dt_texts_equal("{ a = 1; b { c = 2; } }", 23, "{ b { c = 2; } a = 1 }", 22));
-    CHECK(!sh_dt_texts_equal("{ l = { num = 2; item[0] = \"x\"; item[1] = \"y\"; } }", 50,
+    CHECK(texts_equal("{ a = 1; b { c = 2; } }", 23, "{ b { c = 2; } a = 1 }", 22));
+    CHECK(!texts_equal("{ l = { num = 2; item[0] = \"x\"; item[1] = \"y\"; } }", 50,
                              "{ l = { num = 2; item[0] = \"y\"; item[1] = \"x\"; } }", 50));
-    CHECK(sh_dt_texts_equal("{ size = 0 0 1; }", 17, "{ size = 0  0\t1; }", 18));
+    CHECK(texts_equal("{ size = 0 0 1; }", 17, "{ size = 0  0\t1; }", 18));
 }
 
 /* ------------------------------------------------------------------ the diff */
@@ -194,7 +204,7 @@ static void test_diff(void)
     /* Applied to the game's text: the copy, semantically. */
     copies[0] = COPY;
     text = apply_copies("generated/decls/entitydef/player/coop.decl", STOCK, copies, 1, NULL, 0, NULL);
-    CHECK(text && sh_dt_texts_equal(text, strlen(text), COPY, strlen(COPY)));
+    CHECK(text && texts_equal(text, strlen(text), COPY, strlen(COPY)));
     CHECK(text && strstr(text, "\t\t\tnum = 3;\r\n\t\t\titem[0] = \"weapon/a\";") && strstr(text, "item[4] = {"));
     free(text);
     /* A list the copy reorders is written whole; a copy equal to the game's has no edits. */
@@ -240,7 +250,7 @@ static void test_apply(void)
     t1 = apply_copies("generated/decls/md6def/player/mp/tp_body_mp.md6.decl", BODY, copies, 2, NULL, 0, &rep);
     copies[0] = B2; copies[1] = B1;
     t2 = apply_copies("generated/decls/md6def/player/mp/tp_body_mp.md6.decl", BODY, copies, 2, NULL, 0, NULL);
-    CHECK(t1 && t2 && sh_dt_texts_equal(t1, strlen(t1), t2, strlen(t2)));
+    CHECK(t1 && t2 && texts_equal(t1, strlen(t1), t2, strlen(t2)));
     CHECK(t1 && strstr(t1, "ae_p") && strstr(t1, "ae_q") && strstr(t1, "ae_one") && strstr(t1, "ae_x"));
     CHECK(t1 && strstr(strstr(t1, "alias"), "alias") == strstr(t1, "alias") && !strstr(strstr(t1, "alias {") + 1, "alias {"));
     CHECK(rep.clashes == 0 && rep.merged >= 1);
@@ -393,7 +403,7 @@ static void test_real(const char *const *mods, int nmods)
                       strstr(e, "\"name\":\"spiderMastermind_attacks\""));
             one[0] = copy;
             applied = apply_copies(requests[r], stock, one, 1, NULL, 0, NULL);
-            CHECK(applied && sh_dt_texts_equal(applied, strlen(applied), copy, cl));
+            CHECK(applied && texts_equal(applied, strlen(applied), copy, cl));
             free(applied);
             free(e);
             free(copy);
@@ -408,7 +418,7 @@ static void test_real(const char *const *mods, int nmods)
             for (i = 0; i < n; ++i) rev[i] = texts[n - 1 - i];
             a = apply_copies(R_BODY, stock, texts, n, NULL, 0, NULL);
             b = apply_copies(R_BODY, stock, rev, n, NULL, 0, NULL);
-            CHECK(a && b && sh_dt_texts_equal(a, strlen(a), b, strlen(b)));
+            CHECK(a && b && texts_equal(a, strlen(a), b, strlen(b)));
             clips = a ? clips_of(a, &aliases) : 0;
             printf("   %d bodies merged in both orders: %d clips, %d alias%s, %zu bytes\n", n, clips, aliases,
                    aliases == 1 ? "" : "es", a ? strlen(a) : 0);

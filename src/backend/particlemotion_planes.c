@@ -101,7 +101,7 @@ static void plane_of(const float end[3], const float n[3], sh_motion_planes *out
 
 /* Traces 2,048 units down for the surface under the place and, for an emitter not facing up, 256 units back along
  * its z axis for the surface behind it. */
-void sh_planes_find(sh_planes_trace_fn trace, const float o[3], const float z[3], sh_motion_planes *out)
+static void sh_planes_find(sh_planes_trace_fn trace, const float o[3], const float z[3], sh_motion_planes *out)
 {
     float from[3], to[3], end[3], n[3], len;
     int i;
@@ -171,6 +171,7 @@ int sh_planes_service(sh_planes_trace_fn trace, int budget)
     return done;
 }
 
+#ifdef SH_PARTICLE_FIXTURE
 void sh_planes_clear(void)
 {
     int i;
@@ -181,3 +182,4 @@ void sh_planes_clear(void)
         _InterlockedIncrement(&g_rows[i].seq);
     }
 }
+#endif

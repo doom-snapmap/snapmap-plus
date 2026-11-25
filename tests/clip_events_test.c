@@ -159,8 +159,8 @@ static void test_build(void)
 
 static void test_registry(void)
 {
-    sh_ce_registry r;
-    sh_ce_row *w;
+    sh_md6_registry r;
+    sh_md6_row *w;
     const char *reg = "{\"banks\":[\"x\"],\"clipEvents\":[{\"md6Def\":\"mods/" SALT "/player/kill_rows.md6\","
                       "\"base\":\"player/mp/tp_body_mp.md6\",\"clips\":[\"" KILL2 "\",\"" KILL "\","
                       "\"md6/player/human/stock.md6anim\"]},"
@@ -170,29 +170,29 @@ static void test_registry(void)
                         "\"clips\":[\"md6/mods/zzzz9999/a.md6anim\",\"" KILL "\"]}]}";
     memset(&r, 0, sizeof r);
     g_nlines = 0;
-    CHECK(sh_ce_registry_add(&r, SALT, "Kills (mods\\kills)", reg, collect, NULL) == 2);
+    CHECK(sh_md6_registry_add(&r, SH_MD6_CLIP_EVENTS, SALT, "Kills (mods\\kills)", reg, collect, NULL) == 2);
     /* a stock clip and a carrier that is a game model are never registered, whatever a build says */
     CHECK(g_nlines == 2);
     CHECK(said("adds rows to a clip that is not its own"));
     CHECK(said("is not one of its own md6Defs"));
     /* another mod cannot register this mod's clip */
-    CHECK(sh_ce_registry_add(&r, "zzzz9999", NULL, other, collect, NULL) == 1);
-    CHECK(sh_ce_registry_add(&r, SALT, NULL, "{\"banks\":[]}", collect, NULL) == 0);
-    CHECK(sh_ce_registry_add(&r, SALT, NULL, NULL, collect, NULL) == 0);
+    CHECK(sh_md6_registry_add(&r, SH_MD6_CLIP_EVENTS, "zzzz9999", NULL, other, collect, NULL) == 1);
+    CHECK(sh_md6_registry_add(&r, SH_MD6_CLIP_EVENTS, SALT, NULL, "{\"banks\":[]}", collect, NULL) == 0);
+    CHECK(sh_md6_registry_add(&r, SH_MD6_CLIP_EVENTS, SALT, NULL, NULL, collect, NULL) == 0);
     g_nlines = 0;
-    CHECK(sh_ce_registry_add(&r, SALT, NULL, "{\"clipEvents\":[", collect, NULL) == 0);
+    CHECK(sh_md6_registry_add(&r, SH_MD6_CLIP_EVENTS, SALT, NULL, "{\"clipEvents\":[", collect, NULL) == 0);
     CHECK(said("its build's record could not be read"));
-    sh_ce_registry_seal(&r);
+    sh_md6_registry_seal(&r);
     CHECK(r.n == 3 && r.mods == 2);
-    w = sh_ce_registry_find(&r, "MD6\\MODS\\" SALT "\\PLAYER\\KILL_FRONT.MD6ANIM");
+    w = sh_md6_registry_find(&r, "MD6\\MODS\\" SALT "\\PLAYER\\KILL_FRONT.MD6ANIM");
     CHECK(w && !strcmp(w->carrier, "mods/" SALT "/player/kill_rows.md6") && !strcmp(w->base, "player/mp/tp_body_mp.md6"));
-    CHECK(w && !strcmp(w->label, "Kills (mods\\kills)") && w->state == SH_CE_ROW_NEW && !w->model);
-    CHECK(sh_ce_registry_find(&r, KILL2) != NULL);
-    w = sh_ce_registry_find(&r, "md6/mods/zzzz9999/a.md6anim");
+    CHECK(w && !strcmp(w->label, "Kills (mods\\kills)") && w->state == SH_MD6_ROW_NEW && !w->model);
+    CHECK(sh_md6_registry_find(&r, KILL2) != NULL);
+    w = sh_md6_registry_find(&r, "md6/mods/zzzz9999/a.md6anim");
     CHECK(w && !strcmp(w->salt, "zzzz9999") && !strcmp(w->label, "zzzz9999"));
-    CHECK(!sh_ce_registry_find(&r, "md6/player/human/stock.md6anim"));
-    CHECK(!sh_ce_registry_find(&r, "md6/mods/" SALT "/player/kill_front"));
-    sh_ce_registry_free(&r);
+    CHECK(!sh_md6_registry_find(&r, "md6/player/human/stock.md6anim"));
+    CHECK(!sh_md6_registry_find(&r, "md6/mods/" SALT "/player/kill_front"));
+    sh_md6_registry_free(&r);
     CHECK(!r.n && !r.rows);
 }
 

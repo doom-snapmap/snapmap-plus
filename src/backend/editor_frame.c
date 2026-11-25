@@ -399,7 +399,7 @@ static void sh_editor_frame_detour(void *editor, void *arg)
     InterlockedCompareExchange(&g_reload_pending, 0, 2);
 }
 
-int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
+int sh_editor_frame_install(void *frame_fn, void *load_map_fn,
                             const uint8_t *module_base)
 {
     glb_status st = GLB_OK;
@@ -412,13 +412,6 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
 
     if (frame_fn == NULL) {
         backend_log("EF: editor-frame hook SKIPPED -- EditorFrame not resolved");
-        return 0;
-    }
-    if (!status_ok) {
-        /* Same policy as the rawmap detours: the hook-tolerant fallback means the live prologue is
-         * already somebody else's detour, and stealing detour bytes corrupts both. */
-        backend_log("EF: editor-frame hook SKIPPED -- EditorFrame resolved via the hook-tolerant "
-                    "fallback (prologue already hooked); not installing over an existing detour");
         return 0;
     }
     if (g_frame_orig != NULL) {
@@ -483,11 +476,11 @@ static int ef_read_text_detour(const char *id, void *text, void *a3, void *a4)
     return r;
 }
 
-int sh_editor_frame_carrier_install(void *read_text_fn, int status_ok, void *assign_cstr_fn)
+int sh_editor_frame_carrier_install(void *read_text_fn, void *assign_cstr_fn)
 {
     void *tramp;
     if (g_read_text_orig != NULL) return 1;
-    if (read_text_fn == NULL || !status_ok || assign_cstr_fn == NULL) {
+    if (read_text_fn == NULL || assign_cstr_fn == NULL) {
         backend_log("EF: saved-map read detour SKIPPED -- ReadLocalSavedMapText or IdStrAssignCStr unresolved; "
                     "opening rawmaps is off");
         return 0;

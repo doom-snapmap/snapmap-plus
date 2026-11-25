@@ -13,6 +13,8 @@ void backend_set_logpath_from_module(HINSTANCE self);
 void backend_log(const char *msg);
 
 /* Release the session log handle outside DllMain, after writers stop. */
+#ifdef SH_LOG_FIXTURE
 void backend_log_close(void);
+#endif
 
 #endif /* BACKEND_LOG_H */

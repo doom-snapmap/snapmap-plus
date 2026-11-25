@@ -70,7 +70,6 @@ size_t sh_boot_pacing_match(const uint8_t *base, sig_result *results, size_t cap
  * installed. */
 unsigned sh_boot_pacing_install(const sig_result *results, size_t count, unsigned mask,
                                 unsigned long age_ms);
-unsigned sh_boot_pacing_live(void);
 /* Milliseconds since this process started (0 when unknown). */
 unsigned long sh_boot_pacing_process_age_ms(void);
 #endif

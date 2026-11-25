@@ -11,14 +11,6 @@
 
 #define AAS_LUMPS SH_AAS_LUMP_DEFS   /* aas_edit.h */
 
-/* Settings: u32 type, three length-prefixed strings, then 39 big-endian words; shipped strings occupy 64 bytes
- * each (4 + 3*(4+64) + 39*4 = 364). Words 0..5 are agent mins/maxs and word 12 is maxStepHeight. The word base
- * derives from the string lengths, and an invalid span falls back to the shipped offset 208. */
-#define AAS_SET_WORDS_OFF   208u
-#define AAS_SET_WORD_COUNT  39u
-#define AAS_SET_W_BBOX      0u      /* words 0..2 mins, 3..5 maxs */
-#define AAS_SET_W_MAXSTEP   12u
-
 typedef struct aas_lump {
     unsigned char *bytes;   /* `count` records, big-endian, verbatim */
     unsigned       count;
@@ -282,6 +274,11 @@ size_t sh_aas_serialized_size(const sh_aas *a)
 
 unsigned char *sh_aas_write(const sh_aas *a, size_t *out_len)
 {
+    return sh_aas_write_alloc(a, out_len, NULL);
+}
+
+unsigned char *sh_aas_write_alloc(const sh_aas *a, size_t *out_len, void *(*allocate)(size_t))
+{
     unsigned char *out;
     size_t total, off;
     int i;
@@ -293,7 +290,7 @@ unsigned char *sh_aas_write(const sh_aas *a, size_t *out_len)
     total = sh_aas_serialized_size(a);
     if (total > g_aas_payload_cap) return NULL;
 
-    out = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, total);
+    out = allocate ? (unsigned char *)allocate(total) : (unsigned char *)HeapAlloc(GetProcessHeap(), 0, total);
     if (!out) return NULL;
 
     memcpy(out, a->header, SH_AAS_HEADER_BYTES);
@@ -382,24 +379,6 @@ int sh_aas_append(sh_aas *a, int lump, unsigned n, unsigned *out_first)
     return 1;
 }
 
-/* Where the 39 words begin: past the u32 type and the three length-prefixed
- * strings. See the layout note at the top of this file for the fallback. */
-static unsigned aas_words_off(const sh_aas *a)
-{
-    unsigned off = 4;
-    int i;
-    for (i = 0; i < 3; i++) {
-        uint32_t n;
-        if (off + 4 > SH_AAS_SETTINGS_BYTES) return AAS_SET_WORDS_OFF;
-        n = sh_aas_get_u32(a->settings, off);
-        off += 4;
-        if (n > (uint32_t)(SH_AAS_SETTINGS_BYTES - off)) return AAS_SET_WORDS_OFF;
-        off += (unsigned)n;
-    }
-    if (off + AAS_SET_WORD_COUNT * 4 != SH_AAS_SETTINGS_BYTES) return AAS_SET_WORDS_OFF;
-    return off;
-}
-
 float sh_aas_setting_f32(const sh_aas *a, unsigned off)
 {
     if (!a || off > SH_AAS_SETTINGS_BYTES - 4) return 0.0f;
@@ -412,11 +391,13 @@ uint32_t sh_aas_setting_u32(const sh_aas *a, unsigned off)
     return sh_aas_get_u32(a->settings, off);
 }
 
+#ifdef SH_AAS_FIXTURE
 void sh_aas_set_setting_f32(sh_aas *a, unsigned off, float v)
 {
     if (!a || off > SH_AAS_SETTINGS_BYTES - 4) return;
     sh_aas_put_f32(a->settings, off, v);
 }
+#endif
 
 void sh_aas_agent_bounds(const sh_aas *a, float out_mins[3], float out_maxs[3])
 {
@@ -427,7 +408,7 @@ void sh_aas_agent_bounds(const sh_aas *a, float out_mins[3], float out_maxs[3])
     if (out_maxs) out_maxs[0] = out_maxs[1] = out_maxs[2] = 0.0f;
     if (!a) return;
 
-    base = aas_words_off(a) + AAS_SET_W_BBOX * 4;
+    base = SH_AAS_SETTING_WORD(0);
     for (i = 0; i < 3; i++) {
         if (out_mins) out_mins[i] = sh_aas_setting_f32(a, base + (unsigned)i * 4);
         if (out_maxs) out_maxs[i] = sh_aas_setting_f32(a, base + (unsigned)(3 + i) * 4);
@@ -437,5 +418,5 @@ void sh_aas_agent_bounds(const sh_aas *a, float out_mins[3], float out_maxs[3])
 float sh_aas_max_step_height(const sh_aas *a)
 {
     if (!a) return 0.0f;
-    return sh_aas_setting_f32(a, aas_words_off(a) + AAS_SET_W_MAXSTEP * 4);
+    return sh_aas_setting_f32(a, SH_AAS_SETTING_WORD(12));
 }

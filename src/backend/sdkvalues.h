@@ -24,8 +24,11 @@ typedef struct sdk_value {
 
 /* Registers a derived decl (its type as the engine spells it, its text) and returns its name, or NULL. The default
  * is modprog's (sh_modprog_register_decl); tests install their own. */
+#ifdef SH_SDK_FIXTURE
 typedef const char *(*sdk_register_fn)(const char *type, const char *text);
 void sdk_set_register(sdk_register_fn fn);
+#endif
+
 const char *sdk_register(const char *type, const char *text);
 
 /* Reads a number, group of numbers or value form from atoms[first..count) of `it`, with dims_min..dims_max
@@ -33,8 +36,6 @@ const char *sdk_register(const char *type, const char *text);
 int sdk_value_read(const sdk_doc *d, const sdk_item *it, size_t first, int dims_min, int dims_max, const char *field,
                    sdk_value *out, char *why, size_t why_len);
 
-/* 1 when `text` (a material line's value, after its key) is one of the four forms (it starts with its word and '{'). */
-int sdk_value_is_form(const char *text, size_t n);
 
 /* Appends the register lines (each ended by `eol`) for material key `key` taking `v`, using temporaries from *temp up.
  * Returns 1, or 0 with `why` for a fade or non-looping curve (a material has no start). */

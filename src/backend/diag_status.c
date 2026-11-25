@@ -21,28 +21,14 @@ __declspec(noinline) void sh_diag_note(const char *mod, const char *text, size_t
     if (mod && text && len) InterlockedIncrement(&sh_diag_note_count);
 }
 
-/* The object being built: malloc'd, grown as text is appended. */
-typedef struct diag_text { char *buf; size_t len, cap; } diag_text;
-
-/* Append text; 0 when memory runs out. */
-static int put(diag_text *t, const char *s)
+static int put(sh_text_buf *t, const char *s)
 {
-    size_t n = strlen(s);
-    if (t->len + n + 1 > t->cap) {
-        size_t cap = t->cap ? t->cap : 256;
-        char *grown;
-        while (t->len + n + 1 > cap) cap *= 2;
-        if ((grown = (char *)realloc(t->buf, cap)) == NULL) return 0;
-        t->buf = grown;
-        t->cap = cap;
-    }
-    memcpy(t->buf + t->len, s, n + 1);
-    t->len += n;
-    return 1;
+    sh_text_append_str(t, s);
+    return !t->oom;
 }
 
 /* Append s as a JSON string body (quotes, backslashes and controls escaped). */
-static int put_escaped(diag_text *t, const char *s)
+static int put_escaped(sh_text_buf *t, const char *s)
 {
     char one[8];
     for (; *s; s++) {
@@ -57,7 +43,7 @@ static int put_escaped(diag_text *t, const char *s)
 
 char *sh_diag_status_build(void)
 {
-    diag_text t = { NULL, 0, 0 };
+    sh_text_buf t = {0};
     char head[160], *name, *raw;
     int i, ok;
     _snprintf_s(head, sizeof head, _TRUNCATE, "{\"protocol\":%d,\"version\":\"", SH_DIAG_STATUS_PROTOCOL);
@@ -72,8 +58,8 @@ char *sh_diag_status_build(void)
     raw = ok ? sh_rawmap_diag_status() : NULL;
     ok = ok && raw && put(&t, "],\"rawmap\":") && put(&t, raw) && put(&t, "}");
     free(raw);
-    if (!ok) { free(t.buf); return NULL; }
-    return t.buf;
+    if (!ok) { free(t.p); return NULL; }
+    return t.p;
 }
 
 int sh_diag_status(char *out, int cap)

@@ -33,8 +33,7 @@ static int render_loaded_calls;
 void sh_cache_published_probe(int on) { (void)on; }
 void sh_map_render_loaded(void *map) { (void)map; render_loaded_calls++; }
 void shield_note_refused_load(void) {}
-char *sh_map_settings_prepare_load(const char *json, size_t len, size_t *out_len)
-{ (void)json; (void)len; if (out_len) *out_len = 0; return NULL; }
+void sh_map_settings_prepare_load(const char *json, size_t len) { (void)json; (void)len; }
 void  sh_map_settings_loaded(int ok) { (void)ok; }
 char *sh_map_settings_on_save(const char *json, size_t len, size_t *out_len)
 { (void)json; (void)len; if (out_len) *out_len = 0; return NULL; }
@@ -42,7 +41,8 @@ char *sh_map_settings_on_save(const char *json, size_t len, size_t *out_len)
 void *install_inline_hook(void *target, void *detour, size_t stolen)
 { (void)target; (void)detour; (void)stolen; return NULL; }
 
-void  sh_navmesh_build_from_map(const char *json, size_t len) { (void)json; (void)len; }
+#include "map_carrier.h"
+void sh_navmesh_build_from_map(const char *json, size_t len, const sh_carrier_span *nav) { (void)json; (void)len; (void)nav; }
 char *sh_navmesh_strip(const char *json, size_t len, size_t *out_len)
 { (void)json; (void)len; if (out_len) *out_len = 0; return NULL; }
 char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len, int *failed)

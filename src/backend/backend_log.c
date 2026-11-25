@@ -58,6 +58,7 @@ void backend_set_logpath_from_module(HINSTANCE self)
     log_rotate_if_large(g_logpath_utf8, LOG_ROTATE_CAP_BYTES);
 }
 
+#ifdef SH_LOG_FIXTURE
 void backend_log_close(void)
 {
     if (InterlockedCompareExchange(&g_lock_ready, 2, 2) != 2) return;
@@ -65,6 +66,7 @@ void backend_log_close(void)
     if (g_loghandle != INVALID_HANDLE_VALUE) { CloseHandle(g_loghandle); g_loghandle = INVALID_HANDLE_VALUE; }
     LeaveCriticalSection(&g_loglock);
 }
+#endif
 
 void backend_log(const char *msg)
 {

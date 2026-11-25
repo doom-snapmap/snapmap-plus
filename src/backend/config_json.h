@@ -73,11 +73,6 @@ int sh_json_decode_string(const char *json, size_t length,
 /* DOOM's native map/state JSON uses byte strings: unescaped bytes >= 0x80 are kept verbatim, even
  * when not UTF-8. Same checks as above; use only for engine-owned documents, never package or
  * configuration JSON. Objects share the normal helpers, and new values passed to object_set stay strict. */
-int sh_native_json_validate(const char *json, size_t length, unsigned max_depth,
-                            sh_json_kind *out_kind, sh_json_error *error);
-int sh_native_json_visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
-                                          sh_json_object_visitor visitor,
-                                          sh_json_field_filter filter, void *context);
 int sh_native_json_parse_object(const char *json, size_t length, unsigned max_depth,
                                 sh_json_object *out);
 int sh_native_json_decode_string(const char *json, size_t length,

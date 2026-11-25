@@ -342,5 +342,4 @@ unsigned sh_boot_pacing_install(const sig_result *results, size_t count, unsigne
     return g_live;
 }
 
-unsigned sh_boot_pacing_live(void) { return g_live; }
 #endif

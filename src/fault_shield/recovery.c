@@ -11,11 +11,11 @@
 #include "../backend/patch.h"
 #include "../backend/commands.h"
 #include "fault_record.h"
-#include "hook.h"
+#include "../backend/hook.h"
 #include "recovery.h"
 #include "shield_sigs.h"
 
-extern uint8_t *g_doom_base;
+#include "fault_shield.h"
 
 const char SHIELD_RECOVERED_TEXT[] =
     "Snapmap+ caught a problem in the game and returned you to the menu. "
@@ -33,17 +33,6 @@ static uint8_t *g_load_state_at  = NULL;   /* load_state -- 3 == RUNNING */
 static uint8_t *g_last_err_at    = NULL;   /* the engine's last formatted Error/FatalError text */
 static uint8_t *g_shell_slot_at  = NULL;   /* .data slot holding idMenuShellLocal* */
 static uint8_t *g_suppr_a_at     = NULL;   /* throw-gate suppressor A */
-
-/* Clear suppressor B, resolved through its instruction anchor; the caller guards the access with SEH. */
-static void write_suppressor_b(void)
-{
-    uintptr_t b;
-    if (g_doom_base == NULL) return;
-    b = glb_resolve(g_doom_base, "throw_suppressor_b", NULL);
-    if (!b) return;                     /* unlocatable on this build -- skip, never guess */
-    if (*(volatile int32_t *)b != 0)
-        *(volatile int32_t *)b = 0;
-}
 
 /* Frame's first 15 bytes on both executables (five pushes and MOV EAX,0x11DC0, position-independent),
  * compared before the detour so a changed function is never patched. */
@@ -212,7 +201,7 @@ static void keep_throw_gate_open(void)
     __try {
         if (g_suppr_a_at && *(volatile int32_t *)g_suppr_a_at != 0)
             *(volatile int32_t *)g_suppr_a_at = 0;
-        write_suppressor_b();
+        shield_clear_suppressor_b(g_doom_base);
     } __except (EXCEPTION_EXECUTE_HANDLER) { /* unreadable page -> skip */ }
 }
 

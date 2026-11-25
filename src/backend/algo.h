@@ -14,13 +14,6 @@ void     sh_algo_matmul(const float *A, const float *B, float *out);
 /* Write the 4x4 inverse and return 1, or leave out untouched and return 0 if singular. */
 int      sh_algo_inverse(const float *M, float *out);
 
-/* Round channels with floor(f*255+0.5), clamp to [0,255], and pack R|G<<8|B<<16|A<<24. */
-uint32_t sh_algo_packrgba(const float *rgba);
-
-/* Evaluate linear, step, or uniform Catmull-Rom curves in double.
- * mode is the engine bracket-search hint; this implementation recomputes the bracket. */
-float    sh_algo_curveeval(const void *c, float t, uint8_t mode);
-
 /* Cache the host image for signature resolution. Overrides remain off until toggled. */
 void sh_algo_install(const uint8_t *module_base);
 

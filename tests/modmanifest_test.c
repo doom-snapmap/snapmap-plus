@@ -11,7 +11,7 @@
 #include "../src/backend/modmanifest.h"
 #include "../src/backend/modserve.h"
 #include "../src/backend/modsalt.h"
-#include "../src/backend/map_shards.h"
+#include "../src/backend/mp_json.h"
 #include "../src/backend/map_carrier.h"
 
 static int g_failed, g_checks;
@@ -146,24 +146,23 @@ static int alloc_string_count(const char *json, unsigned *value)
 
 static unsigned string_rows(const char *json)
 {
-    sh_shard_doc doc;
-    int vars, bucket;
-    unsigned n = 0;
-    if (!sh_shard_doc_build(json, strlen(json), &doc)) return 0xffffffffu;
-    vars = sh_shard_doc_member(json, strlen(json), &doc, 0, "variables");
-    bucket = vars >= 0 ? sh_shard_doc_member(json, strlen(json), &doc, vars, "string") : -1;
-    if (bucket >= 0) n = sh_shard_doc_array_count(json, &doc, bucket);
-    sh_shard_doc_free(&doc);
-    return n;
+    mpj *root = mpj_parse(json, strlen(json));
+    const mpj *bucket;
+    unsigned count;
+    if (!root) return (unsigned)-1;
+    bucket = mpj_get(mpj_get(root, "variables"), "string");
+    count = bucket && bucket->type == MPJ_ARR ? (unsigned)bucket->n : 0;
+    mpj_free(root);
+    return count;
 }
 
 /* The text the engine parses after a load: the family's legacy rows gone
  * (prepare_load's result, or the input when it removed none) and the member
  * stripped last, as rawmap.c prepare_map_buffer does. Process heap. */
-static char *engine_text(char *prepared, const char *input, size_t input_len, size_t *out_len)
+static char *engine_text(const char *src, size_t n, size_t *out_len)
 {
-    const char *src = prepared ? prepared : input;
-    size_t n = prepared ? strlen(prepared) : input_len, w = 0;
+    size_t w = 0;
+    sh_modmanifest_prepare_load(src, n);
     char *bare = sh_carrier_strip(src, n, &w);
     if (!bare) {
         bare = (char *)HeapAlloc(GetProcessHeap(), 0, n + 1);
@@ -171,7 +170,6 @@ static char *engine_text(char *prepared, const char *input, size_t input_len, si
         bare[n] = 0;
         w = n;
     }
-    if (prepared) HeapFree(GetProcessHeap(), 0, prepared);
     if (out_len) *out_len = w;
     return bare;
 }
@@ -327,7 +325,6 @@ static void text_round_trip_and_order(void)
     /* The member strip gives the map back byte for byte. */
     stripped = sh_carrier_strip(written, wlen, &slen);
     CHECK(stripped && slen == sizeof MAP - 1 && strcmp(stripped, MAP) == 0);
-    if (stripped) HeapFree(GetProcessHeap(), 0, stripped);
 
     /* A rewrite replaces the member's rows instead of stacking them. */
     {
@@ -396,7 +393,7 @@ static void all_parts(void)
         CHECK(sh_carrier_part(saved, sn, "nav", &from, &to) == 1 && to - from == sizeof NAV - 1);
         CHECK(sh_modmanifest_read(saved, sn, &back, NULL) == 1 && !strcmp(back.rows[0].build, SH_MODMANIFEST_LOCAL_BUILD));
         sh_modmanifest_list_free(&back);
-        engine = engine_text(sh_modmanifest_prepare_load(saved, sn, &en), saved, sn, &en);
+        engine = engine_text(saved, sn, &en);
         CHECK(engine && !strcmp(engine, MAP) && g_activate_count == 1);
         if (engine) HeapFree(GetProcessHeap(), 0, engine);
         HeapFree(GetProcessHeap(), 0, saved);
@@ -431,7 +428,7 @@ static void member_carries_everything(void)
         CHECK(sh_modmanifest_read(written, wlen, &back, NULL) == 1 && back.rows[0].name_count == 100);
         sh_modmanifest_list_free(&back);
         sh_modmanifest_reset();
-        engine = engine_text(sh_modmanifest_prepare_load(written, wlen, &elen), written, wlen, &elen);
+        engine = engine_text(written, wlen, &elen);
         CHECK(engine && !strstr(engine, "snapmap-plus") && string_rows(engine) == 2);
         CHECK(engine && !strcmp(engine, MAP));
         if (engine) HeapFree(GetProcessHeap(), 0, engine);
@@ -489,8 +486,8 @@ static void editor_substitution(void)
 {
     sh_modmanifest_list rows = {0};
     sh_modmanifest_row row;
-    char err[256], sub[80], *text, *loaded;
-    size_t tl = 0, ll = 0;
+    char err[256], sub[80], *text;
+    size_t tl = 0;
     static const char gone[] = "00000000000000000000000000000000000000000000000000000000000000ab";
     static const char none[] = "00000000000000000000000000000000000000000000000000000000000000cd";
     printf("-- an editor open serves a build no place has through another build of its salt\n");
@@ -509,15 +506,13 @@ static void editor_substitution(void)
     sh_modmanifest_set_substitute(fake_substitute);
     /* A published map's parse: never substituted. */
     g_subst_calls = 0;
-    loaded = text ? sh_modmanifest_prepare_load(text, tl, &ll) : NULL;
-    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+    if (text) sh_modmanifest_prepare_load(text, tl);
     CHECK(g_subst_calls == 0 && !sh_modmanifest_substituted(SH_MODMANIFEST_LOCAL_BUILD, sub, sizeof sub));
     /* The editor's parse: the installed build serves. A local row declares no build (the placeholder), which is what
      * the substitution is recorded against. */
     sh_modmanifest_set_editor_load(1);
-    loaded = text ? sh_modmanifest_prepare_load(text, tl, &ll) : NULL;
+    if (text) sh_modmanifest_prepare_load(text, tl);
     sh_modmanifest_set_editor_load(0);
-    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
     CHECK(g_subst_calls == 2 && sh_modmanifest_substituted(SH_MODMANIFEST_LOCAL_BUILD, sub, sizeof sub) && !strcmp(sub, HASH_A));
     CHECK(!sh_modmanifest_substituted(none, sub, sizeof sub));
     CHECK(g_activate_count == 2 && (!strcmp(g_activated[0], HASH_A) || !strcmp(g_activated[1], HASH_A)));
@@ -529,9 +524,8 @@ static void editor_substitution(void)
     }
     /* The next load starts over. */
     sh_modmanifest_set_editor_load(1);
-    loaded = text ? sh_modmanifest_prepare_load(MAP, sizeof MAP - 1, &ll) : NULL;
+    if (text) sh_modmanifest_prepare_load(MAP, sizeof MAP - 1);
     sh_modmanifest_set_editor_load(0);
-    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
     CHECK(!sh_modmanifest_substituted(SH_MODMANIFEST_LOCAL_BUILD, sub, sizeof sub));
     sh_modmanifest_set_substitute(NULL);
     if (text) HeapFree(GetProcessHeap(), 0, text);
@@ -711,7 +705,7 @@ static void load_step(void)
     written = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &wlen, err, sizeof err);
     CHECK(written != NULL);
     g_activate_calls = 0;
-    engine = written ? engine_text(sh_modmanifest_prepare_load(written, wlen, &elen), written, wlen, &elen) : NULL;
+    engine = written ? engine_text(written, wlen, &elen) : NULL;
     CHECK(engine && !strcmp(engine, MAP) && g_activate_calls == 1 && g_activate_count == 2);
     CHECK(!strcmp(g_activated[0], HASH_A) && !strcmp(g_activated[1], HASH_B));
     CHECK(sh_modmanifest_current(&current) == 2 && !strcmp(current.rows[1].salt, "bobroom1"));
@@ -720,7 +714,7 @@ static void load_step(void)
 
     /* A map without rows: the engine's bytes, activation with nothing, the manifest forgotten. */
     g_activate_calls = 0;
-    CHECK(sh_modmanifest_prepare_load(MAP, sizeof MAP - 1, &elen) == NULL);
+    sh_modmanifest_prepare_load(MAP, sizeof MAP - 1);
     CHECK(g_activate_calls == 1 && g_activate_count == 0);
     CHECK(sh_modmanifest_current(&current) == 0);
 
@@ -731,8 +725,7 @@ static void load_step(void)
             "{\"mod\":\"alexpink@" HASH_A "\",\"size\":5,\"names\":[]},"
             "{\"mod\":\"bobroom1\",\"size\":6,\"local\":true,\"names\":[]}]}}";
         g_activate_calls = 0;
-        engine = sh_modmanifest_prepare_load(mixed, sizeof mixed - 1, &elen);
-        CHECK(engine == NULL);
+        sh_modmanifest_prepare_load(mixed, sizeof mixed - 1);
         CHECK(g_activate_count == 1 && !strcmp(g_activated[0], HASH_B));
         CHECK(strstr(g_last_log, "2 manifest row(s) did not parse") != NULL);
     }
@@ -905,7 +898,7 @@ static void map_level(void)
     g_installed = INSTALLED;
     g_installed_count = 2;
     g_scope_calls = 0;
-    engine = engine_text(sh_modmanifest_prepare_load(written, wlen, &elen), written, wlen, &elen);
+    engine = engine_text(written, wlen, &elen);
     CHECK(engine != NULL && !strcmp(engine, MAP));
     /* The load hook sees both rows and the placed names, before activation. */
     CHECK(g_scope_calls == 1 && g_scope_when == SH_MODSERVE_AT_LOAD && g_scope_rows == 2 && g_scope_attached == 1 &&
@@ -919,7 +912,7 @@ static void map_level(void)
     /* Armed 0: no placed names are read at a load. */
     g_scope_armed_value = 0;
     if (engine) { HeapFree(GetProcessHeap(), 0, engine); engine = NULL; }
-    engine = engine_text(sh_modmanifest_prepare_load(written, wlen, &elen), written, wlen, &elen);
+    engine = engine_text(written, wlen, &elen);
     CHECK(g_scope_calls == 2 && g_scope_names == 0 && g_scope_rows == 2);
     g_scope_armed_value = 1;
 
@@ -939,13 +932,12 @@ static void map_level(void)
     sh_modmanifest_list_free(&rows);
     if (saved) {
         /* Reloaded, the row is map-level again. */
-        size_t again_len = 0;
-        char *again = sh_modmanifest_prepare_load(saved, slen, &again_len);
+        sh_modmanifest_prepare_load(saved, slen);
         CHECK(sh_modmanifest_current(&rows) == 2 && !strcmp(rows.rows[0].salt, "alexpink"));
         sh_modmanifest_list_free(&rows);
         CHECK(sh_modmanifest_current_attached(&rows) == 1 && rows.rows[0].attached);
         sh_modmanifest_list_free(&rows);
-        if (again) HeapFree(GetProcessHeap(), 0, again);
+
         HeapFree(GetProcessHeap(), 0, saved);
     }
 
@@ -1098,7 +1090,7 @@ static void choices(void)
     sh_modmanifest_reset();
     g_installed_count = 0;
     g_choice_calls = 0;
-    engine = engine_text(sh_modmanifest_prepare_load(written, wlen, &elen), written, wlen, &elen);
+    engine = engine_text(written, wlen, &elen);
     CHECK(g_choice_calls == 1 && g_choice_n == 2 && g_choice_recompute == 0 &&
           !strcmp(g_choice_last, "player.hands=alexpink;player.body=bobroom1;"));
     CHECK(sh_modmanifest_current_choice("player.hands", key, sizeof key) == 1 && !strcmp(key, "alexpink"));
@@ -1141,17 +1133,17 @@ static void choices(void)
         /* Reloaded: the same choices (minus the dropped one). */
         char *again;
         g_choice_calls = 0;
-        again = sh_modmanifest_prepare_load(saved, slen, &elen);
+        sh_modmanifest_prepare_load(saved, slen);
         CHECK(g_choice_calls == 1 && g_choice_n == 2 && sh_modmanifest_current_choice("player.hands", key, sizeof key) &&
               !strcmp(key, "bobroom1"));
-        if (again) HeapFree(GetProcessHeap(), 0, again);
+
         HeapFree(GetProcessHeap(), 0, saved);
     }
     /* A map without rows clears them. */
     {
-        char *none = sh_modmanifest_prepare_load(MAP, sizeof MAP - 1, &elen);
+        sh_modmanifest_prepare_load(MAP, sizeof MAP - 1);
         CHECK(g_choice_n == 0 && HOZ(lines, sh_modmanifest_current_choices(HO_P(0))) == 0);
-        if (none) HeapFree(GetProcessHeap(), 0, none);
+
     }
     if (engine) HeapFree(GetProcessHeap(), 0, engine);
     HeapFree(GetProcessHeap(), 0, written);
@@ -1187,14 +1179,11 @@ static char g_vr_comp[SH_MOD_HASH_CHARS + 1];
  * the same salt that carries "extra" (and "imp" too when `root_has_imp`). */
 static void vr_open(const char *map, size_t map_len, int root_has_imp, int carries)
 {
-    size_t en = 0;
     sh_modmanifest_list cur;
-    char *engine;
     sh_modmanifest_reset();
     g_installed = NULL;
     g_installed_count = 0;
-    engine = sh_modmanifest_prepare_load(map, map_len, &en);
-    if (engine) HeapFree(GetProcessHeap(), 0, engine);
+    sh_modmanifest_prepare_load(map, map_len);
     memset(&cur, 0, sizeof cur);
     CHECK(sh_modmanifest_current(&cur) == 1 && cur.rows[0].pinned);
     strcpy_s(g_vr_comp, sizeof g_vr_comp, cur.count ? cur.rows[0].build : HASH_B);
@@ -1352,7 +1341,7 @@ static void standin_pins_pinned(void)
     printf("-- a pinned row composed with stand-ins keeps its pins at a save\n");
     sh_modmanifest_reset();
     g_installed = NULL; g_installed_count = 0;
-    engine = engine_text(sh_modmanifest_prepare_load(PMAP, sizeof PMAP - 1, &en), PMAP, sizeof PMAP - 1, &en);
+    engine = engine_text(PMAP, sizeof PMAP - 1, &en);
     memset(&cur, 0, sizeof cur);
     CHECK(sh_modmanifest_current(&cur) == 1 && cur.rows[0].pinned);
     strcpy_s(g_vr_comp, sizeof g_vr_comp, cur.count ? cur.rows[0].build : HASH_B);
@@ -1405,7 +1394,7 @@ static void standin_pins(void)
     sh_modmanifest_reset();
     g_installed = STANDIN; g_installed_count = 1;
     g_npins = 0;
-    engine = engine_text(sh_modmanifest_prepare_load(written, wlen, &elen), written, wlen, &elen);
+    engine = engine_text(written, wlen, &elen);
     saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
     CHECK(saved && strstr(saved, PIN_IMP) && strstr(saved, "\"size\":185964430") && strstr(saved, "\"local\":true"));
     if (saved && !strstr(saved, PIN_IMP)) printf("%s\n", saved);

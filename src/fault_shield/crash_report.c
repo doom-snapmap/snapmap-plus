@@ -21,7 +21,7 @@
 
 const char *sh_product_version(void) { return SNAPMAP_PLUS_VERSION; }
 
-extern uint8_t *g_doom_base;
+#include "fault_shield.h"
 
 #define CRASH_MAX_RECORDS 8   /* per-session cap: a fault storm can't spam pending-*.json */
 
@@ -180,20 +180,9 @@ static void crash_capture_fatal_locked(EXCEPTION_POINTERS *ep)
     char modbuf[80];
     const char *dump;
 
-    /* module + RVA of the faulting site (loader-lock cost acceptable: the process is dying). */
     {
-        HMODULE hm = NULL;
-        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)rip, &hm) && hm) {
-            static wchar_t path[SH_WPATH_MAX];
-            DWORD n = GetModuleFileNameW(hm, path, SH_WPATH_MAX);
-            if (n && n < SH_WPATH_MAX) {
-                const wchar_t *b = wcsrchr(path, L'\\');
-                if (WideCharToMultiByte(CP_UTF8, 0, b ? b + 1 : path, -1, modbuf, sizeof modbuf, NULL, NULL) > 0)
-                    mod = modbuf;
-            }
-            rva = (uintptr_t)rip - (uintptr_t)hm;
-        }
+        static wchar_t path[SH_WPATH_MAX];
+        if (shield_module_at(rip, path, SH_WPATH_MAX, modbuf, sizeof modbuf, &rva)) mod = modbuf;
     }
     g_rec_stack[0] = '\0';
     if (code != EXCEPTION_STACK_OVERFLOW)   /* never walk an exhausted stack */

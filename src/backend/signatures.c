@@ -1,6 +1,7 @@
 /* Signature resolution (signatures.h): a signature resolves at its recorded RVA for the host's renderer, and
  * only when the whole pattern holds. sig_scan_one is the masked whole-image scan that derives and audits those
  * RVAs. */
+#include "image_view.h"
 #include "safe_read.h"
 #include "signatures.h"
 #include "host_image.h"
@@ -54,6 +55,7 @@ static size_t compile_pattern(const char *pattern, uint8_t *pat, uint8_t *mask, 
     return n;
 }
 
+#ifdef SH_SIGNATURE_SCAN_TESTING
 static void longest_fixed_run(const uint8_t *mask, size_t n, size_t *off, size_t *len)
 {
     size_t best_off = 0, best_len = 0, cur_off = 0, run = 0;
@@ -86,6 +88,7 @@ static long find_bytes(const uint8_t *blob, size_t end, const uint8_t *needle, s
     }
     return -1;
 }
+#endif
 
 /* Mapped executable sections. */
 
@@ -99,19 +102,15 @@ typedef struct exec_section {
 
 static int collect_exec_sections(const uint8_t *module_base, exec_section *out, int cap)
 {
-    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)module_base;
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return -1;
-    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(module_base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return -1;
-    if (nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return -1;
+    const IMAGE_NT_HEADERS64 *nt = sh_pe_headers(module_base);
+    if (!nt) return -1;
 
     const IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
     int n = nt->FileHeader.NumberOfSections;
     int count = 0;
     for (int i = 0; i < n && count < cap; i++) {
         if (!(sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
-        uint32_t vsize = sec[i].Misc.VirtualSize;
-        if (vsize == 0) vsize = sec[i].SizeOfRawData;
+        uint32_t vsize = sh_pe_section_span(&sec[i]);
         if (vsize == 0) continue;
         out[count].base  = module_base + sec[i].VirtualAddress;
         out[count].vaddr = sec[i].VirtualAddress;
@@ -121,7 +120,6 @@ static int collect_exec_sections(const uint8_t *module_base, exec_section *out, 
     return count;
 }
 
-/* SEH-guarded copy of up to n bytes from src into dst; returns 1 if all read, 0 on access violation. */
 static void reset(const sig_entry *sig, sig_result *out)
 {
     out->name = sig->name;
@@ -130,6 +128,7 @@ static void reset(const sig_entry *sig, sig_result *out)
     out->rva = 0;
 }
 
+#ifdef SH_SIGNATURE_SCAN_TESTING
 /* Scanning (the developer tool that derives and audits recorded RVAs). */
 
 sig_status sig_scan_one(const uint8_t *module_base, const sig_entry *sig, sig_result *out)
@@ -186,6 +185,7 @@ sig_status sig_scan_one(const uint8_t *module_base, const sig_entry *sig, sig_re
     out->rva = found_rva;
     return SIG_OK;
 }
+#endif
 
 /* Resolution. */
 
@@ -236,16 +236,24 @@ uintptr_t sig_addr_by_name(const sig_result *results, size_t n, const char *name
     return (uintptr_t)sig_pointer(results, n, name);
 }
 
+static const struct { const char *name, *reason; } sig_status_text[] = {
+    {"OK", "found"},
+    {"NOT_FOUND", "not found at its recorded address"},
+    {"AMBIGUOUS", "the pattern matches more than once"},
+    {"BAD_PATTERN", "the signature is malformed"},
+    {"BAD_MODULE", "the game image is unreadable"},
+    {"CHANGED", "the game's code there has been changed in memory, probably by another program"}
+};
+
 const char *sig_status_reason(sig_status status)
 {
-    switch (status) {
-    case SIG_OK:          return "found";
-    case SIG_CHANGED:     return "the game's code there has been changed in memory, probably by another program";
-    case SIG_AMBIGUOUS:   return "the pattern matches more than once";
-    case SIG_BAD_PATTERN: return "the signature is malformed";
-    case SIG_BAD_MODULE:  return "the game image is unreadable";
-    default:              return "not found at its recorded address";
-    }
+    if ((unsigned)status > SIG_CHANGED) status = SIG_NOT_FOUND;
+    return sig_status_text[status].reason;
+}
+
+const char *sig_status_name(sig_status status)
+{
+    return (unsigned)status <= SIG_CHANGED ? sig_status_text[status].name : "?";
 }
 
 /* Engine signatures for build 13954591: each function's RVA in the Vulkan executable (SHA256

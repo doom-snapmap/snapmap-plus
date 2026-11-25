@@ -15,8 +15,6 @@
 #define SH_BT_NETWORK       4
 #define SH_BT_GENERAL_KB    10
 #define SH_BT_BASE_GENERAL  50     /* every engine-made block starts here */
-#define SH_BT_AUTO_GAME     2
-#define SH_BT_AUTO_VIEW     3
 
 /* Growable text buffer; oom latches on the first failed growth. */
 #include "../common/text.h"

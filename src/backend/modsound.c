@@ -2,6 +2,7 @@
  * LoadBanks) and the engine's own per-bank submit, for banks installed mods
  * carry. */
 #define WIN32_LEAN_AND_MEAN
+#include "image_view.h"
 #include <windows.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -89,16 +90,13 @@ int sh_modsound_find_slots(const uint8_t *module_base, uint64_t value, void ***s
 {
     int found = 0;
     __try {
-        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)module_base;
-        const IMAGE_NT_HEADERS64 *nt;
+        const IMAGE_NT_HEADERS64 *nt = sh_pe_headers(module_base);
         const IMAGE_SECTION_HEADER *sec;
         unsigned i;
-        if (!module_base || dos->e_magic != IMAGE_DOS_SIGNATURE) return -1;
-        nt = (const IMAGE_NT_HEADERS64 *)(module_base + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) return -1;
+        if (!nt) return -1;
         sec = IMAGE_FIRST_SECTION(nt);
         for (i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
-            size_t span = sec->Misc.VirtualSize ? sec->Misc.VirtualSize : sec->SizeOfRawData;
+            size_t span = sh_pe_section_span(sec);
             const uint64_t *q, *end;
             if (!(sec->Characteristics & IMAGE_SCN_MEM_READ) ||
                 (sec->Characteristics & (IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE))) continue;

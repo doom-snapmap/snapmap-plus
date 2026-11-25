@@ -10,10 +10,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* Install the sort-body detour and try an immediate injection. Refuses unless sort_status_ok is a clean SIG_OK
- * and the sort prologue is unhooked; table_lea_fn locates the descriptor, insert_fn/hash_fn/idstr_ctor_fn are the
- * native list, hash and string-pool operations. Returns 1 when the detour is installed. */
-int sh_strids_install(void *sort_body_fn, int sort_status_ok,
+/* Install the verified sort-body detour and try an immediate language-table injection. */
+int sh_strids_install(void *sort_body_fn,
                       void *table_lea_fn, void *insert_fn, void *hash_fn, void *idstr_ctor_fn);
 
 /* Re-read the layers and re-sort on the engine main thread inside the game's process heap (the table's own;

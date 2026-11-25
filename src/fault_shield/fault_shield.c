@@ -6,9 +6,8 @@
 #include "crash_report.h"
 #include "saved_map_guard.h"
 #include "shield_sigs.h"
-#ifdef SH_DIAG
+#include "fault_shield.h"
 #include "../common/wide_path.h"
-#endif
 
 uint8_t *g_doom_base = NULL;   /* shield's view of the DOOM module (set by shield_install from the backend) */
 size_t   g_doom_size = 0;

@@ -74,5 +74,4 @@ unavailable:
     backend_log(line);
     return 0;
 }
-float sh_object_entry_drop(void){return g_live&&g_page?g_page->drop:SH_OBJECT_ENTRY_NATIVE_DROP;}
 #endif

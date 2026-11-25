@@ -50,15 +50,15 @@ static int test_hook_publication(void)
     sh_patch_test_observe_write(check_original_published);
     /* Fail commit protection, internal rollback, and the caller's immediate cleanup. */
     sh_patch_test_faults(2|4|8,0,0);
-    if(sh_nav_play_install(code,1)||!g_orig||hook_is_installed((void *)g_orig)||
+    if(sh_nav_play_install(code)||!g_orig||hook_is_installed((void *)g_orig)||
        hook_owned_count()!=before+1)publication_failures++;
     if(((snapbuild_fn_t)code)(NULL,NULL,NULL)!=42)publication_failures++;
     sh_patch_test_faults(1,0,0);
-    if(sh_nav_play_install(code,1)||!g_orig||hook_owned_count()!=before+1)publication_failures++;
+    if(sh_nav_play_install(code)||!g_orig||hook_owned_count()!=before+1)publication_failures++;
     sh_patch_test_faults(0,0,0);
-    if(!sh_nav_play_install(code,1)||!hook_is_installed((void *)g_orig)||
+    if(!sh_nav_play_install(code)||!hook_is_installed((void *)g_orig)||
        hook_owned_count()!=before+1||!publication_writes)publication_failures++;
-    if(!sh_nav_play_install(NULL,0))publication_failures++;
+    if(!sh_nav_play_install(NULL))publication_failures++;
     if(!hook_unpatch((void *)g_orig))publication_failures++;
     else g_orig=NULL;
     sh_patch_test_observe_write(NULL);
@@ -126,7 +126,7 @@ static void check_image(const char *path)
     static const char *calls[] = { "BuildAASFindCall", "BuildAASLoadCall", "PlacementModelNameCall" };
     unsigned k;
     if (gate) {
-        int ok = nav_play_gate_hold(gate);
+        int ok = (!memcmp(gate,k_gate_expected,sizeof k_gate_expected));
         printf("  BlockingVolumeObstacleGate bytes: %s\n", ok ? "hold" : "FAIL");
         IMG_CHECK(ok);
     }

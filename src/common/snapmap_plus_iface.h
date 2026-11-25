@@ -661,19 +661,10 @@ SH_STATIC_ASSERT(sizeof(sh_prefab_watch) == 24);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 
-/* Fixed object layout: vtable +0, reserved bytes +0x08..+0x57 (the first eight carry the vtable size marker, the rest
- * stay zero), subobject pointer +0x58. Frontends access state through callbacks. */
-#define SH_IFACE_VTBL_OFF   0x00
-#define SH_IFACE_MTX_OFF    0x08
-#define SH_IFACE_SUB_OFF    0x58    /* Pointer to the fixed 0x78-byte subobject header. */
-
 /* Fixed subobject header. Private backend registry/locking storage follows
  * it; SnapStack stacks live separately in the backend. */
 typedef struct sh_iface_sub {
-    void          *map_nil;         /* sub+0x00: map field kept for the ABI; the backend stores its registry pointer here. */
-    void          *map_root;        /* sub+0x08 */
-    uint64_t       map_size;        /* sub+0x10 */
-    uint8_t        _mtx2[0x48];     /* sub+0x18: reserved mutex bytes. */
+    uint8_t reserved[0x60];
     void *reserved_queue[3];
 } sh_iface_sub;
 

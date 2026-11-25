@@ -59,9 +59,6 @@ void  sh_prefab_grab_centred_box(const float size[3], float bmin[3], float bmax[
 /* World centre of the box: ((bmin+bmax)/2) x axis + origin. */
 void  sh_prefab_grab_box_centre(const sh_prefab_grab_box *box, float centre[3]);
 
-/* Distance of p outside the oriented box along its worst axis; 0 inside,
- * negative when an input is not finite. */
-float sh_prefab_grab_outside(const sh_prefab_grab_box *box, const float p[3]);
 
 /* Check and, when needed, correct the helper's output in place: frame is its 12-float transform (origin, 3x3
  * axis) and distance the value it wrote to prefab+0x24. A NULL box (body unreadable) keeps a bounded, finite

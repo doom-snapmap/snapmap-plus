@@ -9,7 +9,7 @@
 #include <string.h>
 #include "load_screen_stop.h"
 #include "fault_record.h"
-#include "hook.h"
+#include "../backend/hook.h"
 #include "../backend/engine_globals.h"
 
 #define LOAD_SCREEN_STOP_BYTE    0x4B1

@@ -90,8 +90,6 @@ void sh_nav_map_free(sh_nav_map *m);
 /* Deep copy into dst, which must be empty (zeroed or freed). 0 on allocation
  * failure, leaving dst empty. */
 int  sh_nav_map_copy(sh_nav_map *dst, const sh_nav_map *src);
-/* Same tables and flags. */
-int  sh_nav_map_equal(const sh_nav_map *a, const sh_nav_map *b);
 /* Same rooms and boxes regardless of read order and entity indices (corners and depth within 0.05, normals
  * 1e-4); flags and the left-out list are not compared. On a match b's tables are reordered into a's order;
  * returns 0, leaving b untouched, on a difference or allocation failure. */
@@ -107,10 +105,6 @@ void sh_nav_map_move(sh_nav_map *dst, sh_nav_map *src);
 size_t sh_nav_map_bytes(const sh_nav_map *m);
 /* Short text for SH_NAVR_DROP_*. */
 const char *sh_nav_regions_drop_reason(int reason);
-
-/* Parse into out, overwriting it even on failure; out's previous tables are not freed. Returns 1 for a map
- * document, including one with no regions, or 0 for invalid input. */
-int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out);
 
 /* 1 when the map text marks a Blocking Box for AI navigation (flags.noFlood): the map carries navigation of its own,
  * which only Snapmap+ builds. 0 when none does, -1 when the text is not a map document. */

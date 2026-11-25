@@ -11,7 +11,6 @@
 #define SH_RENDER_UNLOCKED_TEXT "4;0"
 /* Where the controls appear in native Settings / Properties. Kept here so
  * moving them to another category only changes these two definitions. */
-#define SH_RENDER_SETTINGS_CATEGORY 0
 #define SH_RENDER_SETTINGS_TITLE "Map Rendering"
 /* "Unlock View Distance", one on/off map setting. Off is fully native and the map carries no render setting;
  * on sets the far clip to SH_RENDER_MAX_DISTANCE (r_zfar's maximum) and stretches every environment's fog by

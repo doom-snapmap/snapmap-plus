@@ -86,8 +86,6 @@ unavailable:
     backend_log(line);
     return 0;
 }
-int sh_world_area_cell_live(void){return g_live;}
-float sh_world_area_cell_current(void){return g_live&&g_page?g_page->cell:SH_RENDER_AREA_CELL;}
 static void describe(char *line,size_t cap,const char *prefix,const sh_render_cell_choice *c)
 {
     if(c->cell==SH_RENDER_AREA_CELL&&c->fits)

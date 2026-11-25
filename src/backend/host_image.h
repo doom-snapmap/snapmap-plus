@@ -48,9 +48,6 @@ extern const sh_build_identity SH_KNOWN_BUILDS[];
 /* Look a digest up in SH_KNOWN_BUILDS; NULL when it is not a supported executable. */
 const sh_build_identity *sh_host_identity_for_digest(const unsigned char digest[32]);
 
-/* SHA-256 of a file's bytes; returns 1 on success. The file is opened without write sharing. */
-int sh_host_file_sha256(const wchar_t *path, unsigned char digest[32]);
-
 /* The live host's identity (hashes the executable once), or NULL. */
 const sh_build_identity *sh_host_identity(void);
 int sh_host_is_supported_build(void);
@@ -70,7 +67,6 @@ const char *sh_host_executable_hash8(void);
  * base, a test-bound image in test builds, otherwise NULL. Raw RVAs are only
  * ever applied to an image this returns non-NULL for. */
 const sh_build_identity *sh_host_image_identity(const uint8_t *base);
-int sh_host_image_is_supported(const uint8_t *base);
 
 /* Pick the renderer's value from a Vulkan/OpenGL RVA pair: for an image
  * (sh_host_image_rva) or for the live host (sh_host_rva). 0 when the image or
