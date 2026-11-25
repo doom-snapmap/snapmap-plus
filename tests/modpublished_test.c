@@ -72,6 +72,7 @@ typedef struct fake {
     int answer;                      /* what poll returns once */
     int answered;
     int rescans, activations, activated_count;
+    DWORD rescan_thread, activation_thread;
     char activated[4][65];
     int metadata_copies, metadata_frees;
     int hold_ui, drop_ui;
@@ -222,11 +223,12 @@ static int f_row_state(void *c, const sh_modmanifest_row *row, const char *subje
     }
     return SH_MODPUB_ROW_MISSING;
 }
-static int f_rescan(void *c) { (void)c; F.rescans++; return 1; }
+static int f_rescan(void *c) { (void)c; F.rescans++; F.rescan_thread = GetCurrentThreadId(); return 1; }
 static int f_activate(void *c, const sh_modmanifest_list *rows)
 {
     (void)c;
     F.activations++;
+    F.activation_thread = GetCurrentThreadId();
     F.activated_count = (int)rows->count;
     for (size_t i = 0; i < rows->count && i < 4; i++) strcpy_s(F.activated[i], sizeof F.activated[i], rows->rows[i].build);
     return (int)rows->count;
@@ -739,6 +741,7 @@ static void launch_boundary(void)
     CHECK(F.asks == 0 && sh_modpub_test_state() == 2);
     tick_until_idle();
     CHECK(F.asks == 0 && F.fetch_calls == 2 && F.rescans == 1 && F.activations == 1 && F.activated_count == 2);
+    CHECK(F.rescan_thread != GetCurrentThreadId() && F.activation_thread == GetCurrentThreadId());
     CHECK(F.resumes == 1 && F.resume_hook == SH_MODPUB_LOBBY_LAUNCH && F.resume_extra == (void *)1);
     CHECK(!strcmp(F.resume_text, PINNED_TWO));
     CHECK(!sh_modpublished_holding() && !sh_modpub_test_notice()[0]);

@@ -524,6 +524,13 @@ static void test_cache(const char *top)
     sh_cache_set_mods_root(mods2);
     download(&crate, &b, pack, 1);
     download(&barrel, &b, pack, 1);
+    /* A published metadata read prepares only the safe palette. The existing launch worker uses the cached
+     * files without a request, and the ordinary resume gets the exact complete build. */
+    sh_cache_published_probe(1);
+    load_rows(rows, 1, placed, 2);
+    sh_cache_published_probe(0);
+    CHECK(sh_cache_composed(chash, &complete) && !complete);
+    CHECK(sh_cache_prepare(chash, NULL) == 0 && sh_cache_composed(chash, &complete) && complete);
     load_rows(rows, 1, placed, 2);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\content\\served\\%s", mt_cache_dir(mods2), chash);
     memset(&back2, 0, sizeof back2);

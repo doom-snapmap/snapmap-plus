@@ -21,6 +21,7 @@
 #include "backend_log.h"
 #include "map_carrier.h"
 #include "modmanifest.h"
+#include "modcache.h"
 #include "modexport.h"   /* a .zip rawmap is an export that carries its mods */
 #include "plain_reason.h"
 #include "modpublished.h"
@@ -854,7 +855,9 @@ static int deser_prepared(const char *json, void *out_map)
     /* A read that is not a published map's is the editor's: a row whose build is gone is served by another
      * build of its salt. */
     sh_modmanifest_set_editor_load(g_parse_kind == SH_MODPUB_PARSE_OTHER);
+    sh_cache_published_probe(g_parse_kind != SH_MODPUB_PARSE_OTHER);
     prepared = prepare_map_buffer(json, &refused);
+    sh_cache_published_probe(0);
     sh_modmanifest_set_editor_load(0);
     if (refused) {
         /* The engine never parses it: the open map keeps its settings and the gates see a failed parse. The

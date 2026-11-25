@@ -1,9 +1,8 @@
 /* modpublished.c -- holds a published or local map load until the rows' content is fetched, then resumes it.
  * One hold at a time: BEGUN fetches the rows' units into the content cache under a progress line (stand-ins serve
- * what cannot be had), FETCHING runs the job on the worker, and the resume on a main tick rescans the index,
- * re-checks every row and the owner, activates, and parses the retained text into a fresh map for the completion.
+ * what cannot be had), FETCHING builds the index on the worker, and the resume on a main tick re-checks every row and the owner, activates, and parses the retained text into a fresh map for the completion.
  * A refusal drops the hold with a notice and nothing launched; another load abandons it silently. A rawmap load has
- * no completion to skip and reopens the rawmap; a prefab is never held. */
+ * no completion to skip and reopens the rawmap. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdarg.h>
@@ -288,7 +287,7 @@ static void pub_progress(void *ctx, unsigned long long done, unsigned long long 
     InterlockedExchange64(&job->progress_total, (LONG64)total);
 }
 
-/* Worker thread. Touches only the job. */
+/* The worker prepares the bytes and index; the main thread applies the map scope on resume. */
 static void pub_job_main(void *context)
 {
     pub_job *job = context;
@@ -308,6 +307,7 @@ static void pub_job_main(void *context)
         rc = g_ops.fetch_for ? g_ops.fetch_for(g_ops.context, &row, pub_progress, &job->cancel) : -1;
         if (rc != 0) { job->failed_index = (int)i; job->failed_code = rc; break; }
     }
+    if (!job->cancel && job->failed_index < 0 && g_ops.rescan) (void)g_ops.rescan(g_ops.context);
     g_running_job = NULL;
     MemoryBarrier();
     InterlockedExchange(&job->done, 1);
@@ -1270,7 +1270,6 @@ static void pub_finish(void)
         free(line);
         return;
     }
-    if (g_ops.rescan) (void)g_ops.rescan(g_ops.context);
     if (h->in_lobby && !pub_joiner_content_whole(h)) return;
     for (size_t i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];

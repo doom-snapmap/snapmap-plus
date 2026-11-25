@@ -1670,6 +1670,29 @@ int sh_unit_compose(const char *const *manifests, const size_t *lens, size_t cou
                               why);
 }
 
+typedef struct uw_expected_file {
+    char *path, sha[SH_MB_HASH_HEX + 1];
+} uw_expected_file;
+
+static int uw_built_path(const void *path, const void *file)
+{
+    return _stricmp((const char *)path, ((const sh_mb_file *)file)->path);
+}
+
+/* The build hashes every admitted file. Verify that digest, or read the staged file if the builder omitted it. */
+static int uw_verified_file(const sh_mb_bundle *built, const char *dir, const uw_expected_file *expected)
+{
+    const sh_mb_file *file = built->file_count ? bsearch(expected->path, built->files, built->file_count,
+                                                          sizeof *built->files, uw_built_path) : NULL;
+    if (file && file->blob[0] && !file->absent) return !strcmp(file->blob, expected->sha);
+    char *path = sh_textf("%s\\%s", dir, expected->path);
+    unsigned long long size = 0;
+    char sha[SH_MB_HASH_HEX + 1];
+    int ok = path && sh_mb_sha256_file(path, &size, sha) && !strcmp(sha, expected->sha);
+    free(path);
+    return ok;
+}
+
 int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t count, sh_unit_source_fn source,
                        void *source_context, const sh_unit_extra *extras, size_t extra_count, int link,
                        const char *salt, const char *name, const sh_mb_resolver *resolver, const char *dest,
@@ -1681,6 +1704,8 @@ int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t 
     sh_mb_resolver r;
     size_t u;
     int ok = 0, made = 0, oom = 0;
+    uw_expected_file *expected = NULL;
+    size_t nexpected = 0;
     if (why) *why = NULL;
     if (out) memset(out, 0, sizeof *out);
     if ((count && (!manifests || !lens)) || (!count && !extra_count) || !source || !salt || !sh_salt_valid(salt, strlen(salt)) ||
@@ -1703,6 +1728,11 @@ int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t 
         int i;
         sh_mb_sha256_hex(manifests[u], lens[u], hash);
         if (!files || files->type != MPJ_ARR) { sh_text_set(&reason, "unit %.16s is not a unit manifest", hash); mpj_free(m); break; }
+        if (files->n) {
+            uw_expected_file *next = realloc(expected, (nexpected + (size_t)files->n) * sizeof *next);
+            if (!next) { oom = 1; mpj_free(m); break; }
+            expected = next;
+        }
         if (mod && mod->type == MPJ_OBJ && share) uw_merge(share, mod, &oom);
         for (i = 0; i < files->n && !reason; i++) {
             const mpj *p = mpj_get(files->items[i], "path"), *sha = mpj_get(files->items[i], "sha256");
@@ -1733,17 +1763,19 @@ int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t 
             wf = sh_mb_wpath(from);
             wt = sh_mb_wpath(to);
             if ((slash = wt ? wcsrchr(wt, L'\\') : NULL) != NULL) { *slash = 0; uw_mkdirs(wt); *slash = L'\\'; }
-            /* A hard link costs no bytes (the cache and the mods folder share a volume); a copy where it cannot
-             * be made. Either way the bytes are checked against the unit's SHA-256. */
             if (!wf || !wt) sh_text_set(&reason, "%s could not be copied", p->text);
-            else if (link && CreateHardLinkW(wt, wf, NULL)) {
-                if (!sh_mb_sha256_file(to, &size, have) || strcmp(have, sha->text))
+            else if (!link || !CreateHardLinkW(wt, wf, NULL)) {
+                if (!CopyFileW(wf, wt, TRUE)) sh_text_set(&reason, "%s could not be copied", p->text);
+                else SetFileAttributesW(wt, FILE_ATTRIBUTE_NORMAL);
+            }
+            if (!reason) {
+                if (strlen(sha->text) != SH_MB_HASH_HEX)
                     sh_text_set(&reason, "%s is not the unit's bytes", p->text);
-            } else if (!CopyFileW(wf, wt, TRUE)) sh_text_set(&reason, "%s could not be copied", p->text);
-            else {
-                SetFileAttributesW(wt, FILE_ATTRIBUTE_NORMAL);
-                if (!sh_mb_sha256_file(to, &size, have) || strcmp(have, sha->text))
-                    sh_text_set(&reason, "%s is not the unit's bytes", p->text);
+                else if (!(expected[nexpected].path = sh_text(p->text))) oom = 1;
+                else {
+                    strcpy_s(expected[nexpected].sha, sizeof expected[nexpected].sha, sha->text);
+                    nexpected++;
+                }
             }
             free(wf);
             free(wt);
@@ -1817,6 +1849,12 @@ int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t 
         sh_text_set(&reason, "it does not build on its own: %s", sh_mb_first_cause(out));
         goto done;
     }
+    for (size_t i = 0; i < nexpected; i++) {
+        if (!uw_verified_file(out, dest, &expected[i])) {
+            sh_text_set(&reason, "%s is not the unit's bytes", expected[i].path);
+            goto done;
+        }
+    }
     out->units_of = (char **)calloc(count ? count : 1, sizeof *out->units_of);
     if (!out->units_of) { oom = 1; goto done; }
     for (u = 0; u < count; u++) {
@@ -1841,5 +1879,7 @@ done:
     free(modjson);
     free(one);
     free(wdest);
+    for (size_t i = 0; i < nexpected; i++) free(expected[i].path);
+    free(expected);
     return ok;
 }

@@ -5152,11 +5152,9 @@ a file's block; the Prefabs list reads at most the last 1 MB of each file,
 where the block is. `MODS_STATUS` names each row's mod by its name ("id",
 else "an unnamed mod": a player never sees a salt), with its salt and build.
 
-Resolving. Load / Place first reads the rows (`MODS_RESOLVE`). A placement
-fetches nothing, installs nothing and never waits (D35: a prefab carries its
-units in its `.zip` export; `sh_prefab_mods_poll` always answers 0), and it
-never changes where the open map finds its mods (decision 12), nor does
-`sh_prefab mods`:
+Load / Place reads the prefab's rows with `MODS_RESOLVE`. A complete composition can join the
+open map immediately. For a new composition, a worker builds and indexes the unit files that came
+with the prefab's ZIP. The tab resumes the placement automatically if the same map is still open.
 
 - a module prefab naming a module no row provides and the palette lacks (DLC
   the player does not own) is refused with the module guard's toast and
@@ -5169,7 +5167,7 @@ never changes where the open map finds its mods (decision 12), nor does
   the prefab's .zip export." (one console line, a toast and the tab's
   message);
 - with every row here, a pinned row joins the open map as one of its own rows,
-  composed from the content cache (`eng_use_pinned`, `sh_cache_on_load`); when
+  composed from the content cache (`sh_cache_prepare_prefab`, `pm_join_pinned`); when
   the map already uses another version of that mod (one version per map, D23),
   the installed version serves the prefab's objects if it carries them all,
   else the placement is refused ("Prefab <name> was not placed: this map uses
@@ -5554,7 +5552,7 @@ composes the pinned rows whose composition is not on disk from what is here;
 an object whose unit is not here stands in (D60): every name the map places
 under the namespace that no present unit provides becomes an entityDef
 inheriting `snapmaps/unknown`, so the map, its logic and its saves keep the
-object, and the load gets one notice (S2-S6, `sh_cache_notice_text`). The
+object, and the load gets one notice (S2-S6, `sh_cache_notice_text`). For its first metadata read, a published map can use the saved palette stand-ins while its launch worker prepares and indexes the unit files. The
 published-map gate treats a pinned row as missing until its composition is
 complete: it asks no question and probes nothing, fetches the absent units on
 the network worker (`sh_cache_prepare`: the store's status for the row's
@@ -5588,11 +5586,11 @@ tab) keeps every unit a kept map names (the local saves of My Maps, read
 through `saved_maps.c`, the one reader of the game's save slots, since a map
 saved offline exists only there; the cloud copies in the game's `saved-maps`;
 and, unless the player chose Remove content of maps you only played,
-`published-maps`), the open map's, and the units of every claim and queued
+`published-maps`), the open map's, the units and compositions named by prefabs in the library, and the units of every claim and queued
 claim this computer holds (`sh_cache_sweep_kept`, `modclaim_held`, so the
 self-repair of a claim keeps its files after its map left), and removes the
 rest, then the files no remaining manifest names, then the compositions no kept
-map uses (one being made or replaced is left alone unless nothing has written
+map or library prefab uses (one being made or replaced is left alone unless nothing has written
 it for an hour, and so is a partial download that long), then partial downloads
 whose unit or file nothing names. The sweep also runs, off the calling thread,
 after a map is deleted from My Maps and after a mod is uninstalled

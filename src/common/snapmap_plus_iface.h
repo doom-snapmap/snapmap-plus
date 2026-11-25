@@ -303,7 +303,7 @@ typedef struct sh_module_prefab_call {
     size_t      text_len;
     char       *out;         /* out, owned (NULL in): SAVE, MODS_RECORD, META_READ: the view;
                                 STATUS/PLACE: message */
-    int         seq;         /* PLACE out; STATUS in; MODS_RESOLVE out; MODS_POLL in */
+    int         seq;         /* PLACE out; STATUS in; MODS_RESOLVE held token out or resuming token in; MODS_POLL in */
     int         blueprint;   /* STATE out */
     int         entity_mode; /* STATE out */
     const char *name;        /* MODS_RESOLVE, EXPORT: the prefab's name */
