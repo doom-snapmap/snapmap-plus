@@ -268,8 +268,8 @@ particles {
 [changing value](#values-that-change-over-time) over the particle's life; `colour` takes a colour or a changing
 value; `opacity` takes one number. A speed range, drag and bounce are
 Snapmap+'s simulated particle motion (see [architecture.md](architecture.md#simulated-particle-motion)); everything else is
-the game's own particle stage. A stage with very many particles is drawn on the CPU today; the product will choose
-the game's GPU stages for it once that path is measured (the build log says which it took).
+the game's own particle stage. Write the total number of particles in `count`. Snapmap+ divides large counts
+across CPU stages so the game can draw them. Other visible effects share the game's frame budget.
 
 ## Values that change over time
 

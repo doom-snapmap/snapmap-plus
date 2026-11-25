@@ -19,7 +19,4 @@ int sh_effect_is(const char *text, size_t len);
  * effect. */
 #define SH_EFFECT_MARK "// Snapmap+ effect"
 
-/* Particles the GPU draws when a stage has this many or more and the GPU can draw it as written (CPU otherwise). */
-#define SH_EFFECT_GPU_COUNT 256
-
 #endif /* SNAPMAP_PLUS_MODEFFECT_H */

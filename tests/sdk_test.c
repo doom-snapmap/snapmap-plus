@@ -328,8 +328,9 @@ static void test_particles(void)
     prt = registered("particle", name);
     CHECK(prt != NULL);
     if (prt) {
-        CHECK(has(prt, "stages = {\n\t\t\tnum = 1;"));
-        CHECK(!strcmp(kv(prt, "totalParticles", 0), "300"));
+        CHECK(has(prt, "stages = {\n\t\t\tnum = 2;"));
+        CHECK(count(prt, "totalParticles = 150;") == 2);
+        CHECK(count(prt, "diversity = 1031;") == 1);
         CHECK(!strcmp(kv(prt, "cycles", 0), "0"));
         CHECK(!strcmp(kv(prt, "type", 0), "PDIST_SPHERE"));
         CHECK(!strcmp(kv(prt, "parms[0]", 0), "25"));
@@ -350,7 +351,7 @@ static void test_particles(void)
         CHECK(mtr && has(mtr, "mods/abcdefgh/fx/ember.tga"));
         CHECK(mtr && !has(mtr, "look\t"));                      /* the look compiled */
     }
-    CHECK(x.notes && has(x.notes, "drawn on the CPU"));
+    CHECK(x.notes && has(x.notes, "300 billboards drawn on the CPU in 2 stages"));
     release(&x);
     sdk_set_register(NULL);
 }
@@ -372,6 +373,40 @@ static void test_particles_plain(void)
     CHECK(prt && has(prt, "fadeColor = {\n\t\t\t\t\t\tx = 2;"));
     CHECK(count_type("material") == 0);
     release(&x);
+    sdk_set_register(NULL);
+}
+
+static void test_particle_bounds_and_counts(void)
+{
+    const int totals[] = {170, 171, 341, 20000};
+    int i;
+    sdk_set_register(capture);
+    for (i = 0; i < 4; i++) {
+        char source[180];
+        const char *particle;
+        int seen = 0, sum = 0, n, capped = totals[i] > 16383 ? 16383 : totals[i];
+        res x;
+        snprintf(source, sizeof source,
+                 "{\ntype effect\nparticles { material native(\"test\")\n count %d\n from box {0, 64, 0}\n}\n}", totals[i]);
+        g_nregs = 0;
+        x = compile(FX, source);
+        CHECK(x.r == SH_LOOK_CHANGED);
+        particle = registered("particle", kv(x.out, "declPrt", 0));
+        CHECK(particle != NULL);
+        if (particle) {
+            CHECK(has(particle, "x = -76;"));
+            while ((n = atoi(kv(particle, "totalParticles", seen))) > 0) {
+                CHECK(n <= 170);
+                sum += n;
+                seen++;
+            }
+            CHECK(sum == capped);
+            CHECK(seen == (capped + 169) / 170);
+            CHECK(count(particle, "diversity = ") == seen - 1);
+        }
+        if (totals[i] > capped) CHECK(x.notes && has(x.notes, "16383 billboards"));
+        release(&x);
+    }
     sdk_set_register(NULL);
 }
 
@@ -548,6 +583,7 @@ int main(void)
     test_effect_light_values();
     test_particles();
     test_particles_plain();
+    test_particle_bounds_and_counts();
     test_effect_mistakes();
     test_not_sdk();
     test_environment();
