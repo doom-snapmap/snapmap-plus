@@ -871,6 +871,31 @@ static int lk_ribbon(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *out
     return *out ? SH_LOOK_CHANGED : SH_LOOK_OOM;
 }
 
+static int lk_sky(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *out_len)
+{
+    static const char *const drop[] = { "stageprogram", "zprepassprogram", "envmap" };
+    lk_buf gen = { 0 };
+    lk_val image = { 0 };
+    for (size_t i = first + 1; i < d->n; i++) {
+        lk_ln *line = &d->l[i];
+        if (!line->key || !lk_ieq(line->a + line->ks, line->kn, "image")) continue;
+        if (image.kind == K_IMG) { lk_fail(c, i, "write 'image' once in this material."); return SH_LOOK_MISTAKE; }
+        lk_parse(line->a + line->v0, line->vn, &image);
+        if (image.kind != K_IMG) { lk_fail(c, i, "'image' needs a cubemap image path."); return SH_LOOK_MISTAKE; }
+        line->skip = 1;
+    }
+    if (image.kind != K_IMG) { lk_fail(c, first, "a sky needs 'image' with a cubemap image path."); return SH_LOOK_MISTAKE; }
+    lk_key(&gen, d->eol, "zprepassprogram", "prezdrawstatic");
+    lk_key(&gen, d->eol, "stageprogram", "snapskyboxportal");
+    lk_key_q(&gen, d->eol, "envmap", image.s, image.sn);
+    if (!lk_has_key(d,"surfaceflags")) lk_key(&gen, d->eol, "surfaceflags", "surf_noareas");
+    if (!lk_has_key(d,"noshadows")) lk_key(&gen, d->eol, "noshadows", "1");
+    if (!lk_has_key(d,"stagesortadjust")) lk_key(&gen, d->eol, "stagesortadjust", "100");
+    if (!gen.oom) *out = lk_assemble(d, first, gen.p, drop, sizeof drop / sizeof drop[0], out_len);
+    free(gen.p);
+    return *out ? SH_LOOK_CHANGED : SH_LOOK_OOM;
+}
+
 static int lk_recolourable(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *out_len)
 {
     enum { REGIONS, PRIMARY, SECONDARY, PATTERN, PATTERN_COLOURS, SCRATCHES, DIRT, GLOW, DETAIL, SHINE, COUNT };
@@ -965,7 +990,7 @@ int sh_look_compile_notes(const char *path, const char *text, size_t len, char *
     lk_ctx c;
     lk_doc d;
     size_t i, first = (size_t)-1;
-    int r, layered, ribbon, recolourable;
+    int r, layered, ribbon, recolourable, sky;
     if (out) *out = NULL;
     if (out_len) *out_len = 0;
     if (notes) *notes = NULL;
@@ -993,13 +1018,15 @@ int sh_look_compile_notes(const char *path, const char *text, size_t len, char *
         layered = lk_ieq(word, strlen(word), "layered");
         ribbon = lk_ieq(word, strlen(word), "ribbon");
         recolourable = lk_ieq(word, strlen(word), "recolourable");
-        if (!layered && !ribbon && !recolourable && !lk_ieq(word, strlen(word), "particle")) {
-            lk_fail(&c, first, "'type' is '%s'; write layered, particle, ribbon or recolourable.", word);
+        sky = lk_ieq(word, strlen(word), "sky");
+        if (!layered && !ribbon && !recolourable && !sky && !lk_ieq(word, strlen(word), "particle")) {
+            lk_fail(&c, first, "'type' is '%s'; write layered, particle, ribbon, recolourable or sky.", word);
             lk_doc_free(&d);
             return SH_LOOK_MISTAKE;
         }
     }
-    if (ribbon) r = lk_ribbon(&c, &d, first, out, out_len);
+    if (sky) r = lk_sky(&c, &d, first, out, out_len);
+    else if (ribbon) r = lk_ribbon(&c, &d, first, out, out_len);
     else if (recolourable) r = lk_recolourable(&c, &d, first, out, out_len);
     else if (layered) r = lk_layered(&c, &d, first, out, out_len);
     else r = lk_particle(&c, &d, first, out, out_len);

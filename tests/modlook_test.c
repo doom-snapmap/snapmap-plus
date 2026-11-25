@@ -555,7 +555,7 @@ static void test_mistakes(void)
         }
     }
     mistake("{\n\tdiffusemap d.tga\n\ttype layered\n}\n", "body.decl line 3: 'type' must be the first key of the material; move it to the top.");
-    mistake("{\n\ttype glossy\n}\n", "body.decl line 2: 'type' is 'glossy'; write layered, particle, ribbon or recolourable.");
+    mistake("{\n\ttype glossy\n}\n", "body.decl line 2: 'type' is 'glossy'; write layered, particle, ribbon, recolourable or sky.");
     /* the first mistake is the one reported, by its line; a comment or a quoted value does not hide a field */
     mistake("{\n\ttype layered\n\t// layer5 is not here\n\tlayer1repeat 2 // fine\n\tlayer9 a.tga\n\tlayer1scroll 2\n}\n",
             "body.decl line 5: 'layer9' is not a field of a layered material; a surface has layers 1 to 4.");
@@ -680,6 +680,24 @@ static void test_recolourable(void)
     mistake("{\ntype recolourable\nprimary {0,1,2}\n}\n", "body.decl line 3: 'primary' needs colour channels from 0 to 1.");
 }
 
+static void test_sky(void)
+{
+    res x = compile("sky.decl", "{\ntype sky\nimage env/snapmaps/hell_px$bc7\nstagesortadjust 23\n}\n");
+    CHECK(x.r == SH_LOOK_CHANGED && x.out);
+    if (x.out) {
+        CHECK(!strcmp(value(x.out, "zprepassprogram", 0), "prezdrawstatic"));
+        CHECK(!strcmp(value(x.out, "stageprogram", 0), "snapskyboxportal"));
+        CHECK(!strcmp(unq(value(x.out, "envmap", 0)), "env/snapmaps/hell_px$bc7"));
+        CHECK(!strcmp(value(x.out, "stagesortadjust", 0), "23"));
+        CHECK(!strcmp(value(x.out, "surfaceflags", 0), "surf_noareas"));
+        CHECK(!strcmp(value(x.out, "noshadows", 0), "1"));
+    }
+    release(&x);
+    mistake("{\ntype sky\n}\n", "body.decl line 2: a sky needs 'image' with a cubemap image path.");
+    mistake("{\ntype sky\nimage {1,0,0}\n}\n", "body.decl line 3: 'image' needs a cubemap image path.");
+    mistake("{\ntype sky\nimage a\nimage b\n}\n", "body.decl line 4: write 'image' once in this material.");
+}
+
 int main(int argc, char **argv)
 {
     int i;
@@ -695,6 +713,7 @@ int main(int argc, char **argv)
     test_particle_fields();
     test_ribbon_length_fade();
     test_recolourable();
+    test_sky();
     test_ribbon_age();
     test_mistakes();
     test_not_looks();
