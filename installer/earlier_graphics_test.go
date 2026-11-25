@@ -32,7 +32,7 @@ func TestEarlierParticleSourceAndCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, part := range []string{`"snapmapplus/particles/uberparticles"`, "particleuberparms1\t{ 0, 0, 20, 0 }", "particleemissivemap\t", "smokebrightness\t{ 1, 0, 0, 0 }"} {
+	for _, part := range []string{"type\tparticle", "lighting\texplosion", "gradient\t{ 1, 0.099899, 0, 1, 0.111932, 0.022174 }", `glowmask	"mods/wuahwfly/effect/texture/fire/explosion_m_33_emissive_2.tga"`, "softdistance\t20.997376"} {
 		if !strings.Contains(string(got), part) {
 			t.Fatal("missing", part)
 		}
@@ -62,11 +62,36 @@ func TestEarlierParticleSourceAndCache(t *testing.T) {
 }
 
 func TestUnrelatedAndMalformedEarlierParticleSources(t *testing.T) {
-	unrelated := []byte("{\r\n// eternalparticle in a comment\r\nemissive\tcustomExpr\r\n}\r\n")
-	if out, err := upgradeParticleMaterial(unrelated); err != nil || !bytes.Equal(out, unrelated) {
+	unrelated := []byte("{\r\n/*\r\neternalparticle {1,2,3,4}\r\nstageprogram snapmapplus/eternal/uberparticles\r\n*/\r\nsubblock {\r\nmultiblendsoftness {1,1,1,1}\r\n}\r\nemissive\tcustomExpr\r\n}\r\n")
+	if out, err := upgradeEarlierMaterial(unrelated); err != nil || !bytes.Equal(out, unrelated) {
 		t.Fatal(out, err)
 	}
-	if _, err := upgradeParticleMaterial([]byte("{\neternalparticle\t{1, invalid}\n}")); err == nil {
+	if _, err := upgradeEarlierMaterial([]byte("{\neternalparticle\t{1, invalid}\n}")); err == nil {
 		t.Fatal("accepted malformed vector")
+	}
+}
+
+func TestEarlierLayeredSource(t *testing.T) {
+	original, err := os.ReadFile(filepath.Join("..", "tests", "fixtures", "modprog", "legacy_wounds.decl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := upgradeEarlierMaterial(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, part := range []string{"type\tlayered", "wounds\tyes", `layer1	"mods/wuahwfly/ml/art/tile/gore/blood_gore_char_albedo.tga"`, "surfacetype\t"} {
+		if !strings.Contains(string(got), part) {
+			t.Fatal("missing", part)
+		}
+	}
+	for _, part := range []string{"multiblend", "blendlayer1", "layerstilingfactor"} {
+		if strings.Contains(string(got), part) {
+			t.Fatal("retained old key", part)
+		}
+	}
+	again, err := upgradeEarlierMaterial(got)
+	if err != nil || !bytes.Equal(again, got) {
+		t.Fatal("layered source changed on second conversion", err)
 	}
 }

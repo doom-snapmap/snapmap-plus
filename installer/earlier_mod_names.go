@@ -99,7 +99,7 @@ func earlierAuthorPath(id, request string) (string, error) {
 var earlierNameToken = regexp.MustCompile(`(?:#str_|native:)?[A-Za-z0-9_.$/+@~-]+`)
 var earlierKey = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 var earlierAuthorPrefix = regexp.MustCompile(`^(?:materials|effects|environments|particles|entities|images|animations|collision|movies|scripts|map-modules|virtual-textures|programs|meshes|sounds)/.+|^decls/[^/]+/.+`)
-var earlierLookKey = regexp.MustCompile(`(?i)^(\s*\{\s*)look(\s+(?:layered|particle)\b)`)
+var earlierLookKey = regexp.MustCompile(`(?im)^([ \t]*)look([ \t]+(?:layered|particle)\b)`)
 
 type earlierModNames struct {
 	id, salt string
