@@ -35,6 +35,7 @@ Building the example crate produces this layout in the data folder.
 ```text
 snapmap-plus/
 ├── mods/
+│   ├── snapmap-plus.json
 │   └── spark-crate/
 │       ├── mod.json
 │       ├── entities/
@@ -48,6 +49,7 @@ snapmap-plus/
     └── content/
 ```
 
+The shared `mods/snapmap-plus.json` records local mod identities and publishing history. Snapmap+ maintains it.
 Snapmap+ writes prepared local files into `cache/served/` when the game needs them.
 For a published map, `cache/content/` keeps its verified units and files between plays.
 Maps that use the same version reuse those files. Playing a map leaves the author's `mods/` folder alone.
