@@ -65,6 +65,64 @@ static void progress(void *ctx, unsigned long long done, unsigned long long tota
     g_pr_total = total;
 }
 
+static const char stream_hash[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+static const char stream_body[] = "abcdefghijklmno";
+static int stream_end, stream_wrong, stream_ignore, stream_limit;
+
+static void ranged_reply(SOCKET s, const char *headers)
+{
+    int start = 0, total = sizeof stream_body - 1, end = stream_end;
+    const char *range = strstr(headers, "Range: bytes=");
+    char head[256];
+    if (range) sscanf_s(range, "Range: bytes=%d-", &start);
+    if (stream_ignore) start = 0;
+    if (start < 0 || start > end || end > total) return;
+    if (range && !stream_ignore) {
+        int last = total - 1;
+        if (stream_limit && start + stream_limit < total) last = start + stream_limit - 1;
+        if (end > last + 1) end = last + 1;
+        snprintf(head, sizeof head, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes %d-%d/%d\r\n"
+                 "Content-Length: %d\r\nConnection: close\r\n\r\n",
+                 start + stream_wrong, last, total, last-start+1);
+    } else snprintf(head, sizeof head, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", total);
+    send(s, head, (int)strlen(head), 0);
+    send(s, stream_body + start, end - start, 0);
+}
+
+static void test_resume_progress(const char *tmp)
+{
+    char out[MAX_PATH * 2], bytes[16] = {0};
+    modnet_result r;
+    modnet_io io = {NULL, progress, NULL};
+    FILE *f = NULL;
+    snprintf(out, sizeof out, "%s\\resume-test.part", tmp);
+    g_stub.stream = ranged_reply;
+    stream_end = 5;
+    CHECK(modnet_get_blob(stream_hash, out, 0, &io, &r) != MODNET_OK);
+    CHECK(g_pr_done == 5 && g_pr_total == 15);
+    stream_end = 10;
+    CHECK(modnet_get_blob(stream_hash, out, 5, &io, &r) != MODNET_OK);
+    CHECK(g_pr_done == 10 && g_pr_total == 15);
+    stream_end = 15;
+    stream_wrong = 1;
+    CHECK(modnet_get_blob(stream_hash, out, 10, &io, &r) == MODNET_E_PROTOCOL);
+    CHECK(g_pr_done == 10);
+    stream_wrong = 0;
+    CHECK(modnet_get_blob(stream_hash, out, 10, &io, &r) == MODNET_OK && r.received == 5);
+    CHECK(g_pr_done == 15 && g_pr_total == 15);
+    stream_limit = 3;
+    CHECK(modnet_get_blob(stream_hash, out, 5, &io, &r) == MODNET_OK && r.requests == 4 && r.received == 10);
+    CHECK(g_pr_done == 15 && g_pr_total == 15);
+    stream_limit = 0;
+    stream_ignore = 1;
+    CHECK(modnet_get_blob(stream_hash, out, 10, &io, &r) == MODNET_OK && r.requests == 1);
+    CHECK(g_pr_done == 15 && g_pr_total == 15);
+    CHECK(fopen_s(&f, out, "rb") == 0);
+    if (f) { CHECK(fread(bytes, 1, sizeof bytes, f) == 15 && !memcmp(bytes, stream_body, 15)); fclose(f); }
+    stream_ignore = 0;
+    g_stub.stream = NULL;
+}
+
 int main(void)
 {
     char url[64], tmp[MAX_PATH];
@@ -95,6 +153,8 @@ int main(void)
         free(base);
     }
     CHECK(modnet_set_base_url(url));
+
+    test_resume_progress(tmp);
 
     /* ---- a unit's archive: one request, every file, or the files a mask names as ?want=<base64url> ---- */
     {
