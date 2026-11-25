@@ -427,7 +427,8 @@ static void test_growth(void)
 {
     int st;
     size_t before;
-    sh_script_limits_reset();   /* the product's wall-clock stop: this work is long but returns */
+    sh_script_limits limits = { 0 };
+    sh_script_limits_set(&limits);
     /* a 20 MiB script table */
     st = run_one("api = 1\nbig = {}\nfor i = 1, 400000 do big[i] = string.rep('x', 32) .. i end\n"
                  "print('rows', #big, collectgarbage('count') > 20 * 1024)\n");
@@ -464,10 +465,7 @@ static void test_growth(void)
     sh_script_tick(0.3, 0.15);
     CHECK(strstr(log_of("aaaaaaaa"), "fired\t20000") != NULL);
     sh_script_map_end();
-    {
-        sh_script_limits lim = { 300 };
-        sh_script_limits_set(&lim);
-    }
+    sh_script_limits_reset();
 }
 
 static void test_api_declaration(void)
@@ -927,7 +925,10 @@ static void test_teardown(void)
     file_add("bbbbbbbb", "main.lua", "api = 1\non.map_end(function() while true do end end)\n");
     {
         sh_script_mod_desc d[2] = { { "aaaaaaaa", "Mod A" }, { "bbbbbbbb", "Mod B" } };
+        sh_script_limits setup = { 0 }, teardown = { 300 };
+        sh_script_limits_set(&setup);
         CHECK(sh_script_map_start(d, 2, &g_src, 3, 0.0) == 2);
+        sh_script_limits_set(&teardown);
     }
     memset(&ev, 0, sizeof ev);
     ev.kind = TEV_SPAWN;
@@ -1029,6 +1030,8 @@ static void test_long_names(void)
 static void test_log_whole(void)
 {
     int n;
+    sh_script_limits limits = { 0 };
+    sh_script_limits_set(&limits);
     run_one("api = 1\nfor i = 1, 100000 do print('line ' .. i) end\nprint(string.rep('w', 100000))\nerror('done')\n");
     n = sh_script_log_read("aaaaaaaa", NULL, NULL);
     CHECK(n == 100002);
@@ -1037,6 +1040,7 @@ static void test_log_whole(void)
     CHECK(g_lines_seen == 100002 && g_longest == 100000);
     CHECK(strstr(stop_of("aaaaaaaa"), "Script stopped: ") == stop_of("aaaaaaaa"));
     sh_script_map_end();
+    sh_script_limits_reset();
 }
 
 /* The loader and the runtime fed malformed text: never a crash or a hang,

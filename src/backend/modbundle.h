@@ -336,9 +336,11 @@ void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap);
 
 
 
-/* Validate one request path (relative, '/', no "." or ".." segment, characters [A-Za-z0-9._-$+@~()] and
- * internal spaces, no segment starting with a space or ending in '.' or a space; any length). 1 when valid,
- * else 0 with the cause in *cause (malloc'd). */
+#ifdef SH_MB_EARLIER_ASSETS
+int sh_mb_verify_earlier_assets_text(const char *text, size_t len, const char *hash);
+#endif
+
+/* Validate a relative request path. The caller frees the cause on failure. */
 int  sh_mb_check_request(const char *request, char **cause);
 
 /* Extension whitelist. A .bswf movie is admitted only under

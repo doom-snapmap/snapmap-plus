@@ -3,3 +3,6 @@
 
 # Embedded Bash scripts require LF even when Git uses autocrlf.
 *.yml text eol=lf
+
+# The historical manifest hashes the exact fixture bytes.
+installer/testdata/earlier-tiny/** -text

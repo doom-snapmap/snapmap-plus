@@ -206,8 +206,7 @@ try {
     # b) v0.2.1-beta.19's 2018 pair in this April 2024 folder, overrides\ packages -> update, then uninstall.
     $s = New-Scenario "b-beta19" $binB
     Seed $s "beta19"
-    $keepB = @("config.json", "overrides\tinypack\package.json")
-    # The update leaves the mods, overrides\ and removed-mods\ folders as they are.
+    $keepB = @("config.json", "mods\tinypack\mod.json", "mods\alex.tiny@1.0.0+1\mod.json")
     $keepB += @("removed-mods")
     Step $s "update" @("update", "--yes", "--plain") "installed" $pair $keepB @("the other DOOM build's files") @("Converting mods")
     Step $s "uninstall" @("uninstall", "--yes", "--plain") "uninstalled" @() $keepB @()

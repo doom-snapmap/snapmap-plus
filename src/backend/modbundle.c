@@ -5937,6 +5937,10 @@ static long long mb_now(void)
 /* One entry of the product block's "files" (pointer 0) or "stock" (pointer 1) list.
  * Every refusal of the product's own section is MB_BLOCK_EDITED: the next
  * scan builds the folder again and writes the section anew. */
+#ifdef SH_MB_EARLIER_ASSETS
+static int mb_reading_earlier_assets;
+#endif
+
 static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int pointer)
 {
     static const char *const keys[] = { "needs", "path", "provides", "sha256", "size", NULL };
@@ -5968,6 +5972,11 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
     }
     /* the engine request the folder's path stands for (modauthor.h) */
     expect = NULL;
+#ifdef SH_MB_EARLIER_ASSETS
+    if (mb_reading_earlier_assets) {
+        if (!mb_starts(path->s, "assets/") || !(expect = mb_strdup(path->s + 7))) { mb_error(b, MB_BLOCK_EDITED); return 0; }
+    } else
+#endif
     if (!sh_ma_request(b->id, path->s, &expect, NULL)) { mb_error(b, MB_BLOCK_EDITED); return 0; }
     if (!sh_mb_check_request(expect, NULL)) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
     if (!pointer && !sh_mb_extension_allowed(expect)) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
@@ -6252,6 +6261,23 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, const mbj *block, in
         mb_error(out, "mod.json was edited after its last build; press Refresh in the Mods tab to build it again");
     return out->errors == 0;
 }
+
+#ifdef SH_MB_EARLIER_ASSETS
+/* Called only in the installer helper's single-threaded verification process. */
+int sh_mb_verify_earlier_assets_text(const char *text, size_t len, const char *hash)
+{
+    mbj *root = mbj_parse(text, len, NULL);
+    sh_mb_bundle b = {0};
+    int ok;
+    if (!root) return 0;
+    mb_reading_earlier_assets = 1;
+    ok = mb_load_root(&b, root, mbj_get(root, SH_MB_BLOCK_KEY), 0) && b.validated && !strcmp(b.hash, hash);
+    mb_reading_earlier_assets = 0;
+    sh_mb_free(&b);
+    mbj_free(root);
+    return ok;
+}
+#endif
 
 static int mb_load_modjson(const char *text, size_t len, sh_mb_bundle *out, const wchar_t *folder)
 {

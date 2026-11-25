@@ -150,6 +150,9 @@ func cmdInstall(f flags) error {
 		return fmt.Errorf("installed the files, but couldn't write the install record (%v) -- run: snapmap-plus update", err)
 	}
 	if carriesMarker(filepath.Join(doom, currentProxy), []byte(modBuildManifest)) {
+		if err := convertEarlierData(doom, appDataDir()); err != nil {
+			return fmt.Errorf("Snapmap+ is installed, but updating your earlier content could not finish (%w). Run the same install or update command again", err)
+		}
 		if err := upgradeModLayout(appDataDir()); err != nil {
 			return fmt.Errorf("Snapmap+ is installed, but updating your mod data could not finish (%w). Run the same install or update command again", err)
 		}
