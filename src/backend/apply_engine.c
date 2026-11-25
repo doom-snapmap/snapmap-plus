@@ -28,6 +28,7 @@
 #include "config.h"
 #include "backend_log.h"
 #include "rawmap.h"
+#include "editor_frame.h"
 #include "nav_bake.h"
 #include "nav_entitydef.h"
 #include "nav_snapshot.h"
@@ -1325,6 +1326,15 @@ static int (*g_apply_test_executor)(int, int, const char *);
 #endif
 static int ae_run_item(int kind, int id, const char *text)
 {
+    if (kind == SH_APPLY_PLACE_IN_MAP) {
+        if (!id || id != sh_editor_frame_map_context()) {
+            g_place_reason = SH_PREFAB_MAP_CHANGED;
+            InterlockedExchange(&g_place_decided, SH_PREFAB_PLACE_MAP_CHANGED);
+            InterlockedIncrement(&g_place_seq);
+            return 0;
+        }
+        kind = 2;
+    }
 #ifdef SH_APPLY_ENGINE_TESTING
     return g_apply_test_executor ? g_apply_test_executor(kind, id, text) : 0;
 #else

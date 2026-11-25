@@ -14,6 +14,9 @@ void sh_rawmap_poll_main(void) {}
 int sh_modui_poll_due(void) { return 0; }
 int sh_modui_poll_main(void *context) { (void)context; return 0; }
 
+static int map_context = 41;
+int sh_editor_frame_map_context(void) { return map_context; }
+
 static DWORD engine_id;
 static HANDLE start_event, entered_event, release_event;
 static volatile LONG executions;
@@ -483,6 +486,19 @@ int main(void)
         start_event = NULL;
     }
     assert(executions == 4);
+    {
+        sh_apply_item place = {SH_APPLY_PLACE_IN_MAP, map_context, "original"};
+        engine_id = GetCurrentThreadId();
+        delay_execution = 0;
+        assert(slot_schedule_apply(NULL, &place, 1, "load-prefab") == 1);
+        map_context++;
+        ae_clone_bss_apply_cmd();
+        assert(executions == 4 && g_place_decided == SH_PREFAB_PLACE_MAP_CHANGED && !strcmp(g_place_reason, SH_PREFAB_MAP_CHANGED));
+        place.id = map_context;
+        assert(slot_schedule_apply(NULL, &place, 1, "load-prefab") == 1);
+        ae_clone_bss_apply_cmd();
+        assert(executions == 5);
+    }
     CloseHandle(g_sync_ev); DeleteCriticalSection(&g_pending_lock);
     puts("apply_dispatch_test OK");
     return 0;

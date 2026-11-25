@@ -9,6 +9,7 @@
 #include <intrin.h>   /* _ReturnAddress: which engine read the filter sees */
 
 #include "editor_frame.h"
+#include <limits.h>
 #include "world_area_cell.h"
 #include "fly_to.h"
 #include "module_prefab.h"
@@ -79,6 +80,8 @@ typedef struct ef_reload_request {
 static volatile LONG  g_reload_pending = 0;
 static SRWLOCK g_reload_lock = SRWLOCK_INIT;
 static ef_reload_request g_reload_request;
+static void *g_context_map;
+static unsigned long g_context_generation, g_context_id;
 
 /* LoadMap names a map by its save-directory id: the 20-hex suffix of a folder
  * <Saved Games>\id Software\DOOM\base\savegame.user\<account id>\SNAPMAPS<20 hex>. "Saved Games" is a
@@ -211,6 +214,25 @@ static void *ef_live_map(void *editor)
     return map;
 }
 
+/* The page and the game-thread commit use the same identity even if the editor reuses a map allocation. */
+int sh_editor_frame_map_context(void)
+{
+    void *map;
+    unsigned long generation;
+    int id;
+    AcquireSRWLockExclusive(&g_reload_lock);
+    map = ef_live_map((void *)g_editor_obj);
+    generation = sh_rawmap_load_generation();
+    if (map != g_context_map || generation != g_context_generation) {
+        g_context_map = map;
+        g_context_generation = generation;
+        g_context_id = g_context_id % INT_MAX + 1;
+    }
+    id = map && !g_reload_pending ? (int)g_context_id : 0;
+    ReleaseSRWLockExclusive(&g_reload_lock);
+    return id;
+}
+
 static void ef_service_rawmap_save(void *editor)
 {
     ef_save_request request;
@@ -278,7 +300,7 @@ static void ef_service_reload(void *editor)
     if (map == NULL) return;   /* mid-transition: stay pending, try again next frame */
 
     AcquireSRWLockExclusive(&g_reload_lock);
-    if (!InterlockedExchange(&g_reload_pending, 0)) {   /* consume before the call: never retry a fault */
+    if (InterlockedCompareExchange(&g_reload_pending, 2, 1) != 1) {
         ReleaseSRWLockExclusive(&g_reload_lock);
         return;
     }
@@ -348,6 +370,7 @@ static void sh_editor_frame_detour(void *editor, void *arg)
 {
     g_frame_orig(editor, arg);     /* the engine's own frame, first and unconditionally */
 
+    (void)sh_editor_frame_map_context();   /* notice a close even when the page is hidden */
     if (editor == NULL) return;
 
     /* One read per frame; logs a newly opened map's world-area cell size. */
@@ -373,6 +396,7 @@ static void sh_editor_frame_detour(void *editor, void *arg)
     if (g_load_map == NULL || InterlockedCompareExchange(&g_reload_faulted, 0, 0) != 0) return;
 
     ef_service_reload(editor);
+    InterlockedCompareExchange(&g_reload_pending, 0, 2);
 }
 
 int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
@@ -580,6 +604,7 @@ int sh_editor_frame_request_reload(char **out_msg)
         return 0;
     }
     g_reload_request = request;
+    g_context_id = g_context_id % INT_MAX + 1;
     InterlockedExchange(&g_reload_pending, 1);
     ReleaseSRWLockExclusive(&g_reload_lock);
 

@@ -764,7 +764,7 @@ static void pm_prepare(const sh_modmanifest_list *rows, const char *name)
 typedef struct pm_preparation {
     HANDLE thread;
     int seq;
-    unsigned long long editor;
+    int editor;
     sh_modmanifest_list rows;
     char *why;
 } pm_preparation;
@@ -772,7 +772,7 @@ typedef struct pm_preparation {
 static SRWLOCK g_prepare_lock = SRWLOCK_INIT;
 static pm_preparation *g_preparing;
 static int g_prepare_seq, g_ready_seq;
-static unsigned long long g_ready_editor;
+static int g_ready_editor;
 
 static DWORD WINAPI pm_prepare_files(void *context)
 {
@@ -794,9 +794,8 @@ static void pm_preparation_free(pm_preparation *job)
     free(job);
 }
 
-static int pm_start_preparation(sh_modmanifest_list *rows, int *seq, char **cause)
+static int pm_start_preparation(sh_modmanifest_list *rows, int editor, int *seq, char **cause)
 {
-    const sh_prefab_mods_ops *o = pm_ops();
     pm_preparation *job = calloc(1, sizeof *job);
     int result = -1;
     if (!job) { pm_msg(cause, "Snapmap+ ran out of memory"); return -1; }
@@ -810,7 +809,7 @@ static int pm_start_preparation(sh_modmanifest_list *rows, int *seq, char **caus
     } else {
         job->rows = *rows;
         memset(rows, 0, sizeof *rows);
-        job->editor = o->editor_context ? o->editor_context() : 0;
+        job->editor = editor;
         job->thread = CreateThread(NULL, 0, pm_prepare_files, job, 0, NULL);
         if (job->thread) {
             g_prepare_seq = g_prepare_seq == INT_MAX ? 1 : g_prepare_seq + 1;
@@ -838,7 +837,7 @@ static int pm_poll(int seq, char **msg)
         if (WaitForSingleObject(job->thread, 0) == WAIT_TIMEOUT) result = SH_PREFAB_MODS_HELD;
         else {
             if (o->editor_context && o->editor_context() != job->editor)
-                pm_msg(msg, "The map changed while the prefab was being prepared. Place it in the open map when ready.");
+                pm_msg(msg, SH_PREFAB_MAP_CHANGED);
             else if (GetExitCodeThread(job->thread, &code) && code == 1) {
                 g_ready_seq = job->seq;
                 g_ready_editor = job->editor;
@@ -877,7 +876,7 @@ static void pm_refuse_unasked(const char *name, const sh_modmanifest_list *rows,
     if (o->toast && msg && *msg) o->toast(*msg);
 }
 
-static int pm_join_pinned(const sh_modmanifest_list *pinned, int *seq, char **cause)
+static int pm_join_pinned(const sh_modmanifest_list *pinned, int editor, int *seq, char **cause)
 {
     sh_modmanifest_list cur, use;
     char **names = NULL;
@@ -921,7 +920,7 @@ static int pm_join_pinned(const sh_modmanifest_list *pinned, int *seq, char **ca
         }
         if (cold && seq) {
             sh_cache_note_rows(&use, names, n);
-            r = pm_start_preparation(&use, seq, cause);
+            r = pm_start_preparation(&use, editor, seq, cause);
             goto done;
         }
         sh_cache_on_load(&use, names, n);
@@ -937,14 +936,18 @@ done:
     sh_modmanifest_list_free(&cur);
     return r;
 }
-int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanifest_list *rows, const char *name,
-                                int *seq, char **msg)
+static int pm_resolve_in_map(const char *text, size_t len, const sh_modmanifest_list *rows, const char *name,
+                             int editor, int *seq, char **msg)
 {
     const sh_prefab_mods_ops *o = pm_ops();
     size_t i, missing = 0;
     int r;
     if (seq) *seq = 0;
     if (msg) *msg = NULL;
+    if (o->editor_context && (!editor || editor != o->editor_context())) {
+        pm_msg(msg, SH_PREFAB_MAP_CHANGED);
+        return SH_PREFAB_MODS_REFUSED;
+    }
     if (!rows || !rows->count) return SH_PREFAB_MODS_PLACE;
     /* Rows resolve in the open map's own context. A module prefab whose room no row provides and the palette
      * lacks (DLC the player does not own) cannot be installed. */
@@ -990,7 +993,7 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
         memset(&local, 0, sizeof local);
         for (i = 0; i < rows->count; i++)
             (void)sh_modmanifest_list_add(rows->rows[i].pinned ? &pinned : &local, &rows->rows[i]);
-        r = !pinned.count ? 1 : o->use_pinned ? o->use_pinned(&pinned, &why) : pm_join_pinned(&pinned, seq, &why);
+        r = !pinned.count ? 1 : o->use_pinned ? o->use_pinned(&pinned, &why) : pm_join_pinned(&pinned, editor, seq, &why);
         if (r == SH_PREFAB_MODS_HELD) {
             pm_msg(msg, "Preparing mod content for %s.", name && name[0] ? name : "the prefab");
             sh_modmanifest_list_free(&pinned);
@@ -1012,6 +1015,13 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
         sh_modmanifest_list_free(&local);
     }
     return SH_PREFAB_MODS_PLACE;
+}
+
+int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanifest_list *rows, const char *name,
+                                int *seq, char **msg)
+{
+    const sh_prefab_mods_ops *o = pm_ops();
+    return pm_resolve_in_map(text, len, rows, name, o->editor_context ? o->editor_context() : 0, seq, msg);
 }
 
 int sh_prefab_mods_valid_name(const char *name) { return sh_prefab_block_valid_name(name); }
@@ -1277,7 +1287,7 @@ typedef struct pm_resolve_job {
     size_t len;
     const sh_modmanifest_list *rows;
     const char *name;
-    int result, seq, resume;
+    int result, seq, resume, editor;
     char *msg;               /* malloc'd, or NULL */
 } pm_resolve_job;
 
@@ -1287,16 +1297,17 @@ static int pm_resolve_job_main(void *ctx)
     if (j->resume) {
         const sh_prefab_mods_ops *o = pm_ops();
         AcquireSRWLockExclusive(&g_prepare_lock);
-        int current = j->resume == g_ready_seq && (!o->editor_context || o->editor_context() == g_ready_editor);
+        int current = j->resume == g_ready_seq && j->editor == g_ready_editor &&
+                      (!o->editor_context || j->editor == o->editor_context());
         if (j->resume == g_ready_seq) g_ready_seq = 0;
         ReleaseSRWLockExclusive(&g_prepare_lock);
         if (!current) {
             j->result = SH_PREFAB_MODS_REFUSED;
-            pm_msg(&j->msg, "The map changed while the prefab was being prepared. Place it in the open map when ready.");
+            pm_msg(&j->msg, SH_PREFAB_MAP_CHANGED);
             return 1;
         }
     }
-    j->result = sh_prefab_mods_resolve_main(j->text, j->len, j->rows, j->name, &j->seq, &j->msg);
+    j->result = pm_resolve_in_map(j->text, j->len, j->rows, j->name, j->editor, &j->seq, &j->msg);
     return 1;
 }
 
@@ -1357,9 +1368,16 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
             return SH_PREFAB_MODS_REFUSED;
         }
         /* No rows: the placement goes on without mods. */
-        if (n <= 0) { sh_modmanifest_list_free(&rows); return SH_PREFAB_MODS_PLACE; }
+        if (n <= 0 && !resume) {
+            sh_modmanifest_list_free(&rows);
+            if (!o->editor_context || (call->editor_context && call->editor_context == o->editor_context()))
+                return SH_PREFAB_MODS_PLACE;
+            pm_out(call, SH_PREFAB_MAP_CHANGED);
+            return SH_PREFAB_MODS_REFUSED;
+        }
         memset(&job, 0, sizeof job);
         job.resume = resume;
+        job.editor = call->editor_context;
         job.text = call->text;
         job.len = call->text_len;
         job.rows = &rows;
@@ -1645,7 +1663,7 @@ static char *pm_default_root(void) { return NULL; }
 #include "commands.h"
 #include "grid_room_native.h"
 #include "apply_engine.h"
-#include "rawmap.h"
+#include "editor_frame.h"
 #include "ui_bridge.h"
 #include "modstore.h"
 #include "modcache.h"
@@ -1695,11 +1713,6 @@ static int eng_attach(const sh_modmanifest_row *row, char **note)
 
 static int eng_activate(const sh_modmanifest_list *rows) { return sh_modmanifest_activate(rows); }
 
-static unsigned long long eng_editor_context(void)
-{
-    return ((unsigned long long)sh_rawmap_load_generation() << 1) | (sh_grid_native_editor_map() != NULL);
-}
-
 static int eng_module_known(const char *name) { return sh_grid_native_module_known(name); }
 static void eng_print(const char *line) { sh_printf("%s\n", line); }
 static void eng_toast(const char *text)
@@ -1737,7 +1750,7 @@ static void pm_bind_defaults(void)
     o.toast = eng_toast;
     o.refresh = eng_refresh;
     o.call_main = eng_call_main;
-    o.editor_context = eng_editor_context;
+    o.editor_context = sh_editor_frame_map_context;
     g_ops = o;
 
     g_ops_bound = 1;

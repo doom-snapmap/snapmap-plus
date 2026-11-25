@@ -161,8 +161,8 @@ static int f_use_pinned(const sh_modmanifest_list *pinned, char **cause)
     return 1;
 }
 
-static unsigned long fixture_generation;
-static unsigned long long f_generation(void) { return fixture_generation; }
+static int fixture_generation = 1;
+static int f_generation(void) { return fixture_generation; }
 static HANDLE compose_at_index, compose_continue;
 static int f_failed_index(void) { return -1; }
 static DWORD composition_thread;
@@ -1915,6 +1915,19 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
                   F.pinned_calls == calls + 1 && F.pinned_rows == 1 && m2[0] == 0);
             sh_module_prefab_call resume = {0};
             sh_prefab_mods_bind(&PM_OPS_NO_PINNED);
+            /* The click was queued before another map opened, before a worker or a warm join runs. */
+            resume.op = SH_MODULE_PREFAB_MODS_RESOLVE;
+            resume.text = text;
+            resume.text_len = len;
+            resume.editor_context = fixture_generation++;
+            int refreshes = g_scope_refreshes;
+            CHECK(pm_slot(&resume, m2, sizeof m2) == SH_PREFAB_MODS_REFUSED && !resume.seq &&
+                  strstr(m2, "map changed") && g_scope_refreshes == refreshes);
+            resume.text = STOCK_PREFAB;
+            resume.text_len = sizeof STOCK_PREFAB - 1;
+            CHECK(pm_slot(&resume, m2, sizeof m2) == SH_PREFAB_MODS_REFUSED && !resume.seq && strstr(m2, "map changed"));
+            resume.editor_context = fixture_generation;
+            CHECK(pm_slot(&resume, m2, sizeof m2) == SH_PREFAB_MODS_PLACE);
             sh_cache_set_rescan(f_failed_index);
             CHECK(HO(m2, sh_prefab_mods_resolve_main(text, len, &rows, "Door", &seq2, HO_P(0))) == SH_PREFAB_MODS_HELD);
             CHECK(wait_for_preparation(seq2, m2, sizeof m2) == 0 && strstr(m2, "could not be indexed"));
@@ -1926,6 +1939,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
             resume.text_len = len;
             resume.name = "Door";
             resume.seq = seq2;
+            resume.editor_context = fixture_generation;
             fixture_generation++;
             CHECK(pm_slot(&resume, m2, sizeof m2) == SH_PREFAB_MODS_REFUSED && strstr(m2, "map changed"));
             CHECK(HO(m2, sh_prefab_mods_resolve_main(text, len, &rows, "Door", &seq2, HO_P(0))) == SH_PREFAB_MODS_PLACE && !seq2);

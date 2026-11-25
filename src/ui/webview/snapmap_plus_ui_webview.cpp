@@ -121,6 +121,7 @@ static const wchar_t *g_rename_reason = L"";
 
 static volatile bool g_pending_load_prefab = false;
 static std::string   g_load_prefab_name, g_load_prefab_folder;
+static int           g_load_prefab_context, g_mods_wait_context, g_editor_context_last;
 /* New-entity requests supply prefab JSON directly to the Load/Place apply path. */
 static volatile bool g_pending_new_entity = false;
 static std::string   g_new_entity_json, g_new_entity_label;
@@ -1151,12 +1152,13 @@ static void ui_post_editor_mode(bool force)
     ui_prefab_watch(&watch);
     int modules = blueprint ? watch.modules_selected : 0;
     int now = entity | (blueprint << 1) | (map_open << 2);
-    if (!force && now == g_editor_mode_last && modules == g_editor_modules_last) return;
+    if (!force && now == g_editor_mode_last && modules == g_editor_modules_last && call.editor_context == g_editor_context_last) return;
+    g_editor_context_last = call.editor_context;
     g_editor_mode_last = now;
     g_editor_modules_last = modules;
     wchar_t m[128];
-    _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"editorMode\",\"entityMode\":%d,\"blueprint\":%d,\"modules\":%d,\"mapOpen\":%d}",
-                 entity, blueprint, modules, map_open);
+    _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"editorMode\",\"entityMode\":%d,\"blueprint\":%d,\"modules\":%d,\"mapOpen\":%d,\"context\":%d}",
+                 entity, blueprint, modules, map_open, call.editor_context);
     ui_post_json(m);
 }
 static void ui_strip_trailing_sep(std::string &s)
@@ -1253,17 +1255,6 @@ static void ui_apply_rename_prefab()
  * Placement depends on backend editor gates; queue acceptance alone is not placement. */
 /* __try can't share a function with a C++ object needing unwinding (/EHsc, C2712) -- these leaves have
  * only PODs in scope, so the SEH guards around the engine calls are safe here. */
-static int ui_clear_selection_main(void *)
-{
-    if (g_iface && g_iface->vtbl && g_iface->vtbl->clear_selection) {
-        __try { g_iface->vtbl->clear_selection(g_iface); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-    return 1;
-}
-static void ui_clear_selection_seh()
-{
-    ui_on_main(ui_clear_selection_main, nullptr, UI_MAIN_WAIT_MS);
-}
 static int ui_apply_edit_seh(const sh_apply_item *it, int count, const char *op)
 {
     __try { return g_iface->vtbl->apply_edit(g_iface, it, count, op) ? 1 : 0; }
@@ -1360,6 +1351,7 @@ static void ui_apply_place_module_prefab(const std::string &body)
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_PLACE;
+    call.editor_context = g_load_prefab_context;
     call.text = body.c_str();
     call.text_len = body.size();
     int r = ui_module_prefab_call(&call, &msg);
@@ -1378,7 +1370,7 @@ static void ui_apply_place_module_prefab(const std::string &body)
         g_load_result = 2;          /* pending: posted when the backend finishes */
         return;
     }
-    g_load_result = (r == -1 || r == -4) ? r : 0;
+    g_load_result = (r == -1 || r == -4 || r == -7) ? r : 0;
     g_load_message = msg;           /* the page shows it when it is the backend's sentence */
 }
 /* The mods a prefab records are resolved first (backend/prefab_mods.c) so the engine never sees a prefab whose
@@ -1388,11 +1380,16 @@ static void ui_apply_place_module_prefab(const std::string &body)
 static bool ui_resolve_prefab_mods(const std::string &body)
 {
     std::string path, msg;
-    if (!SH_IFACE_HAS_SLOT(g_iface, module_prefab)) return true;   /* a backend that records no mods */
+    if (!g_load_prefab_context || !SH_IFACE_HAS_SLOT(g_iface, module_prefab)) {
+        g_load_result = -7;
+        g_load_message = "Open a map in the editor and try Load / Place again.";
+        return false;
+    }
     if (!ui_prefab_file_path(g_load_prefab_folder, g_load_prefab_name, path)) path.clear();
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_MODS_RESOLVE;
+    call.editor_context = g_load_prefab_context;
     if (g_mods_resume_seq) {
         call.seq = g_mods_resume_seq;
         g_mods_resume_seq = 0;
@@ -1414,6 +1411,7 @@ static bool ui_resolve_prefab_mods(const std::string &body)
     if (r == 1) return true;                       /* every mod installed and in the open map */
     if (r == 2 && call.seq > 0) {                  /* its carried content is being prepared */
         g_mods_wait_seq = call.seq;
+        g_mods_wait_context = g_load_prefab_context;
         g_mods_wait_name = g_load_prefab_name;
         g_mods_wait_folder = g_load_prefab_folder;
         g_mods_wait_body = body;
@@ -1442,6 +1440,7 @@ static void ui_poll_prefab_mods()
     if (r == 1) {
         /* Placed through the ordinary Load/Place, which finds every mod installed. */
         g_mods_resume_seq = call.seq;
+        g_load_prefab_context = g_mods_wait_context;
         g_load_prefab_name = g_mods_wait_name;
         g_load_prefab_folder = g_mods_wait_folder;
         g_pending_load_prefab = true;
@@ -1493,18 +1492,12 @@ static void ui_apply_load_prefab()
         return;
     }
 
-    /* Paste uses selection as its old-to-new ID map. Clear it first; the backend
-     * rechecks before placement because a pending manipulation may refuse clearing. */
-    ui_clear_selection_seh();
-
-    /* kind=2 stages the prefab (in heap 0, so it survives map-heap resets) and requests the engine's native paste
-     * action on its main thread; missing editor prerequisites leave it staged for manual paste. */
-    sh_apply_item it; it.kind = 2; it.id = 0; it.text = body.c_str();
+    sh_apply_item it; it.kind = SH_APPLY_PLACE_IN_MAP; it.id = g_load_prefab_context; it.text = body.c_str();
     sh_prefab_watch watch;
     bool watched = ui_prefab_watch(&watch) >= 0;
     g_load_result = ui_apply_edit_seh(&it, 1, "load-prefab");
-    ui_logp("load-prefab: name='%s' staged=%d (kind=2: stage + auto pick-up)",
-                             g_load_prefab_name.c_str(), g_load_result);
+    ui_logp("load-prefab: name='%s' queued=%d for map %d",
+            g_load_prefab_name.c_str(), g_load_result, g_load_prefab_context);
     /* The game thread decides on its next frame whether the paste was queued (the prefab arrives
      * in hand) or only staged; the page is told once it has (ui_poll_place_outcome). */
     if (g_load_result == 1 && watched) {
@@ -1536,7 +1529,9 @@ static void ui_poll_place_outcome()
         g_held_obj_seq = watch.place_seq;
     }
     std::wstring m = L"{\"kind\":\"loadPrefabResult\",\"result\":";
-    m += decided && watch.place_result == SH_PREFAB_PLACE_FAILED ? L"-1" : L"1";
+    bool changed = decided && watch.place_result == SH_PREFAB_PLACE_MAP_CHANGED;
+    m += changed ? L"-7" : decided && watch.place_result == SH_PREFAB_PLACE_FAILED ? L"-1" : L"1";
+    if (changed) m += L",\"message\":\"" SH_PREFAB_MAP_CHANGED L"\"";
     m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_place_wait_name.c_str());
     m += L"\",\"placed\":\""; m += sh_webview_json::escape_wide(placed);
     m += L"\",\"reason\":\""; m += sh_webview_json::escape_wide(decided ? reason.c_str() : "");
@@ -3863,6 +3858,8 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 std::wstring nm, fo; sh_webview_json::get_string(json, L"name", nm); sh_webview_json::get_string(json, L"folder", fo);
                 g_mods_resume_seq = 0;
                 if (!g_mods_wait_seq) g_mods_wait_body.clear();
+                g_load_prefab_context = 0;
+                sh_webview_json::get_int(json, L"context", &g_load_prefab_context);
                 g_load_prefab_name = sh_webview_json::to_utf8(nm); g_load_prefab_folder = sh_webview_json::to_utf8(fo);
                 g_pending_load_prefab = true;
             } else if (cmd == L"renamePrefab") {

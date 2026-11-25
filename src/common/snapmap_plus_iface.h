@@ -297,7 +297,7 @@ typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_in
 typedef struct sh_module_prefab_call {
     int         op;
     const char *path;        /* SAVE, MODS_RECORD, META_WRITE, EXPORT: prefab file; IMPORT: prefabs folder */
-    const void *reserved_path;
+    int         editor_context; /* STATE out; requested map for PLACE and MODS_RESOLVE */
     const char *text;        /* PLACE, CHECK, MODS_RECORD, MODS_RESOLVE, META_READ: prefab file text;
                                 MODS_STATUS, META_WRITE: a view */
     size_t      text_len;
@@ -386,6 +386,8 @@ typedef int (*sh_mods_fn)(struct sh_iface *self, sh_mods_call *call); /* +0x378 
 #define SH_PREFAB_HELD_NONE     0
 #define SH_PREFAB_HELD_OBJECTS  1
 #define SH_PREFAB_HELD_MODULES  2
+#define SH_PREFAB_MAP_CHANGED "The map changed while the prefab was being prepared. Place it in the open map when ready."
+#define SH_PREFAB_PLACE_MAP_CHANGED (-1)
 #define SH_PREFAB_PLACE_FAILED  0
 #define SH_PREFAB_PLACE_STAGED  1   /* staged only: Ctrl+V in the 3D view places it */
 #define SH_PREFAB_PLACE_QUEUED  2   /* the native paste was requested: it arrives in hand */
@@ -468,8 +470,9 @@ typedef char        *(*sh_serialize_entity_fn)(struct sh_iface *self, int id);  
 /* Shared apply item. Kind 0 commits entity text; 1 stages prefab text;
  * 2 stages and arms native paste; 3 writes a target reference. Scheduling
  * deep-copies text into a single pending batch, replacing older pending work. */
+#define SH_APPLY_PLACE_IN_MAP 5
 typedef struct sh_apply_item {
-    int         kind;       /* 0 entity edit, 1 prefab stage, 2 stage/queue paste, 3 target write, 4 fly to entity. */
+    int         kind;       /* 0 entity edit, 1 stage, 2 stage/paste, 3 target write, 4 fly to entity, 5 place in map id. */
     int         id;         /* Live entity ID for kinds 0/3/4; ignored for prefab staging. */
     const char *text;       /* Entity/prefab JSON, or target ID text for kind 3; "" for kind 4. */
 } sh_apply_item;

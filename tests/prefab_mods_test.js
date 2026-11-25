@@ -103,6 +103,18 @@ check(src.indexOf("d.kind === 'prefabFileResult'") !== -1, 'Export and Import an
 check(src.indexOf("pfShowModuleCheck(selectedPrefabKind === 'modules' ? d.moduleCheck : null)") !== -1 && /id="pcNeeds"/.test(src),
       'the module check warning is kept');
 
+/* Load / Place carries the map that the page displayed at the click. */
+const placeFn = src.slice(src.indexOf('  function pfLoadPlace('), src.indexOf('  if (prefabLoadBtn)'));
+const send = new Function('edMode', 'post', placeFn + '\npfLoadPlace("Door", "", "objects");');
+let clicked;
+const mode = {known: true, context: 27};
+send(mode, msg => { clicked = msg; });
+mode.context++;
+check(clicked.context === 27 && clicked.cmd === 'loadPrefab', 'the queued click keeps the original map');
+check(host.includes('call.editor_context == g_editor_context_last') && host.includes('g_mods_wait_context = g_load_prefab_context;') &&
+      host.includes('g_load_prefab_context = g_mods_wait_context;') && host.includes('it.id = g_load_prefab_context;'),
+      'a same-mode map change is published and worker readiness resumes the original click');
+
 /* The host's side. */
 check(host.indexOf('cmd == L"exportPrefab"') !== -1 && host.indexOf('ui_begin_pick(2)') !== -1, 'host: exportPrefab opens the Save dialog');
 check(host.indexOf('cmd == L"importPrefab"') !== -1 && host.indexOf('ui_begin_pick(3)') !== -1, 'host: importPrefab opens the Open dialog');
@@ -111,7 +123,7 @@ check(host.indexOf('SH_MODULE_PREFAB_EXPORT') !== -1 && host.indexOf('SH_MODULE_
 const load = host.indexOf('static void ui_apply_load_prefab()');
 check(load !== -1 && host.indexOf('if (!ui_resolve_prefab_mods(body)) return;', load) !== -1 &&
       host.indexOf('if (!ui_resolve_prefab_mods(body)) return;', load) < host.indexOf('ui_apply_place_module_prefab(body);', load) &&
-      host.indexOf('if (!ui_resolve_prefab_mods(body)) return;', load) < host.indexOf('it.kind = 2;', load),
+      host.indexOf('if (!ui_resolve_prefab_mods(body)) return;', load) < host.indexOf('it.kind = SH_APPLY_PLACE_IN_MAP;', load),
       'host: the mods are resolved before either kind reaches the engine');
 check(host.indexOf('SH_MODULE_PREFAB_MODS_RESOLVE') !== -1 && host.indexOf('SH_MODULE_PREFAB_MODS_POLL') !== -1,
       'host: resolve and poll');
@@ -123,7 +135,7 @@ check(host.indexOf('L"},\\"mods\\":{"') !== -1 && host.indexOf('\\"modsStatus\\"
 /* One file per prefab: the host reads details from the block, strips it before the engine, writes no sidecar. */
 const strip = host.indexOf('body.resize(sh_prefab_block_strip(&body[0], body.size()));', load);
 check(strip !== -1 && strip > host.indexOf('if (!ui_resolve_prefab_mods(body)) return;', load) &&
-      strip < host.indexOf('ui_apply_place_module_prefab(body);', load) && strip < host.indexOf('it.kind = 2;', load),
+      strip < host.indexOf('ui_apply_place_module_prefab(body);', load) && strip < host.indexOf('it.kind = SH_APPLY_PLACE_IN_MAP;', load),
       'host: Load / Place strips the block after resolving the mods and before either kind reaches the engine');
 const resolve = host.indexOf('static bool ui_resolve_prefab_mods(');
 check(resolve !== -1 && host.indexOf('GetFileAttributesA(meta) == INVALID_FILE_ATTRIBUTES', resolve) === -1,
