@@ -1,7 +1,7 @@
-/* Resource-provider open hook and native idFile streams. Streams own copies
- * of the bytes they serve. See overrides.h for the resource ordering.
- * Each provider path has an SEH boundary and preserves native file semantics.
- */
+/* Resource-provider open hook and native idFile streams, which own copies of the bytes they serve. See
+ * overrides.h for the resource ordering; each provider path has an SEH boundary. */
+#include "../common/text.h"
+#include "safe_read.h"
 #include <windows.h>
 #include <stdint.h>
 #include <limits.h>
@@ -22,56 +22,46 @@
 #include "engine_build.h"
 #include "modserve.h"             /* installed mod bundles, after every product source */
 
-/* Provider open slot offset: +0x148 on build 13954591 (+0xf8 in 2018); the
- * provider vtable is at OV_PINNED_PROVIDER_VTABLE_RVA below.
- */
+/* Provider open slot offset: +0x148 on build 13954591; the provider vtable is at OV_PINNED_PROVIDER_VTABLE_RVA. */
 #define OPEN_SLOT_OFFSET SH_OVERRIDES_OPEN_SLOT
 
-/* Pinned Vulkan RVAs for audit and signature repair; they do not gate
- * installation. The supported builds share the idFile ABI while function
- * addresses differ. Installation requires clean SIG_OK matches, host-image
- * containment and a decoded read-only provider vtable. The stream below
- * implements the audited 34-slot ABI of build 13954591.
- */
+/* Pinned RVAs for audit and signature repair; they do not gate installation, which requires clean SIG_OK
+ * matches, host-image containment and a decoded read-only provider vtable. The stream below implements the
+ * 34-slot idFile ABI of build 13954591. */
 #define OV_PINNED_RES_PROVIDER_CTOR_RVA SH_RVA(0x2A28C0u, 0x2A2A90u)
 #define OV_PINNED_IDFILE_READSTR_RVA    SH_RVA(0x299850u, 0x299AB0u)
 #define OV_PINNED_IDFILE_COMPARE_RVA    SH_RVA(0x2996D0u, 0x299930u)
 #define OV_PINNED_IDFILE_WRITESTR_RVA   SH_RVA(0x29A0B0u, 0x29A310u)
-/* Base idFile implementation of slot +0x50 (build 13954591 base idFile vtable). */
+/* Base idFile implementation of slot +0x50. */
 #define OV_BASE_HELPER_RVA_VK           0x2997D0u
 #define OV_BASE_HELPER_RVA_GL           0x299A30u
 #define OV_PINNED_PROVIDER_VTABLE_RVA   SH_RVA(0x1FF4CA0u, 0x200EA70u)
 
-/* Engine ABI: idFile* open(self, name, uint8 b1, uint8 b2, uint mode). Mode
- * >= 2 bypasses shadowing; preserve both byte arguments when chaining.
- */
+/* Engine ABI: idFile* open(self, name, uint8 b1, uint8 b2, uint mode). Mode >= 2 bypasses shadowing; both byte
+ * arguments are passed through when chaining. */
 typedef void *(*open_fn_t)(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode);
 
 static open_fn_t  g_orig_open  = NULL;   /* the saved engine resource-open (the slot's original value) */
 static void     **g_slot       = NULL;   /* the live vtable slot we patched (for uninstall) */
 static volatile LONG g_shadow_count = 0;
-/* Native idFile stream head: +0x00 vtable, +0x08 FILE*, +0x10 name, +0x18
- * length, +0x20 short flag. All 31 slots use our stream object; its
- * destructor releases it with HeapFree.
- *
- * fp selects disk backing. Otherwise buf is read-only memory, pos is its
- * cursor, and owns_buf controls whether the destructor frees the payload.
- * Static baked text is borrowed.
- */
+/* Native idFile stream head (+0x00 vtable, +0x08 FILE*, +0x10 name, +0x18 length, +0x20 short flag), released
+ * with HeapFree. fp selects disk backing; otherwise buf is read-only memory read through pos. */
 typedef struct ov_stream {
     void        *vtable;     /* +0x00 */
-    FILE        *fp;         /* +0x08 (NULL for a memory-backed stream) */
-    const char  *name;       /* +0x10 (points at the heap-dup'd name appended after the struct) */
+    FILE        *fp;         /* +0x08; NULL when memory-backed */
+    const char  *name;       /* +0x10; points at the name appended after the struct */
     long long    length;     /* +0x18 */
     short        flag16;     /* +0x20 (OG sets 1) */
-    const unsigned char *buf;/* memory backing (baked static text, or an owned heap copy) */
+    const unsigned char *buf;/* memory backing: static text or an owned heap copy */
     long long    pos;        /* memory-backing read cursor */
-    int          owns_buf;   /* 1 -> dtor HeapFrees buf */
+    int          owns_buf;   /* 1: the destructor frees buf */
 } ov_stream;
 
-/* Native virtual-method implementations; self arrives in RCX. */
+/* Native virtual-method implementations; self arrives in RCX. Slot positions are in g_stream_vtable. */
 
-static void  ov_dtor(ov_stream *s)                                   /* [0] close + free(this) */
+static long long ov_zero(ov_stream *s) { (void)s; return 0; }
+static long long ov_one(ov_stream *s)  { (void)s; return 1; }
+static void  ov_dtor(ov_stream *s)                                   /* close + free(this) */
 {
     if (s) {
         if (s->fp) { fclose(s->fp); s->fp = NULL; }
@@ -80,9 +70,8 @@ static void  ov_dtor(ov_stream *s)                                   /* [0] clos
         HeapFree(GetProcessHeap(), 0, s);
     }
 }
-static long long ov_ret0_a(ov_stream *s)        { (void)s; return 0; }   /* [1] return 0 */
-static const char *ov_name(ov_stream *s)        { return s ? s->name : NULL; }           /* [4] *(this+0x10) */
-static long long ov_read(ov_stream *s, void *buf, uint64_t n)          /* [5] fread(buf,1,n,fp) */
+static const char *ov_name(ov_stream *s)        { return s ? s->name : NULL; }           /* *(this+0x10) */
+static long long ov_read(ov_stream *s, void *buf, uint64_t n)          /* fread(buf,1,n,fp) */
 {
     if (!s || !buf) return 0;
     if (n > (uint64_t)SIZE_MAX || n > (uint64_t)INT64_MAX) return 0;
@@ -98,41 +87,39 @@ static long long ov_read(ov_stream *s, void *buf, uint64_t n)          /* [5] fr
     }
     return 0;
 }
-static long long ov_write(ov_stream *s, const void *buf, uint64_t n)       /* [6] fwrite(buf,1,n,fp); memory form is read-only */
+static long long ov_write(ov_stream *s, const void *buf, uint64_t n)       /* fwrite; memory form is read-only */
 {
     if (!s || !s->fp || !buf) return 0;
     if (n > (uint64_t)SIZE_MAX || n > (uint64_t)INT64_MAX) return 0;
     return (long long)fwrite(buf, 1, (size_t)n, s->fp);
 }
-static int       ov_seek(ov_stream *s, long long off, int origin);       /* fwd-decl ([14]) */
-/* [7] Match native read-at (Vulkan RVA 0x1a1b520): Seek with ABS=2, then
- * Read.
- */
+static int       ov_seek(ov_stream *s, long long off, int origin);       /* forward declaration */
+/* Matches the native read-at (Vulkan RVA 0x1a1b520): Seek with ABS=2, then Read. */
 static long long ov_seekread(ov_stream *s, long long off, void *buf, uint64_t n)
 {
     if (!s || ov_seek(s, off, 2) != 0) return 0;
     return ov_read(s, buf, n);
 }
-/* [8] The native helper at RVA 0x1a1c220 calls Seek(this,off,ABS=2), then Write(this,buf,len). */
+/* The native helper at RVA 0x1a1c220 calls Seek(this,off,ABS=2), then Write(this,buf,len). */
 static long long ov_seekwrite(ov_stream *s, long long off, const void *buf, uint64_t n)
 {
     if (!s || ov_seek(s, off, 2) != 0) return 0;
     return ov_write(s, buf, n);
 }
-static int       ov_lock(ov_stream *s)          { if (s && s->fp) _lock_file(s->fp);   return 1; }   /* [9] */
-static int       ov_unlock(ov_stream *s)        { if (s && s->fp) _unlock_file(s->fp); return 1; }   /* [10] */
-static long long ov_length_byseek(ov_stream *s)                      /* [11] stored length */
+static int       ov_lock(ov_stream *s)          { if (s && s->fp) _lock_file(s->fp);   return 1; }
+static int       ov_unlock(ov_stream *s)        { if (s && s->fp) _unlock_file(s->fp); return 1; }
+static long long ov_length_byseek(ov_stream *s)                      /* stored length */
 {
     return s && s->length >= 0 ? s->length : 0;
 }
-/* +0x60 SetLength always fails: provider streams are read-only. */
+/* +0x70 SetLength always fails: provider streams are read-only. */
 static int       ov_set_length(ov_stream *s, long long requested)
 {
     (void)s;
     (void)requested;
     return 0;
 }
-static long long ov_tell(ov_stream *s)                                                                /* [13] ftell */
+static long long ov_tell(ov_stream *s)                                                                /* ftell */
 {
     if (!s) return 0;
     if (s->fp) return _ftelli64(s->fp);
@@ -147,7 +134,7 @@ static int ov_checked_add_i64(long long base, long long offset, long long *out)
     return 1;
 }
 
-static int       ov_seek(ov_stream *s, long long off, int origin)    /* [14] idFile: 0=CUR, 1=END, 2=ABS */
+static int       ov_seek(ov_stream *s, long long off, int origin)    /* idFile: 0=CUR, 1=END, 2=ABS */
 {
     if (!s) return -1;
     if (!s->fp) {                                        /* memory backing: move the cursor, clamped */
@@ -174,15 +161,13 @@ static int       ov_seek(ov_stream *s, long long off, int origin)    /* [14] idF
     else return -1;
     return _fseeki64(s->fp, off, o);
 }
-static long long ov_vprintf(ov_stream *s, const char *fmt, va_list ap)   /* [15] vfprintf */
+static long long ov_vprintf(ov_stream *s, const char *fmt, va_list ap)   /* vfprintf */
 {
     if (!s || !s->fp || !fmt) return 0;
     return (long long)vfprintf(s->fp, fmt, ap);
 }
-/* Slots [15] and [16] share the native C-varargs printf shape. Both use this
- * FILE-backed thunk; memory streams return zero.
- */
-static long long ov_printf_thunk(ov_stream *s, const char *fmt, ...)     /* [15]/[16] varargs entry */
+/* Two slots share the native C-varargs printf shape and this FILE-backed thunk; memory streams return zero. */
+static long long ov_printf_thunk(ov_stream *s, const char *fmt, ...)     /* varargs entry */
 {
     va_list ap; long long r;
     va_start(ap, fmt);
@@ -190,12 +175,9 @@ static long long ov_printf_thunk(ov_stream *s, const char *fmt, ...)     /* [15]
     va_end(ap);
     return r;
 }
-static long long ov_ret0_c(ov_stream *s)        { (void)s; return 0; }   /* [17] return 0 */
-static long long ov_ret0_d(ov_stream *s)        { (void)s; return 0; }   /* [18] return 0 */
-static long long ov_ret0_e(ov_stream *s)        { (void)s; return 0; }   /* [19] return 0 */
 /* Read-only streams report no writable/physical provider flag. */
-static char      ov_provider_flag(ov_stream *s) { (void)s; return 0; }                    /* [20] */
-static void      ov_flush_a(ov_stream *s)                                                /* [21] flush + refresh size */
+static char      ov_provider_flag(ov_stream *s) { (void)s; return 0; }
+static void      ov_flush_a(ov_stream *s)                                                /* flush + refresh size */
 {
     if (s && s->fp) {
         long long pos, length;
@@ -206,26 +188,14 @@ static void      ov_flush_a(ov_stream *s)                                       
         if (pos >= 0) _fseeki64(s->fp, pos, SEEK_SET);
     }
 }
-static void      ov_flush_b(ov_stream *s)       { if (s && s->fp) fflush(s->fp); }        /* [22] fflush */
-/* Slots build 13954591 inserted: +0x18 returns false and +0xF0 returns zero in
- * the engine's base idFile; +0x50 is a base helper the stream borrows (below). */
+static void      ov_flush_b(ov_stream *s)       { if (s && s->fp) fflush(s->fp); }        /* fflush */
+/* +0x18 returns false and +0xF0 zero in the engine's base idFile. */
 static unsigned char ov_new_false(ov_stream *s)  { (void)s; return 0; }   /* +0x18 */
-static long long ov_new_zero(ov_stream *s)       { (void)s; return 0; }   /* +0xf0 */
-static long long ov_ret1(ov_stream *s)          { (void)s; return 1; }   /* [23] return 1 */
-static long long ov_drive_type(ov_stream *s)   { (void)s; return 0; }   /* [24] drive/storage type */
-static long long ov_storage_true(ov_stream *s) { (void)s; return 1; }   /* [25] native bool true */
-static long long ov_storage_zero_a(ov_stream *s) { (void)s; return 0; } /* [26] reserved zero */
-static long long ov_storage_zero_b(ov_stream *s) { (void)s; return 0; } /* [27] reserved zero */
+static long long ov_drive_type(ov_stream *s)   { (void)s; return 0; }   /* drive/storage type */
 
-/* The build 13954591 idFile vtable has 34 entries: the 2018 slots moved by the
- * three insertions at +0x18, +0x50 and +0xF0 (2018 index 0-2 unchanged, 3-8 +1,
- * 9-27 +2, 28-30 +3; verified on every idFile class). Native idStr helpers occupy
- * the final three slots and the borrowed base helper +0x50; all must resolve
- * before the provider hook is published. Preserve slot order even where several
- * methods share an implementation.
- */
-/* Designated entries pin the shared slot names to their positions; the
- * asserts fail the build if either side moves. */
+/* The build 13954591 idFile vtable has 34 entries; the final three (native idStr helpers) and the borrowed
+ * base helper +0x50 must resolve before the provider hook is published. The assert fails the build if the
+ * named slots move. */
 typedef char ov_slot_layout_check[(SH_IDFILE_SLOT_CLOSE == 0 && SH_IDFILE_SLOT_TRUE_FLAG == 2 &&
                                    SH_IDFILE_SLOT_READ == 6 && SH_IDFILE_SLOT_LENGTH == 13 &&
                                    SH_IDFILE_SLOT_SET_LENGTH == 14) ? 1 : -1];
@@ -235,20 +205,17 @@ typedef char ov_slot_layout_check[(SH_IDFILE_SLOT_CLOSE == 0 && SH_IDFILE_SLOT_T
 #define OV_SLOT_WRITE_STRING  33   /* +0x108 */
 static void *g_stream_vtable[SH_OVERRIDES_STREAM_SLOTS] = {
     [SH_IDFILE_SLOT_CLOSE] = (void *)ov_dtor, /* 0  +0x00 close/dtor */
-    (void *)ov_ret0_a,        /* 1  +0x08 */
-    [SH_IDFILE_SLOT_TRUE_FLAG] = (void *)ov_ret1, /* 2  +0x10 native constant true */
-    (void *)ov_new_false,     /* 3  +0x18 inserted in 13954591; base returns false */
-    /* +0x20 is GetName: idLexer copies this pointer into an idStr when
-     * reading renderprogs and includes. GetLength is +0x68; returning a
-     * length here would treat an integer as a string pointer.
-     */
+    (void *)ov_zero,        /* 1  +0x08 */
+    [SH_IDFILE_SLOT_TRUE_FLAG] = (void *)ov_one, /* 2  +0x10 native constant true */
+    (void *)ov_new_false,     /* 3  +0x18 base returns false */
+    /* +0x20 GetName: idLexer copies this pointer into an idStr, so it must return the name pointer. */
     (void *)ov_name,          /* 4  +0x20 GetName -> name char* */
     (void *)ov_name,          /* 5  +0x28 GetFullPath -> name char* */
     [SH_IDFILE_SLOT_READ] = (void *)ov_read, /* 6  +0x30 Read */
     (void *)ov_write,         /* 7  +0x38 Write */
     (void *)ov_seekread,      /* 8  +0x40 */
     (void *)ov_seekwrite,     /* 9  +0x48 Seek(ABS) + Write */
-    NULL,                     /* 10 +0x50 inserted in 13954591; the engine's base helper, published at install */
+    NULL,                     /* 10 +0x50 the engine's base helper, published at install */
     (void *)ov_lock,          /* 11 +0x58 Lock */
     (void *)ov_unlock,        /* 12 +0x60 Unlock */
     [SH_IDFILE_SLOT_LENGTH] = (void *)ov_length_byseek, /* 13 +0x68 GetLength */
@@ -257,18 +224,18 @@ static void *g_stream_vtable[SH_OVERRIDES_STREAM_SLOTS] = {
     (void *)ov_seek,          /* 16 +0x80 Seek */
     (void *)ov_printf_thunk,  /* 17 +0x88 vfprintf */
     (void *)ov_printf_thunk,  /* 18 +0x90 vfprintf */
-    (void *)ov_ret0_c,        /* 19 +0x98 */
-    (void *)ov_ret0_d,        /* 20 +0xa0 */
-    (void *)ov_ret0_e,        /* 21 +0xa8 */
+    (void *)ov_zero,        /* 19 +0x98 */
+    (void *)ov_zero,        /* 20 +0xa0 */
+    (void *)ov_zero,        /* 21 +0xa8 */
     (void *)ov_provider_flag, /* 22 +0xb0 */
     (void *)ov_flush_a,       /* 23 +0xb8 Flush */
     (void *)ov_flush_b,       /* 24 +0xc0 Flush */
-    (void *)ov_ret1,          /* 25 +0xc8 */
+    (void *)ov_one,          /* 25 +0xc8 */
     (void *)ov_drive_type,    /* 26 +0xd0 drive/storage type = 0 */
-    (void *)ov_storage_true,  /* 27 +0xd8 native bool true */
-    (void *)ov_storage_zero_a,/* 28 +0xe0 = 0 */
-    (void *)ov_storage_zero_b,/* 29 +0xe8 = 0 */
-    (void *)ov_new_zero,      /* 30 +0xf0 inserted in 13954591; base returns 0 */
+    (void *)ov_one,  /* 27 +0xd8 native bool true */
+    (void *)ov_zero,/* 28 +0xe0 = 0 */
+    (void *)ov_zero,/* 29 +0xe8 = 0 */
+    (void *)ov_zero,      /* 30 +0xf0 base returns 0 */
     NULL,                     /* 31 +0xf8 native ReadString helper, published after clean SIG_OK */
     NULL,                     /* 32 +0x100 native Compare helper, published after clean SIG_OK */
     NULL,                     /* 33 +0x108 native WriteString helper, published after clean SIG_OK */
@@ -282,9 +249,8 @@ enum {
 };
 static volatile LONG g_stream_helpers_state = OV_STREAM_HELPERS_NEW;
 
-/* Configure all three native idStr slots before publishing the provider hook.
- * Missing or hooked helpers leave a terminal refusal state.
- */
+/* Configures all three native idStr slots before the provider hook is published; missing or hooked helpers
+ * leave a terminal refusal state. */
 static int ov_stream_helpers_install(void *read_string, int read_clean,
                                      void *compare, int compare_clean,
                                      void *write_string, int write_clean)
@@ -314,9 +280,7 @@ static int ov_stream_helpers_install(void *read_string, int read_clean,
                g_stream_vtable[OV_SLOT_WRITE_STRING] == write_string;
     }
 
-    /* Publish READY only after all helper pointers are set.
-     * InterlockedExchange supplies the memory barrier.
-     */
+    /* READY is published only after all helper pointers are set; InterlockedExchange is the memory barrier. */
     g_stream_vtable[OV_SLOT_READ_STRING] = read_string;
     g_stream_vtable[OV_SLOT_COMPARE] = compare;
     g_stream_vtable[OV_SLOT_WRITE_STRING] = write_string;
@@ -324,8 +288,8 @@ static int ov_stream_helpers_install(void *read_string, int read_clean,
     return 1;
 }
 
-/* Construct a stream over an already-open FILE* + its known length. Allocates the object + a copy of
- * `name` after it (so the Name slot returns a stable pointer). NULL on alloc failure (caller fcloses). */
+/* Constructs a stream over an open FILE* of known length, with a copy of `name` after the object so the Name
+ * slot is stable. NULL on allocation failure (the caller fcloses). */
 static ov_stream *make_stream(FILE *fp, long long length, const char *name)
 {
     size_t namelen = name ? strlen(name) : 0;
@@ -344,8 +308,8 @@ static ov_stream *make_stream(FILE *fp, long long length, const char *name)
     return s;
 }
 
-/* Construct a MEMORY-backed stream over `buf`/`length`. owns_buf=1 hands the (heap) buffer to the
- * stream's dtor; owns_buf=0 leaves it (the static baked text). NULL on alloc failure. */
+/* Constructs a memory-backed stream over `buf`/`length`; owns_buf=1 hands the heap buffer to the stream's
+ * destructor, 0 leaves it (static baked text). NULL on allocation failure. */
 static ov_stream *make_mem_stream(const unsigned char *buf, long long length, const char *name, int owns_buf)
 {
     if (length < 0 || (!buf && length != 0)) return NULL;
@@ -475,24 +439,7 @@ void sh_overrides_test_stream_close(void *stream)
 }
 #endif
 
-/* ====================================================== built-in default lookup + validation =======*/
-
-/* Path-tolerant name compare for the baked table: case-insensitive, '/' == '\\' (the engine asks with
- * forward slashes; be robust to either). */
-static int ov_name_eq(const char *a, const char *b)
-{
-    if (!a || !b) return 0;
-    for (;; a++, b++) {
-        char ca = *a, cb = *b;
-        if (ca == '\\') ca = '/';
-        if (cb == '\\') cb = '/';
-        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
-        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
-        if (ca != cb) return 0;
-        if (ca == '\0') return 1;
-    }
-}
-
+/* Path-tolerant name compare for the baked table: case-insensitive, with '/' equal to '\\'. */
 /* Case- and separator-tolerant prefix test; returns the text after it, or NULL. */
 static const char *ov_after_prefix(const char *name, const char *prefix)
 {
@@ -505,9 +452,8 @@ static const char *ov_after_prefix(const char *name, const char *prefix)
     return name;
 }
 
-/* Decls DOOM never shipped. A runtime registration loads them from the loose
- * source tree (decltree/<type>/<name>.decl) rather than from generated/decls/,
- * so these also answer that spelling. Shipped names keep the exact match. */
+/* Decls DOOM never shipped. A runtime registration loads them from the loose source tree
+ * (decltree/<type>/<name>.decl) rather than generated/decls/, so these also answer that spelling. */
 static const char *const g_ov_product_decls[] = { "snapeditorentitydef/custom/" };
 
 /* The baked default for `name`, or NULL if `name` is not a built-in. */
@@ -516,20 +462,18 @@ static const ov_baked_decl_t *find_baked(const char *name)
     const char *tree;
     if (!name) return NULL;
     for (size_t i = 0; i < sizeof g_ov_baked_decls / sizeof g_ov_baked_decls[0]; i++)
-        if (ov_name_eq(name, g_ov_baked_decls[i].name)) return &g_ov_baked_decls[i];
+        if (sh_path_eq(name, g_ov_baked_decls[i].name)) return &g_ov_baked_decls[i];
     tree = ov_after_prefix(name, "decltree/");
     if (!tree) return NULL;
     for (size_t i = 0; i < sizeof g_ov_baked_decls / sizeof g_ov_baked_decls[0]; i++) {
         const char *rel = ov_after_prefix(g_ov_baked_decls[i].name, "generated/decls/");
         for (size_t k = 0; rel && k < sizeof g_ov_product_decls / sizeof g_ov_product_decls[0]; k++)
-            if (ov_after_prefix(rel, g_ov_product_decls[k]) && ov_name_eq(tree, rel)) return &g_ov_baked_decls[i];
+            if (ov_after_prefix(rel, g_ov_product_decls[k]) && sh_path_eq(tree, rel)) return &g_ov_baked_decls[i];
     }
     return NULL;
 }
 
-/* Capture the provider object from the first hook call so original-resource
- * reads can reuse its native self pointer.
- */
+/* The provider object captured from the first hook call, so original-resource reads can reuse its self pointer. */
 static void *volatile g_provider_self = NULL;
 
 static unsigned char *read_installed_resource(const char *name, size_t *out_len)
@@ -546,15 +490,13 @@ static unsigned char *read_installed_resource(const char *name, size_t *out_len)
     if (!name || !g_orig_open || !g_provider_self) return NULL;
 
     __try {
-        /* mode 2 is the hook's own no-shadow guard, so this cannot re-enter us
-         * even though the slot still points at ov_open_hook. */
+        /* Mode 2 is the hook's no-shadow guard, so this cannot re-enter the hook. */
         f = g_orig_open(g_provider_self, name, 0xff, 0xff, 2);
         if (!f) return NULL;
         vt = *(void ***)f;
         if (!vt) return NULL;
 
-        /* The 34-slot layout g_stream_vtable implements (R-012 scenario 5:
-         * the 2018 indices 11/5 read +0x58, which returns 0 on 13954591). */
+        /* Slot indices follow the 34-slot layout g_stream_vtable implements. */
         len = ((ov_len_fn)vt[SH_IDFILE_SLOT_LENGTH])(f);
         if (len <= 0 || (unsigned long long)len > SH_SMNAV_MAX_PAYLOAD) {
             ((ov_close_fn)vt[SH_IDFILE_SLOT_CLOSE])(f);
@@ -574,9 +516,7 @@ static unsigned char *read_installed_resource(const char *name, size_t *out_len)
         if (out_len) *out_len = (size_t)len;
         return buf;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        /* Release our output buffer and report failure if a native stream
-         * call faults.
-         */
+        /* A fault in a native stream call frees the output buffer and reports failure. */
         if (buf) HeapFree(GetProcessHeap(), 0, buf);
         if (out_len) *out_len = 0;
         return NULL;
@@ -599,9 +539,8 @@ unsigned char *sh_overrides_test_read_installed(void *open_fn, void *provider,
 }
 #endif
 
-/* Inputs to product transforms: a built-in default, otherwise the installed
- * original. Stay below Grid/navigation here so derived reads cannot recurse
- * into themselves. */
+/* Inputs to product transforms: a built-in default, otherwise the installed original. It stays below
+ * Grid/navigation so derived reads cannot recurse into themselves. */
 static unsigned char *read_effective_resource(const char *name, size_t *out_len)
 {
     unsigned char *copy;
@@ -628,9 +567,8 @@ static void grid_release_effective(void *context,void *bytes)
     (void)context;HeapFree(GetProcessHeap(),0,bytes);
 }
 
-/* The engine path a resource name denotes: lower case, '/' separators, and no
- * empty, absolute, device or Windows-reserved component. Malloc-owned; NULL
- * for a name that cannot be one. */
+/* The engine path a resource name denotes: lower case, '/' separators, and no empty, absolute, device or
+ * Windows-reserved component. Malloc-owned; NULL for a name that cannot be one. */
 static char *ov_engine_path(const char *path)
 {
     char *out, *part, *p;
@@ -687,8 +625,8 @@ unsigned char *sh_overrides_read_engine_resource(const char *name,size_t *out_le
     unsigned char *generated=NULL,*copy=NULL;size_t length=0;int claimed;
     if(out_len)*out_len=0;
     if(!name)return NULL;
-    /* Navigation consumes the resized Grid result where applicable, otherwise
-     * the compiled base. Neither path can re-enter map navigation generation. */
+    /* Navigation consumes the resized Grid result where applicable, otherwise the compiled base; neither path
+     * re-enters map navigation generation. */
     claimed=grid_open_validated(name,&generated,&length);
     if(!claimed)return read_effective_resource(name,out_len);
     if(claimed>0){copy=(unsigned char*)HeapAlloc(GetProcessHeap(),0,length);
@@ -699,12 +637,12 @@ unsigned char *sh_overrides_read_engine_resource(const char *name,size_t *out_le
 static void *ov_open_body(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
 {
 #ifndef SH_OVERRIDES_TESTING
-    if (g_orig_open == NULL) return NULL;   /* defensive: never happens once installed */
+    if (g_orig_open == NULL) return NULL;   /* defensive: cannot happen once installed */
 #endif
     if (g_provider_self == NULL) g_provider_self = self;
 
-    /* The editor's placement grid, cut where marked boxes cut the module floor.
-     * Only the native surface rebuild asks for these private names. */
+    /* The editor's placement grid, cut where marked boxes cut the module floor; only the native surface rebuild
+     * asks for these private names. */
     if (mode < 2 && name && (!strncmp(name, "maps/smpnavgrid/", 16) ||
                               !strncmp(name, "generated/maps/smpnavgrid/", 26))) {
         unsigned char *grid = NULL;
@@ -717,8 +655,8 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
         return NULL;
     }
 
-    /* Let embedded or marked-volume navigation take precedence over the
-     * resized room's base AAS; its source reader still resolves that base. */
+    /* Embedded or marked-volume navigation takes precedence over the resized room's base AAS, which its source
+     * reader still resolves. */
     if(mode<2&&grid_aas_name(name)){
         unsigned char *nav=NULL;size_t length=0;
         if(!sh_navmesh_open(name,&nav,&length))
@@ -738,19 +676,16 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
             }
             free(generated);
             if(!stream&&owned)HeapFree(GetProcessHeap(),0,owned);
-            /* A malformed or unsupported private resource cannot resolve to
-             * another room's stock payload. */
+            /* A malformed or unsupported private resource never resolves to another room's stock payload. */
             return stream;
         }
     }
 
-    /* Map-carried navigation precedes disk overrides and is independent of
-     * the launch user-layer gate.
-     */
+    /* Map-carried navigation precedes disk overrides and is independent of the launch user-layer gate. */
     if (mode < 2 && name != NULL && !grid_aas_name(name)) {
         unsigned char *nav = NULL;
         size_t nav_len = 0;
-        /* Embedded navigation takes precedence over dynamically generated output. */
+        /* Embedded navigation takes precedence over generated output. */
         if (!sh_navmesh_open(name, &nav, &nav_len))
             sh_nav_bake_open(name, sh_overrides_read_engine_resource, &nav, &nav_len);
         if (nav) {
@@ -760,11 +695,8 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
         }
     }
 
-    /* Installed mods: below navigation and the Grid Room, above the built-in
-     * defaults and the engine, so a mod's version of a built-in name (the Lift
-     * tile a player expanded under the old overrides layer, which also sat
-     * above the built-ins) is the one the editor reads. A file that cannot be
-     * read falls through. */
+    /* Installed mods rank below navigation and the Grid Room and above the built-in defaults and the engine, so
+     * a mod's version of a built-in name is the one the editor reads. A file that cannot be read falls through. */
     if (mode < 2 && name != NULL && sh_modserve_active()) {
         unsigned char *bytes = NULL;
         size_t length = 0;
@@ -773,7 +705,7 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
             if (s) return s;
             HeapFree(GetProcessHeap(), 0, bytes);
         } else {
-            /* A file a map's own part of a mod left out: noted, never a silent hole. */
+            /* A file a map's own part of a mod left out is noted, never a silent hole. */
             (void)sh_modserve_note_miss(name);
         }
     }
@@ -787,7 +719,7 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
                 if (s && src == NULL) src = "built-in";
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            s = NULL;   /* any fault in the shadow path -> fall through to the original open */
+            s = NULL;   /* a fault in the shadow path falls through to the original open */
         }
         if (s != NULL) {
             unsigned long n = (unsigned long)InterlockedIncrement(&g_shadow_count);
@@ -798,7 +730,6 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
             backend_log(line);
             return s;   /* the engine reads the override bytes through our idFile vtable */
         }
-
     }
 
     /* No shadow, or mode guard: chain with the original byte arguments. */
@@ -827,22 +758,13 @@ void *sh_overrides_test_open(const char *name, unsigned int mode)
 }
 #endif
 
-/* Decode the first LEA RAX,[rip+disp32] in the resolved provider constructor
- * to find its vtable. Installation then requires the target to lie in a read-
- * only host section; pinned RVAs are diagnostic only.
- */
+/* Scan window for decoding the first LEA RAX,[rip+disp32] in the provider constructor, which names its vtable. */
 #define LEA_SCAN_WINDOW 0x40
-
-static int safe_read_n(const uint8_t *src, uint8_t *dst, size_t n)
-{
-    __try { for (size_t i = 0; i < n; i++) dst[i] = src[i]; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
 
 static void *decode_vtable_global(const uint8_t *ctor_fn)
 {
     uint8_t b[LEA_SCAN_WINDOW];
-    if (!safe_read_n(ctor_fn, b, sizeof b)) return NULL;
+    if (!sh_safe_read(ctor_fn, b, sizeof b)) return NULL;
     for (int i = 0; i + 7 <= LEA_SCAN_WINDOW; i++) {
         if (b[i] == 0x48 && b[i + 1] == 0x8D && b[i + 2] == 0x05) {     /* LEA RAX,[rip+disp32] */
             int32_t disp;
@@ -854,11 +776,8 @@ static void *decode_vtable_global(const uint8_t *ctor_fn)
     return NULL;
 }
 
-/* SEH-guarded host-image bounds checks. Invalid or unreadable PE headers
- * refuse installation.
- */
-
-/* SizeOfImage from the host's optional header. 0/failure => 0. */
+/* SizeOfImage from the host's optional header; 0 on failure. SEH-guarded, and invalid or unreadable PE headers
+ * refuse installation. */
 static int ov_image_size(const uint8_t *module_base, uint32_t *out_size)
 {
     __try {
@@ -874,7 +793,7 @@ static int ov_image_size(const uint8_t *module_base, uint32_t *out_size)
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* Check host-image containment; this does not identify the function. */
+/* Checks host-image containment; it does not identify the function. */
 static int ov_address_in_image(const uint8_t *module_base, const void *address)
 {
     uintptr_t base = (uintptr_t)module_base;
@@ -885,9 +804,8 @@ static int ov_address_in_image(const uint8_t *module_base, const void *address)
     return value - base < (uintptr_t)size;
 }
 
-/* Require READ with neither WRITE nor EXECUTE on the containing section. This
- * checks whether a decoded vtable address is plausible, not its identity.
- */
+/* Requires READ with neither WRITE nor EXECUTE on the containing section, which makes a decoded vtable address
+ * plausible without identifying it. */
 static int ov_address_in_readonly_section(const uint8_t *module_base, const void *address)
 {
     __try {
@@ -913,11 +831,8 @@ static int ov_address_in_readonly_section(const uint8_t *module_base, const void
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* Require clean SIG_OK matches for the constructor and all three native
- * helpers, plus host-image containment. Hook-tolerant fallbacks are refused
- * because the constructor is decoded and helpers become callable vtable
- * entries.
- */
+/* Requires clean SIG_OK matches for the constructor and all three native helpers, plus host-image containment;
+ * hook-tolerant fallbacks are refused because the constructor is decoded and helpers become vtable entries. */
 static int ov_supported_build_abi(const uint8_t *module_base,
                                   const void *ctor_fn, int ctor_status_ok,
                                   const void *read_string_fn, int read_string_status_ok,
@@ -951,16 +866,14 @@ int sh_overrides_test_address_in_readonly_section(const uint8_t *module_base, co
 }
 #endif
 
-/* +0x50 (inserted in build 13954591) borrows the engine's base idFile
- * implementation, like the idStr helpers. Its RVA comes from the base idFile
- * vtable of this exact executable; require the recorded prologue there. */
+/* Slot +0x50 borrows the engine's base idFile implementation, like the idStr helpers; the recorded prologue
+ * must be at its RVA. */
 static const uint8_t OV_BASE_HELPER_PROLOGUE[] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10,
                                                    0x48, 0x89, 0x74, 0x24, 0x18 };
 
-/* The install's byte checks on the executable's own code: the base idFile helper's prologue at its
- * recorded RVA, then the vtable decoded from the provider constructor, which must be a read-only location
- * inside the image. Returns NULL when both hold, else the log line naming what failed. *helper_out is set
- * once the prologue held, *vtable_out once the vtable decoded (either may be left NULL by a failure). */
+/* Checks the base idFile helper's prologue at its recorded RVA, then the vtable decoded from the provider
+ * constructor, which must be read-only inside the image. Returns NULL when both hold, else the log line naming
+ * the failure; *helper_out and *vtable_out are set only once their check passes. */
 const char *sh_overrides_check_sites(const uint8_t *module_base, const void *ctor_fn,
                                      const uint8_t **helper_out, void **vtable_out)
 {
@@ -972,7 +885,7 @@ const char *sh_overrides_check_sites(const uint8_t *module_base, const void *cto
     if (helper_out) *helper_out = NULL;
     if (vtable_out) *vtable_out = NULL;
     if (!helper || !ov_address_in_image(module_base, helper) ||
-        !safe_read_n(helper, got, sizeof got) ||
+        !sh_safe_read(helper, got, sizeof got) ||
         memcmp(got, OV_BASE_HELPER_PROLOGUE, sizeof OV_BASE_HELPER_PROLOGUE) != 0)
         return "B1: overrides file-shadow SKIPPED -- the base idFile helper for slot +0x50 is "
                "not at its recorded address on this executable";
@@ -982,9 +895,7 @@ const char *sh_overrides_check_sites(const uint8_t *module_base, const void *cto
     if (vtable == NULL)
         return "B1: overrides file-shadow SKIPPED -- could not decode the vtable LEA "
                "(ResProviderCtor layout shifted?)";
-    /* Require the decoded vtable to lie in a read-only host section. The
-     * pinned Vulkan RVA is for audit only.
-     */
+    /* The decoded vtable must lie in a read-only host section. */
     if (!ov_address_in_image(module_base, vtable) ||
         !ov_address_in_readonly_section(module_base, vtable))
         return "B1: overrides file-shadow SKIPPED -- decoded provider vtable is not a read-only "
@@ -992,8 +903,6 @@ const char *sh_overrides_check_sites(const uint8_t *module_base, const void *cto
     if (vtable_out) *vtable_out = vtable;
     return NULL;
 }
-
-/* ============================================================ the install (slot swap) ==============*/
 
 int sh_overrides_install(const uint8_t *module_base,
                          void *ctor_fn, int ctor_status_ok,
@@ -1008,7 +917,7 @@ int sh_overrides_install(const uint8_t *module_base,
         return 0;
     }
     if (!ctor_status_ok) {
-        /* A hooked constructor may obscure the vtable LEA; refuse fallback matches. */
+        /* A hooked constructor may obscure the vtable LEA, so fallback matches are refused. */
         backend_log("B1: overrides file-shadow SKIPPED -- ResProviderCtor via hook-tolerant fallback "
                     "(prologue may be hooked); not decoding the vtable LEA from a detoured prologue");
         return 0;
@@ -1042,8 +951,7 @@ int sh_overrides_install(const uint8_t *module_base,
         return 0;
     }
 
-    /* The bind-time byte checks live in sh_overrides_check_sites, which the image-backed test calls
-     * against the shipped executables too. */
+    /* The bind-time byte checks live in sh_overrides_check_sites, which the image-backed test also calls. */
     const uint8_t *helper = NULL;
     void *vtable = NULL;
     const char *refused = sh_overrides_check_sites(module_base, ctor_fn, &helper, &vtable);
@@ -1055,11 +963,9 @@ int sh_overrides_install(const uint8_t *module_base,
 
     void **slot = (void **)((uint8_t *)vtable + OPEN_SLOT_OFFSET);
 
-    /* Temporarily make the read-only vtable page writable, replace the eight-
-     * byte open slot, then restore protection.
-     */
+    /* The read-only vtable page is made writable only while the eight-byte open slot is replaced. */
     void *orig = NULL;
-    if (!safe_read_n((const uint8_t *)slot, (uint8_t *)&orig, sizeof orig) || orig == NULL) {
+    if (!sh_safe_read((const uint8_t *)slot, (uint8_t *)&orig, sizeof orig) || orig == NULL) {
         backend_log("B1: overrides file-shadow SKIPPED -- open vtable slot unreadable / null");
         return 0;
     }

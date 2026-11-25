@@ -1,15 +1,6 @@
-/* nav_bake.h -- current editor geometry, preview and per-instance AAS baking.
- *
- * Complete game-thread snapshots capture boxes, transforms and ownership.
- * Geometry changes invalidate the cached preview. Before the engine converts
- * the editor map for Play, a final snapshot freezes the build revision.
- *
- * Each marked module instance receives a private temporary resource name.
- * BuildAAS loads, transforms and merges that instance's payload, then frees
- * the temporary resource. Stock name-based cached resources stay shared.
- *
- * navmesh.c separately serves navigation baked into the map's member (map_carrier.h).
- */
+/* nav_bake.h -- current editor geometry, preview and per-instance AAS baking. Each marked module instance gets a
+ * private temporary resource name that BuildAAS loads and frees; navmesh.c separately serves navigation baked into
+ * the map's member (map_carrier.h). */
 #ifndef SNAPMAP_PLUS_NAV_BAKE_H
 #define SNAPMAP_PLUS_NAV_BAKE_H
 
@@ -23,19 +14,13 @@
  */
 void sh_nav_bake_set_map(const char *json, size_t len);
 
-/* The files a bake reads (the modules' shipped navigation and the traversal
- * table) may have changed: a mod was installed, removed or updated. Retain the
- * map geometry, drop the bake cache, the previews and the traversal table, and
- * plan again; older worker results cannot publish into the new revision. No
- * engine callbacks occur, so any thread. Registered as a serving-index
- * listener (sh_modserve_set_index_listener), which calls it after every table
- * the mod layer publishes. */
+/* The files a bake reads (shipped navigation, traversal table) may have changed. Keeps the map geometry, drops the
+ * bake cache, previews and traversal table, and plans again; stale worker results cannot publish. Any thread; the
+ * serving-index listener (sh_modserve_set_index_listener) calls it after every table the mod layer publishes. */
 void sh_nav_bake_invalidate_sources(void);
 
-/* Read the effective base resource into a process-heap buffer the caller frees, or
- * return NULL. The provider hook supplies this callback because it owns the
- * provider instance.
- */
+/* Read the effective base resource into a process-heap buffer the caller frees, or return NULL; supplied by the
+ * provider hook, which owns the provider instance. */
 typedef unsigned char *(*sh_nav_bake_reader)(const char *name, size_t *out_len);
 
 /* If `name` is the navigation resource of a module this map marked up, bake and
@@ -76,24 +61,17 @@ void sh_nav_bake_summary_get(sh_nav_bake_summary *s);
 void sh_nav_bake_toast(const sh_nav_bake_summary *s, int finished, char *title,
                        size_t title_cap, char *body, size_t body_cap);
 
-/* Refresh geometry and ownership on DOOM's main thread before map conversion.
- * Play does not serialize the editor map, so the loaded JSON alone misses
- * edits. Never call from the UI worker or inside the AAS loader.
- */
+/* Refresh geometry and ownership on DOOM's main thread before map conversion; the loaded JSON alone misses edits
+ * because Play does not serialize the editor map. Never call from the UI worker or the AAS loader. */
 void sh_nav_bake_refresh_live(void);
 /* The same, for an explicit Build Navmesh or the read before Play: boxes the
  * editor cannot measure yet are left out of this bake and named, instead of
  * refusing the read and with it every other box. */
 void sh_nav_bake_refresh_live_partial(void);
 
-/* Re-place the boxes the last complete refresh found, including obstacles.
- * Geometry comes from the editor's memory, so only the flags are serialized.
- * Returns 1 when it committed an answer, or 0 when it could not -- a new or
- * deleted volume, a map it has not read yet -- which the caller answers with a
- * complete refresh.
- *
- * Main thread only, same as the complete refresh. Reports how many volumes it
- * serialized through `volumes` when that is not NULL. */
+/* Re-place the boxes the last complete refresh found, including obstacles; geometry comes from the editor's memory
+ * so only the flags are serialized. Returns 1 when it committed an answer, 0 when a new or deleted volume or an unread
+ * map needs a complete refresh. Main thread only; `volumes`, if not NULL, gets the count serialized. */
 int sh_nav_bake_refresh_volumes(int *volumes);
 
 /* Does the volume `uid` carry a navigation flag? For one the navigation has
@@ -118,9 +96,8 @@ int sh_nav_bake_instance_count(void);
 /* Why the last volumes-only refresh could not answer, for the console. */
 const char *sh_nav_bake_volumes_reason(void);
 
-/* The volumes the navigation actually knows about. One the editor has created
- * since -- including a placement preview -- is not among them, and cannot
- * affect the navigation until a complete read takes it in. */
+/* The volumes the navigation knows about; a volume created after the last complete read (a placement preview
+ * included) is not among them and does not affect the navigation until a complete read takes it in. */
 int sh_nav_bake_volume_uids(int *out, int cap);
 int sh_nav_bake_knows_volume(int uid);
 
@@ -139,14 +116,10 @@ void sh_nav_bake_build_end(void);
 /* Refresh the editor preview from a validated bake for monster48. Lines are
  * world-space; the caller draws them only while the editor is active. */
 typedef void (*sh_nav_preview_line)(const float start[3], const float end[3], void *ctx);
-/* Emit the green lines for the geometry as it stands. Returns 0 when the bake
- * behind them is still on the worker, in which case nothing was emitted and
- * the caller must keep showing what it has: publishing an empty set instead
- * blinks every line off until the worker lands. */
-/* Colour for the lines that follow. Supplied by the caller, like the line sink
- * itself, so the bake stays independent of how anything is drawn. A caller
- * that passes NULL gets the walkable surfaces only: a refused volume drawn in
- * the same colour as a working one would say the opposite of the truth. */
+/* Emit the green lines for the current geometry. Returns 0 while the bake is still on the worker, emitting nothing;
+ * the caller keeps showing what it has, since an empty set would blink every line off. */
+/* Colour for the lines that follow, supplied by the caller like the line sink. A NULL colour gets the walkable
+ * surfaces only, since a refused volume in a working volume's colour would mislead. */
 typedef void (*sh_nav_preview_colour_fn)(float r, float g, float b, void *ctx);
 
 int sh_nav_bake_preview(sh_nav_bake_reader read_shipped, sh_nav_preview_line line,
@@ -160,10 +133,8 @@ int sh_nav_bake_prepare(sh_nav_bake_reader read_shipped);
 /* Request worker shutdown outside DllMain; test/process teardown only. */
 void sh_nav_bake_preview_stop(void);
 
-/* 1 when the worker has finished a bake nobody has collected. Cheap enough to
- * ask every frame, and worth asking: the worker finishes on its own clock, so
- * waiting for the next read to collect it leaves the green stale for as long
- * as that read is away. */
+/* 1 when the worker has finished a bake nobody has collected; cheap enough to ask every frame, so the green does
+ * not stay stale until the next read. */
 int sh_nav_bake_preview_pending(void);
 
 #ifdef SH_DIAG
@@ -175,16 +146,14 @@ int sh_nav_bake_show_marks(int count);
 void sh_nav_bake_enable_instances(int enabled);
 int sh_nav_bake_instance_name(int instance, const char *name, char *out, size_t capacity);
 
-/* The editor's placement grid (nav_overlay.h). Each preview bake also bakes
- * the two larger classes and cuts every class's stock grid model where that
- * class's floor was cut. The native surface rebuild asks for a copy's model by
- * its stock name; a cut copy gets a private name, which the resource open
- * serves. A changed signature means the rebuild should run again. */
+/* The editor's placement grid (nav_overlay.h): each preview bake also bakes the two larger classes and cuts each
+ * class's stock grid model where its floor was cut. A cut copy gets a private name that the resource open serves;
+ * a changed signature means the surface rebuild should run again. */
 int sh_nav_bake_overlay_name(int instance, const char *name, char *out, size_t capacity);
 /* 1 served (HeapAlloc'd bytes), 0 not an overlay name, -1 no such overlay. */
 int sh_nav_bake_overlay_open(const char *name, unsigned char **out, size_t *length);
 unsigned long long sh_nav_bake_overlay_signature(void);
-/* Back to the stock grid everywhere, for a map that is no longer open. */
+/* Back to the stock grid everywhere, once no map is open. */
 void sh_nav_bake_overlay_clear(void);
 /* Every map parse, including a reload into the same map object: drop the cut
  * models and discard any preview bake of the previous map still in flight. */
@@ -203,7 +172,6 @@ void sh_nav_bake_set_live_editor(sh_navr_entity_valid valid,
 int sh_nav_bake_test_parse_name(const char *name, char *module, size_t module_cap,
                                 char *cls, size_t cls_cap);
 void sh_nav_bake_test_reset(void);
-int  sh_nav_bake_test_bake_count(void);
 void sh_nav_bake_test_copy_map(sh_nav_map *out);
 /* Deliver a synthetic completed worker result through the production publisher. */
 void sh_nav_bake_test_preview_complete(unsigned long revision, const char *bytes);
@@ -217,17 +185,12 @@ int sh_nav_bake_test_run(const char *name, const struct sh_aug_platform *plats, 
 void sh_nav_bake_test_preview_outcome(int slot, int state, const char *brief);
 /* The full reason and payload length of the last sh_nav_bake_test_run. */
 const char *sh_nav_bake_test_last_reason(void);
-/* sh_navmesh's face table for synthetic rows: per row a volume number, four
- * compass octants (0 = east, counter-clockwise) and four face codes (0 no
- * floor edge, 1 blocked, 2 no floor, 3 edge, 4 too high, 5 inside, 6 walk,
- * 0x80 | n for n demons climbing). */
+/* sh_navmesh's face table for synthetic rows: per row a volume number, four compass octants (0 = east,
+ * counter-clockwise) and four face codes (0 no floor edge, 1 blocked, 2 no floor, 3 edge, 4 too high, 5 inside,
+ * 6 walk, 0x80 | n for n demons climbing). */
 void sh_nav_bake_test_print_faces(void (*out)(const char *fmt, ...), const unsigned *volumes,
                                   const unsigned char (*dir)[4], const unsigned char (*code)[4],
                                   int rows, int demons, int climbed, int total);
-/* The last test bake's class block, as sh_navmesh prints it under `cls`. */
-void sh_nav_bake_test_print_last(void (*out)(const char *fmt, ...), const char *cls);
-/* The last test bake's floor climbs per box face, as sh_navmesh prints them. */
-const char *sh_nav_bake_test_last_faces(void);
 size_t      sh_nav_bake_test_last_length(void);
 /* Lower the bake cache budget (0 restores it); returns the previous one. */
 size_t sh_nav_bake_test_set_cache_budget(size_t bytes);

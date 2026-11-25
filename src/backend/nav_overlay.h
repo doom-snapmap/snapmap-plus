@@ -1,16 +1,6 @@
-/* nav_overlay.h -- the editor's native placement grid, cut where the bake cut
- * the module floor.
- *
- * The faint green grid a held demon shows is a stock render model per module
- * and navigation class, "<module>/<leaf>_aas_<class>.bmodel", loaded by name
- * when the editor rebuilds its placement surfaces. It is not built from the
- * navigation at run time. When marked boxes cut a module copy's floor, the
- * bake leaves each cut floor area's largest piece in that area and appends the
- * other pieces after the original areas. This rewrites the stock model so its
- * floor triangles cover exactly those pieces: every triangle lying on a cut
- * area keeps only its parts inside the area's pieces, and every other
- * triangle, vertex and byte of the model is kept as it was.
- */
+/* nav_overlay.h -- the editor's placement grid (stock render model "<module>/<leaf>_aas_<class>.bmodel"), cut where
+ * the bake cut the module floor: its floor triangles are rewritten to cover the bake's pieces (largest piece in
+ * place, the rest appended after the original areas) and everything else is kept. */
 #ifndef SNAPMAP_PLUS_NAV_OVERLAY_H
 #define SNAPMAP_PLUS_NAV_OVERLAY_H
 #include <stddef.h>
@@ -34,10 +24,8 @@ typedef struct sh_ov_cut {
  * thousands of units away. */
 #define SH_OV_Z_TOLERANCE 48.0
 
-/* Split one triangle around the cuts. Writes the replacement triangles, each
- * on the input triangle's plane and in its winding, and returns their count;
- * *touched is 0 when no cut overlaps the triangle (then the triangle itself
- * is written once). Returns -1 for an invalid input or when `cap` is short. */
+/* Split one triangle around the cuts into replacement triangles on its plane and winding; returns their count.
+ * *touched is 0 when no cut overlaps (the triangle is written once); returns -1 for invalid input or short `cap`. */
 int sh_nav_overlay_cut_triangle(const double tri[3][3], const sh_ov_cut *cuts, int cut_count,
                                 double (*out)[3][3], int cap, int *touched);
 
@@ -50,11 +38,9 @@ typedef struct sh_nav_overlay_stats {
     int vertices_before, vertices_after;
 } sh_nav_overlay_stats;
 
-/* Rewrite a stock placement-display model for one class from that class's
- * shipped navigation and the bake's cut of it. `first_area` is the first
- * area after the appended floor pieces. Returns 1 with a HeapAlloc'd model in
- * *out, 0 when nothing was cut (keep the stock model), -1 when an input does
- * not parse or the result would not fit the format. */
+/* Rewrite a stock placement-display model for one class from its shipped navigation and the bake's cut; `first_area`
+ * is the first area after the appended floor pieces. Returns 1 with a HeapAlloc'd model in *out, 0 when nothing was
+ * cut (keep the stock model), -1 when an input does not parse or the result would not fit the format. */
 int sh_nav_overlay_build(const unsigned char *model, size_t model_len,
                          const unsigned char *shipped, size_t shipped_len,
                          const unsigned char *cut, size_t cut_len, unsigned first_area,

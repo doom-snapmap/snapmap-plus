@@ -1,13 +1,6 @@
-/* script_lib_base.c -- the libraries a mod script sees, timers and
- * coroutines, require, print and warn (script_runtime.h has the list).
- *
- * Library functions that do work in C the clock hook never sees read the
- * wall clock first (sorting, moving and shifting table elements, scanning
- * UTF-8), so a script looping over them is still stopped when one call has
- * run too long; pcall, xpcall, coroutine.resume and coroutine.close are
- * wrapped so a stop decided by the runtime cannot be caught; setmetatable
- * refuses "__gc" because Lua runs finalizers with hooks off, so a finalizer
- * could never be stopped. */
+/* script_lib_base.c -- the libraries a mod script sees, timers and coroutines, require, print and warn
+ * (script_runtime.h has the list). pcall, xpcall and the coroutine calls are wrapped so a runtime stop cannot be
+ * caught, and setmetatable refuses "__gc" because Lua runs finalizers with hooks off. */
 #include "script_internal.h"
 #include "script_sdk.h"
 #include "script_reason.h"
@@ -18,10 +11,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ------------------------------------------------------------ guards */
-
-/* After the wrapped call: a stop the runtime decided goes on up; a memory
- * error the script caught becomes the memory stop. Results start at 1. */
 /* The API guard inside a protected call: Lua's "attempt to call a nil value
  * (global 'x')" for a global that is still not set is a call to a name that
  * does not exist. */
@@ -45,6 +34,8 @@ static int called_unknown_global(lua_State *L, const char *msg, char *name, size
     return n == LUA_TNIL;
 }
 
+/* After the wrapped call: a stop the runtime decided goes on up; a memory error the script caught becomes the
+ * memory stop. Results start at 1. */
 static int guard_k(lua_State *L, int status, lua_KContext ctx)
 {
     shs_mod *m = shs_mod_of(L);
@@ -63,10 +54,9 @@ static int guard_k(lua_State *L, int status, lua_KContext ctx)
     return lua_gettop(L);
 }
 
-/* pcall, xpcall, coroutine.resume, coroutine.close: the original is
- * upvalue 1. lua_callk keeps a yield inside a pcall'd function working. A
- * pcall handed a global that is not set (pcall(fx, ...)) is a call to a name
- * that does not exist: the API guard stops the mod. */
+/* pcall, xpcall, coroutine.resume, coroutine.close: the original is upvalue 1. lua_callk keeps a yield inside a
+ * pcall'd function working; a pcall handed a global that is not set is a call to a name that does not exist, and the
+ * API guard stops the mod. */
 static int guard(lua_State *L)
 {
     int n = lua_gettop(L);
@@ -79,9 +69,8 @@ static int guard(lua_State *L)
     return guard_k(L, LUA_OK, 0);
 }
 
-/* xpcall's message handler, upvalue 1 the script's. A stop raised by the
- * count hook reaches the handler with hooks still off (Lua calls it from
- * inside the hook), so after a stop the script's handler is not run. */
+/* xpcall's message handler, upvalue 1 the script's. A stop raised by the count hook reaches the handler with hooks
+ * still off, so after a stop the script's handler is not run. */
 static int xpcall_handler(lua_State *L)
 {
     if (shs_mod_of(L)->stop >= 0) return 1;
@@ -128,8 +117,6 @@ static int sb_collectgarbage(lua_State *L)
     lua_pushnumber(L, (lua_Number)lua_gc(L, LUA_GCCOUNT, 0) + (lua_Number)lua_gc(L, LUA_GCCOUNTB, 0) / 1024.0);
     return 1;
 }
-
-/* ------------------------------------------------------- print and warn */
 
 /* The arguments joined with tabs, pushed as one string (any length). */
 static const char *join_args(lua_State *L)
@@ -187,8 +174,6 @@ static void core_warn(void *ud, const char *msg, int tocont)
     used = 0;
 }
 
-/* ----------------------------------------------------- string and table */
-
 /* find, match, gmatch, gsub: upvalue 1 the original, 2 its name. */
 static int sb_pattern(lua_State *L)
 {
@@ -233,8 +218,6 @@ static void wrap(lua_State *L, const char *name, lua_CFunction fn, int extra_kin
     lua_setfield(L, -2, name);
 }
 
-/* ------------------------------------------------------- now and game */
-
 static int sb_now(lua_State *L)
 {
     lua_pushnumber(L, shs_now());
@@ -265,8 +248,6 @@ static int sb_native(lua_State *L)
     luaL_setmetatable(L, SHS_MT_GAME);
     return 1;
 }
-
-/* ------------------------------------------------------------- require */
 
 const sh_script_sdk_lib *sh_script_sdk_find(const char *name)
 {
@@ -338,8 +319,6 @@ static int sb_require(lua_State *L)
     lua_rawset(L, 2);
     return 1;
 }
-
-/* -------------------------------------------------- timers, coroutines */
 
 typedef struct { int id; } shs_timer_ud;
 
@@ -542,7 +521,7 @@ static int job_timer(lua_State *L)
     shs_mod *m = shs_mod_of(L);
     int i = timer_index(m, f->id);
     shs_timer t;
-    if (i < 0) return 0;                            /* cancelled by an earlier one */
+    if (i < 0) return 0;                            /* cancelled meanwhile */
     t = m->timers[i];
     lua_getfield(L, LUA_REGISTRYINDEX, SHS_REG_TIMERS);
     lua_rawgeti(L, -1, t.id);
@@ -606,8 +585,6 @@ void shs_timers_free(shs_mod *m)
     m->timers = NULL;
     m->ntimers = m->ctimers = 0;
 }
-
-/* ------------------------------------------------------------- opening */
 
 void shs_open_libs(lua_State *L, uint64_t seed)
 {

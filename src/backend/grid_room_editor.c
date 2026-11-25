@@ -1,4 +1,4 @@
-/* Extend DOOM's native module properties, including Blueprint selection. */
+/* Extends DOOM's native module properties, including Blueprint selection. */
 #include <windows.h>
 #include <math.h>
 #include <stdint.h>
@@ -45,8 +45,8 @@ static blocked_fn g_blocked;
 static set_state_fn g_set_state;
 static action_help_fn g_action_help;
 static sh_native_property_handler g_property_handler;
-/* Optional: redraw an open sub-editor after the guard. Unbound, the guard still
- * syncs every store and a reopen shows the current size. */
+/* Optional: redraws an open sub-editor after the guard. Unbound, the guard still syncs every store and a reopen
+ * shows the current size. */
 static dirty_refresh_fn g_dirty_refresh;
 static menu_of_fn g_menu_of;
 static screen_by_index_fn g_screen_by_index;
@@ -57,11 +57,9 @@ static void grid_add_vec(void *panel,int id,const char *name,const uint32_t *lab
     unsigned char enabled,const float *value,float min,float max,float step,float big_step,
     unsigned char integral,void *context,const char *extra,const void *extra_value)
 {
-    /* Native AddVec3 clears the context's values but appends to its separate
-     * float-pair range list. This panel reuses that context for Grid Offset
-     * and room dimensions, so stale ranges otherwise win on numeric entry.
-     * Reset only the trivial range count; native code retains ownership of
-     * its allocation and reconstructs the three ranges for this inspector. */
+    /* Native AddVec3 clears the context's values but appends to its separate float-pair range list. The panel reuses
+     * that context for Grid Offset and room dimensions, so stale ranges would win on numeric entry. Only the range
+     * count is reset; native code keeps ownership of the allocation and rebuilds the three ranges. */
     __try {
         unsigned char *c=(unsigned char*)context;
         int n=*(int*)(c+0xa8),cap=*(int*)(c+0xac);
@@ -93,10 +91,9 @@ static int grid_open_blueprint(unsigned char *e,int instance)
     int count=*(int*)(e+0x21078),*stack=*(int**)(e+0x21070);
     unsigned capacity=*(unsigned*)(e+0x2107c)&0x3fffffff;
     if(count<0||count>1024||(count&&(!stack||(unsigned)count>capacity)))return 0;
-    /* Match the native properties selection and replace its stack top, then
-     * run the native Exit/Enter lifecycle. OpenProperties also requests the
-     * Object camera; Blueprint must retain its existing camera instead. An
-     * empty stack closes through the native camera-dependent default state. */
+    /* Matches the native properties selection, replaces its stack top and runs the native Exit/Enter lifecycle.
+     * OpenProperties also requests the Object camera, which Blueprint must not take; an empty stack closes through
+     * the native camera-dependent default state. */
     *(int*)(e+0x22ef8)=instance;
     if(count)stack[count-1]=4;
     g_set_state(e,4);
@@ -106,8 +103,8 @@ static int grid_open_blueprint(unsigned char *e,int instance)
 static void grid_blueprint_update(void *normal,void *mode,void *editor)
 {
     unsigned char *e=(unsigned char*)editor;int instance;
-    /* This one-frame refresh flag is consumed by the native handler. Do not
-     * open a panel in a frame native selection processing deliberately skips. */
+    /* This one-frame refresh flag is consumed by the native handler; no panel is opened in a frame native selection
+     * processing skips. */
     unsigned char refresh=e[0x2120c];
     g_blueprint_update(normal,mode,editor);
     if(refresh)return;
@@ -135,9 +132,8 @@ static void grid_blueprint_help(void *normal,void *editor)
     }
 }
 
-/* What this panel last showed for its room. A room whose size changed under
- * an open panel (undo, a console edit, or a module index shift after a
- * deletion) is never edited from stale panel values. */
+/* What this panel last showed for its room, so a room whose size changed under an open panel (undo, a console edit or
+ * a module index shift after a deletion) is never edited from stale panel values. */
 static struct {void *panel,*map;int instance,valid;sh_grid_size size;} g_shown;
 static void remember(void *panel,void *map,int instance,const sh_grid_size *size)
 {g_shown.panel=panel;g_shown.map=map;g_shown.instance=instance;g_shown.size=*size;g_shown.valid=1;}
@@ -148,19 +144,11 @@ static void report(const char *format,int instance,const sh_grid_size *size)
     backend_log(message);
 }
 
-/* The native XYZ inspector keeps three copies of its value: the row value
- * (+0x100, written by SetVec3), the value its own cancel path restores (+0xe8,
- * set at construction and on accept) and the value the panel opened with
- * (+0xf4, restored by its revert and compared by the dirty marker). The open
- * X/Y/Z sub-editor's draft lives in the panel's numeric-entry context (+0xd8 =
- * panel+0x280), a list of three entries (pointer, count, capacity; stride 0x38,
- * float at +0x30) at +0x58. The context also keeps two snapshots in the same
- * list form: +0x70, the value the row was built with (its dirty comparison),
- * and +0x88, copied from the draft when the sub-editor opens. Both cancel
- * routes (the sub-editor's Delete revert and the Revert dialog's Yes) copy +0x88
- * back into the draft, and the inspector then applies the draft, so a size
- * shown after an outside change must reach the draft always and, for an
- * outside change, every snapshot a cancel or revert can restore. */
+/* The native XYZ inspector keeps three copies of its value: the row value (+0x100, via SetVec3), the cancel-restore
+ * value (+0xe8) and the open-time value (+0xf4, used by revert and the dirty marker). The open sub-editor's draft is
+ * in the numeric-entry context (+0xd8 = panel+0x280): three entries (stride 0x38, float +0x30) in a list at +0x58,
+ * plus snapshots at +0x70 (dirty comparison) and +0x88 (copied from the draft on open, restored by both cancel routes),
+ * so a size shown after an outside change must reach the draft and every snapshot a cancel or revert can restore. */
 static int show_entries(unsigned char *list,const float dims[3])
 {
     unsigned char *entries=*(unsigned char**)list;int count=*(int*)(list+8),capacity=*(int*)(list+12);unsigned i;
@@ -168,14 +156,9 @@ static int show_entries(unsigned char *list,const float dims[3])
     for(i=0;i<3;++i)*(float*)(entries+i*0x38+0x30)=dims[i];
     return 1;
 }
-/* The open sub-editor is the editor menu's idMenuManager_ContextList_Vec
- * (menu +0xa10) screen 10, bound to this context at +0x1b8 and +0x1e8 when the
- * row highlights (inspector vt+0x48). It draws its X/Y/Z text, and each
- * entry's dirty marker, only when native code redraws it after a key, so a
- * draft written from here stays undrawn until then. The row's own dirty
- * marker (+0xc8, set while the draft differs from +0x70) is likewise only
- * recomputed by the native refresh after a sub-editor key. Run both now, as
- * the native key path does, once the stores hold the shown size. */
+/* The open sub-editor is idMenuManager_ContextList_Vec (menu +0xa10) screen 10, bound to this context at +0x1b8 and
+ * +0x1e8 when the row highlights. Its text and the row's dirty marker (+0xc8) are recomputed only by native code, so
+ * this runs the native key-path redraw once the stores hold the shown size. */
 static void show_redraw(unsigned char *inspector,unsigned char *ctx)
 {
     unsigned char *owner,*menu,*manager,*screen;
@@ -196,9 +179,8 @@ static void show_size(unsigned char *panel,unsigned char *inspector,const float 
         ctx=*(unsigned char**)(inspector+0xd8);
         if(!ctx||ctx!=panel+0x280||!show_entries(ctx+0x58,dims))return;
         if(outside){
-            /* The outside size becomes the baseline for every cancel and revert.
-             * A limited user edit (outside == 0) keeps them, so its cancel still
-             * returns to the size the user last accepted. */
+            /* An outside size becomes the baseline for every cancel and revert; a limited user edit (outside == 0)
+             * keeps them, so its cancel returns to the size the user last accepted. */
             memcpy(inspector+0xe8,dims,sizeof(float)*3);
             memcpy(inspector+0xf4,dims,sizeof(float)*3);
             show_entries(ctx+0x70,dims);
@@ -213,10 +195,8 @@ static void grid_changed(void *panel,void *inspector,int action)
     unsigned char *p=(unsigned char*)panel,*v=(unsigned char*)inspector;
     sh_grid_size current,next;sh_grid_warp check;
     float dims[3],requested[3];unsigned i;int instance,adjusted=0,outside=0;void *map;
-    /* The null guard at the original entry precedes our detour. Other native
-     * IDs always reach their original dispatcher with unchanged arguments.
-     * The hook serves the settings tab whether or not the Grid Room
-     * inspector installed; without it the size row never exists. */
+    /* The null guard at the original entry precedes our detour, and other native IDs reach their original dispatcher
+     * with unchanged arguments. The hook serves the settings tab whether or not the Grid Room inspector installed. */
     if(g_property_handler&&g_property_handler(panel,inspector,action))return;
     if(!g_populate||*(const int*)(v+0x40)!=GRID_PROPERTY_SIZE){g_change(panel,inspector,action);return;}
     if(InterlockedCompareExchange(&g_failed,0,0)){
@@ -248,9 +228,8 @@ static void grid_changed(void *panel,void *inspector,int action)
 stale:
         outside=1;
 restore:
-        /* The adapter has already logged why; show what the room really is,
-         * in the row and in the sub-editor, so no later Esc, cancel or reopen
-         * can apply a value the room no longer has. */
+        /* The adapter has logged why; the row and the sub-editor show what the room really is, so no later Esc,
+         * cancel or reopen applies a value the room does not have. */
         for(i=0;i<3;++i)dims[i]=(float)current.xyz[i];
         remember(panel,map,instance,&current);
         show_size(p,v,dims,outside);
@@ -273,10 +252,9 @@ static void grid_populate(void *panel,int instance,void *map,void *settings,void
         label=g_hash("#str_smp_grid_room_size");
         description=g_hash(size.kind==SH_GRID_MODERN?
             "#str_smp_grid_room_modern_help":"#str_smp_grid_room_classic_help");
-        /* +0x280 is the panel's constructed numeric-entry context, reused by
-         * native grid-offset XYZ settings. Its owner outlives this inspector.
-         * Per-axis door limits are checked by the edit adapter, while this
-         * shared native XYZ inspector supplies the overall numeric range. */
+        /* +0x280 is the panel's constructed numeric-entry context, reused by native grid-offset XYZ settings; its
+         * owner outlives this inspector. The edit adapter checks per-axis door limits and the shared native XYZ
+         * inspector supplies the overall numeric range. */
         grid_add_vec(panel,GRID_PROPERTY_SIZE,"Grid Room Size",&label,&description,
             1,dims,1,65534,1,16,1,p+0x280,NULL,NULL);
         remember(panel,map,instance,&size);
@@ -288,21 +266,15 @@ static void grid_populate(void *panel,int instance,void *map,void *settings,void
     }
 }
 
-static const sig_result *clean(const sig_result *results,size_t count,const char *name)
-{
-    size_t i;for(i=0;i<count;++i)if(results[i].name&&!strcmp(results[i].name,name)&&
-        results[i].status==SIG_OK)return &results[i];return NULL;
-}
 
 int sh_native_property_hook_install(const sig_result *results,size_t count)
 {
     const sig_result *change;
     if(g_change)return hook_is_installed((void*)g_change);
-    change=clean(results,count,"GridPropertyChanged");
+    change=sig_ok(results,count,"GridPropertyChanged");
     if(!change)return 0;
-    /* Change's entry has a null branch, so hook its non-null body at +9 and
-     * steal 17 position-independent bytes. The branch itself and its
-     * destination remain untouched. */
+    /* Change's entry has a null branch, so its non-null body is hooked at +9 and 17 position-independent bytes are
+     * stolen; the branch and its destination are untouched. */
     g_change=(change_fn)hook_prepare((void*)(change->addr+9),(void*)grid_changed,17);
     if(!g_change)return 0;
     if(hook_commit((void*)g_change)!=B2_PATCH_OK){
@@ -322,30 +294,30 @@ int sh_grid_editor_install(const sig_result *results,size_t count,
        hook_is_installed((void*)g_blueprint_update)&&hook_is_installed((void*)g_blueprint_help))return 1;
     if(g_populate||g_add_vec||g_blueprint_update||g_blueprint_help)return 0;
     if(!sh_native_property_hook_install(results,count))return 0;
-    populate=clean(results,count,"GridModuleProperties");
-    add=clean(results,count,"GridAddVec3");set=clean(results,count,"GridSetVec3");hash=clean(results,count,"StridsHash");
-    update=clean(results,count,"GridBlueprintUpdate");help=clean(results,count,"GridBlueprintHelp");
-    pressed=clean(results,count,"GridInputPressed");blocked=clean(results,count,"GridPropertiesBlocked");
-    state=clean(results,count,"GridSetEditorState");action_help=clean(results,count,"GridAddActionHelp");
+    populate=sig_ok(results,count,"GridModuleProperties");
+    add=sig_ok(results,count,"GridAddVec3");set=sig_ok(results,count,"GridSetVec3");hash=sig_ok(results,count,"StridsHash");
+    update=sig_ok(results,count,"GridBlueprintUpdate");help=sig_ok(results,count,"GridBlueprintHelp");
+    pressed=sig_ok(results,count,"GridInputPressed");blocked=sig_ok(results,count,"GridPropertiesBlocked");
+    state=sig_ok(results,count,"GridSetEditorState");action_help=sig_ok(results,count,"GridAddActionHelp");
     if(!populate||!add||!set||!hash||!update||!help||!pressed||!blocked||!state||!action_help)return 0;
     g_read=read;g_apply=apply;g_set_vec=(set_vec_fn)set->addr;g_hash=(hash_fn)hash->addr;
     g_pressed=(pressed_fn)pressed->addr;g_blocked=(blocked_fn)blocked->addr;
     g_set_state=(set_state_fn)state->addr;g_action_help=(action_help_fn)action_help->addr;
-    {const sig_result *dirty=clean(results,count,"GridPropertyDirtyRefresh"),*menu=clean(results,count,"GridMenuOf"),
-        *screen=clean(results,count,"MenuScreenByIndex"),*redraw=clean(results,count,"ContextListRedraw"),
-        *resolve=clean(results,count,"SwfWidgetResolve");
+    {const sig_result *dirty=sig_ok(results,count,"GridPropertyDirtyRefresh"),*menu=sig_ok(results,count,"GridMenuOf"),
+        *screen=sig_ok(results,count,"MenuScreenByIndex"),*redraw=sig_ok(results,count,"ContextListRedraw"),
+        *resolve=sig_ok(results,count,"SwfWidgetResolve");
      if(dirty&&menu&&screen&&redraw&&resolve){
         g_dirty_refresh=(dirty_refresh_fn)dirty->addr;g_menu_of=(menu_of_fn)menu->addr;
         g_screen_by_index=(screen_by_index_fn)screen->addr;g_widget_resolve=(widget_resolve_fn)resolve->addr;
         g_list_redraw=(list_redraw_fn)redraw->addr;
      } else backend_log("GRID: sub-editor redraw unavailable (signatures not resolved); after an outside size change, reopen the X/Y/Z editor to see the current size");}
-    /* Populate steals 16 register/stack-only bytes. The change hook is shared
-     * with the settings tab and stays installed whatever happens below. */
+    /* Populate steals 16 register/stack-only bytes. The change hook is shared with the settings tab and stays
+     * installed whatever happens below. */
     g_populate=(populate_fn)hook_prepare((void*)populate->addr,(void*)grid_populate,16);
     /* AddVec3's first 18 bytes only save registers and establish its frame. */
     g_add_vec=(add_vec_fn)hook_prepare((void*)add->addr,(void*)grid_add_vec,18);
-    /* The normal Blueprint handlers' first 15 bytes are complete instructions
-     * without relative operands, independently checked in both renderers. */
+    /* The normal Blueprint handlers' first 15 bytes are complete instructions without relative operands in both
+     * renderers. */
     g_blueprint_update=(blueprint_update_fn)hook_prepare((void*)update->addr,(void*)grid_blueprint_update,15);
     g_blueprint_help=(blueprint_help_fn)hook_prepare((void*)help->addr,(void*)grid_blueprint_help,15);
     if(g_populate&&g_add_vec&&g_blueprint_update&&g_blueprint_help&&

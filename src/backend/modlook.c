@@ -11,8 +11,6 @@
 #include "modprog.h"
 #include "text.h"
 
-/* ------------------------------------------------------------------------------------------- helpers ---- */
-
 typedef struct lk_buf { char *p; size_t n, cap; int oom; } lk_buf;
 
 static void lk_put(lk_buf *b, const char *d, size_t n)
@@ -91,8 +89,6 @@ static unsigned lk_dist(const char *a, size_t an, const char *b)
     return d[bn];
 }
 
-/* ------------------------------------------------------------------------------------------ the text ---- */
-
 typedef struct lk_ln {
     const char *a;                 /* the line, without its terminator */
     size_t an, en;                 /* its length; its terminator's length */
@@ -160,8 +156,6 @@ static int lk_split(lk_doc *d, const char *text, size_t len)
     return 1;
 }
 
-/* ------------------------------------------------------------------------------------------ values ---- */
-
 enum { K_NONE = 0, K_NUM, K_VEC, K_IMG, K_BAD };
 typedef struct lk_val {
     int kind, n;
@@ -225,8 +219,6 @@ static void lk_parse(const char *s, size_t n, lk_val *o)
     o->s = s;
     o->sn = n;
 }
-
-/* ---------------------------------------------------------------------------------------- the fields ---- */
 
 enum { T_NUM, T_IMG, T_IMGNUM, T_IMGC3, T_V2, T_V3, T_V4, T_V5, T_V6, T_YESNO, T_LIGHT };
 
@@ -353,8 +345,6 @@ static void lk_word(const lk_ln *x, char *out, size_t cap)
     out[n] = 0;
 }
 
-/* ---------------------------------------------------------------------------------- classification ---- */
-
 #define LK_VALID 1
 #define LK_PASS 0
 #define LK_UNKNOWN (-1)
@@ -439,8 +429,6 @@ static int lk_classify(const char *k, size_t n, int layered, lk_hit *h)
     return LK_PASS;
 }
 
-/* ----------------------------------------------------------------------------------- field storage ---- */
-
 typedef struct lk_set { lk_val v; int has; size_t line; } lk_set;
 
 /* Reads every key of a look into `g` (layered globals), `l` (layer fields) or `p` (particle). 1 when all fields read. */
@@ -507,8 +495,6 @@ static int lk_read(lk_ctx *c, lk_doc *d, size_t first, int layered, lk_set *g, l
     return 1;
 }
 
-/* ------------------------------------------------------------------------------------ output pieces ---- */
-
 /* The material's name for a registered image path: generated/image/<name>.bimage is <name>.tga. */
 static char *lk_image_name(const char *path)
 {
@@ -570,8 +556,6 @@ static char *lk_const(float r, float g, float b, float a)
     const char *path = sh_modprog_register_const_image(c);
     return path ? lk_image_name(path) : NULL;
 }
-
-/* ------------------------------------------------------------------------------------------ layered ---- */
 
 #define LK_SLOTS 2
 
@@ -750,8 +734,6 @@ static int lk_layered(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *ou
     return SH_LOOK_CHANGED;
 }
 
-/* ------------------------------------------------------------------------------------------ particle ---- */
-
 static int lk_particle(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *out_len)
 {
     lk_set p[P_COUNT];
@@ -830,8 +812,6 @@ static int lk_particle(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *o
     *out = res;
     return SH_LOOK_CHANGED;
 }
-
-/* -------------------------------------------------------------------------------------------- compile ---- */
 
 int sh_look_compile_notes(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
                           size_t why_len, char **notes)

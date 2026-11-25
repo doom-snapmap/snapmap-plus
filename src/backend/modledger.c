@@ -314,8 +314,6 @@ void sh_modledger_reset(void)
     g_complete = 1;
 }
 
-/* ------------------------------------------------------------ pass tally */
-
 sh_modledger_tally_type *sh_modledger_tally_add(sh_modledger_tally *t, const char *type, const char *name)
 {
     sh_modledger_tally_type *row = NULL;
@@ -343,8 +341,6 @@ int sh_modledger_tally_truncated(const sh_modledger_tally_type *row)
 {
     return row && strlen(row->names) >= sizeof row->names - 5;
 }
-
-/* --------------------------------------------------------- name folding */
 
 static char ml_name_fold(char c)
 {

@@ -1,5 +1,5 @@
-/* Private native palettes keep dimension variants out of the stock palette's
- * movable arrays. Each cache entry owns a one-module palette for the process. */
+/* Private native palettes keep dimension variants out of the stock palette's movable arrays; each cache entry owns a
+ * one-module palette for the process. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -54,7 +54,7 @@ typedef void (*tree_free_fn)(void *,size_t);
 typedef union native_string {void *align;unsigned char bytes[48];} native_string;
 typedef struct grid_native_entry {
     sh_grid_size size; /* kind 0 for a bundle module; xyz[2] its height */
-    int state; /* 1 constructing, 2 ready, -1 retained failed native allocation. */
+    int state; /* 1 constructing, 2 ready, -1 failed native allocation, kept */
     void *record;
     union {void *align;unsigned char bytes[128];} palette;
     char module[160]; /* a bundle module's decl name, else empty */
@@ -104,8 +104,7 @@ static int grid_containing_module(void *collision,const float *point)
 {
     int result=g_containing_module(collision,point);
     if(result!=-1||!g_editor||collision!=g_editor+0x20550)return result;
-    /* Every read below is of engine state that can be mid-change; a fault
-     * keeps the native answer. */
+    /* Every read below is of engine state that can be mid-change; a fault keeps the native answer. */
     __try {return grid_containing_module_tall(collision,point,result);}
     __except(EXCEPTION_EXECUTE_HANDLER){return result;}
 }
@@ -131,9 +130,8 @@ static int grid_containing_module_tall(void *collision,const float *point,int re
         for(k=0;k<3;++k)if(!isfinite(bounds[k])||!isfinite(bounds[k+3])||
             point[k]<bounds[k]||point[k]>bounds[k+3])break;
         if(k!=3)continue;
-        /* Native containment requires opposing hits on the same room, but its
-         * fixed 6000-unit rays cannot reach a tall room's ceiling or floor.
-         * Keep that collision test and extend it only for an admitted variant. */
+        /* Native containment requires opposing hits on the same room, but its fixed 6000-unit rays cannot reach a
+         * tall room's ceiling or floor; the test is kept and extended only for an admitted variant. */
         reach=fmaxf(6000,bounds[5]-bounds[2]+16);
         memcpy(end,point,sizeof end);end[2]+=reach;
         g_module_ray(collision,&up,point,end,-1,*(void**)collision,*(int*)((char*)collision+8));
@@ -157,9 +155,8 @@ static unsigned char grid_build_collision(void *collision,void *map,int instance
         }
     } __except(EXCEPTION_EXECUTE_HANDLER){own=0;}
     if(!own)return g_build_collision(collision,map,instance);
-    /* These two resources are cached by a process-lifetime private palette.
-     * Build their native allocations on that same heap and retain only this
-     * palette's collision resources through the map-transition purge. */
+    /* These two resources are cached by a process-lifetime private palette: their native allocations are built on
+     * that heap and only this palette's collision resources are kept through the map-transition purge. */
     if(!sh_process_heap_enter(&g_heap,&heap))return 0;
     __try {
         result=g_build_collision(collision,map,instance);
@@ -173,11 +170,6 @@ static unsigned char grid_build_collision(void *collision,void *map,int instance
     return result;
 }
 
-static void *clean(const sig_result *r,size_t n,const char *name)
-{
-    size_t i;for(i=0;i<n;++i)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)
-        return (void*)r[i].addr;return NULL;
-}
 static unsigned char *read_asset(void *context,const char *name,size_t *length)
 {(void)context;return sh_overrides_read_engine_resource(name,length);}
 static void release_asset(void *context,void *bytes)
@@ -209,16 +201,14 @@ static int catalog(const char *logical,int grid)
         g_ctor(&source,path);registered=g_register(r,&source,NULL);g_dtor(&source);
         if(!registered||!g_source(manager,logical)){backend_log("GRID: module catalog source registration failed");return 0;}
     }
-    /* Runtime source registration does not guarantee a live object after the
-     * engine switches to its compiled-resource existence probe. The provider
-     * preflight and registered source authorize materializing this identity. */
+    /* Runtime source registration does not guarantee a live object once the engine uses its compiled-resource
+     * existence probe; the provider preflight and registered source authorize materializing this identity. */
     decl=g_decl(manager,logical,0);if(!decl)decl=g_decl(manager,logical,1);
     if(!decl){backend_log("GRID: module catalog lookup failed");return 0;}
     state=*((unsigned char*)decl+0x2c);
-    /* Create-if-missing can leave an empty default object at runtime. This
-     * identity belongs to a new private palette with no consumers yet, so it
-     * can safely take the native generic source load before admission. Never
-     * tear down an accepted catalog or a stock room's catalog here. */
+    /* Create-if-missing can leave an empty default object at runtime. This identity belongs to a new private palette
+     * with no consumers, so it can take the native generic source load before admission; an accepted catalog or a
+     * stock room's catalog is never torn down here. */
     if(!(state&1)&&*(int*)((unsigned char*)decl+0x118)==0&&
        *(int*)((unsigned char*)decl+0x130)==0){
         *(unsigned int*)((unsigned char*)decl+0x28)=4;
@@ -243,12 +233,9 @@ static void *end_record(void *palette)
     unsigned char *p=(unsigned char*)palette;int n=*(int*)(p+0x18);
     return *(unsigned char**)(p+0x10)+(size_t)n*0x98;
 }
-/* Native FindModule (13954591 VK 0x1212D20) is a lower_bound over the whole
- * record list followed by one exact comparison, so it assumes the list is in
- * name order. The Blueprint Add tool sorts that same list in place by theme,
- * portal type and its ribbon mode, and the order persists until a map load
- * sorts it by name again. Find this adapter's own records by exact name over
- * every record instead, so the editor's sort state can never hide a room. */
+/* Native FindModule (13954591 VK 0x1212D20) is a lower_bound over the whole record list, so it assumes name order;
+ * the Blueprint Add tool re-sorts that list by theme, portal type and ribbon mode until a map load sorts it by name,
+ * so this adapter finds records by exact name over every record. */
 static void *palette_find(void *palette,const char *name)
 {
     unsigned char *p=(unsigned char*)palette,*records,*record,*wrapper,*decl;const char *key;int n,i;
@@ -265,12 +252,9 @@ static void *palette_find(void *palette,const char *name)
 static const char *g_step;
 #define REFUSE(step) do{g_step=(step);return NULL;}while(0)
 static void log_census(const char *label,const unsigned char *wrapper);
-/* Load one module into a private one-module palette with the editor palette's
- * own loader: the native LoadSnapModule path (VK 0x141213860 / GL 0x141212c70)
- * names the render model maps/modules/palettes/<palette_name>/<decl path>.bmodel
- * and finds the snapModuleInfo by the decl path. `grid` 1 for a Grid Room
- * variant (its catalog must have one floor and four walls), 0 for a bundle
- * module named `module`. Engine thread. */
+/* Loads one module into a private one-module palette with the editor palette's own loader (native LoadSnapModule, VK
+ * 0x141213860 / GL 0x141212c70), naming the render model maps/modules/palettes/<palette_name>/<decl path>.bmodel.
+ * `grid` 1 is a Grid Room variant (one floor, four walls), 0 a bundle module named `module`. Engine thread. */
 static void *load_private(void *palette,const sh_grid_size *size,const char *module,
     unsigned char *stock_wrapper,const char *palette_name,const char *variant,int grid)
 {
@@ -287,8 +271,8 @@ static void *load_private(void *palette,const sh_grid_size *size,const char *mod
         g_step="module catalog declaration (see the previous GRID line)";
         if(!catalog(logical,grid))__leave;
         p=entry->palette.bytes;
-        /* Same empty list construction as the editor's module palette. The
-         * private palette never enters a stock array or a stock destructor. */
+        /* The same empty list construction as the editor's module palette; the private palette never enters a stock
+         * array or a stock destructor. */
         *(void**)p=*(void**)palette;
         *(unsigned*)(p+0x20)=*(unsigned*)(p+0x38)=
             *(unsigned*)(p+0x60)=*(unsigned*)(p+0x78)=0x50000;
@@ -331,8 +315,8 @@ static void *load_private(void *palette,const sh_grid_size *size,const char *mod
     return result;
 }
 /* A Grid Room of `size`: the variant named by its size, or (`module` not NULL) a mod module that stands in as that
- * room under its own name (D-A30, R-DS6), whose derived files the asset layer answers with the room's
- * (grid_room_asset.h sh_grid_asset_standin_name). */
+ * room under its own name, whose derived files the asset layer answers with the room's (grid_room_asset.h
+ * sh_grid_asset_standin_name). */
 static void *create_room(void *palette,const sh_grid_size *size,const char *module)
 {
     unsigned i;unsigned char *stock_record,*stock_wrapper;
@@ -343,8 +327,8 @@ static void *create_room(void *palette,const sh_grid_size *size,const char *modu
         (module?!_stricmp(g_entries[i].module,module):!g_entries[i].module[0])){
         if(g_entries[i].state==2)return g_entries[i].record;
         REFUSE("variant cache: an earlier construction of this size failed in this session");}
-    /* Reload admission runs before the editor becomes active. The palette and
-     * stock wrapper, plus the main-thread heap scope, establish readiness. */
+    /* Reload admission runs before the editor becomes active; the palette, the stock wrapper and the main-thread heap
+     * scope establish readiness. */
     if(g_count==GRID_NATIVE_CAP)REFUSE("variant cache full");
     if(palette!=g_editor+0x206c0)REFUSE("lookup is not on the editor module palette");
     snprintf(stock,sizeof stock,"%s.decl",sh_grid_stock_name(size->kind));
@@ -406,12 +390,9 @@ int sh_grid_module_logical(const char *name,char *out,size_t cap)
     memcpy(out,name+13,n-18);out[n-18]=0;
     return 1;
 }
-/* A bundle module: a snapModule decl a mod bundle serves (modserve.c). It takes
- * the Grid Room variant route: a private one-module palette loaded with the
- * native loader, never an entry in the stock palette's arrays, retained for the
- * process. The stock palette's first record lends the loader its context
- * (wrapper +0x90) and its palette group: every stock module's render model is
- * under maps/modules/palettes/mega_blessed/, so a bundle module's is
+/* A bundle module: a snapModule decl a mod bundle serves (modserve.c), loaded through the Grid Room variant route into
+ * a private one-module palette kept for the process, never into the stock palette's arrays. The stock palette's first
+ * record lends the loader its context (wrapper +0x90) and group; the render model is
  * maps/modules/palettes/mega_blessed/<decl path without maps/modules/>.bmodel. */
 static void *create_bundle(void *palette,const char *name)
 {
@@ -432,9 +413,8 @@ static void *create_bundle(void *palette,const char *name)
     slash=strchr(render+22,'/');len=(size_t)(slash-render-22);
     if(!len||len>=sizeof palette_name)REFUSE("stock template: unexpected palette name");
     memcpy(palette_name,render+22,len);palette_name[len]=0;
-    /* Bundle files are checked in the serving index, never read here: the
-     * Grid preflight reads through sh_grid_asset_open, which claims only
-     * Grid Room names, and a multiplayer map's collision alone is 48 MB. */
+    /* Bundle files are checked in the serving index, never read here: the Grid preflight reads through
+     * sh_grid_asset_open, which claims only Grid Room names, and a multiplayer map's collision alone is 48 MB. */
     if(!g_module_served)REFUSE("no serving index is bound");
     snprintf(info,sizeof info,"generated/decls/snapmoduleinfo/%s.decl",logical);
     if(g_module_served(info,0)!=1)REFUSE("its snapModuleInfo is not served");
@@ -448,7 +428,7 @@ static void *find_variant(void *palette,const char *name)
     sh_grid_size size;void *record=NULL;int bundle=0,standin=0;const char *step;
     if(!sh_grid_parse_name(name,&size)){
         char logical[160];
-        /* A mod module whose unit is absent stands in as the Grid Room of its recorded size (D-A30). */
+        /* A mod module whose unit is absent stands in as the Grid Room of its recorded size. */
         standin=g_standin&&name&&sh_grid_module_logical(name,logical,sizeof logical)&&g_standin(logical,&size);
         bundle=!standin&&g_module_served&&name&&g_module_served(name,1)==1;
         if(!bundle&&!standin)return g_find(palette,name);
@@ -461,8 +441,8 @@ static void *find_variant(void *palette,const char *name)
         backend_log("GRID: native variant creation faulted; disabled");}
     InterlockedExchange(&g_busy,0);
     if((bundle||standin)&&!record){
-        /* One line per module and cause: the membership probe and the lookup
-         * ask the same name several times during one map load. */
+        /* One line per module and cause: the membership probe and the lookup ask the same name several times during a
+         * map load. */
         static char last[400];char line[400];
         step=g_step?g_step:"the native module loader";
         snprintf(line,sizeof line,"MODS: module %s refused: %s",name,step);
@@ -472,20 +452,14 @@ static void *find_variant(void *palette,const char *name)
 }
 static unsigned char has_variant(void *palette,const char *name)
 {
-    /* The native membership probe uses a separate binary search and therefore
-     * bypasses FindModule. Use the same lookup for both admission and copying;
-     * otherwise reload removes the serialized instance before conversion. */
+    /* The native membership probe uses a separate binary search and bypasses FindModule, so admission and copying use
+     * the same lookup; otherwise reload removes the serialized instance before conversion. */
     return (unsigned char)(find_variant(palette,name)!=end_record(palette));
 }
-/* Module entity templates (13954591, VK FUN_14120e790): wrapper+0x88 owns four
- * template lists (+0x00/+0x18/+0x30/+0x48; stride 0x6f0, definition at +0x150)
- * keyed by the editor entity palette category (entry +0x3c8 = 0..3), a list of
- * module entities whose inherit has no editor palette entry (+0x60, count
- * +0x68, stride 0xa8) and a bare counter at +0x78 for category-4 entries, which
- * get no template. The modern room's five static fill lights are category 4
- * (live: 41+0+8+3 templates, 0 palette misses, 255 category 4 = 307 entities).
- * Loading a saved map instantiates only the +0x48 list into each room
- * (VK FUN_141200220). Describe it for live diagnosis. */
+/* Module entity templates (13954591, VK FUN_14120e790): wrapper+0x88 owns four template lists (+0x00/+0x18/+0x30/+0x48;
+ * stride 0x6f0, definition +0x150) keyed by editor palette category (entry +0x3c8 = 0..3), a list of module entities
+ * without an editor palette entry (+0x60, count +0x68, stride 0xa8) and a counter at +0x78 for category-4 entries,
+ * which get no template. Loading a saved map instantiates only the +0x48 list (VK FUN_141200220); this prints that. */
 static int census(const unsigned char *wrapper,char *out,size_t capacity)
 {
     const unsigned char *lists;int counts[5],k,i,hollow=0,lights=0,uninstantiated;size_t used;
@@ -550,8 +524,8 @@ void *sh_grid_native_wrapper(const sh_grid_size *size)
     if(!g_find||!g_editor||!sh_grid_name(size,name,sizeof name)){
         backend_log("GRID: variant lookup failed at binding: the module lookup is not installed or the size has no name");return NULL;}
     g_step=NULL;
-    /* Reverting a stock room's dimensions must restore its original identity,
-     * including when the native properties panel cancels its pending edits. */
+    /* Reverting a stock room's dimensions restores its original identity, including when the native properties panel
+     * cancels its pending edits. */
     if(sh_grid_default(size->kind,&stock)&&!memcmp(stock.xyz,size->xyz,sizeof stock.xyz)){
         snprintf(name,sizeof name,"%s.decl",sh_grid_stock_name(size->kind));
         record=palette_find(g_editor+0x206c0,name);
@@ -602,8 +576,8 @@ static int plan_lights(unsigned char *map,int instance,const sh_grid_size *size,
     if(!entities||!keys||!values||*(int*)(map+0x728)<instance+2)return 0;
     start=keys[instance];end=keys[instance+1];
     if(start<0||end<start||end>*(int*)(map+0x710)||end-start>65536)return 0;
-    /* Exact original names and inheritance identify built-in lights. Other
-     * lights, even ones with identical properties, keep their authored values. */
+    /* Exact original names and inheritance identify built-in lights; other lights, even with identical properties,
+     * keep their authored values. */
     snprintf(name,sizeof name,"%s.decl",sh_grid_stock_name(size->kind));
     source=sh_overrides_read_engine_resource(name,&length);
     if(!source||!sh_grid_decl_lights(size,(const char*)source,length,targets,GRID_LIGHT_CAP,&n))goto done;
@@ -613,7 +587,7 @@ static int plan_lights(unsigned char *map,int instance,const sh_grid_size *size,
             def=*(unsigned char**)(allocation+0x158);if(!def)continue;
             original=*(const char**)(def+8);inherit=*(const char**)(def+0x58);
             if(!original||!inherit||strcmp(original,targets[k].name)||strcmp(inherit,targets[k].inherit))continue;
-            if(id!=-1)goto done; /* Ambiguous ownership must not modify a clone. */
+            if(id!=-1)goto done; /* ambiguous ownership never modifies a clone */
             id=candidate;body=allocation+8;
         }
         if(id!=-1){grid_light_change *c=&changes[(*count)++];
@@ -622,8 +596,8 @@ static int plan_lights(unsigned char *map,int instance,const sh_grid_size *size,
             if(!g_entity_tree||!g_apply_tree||!g_read_properties||!g_tree_vec||!g_tree_float||
                !g_tree_destroy||!g_tree_free||!(reflect=sh_typeinfo_get_reflect()))goto done;
             g_entity_tree(body,&c->old_tree);g_entity_tree(body,&c->new_tree);
-            /* Exactly the fields the generated variant declaration writes, so
-             * a resized room and the same room after a map load agree. */
+            /* Exactly the fields the generated variant declaration writes, so a resized room and the same room after a
+             * map load agree. */
             if(!c->old_tree||!c->new_tree||(c->target.has_radius&&!g_tree_vec(c->new_tree,"lightRadius",c->target.radius,reflect))||
                !g_tree_vec(c->new_tree,"lightCenter",c->target.center,reflect))goto done;
             if(c->target.has_visible&&!g_tree_float(c->new_tree,"maxVisibleRange",c->target.visible_range,reflect))goto done;
@@ -631,13 +605,9 @@ static int plan_lights(unsigned char *map,int instance,const sh_grid_size *size,
         }
     }
     {char message[320];
-        /* The editor instantiates only category-3 module templates: the probe
-         * and the ceiling light. The modern room's five static fill lights are
-         * category-4 palette entries with no template ("category 4 without
-         * template" in the census), so they exist only in the room resource and
-         * take their scaled values from the generated variant when the map is
-         * next loaded or played. A room that owns none of its built-in lights
-         * was loaded without its module templates (see "templates" lines). */
+        /* The editor instantiates only category-3 module templates (the probe and ceiling light); the modern room's
+         * five fill lights are category 4 and exist only in the room resource, so they take scaled values on the next
+         * load or Play. A room that owns none of its built-in lights was loaded without its module templates. */
         if(*count)snprintf(message,sizeof message,
             "GRID: %d of %u built-in lights are editor entities in this room and were updated; the rest have no editor template (category 4, expected) and follow the room on the next load or Play",
             *count,(unsigned)n);
@@ -653,16 +623,15 @@ static int apply_light(void *edit_data,grid_light_change *light,int restore)
     unsigned char *body=g_edit_entity(edit_data,light->id);void *tree=restore?light->old_tree:light->new_tree;
     int k;if(!body||!tree)return 0;
     g_set_transform(body,restore?light->before:light->after);
-    /* GetTypeInfoTree/ApplyTypeInfoTree preserve the complete native definition.
-     * ReadProperties refreshes the light's cached render data from that tree. */
+    /* GetTypeInfoTree/ApplyTypeInfoTree preserve the complete native definition; ReadProperties refreshes the
+     * light's cached render data from that tree. */
     g_apply_tree(body,tree);g_read_properties(body,tree);
     if(!restore)for(k=0;k<3;++k){
         if((light->target.has_radius&&fabsf(*(float*)(body+0xa0+4*k)-light->target.radius[k])>.01f)||
            fabsf(*(float*)(body+0xac+4*k)-light->target.center[k])>.01f){
             char message[200];
-            /* The probe and dynamic point readback layout is verified.
-             * Other built-in light kinds are committed through the same tree;
-             * a readback difference there is reported, not treated as fatal. */
+            /* The probe and dynamic point readback layout is known; other built-in light kinds are committed through
+             * the same tree, and a readback difference there is reported, not fatal. */
             if(strcmp(light->target.inherit,"light/probe")&&
                strcmp(light->target.inherit,"snapmaps/light/dynamic_point")){
                 snprintf(message,sizeof message,"GRID: built-in light %s committed; cached readback differs",light->target.name);
@@ -679,8 +648,7 @@ typedef struct grid_move {
     int assigned;
 } grid_move;
 
-/* One diagnosable sentence per refused or limited edit. Engine-thread only;
- * g_edit_busy serializes every writer. */
+/* One diagnosable sentence per refused or limited edit. Engine thread only; g_edit_busy serializes every writer. */
 static char g_reason[320],g_note[640];
 static void note(const char *message)
 {
@@ -695,9 +663,8 @@ static const char *say(const char *format,...)
     return g_reason;
 }
 
-/* Solve translations on the existing portal graph. The edited room stays at
- * its origin; each connected branch follows the doorway that moved. A cycle
- * must impose the same translation at every visit, or no edit is committed. */
+/* Solves translations on the existing portal graph: the edited room stays at its origin and each connected branch
+ * follows the doorway that moved. A cycle must impose the same translation at every visit, or no edit is committed. */
 static int plan_connected_inner(unsigned char *map,int instance,void *wrapper,
                           grid_move *moves,int n,int *old_connections,int ports,
                           const char **reason,int policy)
@@ -705,9 +672,8 @@ static int plan_connected_inner(unsigned char *map,int instance,void *wrapper,
     int *keys=*(int**)(map+0x7d8),*owners=NULL,*queue=NULL;
     unsigned char *records=*(unsigned char**)(map+0x750);
     int i,j,k,head=0,tail=0,ok=0,connected=0;
-    /* Module records and their portal ranges are copied together with the
-     * map snapshot; native reconnect rebuilds only the connection values. A
-     * disagreement means the map changed under the edit: refuse, never guess. */
+    /* Module records and their portal ranges are copied together with the map snapshot; native reconnect rebuilds
+     * only the connection values. A disagreement means the map changed under the edit, and the edit is refused. */
     if(!keys||*(int*)(map+0x7e0)!=n+1||keys[0]!=0||keys[n]!=ports){
         *reason=say("GRID: module and portal tables disagree (%d modules, %d portal keys, %d portals); dimensions unchanged",
             n,*(int*)(map+0x7e0),ports);return 0;}
@@ -764,9 +730,8 @@ static int plan_connected_inner(unsigned char *map,int instance,void *wrapper,
         g_world_bounds(moves[i].after,moves[i].bounds,(float*)(module+0xa0));
         for(k=0;k<6;++k)if(!isfinite(moves[i].bounds[k]))goto done;
     }
-    /* Native module bounds are axis-aligned after their quarter-turn rotation.
-     * Preserve existing overlaps, but never create or deepen one while moving
-     * a connected assembly. Isolated room edits keep native placement policy. */
+    /* Native module bounds are axis-aligned after their quarter-turn rotation. Existing overlaps are kept but never
+     * created or deepened while moving a connected assembly; isolated room edits keep native placement policy. */
     if(policy&&connected)for(i=0;i<n;++i)for(j=i+1;j<n;++j){
         int overlap=1,deeper=0;
         if(i!=instance&&j!=instance&&!memcmp(moves[i].delta,moves[j].delta,12))continue;
@@ -784,9 +749,8 @@ done:free(queue);free(owners);return ok;
 static float grid_world_limit(void)
 {
     float limit=g_environment_bounds?*g_environment_bounds:0;
-    /* Native assembled navigation uses signed-short area/reachability
-     * coordinates too. Reserve the largest admitted Grid Room outset:
-     * modern X includes a 32-unit wall plus the 64-unit agent radius. */
+    /* Native assembled navigation uses signed-short area and reachability coordinates too, so the largest admitted
+     * Grid Room outset is reserved: modern X includes a 32-unit wall plus the 64-unit agent radius. */
     return isfinite(limit)&&limit>0?fminf(limit,32767-96):0;
 }
 static int inside_environment(const grid_move *moves,int n)
@@ -797,10 +761,9 @@ static int inside_environment(const grid_move *moves,int n)
         if(moves[i].bounds[k]<-limit||moves[i].bounds[k+3]>limit)return 0;
     return 1;
 }
-/* The world box a module may occupy after an edit: the map boundary, widened
- * to wherever that module already reaches. An edit never creates or extends
- * a boundary crossing, but an assembly that already crosses (a lowered cvar,
- * an older map) can still be edited, and shrinking it stays possible. */
+/* The world box a module may occupy after an edit: the map boundary, widened to wherever that module already reaches.
+ * An edit never creates or extends a boundary crossing, but an assembly that already crosses (a lowered cvar, an
+ * older map) can still be edited and shrunk. */
 static void allowed_boxes(const grid_move *current,int n,float limit,float (*allowed)[6])
 {
     int i,k;
@@ -829,8 +792,8 @@ static int plan_connected(unsigned char *map,int instance,void *wrapper,
             module,bound<3?"min":"max","xyz"[bound%3]);return 0;}
     return 1;
 }
-/* A bounded spatial view lets the native portal/bounds helpers evaluate sizes
- * before any asset is materialized. No engine object retains these views. */
+/* A bounded spatial view lets the native portal and bounds helpers evaluate sizes before any asset is materialized;
+ * no engine object retains these views. */
 static int plan_size(unsigned char *map,int instance,const sh_grid_size *before,
                      const sh_grid_size *size,grid_move *moves,int n,int *links,int ports,
                      const char **reason)
@@ -868,8 +831,8 @@ static void describe_limit(char *out,size_t capacity,int instance,int module,int
         module==instance?"the edited room":"connected module",module,"xyz"[bound%3],reach,
         fabsf(edge)>limit+.5f?"its existing extent":"the map boundary",edge);
 }
-/* BuildRenderWorld drops pieces outside their module only while
- * sm_testPortalSystem (default 1, command line only) is set. */
+/* BuildRenderWorld drops pieces outside their module only while sm_testPortalSystem (default 1, command line only)
+ * is set. */
 static int area_cull(void)
 {
     int value=1;
@@ -877,15 +840,13 @@ static int area_cull(void)
     if(g_portal_cvar&&sh_engine_cvar_read_int(g_portal_cvar,&value))return value!=0;
     return 1;
 }
-/* Set by world_area_cell.c once Play's world-area cell size is redirected:
- * a map over 8192 areas at 512 units then builds with coarser cells, so a
- * resize is limited only when no cell size up to SH_RENDER_AREA_CELL_MAX fits. */
+/* Set by world_area_cell.c once Play's world-area cell size is redirected: a map over 8192 areas at 512 units then
+ * builds with coarser cells, so a resize is limited only when no cell size up to SH_RENDER_AREA_CELL_MAX fits. */
 static int g_adaptive_cells;
 void sh_grid_native_set_adaptive_cells(int live){g_adaptive_cells=live!=0;}
 static float area_cell_max(void){return g_adaptive_cells?SH_RENDER_AREA_CELL_MAX:SH_RENDER_AREA_CELL;}
-/* The render areas and nodes the map would have with the room at size, with
- * the cell size Play would choose. 1 counted, 0 refused by the planner (with
- * *reason), -1 not countable. */
+/* The render areas and nodes the map would have with the room at size, with the cell size Play would choose.
+ * 1 counted, 0 refused by the planner (with *reason), -1 not countable. */
 static int count_areas(unsigned char *map,int instance,const sh_grid_size *before,const sh_grid_size *size,
                        grid_move *moves,int n,int *links,int ports,const char **reason,
                        const float (*allowed)[6],sh_render_cell_choice *out)
@@ -898,8 +859,8 @@ static int count_areas(unsigned char *map,int instance,const sh_grid_size *befor
     ok=sh_render_area_cell_choose((const float(*)[6])boxes,n,area_cull(),area_cell_max(),out);free(boxes);
     return ok?1:-1;
 }
-/* Loads at some cell size, or adds no area or node to a map that is already
- * over the limit (compared at the coarsest size, the one Play would use). */
+/* True when the map loads at some cell size, or the edit adds no area or node to a map already over the limit
+ * (compared at the coarsest size, the one Play would use). */
 static int areas_admitted(const sh_render_cell_choice *count,const sh_render_cell_choice *base)
 {
     return count->fits||(count->coarsest.areas<=base->coarsest.areas&&count->coarsest.nodes<=base->coarsest.nodes);
@@ -914,14 +875,9 @@ static const char *cells_fallback(void)
 {
     return g_adaptive_cells?"":"; the world-area cell size cannot follow the map on this build";
 }
-/* Limit the axis just fitted to the map boundary so the map keeps at most
- * SH_RENDER_AREA_MAX world areas and SH_RENDER_NODE_MAX area nodes at the
- * cell size Play would choose; an over-limit map loads with a ParseAreas or
- * ParseNodes error that leaves the native loading screen waiting forever.
- * With the adaptive cell size this only binds for layouts that do not fit
- * even at the coarsest size. The count is a step function of the size, so
- * the largest admitted value is found by bisection and every value taken is
- * counted. Returns 0 only for a planner refusal. */
+/* Limits the axis just fitted so the map keeps at most SH_RENDER_AREA_MAX world areas and SH_RENDER_NODE_MAX area
+ * nodes at the cell size Play would choose (an over-limit map hangs the native loading screen). The count is a step
+ * function of the size, so the largest admitted value is found by bisection; returns 0 only for a planner refusal. */
 static int limit_areas(unsigned char *map,int instance,const sh_grid_size *before,sh_grid_size *accepted,
                        int axis,unsigned start,unsigned want,grid_move *moves,int n,int *links,int ports,
                        const float (*allowed)[6],const char **reason,int *reported)
@@ -964,8 +920,8 @@ static int limit_areas(unsigned char *map,int instance,const sh_grid_size *befor
     note(message);
     return 1;
 }
-/* After a size change, say which world-area cell size Play will use when
- * the map needs (or needed) more than the native 512. */
+/* After a size change, says which world-area cell size Play will use when the map needs (or needed) more than the
+ * native 512. */
 static void report_cells(unsigned char *map,int instance,const sh_grid_size *before,const sh_grid_size *after,
                          grid_move *moves,int n,int *links,int ports)
 {
@@ -983,8 +939,8 @@ static void report_cells(unsigned char *map,int instance,const sh_grid_size *bef
     else return; /* limit_areas already said why the map cannot load. */
     note(message);
 }
-/* Play's cell choice for the map as it is: one GridWorldBounds box per
- * placed module record. Engine thread. Returns 0 when it cannot be counted. */
+/* Play's cell choice for the map as it is: one GridWorldBounds box per placed module record. Engine thread. Returns 0
+ * when it cannot be counted. */
 int sh_grid_native_render_cell(void *map_object,sh_render_cell_choice *out)
 {
     unsigned char *map=(unsigned char*)map_object,*records,*wrapper,*module;
@@ -1012,12 +968,9 @@ void *sh_grid_native_editor_map(void)
     __try {if(g_editor[8])map=*(void**)(g_editor+0x204c8);} __except(EXCEPTION_EXECUTE_HANDLER) {map=NULL;}
     return map;
 }
-/* Fit a requested size to the map boundary. Only the axes the request
- * changes are ever altered; each moves from its current value toward the
- * request as far as the boundary admits, then as far as the render area
- * limit admits. Every limited axis is logged with the limiting module,
- * coordinate and limit. Returns 0 only for a refusal (with *reason); a
- * request limited to the current size returns 1. */
+/* Fits a requested size to the map boundary: each changed axis moves from its current value toward the request as far
+ * as the boundary and then the render area limit admit, and every limited axis is logged. Returns 0 only for a refusal
+ * (with *reason); a request limited to the current size returns 1. */
 static int fit_size(unsigned char *map,int instance,const sh_grid_size *before,
                     sh_grid_size *size,const char **reason,float (*allowed)[6])
 {
@@ -1038,9 +991,8 @@ static int fit_size(unsigned char *map,int instance,const sh_grid_size *before,
             i==instance?"the edited room":"connected module",i,"xyz"[k%3],allowed[i][k],limit);
         note(message);
     }
-    /* Shrinking axes first: a request that grows one axis while shrinking
-     * another is then fitted against the smaller layout, which normally
-     * leaves more room (map bounds and render areas) for the grown axis. */
+    /* Shrinking axes go first: a request that grows one axis while shrinking another is then fitted against the
+     * smaller layout, which leaves more room (map bounds and render areas) for the grown axis. */
     for(pass=0;pass<6;++pass){
         double t=1;int module=-1,bound=-1,grow;unsigned value,start,want;sh_grid_size probe=accepted;
         axis=pass%3;start=accepted.xyz[axis];want=size->xyz[axis];
@@ -1100,15 +1052,13 @@ static int owned_entity(unsigned char *map,int instance,int id)
 static void refresh_placement_surfaces(unsigned char *map)
 {
     void *surfaces=*(void**)(g_editor+0x20548),*world=*(void**)(g_editor+0x198);
-    /* The native camera normally rebuilds these on Object Mode entry. A
-     * dimension edit replaces module geometry without re-entering that mode.
-     * Keep its placement rays and glowing surface display on the same module
+    /* The native camera rebuilds these on Object Mode entry, but a dimension edit replaces module geometry without
+     * re-entering that mode, so the placement rays and glowing surface display are rebuilt for the same module
      * revision. Blueprint leaves an uninitialized display to the native entry. */
     if(surfaces&&world&&*(int*)((unsigned char*)surfaces+8)>0)
         g_refresh_surfaces(surfaces,map,world);
 }
-/* The editor map's module-instance index of `record`, or -1 when it is not
- * one of that map's 0x98-byte records. */
+/* The editor map's module-instance index of `record`, or -1 when it is not one of that map's 0x98-byte records. */
 int sh_grid_native_record_instance(const void *record)
 {
     int index=-1;
@@ -1122,11 +1072,9 @@ int sh_grid_native_record_instance(const void *record)
     } __except(EXCEPTION_EXECUTE_HANDLER){index=-1;}
     return index;
 }
-/* Rebuild the editor's placement surfaces for the current map, as a dimension
- * edit does, so a display model whose name changed is loaded. Engine thread
- * only: the native rebuild allocates its display list and loads models, so it
- * runs inside a verified process-heap scope, never on a map heap Play frees.
- * 1 rebuilt, 0 nothing built yet (native Object Mode entry builds it), -1 refused. */
+/* Rebuilds the editor's placement surfaces for the current map, as a dimension edit does, so a renamed display model
+ * loads. Engine thread only, inside a verified process-heap scope because the native rebuild allocates its display
+ * list; returns 1 rebuilt, 0 nothing built yet (Object Mode entry builds it), -1 refused. */
 int sh_grid_native_refresh_placement(void)
 {
     sh_process_heap_scope heap={0};int result=-1;
@@ -1148,8 +1096,8 @@ static const char *grid_bare(const char *m)
 {
     return strncmp(m,"GRID: ",6)?m:m+6;
 }
-/* What the player reads for an edit's log line: a success says the size, a
- * refusal says "Room size not changed:" and why in plain words. */
+/* What the player reads for an edit's log line: a success says the size, a refusal says "Room size not changed:" and
+ * why in plain words. */
 static void grid_plain(const char *m,char *out,size_t cap)
 {
     static const struct {const char *has,*say;} plain[]={
@@ -1186,7 +1134,7 @@ static void grid_plain(const char *m,char *out,size_t cap)
     for(i=0;i<sizeof plain/sizeof plain[0];++i)if(strstr(bare,plain[i].has)){
         _snprintf_s(out,cap,_TRUNCATE,"Room size not changed: %s.",plain[i].say);return;}
     {
-        /* The rest already read as a reason; drop the engine words around it. */
+        /* The rest already reads as a reason, so the engine words around it are dropped. */
         char text[320];char *cut;
         strncpy_s(text,sizeof text,bare,_TRUNCATE);
         if(!strncmp(text,"dimension edit refused; ",24))memmove(text,text+24,strlen(text+24)+1);
@@ -1234,8 +1182,8 @@ int sh_grid_native_apply(void *edit_data,int instance,const sh_grid_size *size)
     if(InterlockedCompareExchange(&g_edit_busy,1,0)){finish("GRID: dimension edit refused; another dimension edit is in progress");return 0;}
     __try {
         __try {
-            /* The palette factory and entity commits allocate through native
-             * helpers. A verified heap push also rejects an off-main caller. */
+            /* The palette factory and entity commits allocate through native helpers; a verified heap push also rejects
+             * an off-main caller. */
             g_note[0]=0;
             reason="GRID: dimension edit refused; not on the engine thread";
             if(!sh_process_heap_enter(&g_heap,&heap))__leave;
@@ -1248,10 +1196,9 @@ int sh_grid_native_apply(void *edit_data,int instance,const sh_grid_size *size)
             if(*(void**)(g_editor+0x204c8)!=map)__leave;
             records=*(unsigned char**)(map+0x750);
             n=*(int*)(map+0x758);if(n<1||n>4096||!records)__leave;
-            /* Native EditorFrame rebuilds every portal connection and placement
-             * flag from the current module records once per frame. Rebuild them
-             * here too, so a module added or deleted earlier in this frame can
-             * never leave a stale neighbour in the plan. */
+            /* Native EditorFrame rebuilds every portal connection and placement flag from the current module records
+             * once per frame; they are rebuilt here too, so a module added or deleted earlier in this frame cannot
+             * leave a stale neighbour in the plan. */
             g_reconnect(map);records=*(unsigned char**)(map+0x750);
             valid=(unsigned char*)malloc((size_t)n);allowed=calloc((size_t)n,sizeof *allowed);
             reason="GRID: dimension edit refused; out of memory";
@@ -1302,16 +1249,15 @@ int sh_grid_native_apply(void *edit_data,int instance,const sh_grid_size *size)
             }
             reason="GRID: built-in light update failed; restoring the previous room dimensions";
             for(i=0;i<light_count;++i){light_attempted=i+1;if(!apply_light(edit_data,&lights[i],0))__leave;}
-            /* Native dirty bits make the preview compare its old render name
-             * against this wrapper, then destroy/recreate that one display. */
+            /* Native dirty bits make the preview compare its previous render name against this wrapper, then destroy and
+             * recreate that one display. */
             for(i=0;i<n;++i)if(memcmp(moves[i].before,moves[i].after,0x98)){
                 replaced=1;g_replace(map,(unsigned)i,moves[i].after);
             }
             g_reconnect(map);
             records=*(unsigned char**)(map+0x750);
-            /* A placement that was valid must stay valid. One that native code
-             * already marked invalid (outside the boundary or overlapping)
-             * before this edit does not block an edit that does not worsen it. */
+            /* A valid placement must stay valid; one native code already marked invalid (outside the boundary or
+             * overlapping) does not block an edit that does not worsen it. */
             for(i=0;i<n;++i)if(moves[i].assigned&&valid[i]&&!records[(size_t)i*0x98+0x30]){
                 reason=say("GRID: native placement of module %d became invalid; restoring the previous layout",i);__leave;}
             reason="GRID: native portal connection changed; restoring the previous layout";
@@ -1334,8 +1280,8 @@ int sh_grid_native_apply(void *edit_data,int instance,const sh_grid_size *size)
                         if(replaced)refresh_placement_surfaces(map);
                     }
                 } __except(EXCEPTION_EXECUTE_HANDLER){restored=0;}
-                /* Only a failed restoration latches: the map may then disagree
-                 * with this adapter. Every refusal before mutation is recoverable. */
+                /* Only a failed restoration latches, since the map may then disagree with this adapter; every refusal
+                 * before mutation is recoverable. */
                 if(!restored){InterlockedExchange(&g_edit_faulted,1);
                     backend_log("GRID: edit recovery incomplete; further dimension edits disabled");}
             }
@@ -1382,19 +1328,16 @@ int sh_grid_native_selected(int instance,const float *requested,sh_grid_size *ou
     return 1;
 }
 /* GridReconnectPortals reads the environment-bounds cvar's float with a RIP-relative `movss xmm6,[rip+d]` at +0x8f
- * (both native reconnect implementations): the cvar's address, NULL when the bytes there are not that load. The
- * install and the image test run this same decode. */
+ * (both native reconnect implementations): returns the cvar's address, NULL when the bytes there are not that load. */
 const float *sh_grid_native_decode_environment_bounds(const void *reconnect)
 {
     const unsigned char *p=(const unsigned char*)reconnect;int32_t displacement;
     if(!p||memcmp(p+0x8f,"\xf3\x0f\x10\x35",4))return NULL;
     memcpy(&displacement,p+0x93,4);return (const float*)(p+0x97+displacement);
 }
-/* The native re-apply routine owns the same tree: it gets it from GridEntityTree,
- * applies it, then destroys it and deletes its 0x48 bytes. Bind its destructor and
- * delete only when its two leading calls reach the resolved getter and applier.
- * Its live destroy/free check stays open: no live check has reached it yet.
- * 1 with *destroy and *release set; 0 (both untouched) when any check fails. */
+/* The native re-apply routine owns the same tree: it gets it from GridEntityTree, applies it, then destroys it and
+ * deletes its 0x48 bytes. Its destructor and delete are bound only when its two leading calls reach the resolved
+ * getter and applier. 1 with *destroy and *release set; 0 (both untouched) when any check fails. */
 int sh_grid_native_decode_reapply(const void *reapply,const void *entity_tree,const void *apply_tree,
                                   void **destroy,void **release)
 {
@@ -1409,33 +1352,33 @@ int sh_grid_native_decode_reapply(const void *reapply,const void *entity_tree,co
 }
 int sh_grid_native_install(const sig_result *r,size_t n,const uint8_t *base)
 {
-    void *find=clean(r,n,"GridFindModule"),*has=clean(r,n,"GridHasModule");
-    void *collision=clean(r,n,"GridBuildModuleCollision");
-    void *containing=clean(r,n,"GridContainingModule");
+    void *find=sig_pointer(r,n,"GridFindModule"),*has=sig_pointer(r,n,"GridHasModule");
+    void *collision=sig_pointer(r,n,"GridBuildModuleCollision");
+    void *containing=sig_pointer(r,n,"GridContainingModule");
     if(g_find)return hook_is_installed((void*)g_find)&&hook_is_installed(g_has_hook)&&
         hook_is_installed((void*)g_containing_module);
-    g_module_ray=(module_ray_fn)clean(r,n,"GridModuleRay");
-    g_refresh_surfaces=(refresh_surfaces_fn)clean(r,n,"GridRefreshPlacementSurfaces");
-    g_load=(load_module_fn)clean(r,n,"GridLoadModule");g_ctor=(str_ctor_fn)clean(r,n,"IdStrCtor");
-    g_dtor=(str_dtor_fn)clean(r,n,"IdStrDtor");g_anchor=clean(r,n,"DeclRegistryAnchor");
-    g_type=(type_fn)clean(r,n,"DeclTypeByName");g_register=(register_fn)clean(r,n,"DeclRegisterFile");
-    g_source=(source_fn)clean(r,n,"DeclSourceFind");g_decl=(find_decl_fn)clean(r,n,"DeclFind");
-    g_generic_load=(generic_load_fn)clean(r,n,"ResourceGenericLoad");
-    g_replace=(replace_instance_fn)clean(r,n,"GridReplaceInstance");
-    g_reconnect=(reconnect_fn)clean(r,n,"GridReconnectPortals");
+    g_module_ray=(module_ray_fn)sig_pointer(r,n,"GridModuleRay");
+    g_refresh_surfaces=(refresh_surfaces_fn)sig_pointer(r,n,"GridRefreshPlacementSurfaces");
+    g_load=(load_module_fn)sig_pointer(r,n,"GridLoadModule");g_ctor=(str_ctor_fn)sig_pointer(r,n,"IdStrCtor");
+    g_dtor=(str_dtor_fn)sig_pointer(r,n,"IdStrDtor");g_anchor=sig_pointer(r,n,"DeclRegistryAnchor");
+    g_type=(type_fn)sig_pointer(r,n,"DeclTypeByName");g_register=(register_fn)sig_pointer(r,n,"DeclRegisterFile");
+    g_source=(source_fn)sig_pointer(r,n,"DeclSourceFind");g_decl=(find_decl_fn)sig_pointer(r,n,"DeclFind");
+    g_generic_load=(generic_load_fn)sig_pointer(r,n,"ResourceGenericLoad");
+    g_replace=(replace_instance_fn)sig_pointer(r,n,"GridReplaceInstance");
+    g_reconnect=(reconnect_fn)sig_pointer(r,n,"GridReconnectPortals");
     if(g_reconnect){const float *bounds=sh_grid_native_decode_environment_bounds(g_reconnect);
         if(bounds)g_environment_bounds=bounds;}
-    g_edit_entity=(edit_entity_fn)clean(r,n,"GridEditEntity");
-    g_set_transform=(set_transform_fn)clean(r,n,"GridSetEntityTransform");
-    g_portal_bounds=(portal_bounds_fn)clean(r,n,"GridPortalBounds");
-    g_world_bounds=(world_bounds_fn)clean(r,n,"GridWorldBounds");
-    g_entity_tree=(entity_tree_fn)clean(r,n,"GridEntityTree");
-    g_apply_tree=(entity_tree_apply_fn)clean(r,n,"GridApplyEntityTree");
-    g_read_properties=(entity_tree_apply_fn)clean(r,n,"GridReadEntityProperties");
-    g_tree_vec=(tree_vec_fn)clean(r,n,"GridTreeSetVec3");
-    g_tree_float=(tree_float_fn)clean(r,n,"GridTreeSetFloat");
+    g_edit_entity=(edit_entity_fn)sig_pointer(r,n,"GridEditEntity");
+    g_set_transform=(set_transform_fn)sig_pointer(r,n,"GridSetEntityTransform");
+    g_portal_bounds=(portal_bounds_fn)sig_pointer(r,n,"GridPortalBounds");
+    g_world_bounds=(world_bounds_fn)sig_pointer(r,n,"GridWorldBounds");
+    g_entity_tree=(entity_tree_fn)sig_pointer(r,n,"GridEntityTree");
+    g_apply_tree=(entity_tree_apply_fn)sig_pointer(r,n,"GridApplyEntityTree");
+    g_read_properties=(entity_tree_apply_fn)sig_pointer(r,n,"GridReadEntityProperties");
+    g_tree_vec=(tree_vec_fn)sig_pointer(r,n,"GridTreeSetVec3");
+    g_tree_float=(tree_float_fn)sig_pointer(r,n,"GridTreeSetFloat");
     {void *destroy=NULL,*release=NULL;
-        if(sh_grid_native_decode_reapply(clean(r,n,"GridReapplyEntityTree"),(const void*)g_entity_tree,
+        if(sh_grid_native_decode_reapply(sig_pointer(r,n,"GridReapplyEntityTree"),(const void*)g_entity_tree,
                                          (const void*)g_apply_tree,&destroy,&release)){
             g_tree_destroy=(tree_destroy_fn)destroy;g_tree_free=(tree_free_fn)release;}
     }
@@ -1447,9 +1390,8 @@ int sh_grid_native_install(const sig_result *r,size_t n,const uint8_t *base)
         !g_tree_vec||!g_tree_float||!g_tree_destroy||!g_tree_free||!sh_process_heap_bind(&g_heap,r,n,base))return 0;
     /* First five instructions are 16 register/stack-only bytes on both images. */
     g_find=(find_module_fn)hook_prepare(find,(void*)find_variant,16);
-    /* Membership's first 16 bytes include a RIP-relative comparator address.
-     * This ownership trampoline is NEVER executed: has_variant delegates to
-     * the original FindModule for stock names instead. */
+    /* Membership's first 16 bytes include a RIP-relative comparator address, so this ownership trampoline is never
+     * executed: has_variant delegates to the original FindModule for stock names. */
     g_has_hook=hook_prepare(has,(void*)has_variant,16);
     g_build_collision=(build_collision_fn)hook_prepare(collision,(void*)grid_build_collision,21);
     /* The first 19 bytes save registers and reserve stack on both renderers. */

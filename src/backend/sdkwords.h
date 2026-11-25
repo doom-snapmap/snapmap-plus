@@ -1,11 +1,5 @@
-/* sdkwords.h -- every word a mod author writes or reads in the Graphics SDK's data and calls, in one place.
- *
- * The effect, particle, environment and value compilers (modeffect.c, modenv.c, sdkvalues.c), the script calls that
- * play them and the sentences they print name a word only through this table (SDK_W(...)), so renaming one here
- * renames it everywhere: in what the compiler accepts, in its mistakes and nearest-word suggestions, and in the
- * guide's examples kept by the tests. docs/graphics-sdk.md lists the same words.
- *
- * A row is X(ID, "word"). IDs are the code's names and never reach an author. */
+/* sdkwords.h -- every word a mod author writes or reads in the Graphics SDK, in one table (SDK_W(...)) that the
+ * compilers, script calls and their messages share. A row is X(ID, "word"); IDs never reach an author. */
 #ifndef SNAPMAP_PLUS_SDKWORDS_H
 #define SNAPMAP_PLUS_SDKWORDS_H
 
@@ -60,7 +54,7 @@
     /* recolouring */                                                                                              \
     X(R_PRIMARY, "primary") X(R_SECONDARY, "secondary") X(R_PATTERN, "pattern") X(R_SCRATCHES, "scratches")        \
     X(R_DIRT, "dirt") X(R_GLOW, "glow") X(R_SECONDS, "seconds")                                                    \
-    /* script calls (R-NM1's names) */                       \
+    /* script calls */                       \
     X(C_PLAY_EFFECT, "play_effect") X(C_SET_ENVIRONMENT, "set_environment") X(C_CLEAR_ENVIRONMENT, "clear_environment")     \
     X(C_ENVIRONMENT_AREA, "environment_area") X(C_RECOLOUR, "recolour") X(C_GAME, "native")
 
@@ -84,8 +78,8 @@ static __inline const char *sdk_word(sdk_word_id id)
 }
 
 /* The parser's sRGB decode of a colour parm's constant (VK 0x141a035e0 / GL 0x141a1f680): below 0 (or NaN) 0, from 1
- * up 1, else the sRGB curve. A colour the SDK writes where no parser decodes it (an fx value, a per-entity parm) is
- * decoded the same way, so it draws as the same constant in a material would. */
+ * up 1, else the sRGB curve. A colour written where no parser decodes it (an fx value, a per-entity parm) is
+ * decoded the same way, so it draws as the same constant would in a material. */
 static __inline double sdk_srgb_decode(double x)
 {
     if (!(x > 0)) return 0;

@@ -1,7 +1,6 @@
-/* The Prefabs tab's Rename on a list row, lifted from the shipped HTML and run against a minimal row
-   stand-in: a modded prefab's row also holds its "Mods:" pill (a Blueprint prefab its "Blueprint"
-   pill), and the rename must name the file, not the row's visible text, and must keep the pills.
-   The answer is checked against the page's stand-in host rule for renamePrefab. Pure ASCII. */
+/* The Prefabs tab's Rename on a list row, lifted from the shipped HTML and run against a minimal row stand-in:
+   the rename names the file, not the row's visible text, and keeps the "Mods:" and "Blueprint" pills. The answer
+   is checked against the page's stand-in host rule for renamePrefab. */
 'use strict';
 const fs = require('fs');
 const path = require('path');

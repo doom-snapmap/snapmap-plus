@@ -1,24 +1,7 @@
-/* modbankinfo.h -- the game's own Wwise bank index (soundbanksinfo.xml) and
- * which stock banks a mod's borrowed sound events need.
- *
- * A sound decl's name is the Wwise event it starts: the engine posts the event
- * whose id is FNV-1 of the decl name, or of "play_" plus the name's last path
- * component. A mod that borrows a stock event
- * plays it only when a bank holding the event is loaded. SnapMap's listed-bank
- * filter (game mode 2) skips every bank whose name contains "_sp" (build
- * 13954591: only doom_weapon_sp.bnk, whose 4 single-player-only events are
- * filed nowhere else), so a mod naming such an event needs that bank loaded on
- * demand (modsound.h, the stock-bank route).
- *
- * The index: <doom>\base\sound\soundbanks\pc\soundbanksinfo.xml, read once on
- * the first question (about 26 MB, 62 SoundBank records, 7,649 events on
- * 13954591) into an immutable table of bank leaves and lower-cased event names,
- * each with the set of banks that file it. Nothing is read at boot; a mod
- * without sound decls never loads it. Thread-safe.
- *
- * The per-process stock-bank state (what modsound loaded, and how it went)
- * also lives here, so the Mods tab and the doctor can read it without the
- * engine. */
+/* modbankinfo.h -- the game's Wwise bank index (soundbanksinfo.xml, read once on the first question), which stock
+ * banks a mod's borrowed sound events need, and the per-process stock-bank load state. Thread-safe.
+ * SnapMap's mode-2 bank filter skips every bank whose name contains "_sp" (build 13954591: only doom_weapon_sp.bnk),
+ * so a mod naming an event only such a bank files needs it loaded on demand (modsound.h). */
 #ifndef SNAPMAP_PLUS_MODBANKINFO_H
 #define SNAPMAP_PLUS_MODBANKINFO_H
 
@@ -38,9 +21,8 @@ extern "C" {
  * default, the host executable's folder. Drops a loaded index. */
 void sh_mbi_set_install(const char *doom_root);
 
-/* Replace the index with a parse of `xml` (tests, and the loader). 1 when it
- * parsed (at least one SoundBank with a Path), 0 when not (the index is then
- * unavailable with a cause), -1 out of memory. */
+/* Replaces the index with a parse of `xml`. Returns 1 when it parsed (at least one SoundBank with a Path),
+ * 0 when not (the index is then unavailable with a cause), -1 out of memory. */
 int sh_mbi_load_text(const char *xml, size_t len);
 
 /* Forget the index and the stock-bank states (tests). */
@@ -61,11 +43,8 @@ int sh_mbi_snapmap_loads(const char *leaf);
  * 1 with the event in `event`, 0 when neither is an event, -1 unavailable. */
 int sh_mbi_decl_event(const char *decl_name, char *event, size_t cap);
 
-/* What a sound decl needs. 1 when its event is filed only by banks SnapMap
- * skips: `bank` gets the first such bank (byte order) and *bank_id its Wwise
- * id; 0 when it needs nothing (a bank SnapMap loads files the event, or the
- * name is not a stock event); -1 when the index is unavailable. Any output
- * may be NULL. */
+/* What a sound decl needs. Returns 1 when only banks SnapMap skips file its event (`bank` gets the first,
+ * *bank_id its Wwise id), 0 when it needs nothing, -1 when the index is unavailable. Any output may be NULL. */
 int sh_mbi_decl_needs(const char *decl_name, char *event, size_t event_cap, char *bank, size_t bank_cap,
                       uint32_t *bank_id);
 
@@ -89,10 +68,10 @@ void sh_mbi_get_stats(sh_mbi_stats *out);
 int sh_mbi_bundle_need(const char *decl_name, char *bank, size_t cap);
 
 
-/* ------------------------------------------------ per-process stock banks */
+/* Per-process stock-bank state. */
 
 #define SH_MBI_ST_NONE     0     /* not asked for in this process */
-#define SH_MBI_ST_LOADING  1     /* the async load was queued; no callback yet */
+#define SH_MBI_ST_LOADING  1     /* async load queued; no callback yet */
 #define SH_MBI_ST_LOADED   2     /* the callback answered AK_Success */
 #define SH_MBI_ST_FAILED   3     /* LoadBank or its callback answered another AKRESULT */
 #define SH_MBI_ST_REFUSED  4     /* the route is unavailable, or a call faulted; not retried */

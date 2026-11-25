@@ -112,8 +112,8 @@ check(api.getSel()[8] && api.getSel()[9], 'partial result cleared the selection 
 check(toasts.length === 1 && toasts[0].level === 'err' && /1 of 2/.test(toasts[0].text),
   'partial result was not reported as such');
 
-/* One request stays outstanding until its own reply, however late. A delayed
- * reply must apply to the IDs that were actually sent, never to a newer list. */
+/* One request stays outstanding until its own reply, however late; a delayed reply applies to the IDs sent,
+ * never to a newer list. */
 reset({10: true, 11: true, 12: true});
 api.requestDelete([10, 11]);
 check(posts.length === 1, 'first request was not posted');
@@ -144,7 +144,7 @@ api.requestDelete([13]);
 check(posts.length === 2, 'a timeout reply did not release the request');
 api.applyDeleteResult({status: codes.SH_DELETE_BUSY, busy: codes.SH_DELETE_BUSY_PHASE});
 
-/* The context menu only requests; it no longer edits selection or toasts itself. */
+/* The context menu only requests; it neither edits the selection nor toasts. */
 const menu = slice(page, "    addCtx('Delete'", "    addCtx('Add to SnapStack (stack 0)'");
 check(/requestDelete\(ids\)/.test(menu), 'context-menu Delete does not use requestDelete');
 check(!/toast\(/.test(menu) && !/delete selectedEids/.test(menu),

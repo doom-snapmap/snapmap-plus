@@ -22,8 +22,6 @@
 #include "saved_maps.h"
 #include "../common/text.h"
 
-/* ------------------------------------------------------------ state */
-
 static SRWLOCK g_lock = SRWLOCK_INIT;     /* the rows, the notices, the local index, the settings */
 static SRWLOCK g_blob_fetch = SRWLOCK_INIT;   /* a file fetched alone: one at a time (sh_cache_prepare's threads) */
 static SRWLOCK g_disk = SRWLOCK_INIT;     /* the cache's folders: a composition put in place, the sweep */
@@ -97,8 +95,6 @@ static int mc_hex64(const char *s)
     for (i = 0; i < 64; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
     return s[64] == 0;
 }
-
-/* ------------------------------------------------------------ files */
 
 static void mc_slashes(char *p) { for (; p && *p; p++) if (*p == '/') *p = '\\'; }
 
@@ -240,8 +236,6 @@ static char *mc_path(const char *fmt, ...)
     return out;
 }
 
-/* ------------------------------------------------------------ blobs and manifests */
-
 char *sh_cache_blob_path(const char *sha)
 {
     char *p;
@@ -314,11 +308,9 @@ char *sh_cache_manifest(const char *hash, size_t *len)
     free(path);
     if (!bytes) return NULL;
     sh_mb_sha256_hex(bytes, *len, have);
-    if (strcmp(have, hash)) { free(bytes); return NULL; }   /* damaged: treated as absent (N17) */
+    if (strcmp(have, hash)) { free(bytes); return NULL; }   /* damaged: treated as absent */
     return (char *)bytes;
 }
-
-/* ------------------------------------------------------------ the local mods' files (D21, D51) */
 
 typedef struct mc_local {
     char sha[SH_MB_HASH_HEX + 1];
@@ -355,8 +347,8 @@ void sh_cache_local_changed(void)
     ReleaseSRWLockExclusive(&g_lock);
 }
 
-/* Every built mod folder at the top of the mods root (never a dot folder or the retired maps\): its carried files,
- * by SHA-256. Called with the lock held exclusively. */
+/* Every built mod folder at the top of the mods root (never a dot folder or maps\): its carried files, by SHA-256.
+ * Called with the lock held exclusively. */
 static void mc_local_build_locked(void)
 {
     char *root = g_mods_root ? sh_text(g_mods_root) : (g_store_root && g_store_root() ? sh_text(g_store_root()) : NULL);
@@ -406,8 +398,8 @@ static void mc_local_build_locked(void)
     free(root);
 }
 
-/* D51: a local mod's file serves a unit only with the exact SHA-256 the unit names, checked again whenever its size
- * or write time changed since it was last checked (an author editing the folder, N18). Lock held exclusively. */
+/* A local mod's file serves a unit only with the exact SHA-256 the unit names, checked again whenever its size or
+ * write time changed since it was last checked. Lock held exclusively. */
 static int mc_local_verified(mc_local *l)
 {
     WIN32_FILE_ATTRIBUTE_DATA a;
@@ -479,7 +471,7 @@ static char *mc_local_find(const char *sha, unsigned long long size)
     if (!g_local_ready) mc_local_build_locked();
     out = mc_local_lookup_locked(sha, size);
     if (!out && mc_local_stale_locked()) {
-        /* R-LB1 F9: a folder built since the list was made (a Refresh or `sh_mods rescan` after boot) carries files
+        /* a folder built since the list was made (a Refresh or `sh_mods rescan` after boot) carries files
          * the list does not know: read the folders again once, then look again */
         size_t i;
         for (i = 0; i < g_nlocal; i++) free(g_local[i].path);
@@ -501,8 +493,6 @@ static char *mc_source_of(const char *sha, unsigned long long size)
 }
 
 char *sh_cache_file_source(const char *sha, unsigned long long size) { return mc_source_of(sha, size); }
-
-/* ------------------------------------------------------------ manifests read */
 
 typedef struct mc_file { char *path; char sha[SH_MB_HASH_HEX + 1]; unsigned long long size; } mc_file;
 typedef struct mc_unit {
@@ -594,8 +584,6 @@ int sh_cache_unit_state(const char *hash, size_t *missing, unsigned long long *m
     return state;
 }
 
-/* ------------------------------------------------------------ rows */
-
 typedef struct mc_absent { char *object, *mod; int cause; } mc_absent;
 /* What the map saved of a placed name: its entity's class and its reference slot counts (a stand-in keeps them). */
 typedef struct mc_placed_info { char *cls; int entrefs, varrefs, known; } mc_placed_info;
@@ -608,7 +596,7 @@ typedef struct mc_row {
     char **roots;
     char **placed; size_t nplaced;     /* names the map places under mods/<salt>/ */
     mc_placed_info *pinfo;             /* per placed name, when the map text was read */
-    char *modules;                     /* the row's module records (D-A30), JSON, or NULL */
+    char *modules;                     /* the row's module records, JSON, or NULL */
     char *labels;                      /* the row's labels: each placed object's name as the author sees it, or NULL */
     mc_absent *absent; size_t nabsent; /* what its last composition stood in for */
     int broken;                        /* a row of no units: the local folder is here and cannot be used */
@@ -827,8 +815,6 @@ int sh_cache_composed(const char *chash, int *complete)
     return here;
 }
 
-/* ------------------------------------------------------------ notices (SPEC section 8) */
-
 char *sh_cache_object_name(const char *root)
 {
     const char *leaf = root ? strrchr(root, '/') : NULL;
@@ -846,7 +832,7 @@ char *sh_cache_object_name(const char *root)
     return out;
 }
 
-/* The name a notice gives an object of row `r` (DS-WORDS): the name the author sees, carried by the row's labels under
+/* The name a notice gives an object of row `r`: the name the author sees, carried by the row's labels under
  * the name the map places it by (a unit's root is first spelled as the engine names it), else one made from the root
  * or placed name. malloc'd. */
 static char *mc_object_label(const mc_row *r, const char *name, int root)
@@ -869,7 +855,7 @@ static const char *mc_mod_label(const char *name, const char *salt)
     return name && name[0] && (!salt || strcmp(name, salt)) ? name : "a mod";
 }
 
-/* The cause order of SPEC section 8: the most actionable first. */
+/* The cause order: the most actionable first. */
 static int mc_cause_rank(int cause)
 {
     switch (cause) {
@@ -981,7 +967,7 @@ static char *mc_notice_sentence(const char *subject, int cause, int plural)
     return out;
 }
 
-/* S2-S6 for the objects a map is playing without: never over what the game's dialog holds, so a long list of names gives
+/* The sentence for the objects a map is playing without: never over what the game's dialog holds, so a long list of names gives
  * way to the count, the cause's tail kept. */
 char *sh_cache_notice_text(const sh_cache_absent *a, size_t n)
 {
@@ -1045,8 +1031,6 @@ char *sh_cache_take_notice(void)
     return out;
 }
 
-/* ------------------------------------------------------------ composing */
-
 /* The source of a composition's files: path -> blob or local file. */
 typedef struct mc_src { mc_unit *units; size_t n; } mc_src;
 
@@ -1083,10 +1067,9 @@ static int mc_class_name(const char *cls)
 }
 
 /* An absent placed object's entityDef: the stock snapmaps/unknown (idEntity, no model, no collision, no AI) with the
- * class the map saved for the entity, so the definition is of the placed entity's own class with that class's
- * defaults. An entity whose class is not idEntity derives from it, which is all the entityDef parse asks of an
- * inherit (the product's timeline is the same shape on an unmodded game). For an idPlaceableSnapAIEncounter the
- * default encounterToSpawn is NULL, and the engine then logs one level-4 line and never spawns (R-DS5). */
+ * class the map saved for the entity, so it has that class's defaults. A class other than idEntity derives from it,
+ * which is all the entityDef parse asks of an inherit. For an idPlaceableSnapAIEncounter the default encounterToSpawn
+ * is NULL, and the engine then logs one level-4 line and never spawns. */
 char *sh_cache_standin_def_text(const char *cls)
 {
     if (!mc_class_name(cls) || !strcmp(cls, "idEntity")) return sh_text(MC_ENTITY_STANDIN);
@@ -1146,8 +1129,6 @@ char *sh_cache_standin_row_text(const char *def_source, const char *cls, int ent
     free(refs);
     return out;
 }
-
-/* ------------------------------------------------------------ module stand-ins (D-A30) */
 
 /* A number member of a decl block (0 when absent, as the decl's own default). */
 static double mc_dt_num(sh_dt_node *n, const char *key)
@@ -1274,7 +1255,7 @@ static int mc_module_room(const double b[6], char *out, size_t cap, sh_grid_size
     return strcat_s(out, cap, ".decl") == 0;
 }
 
-/* The modules standing in now (R-DS6): a module's logical name ("mods/<salt>/rooms/hall") and the grid room size it
+/* The modules standing in now: a module's logical name ("mods/<salt>/rooms/hall") and the grid room size it
  * stands in as. A composition sets each of its row's module records here when no present unit carries the module, and
  * clears it when one does, so the asset layer answers a stand-in's derived files only while it stands in. */
 typedef struct mc_standin_module { char *logical; sh_grid_size size; } mc_standin_module;
@@ -1419,7 +1400,7 @@ static void mc_extra_add(mc_extras *e, const mc_unit *units, size_t nunits, char
     mc_extra_add_text(e, units, nunits, path, NULL);
 }
 
-/* D-A30: every module record of the row whose module no present unit carries gets the rebuilt blank room of its
+/* Every module record of the row whose module no present unit carries gets the rebuilt blank room of its
  * size with its bounds and portals (sh_cache_module_standin_text) at the module's own file, and a module info at its
  * info's name inheriting the blank room's, so the module palette holds it. Returns the stand-ins added. */
 static int mc_module_standins(mc_extras *e, const mc_unit *units, size_t nunits, const char *salt, const char *modules)
@@ -1659,7 +1640,7 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
         units[i].cause = units[i].state == -2 ? SH_CACHE_ABSENT_NEWER : (causes && causes[i]) ? causes[i] : 0;
         if (!units[i].root) units[i].root = sh_text(snapshot.roots[i]);
     }
-    /* A row of no units (a local row whose folder is not here, D6a): every object the map places under its namespace
+    /* A row of no units (a local row whose folder is not here): every object the map places under its namespace
      * stands in. */
     if (!snapshot.n) complete = 0;
     here = sh_cache_composed(chash, &had_complete);
@@ -1668,7 +1649,7 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
         if (here) mc_side_causes(chash, units, snapshot.n);
         for (i = 0; i < snapshot.n; i++) if (units[i].state != 1 && !units[i].cause) units[i].cause = cause;
     }
-    if (here && had_complete) { ok = 1; complete = 1; goto record; }   /* the same units compose the same bytes (D22a) */
+    if (here && had_complete) { ok = 1; complete = 1; goto record; }   /* the same units compose the same bytes */
     if (here && !complete &&
         (snapshot.n ? mc_side_same(chash, units, snapshot.n) : mc_side_same_placed(chash, &snapshot))) {   /* nothing new */
         if (causes) {
@@ -1682,7 +1663,7 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
         goto record;
     }
 
-    /* Stand-ins (D60) for what is absent: every name the map places under the namespace that no present unit
+    /* Stand-ins for what is absent: every name the map places under the namespace that no present unit
      * provides (first, so a placed name keeps its class and row), then the absent roots that are entities. */
     if (!complete) {
         for (k = 0; k < snapshot.nplaced; k++) {
@@ -1696,7 +1677,7 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
             /* What the map saved of the entity decides both stand-ins: the definition keeps its class, and a palette
              * row names it with the reference slots the map saved, because the map validator (RepairAndMigrate)
              * refuses a placed entity whose name no palette row carries, or whose slot counts differ from its
-             * row's (R-DS5; R-LV2's refusal was "not found in palette"). A map text not read: no row. */
+             * row's. A map text not read: no row. */
             if (mc_carried(units, snapshot.n, def_path)) { free(def_path); def_path = NULL; }
             if (def_path) {
                 mc_extra_add_text(&extras, units, snapshot.n, def_path, sh_cache_standin_def_text(pi ? pi->cls : NULL));
@@ -1769,7 +1750,7 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
     if (built) *built = 1;
 
 record:
-    /* What the load's notice names (S2-S6): the objects of the units that are not here. */
+    /* What the load's notice names: the objects of the units that are not here. */
     AcquireSRWLockExclusive(&g_lock);
     {
         mc_row *r = mc_row_find_locked(chash);
@@ -1790,7 +1771,7 @@ record:
                 }
                 r->notice = r->nabsent > 0;
             } else if (!snapshot.n && snapshot.nplaced) {
-                /* A local row whose folder is not here (D6a): each object the map places of it, an entity's inherit
+                /* A local row whose folder is not here: each object the map places of it, an entity's inherit
                  * (a name only a value spells, a skin, is no object); every name when the map text was not read. */
                 int read = 0;
                 for (i = 0; snapshot.pinfo && i < snapshot.nplaced; i++) read |= snapshot.pinfo[i].known;
@@ -1836,15 +1817,13 @@ int sh_cache_compose_now(const char *chash, int cause, char **why)
     return mc_compose(chash, NULL, cause ? cause : SH_CACHE_ABSENT_OFFLINE, why, NULL);
 }
 
-/* ------------------------------------------------------------ downloads */
-
 /* A failure's absence cause. */
 static int mc_net_cause(int code, const modnet_result *r)
 {
-    /* No name resolved: this computer is not connected, which S2 says (B2), not a store that did not answer (S4). */
+    /* No name resolved: this computer is not connected, not a store that did not answer. */
     if (code == MODNET_E_NET && r && r->offline) return SH_CACHE_ABSENT_OFFLINE;
     if (code == MODNET_E_BLOCKED) return SH_CACHE_ABSENT_REMOVED;
-    if (code == MODNET_E_RETIRED) return SH_CACHE_ABSENT_NEWER;   /* a 410: this Snapmap+ is too old, S6 */
+    if (code == MODNET_E_RETIRED) return SH_CACHE_ABSENT_NEWER;   /* a 410: this Snapmap+ is too old */
     if (code == MODNET_E_NOT_FOUND) return SH_CACHE_ABSENT_NOT_IN_STORE;
     if (code == MODNET_E_ARG && r && r->message && strstr(r->message, "(error 112)")) return SH_CACHE_ABSENT_DISK;
     return SH_CACHE_ABSENT_UNREACHABLE;
@@ -1866,7 +1845,7 @@ int sh_cache_net_retry_ms(int code, int attempt)
     }
 }
 
-/* One blob into files\, resumed from partial\, checked; one retry after a bad download (N22), and up to four after a
+/* One blob into files\, resumed from partial\, checked; one retry after a bad download, and up to four after a
  * failure in the network (sh_cache_net_retry_ms). 0, or a cause. */
 static int mc_fetch_blob(const char *sha, unsigned long long size, const modnet_io *io)
 {
@@ -1902,10 +1881,10 @@ static int mc_fetch_blob(const char *sha, unsigned long long size, const modnet_
     return cause;
 }
 
-/* The archive of a held unit (one request, R-DS6): unit.json first, then the files this computer lacks: every file
- * when its manifest is not here or it lacks all of them, else the files a mask names (bit i: the manifest's file i).
- * A transfer the network broke is resumed (sh_cache_net_retry_ms). The manifest it brings is checked against the
- * unit's hash; each file against its SHA-256 as it goes into files\. 0, a cause, or -1 cancelled. */
+/* The archive of a held unit (one request): unit.json first, then the files this computer lacks (every file
+ * when its manifest is not here or it lacks all, else those a mask names, bit i being the manifest's file i). A
+ * transfer the network broke is resumed; the manifest is checked against the unit's hash and each file against
+ * its SHA-256. 0, a cause, or -1 cancelled. */
 static int mc_fetch_archive(mc_unit *u, const char *hash, const modnet_io *io)
 {
     unsigned char *mask = NULL;
@@ -1990,7 +1969,7 @@ static int mc_fetch_archive(mc_unit *u, const char *hash, const modnet_io *io)
         free(tmp);
         free(bytes);
     }
-    /* What one archive brought, so a live check reads the requests and the time a unit took (R-LV6). */
+    /* What one archive brought, so a live check reads the requests and the time a unit took. */
     (void)mc_exists(part, &have);
     mc_logf("MODS: content: unit %.16s's archive: %zu file(s) stored of %zu in the unit, %llu bytes, %s, "
             "%d network retr%s, %.1f s", hash, stored, u->state >= 0 ? u->nfiles : 0, have,
@@ -2005,18 +1984,17 @@ done:
     return cause;
 }
 
-/* The game's files a unit points to must be this game's bytes (N14). 1 when they are. */
+/* The game's files a unit points to must be this game's bytes. 1 when they are. */
 int sh_cache_pointer_checked(const char *source)
 {
-    /* The product's container (modprog.h) holds files the installed product derives from DOOM's and the mod's own;
-     * a unit names them by the bytes the publishing product derived, which this product derives again where they
-     * serve (R-LV2: the walker writes the container's own name, "snapmapplus", which the check never matched, so
-     * every unit reaching a platform program or look image was refused as needing other DOOM files). */
+    /* The product's container (modprog.h) holds files the installed product derives from DOOM's and the mod's own; a
+     * unit names them by the bytes the publishing product derived, which this product derives again where they serve,
+     * so they are not checked against DOOM's files. */
     return !(source && (!strcmp(source, SH_MODPROG_CONTAINER) || !strcmp(source, "product")));
 }
 
-/* N13: the unit's pointers into the product's own container name bytes this product derives (modprog.h); a product
- * that derives other bytes, or none, does not have the unit's content (S6, a different product version). 1 ok. */
+/* The unit's pointers into the product's own container name bytes this product derives (modprog.h); a product
+ * that derives other bytes, or none, does not have the unit's content (a different product version). 1 ok. */
 static int mc_product_ok(const mc_unit *u)
 {
     mpj *m = mpj_parse(u->bytes, u->len);
@@ -2030,9 +2008,8 @@ static int mc_product_ok(const mc_unit *u)
         if (!p || p->type != MPJ_STR || !s || s->type != MPJ_STR || !src || src->type != MPJ_STR) continue;
         if (sh_cache_pointer_checked(src->text)) continue;   /* DOOM's own files: mc_game_ok */
         /* A file the product names by its bytes' hash (a look's image) exists here only once the unit's own material
-         * has compiled, after this check: this product's compiler answers for it, and it serves the name its own
-         * compile spells (modserve.h sh_modserve_set_product_reader), so a unit published before its builds stopped
-         * pointing at one is not refused for it. */
+         * has compiled, after this check: this product's compiler answers for it and serves the name its own compile
+         * spells (modserve.h sh_modserve_set_product_reader), so a unit pointing at one is not refused for it. */
         if (sh_mb_product_hashed(p->text) && !sh_modprog_owns(p->text)) continue;
         if (!sh_modprog_owns(p->text) ||sh_modprog_read(p->text, &bytes, &len) != SH_MB_STOCK_OK || !bytes) {
             mc_logf("MODS: content: a unit names %s of Snapmap+'s own files, which this Snapmap+ does not make", p->text);
@@ -2071,7 +2048,7 @@ static int mc_game_ok(const mc_unit *u)
     return ok;
 }
 
-/* The held units of a row fetched on up to four threads (5.7): each takes the next unit, fetches its archive (and
+/* The held units of a row fetched on up to four threads: each takes the next unit, fetches its archive (and
  * alone any file the archive lacked) and records its cause. Progress is the sum of every transfer, reported to the
  * caller's callback under one lock. */
 #define MC_FETCH_AT_ONCE 4
@@ -2183,8 +2160,7 @@ int sh_cache_prepare(const char *chash, const modnet_io *io)
     for (i = 0; i < snapshot.n; i++)
         if (sh_cache_unit_state(snapshot.units[i], NULL, NULL, NULL) != 1) want[nwant++] = snapshot.units[i];
     if (nwant) {
-        /* The store's state of each absent unit (held, missing, removed); then the held ones fetched, four at a time
-         * (5.7). */
+        /* The store's state of each absent unit (held, missing, removed); then the held ones fetched, four at a time. */
         int st = modnet_unit_status(want, nwant, states, io, &r);
         size_t w = 0, *todo = (size_t *)calloc(snapshot.n ? snapshot.n : 1, sizeof *todo), ntodo = 0;
         if (!todo) { code = MODNET_E_NOMEM; goto done; }
@@ -2240,8 +2216,6 @@ done:
     return code;
 }
 
-/* ------------------------------------------------------------ the load step */
-
 /* The manifest's content step (modmanifest.h sh_modmanifest_set_content): note the rows; compose each pinned row
  * whose composition is not on disk, or is a stand-in composition whose units are all here now. */
 void sh_cache_on_load(const sh_modmanifest_list *rows, char *const *placed, size_t count)
@@ -2261,8 +2235,6 @@ void sh_cache_on_load(const sh_modmanifest_list *rows, char *const *placed, size
     }
     if (made && g_rescan) (void)g_rescan();
 }
-
-/* ------------------------------------------------------------ kept maps and the sweep */
 
 void sh_cache_set_map_folders(const char *saved, const char *published)
 {
@@ -2303,7 +2275,7 @@ static void mc_set_add(mc_set *s, const char *h)
     strcpy_s(s->v[s->n++], SH_CACHE_HASH_HEX + 1, h);
 }
 
-/* What the kept maps use (5.17, D52): every unit and composition their pinned rows name. A kept map whose text is
+/* What the kept maps use: every unit and composition their pinned rows name. A kept map whose text is
  * there and does not read (a file that cannot be opened, a slot that does not decode, a row that does not parse) is
  * counted in `unreadable`: what it uses is unknown, so the sweep removes nothing while there is one. */
 typedef struct mc_kept { mc_set units, comps; size_t maps, unreadable; } mc_kept;
@@ -2315,13 +2287,15 @@ static void mc_kept_text(mc_kept *k, const char *text, size_t len)
     sh_modmanifest_list rows;
     memset(&rows, 0, sizeof rows);
     {
-        int part = sh_carrier_part(text, len, "mods", NULL, NULL);
-        /* B9: a member that does not read leaves what the map uses unknown, as a row that does not parse does. */
-        if (part < 0) k->unreadable++;
-        if (part == 1) sh_modmanifest_read(text, len, &rows, &rejected);
+        sh_carrier_view member;
+        if (!sh_carrier_view_read(text, len, &member)) { k->unreadable++; return; }
+        if (member.format == 1) return;   /* Earlier maps held only whole bundles. */
+        if (member.state == SH_CARRIER_MALFORMED) k->unreadable++;
+        if (member.state == SH_CARRIER_PRESENT && member.mods.present)
+            sh_modmanifest_read(text, len, &rows, &rejected);
     }
-    /* A row of an earlier Snapmap+ shape names no unit (R-LV6: three such maps on the owner's machine kept the sweep
-     * from ever removing anything); only a row that does not parse leaves what the map uses unknown. */
+    /* A row of an earlier shape names no unit and is not counted; only a row that does not parse leaves what the map
+     * uses unknown. */
     if (rejected > rows.earlier) k->unreadable++;
     for (i = 0; i < rows.count; i++) {
         if (!rows.rows[i].pinned) continue;
@@ -2398,7 +2372,7 @@ static void mc_kept_slot(void *context, const char *local_id, const char *item_i
     mc_kept_text((mc_kept *)context, text, len);
 }
 
-/* The kept maps (2.12): the player's local saves (My Maps slots, the only copy of a map saved offline), the cloud
+/* The kept maps: the player's local saves (My Maps slots, the only copy of a map saved offline), the cloud
  * copies of saved maps, and, unless `drop_played`, the published maps the game keeps. */
 static void mc_kept_read(mc_kept *k, int drop_played)
 {
@@ -2429,14 +2403,14 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
     sh_modmanifest_list cur;
     memset(&st, 0, sizeof st);
     memset(&kept, 0, sizeof kept);
-    /* The references (5.17). */
+    /* The references. */
     mc_kept_read(&kept, drop_played);
     memset(&cur, 0, sizeof cur);
     if (sh_modmanifest_current(&cur)) {
         for (i = 0; i < cur.count; i++) {
             size_t k;
             if (!cur.rows[i].pinned) {
-                /* The open map's local row may be served by its stand-ins (a row of no units, D6a). */
+                /* The open map's local row may be served by its stand-ins (a row of no units). */
                 char none[SH_CACHE_HASH_HEX + 1];
                 if (strcmp(cur.rows[i].salt, SH_MODMANIFEST_PRODUCT) && sh_modmanifest_composition_hash(cur.rows[i].salt, NULL, 0, none))
                     mc_set_add(&kept.comps, none);
@@ -2450,7 +2424,7 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
     for (i = 0; held && i < held_count; i++) mc_set_add(&kept.units, held[i]);
     st.maps = kept.maps;
     if (kept.unreadable) {
-        /* A kept map that does not read may use any unit here: nothing is removed until it reads (I5). */
+        /* A kept map that does not read may use any unit here: nothing is removed until it reads. */
         mc_logf("MODS: content: the sweep removed nothing: %zu kept map(s) or map folder(s) could not be read, so what "
                 "they use is not known", kept.unreadable);
         st.unreadable = kept.unreadable;
@@ -2505,7 +2479,7 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
         char hash[SH_CACHE_HASH_HEX + 1], *path = sh_textf("%s\\%s", sdir, names[i]);
         int stale = strlen(names[i]) != 64;
         if (!stale) { memcpy(hash, names[i], 65); stale = !mc_hex64(hash) || !mc_set_has(&kept.comps, hash); }
-        /* A composition being made or replaced right now (B3: built outside this lock) is left alone; only one nothing
+        /* A composition being made or replaced right now (built outside this lock) is left alone; only one nothing
          * has written for an hour is what a crash left. */
         else stale = path && mc_untouched_for(path, MC_PARTIAL_IDLE_S);
         if (path && stale && mc_rmtree(path)) {
@@ -2517,10 +2491,9 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
         free(path);
     }
     mc_list_free(names, names ? n : 0);
-    /* A download cut short (the player left a lobby, the game closed, the network dropped) leaves its partial file, and
-     * the next download of the same file resumes from it. Once no kept map names its unit or file, and nothing has
-     * written it for an hour (a running download writes all the time), it goes too: nothing partial outlives the maps
-     * that wanted it. */
+    /* A download cut short leaves its partial file, which the next download of the same file resumes. Once no kept map
+     * names its unit or file and nothing has written it for an hour (a running download writes all the time), it goes
+     * too. */
     names = pdir ? mc_list(pdir, "*.part", 0, &n) : NULL;
     for (i = 0; names && i < n; i++) {
         char key[SH_CACHE_HASH_HEX + 1], *path;
@@ -2549,8 +2522,6 @@ done:
     free(pdir);
     return 1;
 }
-
-/* ------------------------------------------------------------ the Mods tab */
 
 static void mc_size_text(char *out, size_t cap, unsigned long long bytes)
 {
@@ -2748,8 +2719,8 @@ int sh_cache_stage_copy(const char *chash, sh_cache_copy *out, char **why)
                               "then try again.", title);
             goto done;
         }
-        /* D29 as built: a unit whose binaries spell its namespace copies too; the copy's binaries keep spelling it, its
-         * build records "spelled", and serving maps that namespace to the copy's salt (D12, modserve.c). */
+        /* A unit whose binaries spell its namespace copies too; the copy's binaries keep spelling it, its build records
+         * "spelled", and serving maps that namespace to the copy's salt (modserve.c). */
         manifests[i] = units[i].bytes;
         lens[i] = units[i].len;
         if (strcmp(row->roots[i], SH_UNIT_WHOLE)) out->objects++;
@@ -2806,8 +2777,8 @@ done:
     return ok;
 }
 
-/* The units this computer's published maps claim (modclaim.h modclaim_held), kept by every sweep (5.17): a claim's
- * units serve its self-repair (5.21) after its map left this computer. Bound at install. */
+/* The units this computer's published maps claim (modclaim.h modclaim_held), kept by every sweep: a claim's
+ * units serve its self-repair after its map left this computer. Bound at install. */
 static sh_cache_held_fn g_held;
 void sh_cache_set_held(sh_cache_held_fn fn) { g_held = fn; }
 
@@ -2825,7 +2796,7 @@ int sh_cache_sweep_kept(int drop_played, sh_cache_sweep_stats *out)
     return r;
 }
 
-/* The sweep at start and after a map is deleted or a mod uninstalled (5.17), off the calling thread. */
+/* The sweep at start and after a map is deleted or a mod uninstalled, off the calling thread. */
 static DWORD WINAPI mc_sweep_thread(LPVOID unused)
 {
     (void)unused;
@@ -2838,8 +2809,6 @@ void sh_cache_sweep_async(void)
     HANDLE h = CreateThread(NULL, 0, mc_sweep_thread, NULL, 0, NULL);
     if (h) CloseHandle(h);
 }
-/* ------------------------------------------------------------ upload (5.3 steps 2-6) */
-
 /* Read a whole file (UTF-8 path) into memory; NULL when it cannot be read. */
 static unsigned char *mc_read_all(const char *path, unsigned long long size, size_t *len)
 {

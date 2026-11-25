@@ -186,11 +186,9 @@ static void preview_post(void **job)
 {
     void *target = NULL;
     g_post(job);
-    /* OpenGL keeps separate post-process and presentation images. In the
-     * editor the final composite can read the image behind job[16], even
-     * though the post job leaves job[13] bound. Draw once into that image and
-     * restore the post target before handing control back to the engine.
-     * Vulkan's render-pass attachments remain owned by its native post job. */
+    /* OpenGL keeps separate post-process and presentation images; in the editor the final composite can read the
+     * image behind job[16] though the post job leaves job[13] bound. Draw once into it and restore the post target;
+     * Vulkan's attachments stay owned by its native post job. */
     if (g_target) __try {
         target = job[16] ? *(void **)job[16] : NULL;
         if (target == job[13]) target = NULL;

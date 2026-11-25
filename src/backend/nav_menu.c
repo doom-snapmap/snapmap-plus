@@ -78,8 +78,7 @@ static unsigned short g_layout_depths[13];
 /* The clone shows its "off" frame while the panel stays rolled off. */
 static int g_clone_hidden;
 
-/* Undo only displacements that are still ours; a matrix the timeline has
- * since rewritten is already the stock value. */
+/* Undo only displacements that are still ours; a matrix the timeline rewrote is already the stock value. */
 static void restore_layout(void)
 {
     int i;
@@ -150,10 +149,8 @@ static void hide_extra(unsigned char *widget)
     }
 }
 
-/* The parent's closing roll-off advances its timeline forward, which never
- * removes a dynamic clip, and animates only timeline-placed entries. Present
- * the clone's own "off" frame, the one the native binder gives unused rows, so
- * nothing of it outlives the stock rows. Only an attached clone is touched. */
+/* The parent's closing roll-off never removes a dynamic clip and animates only timeline-placed entries, so present
+ * the clone's own "off" frame (the one the native binder gives unused rows). Only an attached clone is touched. */
 static void hide_clone(unsigned char *widget)
 {
     unsigned char *row=row_widget(widget,STOCK_ROWS),*parent,*entry,*sprite;
@@ -167,12 +164,9 @@ static void hide_clone(unsigned char *widget)
     g_clone_hidden=1;
 }
 
-/* The screen update shows the panel through the widget's SetVisible slot
- * ("rollOn" on the parent; from a rolled-off panel that is a backward seek,
- * which clears the parent's display list and retires the clone).
- * Begin has already requested it; doing it here, under the same condition the
- * screen applies, makes the rewind happen before the eighth row is attached
- * instead of after the first frame is drawn. */
+/* The screen update shows the panel through the widget's SetVisible slot ("rollOn" on the parent; from a rolled-off
+ * panel that is a backward seek, which clears the parent's display list and retires the clone). Doing it here, under
+ * the screen's own condition, makes the rewind happen before the eighth row is attached, not after the first frame. */
 static void present_panel(unsigned char *editor,unsigned char *widget)
 {
     unsigned char *screen;
@@ -183,8 +177,7 @@ static void present_panel(unsigned char *editor,unsigned char *widget)
     (*(visible_fn*)(*(unsigned char**)widget+WIDGET_SET_VISIBLE))(widget,1);
 }
 
-/* The panel is rolled off, or the screen update is about to roll it off:
- * the widget's visibility byte is clear, or the screen no longer requests the
+/* The panel is rolled off or about to be: the widget's visibility byte is clear, or the screen does not request the
  * panel this widget presents. */
 static int panel_hidden(unsigned char *editor,unsigned char *widget)
 {
@@ -235,17 +228,10 @@ static int ensure_extra(unsigned char *widget)
     return 1;
 }
 
-/* The parent timeline animates the stock rows' display entries and rewrites
- * any entry it moves; it never touches the dynamic entry. Its roll-on writes
- * only row alpha after the rewind; its roll-offs write scale, position and
- * alpha every frame. Run every think. A matrix the timeline wrote since the
- * last pass is the new stock value. Unless a roll-off is playing (parent
- * playing with the widget hidden), extend the panel upward one row over those
- * values so the eighth row keeps the stock text size and clears the fixed
- * footer. Whatever the stock rows show, the clone takes the last row's
- * matrix and colour one row-step further down, so it is drawn, moves and
- * fades with them from the first frame. Idempotent while the timeline is
- * still. */
+/* The parent timeline animates the stock rows' display entries and rewrites any it moves, never the dynamic entry,
+ * so this runs every think and treats a matrix the timeline wrote as the stock value. Unless a roll-off is playing
+ * (parent playing, widget hidden), the panel extends up one row so the eighth row keeps the stock text size and
+ * clears the footer, and the clone takes the last row's matrix and colour one step down. Idempotent while still. */
 static void sync_layout(unsigned char *widget,menu_actions *actions)
 {
     unsigned char *parent,*entries,*last,*prior,*copy,*row6,*row5;
@@ -281,10 +267,8 @@ static void sync_layout(unsigned char *widget,menu_actions *actions)
         }
     }
     g_layout_parent=parent;
-    /* While a roll-off plays, the timeline owns every entry it moves; a
-     * displacement written now would be overwritten before some frames and
-     * not others. The roll-on leaves the matrices alone, so the extension is
-     * part of the first frame drawn. */
+    /* While a roll-off plays the timeline owns every entry it moves, so a displacement written then would be
+     * overwritten on some frames only. The roll-on leaves the matrices alone, so the extension is in the first frame. */
     if (!parent[0x40] || widget[0x1b0]) {
         step=g_layout_matrices[at_last][5]-g_layout_matrices[at_prior][5];
         height=g_layout_matrices[1][5]-g_layout_matrices[3][5];
@@ -318,8 +302,8 @@ static int set_label(unsigned char *widget,int index)
     return field!=NULL;
 }
 
-/* Reattach a clone the parent rewind retired. Returns 0 after restoring the
- * stock seven-row menu because the clone could not be recreated. */
+/* Reattach a clone the parent rewind retired. Returns 0 after restoring the stock seven-row menu when the clone
+ * cannot be recreated. */
 static int attach_extra(unsigned char *widget,menu_actions *actions)
 {
     unsigned char *parent=*(unsigned char**)(widget+8);
@@ -412,11 +396,9 @@ static unsigned char menu_action(void *state,void *object,int index)
     if (!g_enabled || index<0 || !actions_valid(actions) || index>=actions->count ||
         actions->items[index]!=NAV_ACTION) {
         unsigned char done=g_action(state,object,index);
-        /* A completed native action leaves the panel rolled off (a declined
-         * one is rolled on again by the native think). EXIT EDITOR raises its
-         * Yes/No here and the menu state persists behind it without further
-         * thinks, so the clone would keep its last frame. Show its "off"
-         * frame now; a re-show re-presents it and End hides it anyway. */
+        /* A completed native action leaves the panel rolled off (a declined one is rolled on by the native think).
+         * EXIT EDITOR raises its Yes/No here with no further thinks, so the clone would keep its last frame; show
+         * its "off" frame. A re-show re-presents it and End hides it anyway. */
         if (done && g_enabled && !g_failed) {
             __try {
                 unsigned char *widget=*(unsigned char**)((unsigned char*)state+8);
@@ -462,9 +444,8 @@ static void busy_tick(unsigned char *editor)
         }
         status=sh_apply_engine_nav_update_status();
         if (status==SH_NAV_UPDATE_REQUESTED || status==SH_NAV_UPDATE_BUILDING) {
-            /* A 600-box room bakes in about a second; a build still running
-             * after a minute has stalled, and the editor must not stay locked
-             * behind the modal waiting for it. */
+            /* A build still running after a minute has stalled; the editor must not stay locked behind the modal
+             * waiting for it. */
             if (GetTickCount64()-g_busy_since<NAV_BUILD_CEILING_MS) return;
             release_busy();
             *(unsigned*)(screen+SCREEN_SHOWN)|=0xc0;
@@ -513,9 +494,8 @@ static void menu_think(void *state,void *object)
     }
     g_think(state,object);
     busy_tick(editor);
-    /* Native think and busy completion re-show the panel by setting the screen
-     * flags; roll it on now so its rewind cannot remove the clone after this
-     * pass. Then follow the timeline for this frame. */
+    /* Native think and busy completion re-show the panel by setting the screen flags; roll it on here so its rewind
+     * cannot remove the clone after this pass, then follow the timeline. */
     if (g_enabled && !g_failed && *(int*)(editor+ED_STATE)==11) {
         __try {
             if (widget && actions_valid(actions) && actions->count==MENU_ROWS) {
@@ -543,8 +523,8 @@ static void menu_end(void *state,void *object)
         __try { release_busy(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
     g_end(state,object);
-    /* End rolls every bound row off and clears the screen flags; the panel's
-     * own roll-off follows on the next screen update. Hide the clone now. */
+    /* End rolls every bound row off and clears the screen flags; the panel's own roll-off follows on the next screen
+     * update, so hide the clone here. */
     if (g_enabled && !g_failed) {
         __try {
             unsigned char *widget=*(unsigned char**)((unsigned char*)state+8);
@@ -557,14 +537,6 @@ static void menu_end(void *state,void *object)
     }
 }
 
-static const sig_result *find(const sig_result *results,size_t count,const char *name)
-{
-    size_t i;
-    for (i=0;i<count;i++)
-        if (results[i].name && !strcmp(results[i].name,name) && results[i].status==SIG_OK)
-            return &results[i];
-    return NULL;
-}
 
 /* The row-bound compares the install widens (the eighth row), with the instruction each sits in. */
 struct nav_limit { const sig_result *anchor;size_t offset;unsigned char bytes[3]; };
@@ -594,7 +566,7 @@ int sh_nav_menu_install(const sig_result *results,size_t count)
     void *hooks[4]={0};
     int i;
     if (g_bind || g_action || g_think || g_end) return g_enabled;
-#define RESOLVE(dst,type,name) do { r=find(results,count,name);if(!r)goto fail;dst=(type)r->addr; } while(0)
+#define RESOLVE(dst,type,name) do { r=sig_ok(results,count,name);if(!r)goto fail;dst=(type)r->addr; } while(0)
     RESOLVE(g_string,string_fn,"IdStrCtor");
     RESOLVE(g_destroy,destroy_fn,"IdStrDtor");
     RESOLVE(g_busy,message_fn,"EditorBusyShow");
@@ -612,10 +584,10 @@ int sh_nav_menu_install(const sig_result *results,size_t count)
     RESOLVE(g_label,label_fn,"SwfFrameLabel");
     RESOLVE(g_play,play_fn,"SwfPlayFrame");
 #undef RESOLVE
-    bind=find(results,count,"StartMenuBind");action=find(results,count,"StartMenuAction");
-    think=find(results,count,"StartMenuThink");end=find(results,count,"StartMenuEnd");
-    init=find(results,count,"StartMenuInit");row=find(results,count,"StartMenuRow");
-    select=find(results,count,"StartMenuSelect");
+    bind=sig_ok(results,count,"StartMenuBind");action=sig_ok(results,count,"StartMenuAction");
+    think=sig_ok(results,count,"StartMenuThink");end=sig_ok(results,count,"StartMenuEnd");
+    init=sig_ok(results,count,"StartMenuInit");row=sig_ok(results,count,"StartMenuRow");
+    select=sig_ok(results,count,"StartMenuSelect");
     if (!bind||!action||!think||!end||!init||!row||!select) goto fail;
     /* Independently verified instruction offsets and bounds on both renderers.
      * Check every site before making any change; no raw image-RVA fallback. */

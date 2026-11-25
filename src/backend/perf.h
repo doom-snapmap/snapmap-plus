@@ -1,9 +1,5 @@
-/* Wall-clock counters for the paths that run inside a DOOM frame or inside a
- * map load. Reported by the sh_perf console command.
- *
- * A sample is two QueryPerformanceCounter reads and one interlocked add, so a
- * counter may sit on a path that runs hundreds of thousands of times.
- */
+/* Wall-clock counters for paths inside a DOOM frame or a map load, reported by the sh_perf console command.
+ * A sample is two QueryPerformanceCounter reads and one interlocked add, cheap enough for very hot paths. */
 #ifndef SH_PERF_H
 #define SH_PERF_H
 

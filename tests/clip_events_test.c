@@ -1,7 +1,7 @@
-/* clip_events_test.c -- the pure half of clip events (clip_events_rule.c): the namespace tests every lookup
- * makes, the md6Def reader, the build's registries rows and every entry or clip it leaves out with its warning,
- * the per-Play registry (only a mod's own clips, first rows kept, found by name in any case or slash) and the
- * chain rule on fake models. The engine sites are in clip_events_sigs_test and detour_windows_test. */
+/* clip_events_test.c -- the pure half of clip events (clip_events_rule.c): the namespace tests, the md6Def reader, the
+ * build's registry rows with each skipped entry's warning, the per-Play registry and the chain rule on fake models.
+ * The engine sites are covered by clip_events_sigs_test and detour_windows_test. */
+#include "../src/common/text.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +12,7 @@ static int g_checks, g_failed;
 
 #define SALT "abcd1234"
 
-/* ------------------------------------------------------------ warnings */
+/* warnings */
 
 static char g_lines[16][512];
 static int g_nlines;
@@ -34,7 +34,7 @@ static int said(const char *part)
     return 0;
 }
 
-/* --------------------------------------------------- the mod's md6Defs */
+/* the mod's md6Defs */
 
 typedef struct fake_def { const char *name, *text; } fake_def;
 static const fake_def *g_defs;
@@ -45,7 +45,7 @@ static int read_def(void *context, const char *name, char **text, size_t *len)
     int i;
     (void)context;
     for (i = 0; i < g_ndefs; i++) {
-        if (!sh_ce_name_eq(g_defs[i].name, name)) continue;
+        if (!sh_path_eq(g_defs[i].name, name)) continue;
         if (!g_defs[i].text) return -1;
         *len = strlen(g_defs[i].text);
         *text = (char *)malloc(*len + 1);
@@ -84,8 +84,8 @@ static void test_names(void)
     CHECK(!sh_ce_clip_of_mod("md6/player/tp_body.md6anim", SALT));
     CHECK(sh_ce_def_of_mod("mods/" SALT "/player/kill_rows.md6", SALT));
     CHECK(!sh_ce_def_of_mod("player/mp/tp_body_mp.md6", SALT));
-    CHECK(sh_ce_name_eq("Mods\\A/B", "mods/a/b"));
-    CHECK(!sh_ce_name_eq("mods/a", "mods/ab"));
+    CHECK(sh_path_eq("Mods\\A/B", "mods/a/b"));
+    CHECK(!sh_path_eq("mods/a", "mods/ab"));
 }
 
 static void test_md6_read(void)

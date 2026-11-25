@@ -1,7 +1,6 @@
-/* Keyboard routing in the Snapmap+ window (page_keys.js): page-wide shortcuts leave text fields,
- * list boxes, dialogs and menus their keys; a dialog closes on Escape, keeps Tab inside and gives
- * focus back; menus and the tab strip walk with the arrow keys. Run against a small stand-in DOM.
- * Pure ASCII. */
+/* Keyboard routing in the Snapmap+ window (page_keys.js) against a small stand-in DOM: page-wide shortcuts
+ * leave text fields, list boxes, dialogs and menus their keys; a dialog closes on Escape and keeps Tab inside;
+ * menus and the tab strip walk with the arrow keys. */
 'use strict';
 const path = require('path');
 const pageKeys = require(path.join(__dirname, '..', 'src', 'ui', 'webview', 'page_keys.js'));
@@ -9,7 +8,7 @@ const pageKeys = require(path.join(__dirname, '..', 'src', 'ui', 'webview', 'pag
 let failures = 0;
 function check(ok, message) { if (!ok) { console.error('[FAIL] ' + message); failures++; } }
 
-/* ---- a stand-in DOM: enough of Element for the module ---- */
+/* a stand-in DOM: enough of Element for the module */
 const doc = {activeElement: null, contains: function (el) { return !el.detached; }};
 function el(tag, attrs, children) {
   const e = {tagName: tag, attrs: Object.assign({}, attrs || {}), children: children || [], parent: null, style: {},
@@ -39,7 +38,7 @@ function el(tag, attrs, children) {
   return e;
 }
 
-/* ---- a key belongs to the control it was typed in ---- */
+/* a key belongs to the control it was typed in */
 {
   const input = el('INPUT'), area = el('TEXTAREA'), select = el('SELECT'), row = el('DIV', {'class': 'entity-item'});
   const inDialog = el('BUTTON'), dialog = el('DIV', {role: 'dialog'}, [inDialog]);
@@ -55,7 +54,7 @@ function el(tag, attrs, children) {
   check(pageKeys.belongsToControl(editable), 'editable text keeps its keys');
 }
 
-/* ---- dialogs: Escape, Tab, focus back ---- */
+/* dialogs: Escape, Tab, focus back */
 function key(k, shift) {
   return {key: k, shiftKey: !!shift, defaultPrevented: false, preventDefault: function () { this.defaultPrevented = true; }};
 }
@@ -95,7 +94,7 @@ function key(k, shift) {
   check(dialogs.count() === 0, 'every dialog closed');
 }
 
-/* ---- menus and tabs ---- */
+/* menus and tabs */
 {
   const i1 = el('BUTTON', {role: 'menuitem'}), i2 = el('BUTTON', {role: 'menuitemcheckbox'}), i3 = el('BUTTON', {role: 'menuitemradio'});
   const menu = el('DIV', {role: 'menu'}, [i1, el('DIV', {role: 'separator'}), i2, i3]);

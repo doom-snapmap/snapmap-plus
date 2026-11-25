@@ -1,10 +1,6 @@
-/* Reformat whitespace between JSON tokens for sh_pretty_on. Preserve token
- * order, number spelling and all string bytes. Format a copy of the
- * serialized rawmap so the native save buffer stays unchanged.
- *
- * Output uses two-space indentation, a space after each colon, LF line
- * endings and one trailing newline. No filesystem or engine calls.
- */
+/* Reformats whitespace between JSON tokens for sh_pretty_on, keeping token order, number spelling and string
+ * bytes; it formats a copy so the native save buffer is unchanged. Output uses two-space indentation, LF line
+ * endings and one trailing newline. */
 #ifndef SNAPMAP_PLUS_JSON_PRETTY_H
 #define SNAPMAP_PLUS_JSON_PRETTY_H
 
@@ -32,11 +28,9 @@ static int jp_is_space(char c)
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
-/* Format len bytes and return the required output size, even when outcap is
- * too small. Measure with (NULL, 0), then allocate and write. Returns 0 for
- * an unterminated string, unbalanced/deep containers or whitespace-only
- * input; callers then retain the original bytes.
- */
+/* Formats len bytes and returns the required output size even when outcap is too small (measure with
+ * (NULL, 0), then write). Returns 0 for an unterminated string, unbalanced or too deep containers or
+ * whitespace-only input; callers keep the original bytes then. */
 static size_t json_pretty(const char *src, size_t len, char *out, size_t outcap)
 {
     size_t pos = 0, i = 0;

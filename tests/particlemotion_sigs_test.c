@@ -1,10 +1,6 @@
-/* particlemotion_sigs_test.c -- the engine functions simulated particle motion binds (particlemotion_sigs.c,
- * particlemotion.c), checked on each build 13954591 executable given on the command line:
- *   - the vertex writer and the origin function resolve at their recorded RVAs, and each pattern is the only
- *     match in the executable;
- *   - the writer's first call is the origin function (the two are the pair the detour relies on);
- *   - the writer's detour window is whole instructions with no RIP-relative operand or relative branch.
- * Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
+/* particlemotion_sigs_test.c -- on each build 13954591 executable given, the vertex writer and origin function bind
+ * at their recorded RVAs with unique patterns, the writer's first call is the origin function, and its detour window
+ * has no RIP-relative operand or relative branch. Run via run-tests.ps1 (-Doom / -DoomAlt), one image per process. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

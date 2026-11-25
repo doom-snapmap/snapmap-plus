@@ -1,18 +1,6 @@
 /* sdkparse.h -- the Graphics SDK's author grammar, shared by its compilers (modeffect.c, modenv.c, sdkvalues.c).
- *
- * An SDK file is one brace group. A group holds items, one per line (or separated by commas); an item is a row of
- * atoms: words, numbers, quoted names, `native("...")` names and nested groups. So
- *
- *     {
- *         type        effect
- *         light {
- *             colour      { 1, 0.45, 0.1 }
- *             brightness  flicker { rate 8, low 0.6, high 1 }
- *         }
- *     }
- *
- * is a group of two items: [type effect] and [light {group}], and `colour { 1, 0.45, 0.1 }` an item of a word and a
- * group of three one-number items. Comments are // and / * * /. Pure; no allocation outlives sdk_doc_free. */
+ * An SDK file is one brace group of items (one per line or comma-separated); an item is a row of atoms: words,
+ * numbers, quoted names, `native("...")` names and nested groups. Pure; no allocation outlives sdk_doc_free. */
 #ifndef SNAPMAP_PLUS_SDKPARSE_H
 #define SNAPMAP_PLUS_SDKPARSE_H
 
@@ -68,8 +56,7 @@ const sdk_item *sdk_find(const sdk_group *g, const char *key);
 /* The candidate closest to `word` (edit distance, at most a third of its length + 1), or NULL. */
 const char *sdk_nearest(const char *word, size_t n, const char *const *cands, size_t count);
 
-/* Reads numbers: a number atom or a group of one-number items; returns how many were read (at most max), 0 when the
- * atom is neither. */
+/* Reads a number atom or a group of one-number items; returns the count read (at most max), 0 for any other atom. */
 int sdk_numbers(const sdk_atom *a, double *out, int max);
 
 /* The kind an SDK file declares: 1 with the word after its first key `type` (in `kind`, lower case), 0 when its

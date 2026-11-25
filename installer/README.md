@@ -117,7 +117,7 @@ mock, including corrupt, mismatched and interrupted downloads, and
 ## Output
 
 Everything the installer prints goes through `out.go`. Each phase (detecting DOOM,
-the earlier install it found, tidying the data folder, migrating player data,
+the earlier install it found, tidying the data folder,
 cleaning the DOOM folder, installing files, updating,
 uninstalling, status) opens with a title and a rule, details are aligned
 `Label:  value` lines, and each step ends in one result line marked `ok` (done),
@@ -189,8 +189,7 @@ After any install, update or migration:
 
 `install.json` is the installer's only record. The bookkeeping files of earlier
 releases, `installer-files.json`, `installer-versions.json` and
-`<installer>.updates.json`, are folded into it and removed whenever they are found,
-at every start. `"version"` stays the first key while the backend and the frontend
+`<installer>.updates.json`, are removed after their executable ownership records are no longer needed. `"version"` stays the first key while the backend and the frontend
 still read the first `"version"` in the file for their reports; release builds also
 carry the version in the DLLs themselves (`SNAPMAP_PLUS_VERSION`, see
 [packaging](../docs/packaging.md)).
@@ -203,7 +202,6 @@ carry the version in the DLLs themselves (`SNAPMAP_PLUS_VERSION`, see
   "installed_at": "2026-10-31T12:00:00Z",
   "files": ["XINPUT1_4.dll", "snapmap-plus\\snapmap-plus-ui-13954591.dll"],
   "backups": [{"rel": "XINPUT1_4.dll", "backup": "C:\\Users\\me\\AppData\\Local\\snapmap-plus\\cache\\installer\\backup\\XINPUT1_4.dll"}],
-  "legacy_removed": ["dinput8.dll", "snaphak_algo.dll"],
   "executables": {
     "snapmap-plus.exe": {"sha256": "<hex>", "version": "v0.3.0"}
   },
@@ -217,13 +215,13 @@ carry the version in the DLLs themselves (`SNAPMAP_PLUS_VERSION`, see
 ```
 
 `files` lists the pair placed; `backups` the files that were not ours and were
-replaced; `legacy_removed` the original SnapHak's files a migration deleted.
+replaced.
 `executables` ties each executable in the data folder to the bytes this installer
 placed, with the release it is when known: an update replaces, and uninstall
 removes, only a recorded copy whose bytes are unchanged, an installer older than
 the stable copy refuses to replace it unless `--force` is given, and a copy the
 player replaced is left alone. An executable earlier releases placed and this
-release does not ship (`retiredExecutables` in `state.go`: the store migration tool
+release does not ship (`earlierFiles` in `leftovers.go`: the store migration tool
 `snapmap-plus-store.exe`) is removed at every start while its bytes are the
 recorded ones, and its entry is dropped; a copy whose bytes changed, or one no
 install recorded, is kept and listed under "Tidying the data folder".
@@ -251,13 +249,7 @@ step that has something to report.
    other files `legacy.go` recognises in DOOM; player data under
    `%USERPROFILE%\snaphak\`). Detection needs one of its own marker files, so an
    unrelated proxy DLL alone never triggers it. "Removing the original SnapHak"
-   lists its files as they go, and backups an earlier install kept of them are
-   discarded so uninstall cannot restore them. "Migrating player data" copies
-   everything the old folder holds (prefabs, strings, rawmaps and any other file)
-   into the data folder, except the retired package folders and `cache\webview2`: existing destination files
-   keep their contents, differing sources and failed copies stay in the old
-   location, and the old folder is retired only once every file is verified.
-   Then the pair is installed.
+   lists the removed files. Player files stay in the original profile.
 2. **From v0.2.1-beta.19** (its 2018 pair in an April 2024 folder, recorded or not,
    and packages under `overrides\`). "Cleaning the DOOM folder" removes the 2018
    pair, the April 2024 pair is installed, and the `overrides\` packages stay where
@@ -273,22 +265,15 @@ step that has something to report.
    else changes.
 5. **A fresh machine**: the pair is installed and the data folder created.
 
-An install made before the rename kept its record and token in
-`%LOCALAPPDATA%\open-snaphak\`. Any installer run reads them from there and moves
-them into the data folder; the old folder is removed once it is empty.
-
 ## Installation and player data
 
 The installer verifies every manifest-listed bundle file before changing DOOM.
 There is one record, so installing into a second DOOM folder replaces the record of
 the first; uninstall the first folder before installing into another.
 
-Migration of player data compares file contents before retiring a source and removes
-only empty directories; read errors and links prevent retirement. Unknown files in
-the old metadata directory also remain there. The installer scaffolds `prefabs\`
-only (a `strings\` folder copied from `%USERPROFILE%\snaphak` stays as it is); this
-migration never copies or creates the retired package folders (`overrides`,
-`package-cache`, `package-staging`, `override-backups`).
+The installer creates the current prefabs folder. Player files from the original SnapHak stay
+under %USERPROFILE%\snaphak. Current installer state and the saved token live under
+%LOCALAPPDATA%\snapmap-plus.
 
 `config.json` belongs to the backend. Install, update, uninstall and reinstall
 do not create, parse or rewrite it. Prefabs, strings and rawmaps also remain

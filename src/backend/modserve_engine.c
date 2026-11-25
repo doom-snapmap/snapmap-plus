@@ -1,46 +1,6 @@
-/* modserve_engine.c -- the engine side of modserve.h: decl registration
- * through the registry, the existence probe, the palette points, per-map
- * activation and the serving verbs of sh_mods (status, rescan, palette
- * rebuild), which modcmd.c dispatches here.
- *
- * Engine surface (build 13954591), bound as timeline_tile.c binds it:
- *   IdStrCtor/IdStrDtor (48-byte idStr), DeclRegistryAnchor (+0x10 MOV RCX,[rip]),
- *   DeclTypeByName (registry vtable [11]), DeclRegisterFile (registry vtable [7]),
- *   DeclSourceFind, DeclFind(manager, name, create), ResourceGenericLoad;
- *   idResource +0x28 lifetime, +0x2c state (bit 0 failed/default, bit 1 unloaded);
- *   sedef +0x08 name, +0x1c8 resolved entityDef; palette +0x10 entries, +0x18 count,
- *   stride 0x6f0.
- *   DeclResourceProbe: bool(self, path, out1, out2, out3, out4, quiet) at decl
- *   manager vtable +0x78, detoured over its 21-byte head (13 bytes of pushes
- *   plus LEA RBP,[RSP-0x88]; no relative operand). All seven arguments are
- *   forwarded; for a path a bundle serves the engine is asked quietly, since
- *   its own miss is fatal with quiet 0 (S1 consequence 9).
- * The registration sequence is the one verified live: source
- * registration with a native idStr, a true probe answer, bytes through the
- * provider, DeclFind, then the generic load once for a new identity.
- *
- * Bundle requirements are applied before every pass, by me_run. A cvar is
- * set through idCVar::Set(cvar, text, force 1) (CvarSetString, VK
- * 0x140295780 / GL 0x1402959a0), the setter map_bounds.c already uses. Force
- * skips the engine's developer check (the product's cvar unlock lifts it for
- * the console too) and its read-only and command-line-only checks, so those
- * two are made here from the cvar's flags (idCVar+0x68: 0x8000 read-only,
- * 0x4000 command line only), and such a cvar is reported refused. That route
- * is immediate, so it needs no drain: Set assigns the value string (its data
- * pointer at idCVar+0x10) and parses it into the int at +0x30 before
- * returning. The blacklist matchers read exactly that int on 13954591 (VK:
- * resource matcher 0x140395150 reads the g_useResourceBlackList object
- * 0x145b13bd0 +0x30, the image matcher at 0x140394fc0 reads
- * g_useImageBlackList 0x145b13a90 +0x30; Ghidra jobs in snaphak-re
- * logs/shared-ghidra/mod-system-reinstatement/laneRQ; both register with
- * flags 1, a plain bool), so a read-back reports the int whenever the string
- * is an integer it disagrees with. The retired route buffered console text,
- * which stays queued until the command buffer runs; modserve.c keeps that
- * two-phase shape for any queued set, and verifies every cvar by reading it
- * back before registering. A requirement's console lines are appended with
- * BufferCommandText (the engine runs them at its next command-buffer pass),
- * on the main thread like every pass.
- */
+/* modserve_engine.c -- the engine side of modserve.h: decl registration through the registry, the existence
+ * probe, the palette points, per-map activation and the serving verbs of sh_mods (status, rescan, palette
+ * rebuild), which modcmd.c dispatches here. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -78,6 +38,8 @@
 #include "sync_clock.h"             /* the sync clock's Play gate */
 #include "../fault_shield/static_model_guard.h"   /* static models reloaded in place rebuild their render models */
 
+/* Offsets (build 13954591): idResource +0x28 lifetime, +0x2c state (bit 0 failed/default, bit 1 unloaded);
+ * sedef +0x08 name, +0x1c8 resolved entityDef; palette +0x10 entries, +0x18 count, stride 0x6f0. */
 #define RES_LIFETIME_OFF    0x28
 #define RES_STATE_OFF       0x2c
 #define SEDEF_NAME_OFF      0x08
@@ -193,11 +155,9 @@ static void me_log_fault(const char *what, const char *type, const char *name, c
            (after[0] && strcmp(after, before)) ? after : "");
 }
 
-/* The engine's resource lock: every list add, remove and find
- * takes it, and list add swap-removes and grows the entry arrays, so every
- * walk of a list here holds it. Recursive on one thread. Its accessor builds
- * the CRITICAL_SECTION on first use, so a NULL pointer means no list has been
- * touched yet and nothing can race the walk. */
+/* The engine's resource lock, held for every walk of a resource list because add swap-removes and grows the
+ * entry arrays; recursive on one thread. The engine builds the CRITICAL_SECTION on first use, so NULL means no
+ * list has been touched yet and nothing can race the walk. */
 static CRITICAL_SECTION *me_lock(void)
 {
     CRITICAL_SECTION *cs = NULL;
@@ -238,24 +198,20 @@ static int me_body_names(const unsigned char *body, size_t len, const char *name
     return 0;
 }
 
-/* ------------------------------------------------------------------ ledger */
-
-/* The provider's serves (modledger.h). A product read of served bytes
- * (validation, the dependents search) sets g_peek and is not recorded. */
+/* Records the provider's serves in the ledger (modledger.h); a product read of served bytes sets g_peek and is
+ * not recorded. */
 static void me_serve_listener(const char *request, const char *bundle_hash, const char *file_hash,
                               const unsigned char *bytes, size_t length)
 {
     sh_modledger_ident id;
     if (g_peek) return;
     if (sh_modledger_ident_of(bundle_hash, file_hash, bytes, length, &id)) (void)sh_modledger_record(request, &id);
-    /* A decl served on the main thread is parsed as soon as this returns, and its #str_ names are looked up then.
-     * An index published off the main thread asks for its bundles' strings at the next main-thread chance, which
-     * came about a second after the first decl of a just-built bundle was served ("Attempted to get unknown string
-     * ID '#str_<salt>_..._name' while loading edit.npcName"). So a pending refresh runs here, before the parse. */
+    /* A decl served on the main thread is parsed as soon as this returns and looks up its #str_ names then, so a
+     * pending string refresh runs here first; otherwise the engine logs "Attempted to get unknown string ID". */
     if (request && !strncmp(request, "generated/decls/", 16) && me_on_main() == 1) (void)sh_strids_refresh_pending();
 }
 
-/* What the open map serves for `request` now. 1 with its identity. */
+/* The identity of what the open map serves for `request`; returns 1 when it serves one. */
 static int me_now_ident(const char *request, sh_modledger_ident *out)
 {
     const char *bundle = NULL, *file = NULL;
@@ -312,8 +268,8 @@ static int me_anim_bytes_ok(const unsigned char *b, size_t len, char *why, size_
     return 1;
 }
 
-/* ------------------------------------------------------------------ registry */
-
+/* The decl registry, read through DeclRegistryAnchor (+0x10 is MOV RCX,[rip]); its vtable [7] is DeclRegisterFile
+ * and [11] DeclTypeByName, and NULL is returned when either differs from the bound functions. */
 static void *me_registry(void)
 {
     int32_t displacement;
@@ -367,11 +323,9 @@ static int op_register_file(void *context, const char *type, const char *name, c
     return ok;
 }
 
-/* The engine error text a load left, when it names the decl's own file: the
- * parse failed. An animWeb's parse catches its own idLexerException (VK
- * FUN_1416e2c10 / GL FUN_1416e3590), so DeclRead returns success and the
- * state byte shows nothing; the reporter copies the text into last_error_msg
- * before the throw on both renderers. */
+/* The engine error text a load left when it names the decl's own file (the parse failed). An animWeb's parse
+ * catches its own idLexerException (VK FUN_1416e2c10 / GL FUN_1416e3590), so DeclRead succeeds and the state
+ * byte shows nothing; the reporter copies the text into last_error_msg before the throw. */
 static char g_refusal[ERROR_TEXT_MAX];
 
 static int me_refused(const char *before, const char *type, const char *name)
@@ -420,10 +374,8 @@ static int op_load(void *context, const char *type, const char *name, int persis
                 return SH_MODSERVE_LOAD_LEFT;
             }
             if (!refused && !(state & 1)) {
-                /* A new identity with no consumers takes the native source load
-                 * once, at the persistent level, as timeline_tile.c does. Only
-                 * a step that keeps its decl joins the kept set first, so what
-                 * its load loads is kept with it; a map step's load is not. */
+                /* A new identity with no consumers takes the native source load once, at the persistent level,
+                 * as timeline_tile.c does; only a step that keeps its decl joins the kept set first. */
                 *(unsigned *)(d + RES_LIFETIME_OFF) = 4;
                 if (persist) sh_modserve_kept_add(d);
                 d[RES_STATE_OFF] = (unsigned char)(state & ~2);
@@ -448,10 +400,8 @@ static int op_load(void *context, const char *type, const char *name, int persis
     return ok;
 }
 
-/* The lookup an animWeb's parse makes for each model it names: DeclFind
- * without makeDefault, which answers from the resource lists, then the
- * visibility probe (a name the probe admits is created and loaded, as the
- * parse would have done). Inside the pass's process heap scope. */
+/* The lookup an animWeb's parse makes for each model it names: DeclFind without makeDefault (from the resource
+ * lists), then the visibility probe, which creates and loads a name it admits. Runs in the pass's heap scope. */
 static int op_decl_found(void *context, const char *type, const char *name)
 {
     int found = -1;
@@ -463,11 +413,9 @@ static int op_decl_found(void *context, const char *type, const char *name)
     return found;
 }
 
-/* Whether the engine holds a resource of this name now, by a walk of the
- * type's own resource list (DeclTypeByName answers the list object: its
- * entries at +0x20, count at +0x28, each resource's owning list at +0x10 and
- * name at +0x08). Unlike DeclFind it creates nothing and loads nothing, so
- * asking does not change what the registration it guards would do. */
+/* Whether the engine holds a resource of this name, by a walk of the type's own list (DeclTypeByName answers the
+ * list: entries +0x20, count +0x28; each resource's owning list +0x10, name +0x08). Unlike DeclFind it creates
+ * and loads nothing. */
 #define ME_LIST_ENTRIES 0x20
 #define ME_LIST_COUNT   0x28
 #define ME_RES_NAME     0x08
@@ -677,8 +625,6 @@ static const char *g_reparse_phase = "plan";   /* the running pass, for the earl
 static const sh_modserve_engine_ops g_ops = { NULL, op_source_registered, op_register_file, op_load, op_stock_exists,
                                               op_sources_published, op_decl_found, op_refusal, op_held };
 
-/* ------------------------------------------------------------------ gates */
-
 static void *me_gate_cvar(const char *name)
 {
     return sh_engine_cvar_find(g_cvar_slot, SH_IDCVAR_NAME_FOR_LOOKUP, name);
@@ -696,8 +642,9 @@ static int me_plain_int(const char *s)
     return 1;
 }
 
-/* The cvar's value text; the int the engine parsed from it when the text is
- * an integer they disagree on (the int is what bool and int readers use). */
+/* The cvar's value text, or the int the engine parsed from it when the text is an integer they disagree on. The
+ * blacklist matchers read that int (VK resource matcher 0x140395150 on g_useResourceBlackList 0x145b13bd0 +0x30,
+ * image matcher 0x140394fc0 on g_useImageBlackList 0x145b13a90 +0x30). */
 static int gate_read(void *context, const char *cvar, char **value)
 {
     const unsigned char *c = (const unsigned char *)me_gate_cvar(cvar);
@@ -726,7 +673,9 @@ static int gate_read(void *context, const char *cvar, char **value)
     return 1;
 }
 
-/* Immediate: the value is in the cvar when Set returns. */
+/* Sets the cvar through idCVar::Set(cvar, text, force 1) (CvarSetString, VK 0x140295780 / GL 0x1402959a0), which
+ * assigns the value string (+0x10) and the int (+0x30) before returning. Force skips the read-only and
+ * command-line-only checks, so they are made here from the flags (idCVar+0x68: 0x8000, 0x4000). */
 static int gate_set(void *context, const char *cvar, const char *value)
 {
     unsigned char *c = (unsigned char *)me_gate_cvar(cvar);
@@ -773,14 +722,10 @@ static const sh_modserve_gate_ops *me_gate_ops(void)
     return g_cvar_set && g_cvar_slot ? &g_gate_ops : &g_lines_ops;
 }
 
-/* The editor closure's watermark (modserve.h, SH_MODSERVE_PART_*). A boot
- * editor pass creates everything its rows lead the engine to create inside
- * one watermark and keeps it; work for those rows done later (a refresh after
- * an in-session install, a map pass registering a decl a row needs) takes one
- * of its own, so it is kept the same way. Nested work inside a watermark
- * (the editor pass, a kept plan part) is covered by the outer one: depth
- * counts them, and g_refresh_part limits the refresh run inside a kept plan
- * part to the closure (the editor pass refreshes everything inside its own). */
+/* The editor closure's watermark (modserve.h, SH_MODSERVE_PART_*): the boot editor pass keeps everything its rows
+ * lead the engine to create inside one watermark, and later work for those rows (a refresh after an in-session
+ * install, a map pass registering a decl a row needs) takes its own. Nested work is covered by the outer one:
+ * g_mark_depth counts them, and g_refresh_part limits the refresh inside a kept plan part to the closure. */
 static int g_mark_depth;
 static int g_refresh_part = SH_MODSERVE_PART_ALL;
 
@@ -822,13 +767,10 @@ static void me_closure_begin(me_closure *c)
 static void me_closure_end(me_closure *c, const char *phase, const char *what);
 static int me_in_play(void);
 
-/* The render models kept decls hold, loaded here while their files serve
- * (sh_modserve_held_models): each one not held yet is created (DeclFind with
- * create, as op_load) and loaded; a default box or a model a map heap holds is
- * loaded again in place. All inside process heap 0 and a keeper of its own
- * (what the load creates, its materials and images, lives as long as the
- * model), then held at level 4. A load that still ends in a default
- * stays at the engine's level and is named. */
+/* Loads the render models kept decls hold while their files serve (sh_modserve_held_models): a model not held yet
+ * is created (DeclFind with create, as op_load) and loaded, and a default box or map-heap model is loaded again
+ * in place. All inside process heap 0 and a keeper of its own, then held at level 4; a load that still ends in a
+ * default stays at the engine's level and is named. */
 typedef struct me_held_load {
     int loaded, reloaded, failed, faulted, skipped;
     char first[400], bad[300];
@@ -1006,13 +948,9 @@ static int me_run_plan(sh_modserve_plan *plan, const char *phase)
     return ready;
 }
 
-/* Run a plan inside process heap 0: decl objects outlive every map. The
- * bundles' requirements are applied and read back first, outside the scope
- * (as map_bounds.c sets its cvars), and gate-blocked steps are marked.
- * Outside a watermark, the steps an editor row needs that are not registered
- * yet run first inside one (sh_modserve_plan_split): a map pass or a refresh
- * plan that registers them keeps what they create, as the boot editor pass
- * does; the rest of the plan runs after, at the engine's own level. */
+/* Runs a plan inside process heap 0 (decl objects outlive every map) after applying the bundles' requirements.
+ * Outside a watermark, the steps an editor row needs run first inside one (sh_modserve_plan_split) so what they
+ * create is kept; the rest runs after, at the engine's own level. */
 static int me_run(sh_modserve_plan *plan, const char *phase)
 {
     sh_modserve_gates gates;
@@ -1104,8 +1042,6 @@ void sh_modserve_play_begin(void)
     sh_modserve_requirements_check(me_gate_ops(), "play", NULL);
 }
 
-/* ------------------------------------------------------------------ probe */
-
 static unsigned char me_probe_hook(void *self, const char *path, void *a, void *b, void *c, void *d, uint64_t quiet)
 {
     int ours = 0;
@@ -1115,10 +1051,9 @@ static unsigned char me_probe_hook(void *self, const char *path, void *a, void *
     return r ? r : (unsigned char)(ours ? 1 : 0);
 }
 
-/* Every resource the engine's lookup returns on the main thread while a pass
- * is open is recorded (sh_modserve_lookups_note); one it returns inside a load
- * is attributed to that load (sh_modserve_attrib_note) and kept at once when
- * the load is a kept object's. */
+/* Records every resource the engine's lookup returns on the main thread while a pass is open
+ * (sh_modserve_lookups_note); one returned inside a load is attributed to that load and kept at once when the
+ * load is a kept object's. */
 static void *me_lookup_hook(void *list, const char *name, uint64_t quiet)
 {
     void *r = g_lookup_orig(list, name, quiet);
@@ -1129,13 +1064,6 @@ static void *me_lookup_hook(void *list, const char *name, uint64_t quiet)
     return r;
 }
 
-/* The engine's load nesting on the main thread: ResourceMaterialize creates a
- * resource it does not find and loads it here, and that load materializes
- * what the resource uses, so a load opened inside another is that one's
- * (the chainsaw gore md6Def loads its mesh, whose load creates its
- * material). The pair is recorded; a kept parent keeps the child, raised
- * when its own load returns (the load's failure path reconstructs the object
- * at level 1). The depth is restored however the load leaves. */
 /* The heap a load on the main thread allocates from with heap -1: the top of
  * idMemLocal's 32-entry stack (ids at +0x44, depth at +0xC4), else 0, as
  * the allocator decides (VK 0x140328530). -1 when it cannot be read. */
@@ -1178,6 +1106,10 @@ static void me_kept_load_note(const void *res, int moved)
                "allocates is released with the map", name);
 }
 
+/* Tracks the engine's load nesting on the main thread: a load opened inside another is that one's (a load
+ * materializes what its resource uses), so the pair is recorded and a kept parent keeps the child, raised when
+ * its own load returns because a failed load reconstructs the object at level 1. The depth is restored however
+ * the load leaves. */
 static void me_load_hook(void *res)
 {
     int depth, kept = 0, heap, moved = 0;
@@ -1268,8 +1200,6 @@ static void me_ensure_probe(void)
     me_log("existence probe hook installed (rva 0x%X, %d-byte window)", g_probe_sig.rva, PROBE_STOLEN);
 }
 
-/* ------------------------------------------------------------------ install */
-
 static void *me_clean(const sig_result *r, size_t n, const char *name)
 {
     size_t i;
@@ -1278,11 +1208,9 @@ static void *me_clean(const sig_result *r, size_t n, const char *name)
     return NULL;
 }
 
-/* Bundle strings (strids.c) follow the published index. A table published
- * on the main thread (sh_mods rescan) refreshes them at once; one published
- * elsewhere (an install job, the Mods tab) asks the main thread through the
- * apply call slot, and when the slot is busy or the frame does not run the
- * request stays pending for the next editor or map pass below. */
+/* Bundle strings (strids.c) follow the published index: a table published on the main thread refreshes them at
+ * once; one published elsewhere asks the main thread through the apply call slot, and when the slot is busy the
+ * request stays pending for the next editor or map pass. */
 static int me_strings_main(void *context)
 {
     (void)context;
@@ -1306,8 +1234,7 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
 {
     size_t i;
     sh_modserve_set_console(me_console_line);
-    /* The boot index was built before this point, and the string injector
-     * (installed after it) read that table in its first pass. */
+    /* The string injector, installed after the boot index, reads that table in its first pass. */
     sh_modserve_set_index_listener(me_index_changed);
     g_ctor = (str_ctor_fn)me_clean(results, count, "IdStrCtor");
     g_dtor = (str_dtor_fn)me_clean(results, count, "IdStrDtor");
@@ -1379,27 +1306,18 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
     return g_bound;
 }
 
-/* ------------------------------------------------------------------ early decls */
-
-/* Shadows the engine parsed from its own bytes before the provider existed
- * (modserve.h, sh_modserve_each_unopened_shadow). Each one the engine holds
- * parsed is loaded again through ResourceGenericLoad with its state bits
- * cleared, the sequence op_load uses for a new identity: the load reads the
- * source through the provider, which now serves the bundle's bytes. One the
- * engine has not parsed yet is left for the provider. Main thread, inside
- * process heap 0 (a re-parsed decl lives for the process). */
+/* Reloads the shadows the engine parsed from its own bytes before the provider existed
+ * (sh_modserve_each_unopened_shadow): each parsed one is loaded again as op_load does for a new identity, so the
+ * load reads the bundle's bytes; an unparsed one is left for the provider. Main thread, inside process heap 0. */
 typedef struct me_reparse {
     sh_modledger_tally tally;   /* per type, for the log (copies the type: dependents pass a stack buffer) */
     int reparsed, through_provider, failed, faulted, pending, skipped, restored;
     int surfaces;               /* surfaces offered and left alone (sh_modserve_is_surface) */
 } me_reparse;
 
-/* Every in-place load keeps the resource's lifetime: ResourceGenericLoad's
- * failure path reconstructs the object (ResourceReconstruct, VK 0x1416c67f0),
- * and idResource's constructor (VK 0x1416c5580) writes level 1 or 2, so a
- * permanent decl that failed a re-parse would be destroyed by the next map
- * unload while everything permanent that points at it (the menu's
- * collectibles, an editor row) keeps the pointer. */
+/* Every in-place load keeps the resource's lifetime: ResourceGenericLoad's failure path reconstructs the object
+ * (ResourceReconstruct, VK 0x1416c67f0) and idResource's constructor (VK 0x1416c5580) writes level 1 or 2, so a
+ * permanent decl that failed a re-parse would be destroyed by the next map unload. */
 static void me_load_in_place(unsigned char *d, const char *what, const char *type, const char *name)
 {
     unsigned was = 0, left;
@@ -1448,8 +1366,7 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
         free(model);
         {
             int refused;
-            /* Its default tree follows the bytes it is parsed from now, the
-             * build the open map serves (a refresh, a map's own copy). */
+            /* Its default tree follows the bytes it is parsed from: the build the open map serves. */
             sh_modtypeinfo_decl_changed(type, name);
             me_load_in_place(d, "reparse", type, name);
             state = d[RES_STATE_OFF];
@@ -1514,10 +1431,8 @@ static void me_reparse_early(const char *phase, int in_heap)
            r.through_provider, r.failed, r.restored, r.faulted, r.skipped, r.pending, offered);
 }
 
-/* Models and images a gated bundle serves that the engine loaded before the
- * gates were live (modserve.h, sh_modserve_each_ungated_raw): each one the
- * resource lists hold is loaded again in place, which resolves its materials
- * and pixels with the blacklists off. Matched by name within the list of its
+/* Reloads in place the models and images a gated bundle serves that the engine loaded before the gates were live
+ * (sh_modserve_each_ungated_raw), with the blacklists off. Matched by name within the list of the resource's
  * class (idMD6Model, idImage), since a material and an image can share one. */
 #define ME_RAW_MODEL 0
 #define ME_RAW_IMAGE 1
@@ -1546,10 +1461,8 @@ static int me_raw_collect(void *context, const char *type, const char *name, con
 {
     me_raw *r = (me_raw *)context;
     (void)bundle_id;
-    /* A surface model or image is collected like any other: the gated reload
-     * is the one pass that loads the game's own bytes again, inside its
-     * keeper, so a boot-held stock mesh gets its blacklisted materials
-     *. */
+    /* A surface model or image is collected like any other: the gated reload is the one pass that loads the
+     * game's own bytes again inside its keeper. */
     if (r->n == r->cap) {
         /* Every name is kept: the list grows (no count of the product's own). */
         int cap = r->cap ? r->cap * 2 : 256;
@@ -1582,10 +1495,9 @@ static void me_raw_note(me_raw *r, const char *name)
                     r->first[0] ? ", " : "", name);
 }
 
-/* An anim is reloaded only when it is held for the session (level 4: stock,
- * or raised with the editor closure); a level-1 anim is freed at every map
- * transition and read again from the current bytes. Its served bytes are
- * checked first: a Load that fails frees the data the held anim points at. */
+/* An anim is reloaded only when held for the session (level 4: stock, or raised with the editor closure); a
+ * level-1 anim is freed at every map transition. Its served bytes are checked first, since a failed Load frees
+ * the data the held anim points at. */
 static int me_anim_ready(me_raw *r, unsigned char *d, const me_raw_name *n)
 {
     char why[160];
@@ -1654,10 +1566,8 @@ static void me_raw_one(void *context, const char *list_class, void *resource, co
     }
 }
 
-/* After anims reloaded in place: the md6Def and animWeb decls the open map
- * serves that name one are parsed again, so whatever they built from the old
- * data is rebuilt from the new (which objects cache an anim's data pointer
- * is not established). Inside process heap 0, main thread. */
+/* After anims reload in place, the md6Def and animWeb decls the open map serves that name one are parsed again,
+ * rebuilding what they built from the old data. Inside process heap 0, main thread. */
 typedef struct me_dep {
     const me_raw *raw;
     me_reparse *decls;
@@ -1729,11 +1639,9 @@ static void me_reload_ungated(const char *phase, int in_heap)
         free(r.names);
         return;
     }
-    /* A reload in place of a held model resolves its materials and images
-     * again: whatever that creates must live as long as the held model, or
-     * the next purge frees images a permanent material still points at (the
-     * cold-launch crash). Outside an editor pass's watermark this
-     * reload opens its own keeper (sh_modserve_inplace_keeper). */
+    /* A reload in place of a held model resolves its materials and images again, and what that creates must live
+     * as long as the held model or the next purge frees images a permanent material points at. Outside an editor
+     * pass's watermark it opens its own keeper (sh_modserve_inplace_keeper). */
     own = sh_modserve_inplace_keeper(g_mark_depth, r.n);
     if (own) me_closure_begin(&keeper);
     me_raw_smodel_begin(&r);
@@ -1750,15 +1658,9 @@ static void me_reload_ungated(const char *phase, int in_heap)
     free(r.names);
 }
 
-/* ------------------------------------------------------------------ refresh */
-
-/* What a rescan changed under the engine (modserve.h, sh_modserve_each_refresh):
- * each changed decl the engine holds parsed is re-parsed with the early-decl
- * primitive (me_reparse_one), a gone shadow decl the same way (the provider
- * no longer answers it, so the engine reads its own bytes), and each changed
- * model and image it holds loaded is reloaded in place with the gated-reload
- * primitive (me_raw_one). Main thread, inside process heap 0; never during
- * Play (sh_modserve_refresh_after_rescan defers to the next pass). */
+/* Applies what a rescan changed (sh_modserve_each_refresh): changed or gone-shadow decls the engine holds parsed
+ * are re-parsed with me_reparse_one, and changed models and images it holds loaded are reloaded in place with
+ * me_raw_one. Main thread, inside process heap 0; never during Play (the next pass applies it). */
 #define ED_ACTIVE_OFF       0x09      /* editor_set_active's byte: clear during SnapMap Play */
 
 /* `sh_mods rescan` prints every refresh line to the console as well. */
@@ -1789,10 +1691,8 @@ static int me_in_play(void)
     return !active && reason == 3;
 }
 
-/* A map pass (modserve_activate_bundles): the engine's purge has run, the
- * departed map's entities are gone and the next map's are not spawned, so a
- * held anim may be reloaded in place. Anims marked at any
- * other point wait for it. */
+/* A map pass (modserve_activate_bundles): the engine's purge has run, the departed map's entities are gone and the
+ * next map's are not spawned, so a held anim may be reloaded in place; anims marked at any other point wait. */
 static int g_anim_pass;
 /* Anims the last refresh outside a map pass left waiting: the map pass says
  * when it has settled them, so the count does not read as stuck. */
@@ -1803,7 +1703,7 @@ typedef struct me_refresh {
     me_raw raw;
     int stage;            /* 0 decls and collect, 1 settle the collected models, images and anims */
     int not_held, gated;
-    int kept;             /* held with the bytes served now (the ledger): nothing to reload */
+    int kept;             /* held with the bytes served (the ledger): nothing to reload */
     int game;             /* never served by a mod this session (the ledger): not refreshed */
     int anims_waiting;    /* anims marked outside a map pass */
     int dependents;       /* md6Def and animWeb decls re-parsed after their anims reloaded */
@@ -1821,9 +1721,8 @@ static int me_refresh_visit(void *context, const sh_modserve_refresh_item *it)
         return 1;
     }
     if (c->stage) return 1;
-    /* Raw resources: the ledger says whether the bytes the engine was given
-     * under this name differ from the bytes served now. (Decls keep the
-     * marks alone: a child is marked for its parent's change, not its own.) */
+    /* Raw resources: the ledger says whether the bytes the engine was given under this name differ from the bytes
+     * served. (Decls keep the marks alone: a child is marked for its parent's change, not its own.) */
     switch (me_ledger_decision(it)) {
     case SH_MODLEDGER_KEEP: c->kept++; return 1;
     case SH_MODLEDGER_GAME: c->game++; return 1;
@@ -1855,10 +1754,8 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
         free(c.raw.names);
         return;
     }
-    /* A re-parse or reload in place of a held resource binds it to what it
-     * resolves now; outside a watermark (the rest of a refresh, a scope
-     * change) that is kept by a keeper of its own, as inside the editor's
-     * pass. Only when there is something to apply. */
+    /* A re-parse or reload of a held resource binds it to what it resolves; outside a watermark (the rest of a
+     * refresh, a scope change) a keeper of its own keeps that, only when there is something to apply. */
     (void)sh_modserve_each_refresh_part(me_refresh_count, &items, part);
     own = sh_modserve_inplace_keeper(g_mark_depth, items);
     if (own) me_closure_begin(&keeper);
@@ -1920,10 +1817,9 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
     free(c.raw.names);
 }
 
-/* Apply a refresh. Outside a watermark, the editor closure's changes (rows
- * and what they need, modserve.h) are applied first inside one, so what their
- * re-parse and reload create is kept for the session as at boot, then the
- * rest at the engine's own level. Inside a watermark: the part it covers. */
+/* Applies a refresh. Outside a watermark, the editor closure's changes (rows and what they need, modserve.h)
+ * apply first inside one so what they create is kept as at boot, then the rest at the engine's own level; inside
+ * a watermark, the part it covers. */
 static void me_refresh_apply(const char *phase, int in_heap, sh_modserve_refresh *out)
 {
     if (g_mark_depth) { me_refresh_apply_part(phase, in_heap, out, g_refresh_part); return; }
@@ -1949,18 +1845,14 @@ static void me_refresh_note(sh_modserve_refresh *r, const char *fmt, ...)
     va_end(ap);
 }
 
-/* A deferred refresh waits for the editor: a watcher thread hands it to the
- * main-thread call slot, which drains in editor frames only, once Play has
- * ended (the next registration pass applies it too, whichever comes first).
- * Changes still waiting for their bundles' gates stay for the next pass. */
+/* A deferred refresh waits for the editor: a watcher thread hands it to the main-thread call slot, which drains
+ * in editor frames only, once Play has ended; the next registration pass applies it too. Changes still waiting
+ * for their bundles' gates stay for the next pass. */
 static volatile LONG g_refresh_watch;
 
-/* The editor side of a refresh, main thread, not in Play: new gameplay decls
- * of mods this session registered are registered now (as a map's activation
- * would), and when a rescan added, changed or removed editor rows the live
- * palette is rebuilt (the 'sh_mods palette rebuild' path, whose editor pass
- * registers new rows first). Without a palette yet the first editor entry
- * builds it with every row. */
+/* The editor side of a refresh (main thread, not in Play): new gameplay decls of mods in use are registered as a
+ * map's activation would, and changed editor rows rebuild the live palette (the 'sh_mods palette rebuild' path).
+ * With no palette yet, the first editor entry builds it with every row. */
 static volatile LONG g_palette_wanted;
 
 static void me_keep_rows(const char *phase);
@@ -2023,10 +1915,8 @@ static DWORD WINAPI me_refresh_watcher(LPVOID unused)
     int i, tries, result = 0;
     (void)unused;
     sh_apply_engine_get_run_on_main(&run);
-    /* Up to an hour; any registration pass in between applies the same marks.
-     * A palette rebuild the editor refuses (an entity or a wire held, or a
-     * native edit such as the Mods tab's Delete Selection still committing)
-     * is tried again once the editor is free, at most 40 times. */
+    /* Polls up to an hour; any registration pass in between applies the same marks. A palette rebuild the editor
+     * refuses (a held entity or wire, or a native edit still committing) is retried when it is free, 40 times. */
     for (i = 0, tries = 0; run && i < 7200 && tries < 40; ++i) {
         sh_modserve_diff d;
         Sleep(500);
@@ -2091,7 +1981,7 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
     r.needs_restart = d.changed_restart;
     r.state = why && r.pending ? 2 : 1;
     if (!why && r.palette < 0 && g_bound) {
-        /* The editor refused the palette rebuild for now: retried when it is free. */
+        /* The editor refused the palette rebuild: retried when it is free. */
         me_refresh_watch();
         me_refresh_note(&r, "the Toybox updates when you let go of the object you are holding");
     }
@@ -2242,13 +2132,9 @@ static void op_sources_published(void *context)
     me_reload_ungated(g_reparse_phase, 1);
 }
 
-/* ------------------------------------------------------------------ palette */
-
-/* Keep the decls an editor row points at for the session (modserve.h,
- * sh_modserve_editor_refs): an object the engine created at level 1 after
- * boot is raised to 4, as everything a stock row names was at the boot
- * promotion. The row's parse normally made the object; one it did not is
- * created by name first. Only the level changes: contents load on demand. */
+/* Keeps the decls an editor row points at for the session (modserve.h, sh_modserve_editor_refs): an object the
+ * engine created at level 1 after boot is raised to 4, as everything a stock row names was at boot. The row's
+ * parse normally made the object and one it did not is created by name first; only the level changes. */
 typedef struct me_keep {
     int kept, permanent, created, missing, loaded;
     int older;                            /* kept from level 1 although it predates the watermark */
@@ -2275,15 +2161,11 @@ static void me_keep_ref(void *context, const char *type, const char *name, const
             k->loaded++;
         }
         if (*(unsigned *)((unsigned char *)decl + RES_LIFETIME_OFF) == 1) {
-            /* Created before the watermark (by an open map's own load, say):
-             * what its earlier parse created is not new to the watermark and
-             * stays at the engine's level. A row names an md6Def by name only
-             * (the editor finds it at entity Init, VK FUN_14123b340 / GL
-             * FUN_14123a7e0, without creating it), so such an md6Def is left
-             * whole at level 1: kept alone it would outlive its MD6 model, and
-             * the next Play built an animator on the freed model (seen live,
-             * VK DOOM+0x173fb46). An animWeb or material the row holds by
-             * pointer is kept, as before. */
+            /* Created before the watermark (by an open map's own load, say): what its parse created is not new to
+             * it and stays at the engine's level. A row names an md6Def by name only (the editor finds it at
+             * entity Init, VK FUN_14123b340 / GL FUN_14123a7e0, without creating it), so it is left whole at
+             * level 1: kept alone it would outlive its MD6 model and the next Play would build an animator on the
+             * freed model. An animWeb or material the row holds by pointer is kept. */
             int older = k->mark && sh_modserve_watermark_has(k->mark, decl);
             if (older) k->older++;
             if (older && !_stricmp(type, "md6Def")) {
@@ -2338,12 +2220,9 @@ static void me_keep_rows(const char *phase)
 
 static void me_ledger_sweep(const char *phase);
 
-/* The editor rows' registration an editor entry runs (the palette's pass)
- * and a hub launch's gate runs before its level load
- * (sh_modserve_launch_preload): every row the scope serves and the closure
- * of decls it needs, inside a watermark and process heap 0, kept for the
- * session. `*todo` receives the steps no earlier pass had settled. Returns
- * the plan's step count, or -1. */
+/* Registers every row the scope serves plus the decls it needs, for an editor entry and for a hub launch's gate
+ * (sh_modserve_launch_preload), inside a watermark and process heap 0, kept for the session. `*todo` receives
+ * the steps no previous pass had settled; returns the plan's step count, or -1. */
 static int me_editor_rows(const char *phase, int first, int *todo)
 {
     sh_modserve_plan plan;
@@ -2416,13 +2295,12 @@ static int me_editor_rows(const char *phase, int first, int *todo)
     return count;
 }
 
-/* The passes' common start: mod virtual-texture families first (a material
- * binds to its family only when the family's record exists when the
- * material is parsed), mod sound banks once the sound system is up
- * (modsound.h), bundle strings of an index published off the main thread. */
+/* The passes' common start: mod virtual-texture families first (a material binds to its family only if the
+ * record exists when the material is parsed), mod sound banks once the sound system is up (modsound.h), then
+ * bundle strings of an index published off the main thread. */
 static void me_pass_prelude(const char *phase)
 {
-    /* Earlier index tables are freed at the start of an outermost pass. */
+    /* Retired index tables are freed at the start of an outermost pass. */
     if (me_on_main() == 1 && !g_mark_depth) (void)sh_modserve_index_retire();
     sh_modvt_before_pass(phase);
     sh_modsound_before_pass(phase);
@@ -2437,10 +2315,8 @@ void sh_modserve_palette_before_build(void)
     if (!g_bound || !sh_modserve_active()) return;
     me_ensure_probe();
     (void)sh_companions_ensure("editor");
-    /* A palette pass is the editor's: the PLAY mode a hub launch set at its
-     * launch boundary (modpublished.c), which nothing ends, must not refuse
-     * undeclared rows' sources here (the editor's tick resets it too, but only
-     * once the editor shows a map). */
+    /* A palette pass is the editor's: the PLAY mode a hub launch set at its launch boundary (modpublished.c),
+     * which nothing ends, must not refuse undeclared rows' sources here (the editor's tick resets it too). */
     if (sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_PLAY && me_in_play() != 1 && me_on_main() == 1 &&
         sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0)
         (void)sh_modserve_scope_apply("editor");
@@ -2464,10 +2340,9 @@ int sh_modserve_launch_preload(const char *why)
     me_pass_prelude(phase);
     me_ensure_probe();
     (void)sh_companions_ensure(phase);
-    /* The hub's own mode, as the palette pass resets it: a PLAY mode left
-     * over from an earlier launch would refuse undeclared rows' sources, and
-     * the level load's palette pass would then register them after all. The
-     * launch sets PLAY right after this pass (sh_modui_scope_launch). */
+    /* The hub's own mode, as the palette pass resets it: a PLAY mode left from a previous launch would refuse
+     * undeclared rows' sources and the level load's palette pass would register them anyway. The launch sets PLAY
+     * right after this pass (sh_modui_scope_launch). */
     if (sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_PLAY && sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0)
         (void)sh_modserve_scope_apply(phase);
     /* 1. The editor rows and their closure, as an editor entry registers
@@ -2532,11 +2407,9 @@ static int me_count_mod_rows(void *palette, int *rows)
 }
 
 #ifdef SH_DIAG   /* developer diagnostics: the diagnostic build only */
-/* 'sh_mods palette check': where each palette row's owned strings live. The
- * Play build sorts the palette in place and copies every row through the
- * row copy constructor, so a row string outside the process heap is read
- * after the Play transition freed it (the review's A-D3 fault: a row's
- * clipModelName, entry+0x228, in a released map heap). */
+/* 'sh_mods palette check': where each palette row's owned strings live. The Play build sorts the palette in place
+ * and copies every row through the row copy constructor, so a row string outside the process heap is read after
+ * the Play transition frees it (for example clipModelName, entry+0x228). */
 #define PAL_STR_FIELDS 6
 #define PAL_CHECK_LIST 16
 static const unsigned me_pal_str_off[PAL_STR_FIELDS] = { 0x168, 0x1a0, 0x1f8, 0x228, 0x258, 0x350 };
@@ -2673,9 +2546,8 @@ int modserve_palette_rebuild_requested(void)
         me_log("palette rebuild refused: %s", main ? "the main thread is unknown" : "not on the main thread");
         return 0;
     }
-    /* The module palette (editor+0x206c0, FUN_141213220) is built against the
-     * entity palette and is NOT re-run here: whether it keeps entity-row
-     * pointers across this rebuild is an open trace. */
+    /* The module palette (editor+0x206c0, FUN_141213220) is built against the entity palette and is not re-run
+     * here; whether it keeps entity-row pointers across this rebuild is not established. */
     t0 = me_now_ms();
     r = sh_timeline_tile_rebuild_palette(&before, &after);
     switch (r) {
@@ -2702,8 +2574,6 @@ int modserve_palette_rebuild_requested(void)
         return 0;
     }
 }
-
-/* ------------------------------------------------------------------ per-map */
 
 static const char *me_rebuild_reason(int r)
 {
@@ -2772,13 +2642,11 @@ static void me_sync_rows(const char *const *bundle_hashes, int n)
                me_rebuild_reason(res.rebuild), res.rows_before);
 }
 
-/* The ledger's backstop at a map pass (modledger.h): a name the provider
- * served this session whose bytes differ from what the open map serves now,
- * that the engine holds and that the scope marks did not settle, is refreshed
- * in place by its type's mechanism (decls re-parsed; models, images and anims
- * reloaded); a held skeleton or other raw type has no in-place route and is
- * reported. Stock paths (shadows) and paths the map does not serve are left
- * to the marks. Main thread, inside process heap 0. */
+/* The ledger's backstop at a map pass (modledger.h): a name the provider served whose bytes differ from what the
+ * open map serves, that the engine holds and the scope marks did not settle, is refreshed in place by its type's
+ * mechanism (decls re-parsed; models, images and anims reloaded); a held skeleton or other raw type has no
+ * in-place route and is reported. Stock paths and paths the map does not serve are left to the marks. Main
+ * thread, inside process heap 0. */
 typedef struct me_sweep_item { const char *request; } me_sweep_item;
 typedef struct me_sweep { me_sweep_item *v; int n, cap, dropped; } me_sweep;
 
@@ -2922,8 +2790,6 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     return ready;
 }
 
-/* ------------------------------------------------------------------ console */
-
 static void me_print_bundle(void *context, const char *id, const char *hash, int admitted, const char *cause,
                             int files, int place)
 {
@@ -2941,9 +2807,8 @@ static void me_print_line(void *context, const char *line) { (void)context; sh_p
 static int me_rebuild_main(void *context) { (void)context; return modserve_palette_rebuild_requested(); }
 
 #ifdef SH_DIAG   /* developer diagnostics: the diagnostic build only */
-/* `sh_mods held [filter]`: the census of level-4 resources whose names the
- * product served this session, by type (an open question: whether
- * a mod skeleton ever reaches level 4), then the ledger itself. */
+/* `sh_mods held [filter]`: the census of level-4 resources whose names the product served, by type, then the
+ * ledger itself. */
 #define ME_HELD_TYPES 24
 #define ME_HELD_LINES 200
 typedef struct me_census_type { char type[40]; int count; char names[240]; } me_census_type;

@@ -1,4 +1,4 @@
-/* The features that are off this session (feature_health.h). */
+/* Records the features that are off this session (feature_health.h). */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,7 +8,7 @@
 #include "snapmap_plus_iface.h"
 #include "../common/text.h"
 
-/* As many features as are off, each name its own copy. */
+/* One owned copy of the name per feature that is off. */
 static SRWLOCK g_lock = SRWLOCK_INIT;
 static char  **g_off;
 static int     g_count, g_capacity;

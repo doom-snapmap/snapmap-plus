@@ -87,8 +87,6 @@ int sh_fsm_parse(const char *name, int *kind, char *salt, size_t salt_cap, char 
     return 1;
 }
 
-/* ---------------------------------------------------------------- the virtuals */
-
 static fsm_class *class_of(void *self)
 {
     void **vt = self ? *(void ***)self : NULL;
@@ -179,8 +177,6 @@ static void v_update(void *self, void *ai, void *fsm, void *time)
     (void)time;
     state_hook(self, ai, fsm, "update");
 }
-
-/* ---------------------------------------------------------------- objects */
 
 static void *dress(fsm_class *c, void *obj)
 {
@@ -328,7 +324,6 @@ int sh_fsm_class_count(void)
 }
 
 #ifndef SH_SCRIPT_PURE
-/* ================================================== engine side (the DLL) */
 #include "../backend_log.h"
 #include "../hook.h"
 #include "../signatures.h"

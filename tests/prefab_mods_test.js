@@ -1,7 +1,5 @@
-/* The Prefabs tab's mods: the status a prefab's snapmapPlus block records (backend/prefab_mods.c),
-   the list pill, the Prefab Details rows, the Load / Place answers about mods and the Export and
-   Import buttons, lifted from the shipped HTML; and the host's side of each message: the block
-   read for the list and details, stripped before the engine, and no sidecar written. Pure ASCII. */
+/* The Prefabs tab's mod status (backend/prefab_mods.c), list pill, details rows, Load / Place answers and Export / Import
+   buttons, lifted from the shipped HTML, plus the host's side of each message. Pure ASCII. */
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -133,7 +131,7 @@ check(resolve !== -1 && host.indexOf('GetFileAttributesA(meta) == INVALID_FILE_A
 const detail = host.indexOf('static void ui_send_prefab_detail(');
 check(detail !== -1 && host.indexOf('sceneBody.resize(sh_prefab_block_strip(&sceneBody[0], sceneBody.size()));', detail) !== -1,
       'host: the selected prefab\'s scene ships without its block');
-check(host.indexOf('call.op = SH_MODULE_PREFAB_META_READ;') !== -1 && host.indexOf('ui_prefab_view(path.c_str(), mp.c_str(), nullptr)') !== -1,
+check(host.indexOf('call.op = SH_MODULE_PREFAB_META_READ;') !== -1 && host.indexOf('ui_prefab_view(path.c_str(), nullptr, nullptr, &fileType)') !== -1,
       'host: the list and details read the view from the file');
 const rec = host.indexOf('call.op = SH_MODULE_PREFAB_MODS_RECORD;');
 check(rec !== -1 && host.indexOf('call.path = path.c_str();', rec) !== -1 && host.indexOf('call.path = path.c_str();', rec) < rec + 200,
@@ -144,6 +142,14 @@ check(save !== -1 && host.slice(save, saveEnd).indexOf('fopen_s') === -1 && host
       host.slice(save, saveEnd).indexOf('call.path = path.c_str();') !== -1,
       'host: description and tag edits go to the file\'s block; no sidecar is written or deleted');
 check(host.indexOf('call.meta_path = meta;\n    call.out = out;') === -1, 'host: the module prefab save writes no sidecar');
+
+const folder = host.slice(host.indexOf('static void ui_apply_delete_folder()'), host.indexOf('/* Run enum_inherits'));
+check(folder.includes('ui_prefab_can_move(dir + item + ".json"') &&
+      folder.indexOf('ui_prefab_can_move(') < folder.indexOf('ui_move(') &&
+      host.includes('if (!ui_prefab_can_move(path, reason)) return 0;') &&
+      host.includes('if (!ui_prefab_can_move(oldp, &g_rename_reason))') &&
+      host.includes('if (!ui_prefab_can_move(oldp, reason)) return 0;'),
+      'moves, renames and recycling check the prefab before detaching its details');
 
 /* The look. */
 check(/\.pf-mods\s*\{/.test(css) && /\.pf-mods\.pf-mods-missing\s*\{/.test(css) && /\.pc-mods\s*\{/.test(css) &&

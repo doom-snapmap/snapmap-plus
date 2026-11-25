@@ -495,7 +495,7 @@
   .pc-limits-rows .pcl-after.pcl-ok { color: var(--infoText); }
   .pc-limits-rows .pcl-after.pcl-warn { color: var(--warnText); }
   .pc-limits-rows .pcl-after.pcl-over { color: var(--dangerText); }
-  /* The meter bar in the result's colour: the map's use now faint, then this prefab's share solid. */
+  /* The meter bar in the result's colour: the map's current use faint, then this prefab's share solid. */
   .pcl-bar { --pclFill: var(--accent); position: relative; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
   .pcl-bar.pcl-warn { --pclFill: var(--warnText); }
   .pcl-bar.pcl-over { --pclFill: var(--danger); }
@@ -620,27 +620,19 @@
 
 /* File menu: disabled items stay readable, the arm toggle shares the tick
    gutter with the theme radios, and the staged-path readout sizes the popup. */
-  /* A disabled item still has to be readable -- it is carrying information ("nothing is
-     staged"), not just refusing a click -- so it dims rather than fades, and drops the hover
-     highlight that would otherwise promise it is clickable. */
+  /* A disabled item dims rather than fades and drops the hover highlight, since it carries information. */
   .menu-popup button[disabled] { color: var(--muted); }
   .menu-popup button[disabled]:hover, .menu-popup button[disabled]:focus-visible { background: transparent; color: var(--muted); }
   /* the arm toggle uses the same tick gutter as the theme radios so both menus align */
   .menu-popup button[role="menuitemcheckbox"]::before { content: ""; width: 12px; flex: 0 0 12px; text-align: center; }
   .menu-popup button[role="menuitemcheckbox"][aria-checked="true"]::before { content: "\2713"; }
   .menu-sep { height: 1px; margin: 3px 4px; background: var(--border2); }
-  /* the staged-path readout. A fixed width, not max-width: the popup sizes to its content, and a
-     max-width alone let it stay narrow and wrap every path over three lines. This sets the popup's
-     width for the whole File menu. overflow-wrap still catches a pathological filename. */
+  /* the staged-path readout; a fixed width (not max-width) sets the popup's width for the whole File menu. */
   .menu-note { width: 296px; padding: 3px 8px 2px; color: var(--textDim, var(--text)); font-size: 11px; line-height: 1.5; opacity: .85; overflow-wrap: anywhere; }
   .menu-note > div + div { margin-top: 1px; }
   .menu-note b { font-weight: 600; opacity: .8; }
-  /* Mods tab (mods_tab.js). One flat list sorted by name: every row shown is mounted and #modsList
-     (a .panel-body, flex: 1, min-height: 0, overflow-y: auto) scrolls it natively with the wheel,
-     the scrollbar and the keyboard. The header's actions are the panel's icon buttons, as the
-     Prefabs tab's; each row carries one status glyph (installed, in this map, needs attention). */
-  /* The header keeps every icon button inside the pane down to its 220 px minimum: the label area
-     (title and count) gives up its room first and is clipped, the buttons never shrink. */
+  /* Mods tab (mods_tab.js): one flat name-sorted list that #modsList scrolls natively; each row carries one status glyph. */
+  /* The header keeps every icon button inside the pane down to 220 px: the label area clips first, the buttons never shrink. */
   .mods-head-label { display: flex; align-items: center; gap: 8px; flex: 1 1 0; min-width: 0; overflow: hidden; }
   .mods-head-label > .panel-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .mods-head-label > .badge { flex: none; }

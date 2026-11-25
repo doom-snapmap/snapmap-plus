@@ -1,7 +1,6 @@
-/* Snapshot writing already skips expired entity handles. Swap-removal must do
- * the same when updating the moved entity's serialized index. Leave the native
- * handle move, count reduction and removed entity's state reset intact.
- * Only NULL is handled; invalid non-NULL pointers still reach normal diagnostics. */
+/* Snapshot writing skips expired entity handles, so swap-removal must also skip them when updating the
+ * moved entity's serialized index. Only NULL is handled; the native handle move, count reduction and state
+ * reset are untouched. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -12,8 +11,7 @@
 
 static const uint8_t index_write[] = {0x89,0xa8,0x64,0x0b,0x00,0x00};
 
-/* The bytes the install expects at the signature's site (the expect argument of its code_patch_sig), public so the
- * build-image test runs the same comparison on each executable's own SerializedEntityIndexWrite. 1 when they match. */
+/* 1 when the bytes at the SerializedEntityIndexWrite site are the ones the install expects. */
 int sh_serialized_entities_site_ok(const uint8_t *site)
 {
     int same = 0;
@@ -26,10 +24,8 @@ static sh_patch_handle g_index_patch;
 static uint8_t *g_index_relay;
 static int g_index_ready;
 
-/* The original MOV preserves flags. Neither path may clobber a register or
- * flags before resuming. A separate writable page holds the diagnostic count;
- * published code stays executable/read-only. No callback or engine call runs
- * from this instruction boundary. */
+/* The original MOV preserves flags, so neither relay path may clobber a register or flags before resuming.
+ * A separate writable page holds the skipped-empty count while the code page stays read-only. */
 static int index_relay_emit(uint8_t *relay, size_t page, uintptr_t resume)
 {
     const uint8_t code[] = {
@@ -98,8 +94,8 @@ int sh_serialized_entities_guard_install(const sig_result *results, size_t count
     sh_patch_status status;
     size_t i;
     if (g_index_ready) return 1;
-    /* A failed patch can still reference the relay. Restore first; keep both
-     * the handle and allocation if restoring bytes or protection fails. */
+    /* A failed patch can still reference the relay: restore first, and keep the handle and allocation if
+     * restoring fails. */
     if (g_index_patch.live && code_unpatch(&g_index_patch) != B2_PATCH_OK) return 0;
     if (g_index_relay) {
         VirtualFree(g_index_relay, 0, MEM_RELEASE);

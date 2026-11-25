@@ -21,7 +21,7 @@
 #include "modui.h"
 #include "../common/text.h"
 
-/* Set *cause (malloc'd, the old one freed) to the sentence; returns 0. */
+/* Set *cause (malloc'd; any previous one is freed) to the sentence; returns 0. */
 static int me_cause(char **cause, const char *fmt, ...)
 {
     va_list ap;
@@ -61,8 +61,7 @@ int modexport_is_zip_path(const char *path)
     return n > 4 && _stricmp(path + n - 4, ".zip") == 0;
 }
 
-/* The entry a map's export names its map: the ZIP's own base name with .json
- * ("my map.zip" carries "my map.json"), malloc'd, or NULL. */
+/* The entry name of a map's export: the ZIP's base name with .json ("my map.zip" -> "my map.json"), malloc'd, or NULL. */
 static char *me_map_entry(const char *zip_path)
 {
     const char *base = zip_path, *p;
@@ -84,8 +83,6 @@ static int me_hex64(const char *s, size_t n)
     for (i = 0; i < n; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
     return 1;
 }
-
-/* ------------------------------------------------------------ write ----- */
 
 typedef struct me_payload {
     const char *entry;                 /* "<name>.json" */
@@ -128,7 +125,7 @@ static const char *me_row_label(const sh_modmanifest_row *row)
 }
 
 /* One unit: units/<hash>.json, then every file it carries as files/<sha256>, each once per export. The bytes come
- * from the content cache, else from a local mod's file with that SHA-256 (D21). */
+ * from the content cache, else from a local mod's file with that SHA-256. */
 static int me_add_unit(sh_zip_writer *w, const char *what, const sh_modmanifest_row *row, const char *hash,
                        me_seen *seen, modexport_stats *st, char **cause)
 {
@@ -216,8 +213,8 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     }
     st->bundles = (unsigned)rows.count;
 
-    /* SPEC 5.16: the rows leave this computer as units. Every local row is pinned from its folder (modpin.h); a row
-     * no folder here serves cannot be carried. */
+    /* The rows leave as units: every local row is pinned from its folder (modpin.h); a row no folder here serves
+     * cannot be carried. */
     if (rows.count && sh_modpin_rows(&rows, pl->text, pl->len, NULL, &pr) < 0) {
         me_cause(cause, "the %s's mod content could not be prepared. Try again", what);
         goto done;
@@ -336,8 +333,6 @@ int modexport_write_prefab(const char *name, const char *prefab, size_t len, con
     return ok;
 }
 
-/* ------------------------------------------------------------ read ------ */
-
 enum { ME_KIND_MAP = 1, ME_KIND_PREFAB = 2 };
 
 void modexport_set_stock(sh_mb_exists_fn stock, void *ctx) { (void)stock; (void)ctx; }
@@ -409,8 +404,8 @@ static int me_walk(sh_zip_reader *r, const wchar_t *abs, const char *rel, char *
     return ok;
 }
 
-/* An export of an earlier shape: whole mod folders (mods/<folder>/...), a bundle.canonical.json, or an export.json
- * index. Refused with MODEXPORT_EARLIER: converting earlier shapes is the installer's work, not the product's. */
+/* An export of an earlier shape (whole mod folders mods/<folder>/..., a bundle.canonical.json, or an export.json
+ * index), refused with MODEXPORT_EARLIER. */
 static int me_retired(const sh_zip_reader *r)
 {
     static const char LEAF[] = "bundle.canonical.json";
@@ -452,8 +447,7 @@ static int me_classify(const char *text, size_t len)
 static const char *me_kind_word(int kind) { return kind == ME_KIND_PREFAB ? "prefab" : "map"; }
 
 /* Open an export for `want` and read its .json: a ZIP, or (a prefab only) the folder of a picked .json, whose units/
- * and files/ folders are walked into entries as the ZIP's would be. The .json is read and checked before anything
- * goes into the cache: a damaged or mistaken export changes nothing. */
+ * and files/ are walked into entries. The .json is checked before anything goes into the cache. */
 static int me_open(sh_zip_reader *zr, const char *path, int want, char **text, size_t *len, long *idx, char **cause)
 {
     size_t n = path ? strlen(path) : 0, i;
@@ -535,9 +529,8 @@ static int me_open(sh_zip_reader *zr, const char *path, int want, char **text, s
     return 1;
 }
 
-/* The export's units and files into the content cache (modcache.h): a manifest whose SHA-256 is its name, a file
- * whose SHA-256 is its name. Anything else is a damaged export: refused before the rest is read. A unit already in
- * the cache is not written again. */
+/* The export's units and files into the content cache (modcache.h), each checked against its SHA-256 name; anything
+ * else is a damaged export, refused before the rest is read. A unit already cached is not written again. */
 static int me_take(sh_zip_reader *zr, int kind, modexport_stats *st, char **cause)
 {
     size_t i;
@@ -610,8 +603,7 @@ static int me_take(sh_zip_reader *zr, int kind, modexport_stats *st, char **caus
     return 1;
 }
 
-/* The rows whose content is not all here now (a row of an export that does not carry it): the map or prefab then
- * stands their objects in (SPEC 5.8, S2). */
+/* The rows whose content is not all here (an export that does not carry it): the map or prefab stands their objects in. */
 static void me_count_absent(const sh_modmanifest_list *rows, modexport_stats *st)
 {
     size_t i, k;
@@ -650,8 +642,7 @@ char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *stp
     memset(st, 0, sizeof *st);
     memset(&rows, 0, sizeof rows);
     if (!me_open(&zr, zip_path, ME_KIND_MAP, &text, &len, &idx, cause)) { st->ms = me_now_ms() - t0; return NULL; }
-    /* The map's units go into the content cache; the map is then one this computer keeps, and its load composes them
-     * as a downloaded map's (SPEC 5.16). Nothing is installed. */
+    /* The map's units go into the content cache and its load composes them as a downloaded map's; nothing is installed. */
     if (!me_take(&zr, ME_KIND_MAP, st, cause)) { free(text); text = NULL; len = 0; goto done; }
     sh_modmanifest_read(text, len, &rows, &rejected);
     st->bundles = (unsigned)rows.count;
@@ -690,7 +681,7 @@ int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx
         if (n == -2) { me_cause(cause, "%s", MODEXPORT_EARLIER); goto done; }
         if (n < 0) { me_cause(cause, "the prefab's mods cannot be read"); goto done; }
     }
-    /* D35: a prefab carries units, not installs. Its units go into the content cache; placing it composes them. */
+    /* A prefab carries units, not installs: its units go into the content cache and placing it composes them. */
     if (!me_take(&zr, ME_KIND_PREFAB, st, cause)) goto done;
     st->bundles = (unsigned)rows.count;
     me_count_absent(&rows, st);
@@ -709,8 +700,6 @@ done:
     st->ms = me_now_ms() - t0;
     return ok;
 }
-
-/* ------------------------------------------------------------ rawmap ---- */
 
 unsigned long long modexport_write_text(const char *data, size_t len, const char *path)
 {

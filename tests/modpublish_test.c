@@ -1,16 +1,6 @@
 /* modpublish_test -- the publish side of the mod system (modpublish.c) with the engine replaced by fakes and the mod
- * store by a scripted one at the modclaim.h seam (modclaim_fake.c; modclaim itself runs against the Worker in
- * unit_roundtrip and the store's contract test):
- *   a map without mod rows publishes as the engine would; a map with rows is held at PublishStart while its content
- *   is prepared, under the pacifier; units the store holds go straight on; units it lacks are asked about once (S7),
- *   No leaves the map unpublished, Yes uploads with progress on the pacifier and then starts the engine's publish; the
- *   resumed publish's save pins its rows (and only that save); a refused upload, a retired client (410) and a key that
- *   cannot be made refuse with one sentence; a busy store lets the publish go on with its claim queued (N27); an
- *   object neither here nor in the store (S8) and one moderation removed are said after the publish; a mod that is not
- *   on this computer refuses the publish; the editor leaving abandons; the feed post claims the save's units for the
- *   item, a claim the store could not take is queued, a republish without mods and an unpublish release; a text over
- *   the service bound and an unreadable mod list are refused at PublishAfterSave; the search tag; the delete checks;
- *   the copy gate on both sides of the bound; the launch step.
+ * store by a scripted one at the modclaim.h seam (modclaim_fake.c). It covers the hold at PublishStart, the S7 question,
+ * upload with progress, the pins of the resumed save, the refusals, S8, the feed post's claim and the launch step.
  */
 #include "heap_out.h"
 #include "../src/backend/modpublish.h"
@@ -165,7 +155,7 @@ static int f_finish_ask(void *c, void *editor, const char *title, const char *te
     FF.yes_no = yes_no;
     strcpy_s(FF.title, sizeof FF.title, title ? title : "(publish failed)");
     strcpy_s(FF.text, sizeof FF.text, text);
-    /* the one question surface: a Yes/No is the S7 question (buttons as the old shell set, 6), one button a refusal */
+    /* the one question surface: a Yes/No is the S7 question (6 buttons), one button a refusal */
     if (yes_no) { F.asks++; F.ask_buttons = 6; strcpy_s(F.asked, sizeof F.asked, text); }
     else strcpy_s(F.toast, sizeof F.toast, text);
     return 1;
@@ -202,7 +192,7 @@ static int idle_all(void) { return !sh_modpublish_holding() && !sh_modpublish_te
 #define UNIT_M "2222222222222222222222222222222222222222222222222222222222222222"
 #define UNIT_W "3333333333333333333333333333333333333333333333333333333333333333"
 
-/* What a save of the open map would write now (the publish asks before PublishStart). */
+/* What a save of the open map would write (the publish asks before PublishStart). */
 static sh_modmanifest_list g_rows;
 
 static int t_rows_for(const char *const *names, size_t count, sh_modmanifest_list *out)
@@ -461,7 +451,7 @@ int main(int argc, char **argv)
         g_fc.upload_delay_ms = 400;
         publish(1);
         CHECK(F.asks == 2 && g_fc.uploads == 1 && g_fc.uploaded_bytes == 212ull * 1024 * 1024);
-        /* the summary counts what this publish sent, not the emptied hold (R-LB1) */
+        /* the summary counts what this publish sent, not the emptied hold */
         CHECK(strstr(g_log + mark, "MODS: publish: uploaded 1 unit(s), 212.0 MB (222298112 bytes)") != NULL);
         if (!strstr(g_log + mark, "MODS: publish: uploaded 1 unit(s)")) printf("%s\n", g_log + mark);
         CHECK(strstr(F.busy_seen, "Uploading mod content: 0 of 212 MB.\n") != NULL);
@@ -571,11 +561,11 @@ int main(int argc, char **argv)
         CHECK(F.starts == starts + 1);
         CHECK(!strcmp(g_menu_notice, "Players will see this map without the Tyrant from Eternal Demons: its content is "
                                      "not on this computer or in the mod store."));
-        /* R-LV9: the notice queue logs the notice it takes; the publish does not log it a second time */
+        /* the notice queue logs the notice it takes; the publish does not log it a second time */
         CHECK(strstr(g_log + logged, "MODS: notice:") == NULL);
         CHECK(engine_save() == 1);
         {
-            /* R-LB1 F7: the claim names only what the store holds; the absent Tyrant is left out, so it succeeds, nothing
+            /* the claim names only what the store holds; the absent Tyrant is left out, so it succeeds, nothing
              * is queued, and the only notice is S8's */
             int claims = g_fc.claims, refused = g_fc.claims_refused, queued = g_fc.queued;
             size_t mark = g_log_n;
@@ -609,8 +599,8 @@ int main(int argc, char **argv)
                                      "or in the mod store."));
         CHECK(engine_save() == 1);
         {
-            /* F7: every unit is on no computer: nothing is claimed, and nothing untrue is said or queued. F9: the map
-             * still names mods, so the emptied claim is no release; the item keeps what it claimed */
+            /* every unit is on no computer: nothing is claimed, and nothing untrue is said or queued; the map still
+             * names mods, so the emptied claim is no release and the item keeps what it claimed */
             int claims = g_fc.claims, queued = g_fc.queued, releases = g_fc.releases;
             size_t mark = g_log_n;
             g_menu_notice[0] = 0;
@@ -625,9 +615,8 @@ int main(int argc, char **argv)
         rows_pinned(1);
     }
 
-    /* The owner (2026-11-18, the SPEC's S8 question): the author proceeds. A local row no folder here serves publishes
-     * as it is, players see stand-ins for its objects, and S8 is the one notice; nothing of it is claimed (R-LV9 check
-     * 4 was refused with "cannot find the mod"). */
+    /* A local row no folder here serves publishes as it is: players see stand-ins for its objects, S8 is the one
+     * notice, and nothing of it is claimed. */
     printf("-- a mod that is not on this computer publishes with S8, its row local and nothing of it claimed\n");
     {
         int starts = F.starts, plans = g_fc.plans, claims = g_fc.claims, queued = g_fc.queued;
@@ -642,14 +631,14 @@ int main(int argc, char **argv)
         {
             size_t mark = g_log_n;
             CHECK(engine_save() == 1);
-            /* R-LV9: a local row is no pin; the published copy's line counts the pinned rows only */
+            /* a local row is no pin; the published copy's line counts the pinned rows only */
             CHECK(strstr(g_log + mark, "the published copy carries 0 pinned row(s)") != NULL);
         }
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc4", "rev1");
         PUMP_UNTIL(idle_all());
         CHECK(g_fc.claims == claims && g_fc.queued == queued);   /* nothing is claimed or queued */
 
-        /* R-LV9: a cloud save that does not read the slot. With no row pinned that is no failure: the published map is
+        /* a cloud save that does not read the slot. With no row pinned that is no failure: the published map is
          * the slot's text, its rows local. */
         {
             size_t mark;
@@ -925,7 +914,7 @@ int main(int argc, char **argv)
                 size_t mark = g_log_n;
                 other = sh_modpublish_cloud_text("ANOTHERSLOT", g_slot, strlen(g_slot), &ul);
                 CHECK(other == NULL && !sh_modpublish_cloud_sum_take(LOCAL_ID, &sum));
-                /* R-LV9: a read of the wrong slot says so */
+                /* a read of the wrong slot says so */
                 CHECK(strstr(g_log + mark, "the cloud save read slot 'ANOTHERSLOT', not the published slot") != NULL);
             }
             if (other) HeapFree(GetProcessHeap(), 0, other);
@@ -970,7 +959,7 @@ int main(int argc, char **argv)
         CHECK(sh_modserve_index_build(store) >= 1);
 
         /* the republish snapshots the folder's current build: the new unit is uploaded and claimed, and the old one goes
-         * only by that claim's replacing the item's set: no release (F9) */
+         * only by that claim's replacing the item's set: no release */
         claims = g_fc.claims;
         releases_before = g_fc.releases;
         publish(1);

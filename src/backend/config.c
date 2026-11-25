@@ -156,10 +156,8 @@ static const config_descriptor g_registry[] = {
         NULL
     },
     {
-        /* The player plays maps whose mods include scripts (the Mods tab's
-         * setting). Off, the download gate refuses such a map before any
-         * download (modui.h sh_modui_scripted_maps_allowed).
-         */
+        /* Off, the download gate refuses maps whose mods include scripts before any download
+         * (modui.h sh_modui_scripted_maps_allowed). */
         "mods.scripted_maps", SH_JSON_BOOL, "true",
         SH_CONFIG_BACKEND_READ | SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
         NULL,

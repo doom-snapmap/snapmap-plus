@@ -1,14 +1,5 @@
-/* modstore_test.c -- the mods\ store in the one shape (ONE-SHAPE rules 1 to
- * 4): install with real copies, enumeration and verification, the salt (a
- * new folder salted at the scan with its own references rewritten and its
- * name kept; a binary naming the folder, files under another mod and a
- * refused swap leave it untouched; a renamed folder keeps its salt; a copied
- * folder gets a new one by "built", ties by path; an installed copy is the
- * newer), earlier shapes refused with their reason and nothing written, the
- * mods\maps\ retired (never walked, listed, built or written), add to my mods
- * (a staged folder copied under a new salt), New mod, the rebuild rule from the block's tree, the store lock,
- * the boot scan, crash leftovers, nested folders, removal through the Recycle
- * Bin.
+/* modstore_test.c -- the mods\ store: install, enumeration, verification, the salt, add to my mods, New mod,
+ * the store lock, the boot scan, crash leftovers, nested folders and removal through the Recycle Bin.
  *
  *   modstore_test.exe <tests\fixtures\mods\alex.r2-imp>
  */
@@ -141,8 +132,8 @@ static void make_small_mod(const char *dir, const char *leaf)
 #define FB_ROW  "entities\\probe.decl"
 
 /* A new mod named `leaf`: two entity decls, one inheriting the other by the
- * mod's own name (entities/probe_base), and a mod.json value naming mods/<leaf>/. (Its strings cannot be
- * keyed before it has a salt: a key is <salt>_<name>, DECISIONS 5.) */
+ * mod's own name (entities/probe_base), and a mod.json value naming mods/<leaf>/. Its strings are not keyed,
+ * since a key is <salt>_<name> and the mod has no salt yet. */
 static void fb_make(const char *dir, const char *leaf)
 {
     char rel[MAX_PATH], text[600];
@@ -173,8 +164,6 @@ static void dir_names(const char *parent, char *out, size_t cap)
     } while (FindNextFileA(h, &fd) && w < cap);
     FindClose(h);
 }
-
-/* --------------------------------------------------------- install, list */
 
 static void test_install(const char *fixture, const char *tmp)
 {
@@ -275,8 +264,6 @@ static void test_install(const char *fixture, const char *tmp)
     sh_ms_list_free(&list);
 }
 
-/* -------------------------------------------------------------- the salt */
-
 static void test_fresh_folder_salted(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH], salt[SH_SALT_LEN + 1], hash[65], rel[MAX_PATH], *t;
@@ -356,9 +343,8 @@ static void test_fresh_folder_salted(const char *tmp)
     }
 }
 
-/* DECISIONS 6: a mod's strings keys and the #str_ references in its texts are written without the salt; the
- * build names each <salt>_<key>, so a new folder's and a copy's keys follow its salt and the files stay as
- * written. */
+/* A mod's strings keys and the #str_ references in its texts are written without the salt; the build names
+ * each <salt>_<key>, so a new folder's and a copy's keys follow its salt and the files stay as written. */
 static void test_fresh_folder_strings(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH], copy[MAX_PATH], salt[SH_SALT_LEN + 1], s2[SH_SALT_LEN + 1], rel[MAX_PATH];
@@ -395,8 +381,8 @@ static void test_fresh_folder_strings(const char *tmp)
         CHECK(e && e->bundle.registries && strstr(e->bundle.registries, want));
         sh_ms_list_free(&l);
     }
-    /* DECISIONS 9: a key the game (snapentity_demon_baron) or Snapmap+
-     * (sh_bv_navigation_desc) defines is a string edit and keeps its name. */
+    /* A key the game (snapentity_demon_baron) or Snapmap+ (sh_bv_navigation_desc) defines is a string edit and
+     * keeps its name. */
     CHECK(t && strstr(t, "\"snapentity_demon_baron\": \"Big Baron\"") && strstr(t, "\"sh_bv_navigation_desc\": \"Mine\""));
     free(t);
     t = slurp(dir, FB_ROW, NULL);
@@ -424,7 +410,7 @@ static void test_fresh_folder_strings(const char *tmp)
         CHECK(e && e->bundle.registries && strstr(e->bundle.registries, want));
         sh_ms_list_free(&l);
     }
-    /* A key added later builds as <salt>_<key> at the next scan; the file keeps it as written (DECISIONS 20). */
+    /* A key added later builds as <salt>_<key> at the next scan; the file keeps it as written. */
     t = slurp(dir, "mod.json", NULL);
     if (t) {
         char *at = strstr(t, "\"en\": {");
@@ -548,12 +534,9 @@ static void test_fresh_folder_refusals(const char *tmp)
     }
 }
 
-/* An outside converter (Doomforge) writes a new folder already salted: its
- * builder part is only {"format":2,"salt":"<salt>"}, and its binaries name
- * that salt. The first scan keeps the salt and builds it; a second such folder
- * of the same salt is a copy of the first and gets a new salt: its texts follow,
- * its binaries keep naming the first salt, and its build records that as
- * "spelled", which serving maps to its own salt (SPEC-distribution D12). */
+/* An outside converter (Doomforge) writes a folder already salted, with only {"format":2,"salt":"<salt>"}
+ * and binaries naming that salt. The first scan keeps the salt; a second folder of the same salt is a copy
+ * and gets a new one, with its build recording the binaries' salt as "spelled" for serving to map. */
 static void conv_make(const char *dir, const char *salt)
 {
     char rel[MAX_PATH * 2], text[600], path[MAX_PATH * 2];
@@ -640,8 +623,7 @@ static void test_copy_gets_new_salt(const char *tmp)
     t = slurp(b, FB_ROW, NULL);   /* the copy's files name their neighbours by the mod's own names, so they follow its salt */
     CHECK(t && strstr(t, "inherit = \"entities/probe_base\""));
     free(t);
-    /* A copy whose name sorts first, with the same "built": the folder the
-     * record names keeps the salt (DECISIONS 15). */
+    /* A copy whose name sorts first, with the same "built": the folder the record names keeps the salt. */
     _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\a copy", root);
     CHECK(mt_copy_tree(a, c));
     CHECK(sh_ms_enumerate(&list));
@@ -661,8 +643,7 @@ static void test_copy_gets_new_salt(const char *tmp)
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 1);
     CHECK(entry_of("zz guards", sb, NULL, &usable) && usable && !strcmp(sb, sa));
     CHECK(entry_of("aa guards", sc, NULL, &usable) && usable && strcmp(sc, sa));
-    /* The record decides before the creation time: the folder at the path
-     * that held the salt keeps it even when it was created later. */
+    /* The record decides before the creation time: the folder at the path that held the salt keeps it. */
     _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\older elsewhere", root);
     CHECK(MoveFileA(b, c));
     Sleep(20);
@@ -718,8 +699,6 @@ static void test_earlier_shapes(const char *tmp)
     sh_ms_list_free(&list);
 }
 
-/* ------------------------------------------------- mods\maps\ retired */
-
 typedef struct walk_seen { unsigned count; int saw_top, saw_maps; } walk_seen;
 static int walk_note(void *context, const char *folder, const char *name)
 {
@@ -763,7 +742,7 @@ static void test_retired_places(const char *fixture, const char *tmp)
     CHECK(sh_ms_enumerate(&list) && list.count == 1 && find_entry(&list, "top") && !find_entry(&list, "maps\\X") &&
           !find_entry(&list, "maps\\Hell Arena\\Y"));
     sh_ms_list_free(&list);
-    /* The scan builds the root's mod and leaves mods\maps\ as it was. */
+    /* The scan builds the root's mod and leaves mods\maps\ untouched. */
     CHECK(sh_ms_sync_pending() == 1);
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.salted == 1 && ss.rebuilt == 1 && ss.folders == 1 && ss.failed == 0);
     CHECK(sh_ms_sync_pending() == 0);
@@ -797,8 +776,6 @@ static void test_retired_places(const char *fixture, const char *tmp)
     sh_ms_list_free(&list);
 }
 
-/* ------------------------------------------------------ add to my mods */
-
 #define AC_SALT "stagedsl"
 #define AC_FILE "assets\\data\\mods\\" AC_SALT "\\thing.txt"
 #define AC_REF  "entities\\ref.decl"
@@ -827,7 +804,7 @@ static void test_add_copy(const char *tmp)
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\My Copy", root);
     CHECK(mt_has(path, "mod.json") && mt_has(path, "images\\a.bimage"));
     CHECK(entry_of("My Copy", s1, NULL, NULL) && sh_salt_valid(s1, strlen(s1)) && strcmp(s1, AC_SALT));
-    /* The file moved to the new salt's folder; the old salt's path is gone. */
+    /* The file is under the new salt's folder; the old salt's path is gone. */
     _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\data\\mods\\%s\\thing.txt", s1);
     CHECK(mt_has(path, rel) && !mt_has(path, AC_FILE));
     t = slurp(path, rel, NULL);
@@ -863,8 +840,6 @@ static void test_add_copy(const char *tmp)
     CHECK(!HO2(name, cause, sh_ms_add_copy(staged, MODJSON, strlen(MODJSON), "bad", "x", HO_P(0), HO_P(1))) && cause[0]);
 }
 
-/* ------------------------------------------------------------- new mod */
-
 static void test_new_mod(const char *tmp)
 {
     char root[MAX_PATH], salt[SH_MB_ID_MAX + 1], folder[MAX_PATH * 2], example[MAX_PATH], cause[600] = "", want[200], *t;
@@ -898,8 +873,6 @@ static void test_new_mod(const char *tmp)
     if (ss.failed) log_dump("new mod");
     CHECK(entry_of("Hell Guards", s2, NULL, &usable) && !strcmp(s2, salt) && usable);
 }
-
-/* ------------------------------------------------------------ the lock */
 
 typedef struct lock_job {
     char folder[MAX_PATH * 2];
@@ -936,9 +909,8 @@ static DWORD WINAPI hold_thread(void *p)
     return 0;
 }
 
-/* Stands for another process: takes a named lock through a handle of its
- * own, opened by name (store_lock.h), and lets go once `waits` moved (the store
- * code is waiting for it) or, with no wait count to watch, after `ms`. */
+/* Stands for another process: takes a named lock through its own handle (store_lock.h) and lets go once
+ * `waits` moves, or after `ms` when there is no wait count to watch. */
 typedef struct named_job {
     wchar_t name[64];
     unsigned waits;
@@ -1062,8 +1034,6 @@ static void test_lock(const char *tmp)
     }
 }
 
-/* ---------------------------------------------------------- the boot scan */
-
 static volatile LONG g_boot_rescans;
 static int boot_rescan(void) { InterlockedIncrement(&g_boot_rescans); return 1; }
 
@@ -1104,7 +1074,7 @@ static void test_boot_sync(const char *fixture, const char *tmp)
     CHECK(sh_ms_entry_usable(find_entry(&list, "alex.r2-imp")) && sh_ms_entry_usable(find_entry(&list, "campaign\\alexboot")));
     sh_ms_list_free(&list);
     CHECK(sh_ms_sync_pending() == 0 && sh_ms_boot_sync(&RESOLVER, boot_rescan, 0) == 0 && g_boot_rescans == 1);
-    /* An edit made while the game was closed: built in the background, then indexed. */
+    /* An edit made while the game was closed is built in the background, then indexed. */
     {
         mt_write(c, "entities\\thing.decl", "{\r\n\tinherit = \"mods/alexrimp/imp_copy\";\r\n\t// edited\r\n}");
     }
@@ -1173,8 +1143,6 @@ static void test_boot_release(const char *tmp)
     sh_ms_test_between_folders = NULL;
     CloseHandle(g_between_seen);
 }
-
-/* ----------------------------------------------- folders and removal */
 
 static long long bin_items(const char *path)
 {
@@ -1275,7 +1243,7 @@ static void test_crash_leftovers(const char *tmp)
     CHECK(sh_ms_recover_work() == 1);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\gone", root);
     CHECK(mt_has(dir, "mod.json"));
-    /* mods\\maps\\ is retired: nothing there is read or written, leftovers included. */
+    /* Nothing under mods\\maps\\ is read or written, leftovers included. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Arena\\nested", root);
     CHECK(!mt_exists(dir));
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\Arena\\nested.old-%lu", root, DEAD);
@@ -1320,9 +1288,8 @@ static void write_bank(const char *folder, const char *rel, unsigned long id)
     if (fopen_s(&f, path, "wb") == 0 && f) { fwrite(bytes, 1, sizeof bytes, f); fclose(f); }
 }
 
-/* DECISIONS 20 and 16: what an author adds to a folder is built under the folder's salt at every scan, not
- * only the first, and stays where the author put it; a rename between scans changes nothing; a bank in sounds/
- * is served as <salt>_<name>; a README beside mod.json is ignored. */
+/* What an author adds to a folder is built under the folder's salt at every scan and stays where it was put;
+ * a rename between scans changes nothing, a bank in sounds/ is served as <salt>_<name> and a README is ignored. */
 static void test_rehome(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH * 2], renamed[MAX_PATH * 2], salt[SH_SALT_LEN + 1], s2[SH_SALT_LEN + 1];
@@ -1393,7 +1360,7 @@ static void test_rehome(const char *tmp)
     sh_mb_set_script_check(NULL);
 }
 
-/* Folder names an earlier layout used are ordinary names now. */
+/* Folders named blobs or legacy are ordinary mods. */
 static void test_ordinary_names(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH * 2], salt[SH_SALT_LEN + 1];
@@ -1471,7 +1438,7 @@ static void test_nested(const char *tmp)
     make_small_mod(dir, "spider");
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\top\\inner", root);
     make_small_mod(dir, "inner");
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\notaplace", root);   /* a mod.json right in the retired folder */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\maps\\notaplace", root);   /* a mod.json right in the maps folder */
     make_small_mod(dir, "notaplace");
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\empty-group\\deeper", root);
     mt_mkdirs_for(dir);

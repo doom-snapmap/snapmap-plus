@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -33,10 +35,20 @@ func copyVersionOf(path string) string {
 		return ""
 	}
 	e, ok := rec.Executables[filepath.Base(path)]
-	if !ok || !ownsExecutable(path, e.SHA256) {
-		if v, ok := readRetiredVersions(filepath.Dir(path))[filepath.Base(path)]; ok && ownsExecutable(path, v.SHA256) {
-			return v.Version
+	if !ok {
+		// Verify an earlier installer's version only while choosing whether it may be replaced.
+		record := filepath.Join(filepath.Dir(path), retiredVersionsRecord)
+		if !plainPath(record) {
+			return ""
 		}
+		bytes, err := os.ReadFile(record)
+		var versions map[string]exeEntry
+		if err != nil || json.Unmarshal(bytes, &versions) != nil {
+			return ""
+		}
+		e = versions[filepath.Base(path)]
+	}
+	if !ownsExecutable(path, e.SHA256) {
 		return ""
 	}
 	return e.Version

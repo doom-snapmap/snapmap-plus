@@ -1,61 +1,6 @@
-/* decl_tree.h -- the structural decl model behind derived edits
- * (DESIGN-additive 2.4): a parser from the decl grammar to a tree, the
- * structural diff of an author's edited copy of a game file against the
- * game's own text, and the apply of several mods' diffs onto the game's text.
- * Pure C: no engine, filesystem or index access.
- *
- * Grammar (the one ms_compose has served since phase 2, extended to keep
- * every token): a text is one block; a block holds statements
- *
- *   stmt := key '=' value [';']            a field (`num = 3;`, `color = ( 1, 1, 1, 1 );`)
- *         | key value [';']                the md6Def spelling (no '=')
- *         | key ['='] '{' stmt* '}' [';']  a block (`edit = {`, `editorVars {`)
- *         | key name '{' stmt* '}' [';']   a named block (`anim "clip" {`, `event "ae_sound" {`)
- *         | key                            a bare member before '}' (`{ "MD6_WEIGHTGROUP_ALL" }`)
- *   key, name, value := word | "string"     value also ( group )
- *
- * Comments are dropped; every other token, every '=' and every ';' is kept,
- * so a generated text lexes to the token sequence the engine would read from
- * the same tree. Keys are matched without case; values and names are compared
- * as written (keyed names without case, as the engine looks graphs up).
- *
- * Kinds of block member, decided from both texts of a diff:
- *   field        a key that appears at most once on each side and has no
- *                name: set (path, value) or removed (path); blocks on both
- *                sides are compared member by member.
- *   ordered list a block of `num = N;` and item[0] .. item[n-1], dense and
- *                in order: entries are the items, matched by their text (a
- *                conductor aiTypeList item is its aiType and entityDef pair);
- *                written back renumbered with num kept at N plus the items
- *                added. Sparse item[i] blocks (damageGroups) are fields.
- *   named entry  a block with a name (`anim "<clip>"`), unique by name on
- *                each side: added, removed, or compared member by member;
- *                two mods adding one name merge their rows.
- *   keyed entry  repeated blocks each carrying a name field (a `name`
- *                member, or one under `object` or `object/object`: the
- *                subGraphs and nodes of aifsmmanager states), unique by
- *                name on each side: added, removed or replaced whole.
- *   bag entry    any other repeated statement (`alias { }`, `event "x" { }`
- *                rows, `layer = "x";`), and the members a block holds when
- *                the game's block is empty: matched by their whole text,
- *                added or removed.
- *
- * Edits JSON (the product block's "edits", one element per edited file):
- *   {"file": "<request>", "stock": "<64-bit FNV-1a of the game text diffed against, hex>",
- *    "counts": {"set": n, "remove": n, "list": n, "keyed": n, "bag": n, "drop": n},
- *    "ops": [ op, ... ]}
- *   op := {"op": "set",    "path": [seg...], "entry": "<statement>"}
- *       | {"op": "remove", "path": [seg...]}
- *       | {"op": "list",   "path": [seg...], "entry": "<item value>"}
- *       | {"op": "unlist", "path": [seg...], "entry": "<item value>"}
- *       | {"op": "keyed",  "path": [seg...], "word": "<key>", "name": "<name>", "entry": "<statement>"}
- *       | {"op": "unkey",  "path": [seg...], "word": "<key>", "name": "<name>"}
- *       | {"op": "bag",    "path": [seg...], "entry": "<statement>"}
- *       | {"op": "unbag",  "path": [seg...], "entry": "<statement>"}
- * A seg is a member's key (`edit`, `item[4]`) or a named block's head
- * (`anim "clip"`). A set's path ends at the field it sets; every other path
- * is the container's.
- */
+/* decl_tree.h -- the structural decl model behind derived edits: parse a decl text to a tree, diff an
+ * author's edited copy against the game's text, and apply several mods' diffs. Pure C: no engine,
+ * filesystem or index access. */
 #ifndef BACKEND_DECL_TREE_H
 #define BACKEND_DECL_TREE_H
 
@@ -68,15 +13,16 @@ typedef struct sh_dt_node {
     struct sh_dt_node **kids;
     int nkids, ckids;
     int block, eq, semi;               /* a block; written with '='; followed by ';' */
-    int list;                          /* a dense ordered list (num + item[0..n-1]) */
+    int list;                          /* a dense ordered list */
     long num_delta;                    /* a list's num minus its item count */
-    int src;                           /* -1 parsed from the base; else the apply source that added it */
+    int src;                           /* -1 parsed from the base, else the adding source */
 } sh_dt_node;
 
 typedef struct sh_dt sh_dt;            /* a tree and the arena its nodes live in */
 
-/* Parse a decl text. NULL with a cause ("line N: ...") when it does not read
- * in the grammar. */
+/* Parses a decl text: a block of statements `key = value;`, `key value;` (md6Def), `key { ... }`,
+ * `key "name" { ... }` or a bare `key`, where a value is a word, "string" or ( group ). Comments are
+ * dropped, every other token is kept, and keys match without case. NULL with a cause ("line N: ...") on a parse failure. */
 sh_dt *sh_dt_parse(const char *text, size_t len, char *cause, size_t cap);
 void   sh_dt_free(sh_dt *t);
 sh_dt_node *sh_dt_root(sh_dt *t);
@@ -100,11 +46,19 @@ int    sh_dt_set_value(sh_dt *t, sh_dt_node *n, const char *val, size_t len);
 typedef struct sh_dt_counts { int set, remove, list, keyed, bag, drop; } sh_dt_counts;
 int sh_dt_counts_total(const sh_dt_counts *c);
 
-/* The edits element of one edited copy against the game's text: a JSON
- * object (malloc'd) as above, its counts in *counts. NULL with a cause when
- * either text does not parse ("the game's text: ..." or "line N: ..."). A
- * cause quotes at most 60 characters of the decl text around the line it
- * names, so SH_DT_CAUSE_CAP bytes always hold it whole. */
+/* The diff classifies each block member as: field (set or removed; blocks recurse), ordered list (dense
+ * `num = N;` plus item[0..n-1], matched by item text), named entry (unique `key "name"` block), keyed
+ * entry (repeated blocks with a name field, replaced whole) or bag entry (any other repeated
+ * statement, matched by whole text). */
+
+/* Edits JSON, one element per edited file: {"file", "stock" (FNV-1a hex of the diffed game text),
+ * "counts", "ops": [{"op": set|remove|list|unlist|keyed|unkey|bag|unbag, "path": [seg...], "entry"?,
+ * "word"?, "name"?}]}. A seg is a member key (`item[4]`) or a named block's head (`anim "clip"`); a
+ * set's path ends at its field, every other path is the container's. */
+
+/* The edits element (malloc'd JSON, counts in *counts) of one edited copy against the game's text.
+ * NULL with a cause ("the game's text: ..." or "line N: ...") when either text does not parse; a cause
+ * quotes at most 60 decl characters, so SH_DT_CAUSE_CAP bytes always hold it. */
 #define SH_DT_CAUSE_CAP 512
 char *sh_dt_diff(const char *request, const char *stock, size_t stock_len, const char *copy, size_t copy_len,
                  sh_dt_counts *counts, char *cause, size_t cap);
@@ -136,11 +90,9 @@ typedef struct sh_dt_report {
     unsigned char *used;               /* optional, one per source: set when its operations changed the text */
 } sh_dt_report;
 
-/* The game's text `stock` of `request` with every source's operations for
- * that file applied in row order: identical operations merge, additions
- * union, a slot set to different values is the choice's (slot
- * "<type>/<decl name>/<path>", key) else the first source's. NULL when the
- * stock text does not parse, or no source has operations for the file. */
+/* The game's `stock` text of `request` with every source's operations applied in row order: identical
+ * ones merge, additions union, a slot set differently is the choice's (slot "<type>/<decl name>/<path>",
+ * key) else the first source's. NULL when stock does not parse or no source has operations. */
 sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, const sh_dt_source *src, int n,
                    const sh_dt_choice *choices, int nchoices, sh_dt_report *report);
 

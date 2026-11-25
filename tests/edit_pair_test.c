@@ -5,8 +5,8 @@
 static unsigned failures;
 static int calls;
 
-/* Replace the pooled allocation before faulting, so recovery must cover a
- * partially completed assignment and cannot borrow an old pointer. */
+/* Replace the pooled allocation before faulting, so recovery must cover a partially completed assignment and
+ * cannot borrow the previous pointer. */
 static void assign(void *field, const char *value)
 {
     char *copy = _strdup(value);

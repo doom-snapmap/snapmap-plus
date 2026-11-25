@@ -1,20 +1,6 @@
-/* particlemotion.c -- simulated motion for a CPU particle stage: the detour of the particle vertex writer
- * (particlemotion.h).
- *
- * The engine's per-stage job (VK 0x19B1400) walks a stage's particles and calls the writer for each one that is
- * alive: writer(context, generation, cursor). `context` is the job's own record of the stage being drawn (its
- * stage pointer first; the emitter's axes at +0x48, times its scale, and origin at +0x6C as the origin function
- * applies them, the identity and zero for a stage that is not transparency sorted; the view's origin at +0xB4),
- * `generation` the particle (index, age in seconds, life in seconds, two fractions of
- * its life, its seed), `cursor` where the vertices go (48 bytes each, position first). Both records live on the
- * job's stack, so nothing here is shared between threads.
- *
- * For a stage that asks (sh_motion_asked) the game's writer runs first and writes the quad at the game's own
- * place. The detour then asks the game's origin function where the particle was born and where it is a moment
- * later (its launch velocity, times the stage's launch speed factor, plus its launch ball), where the game put it now, integrates the stage's
- * forces from the birth
- * (sh_motion_run) and moves the quad (sh_motion_place). A trail or a mesh (more or fewer than four vertices) is
- * left where the game put it. */
+/* particlemotion.c -- the detour of the particle vertex writer (particlemotion.h). The per-stage job (VK 0x19B1400)
+ * calls writer(context, generation, cursor) per live particle; for a stage that asks, the game writes the quad
+ * first and the detour moves it (a trail or a mesh stays where the game put it). */
 #include <windows.h>
 #include <stdint.h>
 #include <stdarg.h>
@@ -47,9 +33,9 @@ static write_fn g_write;
 static origin_fn g_origin;
 static context_fn g_context;
 
-/* The fx item's scale of the stage this thread last built in its model's axes: the job builds a stage's context and
- * then writes its particles on the same thread (VK 0x1419B1400 calls the builder, then the writer per particle), and
- * the builder leaves that scale out of a model-axes context (it multiplies the axes by it only for a sorted stage). */
+/* The fx item's scale of the stage this thread last built in its model's axes. The job builds the context and then
+ * writes the particles on the same thread (VK 0x1419B1400), and the builder multiplies the axes by the scale only
+ * for a sorted stage. */
 static __declspec(thread) void *t_model_context;
 static __declspec(thread) float t_model_scale;
 static __declspec(thread) float t_model_origin[3], t_model_axes[9];   /* the model in the world: o + A p */
@@ -83,14 +69,6 @@ static void pm_log(const char *fmt, ...)
     backend_log(line);
 }
 
-static void *clean(const sig_result *r, size_t n, const char *name)
-{
-    size_t i;
-    for (i = 0; i < n; ++i)
-        if (r[i].name && !strcmp(r[i].name, name) && r[i].status == SIG_OK) return (void *)r[i].addr;
-    return NULL;
-}
-
 /* The game's origin for this particle at another age. */
 static void origin_at(void **context, const uint32_t *born, float age, float life, float out[3])
 {
@@ -105,9 +83,9 @@ static void origin_at(void **context, const uint32_t *born, float age, float lif
     out[0] = org[0]; out[1] = org[1]; out[2] = org[2];
 }
 
-/* The emitter's frame from the context: its axes without the scale, the scale, its origin and the eye. For a stage
- * built in its model's axes the scale is the one its builder was given (context_detour), and *model (when asked) says
- * so: the game's own places are then unscaled. */
+/* Reads the emitter's frame from the context: unit axes, origin and eye; returns the scale. For a stage built in its
+ * model's axes the scale comes from context_detour and *model (when given) is set, since the game's places are then
+ * unscaled. */
 static float read_frame_ex(void **context, sh_motion_frame *fr, float eye[3], int *model);
 
 static float read_frame(void **context, sh_motion_frame *fr, float eye[3])
@@ -145,15 +123,15 @@ static float read_frame_ex(void **context, sh_motion_frame *fr, float eye[3], in
     return scale;
 }
 
-/* A particle's flight to `age`: its birth place and launch by the game's origin function (from `from` when given:
- * a child born at its parent's place), then the stage's simulated motion against the scene's planes. 1 when it died
- * on a surface. `have` says whether planes were used. */
 /* What a traced particle's flight started from (sh_particlemotion_trace). */
 typedef struct pm_start {
     float p0[3], v0[3], scale;
     sh_motion_frame fr;
 } pm_start;
 
+/* A particle's flight to `age`: birth place and launch from the game's origin function (from `from` when given: a
+ * child born at its parent's place), then the stage's simulated motion against the scene's planes. Returns 1 when
+ * it died on a surface; *have says whether planes were used. */
 static int flight(void **context, const uint8_t *stage, const uint32_t *born, float age, float life,
                   const float *from, const float *inherit, float p[3], float v[3], int *have, pm_start *start)
 {
@@ -168,8 +146,8 @@ static int flight(void **context, const uint8_t *stage, const uint32_t *born, fl
     span = life < LAUNCH_SPAN ? life : LAUNCH_SPAN;
     origin_at(context, born, 0.0f, life, p0);
     origin_at(context, born, span, life, p1);
-    /* the game's places carry the scale in world axes; in its model's axes they do not, and the birth place is
-     * scaled whole here, as Eternal scales it (its INTEGRATE: the displacement x the scale, the velocity not) */
+    /* The game's places carry the scale in world axes but not in model axes, where the birth place is scaled here
+     * (the displacement times the scale, the velocity not). */
     for (i = 0; i < 3; i++) v0[i] = (p1[i] - p0[i]) / (model ? span : span * scale);
     if (model) for (i = 0; i < 3; i++) p0[i] = fr.origin[i] + (p0[i] - fr.origin[i]) * scale;
     sh_motion_launch(&m, born[5], v0);
@@ -212,10 +190,8 @@ static int flight(void **context, const uint8_t *stage, const uint32_t *born, fl
     return sh_motion_run_planes(&m, &fr, born[5], age, life, scale, p0, v0, *have ? &planes : NULL, p, v);
 }
 
-/* One traced particle in the backend log: the stage (its address, count, life, sorted bit), the particle (index,
- * age, life, seed), what its flight started from (birth place, launch velocity after the launch speed factor and
- * ball, the emitter's scale, origin and axes the detour read) and where it is (the game's own place, the
- * simulated place and velocity). Doomforge's particle_motion.run on p0, v0, scale and the frame gives p again. */
+/* Logs one traced particle: the stage, the particle, what its flight started from (birth place, launch velocity,
+ * emitter scale, origin and axes) and where it is (the game's place, the simulated place and velocity). */
 static void trace_line(const uint8_t *stage, const uint32_t *born, float age, float life, const pm_start *s,
                        const float pe[3], const float p[3], const float v[3], int dead)
 {
@@ -233,10 +209,8 @@ static void trace_line(const uint8_t *stage, const uint32_t *born, float age, fl
            v[0], v[1], v[2], dead);
 }
 
-/* The context the job built for the stage, raw (sh_particlemotion_trace's first lines): its first 0x100 bytes as
- * words, and for each of its first five pointer slots the floats at +0x78 and +0xF8 of what it points to (where a
- * particle model's and an emitter record's scale were read, R-FXC): for finding what of the fx item reaches a stage
- * the context builder left in its model's axes. */
+/* Logs the job's raw context for the stage: its first 0x100 bytes as words, and for each of its first three pointer
+ * slots the offsets (below 0x800) of floats between 1.05 and 4, which is where an fx scale shows up. */
 static void trace_context(void **context)
 {
     char line[4096];
@@ -246,7 +220,6 @@ static void trace_context(void **context)
     n += (size_t)_snprintf_s(line + n, sizeof line - n, _TRUNCATE, "PARTICLES: trace context");
     for (i = 0; i < CTX_COPY / 4 && n < sizeof line - 16; i++)
         n += (size_t)_snprintf_s(line + n, sizeof line - n, _TRUNCATE, " %08x", w[i]);
-    /* each of the first three pointer slots: the offsets (to 0x800) of floats between 1.05 and 4, the fx sizes */
     for (i = 0; i < 3 && n < sizeof line - 64; i++) {
         n += (size_t)_snprintf_s(line + n, sizeof line - n, _TRUNCATE, " [%d]", i);
         __try {
@@ -271,8 +244,8 @@ static void fold(float *verts)          /* a particle that is not there: its qua
         for (k = 0; k < 3; k++) ((float *)((uint8_t *)verts + VERT_STRIDE * (size_t)i))[k] = verts[k];
 }
 
-/* A child particle (sh_family_role 2): where its parent was when it was born (particlemotion.h). 1 and the place
- * (and the parent's velocity there) when the parent existed then; 0 when it did not (the child is not drawn). */
+/* Finds where a child particle's parent was when the child was born (particlemotion.h). Returns 1 with the place and
+ * the parent's velocity there, 0 when the parent did not yet exist (the child is not drawn), -1 for a non-family. */
 static int parent_place(void **context, const uint8_t *child, const uint32_t *born, float at[3], float vel[3])
 {
     const uint8_t *parent = sh_family_parent(child);
@@ -328,7 +301,7 @@ static void move_quad(void **context, const uint8_t *stage, const uint32_t *born
     }
     sh_motion_place(verts, VERT_STRIDE, *(const int *)(stage + SH_MOTION_STAGE_ORIENTATION) == 3, pe, p, v, eye,
                     m.stretch);
-    if (dead) {                          /* Eternal's COLLISION_KILL: the particle is gone */
+    if (dead) {                          /* killed on a surface: the particle is gone */
         fold(verts);
         InterlockedIncrement(&g_killed);
     }
@@ -345,7 +318,7 @@ static uint64_t write_detour(void **context, void *generation, void **cursor)
     uint64_t n;
     if (!sh_motion_asked(stage) || !generation || !cursor) return g_write(context, generation, cursor);
     if (sh_family_role(stage) == 1) {
-        /* a parent: its random numbers are the product's, so its children can retrace it */
+        /* a parent: its seed is derived from its place, so its children can retrace it */
         __try {
             sh_motion_frame fr;
             uint32_t s;
@@ -391,7 +364,7 @@ long sh_particlemotion_children(void)
     return InterlockedCompareExchange(&g_children, 0, 0);
 }
 
-/* The game thread, once a frame with the script tick: trace the emitter places the particle jobs asked for. */
+/* Runs on the game thread once a frame with the script tick: traces the emitter places the particle jobs asked for. */
 static void planes_frame(void)
 {
     int n = sh_planes_service(sh_script_api_world_trace, 24);
@@ -420,10 +393,9 @@ int sh_particlemotion_install(const sig_result *results, size_t count, const uin
             return 0;
         }
     }
-    g_origin = (origin_fn)clean(own, 3, "ParticleOrigin");
-    /* the fx item's scale of a stage in its model's axes (context_detour); without it such a stage is drawn as the
-     * game builds it, at scale 1, and the rest still runs */
-    tramp = hook_prepare(clean(own, 3, "ParticleContext"), (void *)context_detour, CONTEXT_STOLEN);
+    g_origin = (origin_fn)sig_pointer(own, 3, "ParticleOrigin");
+    /* The context detour supplies the fx scale of a model-axes stage; without it such a stage draws at scale 1. */
+    tramp = hook_prepare(sig_pointer(own, 3, "ParticleContext"), (void *)context_detour, CONTEXT_STOLEN);
     if (tramp && hook_commit(tramp) == B2_PATCH_OK) {
         g_context = (context_fn)tramp;
     } else {
@@ -431,7 +403,7 @@ int sh_particlemotion_install(const sig_result *results, size_t count, const uin
         pm_log("PARTICLES: the stage context builder could not be detoured (%s); a stage in its model's axes is "
                "drawn at scale 1", hook_last_failure());
     }
-    tramp = hook_prepare(clean(own, 3, "ParticleWriteVerts"), (void *)write_detour, WRITE_STOLEN);
+    tramp = hook_prepare(sig_pointer(own, 3, "ParticleWriteVerts"), (void *)write_detour, WRITE_STOLEN);
     if (!tramp) {
         pm_log("PARTICLES: the particle vertex writer could not be detoured (%s); a stage's simulated motion is "
                "not drawn", hook_last_failure());

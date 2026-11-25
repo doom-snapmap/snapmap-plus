@@ -1,32 +1,7 @@
-/* prefab_mods_test -- a prefab's details and the mods it needs (backend/prefab_mods.c,
- * backend/prefab_block.c), and its export and import in the unit layout (SPEC-distribution 5.16, D35).
- *
- * Over a real store and serving index (a mod built and installed into a temporary folder), covered:
- *   the block: put after the engine's members, replaced, stripped back to the engine's exact bytes (formatting,
- *     comments, an empty object, a first member), found in a tail, a text that is not an object refused; a view
- *     composed into a block and read back;
- *   comments: the serializer's comments removed outside strings, and Create's file written as plain JSON with its block;
- *   recording: Create writes an object prefab's closure into the file's block and no sidecar; description and tag edits
- *     rewrite the block and keep the rows; a prefab without mods gets a block naming none; a module prefab's file
- *     carries its summary and rows; a prefab an earlier version saved (a sidecar and no block, or rows naming "id" and
- *     "bundle") is not read, its placement and export are refused and an edit writes nothing;
- *   placement (resolve): nothing is ever held or fetched, and the poll always says 0. A local row nothing serves, or a
- *     pinned row whose units are not all in the content cache, refuses the placement with "This prefab was not placed:
- *     it needs <mods>, which is/are not on this computer. Ask its author for the prefab's .zip export." (printed and
- *     toasted); pinned rows whose units are here go to the open map through the pinned-rows op (a refusal reads "Prefab
- *     <name> was not placed: <cause>."), local rows are activated and attached as before; a DLC module no row provides
- *     is refused first; the slot's rows from the block, META_READ from the file or a tail;
- *   the ZIP: <name>.json with its rows pinned (modpin, format 2), units/<hash>.json and files/<sha256>, no mods/ folder
- *     and no index, byte-identical on a second export, also for a prefab without mods; a row no folder here serves, or
- *     content this computer lacks, refuses the export with the mod's name; the map importer refuses it and the prefab
- *     importer refuses a map's ZIP and every earlier shape;
- *   import: the units and files go into the content cache (each checked against its name), the prefab text into the
- *     library as it is, nothing installed (no mod folder, no refresh); "Imported prefab X with its mod content.",
- *     "Prefab X is already in your library; its mod content was added.", "Prefab X and its mod content are already
- *     here; nothing was changed."; a different prefab of that name kept beside it; an extracted export folder; content
- *     the export does not carry named in the message; a damaged entry, a cache that cannot be written, and a unit that
- *     carries scripts while scripts are off each refuse and take the prefab they added out again;
- *   the console verbs and the slot's outputs; prefab names.
+/* prefab_mods_test -- a prefab's details and the mods it needs (backend/prefab_mods.c, backend/prefab_block.c), and its
+ * export and import in the unit layout, over a real store and serving index (a mod built and installed into a
+ * temporary folder). Covers the block (put, replaced, stripped to the engine's exact bytes, read back), recording,
+ * placement and its refusals, the ZIP export and import with their messages, the console verbs and prefab names.
  * argv[1] is unused; -v echoes the backend log. */
 #define WIN32_LEAN_AND_MEAN
 #include "../src/common/text.h"
@@ -454,7 +429,7 @@ static void comments(const char *lib)
     }
 }
 
-/* A local row is written without a build: it follows its folder (D6a). */
+/* A local row is written without a build: it follows its folder. */
 #define LOCAL_ROW "\"local\":true"
 
 static const char BLOCK_HEAD[] = "{\"format\":1,\"description\":\"\",\"tags\":[],\"mods\":[{\"mod\":\"testdoor\"";
@@ -498,23 +473,23 @@ static void recording(const char *lib, const sh_modmanifest_row *door)
     printf("-- description and tag edits rewrite the block in place and keep the rows; no sidecar\n");
     {
         static const char BODY[] = "{\"desc\":\"Blast door\",\"tags\":[\"door\",\"x\"],\"kind\":\"ignored\",\"mods\":[]}";
-        CHECK(sh_prefab_mods_meta_write(BODY, sizeof BODY - 1, prefab, meta) == 1);
+        CHECK(sh_prefab_mods_meta_write(BODY, sizeof BODY - 1, prefab) == 1);
     }
     text = slurp(prefab, &len);
     blk = block_of(text, len);
     CHECK(strstr(blk, "\"description\":\"Blast door\",\"tags\":[\"door\",\"x\"]") && strstr(blk, LOCAL_ROW) && !strstr(blk, "ignored"));
     CHECK(engine_bytes_are(prefab, OBJECT_PREFAB) && !mt_exists(meta));
-    view = sh_prefab_mods_view_of(text, len, 0, meta, &source, NULL);
+    view = sh_prefab_mods_view_of(text, len, 0, prefab, &source, NULL);
     CHECK(view && source == SH_PREFAB_META_BLOCK && strstr(view, "\"desc\":\"Blast door\"") && strstr(view, "\"mods\":["));
     free(view);
     free(text);
     /* Clearing both fields keeps the block and its rows. */
-    CHECK(sh_prefab_mods_meta_write("", 0, prefab, meta) == 1);
+    CHECK(sh_prefab_mods_meta_write("", 0, prefab) == 1);
     text = slurp(prefab, &len);
     blk = block_of(text, len);
     CHECK(strstr(blk, "\"description\":\"\",\"tags\":[]") && strstr(blk, LOCAL_ROW) && !mt_exists(meta));
     free(text);
-    CHECK(sh_prefab_mods_meta_write("{\"desc\":\"An airlock\",\"tags\":[\"door\"]}", 37, prefab, meta) == 1);
+    CHECK(sh_prefab_mods_meta_write("{\"desc\":\"An airlock\",\"tags\":[\"door\"]}", 37, prefab) == 1);
 
     /* A prefab that needs no mods still gets its block, naming none. */
     {
@@ -571,13 +546,13 @@ static void recording(const char *lib, const sh_modmanifest_row *door)
         _snprintf_s(side, sizeof side, _TRUNCATE, SIDE, door->build);
         CHECK(put_file(p3, OBJECT_PREFAB) && put_file(m3, side));
         text = slurp(p3, &len);
-        view = sh_prefab_mods_view_of(text, len, 0, m3, &source, NULL);
+        view = sh_prefab_mods_view_of(text, len, 0, p3, &source, NULL);
         CHECK(!view && source == SH_PREFAB_META_EARLIER);
-        CHECK(sh_prefab_mods_rows_of(text, len, m3, &rows) == SH_PREFAB_ROWS_EARLIER && rows.count == 0);
+        CHECK(sh_prefab_mods_rows_of(text, len, p3, &rows) == SH_PREFAB_ROWS_EARLIER && rows.count == 0);
         view = sh_prefab_mods_view_of(text, len, 0, NULL, &source, NULL);
         CHECK(!view && source == SH_PREFAB_META_NONE);
         free(text);
-        CHECK(sh_prefab_mods_meta_write("{\"desc\":\"New hall\",\"tags\":[\"old\"]}", 34, p3, m3) == -1);
+        CHECK(sh_prefab_mods_meta_write("{\"desc\":\"New hall\",\"tags\":[\"old\"]}", 34, p3) == -1);
         text = slurp(p3, &len);
         CHECK(text && !strcmp(text, OBJECT_PREFAB));   /* nothing written */
         free(text);
@@ -736,9 +711,8 @@ static void rows_of(sh_modmanifest_list *rows, const sh_modmanifest_row *door, i
     }
 }
 
-/* D1, D35 (manager, from R-UI1): a prefab of one Tyrant from a two-demon pack brings the pack into the map the way
- * placed objects do: no map-level row, so a publish pins the Tyrant's unit alone. Only a mod the prefab uses whole
- * is attached. */
+/* A prefab of one Tyrant from a two-demon pack brings the pack into the map as placed objects do: no map-level row, so
+ * a publish pins the Tyrant's unit alone. Only a mod the prefab uses whole is attached. */
 static void one_demon_of_a_pack(const char *tmp, const char *store)
 {
     static const char TYRANT_PREFAB[] =
@@ -775,7 +749,7 @@ static void one_demon_of_a_pack(const char *tmp, const char *store)
     row.labels = _strdup("mods/twodemon/tyrant\tBig Tyrant\n");
     CHECK(sh_modpin_row(&row, NULL, 0, NULL, &res) == SH_MODPIN_PINNED && row.pinned && row.unit_count == 1);
     {
-        /* The pin keeps the labels, and a published or exported row writes them (DS-WORDS, D6c). */
+        /* The pin keeps the labels, and a published or exported row writes them. */
         char *label = sh_modmanifest_row_label(&row, "mods/twodemon/tyrant"), *value;
         size_t vn = 0;
         CHECK(label && !strcmp(label, "Big Tyrant"));
@@ -813,10 +787,8 @@ static void one_demon_of_a_pack(const char *tmp, const char *store)
     sh_modmanifest_row_free(&pack);
 }
 
-/* Manager Q8, D6a, end to end in one process: a map whose local row names a mod this computer does not have loads
- * with its objects stood in from the real content cache and serving index, the row is served, the load's one sentence
- * names the placed entity only (not a name a value spells), and the save writes the row back as one local row with
- * every name. */
+/* A map whose local row names a mod this computer lacks loads with its objects stood in from the real content cache
+ * and serving index; the load's one sentence names the placed entity only, and the save writes the row back whole. */
 static void absent_local_row_stands_in(void)
 {
     static const char MAP_ABSENT[] =
@@ -862,9 +834,8 @@ static void absent_local_row_stands_in(void)
     sh_modmanifest_reset();
 }
 
-/* DS-WORDS, end to end: a notice names a placed object by the name the author sees, carried by the row's labels (the
- * Toybox row's name, written at the save from the installed mods), never by its unit's root; a save keeps the labels a
- * row was loaded with for a mod that is not here. */
+/* A notice names a placed object by the name the author sees, carried by the row's labels (written at the save from the
+ * installed mods), never by its unit's root; a save keeps the labels of a mod that is not here. */
 static void label_name(const char *const *placed, size_t n, char **labels)
 {
     size_t k;
@@ -894,7 +865,7 @@ static void notices_name_objects_as_the_author_sees_them(void)
     t = sh_cache_take_notice();
     CHECK(t && !strcmp(t, "This map is playing without the Wooden Crate from Absent Pack, which is not on this computer."));
     free(t);
-    /* the mod is not here: the save keeps the label the row was loaded with */
+    /* the mod is not here: the save keeps the row's label */
     saved = sh_modmanifest_on_save(MAP_LABELED, sizeof MAP_LABELED - 1, &n);
     memset(&back, 0, sizeof back);
     CHECK(saved && sh_modmanifest_read(saved, n, &back, NULL) == 1 && back.count == 1);
@@ -916,8 +887,8 @@ static void notices_name_objects_as_the_author_sees_them(void)
     sh_modmanifest_reset();
 }
 
-/* DS-WORDS on a pinned row (the case labels exist for): a published map on a machine that has neither the mod nor its
- * unit names the absent object by the row's label, the unit's root read as the name the map places it by. */
+/* On a pinned row, a published map on a machine with neither the mod nor its unit names the absent object by the row's
+ * label, the unit's root read as the name the map places it by. */
 static void pinned_label_names_the_absent_object(void)
 {
     static const char MAP_PINNED[] =
@@ -941,9 +912,8 @@ static void pinned_label_names_the_absent_object(void)
     sh_modmanifest_reset();
 }
 
-/* Manager, 2026-11-24, end to end: the author's own map places an object their folder no longer has (removed from the
- * mod). The map is never refused: the folder serves what it has, the object it lacks stands in beside it (the stand-in
- * composition of the salt, declared after the folder's build), and the load's one sentence says so. */
+/* The author's own map places an object their folder lacks (removed from the mod): the map is never refused, the folder
+ * serves what it has, the missing object stands in beside it, and the load's one sentence says so. */
 static void lacking_local_row_stands_in(void)
 {
     static const char MAP_LACKS[] =
@@ -1072,12 +1042,9 @@ static void folder_of(const char *salt, char *out, size_t cap)
     sh_ms_list_free(&l);
 }
 
-/* R-LB1 F6, with the real unit walk, serving index, content cache and map scope.
- *  - The author's own map (the owner's ruling): a publish's save pins a copy of its rows for the published copy alone;
- *    the slot it writes and the open map keep their local rows, served by the author's folder.
- *  - A map opened pinned (someone else's, or a kept copy) with the mod installed (D26, D23): its row compares equal to
- *    the folder until a file of its object changes and the folder is built again, then differs, with no reload, and
- *    stays served by its composition meanwhile: Update follows the rebuild in the same session. */
+/* With the real unit walk, serving index, content cache and map scope: the author's own map pins a copy of its rows for
+ * the published copy alone (the open map keeps its local rows); an opened pinned map equals the folder until the
+ * folder is rebuilt, then differs with no reload while its composition keeps serving it. */
 static void published_map_follows_rebuild(const char *tmp, const char *store)
 {
     static const char MAP_PUB[] =
@@ -1134,7 +1101,7 @@ static void published_map_follows_rebuild(const char *tmp, const char *store)
     sh_modserve_bundle_ref_free(&ref);
     sh_modmanifest_list_free(&cur);
 
-    /* Someone else's map of that mod, pinned from the folder as it is now (its published copy), opened here. */
+    /* Someone else's map of that mod, pinned from the folder (its published copy), opened here. */
     row = mod;
     row.name = NULL;
     CHECK(sh_modmanifest_row_set_name(&row, "Pub Tyrant") && sh_modmanifest_row_add_name(&row, "mods/pubtyr01/tyrant"));
@@ -1157,8 +1124,8 @@ static void published_map_follows_rebuild(const char *tmp, const char *store)
     sh_modserve_bundle_ref_free(&ref);
     CHECK(cur.count && sh_modpin_row_differs(&cur.rows[0]) == 0);
 
-    /* The Tyrant changes in the folder and Refresh builds it again: the open pinned map now differs (Update), with no
-     * reload, and is still served by its composition. */
+    /* The Tyrant changes in the folder and Refresh builds it again: the open pinned map differs (Update), with no reload,
+     * and is still served by its composition. */
     mt_write(folder, "entities\\tyrant.decl", TYRANT_V2);
     CHECK(sh_ms_sync(NULL, NULL));
     CHECK(sh_modserve_index_rescan() >= 1);
@@ -1185,9 +1152,8 @@ done:
     sh_cache_local_changed();   /* the local folders' snapshot is read again, as the next map load reads it */
 }
 
-/* R-LB1 F9: a unit pinned from a folder built after the content cache first listed the local folders is here whole,
- * so a publish uploads it instead of calling it absent. The window's Refresh (modui.c mu_sync) and `sh_mods rescan`
- * (modcmd.c mc_sync) both build through sh_ms_sync, as here. */
+/* A unit pinned from a folder built after the content cache first listed the local folders is here whole, so a publish
+ * uploads it; the window's Refresh (modui.c mu_sync) and `sh_mods rescan` (modcmd.c mc_sync) build through sh_ms_sync. */
 static void rebuilt_folder_unit_is_here(const char *tmp, const char *store)
 {
     /* texts no other mod of this test carries, so only the local folder has their bytes */
@@ -1203,7 +1169,7 @@ static void rebuilt_folder_unit_is_here(const char *tmp, const char *store)
     CHECK(sh_modserve_index_build(store) >= 1);
     folder_of("rebuil01", folder, sizeof folder);
     CHECK(folder[0] != 0);
-    /* the first publish's unit, here whole (the cache lists the local folders' files now) */
+    /* the first publish's unit, here whole (the cache lists the local folders' files) */
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, "rebuil01");
     memset(row.build, '0', SH_MOD_HASH_CHARS);
@@ -1298,9 +1264,9 @@ static void add_to_my_mods_end_to_end(const char *tmp, const char *store)
     sh_cache_set_map_folders(NULL, NULL);
 }
 
-/* D29 as built (manager): Add to my mods of one Tyrant from a two-demon pack whose model binary spells the pack's
- * namespace. The copy gets a new salt, its texts follow, its binary is kept as written and its build records the old
- * namespace as "spelled", and the serving index serves the binary with the copy's namespace (D12). */
+/* Add to my mods of one Tyrant from a two-demon pack whose model binary spells the pack's namespace: the copy gets a
+ * new salt and its texts follow, its binary is kept as written, its build records the old namespace as "spelled", and
+ * the serving index serves the binary with the copy's namespace. */
 static void copy_a_demon_whose_binary_spells(const char *tmp, const char *store)
 {
     static const char tyrant[] =
@@ -1403,7 +1369,7 @@ static void resolving(const sh_modmanifest_row *door)
     CHECK(r == SH_PREFAB_MODS_PLACE && seq == 0 && F.activations == 1 && F.attaches == 1 && !strcmp(F.attached[0], door->build));
     CHECK(F.prints == 0 && F.pinned_calls == 0);   /* the Mods tab shows the new row: no console note */
     r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
-    CHECK(r == SH_PREFAB_MODS_PLACE && F.attaches == 1 && F.prints == 0);   /* the map lists it now */
+    CHECK(r == SH_PREFAB_MODS_PLACE && F.attaches == 1 && F.prints == 0);   /* the map lists it */
     sh_modmanifest_list_free(&rows);
     /* No rows: placed as before, nothing asked. */
     memset(&rows, 0, sizeof rows);
@@ -1531,7 +1497,7 @@ static void resolving(const sh_modmanifest_row *door)
                   strstr(msg, "ind_dlc/dlc_room") && !strstr(msg, "maps/modules/x"));
             free(with);
         }
-        /* The module the ghost row provides is a mod, not a missing room: the row is what is missing now. */
+        /* The module the ghost row provides is a mod, not a missing room: the row is what is missing. */
         r = HO(msg, sh_prefab_mods_resolve_main(MODDED, sizeof MODDED - 1, &rows, "Rooms", &seq, HO_P(0)));
         _snprintf_s(want, sizeof want, _TRUNCATE, "This prefab was not placed: it needs ghost.mod, which is not on this computer.%s",
                     REFUSE_TAIL);
@@ -1562,24 +1528,24 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
     call.op = SH_MODULE_PREFAB_MODS_RESOLVE;
     call.text = OBJECT_PREFAB;   /* no block, no sidecar */
     call.text_len = sizeof OBJECT_PREFAB - 1;
-    call.meta_path = none;
+    call.path = NULL;
     call.name = "Nothing";
     CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_PLACE && F.main_calls == 0);
     text = slurp(path, &len);   /* Door.json carries its block */
     call.text = text;
     call.text_len = len;
-    call.meta_path = meta;
+    call.path = path;
     call.name = "Door";
-    /* The recorded row places the door: it reaches the map through the placed door, not as a map-level row (D1). */
+    /* The recorded row places the door: it reaches the map through the placed door, not as a map-level row. */
     CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_PLACE && F.main_calls == 1 && F.attaches == 0 &&
           F.activations == 1);
     {
         /* A prefab an earlier version saved: refused with its sentence. */
         char old[MAX_PATH * 2];
-        _snprintf_s(old, sizeof old, _TRUNCATE, "%s\\Old hall.meta.json", lib);
+        _snprintf_s(old, sizeof old, _TRUNCATE, "%s\\Old hall.json", lib);
         call.text = OBJECT_PREFAB;
         call.text_len = sizeof OBJECT_PREFAB - 1;
-        call.meta_path = old;
+        call.path = old;
         call.name = "Old hall";
         CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_REFUSED && !strcmp(out, SH_PREFAB_EARLIER_TEXT) &&
               !strcmp(F.last_print, "Prefab Old hall was not placed: it was saved by an earlier Snapmap+; run the "
@@ -1591,7 +1557,7 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
     call.op = SH_MODULE_PREFAB_META_READ;
     call.text = text;
     call.text_len = len;
-    call.meta_path = meta;
+    call.path = path;
     CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_META_BLOCK && strstr(out, "\"desc\":\"An airlock\"") && strstr(out, LOCAL_ROW));
     call.text = text + 40;
     call.text_len = len - 40;
@@ -1600,10 +1566,10 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
     call.text = OBJECT_PREFAB;
     call.text_len = sizeof OBJECT_PREFAB - 1;
     call.tail = 0;
-    call.meta_path = none;
+    call.path = NULL;
     CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_META_NONE && out[0] == 0);
-    _snprintf_s(meta, sizeof meta, _TRUNCATE, "%s\\Old hall.meta.json", lib);
-    call.meta_path = meta;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Old hall.json", lib);
+    call.path = path;
     CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_META_EARLIER && out[0] == 0);
     free(text);
 
@@ -1623,7 +1589,6 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
         call.text = "{\"desc\":\"s\",\"tags\":[]}";
         call.text_len = strlen(call.text);
         call.path = p2;
-        call.meta_path = none;
         CHECK(pm_slot(&call, out, sizeof out) == 1 && !mt_exists(none));
         text = slurp(p2, &len);
         CHECK(strstr(block_of(text, len), "\"description\":\"s\"") && strstr(block_of(text, len), LOCAL_ROW));
@@ -1714,7 +1679,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     _snprintf_s(prefab, sizeof prefab, _TRUNCATE, "%s\\Door.json", libA);
     _snprintf_s(meta, sizeof meta, _TRUNCATE, "%s\\Door.meta.json", libA);
     disk = slurp(prefab, &dl);
-    CHECK(HO(msg, sh_prefab_mods_export(prefab, meta, "Door", zipA, HO_P(0))) == 1);
+    CHECK(HO(msg, sh_prefab_mods_export(prefab, "Door", zipA, HO_P(0))) == 1);
     CHECK(strstr(msg, "Exported prefab Door with 1 mod to ") != NULL);
     z = slurp(zipA, &zl);
     CHECK(zip_count(zipA, "") == 3 && zip_count(zipA, "units/") == 1 && zip_count(zipA, "files/") == 1 &&
@@ -1728,7 +1693,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         zip_door[el] = 0;
         zip_door_len = el;
     }
-    /* the rows are pinned: units and their composition, no longer the local build */
+    /* the rows are pinned: units and their composition, not the local build */
     CHECK(zip_door && sh_prefab_mods_rows_of(zip_door, zip_door_len, NULL, &pinned) == 1 && pinned.rows[0].pinned &&
           pinned.rows[0].unit_count == 1 && !strcmp(pinned.rows[0].salt, "testdoor") &&
           !strcmp(pinned.rows[0].name, "test.door"));
@@ -1770,14 +1735,14 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     free(z);
     free(disk);
     printf("-- two exports of the same prefab are byte-identical\n");
-    CHECK(HO(msg, sh_prefab_mods_export(prefab, meta, "Door", zipA2, HO_P(0))) == 1);
+    CHECK(HO(msg, sh_prefab_mods_export(prefab, "Door", zipA2, HO_P(0))) == 1);
     {
         size_t al = 0, bl = 0;
         char *a = slurp(zipA, &al), *b = slurp(zipA2, &bl);
         CHECK(a && b && al == bl && !memcmp(a, b, al));
         free(a); free(b);
     }
-    CHECK(HO(msg, sh_prefab_mods_export(prefab, meta, "Door", "C:\\x\\Door.json", HO_P(0))) == -1 &&
+    CHECK(HO(msg, sh_prefab_mods_export(prefab, "Door", "C:\\x\\Door.json", HO_P(0))) == -1 &&
           strstr(msg, "must end in .zip"));
     /* A map's importer refuses it. */
     CHECK(HOT(char *, cause, modexport_read(zipA, &len, &st, HO_P(0))) == NULL && strstr(cause, "prefab's export, not a map's"));
@@ -1789,7 +1754,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         _snprintf_s(z0, sizeof z0, _TRUNCATE, "%s\\Crate.zip", tmp);
         CHECK(put_file(p0, STOCK_PREFAB));
         CHECK(sh_prefab_mods_record(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, p0, NULL) == 0);
-        CHECK(HO(msg, sh_prefab_mods_export(p0, NULL, "Crate", z0, HO_P(0))) == 1 && strstr(msg, "it uses no mods"));
+        CHECK(HO(msg, sh_prefab_mods_export(p0, "Crate", z0, HO_P(0))) == 1 && strstr(msg, "it uses no mods"));
         z = slurp(z0, &zl);
         disk = slurp(p0, &len);
         e = zip_entry(z, zl, "Crate.json", &el);
@@ -2120,7 +2085,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
             /* and its export is refused with the mod's name: nothing here to carry */
             _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\nothing here.zip", tmp);
             CHECK(HO(msg, sh_prefab_mods_export(libB[0] ? (_snprintf_s(content, sizeof content, _TRUNCATE, "%s\\Door (2).json", libB), content) : NULL,
-                                                NULL, "Door (2)", path, HO_P(0))) == -1);
+                                                "Door (2)", path, HO_P(0))) == -1);
             CHECK(strstr(msg, "Prefab Door (2) was not exported: the content of test.door that this ") == msg &&
                   strstr(msg, " is not on this computer. Import the prefab's .zip export again") && !mt_exists(path));
             use_store(storeB);
@@ -2183,7 +2148,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         with = sh_prefab_mods_embed(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, side, strlen(side), NULL, &wl);
         CHECK(with && sh_prefab_mods_write_file(p3, with, wl));
         free(with);
-        CHECK(HO(msg, sh_prefab_mods_export(p3, NULL, "Ghost", z3, HO_P(0))) == -1 &&
+        CHECK(HO(msg, sh_prefab_mods_export(p3, "Ghost", z3, HO_P(0))) == -1 &&
               !strcmp(msg, "Prefab Ghost was not exported: this prefab uses ghost.mod, which is not on this computer. Install "
                            "it in the Mods tab, or remove its objects from the prefab.") &&
               !strstr(msg, "ghostmod@") && !mt_exists(z3));
@@ -2196,7 +2161,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         _snprintf_s(m4, sizeof m4, _TRUNCATE, "%s\\Old door.meta.json", libA);
         _snprintf_s(z4, sizeof z4, _TRUNCATE, "%s\\old.zip", tmp);
         CHECK(put_file(p4, OBJECT_PREFAB) && !mt_exists(m4));
-        CHECK(HO(msg, sh_prefab_mods_export(p4, m4, "Old door", z4, HO_P(0))) == 1 && strstr(msg, "with 1 mod"));
+        CHECK(HO(msg, sh_prefab_mods_export(p4, "Old door", z4, HO_P(0))) == 1 && strstr(msg, "with 1 mod"));
         z = slurp(z4, &zl);
         e = zip_entry(z, zl, "Old door.json", &el);
         CHECK(e && strstr(block_of(e, el), "\"objects\"") && !strstr(block_of(e, el), door->build) && !strstr(block_of(e, el), "\"local\""));
@@ -2207,7 +2172,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         free(text);
         /* With an earlier version's sidecar and no block: refused. */
         CHECK(put_file(m4, "{\"desc\":\"From the sidecar\",\"tags\":[\"old\"]}"));
-        CHECK(HO(msg, sh_prefab_mods_export(p4, m4, "Old door", z4, HO_P(0))) == -1 &&
+        CHECK(HO(msg, sh_prefab_mods_export(p4, "Old door", z4, HO_P(0))) == -1 &&
               !strcmp(msg, "Prefab Old door was not exported: it was saved by an earlier Snapmap+; run the Snapmap+ "
                            "installer to update it."));
 

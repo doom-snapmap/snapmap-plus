@@ -1,6 +1,5 @@
-/* Tests AAS2 3.29 parsing, appending and byte-preserving serialization.
- * Synthetic fixtures use nonzero header, settings and record bytes to expose
- * accidental rewriting. They also satisfy navmesh.c's structural gate. */
+/* Tests AAS2 3.29 parsing, appending and byte-preserving serialization. Its synthetic fixtures use nonzero
+ * header, settings and record bytes to expose accidental rewriting and satisfy navmesh.c's structural gate. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -20,9 +19,7 @@ static int g_failed;
     }                                                                            \
 } while (0)
 
-/* ==================================================================== */
-/* a synthetic AAS2 3.29 file                                            */
-/* ==================================================================== */
+/* a synthetic AAS2 3.29 file */
 
 /* Keep format sizes independent of aas_edit.c so drift cannot make the
  * implementation and its fixture agree on the same mistake. */
@@ -222,9 +219,7 @@ static int synth_aas(aas_synth *b, unsigned pad)
 
 static void free_synth(aas_synth *b) { free(b->p); b->p = NULL; }
 
-/* ==================================================================== */
-/* the format table                                                      */
-/* ==================================================================== */
+/* the format table */
 
 static void test_record_sizes(void)
 {
@@ -239,9 +234,7 @@ static void test_record_sizes(void)
     CHECK(sh_aas_record_size(9999) == 0);
 }
 
-/* ==================================================================== */
-/* the big-endian edge                                                   */
-/* ==================================================================== */
+/* the big-endian edge */
 
 /* The store is big-endian and the host is not, so these helpers are the only
  * thing standing between an author's coordinate and a byte-swapped navmesh. */
@@ -276,9 +269,7 @@ static void test_field_helpers(void)
     CHECK(sh_aas_get_f32(rec, 24) == -18.5f);
 }
 
-/* ==================================================================== */
-/* parse, and the byte-for-byte round trip                               */
-/* ==================================================================== */
+/* parse, and the byte-for-byte round trip */
 
 static void roundtrip_one(unsigned pad)
 {
@@ -426,7 +417,7 @@ static void test_parse_refusals(void)
     CHECK(strstr(err, "areaBounds") != NULL && strstr(err, "2 areas") != NULL);
     put32(b.p + b.off[SH_AAS_L_AREABOUNDS] - 4, b.count[SH_AAS_L_AREABOUNDS]);
 
-    /* the good payload still parses after every one of those was undone */
+    /* the good payload still parses once the damage is undone */
     a = sh_aas_parse(b.p, b.len, err, sizeof err);
     CHECK(a != NULL);
     sh_aas_free(a);
@@ -445,9 +436,7 @@ static void test_parse_refusals(void)
     free_synth(&b);
 }
 
-/* ==================================================================== */
-/* appending                                                             */
-/* ==================================================================== */
+/* appending */
 
 /* Growth is the part with a memory bug in it if there is one: the array
  * reallocates under records the caller already wrote. */
@@ -548,7 +537,7 @@ static void test_append_survives_a_round_trip(void)
             CHECK(sh_aas_get_f32(sh_aas_rec_const(again, SH_AAS_L_VERTICES, 5), 8) == 96.0f);
             CHECK(sh_aas_get_i32(sh_aas_rec_const(again, SH_AAS_L_AREAS, 2), 0x14) == -1);
             CHECK(sh_aas_get_u16(sh_aas_rec_const(again, SH_AAS_L_AREABOUNDS, 2), 10) == 106);
-            /* everything the file brought is still exactly where it was */
+            /* everything from the file is unchanged */
             CHECK(memcmp(out, b.p, SH_AAS_PREAMBLE_BYTES) == 0);
             CHECK(sh_aas_get_f32(sh_aas_rec_const(again, SH_AAS_L_VERTICES, 2), 0) == 128.0f);
             CHECK(strcmp((const char *)sh_aas_rec_const(again, SH_AAS_L_DEPENDENCYNAMES, 0),
@@ -620,9 +609,7 @@ static void test_write_refuses_over_budget(void)
     free_synth(&b);
 }
 
-/* ==================================================================== */
-/* the settings block                                                    */
-/* ==================================================================== */
+/* the settings block */
 
 /* Agent radius and height must come from the correct settings words. */
 static void test_settings_accessors(void)
@@ -677,7 +664,7 @@ static void test_settings_accessors(void)
     CHECK(sh_aas_setting_f32(NULL, 0) == 0.0f);
     sh_aas_set_setting_f32(a, 0xFFFFFFFFu, 1.0f);
     sh_aas_set_setting_f32(NULL, 0, 1.0f);
-    CHECK(sh_aas_max_step_height(a) == 24.0f);      /* nothing was corrupted */
+    CHECK(sh_aas_max_step_height(a) == 24.0f);      /* unchanged */
 
     /* a model that is not there answers a defined zero, not a fault */
     sh_aas_agent_bounds(NULL, mins, maxs);

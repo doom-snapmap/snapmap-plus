@@ -4,27 +4,20 @@
 #include <stddef.h>
 #include "script_api_common.h"
 
-/* Build 13954591 (shared Ghidra, snaphak-re logs/shared-ghidra/SC4-*; each
- * pattern is the only match in each executable, at the recorded RVA):
+/* Build 13954591; each pattern is the only match in each executable, at the recorded RVA:
  *   ScriptProcessEventArgs  VK 0x140B47350  GL 0x140B46940  (obj, ret[0x18], def, n, a0..a7)
  *   ScriptPostEventArgs     VK 0x140B45700  GL 0x140B44CF0  (obj, def, ms, n, a0...)
  *   ScriptEventArgClear     VK 0x140B44640  GL 0x140B43A50  releases an idEventArg
  *   ScriptEventArgEntity    VK 0x140B44300  GL 0x140B438F0  (arg, idEntity*) -> an 'e' argument
- *   ScriptTraceQuery        VK 0x141637CE0  GL 0x141638B60  (traces, handle*, result*, start*, end*, clip,
- *                           axis*, contents, pass spawn id, keep, name, pass spawn id 2); a result pointer
- *                           runs the trace at once (VK 0x141638340 / GL 0x1416391C0).
- *   ScriptDifficulty        VK 0x140391A80  GL 0x140391350  idGameLocal vtable +0x670 (game) -> int: the
- *                           g_gameDifficulty cvar when it is 0 or more, else the game's currentGameDifficulty
- *                           (+0x2C3010); 0 easy, 1 medium, 2 hard, 3 ultra-violent, 4 nightmare. Optional: the
- *                           calls work without it and difficulty() then answers nil.
- *   ScriptTagFind           VK 0x1416CE1E0  GL 0x1416CEE90  (model decl +0x210 prop list, prop name, tag name) ->
- *                           the tag row: +0 offset idVec3, +0xC rotation quaternion, +0x1C short parent joint
- *                           (-1 for a default row when there is none). The engine reads aim and focus tags with
- *                           it from the "_info" prop (VK 0x1407720A0, "can't find focus tracking tag").
- *   ScriptTagWorld          VK 0x1415EFAA0  GL 0x1415F0CA0  (animator, 1, tag row, idVec3 *pos, idMat3 *axis) ->
- *                           bool: the tag placed on its parent joint in world space, as idAI2 finds a muzzle
- *                           tag (VK 0x140434E20). Both optional: without them a tag name answers as a joint.
- *                           Evidence snaphak-re logs/shared-ghidra/SCF2-*. */
+ *   ScriptTraceQuery        VK 0x141637CE0  GL 0x141638B60  (traces, handle*, result*, start*, end*, clip, axis*,
+ *                           contents, pass spawn id, keep, name, pass spawn id 2); a result pointer runs it at once
+ *   ScriptDifficulty        VK 0x140391A80  GL 0x140391350  idGameLocal vtable +0x670 (game) -> int, 0 easy .. 4
+ *                           nightmare; optional: without it difficulty() answers nil
+ *   ScriptTagFind           VK 0x1416CE1E0  GL 0x1416CEE90  (model decl +0x210 prop list, prop name, tag name) -> the
+ *                           tag row: +0 offset idVec3, +0xC rotation quaternion, +0x1C short parent joint
+ *   ScriptTagWorld          VK 0x1415EFAA0  GL 0x1415F0CA0  (animator, 1, tag row, idVec3 *pos, idMat3 *axis) -> bool,
+ *                           the tag placed on its parent joint in world space; both tag calls are optional: without
+ *                           them a tag name answers as a joint */
 const sig_entry SH_SCRIPT_API_SIGNATURES[] = {
     { "ScriptProcessEventArgs",
       "44 89 4C 24 20 53 55 56 57 41 56 41 57 48 81 EC 28 01 00 00", 0xB47350u, 0xB46940u },

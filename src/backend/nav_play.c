@@ -28,10 +28,8 @@ void backend_log(const char *message);
  * RIP-relative operand, no relative jmp or call). The installer needs >= 14. */
 #define SNAPBUILD_STOLEN 15
 
-/* Three register arguments, no stack arguments; int return must pass through.
- * The pinned Vulkan call site at 0x4EE428 sets RCX=R14, RDX=[RBP+0x900],
- * R8=RDI and consumes EAX.
- */
+/* Three register arguments, no stack arguments; the int return must pass through. The pinned Vulkan call site at
+ * 0x4EE428 sets RCX=R14, RDX=[RBP+0x900], R8=RDI and consumes EAX. */
 typedef int (*snapbuild_fn_t)(void *a, void *b, void *c);
 
 static snapbuild_fn_t g_orig;
@@ -94,10 +92,9 @@ static int nav_heap_install(const sig_result *results, size_t count)
     return 0;
 }
 
-/* The marker is stored independently, but walkable solid geometry must not be
- * registered as an avoidance obstacle. Keep native physical collision and the
- * native flag's behavior; add the derived policy only to marked Blocking Boxes.
- * This executes inside their contents update, including spawn and copied boxes. */
+/* Walkable solid geometry must not register as an avoidance obstacle, though the marker is stored independently.
+ * Native collision and flag behavior are kept; the derived policy is added only to marked Blocking Boxes, inside
+ * their contents update (spawned and copied boxes included). */
 static unsigned char nav_volume_clear_obstacle(const unsigned char *entity)
 {
     int enabled=0;
@@ -132,10 +129,8 @@ static void *nav_instance_load(void *self,const char *name,unsigned char a,unsig
     return result;
 }
 
-/* Leaf relays preserve the original call frame. The find-site relay supplies
- * its live R14 instance record as the fourth argument, the placement-name
- * relay its R13 record; the load relay leaves all four original arguments
- * intact. */
+/* Leaf relays preserve the call frame. The find-site relay passes its live R14 instance record as the fourth
+ * argument, the placement-name relay its R13 record; the load relay leaves all four arguments intact. */
 static void *nav_near_relay(uintptr_t call,void *handler,int instance)
 {
     /* The patched CALL's rel32 is relative to its end, call + 5. */
@@ -322,10 +317,9 @@ int sh_nav_play_install(void *snapbuild_fn, int status_ok)
     return 1;
 }
 
-/* The editor's placement grid is a stock model per module and class, loaded
- * by the name the native surface rebuild composes. Where the bake cut a copy's
- * floor, the finished name is replaced with a private one the resource hook
- * serves, so the native rebuild loads, shows and hides the cut model itself. */
+/* The placement grid is a stock model per module and class, loaded by the name the native surface rebuild composes.
+ * Where the bake cut a copy's floor, that name becomes a private one the resource hook serves, so the native rebuild
+ * loads, shows and hides the cut model itself. */
 typedef void *(*nav_concat_fn)(void *,const void *,const char *);
 typedef void (*nav_assign_fn)(void *,const char *);
 static nav_concat_fn g_concat;

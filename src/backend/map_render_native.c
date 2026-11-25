@@ -27,17 +27,9 @@ typedef unsigned char (*cvar_set_fn)(void *,const char *,unsigned char);
 static cvar_set_fn g_set;
 static void *g_zfar;
 
-static const sig_result *binding(const sig_result *r,size_t n,const char *name)
-{
-    size_t i;for(i=0;i<n;i++)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)return r+i;
-    return NULL;
-}
 
-/* The setting belongs to the open map and is held by map_settings.c: every
- * map parse reads it from the "render" key of the map's member's settings
- * part, which goes before the engine sees it, and every save writes it back. The engine's own
- * variable lists never carry it, so the map argument only names the map the
- * caller means. */
+/* The setting belongs to the open map and is held by map_settings.c: each map parse reads it from the "render" key
+ * of the settings part and each save writes it back. The map argument only names the map the caller means. */
 int sh_map_render_read(void *map,sh_map_render *settings)
 {
     sh_map_settings current;
@@ -57,10 +49,8 @@ int sh_map_render_write(void *map,const sh_map_render *settings)
         "RENDER: Unlock View Distance off for this map; its next save stores no view setting");
     return 1;
 }
-/* r_zfar is also left as it is in frames where no environment resolves (the
- * blend writes nothing then), so an unlocked map sets it once when selected.
- * Every other writer then agrees: the blend's read returns the maximum and the
- * Blueprint far plane is raised to it (R-024 writer survey). */
+/* An unlocked map sets r_zfar once when selected, because frames where no environment resolves leave it unchanged.
+ * The blend's read and the Blueprint far plane then agree on the maximum. */
 static void force_far_clip(void)
 {
     if(!g_set||!g_zfar)return;
@@ -84,16 +74,15 @@ static void publish(const sh_map_render *settings,int valid,int quiet)
         "RENDER: selected this map's original module environments"):
         "RENDER: no valid map rendering metadata; native environment retained");
 }
-/* Native conversion (SnapMapEditToSnapBuild) serves Play only; its map is a
- * build copy of the editable map. Play uses the open map's setting. */
+/* Native conversion (SnapMapEditToSnapBuild) serves Play only and works on a build copy of the editable map; it
+ * uses the open map's setting. */
 void sh_map_render_build(void *map)
 {
     sh_map_render settings;int valid=sh_map_render_read(map,&settings);
     publish(&settings,valid,0);
 }
-/* After a successful parse: select the parsed map's setting, which
- * map_settings.c has just made current. NULL clears the selection silently
- * before every load, including failed loads. */
+/* After a successful parse: select the parsed map's setting, already current in map_settings.c. NULL clears the
+ * selection silently. */
 void sh_map_render_loaded(void *map)
 {
     sh_map_render settings;int valid;
@@ -106,12 +95,9 @@ void sh_map_render_select(const sh_map_render *settings)
     publish(settings,settings&&sh_map_render_valid(settings),0);
 }
 
-/* Overwrite every literal op of the named render parm in a blended block
- * (ops +0, count +8, values +24 as 16-byte vectors, value count +32). The
- * block is the view's own copy: the blend copies the target's ops and values
- * element by element (VK FUN_1415b8260 / GL FUN_1415b9110) and rebuilds it
- * every frame, so a shared environment declaration is never changed and
- * nothing needs restoring. Callers guard with __try. */
+/* Overwrite every literal op of the named render parm in a blended block (ops +0, count +8, values +24 as 16-byte
+ * vectors, value count +32). The block is the view's own copy, rebuilt every frame from the target's ops and values
+ * (VK FUN_1415b8260 / GL FUN_1415b9110), so shared declarations are never changed. Callers guard with __try. */
 static int write_literals(void *block,const char *parm,float value)
 {
     unsigned char *b=(unsigned char*)block,*ops=*(unsigned char**)b;
@@ -151,18 +137,9 @@ static int scale_literals(void *block,const char *parm,float r,int strength)
     return written;
 }
 
-/* This call reads the blended environment's maxViewDistance, after every
- * environment source has been merged: module environment layers, Set
- * Environment and Player Set Environment blends, and view renderparm
- * overrides. The engine raises the result to at least 256 and writes it to
- * r_zfar. With Unlock View Distance on, the read returns the maximum and the
- * same block's fog is stretched by the same factor as the clip, whatever the
- * environment, in the editor and Play alike (R-024); off returns the
- * engine's own read. The view's literal
- * is changed too so the block stays consistent; shared environment
- * declarations and unrelated render passes stay native. The blend reaches
- * this read only when some environment resolves; publish() covers the frames
- * where none does. */
+/* Reads the blended environment's maxViewDistance after every environment source has been merged; the engine raises
+ * the result to at least 256 and writes it to r_zfar. With Unlock View Distance on it returns the maximum and
+ * stretches the block's fog by the same factor as the clip; off, it returns the engine's own read. */
 static float render_clip_value(void *block,void *decl,uintptr_t context)
 {
     sh_map_render settings;int ready;float native,r;
@@ -170,17 +147,12 @@ static float render_clip_value(void *block,void *decl,uintptr_t context)
         return g_float(block,decl,context);
     AcquireSRWLockShared(&g_lock);ready=g_ready;settings=g_runtime;ReleaseSRWLockShared(&g_lock);
     if(!ready||!sh_map_render_unlocked(&settings))return g_float(block,decl,context);
-    /* The blended block's own distance, before it is replaced. */
     native=g_float(block,decl,context);
     r=sh_map_render_fog_stretch(native);
     __try {
         int i;
-        /* With the far clip at the maximum no environment's fog may saturate
-         * inside it, but each Environment FX keeps its look: its fog is
-         * stretched by the same factor as its clip. The renderer packs these
-         * parms into fogParms/fogParms2 from the parm state this block is
-         * applied to right after the blend (VK FUN_1417b3d70 / GL
-         * FUN_1417b5000), so the change lasts for this view's frame only. */
+        /* The renderer packs these parms into fogParms/fogParms2 from the parm state this block is applied to right
+         * after the blend (VK FUN_1417b3d70 / GL FUN_1417b5000), so the change lasts for this view's frame only. */
         for(i=0;i<SH_RENDER_FOG_DISTANCE_COUNT;i++)
             scale_literals(block,sh_map_render_fog_distance_parms[i],r,0);
         for(i=0;i<SH_RENDER_FOG_STRENGTH_COUNT;i++)
@@ -194,9 +166,8 @@ static float render_clip_value(void *block,void *decl,uintptr_t context)
     return sh_map_render_distance(&settings);
 }
 
-/* In the editor's Blueprint frames the editor camera also forces r_zfar;
- * editor_zoom raises this value under the editor's own condition so both
- * per-frame writers agree. Elsewhere the value is unchanged. */
+/* In the editor's Blueprint frames the editor camera also forces r_zfar, so editor_zoom raises this value under the
+ * editor's own condition. */
 static float render_clip(void *block,void *decl,uintptr_t context)
 {
     return sh_editor_zoom_far_plane(render_clip_value(block,decl,context));
@@ -222,7 +193,7 @@ static void *near_relay(uintptr_t call)
     return NULL;
 }
 /* The RenderClipRead site is a rel32 call (byte 0 E8) to the parm float reader: copy its five bytes to `bytes` and
- * give the callee. 0 when the site is not that call. The install and the image test both run this. */
+ * give the callee. Returns 0 when the site is not that call. */
 int sh_map_render_decode_read(uintptr_t site,unsigned char bytes[5],uintptr_t *callee)
 {
     int32_t relative;
@@ -234,8 +205,8 @@ int sh_map_render_install(const sig_result *results,size_t count,const uint8_t *
     const sig_result *read,*decl,*set;unsigned char before[5],after[5];int32_t relative;
     intptr_t distance;void **slot;unsigned char *system;void **vars;int i,n;
     if(g_patch.live)return g_relay!=NULL;
-    read=binding(results,count,"RenderClipRead");decl=binding(results,count,"RenderParmFromOp");
-    set=binding(results,count,"CvarSetString");
+    read=sig_ok(results,count,"RenderClipRead");decl=sig_ok(results,count,"RenderParmFromOp");
+    set=sig_ok(results,count,"CvarSetString");
     if(!read||!decl)return 0;
     __try {
         slot=(void**)glb_resolve(base,"cvar_system_slot",NULL);if(!slot||!*slot)return 0;
@@ -247,8 +218,7 @@ int sh_map_render_install(const sig_result *results,size_t count,const uint8_t *
             else if(name&&!strcmp(name,"r_zfar"))g_zfar=vars[i];
         }
         if(!g_game_type)return 0;
-        /* Without the setter or r_zfar only frames with no environment keep
-         * their previous far clip; everything else still works. */
+        /* Without the setter or r_zfar only frames with no environment keep their previous far clip. */
         if(set&&g_zfar)g_set=(cvar_set_fn)set->addr;
         else backend_log("RENDER: r_zfar setter unavailable; frames without an environment keep their previous far clip");
         {uintptr_t callee;

@@ -1,8 +1,7 @@
-/* Guarded code patches with restore handles, plus wrappers for hook.c detours.
- * Every write runs with the process's other threads suspended and none of them
- * executing inside, or about to return into, the bytes being changed, so no
- * thread can run a half-written instruction. Expected bytes are checked before
- * writing; failed writes roll back; a failed rollback keeps its handle. */
+/* Guarded code patches with restore handles, plus wrappers for hook.c detours. Every write runs with the other
+ * threads suspended and outside the changed bytes, after the expected bytes check; a failed write rolls back, and a
+ * failed rollback keeps its handle. */
+#include "safe_read.h"
 #include <windows.h>
 #include <tlhelp32.h>
 #include <stdint.h>
@@ -28,9 +27,7 @@ const char *sh_patch_status_str(sh_patch_status s)
     }
 }
 
-/* Guarded memory access. */
-
-/* Return 1 if both ranges were readable, with their equality in match. */
+/* Return 1 if both ranges are readable, with their equality in match. */
 static int safe_memcmp(const uint8_t *a, const uint8_t *b, size_t n, int *match)
 {
     __try {
@@ -44,16 +41,6 @@ static int safe_memcmp(const uint8_t *a, const uint8_t *b, size_t n, int *match)
 }
 
 /* Return 0 on a memory fault; a partial copy may already have occurred. */
-static int safe_memcpy(uint8_t *dst, const uint8_t *src, size_t n)
-{
-    __try {
-        for (size_t i = 0; i < n; i++) dst[i] = src[i];
-        return 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
 #ifdef SH_PATCH_TESTING
 static uint64_t g_fail_protect, g_fail_write;
 static unsigned g_protect_calls, g_write_calls;
@@ -82,25 +69,18 @@ static int patch_write(uint8_t *target, const uint8_t *bytes, size_t size)
     if (g_write_observer) g_write_observer(target);
     unsigned call = g_write_calls++;
     if (call < 64 && (g_fail_write & (UINT64_C(1) << call))) {
-        safe_memcpy(target, bytes, g_write_prefix < size ? g_write_prefix : size);
+        sh_safe_read(bytes, target, g_write_prefix < size ? g_write_prefix : size);
         return 0;
     }
 #endif
-    return safe_memcpy(target, bytes, size);
+    return sh_safe_read(bytes, target, size);
 }
 
-/* Quiescing the process.
- *
- * Between quiesce() and resume_all() this thread must not allocate, log or
- * take a lock another thread could hold: every other thread is suspended. Only
- * VirtualProtect, plain copies and FlushInstructionCache run in that window.
- * A thread is inside when its RIP lies strictly within (start, start+len) --
- * RIP == start is an instruction boundary and runs the new bytes -- or when one
- * of its top stack slots is a return address strictly inside the window (a
- * thread in the callee of a call the window covers, such as a stack probe).
- * Then every thread is resumed and the attempt repeated a moment later. A
- * thread created after the thread list is taken is not covered; creating and
- * starting one takes far longer than a patch window. */
+/* Quiescing the process: between quiesce() and resume_all() this thread must not allocate, log or take a lock
+ * another thread could hold, since every other thread is suspended. A thread is inside the window when its RIP lies
+ * strictly within (start, start+len) (RIP == start runs the new bytes) or one of its top stack slots is a return
+ * address strictly inside it; every thread is then resumed and the attempt repeated. A thread created after the
+ * list is taken is not covered; starting one takes far longer than a patch window. */
 
 #define QUIESCE_MAX_THREADS  1024
 #define QUIESCE_ATTEMPTS     100
@@ -134,7 +114,7 @@ static int thread_in_window(HANDLE thread, uintptr_t start, size_t len)
     /* GetThreadContext also waits for the suspension to take effect. */
     if (!GetThreadContext(thread, &context)) return 1;
     if (inside((uintptr_t)context.Rip, start, len)) return 1;
-    if (!safe_memcpy((uint8_t *)slots, (const uint8_t *)(uintptr_t)context.Rsp, sizeof slots))
+    if (!sh_safe_read((const void *)(uintptr_t)context.Rsp, slots, sizeof slots))
         return 0;
     for (int i = 0; i < QUIESCE_STACK_SLOTS; i++)
         if (inside((uintptr_t)slots[i], start, len)) return 1;
@@ -230,8 +210,6 @@ static void hexdump(const uint8_t *buf, size_t n, char *out, size_t outcap)
     else if (!p && outcap) out[0] = '\0';
 }
 
-/* Byte patches and restoration. */
-
 sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *new_bytes,
                            size_t len, sh_patch_handle *out_handle)
 {
@@ -255,7 +233,7 @@ sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *n
         if (!match) {
             char exp_hex[200], got_hex[200];
             uint8_t got[B2_PATCH_MAX_BYTES];
-            int rd = safe_memcpy(got, t, len);
+            int rd = sh_safe_read(t, got, len);
             hexdump(expect, len, exp_hex, sizeof exp_hex);
             if (rd) hexdump(got, len, got_hex, sizeof got_hex);
             _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -267,7 +245,7 @@ sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *n
     }
 
     /* Read the original and the new bytes before any thread is suspended. */
-    if (!safe_memcpy(out_handle->orig, t, len) || !safe_memcpy(bytes, new_bytes, len)) {
+    if (!sh_safe_read(t, out_handle->orig, len) || !sh_safe_read(new_bytes, bytes, len)) {
         backend_log("patch: target or replacement unreadable; nothing written");
         return B2_PATCH_FAIL_SEH;
     }
@@ -320,8 +298,6 @@ sh_patch_status code_unpatch(sh_patch_handle *handle)
     }
 }
 
-/* Signature-gated patch operations. */
-
 sh_patch_status code_patch_call_sig(const sig_result *r, const uint8_t expect[5],
                                     const uint8_t replacement[5], sh_patch_handle *handle)
 {
@@ -346,8 +322,6 @@ sh_patch_status code_patch_sig(const sig_result *r, const uint8_t *expect, const
     }
     return code_patch((void *)r->addr, expect, new_bytes, len, out_handle);
 }
-
-/* Inline detour wrappers. */
 
 int sh_uninstall_detour(void *tramp)
 {
@@ -375,8 +349,6 @@ void *sh_prepare_detour_sig(const sig_result *r, void *detour, size_t stolen)
     }
     return tramp;
 }
-
-/* Scratch-memory patch check. */
 
 /* This stub returns 0x11. Change its immediate to 0x22 and restore it, checking
  * calls as well as bytes. Handwritten code keeps the patch window deterministic. */

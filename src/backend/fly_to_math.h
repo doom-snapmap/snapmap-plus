@@ -1,7 +1,6 @@
-/* fly_to_math.h -- the arithmetic behind "fly to entity", kept free of engine
- * reads so tests can drive it: an entity's world bounds centre, the eye that
- * frames it, and the pitch/yaw that aim at it. idAngles convention: degrees,
- * Z up, forward = (cos p cos y, cos p sin y, -sin p), pitch positive looks down. */
+/* The arithmetic behind "fly to entity", free of engine reads: an entity's world bounds centre, the eye that frames
+ * it, and the pitch/yaw that aim at it. idAngles convention: degrees, Z up, forward = (cos p cos y, cos p sin y,
+ * -sin p), pitch positive looks down. */
 #ifndef SH_FLY_TO_MATH_H
 #define SH_FLY_TO_MATH_H
 
@@ -18,9 +17,8 @@ typedef struct sh_fly_vec3 { float x, y, z; } sh_fly_vec3;
 
 static sh_fly_vec3 sh_fly_v3(float x, float y, float z) { sh_fly_vec3 v; v.x = x; v.y = y; v.z = z; return v; }
 
-/* The entity's bounds centre in its module frame: origin plus the local
- * centre carried through the three axis rows, exactly as the engine's own
- * world-point helper does. */
+/* The entity's bounds centre in its module frame: origin plus the local centre carried through the three axis rows,
+ * as the engine's world-point helper does. */
 static sh_fly_vec3 sh_fly_local_centre(const float origin[3], const float axis[9],
                                        const float bmin[3], const float bmax[3])
 {
@@ -41,8 +39,8 @@ static float sh_fly_radius(const float bmin[3], const float bmax[3])
     return 0.5f * sqrtf(dx * dx + dy * dy + dz * dz);
 }
 
-/* A module frame: one of eight orientation codes (module_orientation.h) then
- * a translation. */
+/* Maps a point from a module frame to world: one of eight orientation codes (module_orientation.h), then a
+ * translation. */
 static sh_fly_vec3 sh_fly_module_to_world(sh_fly_vec3 p, int rotation, const float translation[3])
 {
     float rx, ry;

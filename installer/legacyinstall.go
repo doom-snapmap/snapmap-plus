@@ -8,10 +8,9 @@ import (
 	"path/filepath"
 )
 
-// The 2018 build is installed by the final 2018 release's own snapmap-plus.exe, exactly as that
-// release would install itself: its install also converts the packages in overrides\ and keeps the
-// my-overrides starter package, steps the current installer does not have. The downloaded copy is
-// renamed so its own stable copy never replaces the current installer's in %LOCALAPPDATA%.
+// The 2018 build is installed by the final 2018 release's own snapmap-plus.exe, which also converts
+// overrides\ packages and keeps the my-overrides starter package. The downloaded copy runs under its
+// own name so its stable copy never replaces the current installer's in %LOCALAPPDATA%.
 
 // legacyExeName is the name the legacy installer runs under (and copies itself to in app data).
 const legacyExeName = "snapmap-plus-" + legacyReleaseTag + ".exe"
@@ -61,12 +60,11 @@ func installLegacyRelease(f flags, doom string) error {
 	if f.token != "" {
 		args = append(args, "--token", f.token)
 	}
-	// That installer rewrites install.json in its own format and keeps backups in DOOM, so the
-	// installer's own state is carried across its run and the DOOM folder is brought to the 2018
-	// pair's contract before and after it.
+	// That installer rewrites install.json in its own format and keeps backups in DOOM, so this
+	// installer's state is carried across its run and the DOOM folder is tidied before and after it.
 	dir := appDataDir()
 	saved, _ := loadStateAt(dir)
-	tidyRetiredFolders()
+	removeLeftovers(doom, dir, "")
 	reportStartupTidy()
 	tidy2018(doom, "Cleaning the DOOM folder")
 	ui.Section("Installing files")
@@ -93,8 +91,7 @@ func installLegacyRelease(f flags, doom string) error {
 		})
 	}
 	ui.Blank()
-	startupTidy = append(startupTidy, retireBookkeeping(dir, "")...)
-	tidyRetiredFolders()
+	removeLeftovers(doom, dir, "")
 	reportStartupTidy()
 	tidy2018(doom, "Cleaning up after the "+legacyReleaseTag+" installer")
 	if runErr != nil {

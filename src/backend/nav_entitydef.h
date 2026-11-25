@@ -1,15 +1,6 @@
-/* nav_entitydef.h -- the collision size a Blocking Box inherits from its
- * entityDef, for reads that have only map text.
- *
- * Native serialization omits every member equal to the declaration's value,
- * so a box the author never resized carries no clipModelInfo.size at all. The
- * editor snapshot resolves that through the live entity; the map text read at
- * load and after Save has no entity, and asks here instead.
- *
- * Shared by the custom-navigation reads (nav_bake) and any other map-text
- * consumer that needs the same answer. No engine calls and no I/O: navigation
- * reads only the shipped snapmaps/volume/blocking, whose size is built in.
- */
+/* nav_entitydef.h -- the collision size a Blocking Box inherits from its entityDef, for map-text reads. Native
+ * serialization omits members equal to the declaration's value, so an unresized box has no clipModelInfo.size; no
+ * engine calls, no I/O. */
 #ifndef SNAPMAP_PLUS_NAV_ENTITYDEF_H
 #define SNAPMAP_PLUS_NAV_ENTITYDEF_H
 

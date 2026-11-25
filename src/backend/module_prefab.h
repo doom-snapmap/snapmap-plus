@@ -1,18 +1,10 @@
-/* module_prefab.h -- Blueprint module prefabs: save the selected modules with
- * every entity inside them, place them in another map's Blueprint mode.
+/* module_prefab.h -- Blueprint module prefabs: save the selected modules with their entities, place them in
+ * another map's Blueprint mode.
  *
- * Save serializes the open map (EditorMapToJson) on the game thread and cuts
- * the selected modules out of it in product code (module_prefab_map.c).
- * Place merges the file into a fresh serialization of the open map, builds an
- * idSnapMap and an idSnapMapEdit from the result, and installs it through the
- * engine's own Redo step: the undo list is pointed at a two-entry stand-in for
- * one call, so the native assignment, selection re-init and editor refresh all
- * run exactly as they do on Ctrl+Y, and the real undo history is restored
- * untouched. The new modules are then selected and the native Move grab is
- * requested; once Edit has entered, its duplicate flag is set so Space commits
- * "Duplicate Modules" (one undo step) and Esc deletes the placed group, as
- * after a native Duplicate. The editor budget is recomputed after the install;
- * a placement over budget is taken back by installing the map as it was. */
+ * Place merges the file into a fresh serialization of the open map and installs the result through the
+ * engine's own Redo step (the undo list points at a two-entry stand-in for one call), then starts the native
+ * Move grab with the duplicate flag set so Space commits "Duplicate Modules" and Esc deletes the group.
+ * A placement over the editor budget is taken back by installing the map as it was. */
 #ifndef SH_MODULE_PREFAB_H
 #define SH_MODULE_PREFAB_H
 

@@ -1,11 +1,8 @@
-/* Native idFile / idFileSystem slots against the supported executables.
- * The backend calls native streams through SH_IDFILE_SLOT_* (overrides.c).
- * This test checks them against the engine's own code on each image:
- *   - idFileSystemLocal (found through RTTI) slot +0xF8 is ReadFile; it opens
- *     through SH_PROVIDER_OPEN_SLOT and calls the returned stream's GetLength
- *     and Read at SH_IDFILE_SLOT_LENGTH and SH_IDFILE_SLOT_READ;
- *   - SnapMapReadSizeLimit (whose length checks map_payload.c patches) calls
- *     GetFileLength +0x180 and ReadFile +0xF8.
+/* Native idFile / idFileSystem slots against the supported executables: the backend calls native streams through
+ * SH_IDFILE_SLOT_* (overrides.c), and this test checks them against the engine's own code on each image.
+ *   - idFileSystemLocal (found through RTTI) slot +0xF8 is ReadFile; it opens through SH_PROVIDER_OPEN_SLOT and calls
+ *     the returned stream's GetLength and Read at SH_IDFILE_SLOT_LENGTH and SH_IDFILE_SLOT_READ;
+ *   - SnapMapReadSizeLimit (whose length checks map_payload.c patches) calls GetFileLength +0x180 and ReadFile +0xF8.
  * Run via run-tests.ps1 with -Doom / -DoomAlt. */
 #include <windows.h>
 #include <stdint.h>

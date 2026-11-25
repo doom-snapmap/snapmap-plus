@@ -57,7 +57,7 @@ func selfInstall(force bool) error {
 		return nil
 	}
 	noteCopyVersion(target, version)
-	if existed != nil { // first time -> let the user know where it went
+	if existed != nil { // first copy: tell the user where it went
 		ui.OK("snapmap-plus is now installed at %s -- run it from there in future, or add that folder to your PATH.", target)
 	}
 	return nil

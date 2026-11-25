@@ -3,11 +3,8 @@
 #define SNAPMAP_PLUS_NAV_GEOMETRY_H
 #include "aas_augment.h"
 
-/* Boxes are one face plus its extrusion. Consider all upward faces and apply
- * agent clearance once across support unions and step-height contacts.
- * Returns -1 for invalid geometry or exhausted capacity; discard the entire
- * candidate bake.
- */
+/* Boxes are one face plus its extrusion; all upward faces are considered and agent clearance applies once across
+ * support unions and step-height contacts. Returns -1 for invalid geometry or exhausted capacity (discard the bake). */
 int sh_nav_geometry_build(const sh_aug_platform *boxes, int count,
     double radius, double height, double floor_cos, double step, sh_aug_platform *out,
     int *source, int *pieces, unsigned char *buried, int capacity);
@@ -29,10 +26,8 @@ typedef struct sh_nav_geometry_stats {
     unsigned char *source_dropped;  /* optional, one per box: 1 when it lost a face */
 } sh_nav_geometry_stats;
 
-/* As sh_nav_geometry_build_supported, but degrading: a face whose pieces, clip
- * polygons or edge strips do not fit is left out whole and counted, and the
- * rest is built. A face is never emitted partly cut. The boxes behind a
- * dropped face still subtract from every other face. Returns -1 only for
+/* As sh_nav_geometry_build_supported, but a face whose pieces, clip polygons or edge strips do not fit is dropped
+ * whole and counted, never emitted partly cut; its boxes still subtract from other faces. Returns -1 only for
  * invalid input. */
 int sh_nav_geometry_build_budget(const sh_aug_platform *boxes, int count,
     const sh_aug_platform *support, int support_count,
@@ -40,19 +35,11 @@ int sh_nav_geometry_build_budget(const sh_aug_platform *boxes, int count,
     int *source, int *pieces, unsigned char *buried, int capacity,
     sh_nav_geometry_stats *stats);
 
-/* Cut walkable support polygons -- a module's own floor areas -- around the
- * marked solids standing on them or hanging lower over them than the agent is
- * tall, by exactly the rule a box face is cut around the solids standing in
- * it: the occupied standing space of each solid, grown by the agent's
- * clearance, is subtracted and the remainder merged into convex pieces.
- * A solid whose top is within step height of the support, or whose underside
- * is at least the agent's height above it, leaves the support whole.
- * Walls that only block (obstacle_only) are not cut out.
- *
- * Pieces of support[i] go to out[] with owner[k] = i; cut[i] is 1 when support
- * i lost ground, 0 when it is untouched (and then it emits nothing), 2 when
- * its pieces would not fit `per_support` and it was left whole, and 3 when the
- * solids cover all of it (nothing standable is left; it emits nothing).
+/* Cut walkable support polygons (a module's floor areas) around marked solids standing on them or hanging lower than
+ * the agent is tall, by the same rule as a box face: each solid's occupied standing space is subtracted and the rest
+ * merged into convex pieces. A solid whose top is within step height, or whose underside is an agent height up,
+ * leaves the support whole. Pieces go to out[] with owner[k] = i; cut[i] is 1 when support i loses ground, 0
+ * untouched (emits nothing), 2 left whole because its pieces exceed `per_support`, 3 fully covered (emits nothing).
  * Returns the piece count, or -1 for invalid input. */
 int sh_nav_geometry_cut_support(const sh_aug_platform *boxes, int count,
     const sh_aug_platform *support, int support_count,

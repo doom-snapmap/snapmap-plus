@@ -1,9 +1,6 @@
-/* Repair invalid event-link lists and missing interactable subsystems before
- * map-load/spawn code uses them. Healthy paths remain unchanged; repairs never
- * free engine memory. A repair can discard wiring or an interactable's tags.
- * Keep the original calls outside __try: catching their C++ exceptions would
- * swallow idException and prevent the engine's Frame catch from recovering.
- * Work runs at load/spawn time, with bounded logging and guarded memory access. */
+/* Repair invalid event-link lists and missing interactable subsystems before map-load/spawn code uses them;
+ * repairs never free engine memory but can discard wiring or tags. The original calls stay outside __try,
+ * since catching their C++ exceptions would swallow idException and defeat the engine's Frame catch. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -51,9 +48,7 @@ static int mem_range_writable(const void *addr, size_t nbytes)
     return 1;
 }
 
-/* Verify the complete stolen prologue before detouring a resolved target.
- * Mismatches, including existing hooks, must refuse installation. Recheck whole
- * instruction boundaries and position independence when updating these bytes. */
+/* The expected stolen prologues; a mismatch (including an existing hook) refuses installation. */
 static const uint8_t k_evlink_prologue[EVLINK_STOLEN] = {
     0x40, 0x57,                                      /* PUSH RDI                        */
     0x48, 0x83, 0xEC, 0x30,                          /* SUB  RSP,0x30                   */
@@ -79,8 +74,7 @@ static int prologue_matches(const uint8_t *target, const uint8_t *expect, size_t
     return 1;
 }
 
-/* The two installs' stolen-prologue checks, public so the build-image test (fault_shield_sites_test) runs them on each
- * executable's own functions. 1 when the bytes at `target` are the expected ones. */
+/* The two installs' stolen-prologue checks; 1 when the bytes at `target` are the expected ones. */
 int sh_evlink_prologue_ok(const uint8_t *target)
 {
     return target != NULL && prologue_matches(target, k_evlink_prologue, EVLINK_STOLEN);
@@ -110,11 +104,9 @@ static void guard_log(LONG counter, const char *msg, uintptr_t rva, uintptr_t ad
     }
 }
 
-/* Event-link guard: validate the list header and its entire capacity span.
- * Drop an unreadable handle so the engine reconstructs it, or reset a damaged
- * header to {NULL,0,0}. Preserve granularity and never free the old buffer.
- * Repairs lose that list's wiring. Page checks cannot detect freed storage that
- * remains committed or has been recycled; those defects require a lifetime fix. */
+/* Event-link guard: validate the list header and its capacity span, dropping an unreadable handle or
+ * resetting a damaged header to {NULL,0,0} without freeing the old buffer. Page checks cannot detect
+ * freed storage that stays committed or is recycled. */
 
 typedef void (*evlink_fn)(void *a, void *b);
 static evlink_fn     g_orig_evlink   = NULL;
@@ -203,8 +195,7 @@ static void sh_evlink_detour(void *a, void *b)
     g_orig_evlink(a, b);        /* OUTSIDE every __try -- must not swallow the engine's C++ throws */
 }
 
-/* Take the bootstrap's resolution, with pinned-build fallback. Callers also
- * verify the stolen prologue because an identified function may already be hooked. */
+/* The bootstrap's resolved address for a signature name, or NULL; callers also verify the stolen prologue. */
 static void *guard_target(const sig_result *results, size_t count, const char *sig_name)
 {
     return results ? (void *)sig_addr_by_name(results, count, sig_name) : NULL;
@@ -261,11 +252,9 @@ int sh_evwire_guard_install(const uint8_t *module_base, const sig_result *result
     return 1;
 }
 
-/* Interactable guard: skip tag binding if its subsystem is missing or unreadable.
- * The loop's apparent null-chain branch still dereferences null in its callee;
- * only the tag-count gate avoids both unchecked subsystem reads.
- * Leave the count zero after Spawn: restoring it would advertise tags that the
- * engine never populated. The rest of Spawn runs, but the object loses its tags. */
+/* Interactable guard: skip tag binding if its subsystem is missing or unreadable, by zeroing the tag
+ * count (the loop's null-chain branch still faults in its callee). The count stays zero after Spawn,
+ * so the object loses its tags. */
 
 typedef void (*ia_spawn_fn)(void *self);
 static ia_spawn_fn   g_orig_ia_spawn = NULL;

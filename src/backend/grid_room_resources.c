@@ -1,4 +1,4 @@
-/* Transform admitted installed geometry without embedding game asset bytes. */
+/* Transforms admitted installed geometry; no game asset bytes are embedded. */
 #include "grid_room.h"
 #include <math.h>
 #include <stdint.h>
@@ -104,8 +104,8 @@ int sh_grid_bmodel(const sh_grid_warp *w, const unsigned char *s, size_t n, unsi
         for (j = 0; j < indices; ++j) if (be16(s+at+j*2) >= vertices) return 0;
         at += (size_t)indices*2;
         if (!block(n,at,1,32) || !bounds(w,s+at,d+at) || be32(s+at+28) != magic) return 0;
-        /* Recompute declared bounds from transformed vertices: a piecewise
-         * mapping may preserve empty margins, but must never exclude a vertex. */
+        /* Declared bounds are recomputed from the transformed vertices: a piecewise mapping may keep empty margins but
+         * never excludes a vertex. */
         if (vertices) {
             unsigned a;
             for (a = 0; a < 3; ++a) {
@@ -158,8 +158,8 @@ static int plane(const sh_grid_warp *w, const unsigned char *s, unsigned char *d
         float scale, shift;
         if (hi < lo) return 0;
         sh_grid_affine(w,a,(lo+hi)*.5f,&scale,&shift);
-        /* An oblique brush spanning a knot requires splitting its planes.
-         * Refuse that topology instead of silently producing bad collision. */
+        /* An oblique brush spanning a knot would need its planes split; that topology is refused rather than producing
+         * bad collision. */
         if (fabsf(normal[a]) > .00001f &&
             (fabsf(sh_grid_coordinate(w,a,lo)-(scale*lo+shift)) > .01f ||
              fabsf(sh_grid_coordinate(w,a,hi)-(scale*hi+shift)) > .01f)) return 0;
@@ -179,8 +179,7 @@ int sh_grid_bcm(const sh_grid_warp *w, const unsigned char *s, size_t n, unsigne
     uint32_t nodes, areas, i, j, t;
     if (!w || !s || !d || n < 69 || n > 64u*1024u*1024u || !disjoint(s,d,n) || memcmp(s,"BCM8",4) || s[56]) return 0;
     nodes = be32(s+57);
-    /* Installed Grid Room collisions have no outer BSP. Its node layout has
-     * not been established; it must not be inferred from the area's tree. */
+    /* Installed Grid Room collisions have no outer BSP, and its node layout is not inferred from the area's tree. */
     if (nodes) return 0;
     if (!block(n,at,nodes,16)) return 0;
     memcpy(d,s,n);

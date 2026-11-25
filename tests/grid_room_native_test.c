@@ -162,8 +162,8 @@ static void layout_checks(void)
     links[1]=2;links[2]=1;
     memset(moves,0,sizeof moves);assert(!plan_connected(local_map,0,wrapper,moves,3,links,6,(const float(*)[6])box,&reason));
     assert(strstr(reason,"loop"));
-    /* A huge room near the south world edge used to become invalid while
-     * retaining reciprocal doors, then crash native render construction. */
+    /* A huge room near the south world edge stays valid with its reciprocal doors, so native render
+     * construction does not crash. */
     links[1]=links[2]=-1;
     {sh_grid_size before,requested={SH_GRID_MODERN,{16384,16384,16384}};unsigned prior_loads=loads;
         sh_grid_default(SH_GRID_MODERN,&before);
@@ -202,9 +202,8 @@ int sh_grid_asset_open(const char *name,sh_grid_asset_read_fn read,
     sh_grid_asset_release_fn release,void *context,unsigned char **out,size_t *len)
 {
     (void)read;(void)release;(void)context;
-    /* As the real one: only Grid Room names are claimed (13954591 live: a
-     * bundle module's preflight through here was refused, validator 4), and a
-     * stand-in's derived names, which the real one answers as the room's. */
+    /* As the real one: only Grid Room names are claimed (a bundle module's preflight through here is refused),
+     * plus a stand-in's derived names, which the real one answers as the room's. */
     if(!strstr(name,"smpgrid/v1/")&&!strstr(name,"mods/t.arena/hall/"))return 0;
     ++preflights;
     *out=malloc(1);assert(*out);**out=0;*len=1;return 1;
@@ -311,8 +310,7 @@ static void edit_rule_checks(void)
     /* Tables that disagree (a deletion mid-frame) are refused, not guessed. */
     *(int*)(map+0x7e0)=3;assert(!fit(map,&room,&r,&reason)&&strstr(reason,"tables disagree"));
     *(int*)(map+0x7e0)=2;
-    /* A room that already crosses the boundary (a lowered cvar or an older
-     * map) shrinks on the requested axis only; its other axes are held. */
+    /* A room that already crosses the boundary (a lowered cvar) shrinks on the requested axis only; its other axes are held. */
     *(float*)(records[0]+0x10)=-13000; /* Y spans -16720..-6720 */
     r=room;r.xyz[2]=4000;assert(fit(map,&room,&r,&reason)&&r.xyz[1]==10000&&r.xyz[2]==4000);
     assert(strstr(g_note,"already crosses the map boundary at y=-16720"));
@@ -366,7 +364,7 @@ static void area_rule_checks(void)
     environment_limit=16000;
 }
 /* With Play's world-area cell size following the map (the redirect is live),
- * resizes are no longer limited by the render area count; the log names the
+ * resizes are not limited by the render area count; the log names the
  * cell size Play will use. */
 static void adaptive_area_checks(void)
 {
@@ -378,7 +376,7 @@ static void adaptive_area_checks(void)
     *(void**)records[0]=sh_grid_native_wrapper(&room);
     *(void**)(map+0x750)=records;*(int*)(map+0x758)=1;*(void**)(map+0x7d8)=keys1;*(int*)(map+0x7e0)=2;
     *(void**)(map+0x7c0)=links1;*(int*)(map+0x7c8)=2;
-    /* The fallback limited these to 32768; now they apply in full. */
+    /* These apply in full, not capped at 32768. */
     r=room;r.xyz[1]=40000;assert(fit(map,&room,&r,&reason)&&r.xyz[1]==40000&&!strstr(g_note,"limited"));
     assert(strstr(g_note,"Play will use world-area cell size 1024: 2112 world areas and 2111 area nodes (512 would give 8320 and 8319"));
     r=room;r.xyz[0]=64062;r.xyz[1]=62846;r.xyz[2]=32671;
@@ -423,10 +421,8 @@ static void census_checks(void)
     assert(strstr(text," light_point_9448")&&strstr(text," speaker_0")&&strstr(text," (null)"));
     *(void**)(wrapper+0x88)=NULL;assert(!census(wrapper,text,sizeof text));
 }
-/* The Blueprint Add tool re-sorts the editor module palette in place, after
- * which native FindModule's lower_bound misses names that are present. Stock
- * and variant lookups must not depend on that order, and a lookup that does
- * fail must name its step. */
+/* The Blueprint Add tool re-sorts the editor module palette in place, so native FindModule's lower_bound
+ * misses present names; lookups must not depend on that order, and a failed one names its step. */
 static void *find_unsorted(void *palette,const char *name)
 {(void)name;return end_record(palette);}
 static void palette_order_checks(void)
@@ -473,7 +469,7 @@ static void bundle_module_checks(void)
     assert(!sh_grid_module_logical("maps/modules/palettes/mega_blessed/mods/t.arena/arena.decl",logical,sizeof logical));
     assert(!sh_grid_module_logical("maps/modules/mods/t.arena/arena.bmodel",logical,sizeof logical));
     assert(!sh_grid_module_logical("maps/game/mp/x.decl",logical,sizeof logical));
-    /* No serving index: the stock lookup answers, as before. */
+    /* No serving index: the stock lookup answers. */
     sh_grid_native_set_module_source(NULL);
     assert(find_variant(editor+0x206c0,ARENA)==end&&loads==before);
     sh_grid_native_set_module_source(fake_served);
@@ -499,8 +495,8 @@ static void bundle_module_checks(void)
     assert(*(int*)(heap_state+0xc4)==0&&constructors==destructors);
     sh_grid_native_set_module_source(NULL);
 }
-/* R-DS6: a mod module whose unit is absent (the content cache stands in for it) takes the Grid Room route under its
- * own name, though the serving index serves its decl: the room of its recorded size, its derived files the room's. */
+/* A mod module whose unit is absent (the content cache stands in for it) takes the Grid Room route under its
+ * own name though the serving index serves its decl: the room of its recorded size, its derived files the room's. */
 static int fake_standin(const char *logical,sh_grid_size *size)
 {
     if(_stricmp(logical,"mods/t.arena/hall"))return 0;
@@ -528,7 +524,7 @@ static void standin_module_checks(void)
         void *room=sh_grid_native_wrapper(&size);
         assert(room&&room!=*(void**)r&&loads==before+2);
     }
-    /* No longer a stand-in (its unit arrived): the bundle route answers, which refuses without collision served. */
+    /* Once its unit arrives it is not a stand-in: the bundle route answers, which refuses without collision served. */
     sh_grid_native_set_standins(NULL);
     assert(find_variant(editor+0x206c0,"maps/modules/mods/t.arena/hall.decl")==end);
     sh_grid_native_set_module_source(NULL);

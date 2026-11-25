@@ -55,7 +55,7 @@ function populate(world,axes,grabPoint,grabAxis){
   return {position:rowTimes(world.map((v,i)=>v-grabPoint[i]),t), axes:axes.map(a=>rowTimes(a,t))};
 }
 const c30=Math.cos(Math.PI/6), s30=Math.sin(Math.PI/6);
-const tilt=[[1,0,0],[0,c30,s30],[0,-s30,c30]];               /* 30 degrees about X, the R-004 ramp */
+const tilt=[[1,0,0],[0,c30,s30],[0,-s30,c30]];               /* 30 degrees about X, a ramp */
 const yaw90=[[0,1,0],[-1,0,0],[0,0,1]];
 const mirrored=[[-1,0,0],[0,0,1],[0,1,0]];                    /* det -1, a mirrored module copy */
 const identity=[[1,0,0],[0,1,0],[0,0,1]];
@@ -76,7 +76,7 @@ for (const anchor of [tilt, yaw90, mirrored]) {
     for (let r=0;r<3;r++) vecNear(shown.axes[r],e.axes[r],'preview axis '+r+' is the world axis');
   }
 }
-/* Without the frame (the old preview) the tilted anchor shows the whole group rotated. */
+/* Without the frame the tilted anchor shows the whole group rotated. */
 const oldView=populate(layout[1].world,identity,grabPoint,tilt);
 check(Math.abs(oldView.axes[2][2]-1)>.1,'an unframed tilted anchor visibly tilts the preview');
 vecNear(tx.grabFrame({grabAxis:{mat:[{x:0,y:0,z:0},{x:0,y:0,z:0},{x:0,y:0,z:0}]}})[0],[1,0,0],

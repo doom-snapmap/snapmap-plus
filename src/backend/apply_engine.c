@@ -1,8 +1,6 @@
-/* Entity reflection, decl commits, and prefab staging for the shared interface.
- * Deferred work runs through clone_bss_apply on the engine command drain.
- * apply_sync marshals known off-main callers and refuses missing transport.
- * Engine-owned strings and prefab
- * arrays need process-heap lifetime across Play and map teardown. */
+/* Entity reflection, decl commits, and prefab staging for the shared interface. Deferred work runs through
+ * clone_bss_apply on the engine command drain; apply_sync marshals off-main callers and refuses a missing transport.
+ * Engine-owned strings and prefab arrays need process-heap lifetime across Play and map teardown. */
 #include <windows.h>
 #include <stdint.h>
 #include <limits.h>
@@ -40,9 +38,8 @@
 #include "script/script_api_game.h"
 #include <math.h>
 
-/* Editor layout. */
 /* Editor and entity offsets shared with iface_engine; globals use signed code anchors. */
-/* Extraction-build editor RVA, retained for diagnostics. */
+/* Extraction-build editor RVA, kept for diagnostics. */
 #define EDITOR_SINGLETON_PINNED_RVA   SH_RVA(0x2F6AD18u, 0x2FB2C08u)
 #define ED_MAP_OBJ_OFF         0x204c8      /* editor+0x204c8 -> loaded-map object ptr (null off-editor) */
 #define ARR_ENT_ARRAY_OFF      0x6a0        /* arrObj+0x6a0 -> entity-ptr array (8-byte entries) */
@@ -50,27 +47,23 @@
 #define ENT_VALID_OFF          0x8          /* entity[id]+8 != 0 => valid; ALSO the clone base (ent+8) */
 #define ENT_CLONE_DEFSUB_OFF   0x150        /* cloneBase+0x150 = ent+0x158 = the defsub EntityClone derefs */
 #define ENT_TRANSFORM_OFF      0x288        /* cloneBase+0x288: origin (3 floats) then the 3x3, module space */
-/* What navigation reads out of a volume, and nothing else. GridApplyEntityTree
- * writes the origin at +0x288, the 3x3 at +0x294 and clipModelInfo.size at
- * +0x2b8, which are contiguous. The rest of the block is scratch the engine
- * rewrites constantly, so hashing it would report a change every frame. */
+/* The only volume bytes navigation reads: origin +0x288, the 3x3 at +0x294 and clipModelInfo.size at +0x2b8
+ * (GridApplyEntityTree writes them contiguously). The rest of the block is scratch the engine rewrites every frame. */
 #define ENT_NAV_FIELDS_OFF     0x288
 #define ENT_NAV_FIELDS_LEN     0x3c
 #define DECL_NAV_PATH_OFF      0x1a0        /* decl+0x1a0: nonzero only on a Blocking Volume */
 #define MAP_MODULES_OFF        0x750        /* mapObj+0x750 -> module record array */
 #define MAP_ENT_INSTANCE_OFF   0x6f0        /* mapObj+0x6f0 -> int per entity: its module */
-/* mapObj+0x6d0 -> 64-bit words, one bit per entity id. The paste path sets the
- * bit for each entity it creates. Only ever folded into a fingerprint, so a
- * wrong guess at its meaning costs a read and cannot place a box wrongly. */
+/* mapObj+0x6d0 -> 64-bit words, one bit per entity id; the paste path sets the bit for each entity it creates.
+ * Only folded into a fingerprint, so a wrong guess at its meaning cannot place a box wrongly. */
 #define MAP_ENT_STATE_OFF      0x6d0
 #define MAP_MODULE_STRIDE      0x98         /* one record, mostly scratch */
 #define MOD_ORIGIN_OFF         0x0c         /* three floats */
 #define MOD_ORIENT_OFF         0x18
 #define MAP_MODULE_MAX         4096
 #define NAV_VOLUME_MAX         4096         /* volumes the navigation can know about */
-/* CommitEdit pushes the undo snapshot through *(editor+0x10). Undo and redo
- * restore into the map object rather than replacing it, so its pointer never
- * moves; the stack's cursor is what says one happened. */
+/* CommitEdit pushes the undo snapshot through *(editor+0x10). Undo and redo restore into the map object in place,
+ * so the stack's cursor is what says one happened. */
 #define ED_UNDO_STACK_OFF      0x10
 #define UNDO_COUNT_OFF         0x08
 #define UNDO_CURSOR_OFF        0x18
@@ -78,7 +71,7 @@
 
 #define DEFSUB_CLASS_OFF       0x60         /* defsub+0x60 -> classname idStr (commit dst) */
 #define DEFSUB_INHERIT_OFF     0x58         /* defsub+0x58 -> inherit idStr (commit dst) */
-#define DECL_BLOB_OFF          0x38         /* Decl source blob; rebuilt before raw inherit assignment, so it can lag one commit. */
+#define DECL_BLOB_OFF          0x38         /* Decl source blob; can lag one commit */
 #define ENT_COUNT_CAP         1000000u      /* sanity cap on the entity array count */
 
 /* Pending idSnapEntityPrefab. Re-derive from the native copy/populate callers. */
@@ -86,18 +79,15 @@
 
 /* Native paste requires a nonempty staged prefab and an empty selection for ID remapping. */
 #define PASTE_PREFAB_ENTCOUNT_OFF 0x209e0   /* = editor+0x209a8+0x38 -> staged prefab entity count (s32) */
-/* Teardown visits list capacity, not just count. Reset reused staging before deserialization. */
+/* Teardown visits list capacity, not just count. */
 #define PASTE_PREFAB_ENTCAP_OFF   0x209e4   /* = editor+0x209a8+0x3c -> that idList's capacity (s32) */
 #define PASTE_PREFAB_ENTPTR_OFF   0x209d8   /* = editor+0x209a8+0x30 -> that idList's buffer ptr */
 
-/* Stage under process-heap scope so prefab allocations survive map teardown.
- * The engine scope applies on its main thread; pair every successful push
- * with a pop, including exception paths. */
-/* PushHeap/PopHeap use the engine main-thread gate. Off-main scope pushes
- * have no effect and the allocator defaults to the process heap. */
+/* Prefabs are staged under process-heap scope so their allocations survive map teardown; every successful push
+ * is paired with a pop. PushHeap/PopHeap use the engine main-thread gate: off-main pushes have no effect and the
+ * allocator defaults to the process heap. */
 #define MEMLOCAL_SCOPE_DEPTH  0xc4      /* idMemLocal +0xC4 -> heap-scope stack depth (ids at +0x44) */
-/* Heap helpers use signatures first, then exact-build extraction RVAs.
- * Obtain idMemLocal through its getter, never a guessed instance address. */
+/* Heap helpers resolve by signature first, then by these build RVAs; idMemLocal comes from its getter. */
 #define MEMLOCAL_GET_RVA      SH_RVA(0x31D4A0u, 0x31D020u)   /* idMemLocal *(void) -- the magic-static accessor */
 #define MEMLOCAL_PUSHHEAP_RVA SH_RVA(0x3217A0u, 0x3213E0u)   /* void(this, int heapId) */
 #define MEMLOCAL_POPHEAP_RVA  SH_RVA(0x321770u, 0x3213B0u)   /* void(this) -- fatals on underflow */
@@ -106,27 +96,24 @@ typedef void *(*memlocal_get_fn)(void);
 typedef void (*memlocal_pushheap_fn)(void *self, int heapId);
 typedef void (*memlocal_popheap_fn)(void *self);
 #define PREFAB_BLOB_STRIDE        0x1b0     /* per-entity blob stride inside that buffer */
-/* Prefab blob teardown reads the idStr at +0x168; array stride is 0x1B0. */
+/* Prefab blob teardown reads the idStr at +0x168. */
 #define PREFAB_BLOB_NAMESTR_OFF   0x168
 #define ED_MODE_OBJ_OFF           0x22330   /* editor+0x22330 -> inline EntityMode object */
 #define ED_ENTITY_MODE_OFF        0x23618   /* editor+0x23618 -> active editor state id (2 == EntityMode) */
 #define ED_SEL_OBJ_OFF            0x204d0   /* editor+0x204d0 -> selection object ptr */
 #define SEL_COUNT_OFF             0x88      /* selObj+0x88 -> selected count (s32) */
 #define SEL_HOVERED_OFF           0x2c      /* selObj+0x2c -> hovered entity id (-1 == hovering nothing) */
-/* Selection +0x80 is an ID-list pointer, not inline IDs. Native paste uses
- * the selection as its old-to-new map and requires it to start empty. */
+/* Selection +0x80 is an ID-list pointer, not inline IDs; native paste fills it as the old-to-new map. */
 #define SEL_ID_ARRAY_PTR_OFF      0x80
 #define PREFAB_MAX_ENTITIES       100000    /* stale-slot sanity guard on the staged entity count */
 
-/* Queue native paste action 0x5C for a later engine frame. Calling the paste
- * worker and grab transition directly bypasses required dispatcher state.
- * Write the action ID before arming; the engine consumes and resets it.
- * The idle substate paste-available bit at +0x41 also gates dispatch. */
+/* Native paste is queued as action 0x5C for a later engine frame, because calling the paste worker directly
+ * bypasses dispatcher state. The action ID is written before arming, the engine resets it, and the idle
+ * substate's paste-available bit at +0x41 also gates dispatch. */
 #define MODE_IDLE_SUBSTATE_OFF    0x1B0      /* mode+0x1B0 -> the idle sub-state object (active when +0x1ac==1) */
 #define SUBSTATE_FLAGS1_OFF       0x41       /* substate+0x41 -> capability byte; bit 0x40 = paste available */
 #define SUBSTATE_PASTE_AVAIL_BIT  0x40
-/* A dirty capability cache consumes the idle tick before action dispatch.
- * Do not dirty it while injecting paste; update only the validated paste bit. */
+/* A dirty capability cache consumes the idle tick before action dispatch, so paste injection sets only the paste bit. */
 #define SUBSTATE_FLAGS2_OFF       0x42
 #define SUBSTATE_RECOMPUTE_BIT    0x01
 #define MODE_ACTION_ARM_OFF       0x420      /* mode+0x420 -> descriptor arming word (-1 == empty) */
@@ -134,45 +121,33 @@ typedef void (*memlocal_popheap_fn)(void *self);
 #define EDITOR_ACTION_PASTE       0x5C       /* the abstract action id the paste branch matches on */
 #define MODE_ACTION_ARMED         0          /* any value != -1 arms it; 0 is the menu's own first slot */
 
-
-/* Prefab construction needs at least 0x590 bytes; reserve 0x2000 for scratch.
- * Populate takes (prefab, editor, writable status), not two arguments, and
- * requires a usable selection. Destroy constructed scratch on every exit. */
-#define PREFAB_CTOR_RVA        SH_RVA(0x11AC8D0u, 0x11AB9E0u)   /* Extraction RVAs for signature-first prefab helpers. */
+/* Prefab construction needs at least 0x590 bytes (0x2000 reserved). Populate takes (prefab, editor, writable
+ * status) and requires a usable selection; the constructed scratch is destroyed on every exit. */
+#define PREFAB_CTOR_RVA        SH_RVA(0x11AC8D0u, 0x11AB9E0u)   /* build RVAs behind the signature-first prefab helpers */
 #define PREFAB_POPULATE_RVA    SH_RVA(0x11ADB30u, 0x11ACD30u)
 #define PREFAB_DTOR_RVA        SH_RVA(0x117DC40u, 0x117CCC0u)
 #define PREFAB_TEMP_SIZE       0x2000      /* Headroom above the constructor/populate write range. */
 #define ENT_DESHARE_RVA        SH_RVA(0x118C2C0u, 0x118B420u)   /* Optional copy-on-write helper (ae_deshare_slot). */
 
-/* Reflection object layouts. */
 /* Scratch objects must fit engine constructor and parser writes. */
-#define LEXER_SIZE             0xC0         /* Lexer constructor initializes 0xB8 bytes; reserve 0xC0. */
+#define LEXER_SIZE             0xC0         /* the constructor initializes 0xB8 bytes */
 #define LEXER_IDSTR0_OFF       0x30         /* idLexer embedded idStr #1 (ctor FUN_1419fd040 @ self+0x30) */
 #define LEXER_IDSTR1_OFF       0x88         /* idLexer embedded idStr #2 (ctor FUN_1419fd040 @ self+0x88) */
 #define PARSE_NODE_SIZE        0x28         /* parse-node alloc (object 0x18; frame slot spacing 0x28) */
-#define TEMP_DEF_SIZE          0x1B0        /* Constructor writes through +0x1AE. */
+#define TEMP_DEF_SIZE          0x1B0        /* the constructor writes through +0x1AE */
 #define IDSTR_SIZE             0x30         /* sizeof(idStr) -- the SSO size */
-#define IDSTR_LEN_OFF          0x8          /* idStr: int len @ +0x8 */
-#define IDSTR_DATA_OFF         0x10         /* Always a pointer: either the inline buffer at +0x1C or heap storage. */
-#define IDSTR_FLAGS_OFF        0x18         /* Capacity mask 0x3FFFFFFF; bit 31 dynamic, bit 30 heap-owned. */
-#define IDSTR_SSO_OFF          0x1c         /* idStr: inline SSO buffer @ +0x1C -- data==self+0x1C means self-owned */
-#define TDEF_INHERIT_OFF       0x58         /* Normalized inherit string pointer. */
-#define TDEF_CLASS_OFF         0x60         /* Normalized class string pointer. */
+#define IDSTR_LEN_OFF          0x8          /* idStr: int len */
+#define IDSTR_DATA_OFF         0x10         /* always a pointer: the inline buffer at +0x1C or heap storage */
+#define IDSTR_FLAGS_OFF        0x18         /* capacity mask 0x3FFFFFFF; bit 31 dynamic, bit 30 heap-owned */
+#define IDSTR_SSO_OFF          0x1c         /* inline SSO buffer; data == self+0x1C means self-owned */
+#define TDEF_INHERIT_OFF       0x58         /* normalized inherit string pointer */
+#define TDEF_CLASS_OFF         0x60         /* normalized class string pointer */
 #define TDEF_SOURCE_OFF        0x140        /* temp-def normalized decl-source idStr data-ptr (tmp+0x140) */
-#define VSLOT_REFLECT_ACCESSOR 0x80         /* declMgr vtable +0x80 -> reflection mgr (the reference implementation + sh_typeinfo) */
+#define VSLOT_REFLECT_ACCESSOR 0x80         /* declMgr vtable +0x80 -> reflection mgr */
 #define SER_TREE_KIND          7            /* the out parse-tree is built with parse-node kind 7 */
 #define SER_TAG_KIND           7            /* the {tag} arg5 node is also kind 7 */
 
-/* Apply batches and diagnostics. */
 #define CLONE_BSS_CMD          "clone_bss_apply"
-
-/* Optional reflection serialization diagnostics. */
-
-/* Optional lexer/deserialization diagnostics. */
-
-/* Optional staging list and heap-scope diagnostics. */
-
-/* Optional decl commit and allocation diagnostics. */
 
 /* Engine call signatures. */
 typedef void  (*entity_clone_fn)(void *cloneBase, void *tmpDef, int one);
@@ -218,7 +193,7 @@ static idstr_ctor_fn       g_idstr_ctor  = NULL;
 static idstr_dtor_fn       g_idstr_dtor  = NULL;
 static idstr_assign_fn     g_idstr_assign= NULL;
 static decl_src_rebuild_fn g_decl_rebuild= NULL;
-static ent_deshare_fn      g_deshare     = NULL;   /* Optional COW helper; see ae_deshare_slot. */
+static ent_deshare_fn      g_deshare     = NULL;   /* optional COW helper; see ae_deshare_slot */
 static buffer_cmd_fn       g_buffer_cmd  = NULL;
 static add_command_fn      g_add_command = NULL;
 static prefab_ctor_fn      g_prefab_ctor     = NULL;
@@ -227,7 +202,7 @@ static prefab_dtor_fn      g_prefab_dtor     = NULL;
 /* Load-state transitions drive the staged-prefab lifetime check. */
 #define LOAD_STATE_RUNNING    3
 
-/* Unresolved thread identity refuses engine edits and maintenance. */
+/* An unresolved thread identity refuses engine edits and maintenance. */
 static const uint8_t       *g_load_state_at = NULL;
 static const uint8_t       *g_main_thread_at = NULL;
 static volatile LONG        g_last_load_state = -1;
@@ -235,10 +210,9 @@ static volatile LONG        g_last_load_state = -1;
  * native clipboard replacement cannot be distinguished by this check. */
 static volatile LONG        g_we_staged      = 0;
 static volatile LONG        g_we_staged_count = 0;
-/* Load / Place's paste as the Prefabs tab sees it (sh_apply_engine_place_watch).
- * The game thread writes each decision's reason and result, then bumps the
- * sequence. A queued paste is watched until EntityMode +0x1AC reads 4, the
- * grab (1 idle, 2 selection), and then until it leaves 4 (Space or Esc). */
+/* Load / Place's paste as the Prefabs tab sees it (sh_apply_engine_place_watch). The game thread writes each
+ * decision's reason and result, then bumps the sequence; a queued paste is watched until EntityMode +0x1AC reads 4
+ * (the grab; 1 idle, 2 selection) and then until it leaves 4. */
 #define AE_MODE_STATE_OFF     0x1ac
 #define AE_MODE_STATE_HELD    4
 #define AE_PASTE_HOLD_WAIT_MS 3000ULL
@@ -248,28 +222,23 @@ static const char *volatile  g_place_reason = "";  /* one of the g_place_why phr
 static const char          *g_place_why;          /* game thread: the staged-only cause */
 static volatile LONG        g_paste_watch;        /* 0 none, 1 queued, 2 held */
 static volatile ULONGLONG   g_paste_queued_at;
-/* A Load/Place armed the native paste. When the boxes it brings in arrive and
- * one carries the AI Navigation tick, ask for the same update the View menu
- * does, once, so the green preview and any refusal show without a menu trip.
- * A placement nobody drops expires instead of claiming a later arrival. */
+/* A Load/Place armed the native paste. When its boxes arrive and one carries the AI Navigation tick, the same update
+ * the View menu asks for is requested once; a placement nobody drops expires instead of claiming a later arrival. */
 #define NAV_PLACE_WINDOW_MS  120000ULL
 static volatile LONG       g_nav_place_pending;
 static volatile ULONGLONG  g_nav_place_tick;
-/* The placement's update is owed until a read measures every box. Boxes that
- * have only just been pasted may not be measurable on the tick they arrive,
- * and a partial read there would leave them out with nothing later to notice
- * (their live fields do not change when the engine resolves their size). */
+/* The placement's update is owed until a read measures every box: a just-pasted box may not be measurable on the
+ * tick it arrives, and its live fields do not change when the engine resolves its size. */
 static int                 g_nav_place_owed;
 static int                 g_nav_place_tries;
 static volatile LONG       g_installed   = 0;
 static volatile LONG       g_cmd_registered = 0;
 
-/* Pending command-drain work. */
 /* One pending batch, protected while ownership moves to the main-thread drain. */
 typedef struct apply_item_copy {
     int   kind;     /* 0 decl edit, 1 prefab stage, 2 stage and queue paste, 3 native target write. */
     int   id;
-    char *text;     /* Owned text copy. */
+    char *text;     /* owned text copy */
 } apply_item_copy;
 
 static CRITICAL_SECTION  g_pending_lock;
@@ -279,11 +248,10 @@ static int               g_pending_count = 0;
 static char              g_pending_op[32] = {0};
 static unsigned long long g_pending_serial;
 
-/* One blocking cross-thread request. Deep copies outlive the waiter when a
- * drain is already running; timeout handling transfers or releases ownership. */
+/* One blocking cross-thread request. Deep copies outlive the waiter when a drain is already running. */
 #define AE_SYNC_EMPTY       0   /* no request */
 #define AE_SYNC_PUBLISHED   1   /* posted, not yet picked up by the drain */
-#define AE_SYNC_RUNNING     2   /* the drain is executing it on the main thread right now */
+#define AE_SYNC_RUNNING     2   /* the drain is executing it on the main thread */
 #define AE_SYNC_DONE        3   /* finished; `applied` is valid until the waiter collects it */
 #define AE_SYNC_ABANDONED   4   /* the waiter gave up mid-run; the drain resets to EMPTY when done */
 typedef struct ae_sync_request {
@@ -295,9 +263,8 @@ typedef struct ae_sync_request {
 } ae_sync_request;
 static ae_sync_request g_sync_req;              /* guarded by g_pending_lock */
 static HANDLE          g_sync_ev = NULL;        /* manual-reset; created once at install */
-/* First wait: the drain normally comes on the very next frame, so this only expires when the main
- * thread is parked (load screen, modal error) -- in which case the request is withdrawn un-run.
- * Grace wait: the request was picked up and is executing; give a slow batch time to finish. */
+/* First wait: the drain normally comes the next frame, so this expires only when the main thread is parked
+ * (load screen, modal error) and the request is withdrawn un-run. Grace wait: a picked-up batch gets time to finish. */
 #ifndef AE_MARSHAL_WAIT_MS
 #define AE_MARSHAL_WAIT_MS   3000
 #define AE_MARSHAL_GRACE_MS 10000
@@ -308,7 +275,6 @@ static HANDLE          g_sync_ev = NULL;        /* manual-reset; created once at
 #define AE_MARSHAL_NOT_RUN       1   /* never drained; withdrawn -- the batch DEFINITELY did not run */
 #define AE_MARSHAL_LOST          2   /* picked up but no completion in time -- outcome unknown */
 
-/* Guarded engine reads. */
 static int ae_read_ptr(const void *src, void **out)
 {
     __try { *out = *(void *const *)src; return 1; }
@@ -342,8 +308,7 @@ static int ae_on_main_thread(void)
     return (mt == GetCurrentThreadId()) ? 1 : 0;
 }
 
-/* Return 1 only when the caller must pop the scope. */
-/* Helpers resolve once, using signatures before extraction-RVA fallbacks. */
+/* Heap helpers resolve once, by signature first and then by build RVA. */
 static memlocal_get_fn      g_memlocal_get   = NULL;
 static memlocal_pushheap_fn g_memlocal_push  = NULL;
 static memlocal_popheap_fn  g_memlocal_pop   = NULL;
@@ -372,7 +337,7 @@ static int ae_in_doom_module(const void *p)
     return (b >= g_doom_base) && (b < g_doom_base + g_doom_module_span);
 }
 
-/* Resolve the object through idMemLocal::Get, not an instance RVA. */
+/* The idMemLocal object comes from idMemLocal::Get, never an instance RVA. */
 static void *ae_memlocal(void)
 {
     if (!g_memlocal_get || !ae_in_doom_module((const void *)g_memlocal_get)) return NULL;
@@ -381,7 +346,8 @@ static void *ae_memlocal(void)
     return self;
 }
 
-/* why: 0 pushed, 1 no instance, 2 push fn unresolved, 3 push fn outside the DOOM module, 4 faulted */
+/* Pushes the process-heap scope; returns 1 when the caller must pop it. why: 0 pushed, 1 no instance, 2 push fn
+ * unresolved, 3 push fn outside the DOOM module, 4 faulted. */
 static int ae_push_heap_global_why(int *why)
 {
     *why = 1;
@@ -397,11 +363,6 @@ static int ae_push_heap_global_why(int *why)
 }
 
 static int ae_push_heap_global(void) { int why = 0; return ae_push_heap_global_why(&why); }
-
-
-/* Optional paste outcome snapshots, taken after entering manipulation state.
- * The recent-action marker attributes our queued paste; ordinary grabs can
- * also enter this state, so unmarked samples are only a diagnostic control. */
 
 /* LOAD-BEARING (pairs with ae_push_heap_global) -- must never be inside a diagnostic gate. */
 static void ae_pop_heap(void)
@@ -453,8 +414,7 @@ static void ae_main_call_poll(void)
     WakeAllConditionVariable(&g_mc_cv);
 }
 
-/* A withdrawn call never runs. A started one borrows the caller's ctx, so the
- * caller waits it out; the main thread never waits on the caller. */
+/* A withdrawn call never runs. A started one borrows the caller's ctx, so the caller waits it out. */
 static int slot_run_on_main(sh_iface *self, sh_main_call_fn fn, void *ctx, int timeout_ms, int *out_result)
 {
     (void)self;
@@ -496,8 +456,8 @@ void sh_apply_engine_get_run_on_main(sh_run_on_main_fn *run_on_main)
     if (run_on_main) *run_on_main = slot_run_on_main;
 }
 
-/* A valid process/persistent-heap allocation survives map teardown.
- * Unknown headers and map-heap allocations return false. */
+/* 1 for a valid process or persistent heap allocation, which survives map teardown; unknown headers and map-heap
+ * allocations return 0. */
 static int ae_block_survives_map(const void *p)
 {
     if (!p) return 0;
@@ -517,7 +477,7 @@ static int ae_block_survives_map(const void *p)
     return 1;                                   /* persist (bit3) or process heap -> survives */
 }
 
-/* Unknown or invalid allocation headers produce no heap classification. */
+/* The heap class of an allocation, or a "?(...)" text when its header is unknown or invalid. */
 static const char *ae_block_heap_name(const void *p)
 {
     if (!p) return "?(null)";
@@ -654,8 +614,8 @@ static int ae_commit_bound(void)
     return g_def_ctor && g_def_dtor && g_decl_rebuild && g_idstr_assign;
 }
 
-/* Clone ent + 8, serialize its defsub, then render JSON. Return bytes copied or zero. */
-/* The entity's JSON, whole, as owned text (sh_iface_text_free); NULL on failure. */
+/* Clones ent + 8, serializes its defsub and renders JSON: the whole text as owned text (sh_iface_text_free), or
+ * NULL on failure. */
 static char *ae_serialize_to_json(const char *typeName, void *cloneBase)
 {
     if (!ae_serialize_bound() || !cloneBase) {
@@ -720,9 +680,8 @@ static char *ae_serialize_to_json(const char *typeName, void *cloneBase)
     return written;
 }
 
-/* Deserialize through a source idStr, lexer, input tree, and tag node.
- * The deserialize call has six arguments. Release lexer strings with their
- * idStr destructors, never raw Mem_Free on possibly inline storage. */
+/* Deserializes through a source idStr, lexer, input tree, and tag node. Lexer strings are released with their
+ * idStr destructors, never raw Mem_Free, since the storage may be inline. */
 static int ae_deserialize_to_obj(const char *text, void *dstObj, const char *typeName)
 {
     if (!ae_deserialize_bound() || !text || !dstObj) {
@@ -814,11 +773,9 @@ static int ae_extract_field(const char *text, const char *field, char *buf, size
     return 0;
 }
 
-/* Undo snapshots share entity holders by the refcount at holder+0, so a
- * write to a shared holder also rewrites those snapshots. EntityDeshare takes
- * the array cell, replaces a shared holder with a private copy and returns
- * holder+8. Returns 1 when the cell now holds an unshared holder (or the
- * helper is unbound, which keeps the old in-place behaviour), 0 on failure. */
+/* Undo snapshots share entity holders by the refcount at holder+0, so a write to a shared holder also rewrites
+ * those snapshots. EntityDeshare replaces a shared holder in the array cell with a private copy and returns
+ * holder+8. Returns 1 when the cell holds an unshared holder (or the helper is unbound), 0 on failure. */
 static int ae_deshare_slot(void **cell)
 {
     void *ent = NULL, *se = NULL;
@@ -827,10 +784,8 @@ static int ae_deshare_slot(void **cell)
     if (!g_deshare) return 1;
     if (!ae_read_u32_safe((const uint8_t *)ent, &refs)) return 0;
     if (refs == 1) return 1;
-    /* The private copy (holder, record and its text) must outlive the map: on
-     * the main thread the allocator otherwise inherits map lifetime, the Play
-     * transition frees it, and the next Play build reads the freed record text
-     * (the second Play of a map with Timeline tiles faulted in EntityClone). */
+    /* The private copy (holder, record and text) must outlive the map: on the main thread the allocator otherwise
+     * inherits map lifetime, the Play transition frees it, and the next Play build reads freed text. */
     pushed = ae_push_heap_global();
     __try { se = g_deshare(cell); } __except (EXCEPTION_EXECUTE_HANDLER) { se = NULL; }
     if (pushed) ae_pop_heap();
@@ -848,8 +803,7 @@ int sh_apply_engine_deshare_bound(void)
     return g_deshare != NULL;
 }
 
-/* Deserialize text into a temporary entity, then commit source, class and
- * inherit to the live defsub. Returns 1 when committed. */
+/* Deserializes text into a temporary entity, then commits source, class and inherit to the live defsub. */
 static int ae_commit_entity_text(int id, void *defsub, const char *text)
 {
     uint8_t tmpDef[TEMP_DEF_SIZE];
@@ -864,15 +818,13 @@ static int ae_commit_entity_text(int id, void *defsub, const char *text)
             void *srcPtr = *(void * const *)(tmpDef + TDEF_SOURCE_OFF);
             void *clsPtr = *(void * const *)(tmpDef + TDEF_CLASS_OFF);
             void *inhPtr = *(void * const *)(tmpDef + TDEF_INHERIT_OFF);
-            /* Keep source rebuild and string assignments in process-heap scope.
- * The main-thread allocator otherwise inherits map lifetime. Balance the
- * push in __finally; off-main scope calls do not change heap selection. */
+            /* Source rebuild and string assignments run in process-heap scope, since the main-thread allocator
+             * otherwise inherits map lifetime; the push is balanced in __finally. */
             int commit_pushed = ae_push_heap_global();
             __try {
 
             g_decl_rebuild(defsub, (const char *)srcPtr, 1);
-            /* Do not blank class/inherit when deserialization supplied empty strings.
- * The source may already have been committed by this point. */
+            /* Empty class/inherit strings from deserialization never blank the live ones. */
             if (clsPtr && *(const char *)clsPtr) g_idstr_assign((uint8_t *)defsub + DEFSUB_CLASS_OFF, (const char *)clsPtr);
             if (inhPtr && *(const char *)inhPtr) g_idstr_assign((uint8_t *)defsub + DEFSUB_INHERIT_OFF, (const char *)inhPtr);
             } __finally {
@@ -889,16 +841,11 @@ static int ae_commit_entity_text(int id, void *defsub, const char *text)
     return applied;
 }
 
-/* The network-static property. The budget sum (VK 0x141201dc0, GL 0x141201190)
- * subtracts an entity's sedef limits.network when the holder byte +0x320
- * (entry +0x318) is set. The engine fills that byte only when it reads an entry
- * from its definition tree (VK 0x1411a3750): it clears it and, when the sedef's
- * networkStaticPath (sedef +0x108, path count +0x110) is not empty, reads the
- * bool at that path. Replacing the definition text in place does not reread
- * the entry, so the text and the counted state diverge until a reload unless
- * the apply writes the byte itself. The native Static toggle (VK 0x1412328b0)
- * writes the byte, recomputes the budget and, when turning Static off leaves the
- * limits-reached byte set, restores the byte and shows the limits toast. */
+/* The network-static property. The budget sum (VK 0x141201dc0, GL 0x141201190) subtracts an entity's sedef
+ * limits.network when holder byte +0x320 (entry +0x318) is set; the engine fills it only when it reads the entry
+ * from its definition tree (VK 0x1411a3750; sedef networkStaticPath +0x108, count +0x110). Replacing the text in
+ * place does not reread the entry, so the apply writes the byte itself, as the native Static toggle (VK 0x1412328b0)
+ * does, restoring it with the limits toast when turning Static off leaves the limits reached. */
 #define ENT_NET_STATIC_OFF        0x320   /* holder +0x320 = entry +0x318 */
 #define ENTRY_SEDEF_OFF           0x0     /* entry +0 -> idDeclSnapEditorEntity */
 #define SEDEF_NET_STATIC_PATH_NUM 0x110   /* sedef networkStaticPath (+0x108) path count */
@@ -960,9 +907,8 @@ static int ae_write_u8(uint8_t *at, unsigned value)
     __try { *at = (uint8_t)value; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* Recompute the editor budget now and report the limits-reached byte. The byte
- * is cleared first: with snapEdit_skipLimits the recompute writes nothing and
- * the engine's own reader reports 0, which the cleared byte then matches. */
+/* Recomputes the editor budget and reports the limits-reached byte. The byte is cleared first: with
+ * snapEdit_skipLimits the recompute writes nothing and the engine's reader reports 0. */
 static int ae_budget_reached(const uint8_t *ed)
 {
     unsigned reached = 0;
@@ -977,10 +923,9 @@ static int ae_budget_reached(const uint8_t *ed)
     return reached != 0;
 }
 
-/* Bring the byte in line with committed text that sets the property to want
- * (0 or 1). before is the byte read ahead of the commit. When guard is set and
- * the write turns Static off, recompute; over a limit, restore before and
- * report AE_STATIC_REFUSED, leaving the text to the caller. */
+/* Brings the byte in line with committed text that sets the property to `want`; `before` is the byte read ahead
+ * of the commit. With `guard`, turning Static off recomputes the budget and, over a limit, restores `before` and
+ * returns AE_STATIC_REFUSED. */
 static int ae_static_after_commit(uint8_t *ent, const uint8_t *ed, int want, unsigned before, int guard)
 {
     if (!ent || want < 0) return AE_STATIC_UNCHANGED;
@@ -1015,8 +960,7 @@ static int ae_apply_one(int id, const char *patched_text)
     void *defsub = NULL;
     if (!ae_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) return 0;
 
-    /* Preserve live class/inherit when omitted. Empty replacements can trigger
- * fatal engine declaration errors. */
+    /* Omitted class/inherit keep the live values: empty replacements can raise fatal engine declaration errors. */
     {
         char newcls[256], newinh[256];
         int hc = ae_extract_field(patched_text, "class",   newcls, sizeof newcls);
@@ -1058,9 +1002,8 @@ static int ae_apply_one(int id, const char *patched_text)
     }
     free(original);
 
-    /* Record thread identity and classify the rebuilt source allocation once.
-     * The rebuild may reuse an existing buffer. Off-main or unknown identity
-     * indicates a caller bypassed the verified main-thread dispatch contract. */
+    /* Logs once the thread and heap class of the rebuilt source; off-main or unknown identity means a caller
+     * bypassed the main-thread dispatch. */
     if (applied) {
         static volatile LONG s_commit_probe_done = 0;
         if (InterlockedExchange(&s_commit_probe_done, 1) == 0) {
@@ -1076,16 +1019,14 @@ static int ae_apply_one(int id, const char *patched_text)
         }
     }
 
-    /* Leave registration teardown to the entity owner. Removing an unregistered
- * per-entity decl through Remove_Locked can raise a fatal engine error. */
+    /* Registration teardown is left to the entity owner: removing an unregistered per-entity decl through
+     * Remove_Locked can raise a fatal engine error. */
     return applied;
 }
 
-/* Rebuild a definition record that no entity owns, such as a palette
- * prototype, from idSnapEntity JSON with the same primitives as ae_apply_one.
- * The class is assigned before DeclSourceRebuild as well as after it: the
- * rebuild writes a class line only when the record's class differs from the
- * inherited one, and copies of the record reparse that text. Main thread. */
+/* Rebuilds a definition record no entity owns (a palette prototype) from idSnapEntity JSON, on the main thread.
+ * The class is assigned before and after DeclSourceRebuild, which writes a class line only when it differs from
+ * the inherited one, and copies of the record reparse that text. */
 int sh_apply_engine_commit_record(void *record, const char *json)
 {
     if (!ae_deserialize_bound() || !ae_commit_bound() || !record || !json) return 0;
@@ -1119,9 +1060,8 @@ int sh_apply_engine_commit_record(void *record, const char *json)
     return applied;
 }
 
-/* Bare timeline wiring uses state.edit.targets, not a CSR connection edge. */
-
-/* Splice a target into serialized edit state without changing numeric formatting. */
+/* Splices a target into serialized edit state without changing numeric formatting; bare timeline wiring uses
+ * state.edit.targets, not a CSR connection edge. */
 static int ae_splice_targets(const char *src, const char *ref, char *out, int cap)
 {
     if (!src || !ref || !out || cap <= 0) return 0;
@@ -1129,7 +1069,7 @@ static int ae_splice_targets(const char *src, const char *ref, char *out, int ca
     if (!edit) return 0;
     const char *brace = strchr(edit, '{');
     if (!brace) return 0;
-    const char *targets = strstr(brace, "\"targets\"");   /* This splice expects the serialized entity shape and a single targets array. */
+    const char *targets = strstr(brace, "\"targets\"");   /* expects the serialized entity shape, one targets array */
     if (targets) {
 
         const char *tbrace = strchr(targets, '{');
@@ -1201,12 +1141,9 @@ static int ae_mkcmd_one(const char *prefab_text)
     const uint8_t *ed = ae_editor_session();
     if (!ed || !prefab_text) return 0;
     void *staging = (void *)(ed + PASTE_STAGING_OFF);
-    /* Reconstruct reused staging before deserializing: stale nested strings can
-     * fault during compare/assign. The constructor replaces fields without
-     * freeing them, so contents whose entity block is a live process or
-     * persistent allocation (a previous Load / Place's) are destroyed first;
-     * anything else is map-heap storage the next teardown releases, or state
-     * not safe to free. */
+    /* Reused staging is reconstructed before deserializing, since stale nested strings can fault. The constructor
+     * does not free fields, so contents in a live process or persistent allocation (a previous Load / Place's) are
+     * destroyed first; anything else is map-heap storage the next teardown releases. */
     {
         void *blobs = NULL;
         if (g_prefab_ctor && g_prefab_dtor && ae_read_ptr(ed + PASTE_PREFAB_ENTPTR_OFF, &blobs) && blobs &&
@@ -1216,8 +1153,7 @@ static int ae_mkcmd_one(const char *prefab_text)
             }
         }
     }
-    /* Allocate staged contents under process-heap scope so they survive Play.
-     * Always balance a successful push, including exception paths. */
+    /* Staged contents are allocated under process-heap scope so they survive Play; a successful push is always popped. */
     int pushWhy = 0;
     int pushed = ae_push_heap_global_why(&pushWhy);
     (void)pushWhy;
@@ -1242,12 +1178,9 @@ static int ae_mkcmd_one(const char *prefab_text)
     return ok;
 }
 
-/* Stage a prefab, then request native paste on a later engine frame.
- * Require idle/selected EntityMode, clear and verify selection for ID remapping,
- * and reject hovered entities. The engine later instantiates and enters grab;
- * the user positions the result and clicks to drop it.
- * Return 0 on stage failure, 1 for stage-only, or 2 when the action was armed.
- * Result 2 does not confirm the engine consumed the action or entered grab. */
+/* Stages a prefab, then requests native paste on a later engine frame. It needs idle or selected EntityMode, a
+ * selection that clears (for ID remapping) and no hovered entity. Returns 0 on stage failure, 1 for stage-only,
+ * or 2 when the action was armed; 2 does not confirm the engine consumed it. */
 #define AE_PASTE_FAILED  0
 #define AE_PASTE_STAGED  1
 #define AE_PASTE_ARMED   2
@@ -1257,8 +1190,7 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
     g_place_why = "the editor could not read the prefab file (re-save it or pick another)";
     if (!ae_mkcmd_one(prefab_text)) return AE_PASTE_FAILED;
 
-    /* Resolved paste worker/grab addresses are diagnostic only. Dispatch by action
- * so the engine performs the required state transitions itself. */
+    /* Paste is dispatched by action so the engine performs the required state transitions itself. */
     const uint8_t *ed = ae_editor_session();
     g_place_why = "no editor is open";
     if (!ed) { backend_log("APPLY place: no editor session -> staged only"); return AE_PASTE_STAGED; }
@@ -1276,8 +1208,7 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
         backend_log("APPLY place: native copy/paste is disabled or unavailable -> staged only");
         return AE_PASTE_STAGED;
     }
-    /* Staging +0x209E0/+0x209E4, the paste bit (+0x41, 0x40) and action 0x5C at
-     * mode +0x424 were confirmed live on build 13954591. */
+    /* Staging +0x209E0/+0x209E4, the paste bit (+0x41, 0x40) and action 0x5C at mode +0x424 are build 13954591's. */
 
     /* Native paste requires a nonempty, bounded staged entity list. */
     int ent_count = 0;
@@ -1290,9 +1221,8 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
         return AE_PASTE_STAGED;
     }
 
-    /* Check the mode before clearing selection, which can change it to idle.
- * Reject manipulation state so a second Load/Place cannot clear a held
- * prefab. This state updates sooner than the layer-based snapshot guard. */
+    /* The mode is checked before the selection is cleared, which can change it to idle; manipulation state is
+     * rejected so a second Load/Place cannot clear a held prefab. */
     int mode_state = 0;
     g_place_why = "something is already held in the 3D view";
     if (!ae_read_u32_safe(ed + ED_MODE_OBJ_OFF + AE_MODE_STATE_OFF, &mode_state) ||
@@ -1358,13 +1288,12 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
 
 
 
-/* Command-drain execution and result reporting. */
-/* The one result line for an apply, titled by the surface that asked for it. */
 static int ae_op_is(const char *op, const char *const *names)
 {
     for (; *names; names++) if (strcmp(op, *names) == 0) return 1;
     return 0;
 }
+/* The one result line for an apply, titled by the surface that asked for it. */
 static void ae_toast_result(const char *op, int applied, int total)
 {
     static const char *const quiet_ops[] = { "load-prefab", "tl-inherit-portable", "accl", "acctargets", "fly-to", NULL };
@@ -1519,10 +1448,9 @@ static int ae_ensure_command(void)
     return 1;
 }
 
-/* Takes ownership of copy on every outcome. DONE supplies out_applied.
- * Pending timeouts withdraw and free work; running timeouts leave ownership
- * with the drain. BufferCommandText itself has no cross-thread queue lock,
- * so publication can race other engine command-buffer appends. */
+/* Takes ownership of copy on every outcome; DONE supplies out_applied. A pending timeout withdraws and frees the
+ * work, a running one leaves ownership with the drain. BufferCommandText has no cross-thread queue lock, so
+ * publication can race other engine command-buffer appends. */
 static int ae_marshal_publish_and_wait(apply_item_copy *copy, int built, const char *op,
                                        int *out_applied)
 {
@@ -1572,8 +1500,7 @@ static int ae_marshal_publish_and_wait(apply_item_copy *copy, int built, const c
         backend_log("APPLY sync-marshal: engine never drained the request -> withdrawn, 0 applied");
         return AE_MARSHAL_NOT_RUN;
     }
-    /* Already running: allow a grace period, then report an unknown outcome.
- * A bounded item count does not bound engine call duration. */
+    /* Already running: allow a grace period, then report an unknown outcome. */
     LeaveCriticalSection(&g_pending_lock);
     wr = WaitForSingleObject(g_sync_ev, AE_MARSHAL_GRACE_MS);
     (void)wr;
@@ -1617,8 +1544,6 @@ static int ae_apply_marshal(const sh_apply_item *items, int count, const char *o
     return ae_marshal_publish_and_wait(copy, built, op, out_applied);
 }
 
-/* Shared interface slots. */
-
 /* Serialize a live entity using the clone base at ent + 8: owned text, or NULL. */
 static char *slot_serialize_entity(sh_iface *self, int id)
 {
@@ -1629,9 +1554,8 @@ static char *slot_serialize_entity(sh_iface *self, int id)
     if (!ent) return NULL;
 
     void *cloneBase = (void *)((uint8_t *)ent + ENT_VALID_OFF);
-    /* EntityClone later dereferences cloneBase + 0x150 without a null check.
- * Half-built entities during Play can lack this defsub. Reject them before
- * cloning; repeated caught faults can still escalate through the fault shield. */
+    /* EntityClone dereferences cloneBase + 0x150 without a null check, and half-built entities during Play can lack
+     * this defsub, so they are rejected before cloning. */
     {
         void *defsub = NULL;
         if (!ae_read_ptr((const uint8_t *)cloneBase + ENT_CLONE_DEFSUB_OFF, &defsub) ||
@@ -1793,10 +1717,8 @@ static int ae_snapshot_box_size(unsigned index, float size[3], void *ctx)
             /* Read but not a usable box: that box alone is left out. */
             return sh_nav_regions_decl_size((const char *)text, length, size) ? 1 : -1;
     }
-    /* In the editor an unmeasured box is one that has only just been placed,
-     * and the next read gets it. A conversion has no next read: the box takes
-     * the size its entityDef gives it through nav_entitydef, the same resolver
-     * the map-text reads use, and any axis the map spells still wins. */
+    /* In the editor an unmeasured box has only just been placed and the next read gets it. A conversion has no
+     * next read, so the box takes its entityDef's size through nav_entitydef, and any axis the map spells wins. */
     if (box->converting && sh_nav_entitydef_box_size(AE_PROBE_VOLUME_DEF, size)) {
         box->inherited++;
         return 1;
@@ -1954,11 +1876,8 @@ static double ae_perf_msf(LONGLONG ticks)
     return (double)ticks * 1000.0 / (double)freq.QuadPart;
 }
 
-/* Compare the two ways of reading current editor geometry, once, on demand.
- *
- * The bake reads the whole map through the engine's serializer. The marked
- * volumes are a handful of entities, and the engine can write one entity at a
- * time. This says whether reading only those would be cheaper, and by how much. */
+/* Compares, once on demand, reading the whole map through the engine's serializer against reading one entity
+ * at a time, to show whether reading only the marked volumes would be cheaper. */
 #define AE_PROBE_VOLUME      "snapmaps/volume/blocking"
 
 void sh_apply_engine_read_probe(void (*out)(const char *fmt, ...))
@@ -2019,9 +1938,8 @@ void sh_apply_engine_read_probe(void (*out)(const char *fmt, ...))
 static volatile LONG g_nav_refresh_queued;
 static int g_nav_refresh_registered;
 
-/* The geometry the lines on screen were built from. Published lines keep
- * drawing every frame on their own, so rebuilding them unchanged costs about
- * 11 ms and shows nothing new. */
+/* The geometry the lines on screen were built from; published lines keep drawing on their own, so rebuilding
+ * them unchanged shows nothing new. */
 static unsigned long g_preview_built_revision = ~0UL;
 
 static void ae_nav_preview_colour(float r, float g, float b, void *ctx)
@@ -2054,14 +1972,11 @@ static void ae_nav_preview(const uint8_t *ed)
     g_preview_built_revision = revision;
 }
 
-/* Every undoable editor action ends in CommitEdit, so the map changes only
- * when one has run. The per-box read handles what an action did to a box it
- * already knows; a box added since the last complete read is not one of those,
- * and the entity table lengthening is what betrays it. */
+/* Every undoable editor action ends in CommitEdit, so the map changes only when one has run. A box added since
+ * the last complete read is betrayed by the entity table lengthening. */
 static volatile LONG g_nav_edit_pending;
-/* A property applied to a volume. The reflected flags -- the navigation tick,
- * Block Demons -- are accessors rather than fields, so no fingerprint of the
- * entity's memory is guaranteed to see one change. */
+/* A property applied to a volume: the reflected flags (the navigation tick, Block Demons) are accessors, not
+ * fields, so no fingerprint of the entity's memory is guaranteed to see one change. */
 static volatile LONG g_nav_volume_property;
 
 /* The volumes a property edit named, which are the only ones whose flags are
@@ -2084,9 +1999,8 @@ static int  g_nav_read_tries;
  * and the volume set then says whether it was one navigation was built from. */
 static volatile LONG g_nav_delete_pending;
 
-/* Which entity ids are blocking boxes, now and as of the last settled read.
- * The difference names the boxes that have just arrived, which is what has to
- * be read; without it every unflagged box is read again on every placement. */
+/* Which entity ids are blocking boxes, now and as of the last settled read; the difference names the boxes
+ * that have just arrived, so unflagged boxes are not re-read on every placement. */
 #define NAV_UID_MAX 65536
 static unsigned char g_nav_now_bits[NAV_UID_MAX / 8];
 static unsigned char g_nav_seen_bits[NAV_UID_MAX / 8];
@@ -2172,10 +2086,9 @@ static int ae_undo_mark(const uint8_t *ed, void **cursor, int *count)
     return 1;
 }
 
-/* The placed modules, whose origins every box coordinate is relative to. A
- * room the user dragged moves its boxes without touching a single one of their
- * blocks, and the per-box refresh keeps the instance table it was given, so a
- * change here has to reach the complete read. */
+/* The placed modules, whose origins every box coordinate is relative to. A dragged room moves its boxes without
+ * touching their blocks, and the per-box refresh keeps its instance table, so a change here must reach the
+ * complete read. */
 static unsigned ae_fold_modules(unsigned h)
 {
     const uint8_t *ed = ae_editor_session();
@@ -2277,17 +2190,10 @@ static int ae_nav_edit_matters(void)
     return 0;
 }
 
-/* Two fingerprints over the volumes the navigation was built from.
- *
- * `shape` is where each box stands and how big it is: a drag, a turn or a
- * resize moves only this, and the geometry for that comes out of memory, so it
- * costs no serializing at all.
- *
- * `roster` is everything about which boxes exist -- the entity count, each
- * box's slot, its per-entity state bit, and whether it still reads as a
- * blocking volume. A delete, an add or a paste has to show up in at least one
- * of those, and when it does the answer comes from serializing the boxes
- * rather than from anything guessed about how the editor marks a box gone. */
+/* Fingerprints over the volumes the navigation was built from. `shape` is where each box stands and how big it
+ * is: a drag, turn or resize moves only this, and its geometry comes from memory. `tracked` is the identity of the
+ * known boxes (slot, state bit, still a blocking volume) and `present` is which blocking boxes the editor holds,
+ * so a delete, add or paste shows in one of them and the answer then comes from serializing the boxes. */
 static int ae_nav_fingerprints(unsigned *shape, unsigned *tracked, unsigned *present)
 {
     static int uids[NAV_VOLUME_MAX];
@@ -2526,11 +2432,9 @@ static void ae_apply_tree_detour(void *entity, void *tree)
     if (g_apply_tree_tramp) g_apply_tree_tramp(entity, tree);
 }
 
-/* PrefabGrabFrame(editor, body, frame, grabDistance): VK 0x1412164d0 /
- * GL 0x141215920. Nineteen bytes of whole, position-independent prologue:
- * five pushes, an LEA and a SUB. The guard acts only on the thread that armed
- * it in slot_serialize_selection, so the native Ctrl+C copy and the
- * selection-grab caller keep the engine's own behaviour. */
+/* PrefabGrabFrame(editor, body, frame, grabDistance): VK 0x1412164d0 / GL 0x141215920; the stolen 19 bytes are
+ * five pushes, an LEA and a SUB. The guard acts only on the thread that armed it in slot_serialize_selection,
+ * so native Ctrl+C copy and the selection-grab caller keep the engine's behaviour. */
 #define AE_GRAB_FRAME_STOLEN   19
 #define ED_VIEW_ORIGIN_OFF     0x170        /* editor+0x170: view origin the helper clips from */
 #define ED_VIEW_ANGLES_OFF     0x17c        /* editor+0x17c: pitch, yaw (+0x180, cameraYaw), roll */
@@ -2797,13 +2701,9 @@ static void ae_nav_refresh_poll(void)
                  (cursor != g_nav_undo_cursor || count != g_nav_undo_count);
         if (undone) { g_nav_undo_cursor = cursor; g_nav_undo_count = count; }
     }
-    /* No fingerprint yet -- a map just opened, or one was thrown away. Ask for
-     * the read that establishes it, but only once the table it is taken from can
-     * be read at all, or an unreadable table would mean a read every frame.
-     *
-     * A map that has only just opened refuses the read until its boxes can be
-     * measured, so attempts are held a second apart; without that, the whole
-     * wait is spent inside back-to-back complete reads. */
+    /* No fingerprint yet (a map just opened, or one was thrown away): ask for the read that establishes it, once
+     * the entity table is readable. Attempts are a second apart, since a new map refuses the read until its boxes
+     * can be measured and the wait would otherwise go to back-to-back complete reads. */
     if (!g_nav_have_hash && g_nav_read_tries < NAV_READ_TRIES) {
         void *array = NULL;
         uint32_t count = 0;
@@ -2856,13 +2756,6 @@ static void ae_nav_refresh_poll(void)
     ae_nav_refresh_queue();
 }
 
-/* Retired +0x298 slot: palette timelines are placed on snapmaps/unknown
- * directly (timeline_tile.c), so there is nothing to normalize. */
-static int slot_normalize_timeline_inherit(sh_iface *self, int id)
-{
-    (void)self; (void)id;
-    return 1;
-}
 
 /* Deep-copy a batch and request execution through the engine command buffer. */
 static int slot_schedule_apply(sh_iface *self, const sh_apply_item *items, int count, const char *op_label)
@@ -3073,18 +2966,15 @@ static int slot_apply_sync(sh_iface *self, const sh_apply_item *items, int count
     return applied;
 }
 
-/* Slot export and installation. */
 void sh_apply_engine_get_slots(sh_serialize_entity_fn *serialize_entity,
                                sh_schedule_apply_fn   *apply_edit,
                                sh_read_prefab_fn      *read_prefab,
-                               sh_apply_sync_fn       *apply_sync,
-                               sh_normalize_timeline_inherit_fn *normalize_timeline_inherit)
+                               sh_apply_sync_fn       *apply_sync)
 {
     if (serialize_entity) *serialize_entity = slot_serialize_entity;
     if (apply_edit)       *apply_edit       = slot_schedule_apply;
     if (read_prefab)      *read_prefab      = slot_read_prefab;
     if (apply_sync)       *apply_sync       = slot_apply_sync;
-    if (normalize_timeline_inherit) *normalize_timeline_inherit = slot_normalize_timeline_inherit;
 }
 
 
@@ -3113,20 +3003,9 @@ int sh_apply_engine_place_watch(int *seq, int *result, const char **reason)
     return 0;
 }
 
-/* Optional snapshots of staged prefab storage across Play. Historical staging
- * could leave an unchanged list header pointing to unmapped map-heap storage;
- * current staging requests process lifetime and the watchdog validates it.
- * With protection enabled, post-Play samples may show the reset slot rather
- * than the original failure. Compare with a native clipboard as a control. */
-/* Diagnostic only: holding an unsafe slot skips protection and can cause a
- * fatal guarded-free error on later copy/paste. Keep disabled in normal builds. */
-
-
-
-/* Poll nav maintenance after a successful native Frame on the main thread.
- * On leaving RUNNING, preserve verified process/persistent allocations; reset
- * our matching staged slot when lifetime cannot be verified. Ownership uses
- * a marker and count heuristic, not a unique clipboard identity. */
+/* Polls nav maintenance after a successful native Frame on the main thread. On leaving RUNNING it keeps verified
+ * process/persistent allocations and resets our staged slot when lifetime cannot be verified; ownership is a
+ * marker and count heuristic, not a unique clipboard identity. */
 void sh_apply_prefab_poll_play(void)
 {
     if (ae_on_main_thread() != 1) return;
@@ -3162,9 +3041,8 @@ void sh_apply_prefab_poll_play(void)
     (void)ae_read_u32_safe(ed + PASTE_PREFAB_ENTCOUNT_OFF, &ent_count);
 
 
-    /* Touch only the slot matching our staging marker/count heuristic. */
-    /* Process/persistent allocations can survive Play. Validate the header instead
- * of assuming PushHeap succeeded; unknown/map lifetime requires a reset. */
+    /* Only the slot matching our staging marker and count is touched. A process or persistent allocation can
+     * survive Play; the header is validated rather than assuming PushHeap succeeded. */
     void *blobArray = NULL;
     int survives = 0;
     if (ae_read_ptr(ed + PASTE_PREFAB_ENTPTR_OFF, &blobArray) && blobArray)
@@ -3288,7 +3166,6 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
     g_add_command  = (add_command_fn)     sig_addr_by_name(results, n, "AddCommand");
     /* Guards an entity edit that turns Static off; without it the edit applies unguarded. */
     g_budget_update = (budget_update_fn)  sig_addr_by_name(results, n, "EditorBudgetUpdate");
-    /* Diagnostic addresses only; kind 2 injects an action without calling either. */
 
     /* Resolve prefab helpers through signature-first, exact-build fallbacks. */
     if (module_base) {

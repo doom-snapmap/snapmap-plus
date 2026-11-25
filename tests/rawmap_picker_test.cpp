@@ -1,7 +1,5 @@
-// rawmap_picker_test -- the file types the File menu's rawmap dialogs offer:
-// Load Rawmap lists .json and .zip together, Save Rawmap As puts .zip first
-// (and proposes rawmap.zip) when the open map uses a mod, .json first when it
-// does not, and the mod count is read from the backend's status object.
+// rawmap_picker_test -- the file types the File menu's rawmap dialogs offer: Load Rawmap lists .json and .zip,
+// Save Rawmap As puts .zip first (proposing rawmap.zip) when the open map uses a mod, and the mod count is read from status.
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>

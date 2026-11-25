@@ -1,14 +1,10 @@
-/* modlook_mod_test.c -- the Graphics SDK's look compiler (modlook.c) wired where it is used: a mod folder built into a
- * bundle by the builder (sh_mb_build with sh_mb_set_look_compiler) and the same folder served by the provider through
- * its material filter (sh_modserve_set_material_filter), the two hooks dllmain.c installs.
+/* modlook_mod_test.c -- the Graphics SDK's look compiler (modlook.c) wired where it is used: a mod folder built into
+ * a bundle (sh_mb_build with sh_mb_set_look_compiler) and the same folder served through the provider's material
+ * filter (sh_modserve_set_material_filter).
  *
- * Build: a folder of a layered material (a layer image, a colour layer, a burn), a particle material of the platform route and
- * one of the stock route, a material that is not a look, builds; its needs are the folder's own images and the game's
- * names, never a file the product derives (snapmapplus/layered/*, snapmapplus/particles/*, snapmapplus/look/*); the
- * report carries the look notes; a copy with one wrong field fails with exactly the compiler's sentence.
- * Serve: each look material is served as it compiles, the derived images it names are readable through
- * sh_modprog_read, a material that is not a look, or that writes the old keys, is served byte for byte as written.
- * A real converted mod (Doomforge's Tyrant, when the folder is on this computer) builds offline.
+ * Build: layered, platform-route and stock-route particle materials build from the folder's own images and the
+ * game's names, with the look notes in the report and a wrong field failing with the compiler's sentence. Serve: each
+ * look material is served as it compiles, and a non-look or old-key material is served byte for byte.
  *
  *   modlook_mod_test.exe [fixtures=<tests\fixtures\mods>] [fixtures_prog=<tests\fixtures\modprog>]
  *                        [doom=<install root>] [tyrant=<folder>] [verbose] */
@@ -104,6 +100,18 @@ static int stock_exists(void *ctx, const char *request)
     if (!strncmp(request, "generated/decls/renderprog/", 27) && !strchr(request + 27, '/')) return 1;
     if (g_verbose) printf("    stock miss: %s\n", request);
     return 0;
+}
+static int example_stock(void *ctx, const char *request)
+{
+    if (g_doom_registered) return stock_exists(ctx,request);
+    static const char *const stock[] = {
+        "generated/decls/material/textures/guis/snapmaps/entity_icons/prop/crate01.decl",
+        "generated/decls/particle/env/sparks/sparks_med_01.decl",
+        "cooked/model/models/snapmaps/props/new/crate01.bmodel"
+    };
+    for (size_t i=0; i<sizeof stock/sizeof stock[0]; ++i)
+        if (!strcmp(request,stock[i])) return 1;
+    return stock_exists(ctx,request);
 }
 static sh_mb_resolver g_resolver = { NULL, NULL, stock_exists, NULL };
 
@@ -328,7 +336,7 @@ static void test_serve(const char *tmp)
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\" GOOD_SALT, root);
     CHECK(CreateDirectoryA(root, NULL));
     CHECK(mt_copy_tree(fixture_path("looks-good", src, sizeof src), folder));
-    /* an old-key material (emitted before the numbers moved), copied in under its own name; its images are the mod's */
+    /* a material written with the old keys, copied in under its own name; its images are the mod's */
     {
         char lp[MAX_PATH], dst[MAX_PATH];
         unsigned char *t;
@@ -431,8 +439,7 @@ static void test_serve(const char *tmp)
                 CHECK(sh_modprog_owns(ipath));
                 CHECK(sh_modprog_read(ipath, &bytes, &bn) == SH_MB_STOCK_OK && bytes && bn > 62);
                 {
-                    /* and the provider serves it to the engine, though no build lists it (R-HD1: none did, and the
-                     * layered surface drew black) */
+                    /* and the provider serves it to the engine, though no build lists it */
                     unsigned char *sv = NULL;
                     size_t svn = 0;
                     CHECK(sh_modserve_open(ipath, &sv, &svn) == 1 && sv && bytes && svn == bn && !memcmp(sv, bytes, bn));
@@ -538,7 +545,7 @@ static int plan_has(const sh_modserve_plan *p, const char *type, const char *pre
     return -1;
 }
 
-/* ------------------------------------------------------------------ 3. a real converted mod */
+/* ---- 3. a real converted mod ---- */
 
 static void test_tyrant(const char *tmp)
 {
@@ -594,7 +601,7 @@ static void test_tyrant(const char *tmp)
     printf("   %u material(s), %u compiled as looks, %u note(s)\n", (unsigned)mats, (unsigned)looks, (unsigned)notes);
     CHECK(ok);
     CHECK(b.errors == 0);
-    /* Its map pass (R-GS3): its own decls, then the product's programs and render parms it reaches, planned too and
+    /* Its map pass: its own decls, then the product's programs and render parms it reaches, planned too and
      * readable in plan order in a fresh process (the programs derive from the installed game's own). */
     if (ok) {
         char *cause = NULL;
@@ -690,10 +697,9 @@ static int count_closure(const sh_mb_bundle *b, const char *prefix)
     return n;
 }
 
-/* An effect, an environment and a material with a value that changes, built and served: the build reads each
- * through the SDK's compilers and brings what they derive (the emitter, the particle decl, its material, the curve
- * tables, the environment's fx) along as pointers; the server serves the compiled fx and env decls and the derived
- * decls from the product; a misspelt field fails the build with the compiler's sentence. */
+/* An effect, an environment and a material with a changing value, built and served: the build compiles each through
+ * the SDK and carries what they derive as pointers, the server serves the compiled and derived decls, and a
+ * misspelt field fails the build with the compiler's sentence. */
 static void test_sdk(const char *tmp)
 {
     char root[MAX_PATH], folder[MAX_PATH], src[MAX_PATH], *cause = NULL;
@@ -737,8 +743,7 @@ static void test_sdk(const char *tmp)
     sh_mb_free(&b);
 
     /* The registration plan a map pass runs, with the engine faked as it reads (each load opens its file through the
-     * provider), in a fresh process: nothing has compiled the effect, so the derived decls exist only once a read
-     * compiles the file that needs them (R-GS3). */
+     * provider), in a fresh process: the derived decls exist only once a read compiles the file that needs them. */
     if (g_doom_registered) {
         sh_modserve_plan p;
         const char *hashes[1];
@@ -822,6 +827,22 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "doom=", 5)) strcpy_s(g_doom, sizeof g_doom, argv[i] + 5);
         else if (!strncmp(argv[i], "tyrant=", 7)) strcpy_s(g_tyrant, sizeof g_tyrant, argv[i] + 7);
         else if (!strcmp(argv[i], "verbose")) g_verbose = 1;
+    }
+    if (argc >= 3 && !strcmp(argv[1], "--author-example")) {
+        sh_mb_bundle b;
+        if (g_doom[0]) {
+            sh_modstock_set_install(g_doom);
+            sh_modstock_register();
+            g_doom_registered = 1;
+        }
+        sh_mb_set_script_check(sh_script_compile_check);
+        sh_mb_set_sdk_compiler(sh_sdk_compile);
+        sh_mb_set_look_compiler(sh_look_compile_notes);
+        sh_mb_resolver r = { NULL, NULL, example_stock, NULL };
+        int ok = sh_mb_build(argv[2], "spark123", &r, &b);
+        if (!ok) fprintf(stderr, "author example: %s\n", sh_mb_first_cause(&b));
+        sh_mb_free(&b);
+        return ok ? 0 : 1;
     }
     if (!g_fixtures[0] || !g_fixtures_prog[0]) { fprintf(stderr, "usage: fixtures=<dir> fixtures_prog=<dir>\n"); return 2; }
     if (!mt_temp_dir("modlookmod", tmp, sizeof tmp)) { fprintf(stderr, "no temp dir\n"); return 2; }

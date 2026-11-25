@@ -1,32 +1,7 @@
-/* modpublish.c -- see modpublish.h.
- *
- * One publish at a time. Its life (SPEC-distribution 5.3):
- *
- *   PublishStart (held)  the editor's Publish: the engine's PublishStart is not called yet. A job on the modnet worker
- *                 computes the units of the map's local rows (modpin.h: each placed object's unit from its folder's
- *                 build), asks the store which of the map's units it holds, and sizes what it lacks (modclaim.h). The
- *                 editor shows its pacifier with a line of progress meanwhile.
- *   ASKING        bytes to upload: "Publishing uploads 212 MB of mod content that the mod store does not have yet.
- *                 Publish?" (S7). No: the publish never starts.
- *   UPLOADING     the missing units go up, with "Uploading mod content: 84 of 212 MB." on the pacifier.
- *   (resume)      the engine's PublishStart runs; its save pins a copy of the map's rows (sh_modmanifest_set_pin),
- *                 which the cloud save's read of the slot gets (sh_modpublish_cloud_text), so the text the engine
- *                 publishes names units only. The open map and its slot keep their own rows.
- *   PublishAfterSave  the text bound (10 MB) and an unreadable mod list are refused here, as before.
- *   PublishFeedPost   (the item id known) the save's units are claimed for the item on the worker (a republish
- *                 replaces its set); a claim the store could not take is queued and retried at every start.
- *
- * A busy store is waited out (Retry-After) for two minutes; after that the publish goes on and what could not be sent
- * is queued (N27). A unit neither here nor in the store (S8) or removed by moderation is said in one notice after the
- * publish, which proceeds. An object whose folder is not built cannot be published: the publish does not start, and the
- * notice says what to fix.
- *
- * Background jobs (claims, releases, the launch step) run one at a time on the worker, in order, whenever it is free.
- *
- * Delete checks: the delete completion queues one check per deleted map with linked, claimed items; the next tick
- * starts the engine's published-items query, whose callbacks post an answer (any thread) that a later tick settles. An
- * unanswered check expires and keeps its claims.
- */
+/* modpublish.c -- the map publish's mod-content flow (modpublish.h): one publish at a time, held at FINISH while a
+ * worker job sizes the map's mod units and uploads those the store lacks, then resumed so the save pins the rows and
+ * the feed post claims the units for the item. It also runs the background claim and release jobs and the delete
+ * checks, which a later tick settles from the published-items query's answer. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shlobj.h>
@@ -55,7 +30,7 @@
 #define MP_SAVE_FRESH_MS   5000ull /* the Save state saves and calls back in one frame */
 #define MP_PIN_ARM_MS      30000ull /* PublishStart to its save is about 60 frames */
 #define MP_CONTEXT_MS      (15ull * 60ull * 1000ull)
-#define MP_STORE_WAIT_MS   120000ull   /* a busy store is waited out this long (N27) */
+#define MP_STORE_WAIT_MS   120000ull   /* a busy store is waited out this long */
 #define MP_TEXT_CAP        256     /* the game's dialog body (engine_dialog.c: 255 bytes of text) */
 /* A saved-map or item id the links file keeps: the engine's own ids, which
  * are short plain tokens; anything longer is not one (mp_link_id). */
@@ -69,7 +44,7 @@ enum { MP_DIALOG_PENDING = 0, MP_DIALOG_ACCEPTED = 1 };
 enum { HOLD_IDLE = 0, HOLD_PREPARING, HOLD_RAISE, HOLD_ASKING, HOLD_UPLOADING, HOLD_RESUME };
 #define MP_RESUME_TICKS    120     /* no editor frame in two seconds: the tick resumes it itself */
 #define MP_QUESTION_TITLE  "Mod content to upload"
-/* CTX_KEEP: the map names mods but no unit of them can be claimed: the item's claim stays as it is (R-LB1 F9). */
+/* CTX_KEEP: the map names mods but no unit of them can be claimed: the item's claim stays as it is. */
 enum { CTX_NONE = 0, CTX_ROWS, CTX_NO_ROWS, CTX_UNKNOWN, CTX_KEEP };
 enum { JOB_PREPARE = 1, JOB_UPLOAD, JOB_CLAIM, JOB_RELEASE, JOB_LAUNCH, JOB_FETCH };
 
@@ -78,8 +53,6 @@ static int g_ops_set;
 static volatile LONG g_resuming;
 /* The rows a save would write now (modmanifest.h); tests give their own. */
 static int (*g_rows_for)(const char *const *names, size_t count, sh_modmanifest_list *out) = sh_modmanifest_rows_for;
-
-/* ------------------------------------------------------------ logging */
 
 static void mp_log(const char *line)
 {
@@ -101,8 +74,6 @@ static int mp_on_main(void)
 {
     return g_ops_set && g_ops.on_main && g_ops.on_main(g_ops.context);
 }
-
-/* ------------------------------------------------------------ text */
 
 void sh_modpublish_size_text(char *out, size_t cap, unsigned long long bytes)
 {
@@ -139,8 +110,6 @@ void sh_modpublish_progress_text(char *out, size_t cap, unsigned long long done,
     sh_modpublish_size_text(a, sizeof a, done);
     _snprintf_s(out, cap, _TRUNCATE, "Uploading mod content: %s of %s.", a, b);
 }
-
-/* ------------------------------------------------------------ the save record */
 
 typedef struct mp_save {
     int valid;
@@ -220,12 +189,10 @@ static int mp_units_add(char (**units)[MODNET_HASH_HEX + 1], size_t *n, size_t *
     return 1;
 }
 
-/* The published copy's rows (R-LB1 F6, the owner's ruling): a publish's save pins a copy of its rows and the slot
- * keeps the map's own, so the author's map follows their folders, published or not. The cloud save reads the slot back
- * to upload it (ReadLocalSavedMapText in the cloud-save request, both renderers) and gets the text with these rows
- * instead (sh_modpublish_cloud_text); the bound and the claim count them. Armed from the save to the feed post (or the
- * next publish, or the context's end), with no timer: a republish fetches the existing cloud save over the network
- * before it reads the slot. `sequence` is the save it was armed for; `served` says the cloud save's read got it. */
+/* The published copy's rows: a publish's save pins a copy of its rows while the slot keeps the map's own. The cloud
+ * save's read of the slot gets this text instead (sh_modpublish_cloud_text), armed from the save to the feed post, the
+ * next publish or the context's end, with no timer, since a republish fetches the cloud save before it reads the slot.
+ * `sequence` is the save it was armed for; `served` says the read got it. */
 static struct {
     int armed, served;
     unsigned long sequence;
@@ -399,13 +366,8 @@ static void mp_save_seen_text(const char *text, size_t length, unsigned long seq
     sh_modmanifest_list_free(&rows);
 }
 
-/* ------------------------------------------------------------ search tag */
-
-/* The tag must be in the local save's metadata: the cloud save that
- * TryCloudSave starts re-reads it from the profile, so a tag added to the
- * editor's model after the save never reaches the cloud save or the item.
- * PublishStart arms; the save observer then sees the rows; the local save's
- * WriteLocalSavedMapText takes the tag into the model it writes. */
+/* The tag must be in the local save's metadata, because the cloud save re-reads it from the profile. PublishStart arms
+ * it and the local save's WriteLocalSavedMapText adds it. */
 #define MP_TAG_ARM_MS 10000ull   /* PublishStart to the save is about 60 frames */
 
 static struct {
@@ -437,10 +399,8 @@ int sh_modpublish_save_tag(const char *local_id, void *model)
         if (GetTickCount64() - g_tag.at > MP_TAG_ARM_MS) g_tag.armed = 0;
         else if (!g_tag.local[0] || (local_id && !strcmp(local_id, g_tag.local))) { armed = 1; g_tag.armed = 0; }
     }
-    /* The observer reported this save's text just before its write. Every
-     * local save makes the tag match it: present with rows or with a feature of
-     * Snapmap+ the map uses (a resized module, its own navigation), absent
-     * without. */
+    /* The observer reported this save's text just before its write. Every local save makes the tag match it: present
+     * with rows or a Snapmap+ feature the map uses, absent without. */
     if (!g_save.valid || GetTickCount64() - g_save.at > MP_SAVE_FRESH_MS || !model) return 0;
     if (!g_save.count && !g_save.uses) {
         if (!g_ops.remove_tag) return 0;
@@ -464,8 +424,6 @@ int sh_modpublish_save_tag(const char *local_id, void *model)
     return tagged;
 }
 
-/* ------------------------------------------------------------ jobs */
-
 typedef struct mp_job {
     struct mp_job *next;
     int kind;
@@ -478,9 +436,9 @@ typedef struct mp_job {
     int code;                                  /* MODNET_OK or the failure */
     char *why;                                 /* the failure, for the log (malloc'd) */
     unsigned char *unbuilt;                    /* prepare: per row, 1 when it is local and no folder here serves it */
-    size_t nunbuilt;                           /* prepare: those rows (S8: they publish as they are, local) */
+    size_t nunbuilt;                           /* prepare: those rows (they publish as they are, local) */
     int made_key;                              /* the key was made by this job (the first publish) */
-    char *after;                               /* prepare: S8 or the removed sentence, said after the publish */
+    char *after;                               /* prepare: the absent or removed sentence, said after the publish */
     unsigned long long done_bytes, total_bytes;   /* upload progress, written by the worker */
     char (*salts)[SH_MODMANIFEST_SALT_CAP];    /* claim: the namespaces its units serve (the Mods tab's record) */
     size_t nsalts;
@@ -531,7 +489,7 @@ static void mp_progress(void *context, unsigned long long done, unsigned long lo
     if (job) InterlockedExchange64((volatile LONG64 *)&job->done_bytes, (LONG64)done);
 }
 
-/* The asked paths of this computer's claims, as the unit walk seeds them (3.8). */
+/* The asked paths of this computer's claims, as the unit walk seeds them. */
 typedef struct mp_asked { sh_unit_asked *v; size_t n, cap; } mp_asked;
 static void mp_asked_one(void *context, const char *unit, const char *root, const char *path)
 {
@@ -553,11 +511,9 @@ static void mp_asked_one(void *context, const char *unit, const char *root, cons
     a->n++;
 }
 
-/* The objects of the plan players will not get, named as the load notices name them: "Players will see this map
- * without the Marauder from Eternal Demons: its content is not on this computer or in the mod store." (S8), or "...,
- * which was removed from the mod store." (moderation). Absent units first: they are the author's to fix; with them
- * the objects of a local row no folder here serves (the owner, 2026-11-18: the author proceeds, players see
- * stand-ins). */
+/* The objects of the plan players will not get, named as the load notices name them: absent units first (the author's to
+ * fix), then the objects of a local row no folder here serves (the publish proceeds; players see stand-ins). Removed
+ * units are named last ("which was removed from the mod store"). */
 static char *mp_missing_sentence(const mp_job *job, int planned)
 {
     sh_cache_absent *a;
@@ -636,7 +592,7 @@ static int mp_prepare(mp_job *job, const modnet_io *io)
         if (!row->pinned && _stricmp(row->salt, SH_MODMANIFEST_PRODUCT)) {
             int state = sh_modpin_row(row, NULL, 0, NULL, &r);
             /* No folder here serves it (modpin logs which): it publishes local, and players see stand-ins for its
-             * objects (S8). */
+             * objects. */
             if (state == SH_MODPIN_ABSENT) {
                 if (!job->unbuilt && !(job->unbuilt = (unsigned char *)calloc(job->rows.count, 1))) {
                     free(r.why);
@@ -662,8 +618,8 @@ static int mp_prepare(mp_job *job, const modnet_io *io)
         free((void *)list);
     }
     free(units);
-    /* S8 for the rows on no computer whatever the store answered (an unreachable store goes on, queued, and still
-     * says it); the plan's absent and removed units only when it answered. */
+    /* The notice for the rows on no computer, whatever the store answered (an unreachable store goes on, queued, and
+     * still says it); the plan's absent and removed units only when it answered. */
     if ((code == MODNET_OK && (job->plan.absent || job->plan.removed)) || job->nunbuilt)
         job->after = mp_missing_sentence(job, code == MODNET_OK);
     return code;
@@ -712,8 +668,8 @@ static int mp_job_run(void *context, const modnet_io *io)
         job->code = modclaim_launch(io, &job->launch);
         break;
     case JOB_FETCH:
-        /* D25: a map copied to My Maps before its content came: the content of each of its rows (`units` holds the
-         * rows' composition hashes) into the cache, so the kept map opens offline. */
+        /* A map copied to My Maps before its content came: the content of each of its rows (`units` holds the rows'
+         * composition hashes) goes into the cache, so the kept map opens offline. */
         for (i = 0; i < job->nunits && job->code == MODNET_OK; i++) {
             int rc = sh_cache_prepare(job->units[i], io);
             if (rc == MODNET_E_CANCELLED) job->code = rc;
@@ -782,8 +738,6 @@ static int mp_queue_release(const char *ref, const char *why)
     return 1;
 }
 
-/* ------------------------------------------------------------ notices */
-
 /* A menu notice goes to the mod system's one notice queue (the notice op:
  * modpublished.h sh_modpublished_notice), raised with a single Accept
  * button when the dialog surface is idle. */
@@ -803,7 +757,7 @@ static void mp_editor_notice(void *editor, const char *text)
 }
 
 /* The store stayed busy or out of reach past the wait: the publish goes on; the claim at the feed post queues what
- * it could not send, and the next start sends it (N27). */
+ * it could not send, and the next start sends it. */
 #define MP_QUEUED_SENTENCE "The map is published, but its mod content could not reach the mod store yet; Snapmap+ " \
                            "sends it the next time DOOM starts."
 
@@ -817,7 +771,7 @@ static void mp_job_report(mp_job *job)
         else {
             mp_logf("MODS: publish: the claim of item '%s' failed: %s%s", job->ref, cause,
                     modnet_transient(job->code) ? " (queued; retried at the next start)" : "");
-            /* The map is published by now: the author reads what players will miss, once (a retired Snapmap+ reads the
+            /* The map is published by now: the author reads what players will miss, once (an older Snapmap+ reads the
              * newer-version notice below). */
             if (modnet_transient(job->code)) mp_menu_notice(MP_QUEUED_SENTENCE);
             else if (job->code != MODNET_E_RETIRED) {
@@ -850,8 +804,6 @@ static void mp_job_report(mp_job *job)
 }
 
 
-/* ------------------------------------------------------------ the hold and the context */
-
 typedef struct mp_hold {
     int state;
     void *editor;
@@ -863,7 +815,7 @@ typedef struct mp_hold {
     unsigned long long shown;                  /* the progress the pacifier shows */
     mp_job *job;                               /* the prepare job, then the upload job */
     modclaim_plan plan;                        /* what the store lacks, kept from the prepare */
-    char *after;                               /* a notice for after the publish (S8, removed, queued), malloc'd */
+    char *after;                               /* a notice for after the publish (absent, removed, queued), malloc'd */
 } mp_hold;
 
 typedef struct mp_context {
@@ -879,8 +831,8 @@ typedef struct mp_context {
 
 static mp_hold g_hold;
 static mp_context g_ctx;
-/* The units the last prepared publish found neither here nor in the store, or removed from it: left out of its claim
- * (R-LB1 F7). Set at the resume, cleared when a publish begins. */
+/* The units the last prepared publish found neither here nor in the store, or removed from it: left out of its claim.
+ * Set at the resume, cleared when a publish begins. */
 static struct { char (*v)[MODNET_HASH_HEX + 1]; size_t n; } g_left_out;
 static int g_editor_ticking;            /* inside sh_modpublish_editor_tick */
 static struct { int armed; ULONGLONG at; } g_pin;   /* the resumed PublishStart's save pins its rows */
@@ -967,7 +919,7 @@ static void mp_resume(void)
     after = h->after;
     h->after = NULL;
     {
-        /* what no claim of this publish can name (F7): the plan's absent and removed units */
+        /* what no claim of this publish can name: the plan's absent and removed units */
         size_t i;
         free(g_left_out.v);
         memset(&g_left_out, 0, sizeof g_left_out);
@@ -1053,7 +1005,7 @@ static int mp_hold_begin(void *editor, unsigned char overwrite)
     sh_modmanifest_list rows;
     int n;
     if (g_ops.account_name) {
-        /* The name the key's requests present (D31): read from the signed-in game at each publish, never typed. */
+        /* The name the key's requests present: read from the signed-in game at each publish, never typed. */
         char name[256];
         if (g_ops.account_name(g_ops.context, name, sizeof name)) modclaim_set_account_name(name);
     }
@@ -1189,9 +1141,8 @@ int sh_modpublish_after_save(void *editor)
     }
     g_ctx.kind = CTX_ROWS;
     if ((g_ctx.units = calloc(g_save.nunits, sizeof *g_ctx.units)) != NULL) {
-        /* R-LB1 F7: the claim names only what the store holds or this publish sent. A unit neither on this computer
-         * nor in the store, or one moderation removed, is left out (S8 said so after the publish): no claim of it can
-         * ever succeed, and no later start could send it. */
+        /* The claim names only what the store holds or this publish sent: a unit neither on this computer nor in the
+         * store, or one moderation removed, is left out, since no claim of it can succeed. */
         size_t i, k, out = 0, left = 0;
         for (i = 0; i < g_save.nunits; i++) {
             int skip = 0;
@@ -1204,8 +1155,7 @@ int sh_modpublish_after_save(void *editor)
             mp_logf("MODS: publish: %zu unit(s) left out of the claim: neither on this computer nor in the mod store, or "
                     "removed from it", left);
         if (!out) {
-            /* The map still names mods: an emptied claim is no release (F9); the item keeps what it claims, and S8 has
-             * told the author what players will miss. */
+            /* The map still names mods: an emptied claim is no release; the item keeps what it claims. */
             free(g_ctx.units);
             g_ctx.units = NULL;
             g_ctx.nunits = 0;
@@ -1231,9 +1181,7 @@ void sh_modpublish_feed_post(void *edit, const char *item_id, const char *revisi
     if (!g_ops_set || !mp_on_main()) return;
     {
         /* With a row pinned, a cloud save that never read the slot published it without its pins: players get
-         * stand-ins, a failure. With no row pinned there is nothing to substitute, so the published map is the slot's
-         * text either way, its rows local (R-LV9: once on 963873d2 the read did not come for such a publish; it came
-         * for the next one). */
+         * stand-ins, a failure. With no row pinned the published map is the slot's text either way, its rows local. */
         int live, served;
         size_t i, pinned = 0;
         AcquireSRWLockShared(&g_upload_lock);
@@ -1284,12 +1232,11 @@ void sh_modpublish_feed_post(void *edit, const char *item_id, const char *revisi
         }
         break;
     case CTX_NO_ROWS:
-        /* A republish without mods: the item's old set (if any) is no longer needed by its current revision. */
+        /* A republish without mods: the item's claimed set (if any) is released. */
         if (modclaim_known(item_id)) (void)mp_queue_release(item_id, "the republished map uses no mods");
         break;
     case CTX_KEEP:
-        /* R-LB1 F9: the map still names mods but none of its units can be claimed (S8 said so): never a release, the
-         * item keeps what it claims */
+        /* The map still names mods but none of its units can be claimed: never a release, the item keeps its claim. */
         mp_logf("MODS: publish: item '%s' revision '%s' names mods none of whose units the store holds or this publish "
                 "sent; its claim is kept as it was", item_id, revision ? revision : "");
         break;
@@ -1314,13 +1261,9 @@ void sh_modpublish_unpublished(const char *item_id)
     (void)mp_queue_release(item_id, "the map was unpublished");
 }
 
-/* ------------------------------------------------------------ links */
-
-/* The "links" section of mods\snapmap-plus.json: {"<item>":{"cloud":"..","local":"..","at":..}},
- * edited here as the document {"format":1,"links":{...}}. Main thread only
- * (feed post, delete, job reports); the record layer writes through a
- * temporary and a rename. Ids are kept only when they are plain (letters,
- * digits, '-', '_', '.', ':'), so the section needs no escaping. */
+/* The "links" section of mods\snapmap-plus.json, {"<item>":{"cloud":"..","local":"..","at":..}}, edited as the document
+ * {"format":1,"links":{...}}. Main thread only; ids are kept only when plain (letters, digits, '-', '_', '.', ':'), so no
+ * escaping is needed. */
 
 static int mp_link_id(const char *s)
 {
@@ -1408,8 +1351,6 @@ static void mp_link_forget(const char *item)
     }
     mpj_free(doc);
 }
-
-/* ------------------------------------------------------------ delete */
 
 #define MP_DELETE_ITEMS 16
 #define MP_ANSWER_ITEMS 256
@@ -1591,8 +1532,6 @@ static void mp_poll_checks(void)
     }
 }
 
-/* ------------------------------------------------------------ copy gate */
-
 static char *g_cache_root;   /* tests: the cache folder (malloc'd), or NULL for the game's */
 
 /* The game's published-map cache folder (malloc'd), or NULL. */
@@ -1628,9 +1567,8 @@ char *sh_modpublish_cache_path(const char *item_id, const char *revision)
     return out;
 }
 
-/* D25 (5.9): a published map copied to My Maps keeps its rows, and its content must be here for the kept map to open
- * offline: the pinned rows whose composition is not complete on this computer are fetched in the background, with
- * nothing asked. The cached published text names them. */
+/* A published map copied to My Maps keeps its rows, and its content must be here for the kept map to open offline: the
+ * pinned rows whose composition is incomplete on this computer are fetched in the background, with nothing asked. */
 static void mp_copy_fetch(const char *item_id, const char *revision)
 {
     char *path = sh_modpublish_cache_path(item_id, revision), *text;
@@ -1644,7 +1582,7 @@ static void mp_copy_fetch(const char *item_id, const char *revision)
     if (!text) return;
     memset(&rows, 0, sizeof rows);
     (void)sh_modmanifest_read(text, len, &rows, NULL);
-    if (rows.count) sh_modmanifest_content_for(text, len, &rows);   /* the cache learns the rows before it fetches them */
+    if (rows.count) sh_modmanifest_content_for(text, len, &rows);   /* the cache learns the rows first */
     free(text);
     if (rows.count && (want = calloc(rows.count, sizeof *want)) != NULL)
         for (i = 0; i < rows.count; i++) {
@@ -1699,16 +1637,12 @@ int sh_modpublish_copy_allowed(const char *item_id, const char *revision)
 }
 
 
-/* ------------------------------------------------------------ launch */
-
 void sh_modpublish_launch(void)
 {
     mp_job *job = mp_job_new(JOB_LAUNCH, NULL, NULL, 0);
     if (!job) { mp_log("MODS: launch: no memory to queue the retry"); return; }
     mp_queue_push(job);
 }
-
-/* ------------------------------------------------------------ the tick */
 
 #define MP_WORKER_TICKS    (60 * 180)   /* the worker busy with a background job: about three minutes */
 #define MP_PROGRESS_TICKS  30           /* the pacifier's progress line, twice a second at most */
@@ -1765,7 +1699,7 @@ static void mp_prepared(void)
         if (modnet_transient(job->code)) {
             mp_logf("MODS: publish: the mod store did not answer (%s); the publish goes on and its claim is queued",
                     job->why ? job->why : modnet_code_text(job->code));
-            if (job->after) mp_after_add(h, job->after);   /* S8 for the rows on no computer */
+            if (job->after) mp_after_add(h, job->after);   /* the absent-unit notice for the rows on no computer */
             mp_after_add(h, MP_QUEUED_SENTENCE);
             mp_job_free(job);
             mp_resume();
@@ -1782,7 +1716,7 @@ static void mp_prepared(void)
     }
     h->made_key = job->made_key;
     if (h->made_key) {
-        /* The first publish made the key: offer its backup once (SPEC 4.2), where the Snapmap+ window shows it. */
+        /* The first publish made the key: offer its backup once, where the Snapmap+ window shows it. */
         modclaim_key_offer(1);
         if (g_ops.key_made) g_ops.key_made(g_ops.context);
         /* the offer shows in the Snapmap+ window; closed, the publish's notice says where it is */
@@ -1810,7 +1744,7 @@ static void mp_uploaded(void)
     mp_job *job = h->job;
     h->job = NULL;
     /* The plan went to the upload job; it comes back to the hold, so what is said next counts what this publish sent
-     * (R-LB1: the summary read the emptied hold and said 0 units, 0 bytes after each unit's upload line). */
+     * (otherwise the summary reads the emptied hold). */
     modclaim_plan_free(&h->plan);
     h->plan = job->plan;
     memset(&job->plan, 0, sizeof job->plan);
@@ -1989,7 +1923,6 @@ void sh_modpublish_poll(void)
     mp_poll_background();
 }
 
-/* ------------------------------------------------------------ tests */
 #ifdef SH_MODPUBLISH_TESTING
 void sh_modpublish_test_set_ops(const sh_modpublish_ops *ops)
 {
@@ -2041,12 +1974,8 @@ void sh_modpublish_test_set_cache_root(const char *root)
 }
 #endif
 
-/* ================================================================== engine
- * Everything below binds the seam to DOOM build 13954591 (both renderers; the
- * offsets are equal on both, the addresses are not). Every engine read and
- * call is SEH-guarded; a failed bind installs nothing. Evidence:
- * logs/shared-ghidra/mod-system-n4/ and lane N1a section 5. The byte checks
- * are in modpub_sites.c (sh_modpublish_check_sites). */
+/* Everything below binds the seam to DOOM build 13954591 (both renderers; the offsets are equal, the addresses are not).
+ * Every engine read and call is SEH-guarded; a failed bind installs nothing; the byte checks are in modpub_sites.c. */
 #ifndef SH_MODPUBLISH_PURE
 #include "signatures.h"
 #include "hook.h"
@@ -2136,7 +2065,7 @@ static struct {
     eng_busy_fn busy_show;                       /* EditorBusyShow(editor, title, body): the pacifier */
     eng_editor_fn busy_clear;                    /* EditorBusyClear(editor) */
     /* The publish screens' FINISH step (sh_modpublish_check_finish): bound when every byte holds; the gate call is
-     * repointed at the relay only while S7 is asked there. */
+     * repointed at the relay only while the upload question is asked there. */
     int finish_bound;
     sig_result finish_site;                      /* PublishFinishGateCall, for code_patch_call_sig */
     eng_gate_fn gate;                            /* the gate the call reaches natively */
@@ -2195,8 +2124,6 @@ static char *eng_string_dup(const void *s)
     } __except (EXCEPTION_EXECUTE_HANDLER) { free(out); out = NULL; }
     return out;
 }
-
-/* ------------------------------------------------------------ ops */
 
 static void eng_log(void *c, const char *line) { (void)c; backend_log(line); }
 
@@ -2300,7 +2227,7 @@ static void eng_editor_notice(void *c, void *editor, const char *text)
 }
 
 /* A file a unit left out that a player's game asked for: told to the store (POST /mods/unit/<hash>/asked, its author
- * path) for the publishers of maps that claim the unit, whose next publish carries it (3.8). On a pool thread: one
+ * path) for the publishers of maps that claim the unit, whose next publish carries it. On a pool thread: one
  * small request; the game never waits for it. */
 typedef struct eng_asked { char hash[MODNET_HASH_HEX + 1]; char *path; } eng_asked;
 
@@ -2321,7 +2248,7 @@ static void eng_report_asked(const char *salt, const char *unit, const char *req
 {
     eng_asked *a;
     (void)by;
-    /* A stand-in's own name is the product's: never asked of the store (R-LB1). */
+    /* A stand-in's own name is the product's: never asked of the store. */
     if (!salt || !request || sh_modserve_standin_name(request) || !modnet_valid_hash(unit) ||
         !(a = (eng_asked *)calloc(1, sizeof *a))) return;
     strcpy_s(a->hash, sizeof a->hash, unit);
@@ -2372,11 +2299,9 @@ static int eng_add_tag(void *c, void *model, const char *tag)
     return result;
 }
 
-/* Take `tag` out of a tag list (idList<idStr>): the entries after it move
- * down one through the engine's idStr assignment (the one PublishStart uses)
- * and num shrinks by one, leaving the last slot constructed for the list's
- * own destructor. remove 0 only asks. 1 removed (or present), 0 absent, -1
- * unreadable or failed. Main thread. */
+/* Take `tag` out of a tag list (idList<idStr>): the entries after it move down one through the engine's idStr
+ * assignment and num shrinks, leaving the last slot constructed. remove 0 only asks. 1 removed (or present), 0 absent,
+ * -1 unreadable or failed. Main thread. */
 static int eng_list_tag(uint8_t *list, const char *tag, int remove)
 {
     char have[64];
@@ -2426,10 +2351,8 @@ static int eng_edit_ids(void *c, void *edit, char *cloud, size_t cloud_cap, char
     return a || b;
 }
 
-/* The published-items query's result callbacks: engine callback objects
- * (vtable slot 0 deleting destructor, +8 invoke, +0x10 clone) built here, so
- * the engine's own request context invokes and destroys them. They only post
- * the answer; the main tick acts on it. */
+/* The published-items query's result callbacks: engine callback objects (vtable slot 0 deleting destructor, +8 invoke,
+ * +0x10 clone) that the engine's request context invokes and destroys. They only post the answer for the main tick. */
 typedef struct eng_callback { void *const *vtable; unsigned ticket; } eng_callback;
 
 static void *eng_cb_destroy(eng_callback *self, unsigned flags) { if (flags & 1) free(self); return self; }
@@ -2536,8 +2459,6 @@ static int eng_window_open(void *c)
     }
     return 0;
 }
-
-/* ------------------------------------------------------------ the FINISH step's dialog */
 
 static uint8_t *eng_screen(void *editor)
 {
@@ -2722,8 +2643,6 @@ static const sh_modpublish_ops ENG_OPS = {
     .cloud_ready = eng_cloud_ready
 };
 
-/* ------------------------------------------------------------ detours */
-
 static int eng_live(void)
 {
     return InterlockedCompareExchange(&g_eng.ready, 0, 0) != 0;
@@ -2783,7 +2702,7 @@ static void eng_deleted_detour(void *screen, void *context, const void *local_st
         } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: delete: the claim check faulted"); }
     }
     ((eng_deleted_fn)g_eng.original[ENG_DELETED])(screen, context, local_string, cloud_string);
-    if (eng_live()) sh_cache_sweep_async();   /* a map deleted: content only it used goes (5.17) */
+    if (eng_live()) sh_cache_sweep_async();   /* a map deleted: content only it used goes */
 }
 
 /* PublishStart(editorLocal, overwrite), the editor's Publish: a map with mods is held while its mod content is
@@ -2810,9 +2729,9 @@ static void eng_publish_start_detour(void *editor, unsigned char overwrite)
     } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the publish-start step faulted"); }
 }
 
-/* The MapProperties frame's gate call, while S7 is asked at FINISH: the game's own checks first (their dialogs and the
- * screens' close are theirs), then the publish is held with the screens up. `state` is the frame's MapProperties state
- * (rsi at the call), whose +0x21 byte PublishStart would get. */
+/* The MapProperties frame's gate call, while the upload question is asked at FINISH: the game's own checks run first
+ * (their dialogs and the screens' close are theirs), then the publish is held with the screens up. `state` is the
+ * frame's MapProperties state (rsi at the call), whose +0x21 byte PublishStart would get. */
 static unsigned char eng_finish_gate_detour(void *editor, unsigned char show, unsigned char back, const uint8_t *state)
 {
     unsigned char blocked = g_eng.gate(editor, show, back);
@@ -2873,7 +2792,7 @@ static int eng_finish_patch(int on)
     return code_patch_call_sig(&g_eng.finish_site, expect, patch, &g_eng.finish_patch) == B2_PATCH_OK;
 }
 
-/* Bind the FINISH step (optional: without it S7 is asked after the screens close, as before). */
+/* Bind the FINISH step (optional: without it the upload question is asked after the screens close). */
 static void eng_bind_finish(const sig_result *results, size_t count, const uint8_t *base)
 {
     sh_modpublish_finish_sites s;
@@ -2992,8 +2911,6 @@ static void eng_save_observer(const char *text, size_t length)
     __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the save record faulted"); }
 }
 
-/* ------------------------------------------------------------ install */
-
 static int eng_bind(const sig_result *results, size_t count, const uint8_t *base)
 {
     const uint8_t *fail, *ctor, *dtor, *start, *query;
@@ -3049,7 +2966,7 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
         backend_log("MODS: publish: the editor's pacifier did not resolve; a publish with mods prepares without it");
     }
     g_eng.publish_fail = (eng_editor_fn)fail;
-    /* the account name the publishing key presents (D31); without it the key's requests carry no name */
+    /* the account name the publishing key presents; without it the key's requests carry no name */
     g_profile_name = (eng_profile_name_fn)eng_site(results, count, base, "GetProfileUsername");
     if (!g_profile_name) backend_log("MODS: publish: GetProfileUsername did not resolve; the key presents no account name");
     g_eng.idstr_ctor = (eng_idstr_ctor_fn)ctor;
@@ -3058,12 +2975,7 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
     return 1;
 }
 
-/* The edit's own tag list (edit+0x998, the model the next local save writes,
- * idList<idStr>). remove 0: 1 when `tag` is present, 0 absent, -1 unreadable.
- * remove 1: the entries after it move down one through the engine's idStr
- * assignment (the one PublishStart uses) and num shrinks by one, leaving the
- * last slot constructed for the list's own destructor: 1 removed, 0 absent,
- * -1 failed. Main thread. */
+/* The edit's own tag list (edit+0x998, the model the next local save writes), handled as eng_list_tag does. */
 int sh_modpublish_edit_tag(void *edit, const char *tag, int remove)
 {
     if (!edit || !tag) return -1;
@@ -3089,12 +3001,13 @@ int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t
     for (size_t i = 0; i < ENG_HOOKS; i++) if (hook_commit(g_eng.original[i]) != B2_PATCH_OK) goto failed;
     sh_rawmap_set_save_observer(eng_save_observer);
     sh_modmanifest_set_pin(sh_modpublish_pin_save);
-    sh_modmanifest_set_notice(sh_modpublished_notice);   /* the version rule's S9 (D23) */
+    sh_modmanifest_set_notice(sh_modpublished_notice);   /* the version rule's notice */
     sh_modmanifest_set_carries(sh_modserve_root_carries);
     sh_cache_set_held(modclaim_held);   /* the sweep keeps what this computer's published maps claim */
     sh_modui_set_key(modclaim_key_action, modclaim_key_status_json);   /* Settings: the key's backup and restore */
    sh_modserve_set_miss_reporter(eng_report_asked);
-    /* S7 at FINISH, the only shape: the gate call is relayed now; without it no map with mods is published */
+    /* The upload question at FINISH, the only shape: the gate call is relayed now; without it no map with mods is
+     * published */
     eng_bind_finish(results, count, module_base);
     if (g_eng.finish_bound && !eng_finish_patch(1)) {
         g_eng.finish_bound = 0;

@@ -1,12 +1,6 @@
-// publishing_key_dispatch_test.cpp -- every publishing key request of the Settings page, end to end without the game
-// (R-LB1, R-LV9 F4): the page (publishing_key.js, run in node by publishing_key_page_driver.js) posts its requests;
-// each is read the way the window's host reads it (mods_message.h: the route, the action's code, the backup's and
-// restore's file from the picker, the answer's envelope, the code on_message, the worker and ui_mods_finish run);
-// the worker's part goes to the real Mods slot (modui.c sh_modui_slot RUN and FETCH) with the key bound to modclaim
-// as the product binds it; and the answer goes back to the page. Checked: status answers the page, Not now saves the
-// offer as done in the mods folder's record, a backup writes its file, a restore reads it back, a closed picker
-// leaves the dialog usable, and a message the host cannot route fails here rather than vanishing.
-//
+// publishing_key_dispatch_test.cpp -- every publishing key request of the Settings page, end to end without the game:
+// node runs the page, the host routes each post as the window does, and the worker's part runs on the real Mods slot.
+// Checks status, Not now, backup, restore and a closed picker, and fails on a message the host cannot route.
 //   publishing_key_dispatch_test.exe <node.exe> <publishing_key_page_driver.js>
 #include <windows.h>
 #include <cstdio>

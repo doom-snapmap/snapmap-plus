@@ -1,8 +1,5 @@
-/* typeinfo_cache_test.c -- the pure part of modtypeinfo.c: the game cache's
- * search on a buffer shaped like idSnapTypeInfoCache, the product's table
- * (insert keeps key order, lookup, remove by key and by name, free) and the
- * one-entry view Get runs on. Built with /DSH_MODTYPEINFO_PURE: no engine
- * binding. */
+/* typeinfo_cache_test.c -- the pure part of modtypeinfo.c: the game cache's search on an idSnapTypeInfoCache-shaped
+ * buffer, the product's table and the one-entry view Get runs on. Built with /DSH_MODTYPEINFO_PURE (no engine binding). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

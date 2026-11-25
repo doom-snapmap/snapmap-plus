@@ -1,16 +1,8 @@
-/* timeline_tile.c -- see timeline_tile.h.
- *
- * Engine surface (build 13954591, snaphak-re editor-palette-surface R-001..R-003):
- *   SnapPaletteBuild   palette at editor+0x20660: entries +0x10, count +0x18,
- *                      stride 0x6f0; entry +0x000 sedef, +0x150 prototype record
- *   sedef              +0x08 decl name, +0x28 resource lifetime, +0x2c load
- *                      state, +0x1c8 resolved entityDef
- *   record             +0x38 text, +0x58 inherit, +0x60 class (pool strings)
- *   entity holder      +0x00 refcount (undo snapshots share holders),
- *                      +0x08 sedef, +0x158 record; EntityDeshare unshares it
- *   DeclRegistryAnchor / DeclTypeByName / DeclRegisterFile / DeclSourceFind /
- *   DeclFind / ResourceGenericLoad   as grid_room_native.c registers a catalog
- * Every engine read is SEH-guarded; a fault retires the module. */
+/* timeline_tile.c -- see timeline_tile.h. Build 13954591: palette at editor+0x20660 (entries +0x10, count +0x18,
+ * stride 0x6f0; entry +0 sedef, +0x150 prototype record); sedef +0x08 decl name, +0x28 lifetime, +0x2c load
+ * state, +0x1c8 entityDef; record +0x38 text, +0x58 inherit, +0x60 class; entity holder +0 refcount (undo
+ * snapshots share holders; EntityDeshare unshares), +0x08 sedef, +0x158 record. Decl registry calls are the
+ * ones grid_room_native.c uses. Every engine read is SEH-guarded; a fault retires the module. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -147,10 +139,7 @@ static uint32_t g_ent_count;
 static uint64_t g_ent_hash;
 static int g_ent_seen;
 
-static volatile LONG g_last_rebinds, g_total_rebinds;
-static SRWLOCK g_status_lock = SRWLOCK_INIT;
-static char *g_record_class;   /* malloc'd copy of the engine's class name, or NULL */
-static int g_status_tile_row = -1, g_status_unknown_row = -1;
+static volatile LONG g_total_rebinds;
 
 static void tl_logf(const char *fmt, ...)
 {
@@ -170,23 +159,7 @@ static int str_eq_guarded(const char *s, const char *want)
     __try { return s && !strcmp(s, want); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-static void *clean(const sig_result *r, size_t n, const char *name)
-{
-    size_t i;
-    for (i = 0; i < n; ++i)
-        if (r[i].name && !strcmp(r[i].name, name) && r[i].status == SIG_OK) return (void *)r[i].addr;
-    return NULL;
-}
 
-static const sig_result *clean_result(const sig_result *r, size_t n, const char *name)
-{
-    size_t i;
-    for (i = 0; i < n; ++i)
-        if (r[i].name && !strcmp(r[i].name, name) && r[i].status == SIG_OK) return &r[i];
-    return NULL;
-}
-
-/* ------------------------------------------------------------ registration */
 
 static void *tl_registry(void)
 {
@@ -202,10 +175,8 @@ static void *tl_registry(void)
     return r;
 }
 
-/* Publish the tile's name into the snapEditorEntityDef manager and load it,
- * so the palette build that follows enumerates and admits it. The bytes are
- * served by the override provider from overrides_baked.h. Process heap: the
- * decl outlives every map. Returns 1 when the decl is ready. */
+/* Publish the tile's name into the snapEditorEntityDef manager and load it (bytes from overrides_baked.h via
+ * the override provider) so the next palette build admits it. Process heap, as the decl outlives every map; returns 1 when ready. */
 static int tl_register_body(void)
 {
     void *r, *manager, *decl;
@@ -266,9 +237,8 @@ static void tl_error_text(char *out, size_t cap)
     __except (EXCEPTION_EXECUTE_HANDLER) { out[0] = 0; }
 }
 
-/* An engine Error/FatalError formats its text into last_error_msg and then
- * throws a C++ exception (0xE06D7363). Report that text only when the
- * registration changed it, so an earlier error is never blamed. */
+/* An engine Error/FatalError formats its text into last_error_msg, then throws a C++ exception (0xE06D7363).
+ * Report that text only when the registration changed it, so a stale error is never blamed. */
 static void tl_log_fault(const char *before)
 {
     char after[ERROR_TEXT_MAX];
@@ -307,16 +277,10 @@ static void tl_register(void)
     }
 }
 
-/* The engine sorts the palette's rows in place from four places, and the
- * Play build does it twice: once inside its own process-heap scope (the
- * validator) and once right after that scope is popped, in the map heap (the
- * Play map's structure). A sort swaps rows through a temporary and gives a
- * row's string a new buffer, in the current heap, when the value moving into
- * it is longer than the slot's old one; a row that grows during the second
- * sort keeps a map-heap string, the return to the editor frees it, and the
- * next Play's first sort reads it (review A-D3: DOOM+0x339c40 reading a
- * row's clipModelName in released memory). Every sort runs on process heap 0
- * here, as the builder does. */
+/* The engine sorts palette rows in place from four places; the Play build sorts twice, the second time in the
+ * map heap. A sort reallocates a row's string in the current heap when the incoming value is longer, so a row
+ * growing in the map-heap sort is freed on return to the editor and the next Play's sort reads it (DOOM+0x339c40
+ * reads clipModelName in released memory). Every sort here runs on process heap 0, as the builder does. */
 typedef void (*palette_sort_fn)(void *);
 static palette_sort_fn g_sort_orig;
 static volatile LONG g_sorts, g_sorts_unscoped;
@@ -355,8 +319,6 @@ static void tl_palette_build(void *palette, void *progress)
     g_patch_failed_entries = NULL;
     sh_budget_table_palette_rebuilt();
 }
-
-/* ------------------------------------------------------------ palette rows */
 
 /* The mod rows that share their entityDef with a stock row, and that row
  * (sh_tl_stock_row_first). The palette sorts by entityDef, so they are
@@ -449,25 +411,6 @@ static int tl_palette_current(const unsigned char *palette)
     return 1;
 }
 
-static void tl_set_status_class(const char *cls)
-{
-    char *copy = NULL, *old;
-    size_t n = 0;
-    if (cls) {
-        __try { n = strlen(cls); } __except (EXCEPTION_EXECUTE_HANDLER) { cls = NULL; }
-    }
-    if (cls && (copy = (char *)malloc(n + 1)) != NULL) {
-        __try { memcpy(copy, cls, n + 1); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { free(copy); copy = NULL; }
-    }
-    AcquireSRWLockExclusive(&g_status_lock);
-    old = g_record_class;
-    g_record_class = copy;
-    g_status_tile_row = g_tile_row;
-    g_status_unknown_row = g_unknown_row;
-    ReleaseSRWLockExclusive(&g_status_lock);
-    free(old);
-}
 
 /* The palette build gives the tile's prototype record the entityDef's own
  * class (idEntity). Give it idTarget_Timeline; previews and placements copy
@@ -475,20 +418,18 @@ static void tl_set_status_class(const char *cls)
 static void tl_patch_record(void)
 {
     void *record = NULL, *cls = NULL, *text = NULL;
-    if (g_tile_row < 0) { tl_set_status_class(""); return; }
+    if (g_tile_row < 0) return;
     if (!rd_ptr(g_pal_entries + (size_t)g_tile_row * PAL_STRIDE + ENTRY_RECORD_OFF, &record) || !record) return;
     if (!rd_ptr((unsigned char *)record + RECORD_CLASS_OFF, &cls)) return;
-    if (str_eq_guarded((const char *)cls, SH_TL_CLASS)) { tl_set_status_class((const char *)cls); return; }
+    if (str_eq_guarded((const char *)cls, SH_TL_CLASS)) return;
     if (g_patch_failed_entries == g_pal_entries) return;
     if (!sh_apply_engine_commit_record(record, sh_tl_record_json)) {
         g_patch_failed_entries = g_pal_entries;
-        tl_set_status_class("");
         if (!g_patch_fail_logged) { g_patch_fail_logged = 1; backend_log("TL tile: prototype record patch refused"); }
         return;
     }
     (void)rd_ptr((unsigned char *)record + RECORD_CLASS_OFF, &cls);
     (void)rd_ptr((unsigned char *)record + RECORD_TEXT_OFF, &text);
-    tl_set_status_class(str_eq_guarded((const char *)cls, SH_TL_CLASS) ? SH_TL_CLASS : "");
     if (!g_patch_logged) {
         int has_line = 0;
         __try { has_line = text && strstr((const char *)text, SH_TL_CLASS) != NULL; }
@@ -498,8 +439,6 @@ static void tl_patch_record(void)
                 SH_TL_CLASS, g_tile_row, has_line ? "yes" : "NO");
     }
 }
-
-/* ------------------------------------------------------------ rebind */
 
 static uint64_t tl_hash_entities(void **array, uint32_t count)
 {
@@ -518,7 +457,7 @@ static void tl_rebind(unsigned char *editor)
     void **array;
     uint32_t count = 0, i;
     uint64_t hash;
-    int substate = 0, rebinds = 0;
+    int substate = 0;
     if ((!g_tile_sedef || !g_unknown_sedef) && !g_nshared) return;
     if (!rd_ptr(editor + ED_MAP_OFF, &map) || !map) { g_ent_seen = 0; return; }
     if (!rd_ptr((unsigned char *)map + MAP_ENTITIES_OFF, &array_ptr) ||
@@ -548,18 +487,16 @@ static void tl_rebind(unsigned char *editor)
         if (!sh_apply_engine_deshare_bound() && (!rd_i32(holder, &refs) || refs != 1)) continue;
         if (!sh_apply_engine_deshare(&array[i]) || !(holder = array[i])) continue;
         *(const void **)((unsigned char *)holder + HOLDER_SEDEF_OFF) = want;
-        ++rebinds;
         if (InterlockedIncrement(&g_total_rebinds) <= REBIND_LOG_MAX)
             tl_logf("TL tile: entity %u rebound to %s", i,
                     want == g_tile_sedef ? SH_TL_TILE_SEDEF : want == g_unknown_sedef ? SH_TL_UNKNOWN_SEDEF
                                                                                        : "its stock row");
     }
-    /* Desharing replaces holders; hash the list as it now stands. */
+    /* Desharing replaces holders, so hash the list after it. */
     g_ent_array = array_ptr;
     g_ent_count = count;
     g_ent_hash = tl_hash_entities(array, count);
     g_ent_seen = 1;
-    InterlockedExchange(&g_last_rebinds, rebinds);
 }
 
 void sh_timeline_tile_tick(void *editor)
@@ -581,21 +518,19 @@ void sh_timeline_tile_tick(void *editor)
     }
 }
 
-/* ------------------------------------------------------------ install + slot */
-
 int sh_timeline_tile_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
-    const sig_result *build = clean_result(results, count, "SnapPaletteBuild");
+    const sig_result *build = sig_ok(results, count, "SnapPaletteBuild");
     void *tramp;
     if (g_build_orig) return 1;
-    g_ctor = (str_ctor_fn)clean(results, count, "IdStrCtor");
-    g_dtor = (str_dtor_fn)clean(results, count, "IdStrDtor");
-    g_anchor = (const unsigned char *)clean(results, count, "DeclRegistryAnchor");
-    g_type = (type_fn)clean(results, count, "DeclTypeByName");
-    g_register = (register_fn)clean(results, count, "DeclRegisterFile");
-    g_source = (source_fn)clean(results, count, "DeclSourceFind");
-    g_decl = (find_decl_fn)clean(results, count, "DeclFind");
-    g_generic_load = (generic_load_fn)clean(results, count, "ResourceGenericLoad");
+    g_ctor = (str_ctor_fn)sig_pointer(results, count, "IdStrCtor");
+    g_dtor = (str_dtor_fn)sig_pointer(results, count, "IdStrDtor");
+    g_anchor = (const unsigned char *)sig_pointer(results, count, "DeclRegistryAnchor");
+    g_type = (type_fn)sig_pointer(results, count, "DeclTypeByName");
+    g_register = (register_fn)sig_pointer(results, count, "DeclRegisterFile");
+    g_source = (source_fn)sig_pointer(results, count, "DeclSourceFind");
+    g_decl = (find_decl_fn)sig_pointer(results, count, "DeclFind");
+    g_generic_load = (generic_load_fn)sig_pointer(results, count, "ResourceGenericLoad");
     g_heap_ok = sh_process_heap_bind(&g_heap, results, count, module_base);
     g_last_error = (const char *)glb_resolve(module_base, "last_error_msg", NULL);
     if (!build || !g_ctor || !g_dtor || !g_anchor || !g_type || !g_register || !g_source || !g_decl ||
@@ -613,9 +548,9 @@ int sh_timeline_tile_install(const sig_result *results, size_t count, const uint
     }
     backend_log("TL tile: palette build hook installed");
     {
-        /* The sort guard (tl_palette_sort). Its absence costs the fix for A-D3
-         * only; the build hook above stands either way. */
-        const sig_result *site = clean_result(results, count, "SnapPaletteSortCall");
+        /* The sort guard (tl_palette_sort). Without it only the released-string fix is lost; the build hook above
+         * stands either way. */
+        const sig_result *site = sig_ok(results, count, "SnapPaletteSortCall");
         const unsigned char *target = site ? sh_timeline_tile_sort_target((const unsigned char *)site->addr + PALETTE_SORT_CALL_OFF) : NULL;
         void *st = target ? hook_prepare_rip_lea((void *)target, (void *)tl_palette_sort, PALETTE_SORT_STOLEN,
                                                  PALETTE_SORT_LEA_OFF)
@@ -635,16 +570,9 @@ int sh_timeline_tile_install(const sig_result *results, size_t count, const uint
     return 1;
 }
 
-/* A runtime rebuild of the live editor palette, shaped like the engine's own
- * callers of the builder (snaphak-re mod-system-reinstatement lane R3,
- * section 3): process heap 0 is entered and verified, so the new array, rows
- * and strings survive the Play transition that frees the ambient map heap;
- * the detour then runs pending registrations inside that scope, the builder
- * with a NULL progress object (guarded in the builder), and the cache resets
- * after it. The module palette (editor+0x206c0) is not rebuilt; whether it
- * keeps entity-row pointers is an open trace. Main thread only, from a point
- * where no native frame is iterating the palette (the caller checks the
- * thread). */
+/* Rebuild the live editor palette like the engine's builder callers, inside verified process heap 0 so it
+ * survives the Play transition that frees the map heap; pending registrations run in that scope (NULL progress
+ * object), then the cache resets. The module palette (editor+0x206c0) is untouched; main thread only. */
 void *sh_timeline_tile_palette(void)
 {
     return g_built_palette;
@@ -680,23 +608,4 @@ int sh_timeline_tile_rebuild_palette(int *rows_before, int *rows_after)
     return result;
 }
 
-int sh_timeline_tile_slot(struct sh_iface *self, sh_timeline_tile_call *call)
-{
-    unsigned char *ed = (unsigned char *)g_editor;
-    void *map = NULL;
-    (void)self;
-    if (!call || call->op != SH_TIMELINE_TILE_STATUS) return 0;
-    call->tile_row = call->unknown_row = -1;
-    call->last_rebinds = (int)InterlockedCompareExchange(&g_last_rebinds, 0, 0);
-    call->total_rebinds = (int)InterlockedCompareExchange(&g_total_rebinds, 0, 0);
-    call->registered = InterlockedCompareExchange(&g_registered, 0, 0) == 1;
-    call->record_class = NULL;
-    if (!ed || !rd_ptr(ed + ED_MAP_OFF, &map) || !map) return 0;
-    AcquireSRWLockShared(&g_status_lock);
-    call->tile_row = g_status_tile_row;
-    call->unknown_row = g_status_unknown_row;
-    if (g_record_class) call->record_class = sh_iface_text(g_record_class);
-    ReleaseSRWLockShared(&g_status_lock);
-    return 1;
-}
 #endif

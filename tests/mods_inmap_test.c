@@ -1,25 +1,7 @@
-/* mods_inmap_test.c -- the Mods tab's "In this map" against the save: the mods the document's map.mods names are
- * exactly the mods a save of the open map would write, at every step an author takes (docs/webview-ui.md, "A mod and
- * the open map").
- *
- * It runs the product's own modui.c (the document), modmanifest.c (the save, sh_modmanifest_on_save) and the serving
- * index over a temporary store of real built mods and a fake editor, and walks the cases:
- *
- *   nothing placed; a mod's object placed before any save; a second object of it; a mod reached only through another
- *   mod's object; a mod used by the whole map (Use in this map); the last object of a saved mod deleted; that delete
- *   undone; a mod of editor tweaks only installed while a stock object it tweaks is placed; a downloaded map's content (in the
- *   content cache) of a mod the player has installed too; Remove from map; a published map's content (a pinned row) opened with
- *   the installed folder alongside (D26); Update; the Snapmap+ entry of a map that uses Snapmap+'s own features (D6b),
- *   which is no mod.
- *
- * At each step the document is read first and the map saved second: the document must name the mods the save then
- * writes (D6b's entry is not a mod). The editor poll must move the document's generation when the open map's placed
- * names change, and only then.
- *
- * Each step's document (its mods and its map.mods, reduced to what the page reads) and the save's rows are written
- * to <out> and compared with the committed <fixture>, which tests/mods_inmap_test.js runs through the page's own
- * rule: the page's badge, block and This map window name exactly the save's mods. When the fixture differs, the run
- * fails and says to copy <out> over it after reading the change.
+/* mods_inmap_test.c -- the Mods tab's "In this map" against the save: the document's map.mods names exactly the mods a
+ * save of the open map writes, at every step an author takes (docs/webview-ui.md, "A mod and the open map"). Each
+ * step's document and save rows go to <out> and are compared with <fixture>, which mods_inmap_test.js runs through
+ * the page's rule.
  *
  *   mods_inmap_test.exe <tests\fixtures\mods\alex.r2-imp> <tests\fixtures\mods_inmap_cases.json> <out.json>
  */
@@ -213,7 +195,7 @@ static void bind_fakes(void)
     sh_modui_bind(&e);
 }
 
-/* What the map uses of Snapmap+ itself (D6b): on for the last case. */
+/* What the map uses of Snapmap+ itself: on for the last case. */
 static unsigned g_uses;
 static unsigned fake_uses(const char *json, size_t length, const char *const *names, size_t count)
 {
@@ -404,7 +386,7 @@ static int install(const char *src)
 
 /* The open map as a map whose rows of `salt` hold content (a published or downloaded map's): the map is saved, the
  * rows of that mod are pinned to their objects' units (modpin, as a publish does), the text with them is loaded in the
- * editor, and the content cache composes them, with the installed folder of the same mod alongside (D26). The
+ * editor, and the content cache composes them, with the installed folder of the same mod alongside. The
  * other rows stay as the save wrote them. */
 static void load_as_content(const char *salt)
 {
@@ -570,7 +552,7 @@ int main(int argc, char **argv)
     g_ents[5].uid = 5; g_ents[5].inherit = "mods/cratebox/crate"; g_ents[5].alive = 1;
     g_ent_n = 6;
     /* A downloaded map opened in the editor: its crates are its own content (in the content cache), and the player
-     * has the same mod installed (D26). The installed folder shows as in this map, which holds its own copy. */
+     * has the same mod installed. The installed folder shows as in this map, which holds its own copy. */
     load_as_content("cratebox");
     doc = list_doc();
     CHECK(has(doc, "\"key\":\"crates\",\"salt\":\"cratebox\""));
@@ -581,7 +563,7 @@ int main(int argc, char **argv)
     step("Remove from map of the mod used by the whole map");
 
     /* The author publishes the map: its imp row holds the published units, and the published text opened in the
-     * editor composes them, with the installed folder of the same mod alongside (D26). */
+     * editor composes them, with the installed folder of the same mod alongside. */
     for (i = 0; i < g_ent_n; i++) g_ents[i].alive = i <= 1;
     load_as_content("alexrimp");
     doc = list_doc();

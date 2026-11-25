@@ -1,70 +1,9 @@
-/* modprog.h -- render programs the product derives from the installed game's own.
- *
- * The layered programs, snapmapplus/layered/<base> for the bases listed in modprog.c (skinvmtr and
- * skinvmtrwounds, the lit skinned virtual-texture programs a ported demon's body, head and wounds draw with), draw
- * a layered surface at draw time: the material's own layer from its virtual-texture pages, blended with up to four
- * tiled layers chosen by a mask.
- * Everything else is the base program unchanged: skinning, page sampling and feedback, lighting, shadows,
- * the wound block, the effects. The blend's rule and what it writes are in programs/shaders/layered.rp.
- *
- * Each program has ONE source, an .rp file in the render program language (programs/shaders/): a function section
- * (hlsl_fp_header) and a call section. tools/gen_programs.js derives from it the OpenGL texts (the two sections as
- * they are), the Vulkan stage text (the functions translated to GLSL, samplers named as the engine names a
- * material's textures) and the SPIR-V (the same GLSL, compiled), so the two renderers run one rule.
- *
- * Every file of such a program's closure is derived, when first asked for and then remembered for the process,
- * from the base program's installed files and the product's own sources (programs/programs_layered.c, generated from
- * programs/shaders/ by tools/gen_programs.js); nothing of the game is shipped:
- *   generated/decls/renderprog/<P>.decl and each permutation's decl: the base's text with the blend's functions in
- *     an hlsl_fp_header section (before its hlsl_fp section; at the end of its own hlsl_fp_header when it has one)
- *     and the blend's call statements as its CUSTOM_TEXTURE_INPUTS template's first statements (the OpenGL renderer
- *     compiles this text);
- *   generated/renderprogs/<P>_pc_vulkan.bin and each permutation's: the base's cooked program with that decl's
- *     checksum, its textures (each with defaultsampler) after the stage's own, the binding tables moved past them,
- *     and the fragment stage text with the blend added (what the module was compiled from, as the engine's
- *     freshness check hashes it); the fragment stage's material uniforms do not grow;
- *   the fragment SPIR-V: the base's module with the blend's functions spliced in (types and constants shared),
- *     its samplers bound after the program's own textures (the program's later bindings move up), and a call where
- *     CUSTOM_TEXTURE_INPUTS begins (right after the store of inputs.normal that ends the texture inputs); its
- *     header hashA is the MD5fold of that stage text;
- *   the vertex SPIR-V: the base's, unchanged.
- * The render parms the programs read that are textures (generated/decls/renderparm/<name>.decl) are product decls
- * too. No vector render parm is: the layered program reads its 28 vectors from a texture, the `layerparms` image
- * (an 8 x 4 RGBA16F image, vector k the texel ( k % 8, k / 8 ); sh_modprog_param_image writes it, and
- * sh_modprog_register_param_image serves it at generated/image/snapmapplus/look/<hash>.bimage), and the particle
- * program reads its constants from the keys the game's particle program already holds (particleuberparms1..3,
- * emissive) and smokebrightness, a vector no program, fx or engine code names. The product's programs take none of
- * the engine's 1,024 vector render parm slots.
- *
- * A program's textures over all its stages are bounded by the engine (ID_VULKAN_MAX_BOUND_TEXTURES, 32: VK
- * 0x141a7bbb0); the layered programs' 20 (19 images and the parameter image) bring skinvmtrwounds to exactly 32
- * (2 vertex, 10 + 20 fragment), and the derivation refuses a program past 32. OpenGL's 32 texture units per stage
- * hold the fragment stage's 30.
- *
- * The particle program, snapmapplus/particles/uberparticles (the base uberparticles, every particle material's program
- * once the engine remaps transsortblend, particleshighq and explosionhighq to it), draws a CPU particle stage with
- * unlit, lit and explosion shading, the near fade and the soft-particle distance, from the same particle vertices and
- * the stage's constants in the material (programs/shaders/particles.rp). Its closure is derived the same way: the decl
- * with the shading's functions in an hlsl_fp_header section and the call statements after its
- * PREMULTIPLY_ALPHA_BLENDED( result ); the cooked program with smokebrightness, projectionmatrixz and globalvieworigin
- * after the fragment stage's material uniforms and the emissive sheet after its textures; the fragment SPIR-V with
- * ep_shade spliced in and called before main returns, replacing the colour the stock shading wrote (it reads the
- * program's own transmap, viewdepthmap and light atlas samplers and its own particleuberparms1..3 and emissive);
- * the vertex SPIR-V unchanged. A liquid stage keeps the game's own blood shading (its material names liquidhighq).
- *
- * The hair programs, snapmapplus/hair/<base> for hairprez (a hair card's alpha-tested depth pre-pass), hairshadow and
- * hairblending (its blended edge), are the game's own with the death fade the skin programs have: while the entity's
- * deathfadeopacity is below 1 a fragment is clipped by it against the magnificationclouds noise, so a hair card
- * dissolves with the body its demon burns away (programs/shaders/hair.rp). Their closure is derived the same way: the
- * decl with hr_fade in an hlsl_fp_header section and its call as the hlsl_fp section's last statements; the cooked
- * program with deathfadeopacity after the fragment stage's material uniforms and magnificationclouds after its
- * textures; the fragment SPIR-V with hr_fade spliced in and called before main returns; the vertex SPIR-V unchanged.
- * hairnew, the opaque pass, draws only where the pre-pass left depth and needs no variant.
- *
- * modstock.c answers for these paths as for an archive entry, in the container SH_MODPROG_CONTAINER: a mod's
- * material that names a multilayer program brings its closure along as pointers, which the builder checks and
- * the server serves like any other installed program, and which an upload never sends.
- */
+/* modprog.h -- render programs the product derives from the installed game's own: the layered, particle and hair
+ * variants, each from one .rp source (programs/shaders/) through tools/gen_programs.js, with nothing of the game shipped.
+ * Every file of a program's closure (decl, cooked program, SPIR-V) is derived on first use from the base program's
+ * installed files and remembered for the process; modstock.c serves the paths in the container SH_MODPROG_CONTAINER.
+ * A program's textures over all stages are bounded by the engine (ID_VULKAN_MAX_BOUND_TEXTURES, 32: VK 0x141a7bbb0),
+ * and the derivation refuses a program past 32. */
 #ifndef SNAPMAP_PLUS_MODPROG_H
 #define SNAPMAP_PLUS_MODPROG_H
 
@@ -76,26 +15,23 @@
 #define SH_MODPROG_EP_PREFIX "snapmapplus/particles/"
 #define SH_MODPROG_HR_PREFIX "snapmapplus/hair/"
 
-/* The names these two programs had before they stopped naming a source game. Served until 1.0 for mods emitted
- * before the rename: sh_modprog_owns and sh_modprog_read answer a path under either with the bytes of the
- * new-name path; sh_modprog_list lists only the new names. */
+/* Alternate prefixes for the particle and layered programs: owns and read answer them with the bytes of the
+ * matching new-name path; list names only the new ones. */
 #define SH_MODPROG_OLD_PREFIX    "snapmapplus/multilayer/"
 #define SH_MODPROG_EP_OLD_PREFIX "snapmapplus/eternal/"
 
 /* 1 when `path` (an archive path: '/' separated, any case) is a file the product derives, else 0. */
 int sh_modprog_owns(const char *path);
 
-/* The bytes of a product file, derived on first use: SH_MB_STOCK_OK with a process-heap copy (HeapAlloc on
- * GetProcessHeap; the caller frees it with HeapFree), SH_MB_STOCK_ABSENT for a path the product does not derive,
- * SH_MB_STOCK_UNAVAILABLE when the installed base program cannot be read or is not the one the derivation knows
- * (sh_modprog_cause says why in one sentence). */
+/* The bytes of a product file, derived on first use: SH_MB_STOCK_OK with a process-heap copy (the caller frees it with
+ * HeapFree), SH_MB_STOCK_ABSENT for a path the product does not derive, SH_MB_STOCK_UNAVAILABLE when the base program
+ * cannot be read or is not the one the derivation knows (sh_modprog_cause says why). */
 int sh_modprog_read(const char *path, unsigned char **bytes, size_t *len);
 
 /* Every product file path starting with `prefix` (lower case), passed to `fn`. */
 void sh_modprog_list(const char *prefix, void (*fn)(void *context, const char *path), void *context);
 
-/* Why the last derivation failed (one sentence), or "" when none has. Thread-local copy not needed: the text is
- * kept until the next failure or sh_modprog_reset. */
+/* Why the last derivation failed (one sentence), or "" when none has; kept until the next failure or reset. */
 const char *sh_modprog_cause(void);
 
 /* How a derivation reads the installed game: OK with a process-heap buffer, or a SH_MB_STOCK_* error. The
@@ -110,8 +46,6 @@ void sh_modprog_reset(void);
  * state slots (parmslots.h). The programs declare none, so this is NULL for every index. */
 const char *sh_modprog_vector_parm(unsigned i);
 
-/* ------------------------------------------------------------------ the parameter image and old keys ---- */
-
 /* A DOOM 2016 .bimage of format RGBA16F, `width` x `height`, one mip: texel i (row-major, 4 floats) as four halves,
  * round to nearest even. malloc'd; 1 on success. */
 int sh_modprog_bimage_rgba16f(unsigned width, unsigned height, const float texel[][4], unsigned char **bytes,
@@ -121,48 +55,36 @@ int sh_modprog_bimage_rgba16f(unsigned width, unsigned height, const float texel
  * the rest 0). malloc'd; 1 on success. */
 int sh_modprog_param_image(const float vec[][4], unsigned count, unsigned char **bytes, size_t *len);
 
-/* Registers that image to be served and returns its path, generated/image/snapmapplus/look/<16 lowercase hex digits of
- * the SHA-256 of its bytes>.bimage (the same vectors give the same path), valid until sh_modprog_reset; NULL on failure.
- * sh_modprog_owns and sh_modprog_read answer the path (SH_MODPROG_CONTAINER) once it is registered, and
- * sh_modprog_list names it. */
+/* Registers that image to be served and returns its path, generated/image/snapmapplus/look/<16 hex digits of the
+ * SHA-256 of its bytes>.bimage (the same vectors, the same path), valid until reset; NULL on failure. */
 const char *sh_modprog_register_param_image(const float vec[][4], unsigned count);
 
-/* Registers a constant image (4 x 4 RGBA16F, every texel `rgba`) to be served and returns its path,
- * generated/image/snapmapplus/look/c<16 lowercase hex digits of the SHA-256 of its bytes>.bimage (the same colour gives the
- * same path), valid until sh_modprog_reset; NULL on failure. Served and listed as the parameter image is. */
+/* Registers a constant image (4 x 4 RGBA16F, every texel `rgba`) and returns its path,
+ * generated/image/snapmapplus/look/c<16 hex digits of the SHA-256 of its bytes>.bimage; served as the parameter image is. */
 const char *sh_modprog_register_const_image(const float rgba[4]);
 
-/* The Graphics SDK's derived decls (sdk.h): registers `text` as a decl of `type` (the engine's spelling, any case) to
- * be served and returns its name: snapmapplus/sdk/<16 lowercase hex digits of the SHA-256 of the type and the text>,
- * snapmapplus_sdk_<hex> for a table (a material expression names its table, so the name has no '/'), at
- * generated/decls/<type lower case>/<name>.decl; the same text gives the same name. Valid until sh_modprog_reset; NULL
- * on failure. Served, owned and listed as the parameter image is. */
+/* Registers `text` as an SDK decl of `type` (any case) to be served at generated/decls/<type lower case>/<name>.decl and
+ * returns its name, snapmapplus/sdk/<16 hex digits of the SHA-256 of type and text> (snapmapplus_sdk_<hex> for a table,
+ * whose name has no '/'). The same text gives the same name; valid until reset; NULL on failure. */
 const char *sh_modprog_register_decl(const char *type, const char *text);
 
-/* An SDK effect's emitter: the entityDef snapmapplus/effect/<fx name> (inherit func/fx, fxEffect the fx), which the
- * product serves from its path alone, at generated/decls/entitydef/snapmapplus/effect/<fx name>.decl. malloc'd. */
+/* An SDK effect's emitter entityDef (inherit func/fx, fxEffect the fx), served at
+ * generated/decls/entitydef/snapmapplus/effect/<fx name>.decl. malloc'd. */
 char *sh_modprog_effect_emitter(const char *fx_name);
 
-/* A material that writes the OLD keys, rewritten so that it draws the same: for a particle material the four
- * eternalparticle* vectors and eternalparticleemissivemap into particleuberparms1..3, emissive, smokebrightness and
- * particleemissivemap (merged field by field with any of those lines the material has; see particles.rp for where each
- * went), for a layered material the 28 vector keys and blendlayer0heightmap into one `layerparms` line naming the
- * registered image (snapmapplus/look/<hash>.tga) and, with vector 9 saying where layer 0's height comes from, a
- * constant (a constant image's value, else a neutral height when no extra map is free) or a free extra map
- * (multilayerextramap0 or 1) the height image takes. Returns 1 with the new text in *out (malloc'd, *out_len bytes),
- * 0 when the material writes no old key (*out NULL), -1 on failure. Registers the image it names. */
+/* Rewrites old particle and layered vector keys into particleuberparms1..3, emissive, smokebrightness and one
+ * `layerparms` line naming the registered image. Returns 1 with the text in *out (malloc'd), 0 when no old key is
+ * written (*out NULL), -1 on failure. */
 int sh_modprog_legacy_material(const char *text, size_t len, char **out, size_t *out_len);
-
-/* ------------------------------------------------------------------ building blocks (tests) ---- */
 
 /* The layered variant of a base program's decl text (its line ends kept): the blend's functions in its
  * hlsl_fp_header section and the call as the first statements of its CUSTOM_TEXTURE_INPUTS template. NULL when the
  * text has no single CUSTOM_TEXTURE_INPUTS template or no hlsl_fp section. malloc'd. */
 char *sh_modprog_patch_decl(const char *text, size_t len, size_t *out_len);
 
-/* The base fragment stage text with the blend added: bindings at or after `tex_end` up by `shift`, the
- * samplers before the program's first struct or input (the material uniform block does not grow), the blend's functions before main and its call after `inputs.normal = sampleNormal.wyz;`. NULL when an
- * anchor is missing. malloc'd. */
+/* The base fragment stage text with the blend added: bindings at or after `tex_end` up by `shift`, the samplers before
+ * the first struct or input, the blend's functions before main and its call after `inputs.normal = sampleNormal.wyz;`.
+ * NULL when an anchor is missing. malloc'd. */
 char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len);
 
 /* The base fragment module (SPIR-V words, no DOOM header) with the blend spliced in. NULL with `why` set (a
@@ -170,20 +92,15 @@ char *sh_modprog_patch_glsl(const char *text, size_t len, unsigned tex_end, unsi
 uint32_t *sh_modprog_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
                             size_t *out_words, const char **why);
 
-/* The particle program's building blocks, as the layered ones above: the decl with the shading's functions and
- * its call; the fragment stage text with bindings at or after `tex_end` up by `shift`, the three parameters after the
- * material uniforms, the emissive sheet's sampler before the first input, ep_shade before main and its call at
- * main's end; the fragment module with ep_shade spliced in. NULL (with `why`) when the base is not the shape known. */
+/* The particle program's building blocks, as the layered ones: ep_shade and its call added to the decl, the fragment
+ * stage text (plus the three parameters and the emissive sampler) and the fragment module. NULL when the base differs. */
 char *sh_modprog_ep_patch_decl(const char *text, size_t len, size_t *out_len);
 char *sh_modprog_ep_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len);
 uint32_t *sh_modprog_ep_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
                                size_t *out_words, const char **why);
 
-/* The hair programs' building blocks, as the particle ones: the decl with the fade's function in its header section and
- * its call as the hlsl_fp section's last statements (NULL when the decl has no single hlsl_fp section closing on a line
- * of its own); the fragment stage text with bindings at or after `tex_end` up by `shift`, deathfadeopacity after the
- * material uniforms, the noise's sampler before the first input, hr_fade before main and its call at main's end (NULL
- * when an anchor is missing or the program already samples the noise); the fragment module with hr_fade spliced in. */
+/* The hair programs' building blocks, as the particle ones, with hr_fade and its call and the deathfadeopacity and noise
+ * sampler additions. NULL when an anchor is missing or the program already samples the noise. */
 char *sh_modprog_hr_patch_decl(const char *text, size_t len, size_t *out_len);
 char *sh_modprog_hr_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len);
 uint32_t *sh_modprog_hr_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
@@ -196,18 +113,17 @@ extern const char SH_MODPROG_ML_GLSL[];
 extern const char SH_MODPROG_ML_HEADER[];   /* OpenGL: the hlsl_fp_header section's text (no braces) */
 extern const char SH_MODPROG_ML_CALL[];     /* OpenGL: the statements that call it */
 
-/* The layered program's 28 vectors, by the material keys they had as render parms: vector k of the parameter image.
- * NOT render parms (the product declares none of them). Then its textures, in the order the program reads them. */
+/* The layered program's 28 vector keys (vector k of the parameter image; not render parms), then its textures in
+ * the order the program reads them. */
 extern const char *const SH_MODPROG_ML_PARMS[];
 extern const unsigned SH_MODPROG_ML_PARM_COUNT;
-/* What each of the 28 vectors was when a material did not set it (the old parms' decl defaults). */
+/* Each vector's value when a material does not set it. */
 extern const float SH_MODPROG_ML_DEFAULTS[28][4];
 extern const char *const SH_MODPROG_ML_TEXTURES[];
 extern const unsigned SH_MODPROG_ML_TEXTURE_COUNT;
 
-/* The particle program's generated module and texts (programs/programs_particles.c), the old keys of its constants
- * (SH_MODPROG_EP_PARMS: eternalparticle, eternalparticlefade, eternalparticlecolor, eternalparticlecolor2; NOT render
- * parms) and its texture. */
+/* The particle program's generated module and texts (programs/programs_particles.c), the keys of its constants
+ * (not render parms) and its texture. */
 extern const unsigned SH_MODPROG_EP_SPIRV_WORDS;
 extern const unsigned SH_MODPROG_EP_SPIRV[];
 extern const char SH_MODPROG_EP_GLSL[];

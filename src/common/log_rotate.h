@@ -11,10 +11,8 @@ extern "C" {
 /* Startup rollover threshold; logs can grow beyond it during a session. */
 #define LOG_ROTATE_CAP_BYTES (4ull * 1024ull * 1024ull)
 
-/* Move path to path.prev at or above cap_bytes, replacing the prior roll.
- * Call once per log at startup, before its first write (one static buffer
- * serves every call). Return 1 if moved, otherwise 0; failures are silent
- * because logging is not initialized yet. */
+/* Move path to path.prev at or above cap_bytes, replacing any prior roll. Call once per log at startup, before
+ * its first write (one static buffer serves every call); returns 1 if moved, else 0, silently. */
 #include <wchar.h>
 int log_rotate_if_large_w(const wchar_t *path, unsigned long long cap_bytes);
 /* The same for a UTF-8 path. */

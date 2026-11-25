@@ -1,13 +1,6 @@
-/* The script SDK: Lua libraries Snapmap+ ships for every mod (src/sdk/lua),
- * embedded in the backend. A script's require("enemy_sdk") finds the mod's
- * own scripts\lib\enemy_sdk.lua first and, when the mod has none, the
- * library of that name here, so a mod uses the SDK without carrying a copy
- * and may still replace a library with its own.
- *
- *   enemy_sdk         bind a brain (an object with spawn, think, damage ...) to an entityDef
- *   enemy_placement   what the map's author set on a placed demon (Spawn Behavior, Team, role)
- *   enemy_locomotion  locomotion modes: ground (the engine's navigation), perch (walls and ceilings)
- */
+/* The script SDK: the Lua libraries in src/sdk/lua (the enemy_* modules), embedded in the backend. A script's
+ * require("enemy_sdk") finds the mod's own scripts\lib\enemy_sdk.lua first, then the library of that name
+ * here, so a mod may replace any of them. */
 #ifndef SH_SCRIPT_SDK_H
 #define SH_SCRIPT_SDK_H
 

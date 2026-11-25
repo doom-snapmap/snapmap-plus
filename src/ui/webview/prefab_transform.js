@@ -57,11 +57,10 @@ var prefabTransform = (function () {
   }
 
   function grabFrame(doc) {
-    /* PrefabPopulate stores each entity as world x inverse(grab frame), and the grab frame's axis is the
-       hovered entity's own idMat3 (rows = its local X/Y/Z in world, unit vectors, no angles). The prefab
-       keeps that axis as grabAxis; PasteInstantiate reapplies it (times a yaw for the change in camera
-       heading, which an orbiting preview can ignore). Without it a prefab anchored on a tilted, rolled or
-       mirrored entity previews rotated by that entity's inverse. A degenerate axis falls back to identity. */
+    /* PrefabPopulate stores each entity as world x inverse(grab frame); the frame's axis is the hovered entity's
+       idMat3 (rows = local X/Y/Z in world), kept as grabAxis and reapplied by PasteInstantiate. Without it a prefab
+       anchored on a tilted or mirrored entity previews rotated by that entity's inverse; a degenerate axis is
+       identity. */
     var axes = orientationAxes(doc && doc.grabAxis ? doc.grabAxis : null);
     var det = determinant(axes);
     if (!isFinite(det) || Math.abs(Math.abs(det) - 1) > 0.05) return [[1,0,0],[0,1,0],[0,0,1]];
@@ -97,10 +96,8 @@ var prefabTransform = (function () {
             blockDemons: blocking && edit.blockDemons === true};
   }
 
-  // Parse prefab scene text. The April 2024 build's serializer writes block
-  // comments (a "camera yaw" comment before "cameraYaw", and one before every
-  // member), which the engine's own reader accepts and JSON.parse does not;
-  // drop them outside strings first. Throws like JSON.parse on anything else.
+  // Parses prefab scene text after dropping the block comments the serializer writes outside strings (the engine's
+  // reader accepts them, JSON.parse does not); throws like JSON.parse on anything else.
   function parseScene(sceneText) {
     var s = String(sceneText), out = '', i = 0, n = s.length, start = 0;
     while (i < n) {

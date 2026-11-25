@@ -1,22 +1,14 @@
 /* commands_decode.c -- the byte decoders the console install and its handlers run on engine code: the guarded
  * reader, the RIP-slot decode of an accessor, the idList-grow call out of AddCommand, and the dev-mode getter's
- * field. They live apart from commands.c (which links the whole backend) so commands_sites_test runs these same
- * functions against each shipped executable. */
+ * field. */
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
 #include "commands.h"
 #include "backend_log.h"
 
-/* Guarded byte reads shared by global decoders and entity handlers. */
-int sh_safe_read(const uint8_t *src, uint8_t *dst, size_t n)
-{
-    __try { for (size_t i = 0; i < n; i++) dst[i] = src[i]; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
-
-/* Decode the first RIP-relative MOV/LEA to RAX/RCX within the accessor window.
- * Return the pointer slot, not the object it contains. */
+/* Decodes the first RIP-relative MOV/LEA to RAX/RCX within the accessor window and returns the pointer slot, not
+ * the object it contains. */
 const uint8_t *sh_decode_rip_slot(const uint8_t *accessor_fn)
 {
     uint8_t b[B2_RIP_SCAN_WINDOW];
@@ -34,14 +26,13 @@ const uint8_t *sh_decode_rip_slot(const uint8_t *accessor_fn)
     return NULL;
 }
 
-/* Decode the idList-grow callee out of AddCommand's body. Returns NULL if the call site is not found
- * within the scanned window or the decoded target lands outside the DOOM module. */
+/* Decodes the idList-grow callee out of AddCommand's body. Returns NULL if the call site is not found in the
+ * scanned window or the target lands outside the DOOM module. */
 void *sh_decode_idlist_grow(void *add_command, const uint8_t *module_base)
 {
     if (!add_command || !module_base) return NULL;
 
-    /* Find LEA RCX,[RSI+8]; E8 rel32 in the first 256 bytes. The developer-list
-     * variant uses +0x20 and calls the same growth helper. */
+    /* Finds LEA RCX,[RSI+8]; E8 rel32 in the first 256 bytes. */
     const uint8_t *p = (const uint8_t *)add_command;
     for (unsigned i = 0; i + 9 <= 256; ++i) {
         uint8_t win[9];
@@ -52,7 +43,7 @@ void *sh_decode_idlist_grow(void *add_command, const uint8_t *module_base)
         memcpy(&rel, win + 5, sizeof rel);
         const uint8_t *tgt = p + i + 9 + rel;
 
-        /* Validate callable addresses against the mapped image. */
+        /* The target must lie in the mapped image. */
         uint8_t probe;
         if (tgt < module_base || !sh_safe_read(tgt, &probe, 1)) return NULL;
         return (void *)tgt;
@@ -61,10 +52,10 @@ void *sh_decode_idlist_grow(void *add_command, const uint8_t *module_base)
     return NULL;
 }
 
-/* SessionDevModeGetter's head: movzx eax, byte [rcx+disp32]. sh_disable_devmode patches over exactly these. */
+/* SessionDevModeGetter's head: movzx eax, byte [rcx+disp32]; sh_disable_devmode patches over exactly these. */
 const uint8_t SH_DEVMODE_GETTER_HEAD[3] = { 0x0F, 0xB6, 0x81 };
 
-/* The session field the getter's displacement names (0 when unreadable). */
+/* Returns the session field the getter's displacement names (0 when unreadable). */
 uint32_t sh_devmode_getter_field(const uint8_t *getter)
 {
     uint32_t field = 0;

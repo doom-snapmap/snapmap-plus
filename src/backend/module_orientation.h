@@ -1,8 +1,6 @@
-/* A placed module's orientation: one of eight codes (four quarter turns, then
- * four reflections), in the engine's order. Row o maps a module-local (x, y)
- * to world: world.x = M[o][0]*x + M[o][1]*y, world.y = M[o][2]*x + M[o][3]*y.
- * Every M[o] is orthogonal, so its inverse is its transpose. The one table
- * the navigation bake, its snapshot and Fly to read. */
+/* A placed module's orientation: eight codes (four quarter turns, then four reflections) in the engine's order.
+ * Row o maps module-local (x, y) to world: x' = M[o][0]*x + M[o][1]*y, y' = M[o][2]*x + M[o][3]*y; each M[o]
+ * is orthogonal, so its inverse is its transpose. */
 #ifndef SH_MODULE_ORIENTATION_H
 #define SH_MODULE_ORIENTATION_H
 

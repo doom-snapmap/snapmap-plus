@@ -1,27 +1,9 @@
-/* module_prefab_map.h -- cut Blueprint modules out of a saved map and merge them
- * into another. Pure functions over idSnapMap JSON (the engine's SerializeToJson
- * text); no engine dependency, unit-tested offline.
- *
- * A module prefab file is itself an idSnapMap holding only the chosen modules:
- *   instances        the chosen instances in selection order, origins relative
- *                    to the first one (the anchor);
- *   instanceEntities their groups (CSR of uniqueIds), then an empty global group;
- *   entities         the entities of those groups, uniqueIds unchanged;
- *   doorsAndCaps     the portal slots of those instances, in instance order;
- *   targets          the wires with both ends inside the set;
- *   references       each entity's entityEntRefs / entityVarRefs rows, slot
- *                    counts unchanged: an entity reference that leaves the set
- *                    becomes -1, a variable reference is remapped to the
- *                    variables carried in the file;
- *   variables        only the variables those entities reference (plus the
- *                    fixed persistent integers), every other top-level member
- *                    copied from the source map.
- * Entity positions are module-local, so moving an instance moves its entities.
- *
- * Variable references are (type << 24) | index, index 0xFFFFFF meaning unbound.
- * Types: 0 integer, 1 number, 2 boolean, 3 color, 4 string, 5 playerResource,
- * 6 teamResource, 7 cachedEntity, 8 customEvent, 9 persistentInteger (fixed,
- * never carried or remapped). */
+/* module_prefab_map.h -- cut Blueprint modules out of a saved map and merge them into another: pure functions
+ * over idSnapMap JSON, no engine dependency. A module prefab file is an idSnapMap holding only the chosen
+ * instances (origins relative to the first, the anchor), their entities (uniqueIds unchanged), portal slots
+ * and wires with both ends inside the set; entity references that leave the set become -1 and variable
+ * references (type << 24 | index, 0xFFFFFF unbound) are remapped to the carried variables. Entity positions
+ * are module-local. Variable type 9 (persistentInteger) is fixed: never carried or remapped. */
 #ifndef SH_MODULE_PREFAB_MAP_H
 #define SH_MODULE_PREFAB_MAP_H
 
@@ -56,17 +38,13 @@ typedef struct sh_mp_summary {
 
 void sh_mp_summary_free(sh_mp_summary *s);
 
-/* Cut the instances sel[0..nsel) (selection order; sel[0] is the anchor) out of
- * map. On success returns 1 with *out (malloc-owned, NUL-terminated) and *sum;
- * returns 0 with a reason in err. */
+/* Cut the instances sel[0..nsel) (sel[0] is the anchor) out of map: 1 with *out (malloc-owned,
+ * NUL-terminated) and *sum, or 0 with a reason in err. */
 int sh_mp_cut(const char *map, size_t len, const int *sel, int nsel,
               char **out, size_t *out_len, sh_mp_summary *sum, char *err, int errcap);
 
-/* Merge the prefab frag into map with the anchor at `at` (world). New
- * entities get fresh uniqueIds above every id the map uses (and above any
- * stale reference rows); variables are appended and remapped. *first_instance
- * is the index of the first added instance and *added the number added.
- * Returns 1 with *out, or 0 with a reason in err. */
+/* Merge the prefab frag into map with the anchor at `at` (world): new entities get fresh uniqueIds, variables
+ * are appended and remapped. Returns 1 with *out (*first_instance, *added set), or 0 with a reason in err. */
 int sh_mp_merge(const char *map, size_t len, const char *frag, size_t flen, const float at[3],
                 char **out, size_t *out_len, int *first_instance, int *added, char *err, int errcap);
 
@@ -78,12 +56,9 @@ int sh_mp_inspect(const char *frag, size_t flen, sh_mp_summary *sum, char *err, 
  * is anything else, including "idSnapEntityPrefab". Scans only the top level. */
 int sh_mp_is_module_file(const char *text, size_t len);
 
-/* The module guard. A prefab is placed only when every module it names is one
- * the receiving editor can build: a record in its module palette (stock rooms
- * and owned DLC), a Grid Room size the grid-room adapter makes, or a module an
- * installed mod serves. The engine has no safe answer for any other name: the
- * map validator drops the instance and keeps its entities, and the module
- * record builder raises "Couldn't find module in modulePalette". */
+/* The module guard: a prefab is placed only when every module it names is in the editor's module palette,
+ * a Grid Room size, or served by an installed mod. For any other name the map validator drops the instance
+ * and keeps its entities, and the record builder raises "Couldn't find module in modulePalette". */
 
 /* known(ctx, name): 1 the receiver can build the module, 0 it cannot, -1 it
  * cannot tell (no editor palette yet). */
@@ -107,11 +82,9 @@ int sh_mp_check_modules(const sh_mp_summary *s, sh_mp_module_known_fn known, voi
 /* "maps/modules/ind_dlc/ind_room.decl" -> "ind_dlc/ind_room": the name a toast shows. */
 void sh_mp_module_short_name(const char *name, char *out, size_t cap);
 
-/* The refusal texts for a check with missing_count > 0. Each returns the length
- * written (truncated to cap). The console line names every listed module in full:
- *   needs module <name>; this room is not in your palette (DLC or a mod you do not have)
- * The toast names them shortly and says nothing was placed. The status is the
- * Prefabs tab line shown before Load. */
+/* The refusal texts for a check with missing_count > 0; each returns the length written (truncated to cap).
+ * The console line names every listed module in full, the toast by short name, the status is the Prefabs
+ * tab line shown before Load. */
 int sh_mp_missing_console_line(const sh_mp_module_check *c, char *out, size_t cap);
 int sh_mp_missing_toast(const sh_mp_module_check *c, char *out, size_t cap);
 int sh_mp_missing_status(const sh_mp_module_check *c, char *out, size_t cap);
@@ -121,12 +94,9 @@ int sh_mp_missing_status(const sh_mp_module_check *c, char *out, size_t cap);
  * malloc-owned text or NULL. */
 char *sh_mp_check_json(const sh_mp_module_check *c);
 
-/* The summary view the save composes into the prefab's snapmapPlus block
- * (prefab_mods.h): {"desc":"","tags":[],"kind":"modules",...}; every member
- * but desc and tags becomes the block's "summary". bounds, when
- * not NULL, holds one world-axis box per module (min xyz, max xyz) relative to
- * the anchor; labels (may be NULL) the display names. desc/tags are written
- * empty. Returns malloc-owned text or NULL. */
+/* The summary view the save composes into the prefab's snapmapPlus block (prefab_mods.h); desc and tags are
+ * written empty. bounds (may be NULL) is one anchor-relative box per module (min xyz, max xyz), labels (may
+ * be NULL) the display names. Returns malloc-owned text or NULL. */
 char *sh_mp_summary_view_json(const sh_mp_summary *s, const float (*bounds)[6], const char *const *labels);
 
 /* ModuleRedoAction (Module Mode redo handler) calls Redo(editor) with an E8 rel32 at this offset. */

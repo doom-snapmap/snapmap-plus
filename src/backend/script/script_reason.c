@@ -8,8 +8,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 
-/* Set when a rule's working text did not fit: the rewording is then not
- * used and the message is kept as written, whole (sh_script_reason). */
+/* Set when a rule's working text did not fit: the message is then kept as written (sh_script_reason). */
 static __declspec(thread) int g_cut;
 
 static void put(char *out, size_t cap, const char *fmt, ...)
@@ -487,8 +486,7 @@ static void reason_into(const char *text, char *what, size_t what_cap, char *tod
 
 void sh_script_reason(const char *text, char **what, char **todo)
 {
-    /* Every rule's sentence is its own words and parts of the message: room
-     * for the message twice over and the longest wording. */
+    /* Room for the message twice over and the longest wording. */
     size_t cap;
     char *w, *t;
     if (!text) text = "";
@@ -500,8 +498,7 @@ void sh_script_reason(const char *text, char **what, char **todo)
     g_cut = 0;
     reason_into(text, w, cap, t, cap);
     if (g_cut) {
-        /* A part of the message did not fit a rule's working text: the
-         * message as written, whole. */
+        /* A part of the message did not fit a rule's working text: keep the message as written. */
         size_t n;
         free(w);
         w = heap_text("%s", text[0] ? text : "the script raised an error without a message");

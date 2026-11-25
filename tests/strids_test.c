@@ -1,9 +1,5 @@
-/* Tests #str_ injection from the admitted bundles' strings and the baked
- * defaults, with bundle-over-default precedence, cross-bundle conflicts,
- * rearm, retirement and native-table refusal. The user document of earlier
- * releases (strings\strids.json) is not read; a mod holding those strings,
- * which user_doc stands in for, is. Engine string-pool and list operations and the serving index's
- * bundle accessor are doubled to inspect appended key/value pairs. */
+/* Tests #str_ injection from the admitted bundles' strings and the baked defaults: precedence, conflicts, rearm,
+ * retirement and native-table refusal. Engine string-pool and list operations and the bundle accessor are doubled. */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -74,15 +70,14 @@ int hook_unpatch(void *tramp)
 
 /* ------------------------------------------------------------------ serving index double */
 
-/* The fixture lists bundles in the accessor's order (installed before
- * map-delivered, then id and version); like the real accessor, the double
+/* The fixture lists bundles in the accessor's order (installed before map-delivered, then id and version); the double
  * visits only admitted bundles that carry an extra object. */
 typedef struct fake_bundle {
     const char *id, *version;
     int place, admitted;
     const char *extra;
-    int edits_off;      /* its edits do not apply now (another map, not declared) */
-    int names_off;      /* its own names do not serve now (inert: the map declares another build) */
+    int edits_off;      /* its edits do not apply (another map, not declared) */
+    int names_off;      /* its own names do not serve (inert: the map declares another build) */
 } fake_bundle;
 static fake_bundle g_bundles[640];
 static int g_nbundles, g_bundle_visits, g_bundle_refuse;
@@ -127,8 +122,7 @@ static void set_bundles(const fake_bundle *list, int n)
     for (i = 0; i < n; i++) g_bundles[i] = list[i];
 }
 
-/* One installed mod whose strings.en is `pairs`, where earlier releases read
- * the user's strids.json. */
+/* One installed mod whose strings.en is `pairs`. */
 static char g_user_extra[4096];
 static int user_doc(const char *pairs)
 {
@@ -176,10 +170,8 @@ static unsigned int fake_hash(const char *s)
     return h;
 }
 
-/* The engine's heap selection (process_heap_scope.h): a stack of heap ids at
- * +0x44 and its depth at +0xC4. The map's heap (7) is selected unless a
- * scope pushed the process heap (0); g_push_ignored plays a push from the
- * wrong thread, which the engine ignores. */
+/* The engine's heap selection (process_heap_scope.h): a stack of heap ids at +0x44 with its depth at +0xC4. The map's
+ * heap (7) is selected unless a scope pushed the process heap (0); g_push_ignored plays a push from the wrong thread. */
 static unsigned char g_heap_self[0x100];
 static int g_push_ignored;
 static int g_insert_heap = -2;   /* the heap selected at the last append */
@@ -245,7 +237,7 @@ static int count_key(const char *id)
 
 /* ------------------------------------------------------------------ fixture helpers */
 
-/* Remove old PID-named fixtures so a reused process ID cannot inherit them. */
+/* Remove stale PID-named fixtures so a reused process ID cannot inherit them. */
 static void remove_tree(const char *path)
 {
     char pattern[MAX_PATH], child[MAX_PATH];
@@ -309,9 +301,8 @@ static unsigned char *dictionary_row(const char *id)
     return NULL;
 }
 
-/* A key the mod stops supplying is retired: a replaced vanilla row
- * gets its original record back and an introduced row disappears, while engine
- * pool text is never freed. */
+/* A key the mod stops supplying is retired: a vanilla row gets its original record back and an introduced row
+ * disappears; engine pool text is never freed. */
 static void test_dictionary_retirement(void)
 {
     unsigned char stock[32] = {0}, collision[32] = {0};
@@ -339,7 +330,7 @@ static void test_dictionary_retirement(void)
     CHECK(rearm_strings());
     CHECK(!count_key("temporary_label") && count_key("stock_label") == 1);
     CHECK(value_for("stock_label") && !strcmp(value_for("stock_label"), "Local"));
-    CHECK(retired_text && !strcmp(retired_text, "Temporary")); /* Engine pool text was not freed. */
+    CHECK(retired_text && !strcmp(retired_text, "Temporary")); /* Engine pool text is not freed. */
     CHECK(user_doc("{}"));
     CHECK(rearm_strings());
     CHECK(g_dictionary.count == baseline);
@@ -407,10 +398,8 @@ static const char *row_owner(const char *id)
     return NULL;
 }
 
-/* The bundle layer sits over the baked defaults;
- * two bundles disagreeing log once and the first in the accessor's order
- * stands; a rearm after an index rebuild adds the new bundles' keys and
- * retires the keys of one that left. */
+/* The bundle layer sits over the baked defaults; of two disagreeing bundles the first in the accessor's order stands
+ * and one line is logged. A rearm after an index rebuild adds new keys and retires those of a bundle that left. */
 static void test_bundle_layer(void)
 {
     static const fake_bundle first[] = {
@@ -517,12 +506,10 @@ static void test_bundle_layer(void)
     CHECK(g_dictionary.count == before);
 }
 
-/* Keys under each mod's salt (DECISIONS 5: <salt>_<name>, no '/'): three
- * packs each carry <salt>_ci_tab with the same text. Identical text under
- * different keys is two rows and no conflict; one key with two texts is
- * still one. */
-/* DECISIONS 9: a string edit (a key the game or Snapmap+ defines) applies
- * where its mod's edits apply; the mod's own keys always do. */
+/* Keys live under each mod's salt (<salt>_<name>): identical text under different keys is two rows and no conflict,
+ * while one key with two texts is a conflict. */
+/* A string edit (a key the game or Snapmap+ defines) applies where its mod's edits apply; the mod's own keys
+ * always do. */
 static void test_string_edits(void)
 {
     static fake_bundle packs[] = {
@@ -573,10 +560,8 @@ static void test_scope_check_many_bundles(void)
     CHECK(rearm_strings() == 1);
 }
 
-/* R6: a mod's own strings come from the build that serves the open map. The
- * root's build of salt mmmmmmmm and a downloaded map's build of it both
- * carry mmmmmmmm_title; the map declares its own build, so the root's is
- * inert and the map's text shows; with the map closed the root's returns. */
+/* A mod's own strings come from the build that serves the open map: the root's and a downloaded map's builds of one
+ * salt both carry mmmmmmmm_title, the map's text shows, and with the map closed the root's returns. */
 static void test_own_strings_follow_the_build(void)
 {
     static fake_bundle builds[] = {
@@ -621,10 +606,8 @@ static void test_plain_map(void)
     CHECK(sh_strids_scope_check() == 0 && sh_strids_refresh_pending() == -1);
 }
 
-/* The engine rebuilds its own dictionary (a language reload): every row this
- * injector added is gone and the game's rows are new records. A Refresh that
- * changes a mod's strings while a map is open must leave a valid table: each
- * key once, the new text, sorted. */
+/* After the engine rebuilds its dictionary (a language reload) a Refresh that changes a mod's strings leaves a valid
+ * table: each key once, the new text, sorted. */
 static void test_rebuilt_table(void)
 {
     static fake_bundle mod[] = {
@@ -659,9 +642,8 @@ static void test_rebuilt_table(void)
     CHECK(rearm_strings() == 1 && count_key("rrrrrrrr_name") == 0 && count_key("game_row") == 1);
 }
 
-/* A refresh that cannot complete leaves the previous table whole: here one
- * wanted key matches two game rows (an ambiguous adoption), while another
- * key the injector owns changes text. Nothing of the pass may land. */
+/* A refresh that cannot complete leaves the table whole: one wanted key matches two game rows (ambiguous) while
+ * another owned key changes text, and nothing of the pass lands. */
 static void test_failed_refresh_changes_nothing(void)
 {
     static fake_bundle mod[] = {
@@ -731,10 +713,8 @@ static void test_namespaced_keys(void)
 }
 
 
-/* The game's own sort of its dictionary, as its parser makes it: the first
- * argument is a comparator object on the parser's stack (a local
- * idLangDict::idSort_ByID), not the descriptor; only the rows say which list
- * is sorted. */
+/* The game's own sort of its dictionary passes a comparator object (a local idLangDict::idSort_ByID) as the first
+ * argument, not the descriptor; only the rows say which list is sorted. */
 static void invoke_sort_hook(void)
 {
     int before = g_sorts;
@@ -858,10 +838,8 @@ static void test_sort_hook_recovery(void)
 }
 
 
-/* A runtime pass grows the game's table in the process heap, never in the
- * map's heap the game frees with the map, and puts the map's heap back; a
- * thread where the process heap cannot be selected runs no pass and keeps
- * the refresh for the next one. */
+/* A runtime pass grows the game's table in the process heap, never in the map's heap, and restores the map's heap;
+ * a thread where the process heap cannot be selected runs no pass and keeps the refresh for the next one. */
 static void test_runtime_pass_heap(void)
 {
     CHECK(user_doc("{\"heap_key\":\"in the process heap\"}"));

@@ -109,7 +109,6 @@ done:
     return result;
 }
 
-/* ------------------------------------------------------------ the open map */
 
 static SRWLOCK g_lock = SRWLOCK_INIT;
 static sh_map_settings g_current = {{0}, {0}};
@@ -121,7 +120,7 @@ static void ms_describe(const sh_map_settings *s, char *out, size_t cap)
 {
     _snprintf_s(out, cap, _TRUNCATE, "Unlock View Distance %s, Unlock Map Bounds %s",
                 sh_map_render_unlocked(&s->render) ? "on" : "off",
-                sh_map_bounds_enabled(&s->bounds) ? "on" : "off");
+                sh_map_bounds_overrides(&s->bounds) ? "on" : "off");
 }
 
 char *sh_map_settings_prepare_load(const char *json, size_t len, size_t *out_len)

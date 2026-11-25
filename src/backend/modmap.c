@@ -84,8 +84,6 @@ static char *mm_str(const mpj *v)
     return v && v->type == MPJ_STR ? sh_mm_decode(v->text) : sh_mm_decode("");
 }
 
-/* ------------------------------------------------------------ names */
-
 typedef struct mm_names { char **v; size_t n, cap; int oom; } mm_names;
 
 static void mm_names_add(mm_names *s, const mpj *str)
@@ -124,8 +122,6 @@ static void mm_walk(const mpj *v, int in_edit, mm_names *s, int depth)
         else mm_walk(c, in_edit || !strcmp(k, "edit"), s, depth + 1);
     }
 }
-
-/* ------------------------------------------------------------ ints */
 
 static int mm_ints(const mpj *arr, long long **out, size_t *n)
 {

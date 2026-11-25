@@ -1,8 +1,6 @@
-/* mods_message.h -- how the window's host reads a page request for the Mods slot: the message names its route in
- * "cmd" ("modsAction"), the action by name and its argument, and the action's name maps to the slot's
- * SH_MODS_ACT_* code. One definition, which on_message (snapmap_plus_ui_webview.cpp) and
- * tests/publishing_key_dispatch_test.cpp both use, so a page module that names its message some other way fails a
- * test instead of being dropped without a word (R-LB1: the publishing key's Not now never reached the backend). */
+/* mods_message.h -- how the window's host reads a Mods slot request: the message's route in "cmd" ("modsAction"),
+ * the action by name and its argument, mapped to the slot's SH_MODS_ACT_* code. on_message and
+ * tests/publishing_key_dispatch_test.cpp share this one definition. */
 #pragma once
 #include <windows.h>
 #include <string>
@@ -67,10 +65,9 @@ inline bool parse_action(const std::wstring &json, std::wstring &action, std::ws
     return true;
 }
 
-/* The publishing key's file requests from the page, "backup\t<passphrase>" or "restore\t<passphrase>": the file comes
- * from the native picker (`pick(save, path)`, the host's own dialog), so the page never names a path, and the backend
- * gets "<op>\t<path>\t<passphrase>". 1 when the argument was a file request and now names the picked file, 0 when it is
- * another request (status, later), -3 when the picker was closed (nothing runs). */
+/* Turns a publishing key file request "backup|restore<TAB><passphrase>" into "<op><TAB><path><TAB><passphrase>", the
+ * path coming from the native picker `pick(save, path)` so the page never names one. Returns 1 when rewritten, 0 for
+ * any other request, -3 when the picker was closed (nothing runs). */
 template <class Pick>
 inline int key_file_request(std::string &arg, Pick pick)
 {

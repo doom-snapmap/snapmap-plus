@@ -1,9 +1,7 @@
-/* map_carrier_test -- the map's "snapmap-plus" root member (map_carrier.h):
- * found only at the root, read by part, stripped, written compact and last
- * with its parts in order, removed when it carries nothing, refused (read as
- * absent, still stripped) when malformed, and a map without it untouched;
- * the retired "place" part (an unknown part now: ignored on read, dropped by
- * a put of another part); the earlier-shape detector (sh_map_old_shape). */
+/* map_carrier_test -- the map's "snapmap-plus" root member (map_carrier.h): found only at the root, read by part,
+ * stripped, written compact and last with its parts in order, removed when it carries nothing, refused (read as
+ * absent, still stripped) when malformed, and a map without it untouched. Unknown parts (such as "place") are ignored
+ * on read and dropped by a put of another part; sh_map_old_shape detects maps in an earlier shape. */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
 #include <windows.h>
@@ -57,13 +55,13 @@ static void vanilla(void)
     CHECK(put(ENGINE, "nav", NULL, &n, err, sizeof err) == NULL && !err[0]);
     /* A member nested below the root is not the carrier. */
     {
-        static const char nested[] = "{\"a\":{\"snapmap-plus\":{\"format\":1,\"mods\":[]}}}";
+        static const char nested[] = "{\"a\":{\"snapmap-plus\":{\"format\":2,\"mods\":[]}}}";
         CHECK(sh_carrier_view_read(nested, sizeof nested - 1, &v) == 1 && v.state == SH_CARRIER_ABSENT);
         CHECK(sh_carrier_strip(nested, sizeof nested - 1, &n) == NULL);
     }
     /* Text that is not one object does not read. */
     CHECK(sh_carrier_view_read("[1]", 3, &v) == 0);
-    CHECK(sh_carrier_view_read("{\"snapmap-plus\":{\"format\":1}", 28, &v) == 0);
+    CHECK(sh_carrier_view_read("{\"snapmap-plus\":{\"format\":2}", 28, &v) == 0);
     CHECK(put("not json", "mods", "[]", &n, err, sizeof err) == NULL && err[0]);
     CHECK(put(ENGINE, "other", "[]", &n, err, sizeof err) == NULL && err[0]);
 }
@@ -118,7 +116,7 @@ static void placement(void)
     printf("-- found anywhere at the root, rewritten last; whitespace and the first-member case\n");
     /* A member not last (written by hand) is moved to the end. */
     {
-        static const char first[] = "{\"snapmap-plus\":{\"format\":1,\"mods\":[]} , \"version\":111}";
+        static const char first[] = "{\"snapmap-plus\":{\"format\":2,\"mods\":[]} , \"version\":111}";
         CHECK(sh_carrier_view_read(first, sizeof first - 1, &v) == 1 && v.state == SH_CARRIER_PRESENT);
         out = sh_carrier_strip(first, sizeof first - 1, &n);
         CHECK(out && !strcmp(out, "{\"version\":111}"));
@@ -128,7 +126,7 @@ static void placement(void)
         if (out) HeapFree(GetProcessHeap(), 0, out);
     }
     {
-        static const char middle[] = "{\"a\":1,\"snapmap-plus\":{\"format\":1},\"b\":2}";
+        static const char middle[] = "{\"a\":1,\"snapmap-plus\":{\"format\":2},\"b\":2}";
         out = sh_carrier_strip(middle, sizeof middle - 1, &n);
         CHECK(out && !strcmp(out, "{\"a\":1,\"b\":2}"));
         if (out) HeapFree(GetProcessHeap(), 0, out);
@@ -144,7 +142,7 @@ static void placement(void)
     }
     /* Pretty text: read with its whitespace, written before the root's close. */
     {
-        static const char pretty[] = "{\n  \"version\": 111,\n  \"snapmap-plus\" : { \"format\" : 1 ,\n"
+        static const char pretty[] = "{\n  \"version\": 111,\n  \"snapmap-plus\" : { \"format\" : 2 ,\n"
                                      "    \"mods\" : [ ] }\n}\n";
         CHECK(sh_carrier_view_read(pretty, sizeof pretty - 1, &v) == 1 && v.state == SH_CARRIER_PRESENT &&
               v.mods.present && span_is(pretty, v.mods.from, v.mods.to, "[ ]"));
@@ -158,7 +156,7 @@ static void placement(void)
         char *text = (char *)malloc(big + 128);
         CHECK(text != NULL);
         if (text) {
-            head = (size_t)sprintf_s(text, 128, "{\"version\":111,\"snapmap-plus\":{\"format\":1,\"nav\":[\"");
+            head = (size_t)sprintf_s(text, 128, "{\"version\":111,\"snapmap-plus\":{\"format\":2,\"nav\":[\"");
             memset(text + head, 'A', big);
             strcpy_s(text + head + big, 128 - 1, "\"]}}");
             CHECK(sh_carrier_part(text, strlen(text), "nav", NULL, NULL) == 1);
@@ -179,11 +177,11 @@ static void malformed(void)
         "{\"version\":111,\"snapmap-plus\":[1,2]}",                                   /* not an object */
         "{\"version\":111,\"snapmap-plus\":{\"mods\":[]}}",                            /* no format */
         "{\"version\":111,\"snapmap-plus\":{\"format\":3,\"mods\":[]}}",               /* another format */
-        "{\"version\":111,\"snapmap-plus\":{\"format\":1,\"mods\":\"garbage\"}}",      /* a part of the wrong type */
-        "{\"version\":111,\"snapmap-plus\":{\"format\":1,\"settings\":[]}}",
-        "{\"version\":111,\"snapmap-plus\":{\"format\":1,\"nav\":{}}}",
-        "{\"version\":111,\"snapmap-plus\":{\"format\":1,\"mods\":[],\"mods\":[]}}",   /* a part twice */
-        "{\"version\":111,\"snapmap-plus\":{\"format\":1},\"snapmap-plus\":{\"format\":1}}",  /* the member twice */
+        "{\"version\":111,\"snapmap-plus\":{\"format\":2,\"mods\":\"garbage\"}}",      /* a part of the wrong type */
+        "{\"version\":111,\"snapmap-plus\":{\"format\":2,\"settings\":[]}}",
+        "{\"version\":111,\"snapmap-plus\":{\"format\":2,\"nav\":{}}}",
+        "{\"version\":111,\"snapmap-plus\":{\"format\":2,\"mods\":[],\"mods\":[]}}",   /* a part twice */
+        "{\"version\":111,\"snapmap-plus\":{\"format\":2},\"snapmap-plus\":{\"format\":2}}",  /* the member twice */
     };
     printf("-- a malformed member is refused (read as absent) and still removed; the map is kept\n");
     for (i = 0; i < sizeof bad / sizeof bad[0]; i++) {
@@ -205,7 +203,7 @@ static void malformed(void)
     }
     /* Unknown parts are ignored on read and not written back. */
     {
-        static const char future[] = "{\"snapmap-plus\":{\"format\":1,\"later\":{\"x\":[1]},\"mods\":[]}}";
+        static const char future[] = "{\"snapmap-plus\":{\"format\":2,\"later\":{\"x\":[1]},\"mods\":[]}}";
         CHECK(sh_carrier_view_read(future, sizeof future - 1, &v) == 1 && v.state == SH_CARRIER_PRESENT && v.mods.present);
         out = put(future, "nav", "[]", &n, err, sizeof err);
         CHECK(out && !strcmp(out, "{\"snapmap-plus\":{\"format\":2,\"mods\":[],\"nav\":[]}}"));
@@ -235,9 +233,8 @@ static void readers(void)
           sh_carrier_array_next(&cursor, cursor + 4, &elem, &len) == -1);
 }
 
-/* One pass names a map in an earlier shape: a variables.string name in a
- * retired family, or a member row with "id" or "bundle". A family's text that
- * is not a variable's name (prose, an entity name, a value) is not one. */
+/* One pass names a map in an earlier shape: a variables.string name in a retired family, or a member row with "id" or
+ * "bundle". A family's text that is not a variable's name (prose, an entity name, a value) is not one. */
 static void old_shapes(void)
 {
     static const char *const families[] = {
@@ -248,6 +245,10 @@ static void old_shapes(void)
     char map[1024];
     size_t i;
     printf("-- earlier shapes: each family and an id row is named; the current shape passes\n");
+    const char old_empty[] = "{\"snapmap-plus\":{\"format\":1}}";
+    sh_carrier_view v;
+    CHECK(sh_map_old_shape(old_empty,sizeof old_empty - 1) == SH_MAP_OLD_FORMAT);
+    CHECK(sh_carrier_view_read(old_empty,sizeof old_empty - 1,&v) && v.state == SH_CARRIER_MALFORMED);
     CHECK(sh_map_old_shape(ENGINE, sizeof ENGINE - 1) == SH_MAP_OLD_NONE);
     for (i = 0; i < sizeof families / sizeof families[0]; i++) {
         _snprintf_s(map, sizeof map, _TRUNCATE,
@@ -275,7 +276,7 @@ static void old_shapes(void)
         static const char bundle_row[] = ENGINE_HEAD MEMBER(",\"mods\":[" "{\"mod\":\"aaaabbbb@x\",\"size\":1},"
                                                             "{\"bundle\":\"x\",\"size\":1}]") "}";
         static const char names_only[] = ENGINE_HEAD MEMBER(",\"mods\":[{\"mod\":\"aaaabbbb\",\"names\":[\"id\",\"bundle\"]}]") "}";
-        /* Format 1 (before units) named a mod "<salt>@<build hash>": an earlier shape; a format 2 row names the salt. */
+        /* A format 1 row names a mod "<salt>@<build hash>" (an earlier shape); a format 2 row names the salt. */
         static const char at_row[] = "{\"entities\":[],\"~type\":\"idSnapMap\",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"aaaabbbb@"
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"size\":1,\"names\":[]}]}}";
         static const char fmt2_row[] = "{\"entities\":[],\"~type\":\"idSnapMap\",\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"aaaabbbb\","
@@ -284,14 +285,13 @@ static void old_shapes(void)
         CHECK(sh_map_old_shape(id_row, sizeof id_row - 1) == SH_MAP_OLD_ROWS);
         CHECK(sh_map_old_shape(bundle_row, sizeof bundle_row - 1) == SH_MAP_OLD_ROWS);
         CHECK(sh_map_old_shape(names_only, sizeof names_only - 1) == SH_MAP_OLD_NONE);
-        CHECK(sh_map_old_shape(at_row, sizeof at_row - 1) == SH_MAP_OLD_ROWS);
+        CHECK(sh_map_old_shape(at_row, sizeof at_row - 1) == SH_MAP_OLD_FORMAT);
         CHECK(sh_map_old_shape(fmt2_row, sizeof fmt2_row - 1) == SH_MAP_OLD_NONE);
     }
     CHECK(!strcmp(SH_MAP_OLD_REFUSAL, "This map was saved by an earlier Snapmap+; run the Snapmap+ installer to update it."));
 }
 
-/* "place" (a map's folder under mods\maps\, retired) is no longer a part: an unknown one is ignored on read and
- * not written back. */
+/* "place" is not a part: an unknown one is ignored on read and not written back. */
 static void place_retired(void)
 {
     static const char with_place[] = ENGINE_HEAD MEMBER(",\"mods\":" MODS ",\"place\":\"Caf\xc3\xa9 arena\"") "}";
@@ -304,7 +304,7 @@ static void place_retired(void)
     CHECK(sh_carrier_view_read(with_place, sizeof with_place - 1, &v) == 1 && v.state == SH_CARRIER_PRESENT);
     CHECK(v.mods.present && span_is(with_place, v.mods.from, v.mods.to, MODS) && !v.settings.present && !v.nav.present);
     CHECK(sh_carrier_part(with_place, sizeof with_place - 1, "mods", &from, &to) == 1 && span_is(with_place, from, to, MODS));
-    /* Not a part any longer: asking for it is a refused name, and a wrong-typed place does not malform the member. */
+    /* Asking for "place" is a refused name, and a wrong-typed place does not malform the member. */
     CHECK(sh_carrier_part(with_place, sizeof with_place - 1, "place", &from, &to) != 1);
     CHECK(sh_carrier_view_read(bad_place, sizeof bad_place - 1, &v) == 1 && v.state == SH_CARRIER_PRESENT && v.mods.present);
     /* A put of another part writes the member without it. */
@@ -312,7 +312,7 @@ static void place_retired(void)
     CHECK(a && !strcmp(a, ENGINE_HEAD MEMBER(",\"mods\":" MODS ",\"settings\":" SETTINGS) "}") && !strstr(a, "place"));
     b = put(with_place, "mods", NULL, &n, err, sizeof err);
     CHECK(b && !strstr(b, "place"));
-    /* A member with the place only carries nothing readable. */
+    /* A member holding only the place part carries nothing readable. */
     c = put(only_place, "nav", NAV, &n, err, sizeof err);
     CHECK(c && !strcmp(c, ENGINE_HEAD MEMBER(",\"nav\":" NAV) "}"));
     if (a) HeapFree(GetProcessHeap(), 0, a);

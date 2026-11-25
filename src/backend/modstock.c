@@ -1,16 +1,6 @@
-/* modstock.c -- see modstock.h. The two pindex files of the installed game
- * are parsed into one table of rows (name, container, selector, offset,
- * stored and decoded size); a row's bytes are read with one positional read
- * and, when stored smaller than decoded, inflated. Loose files are read from
- * <doom>\base\<path>, then <doom>\<path>. Nothing here writes a file.
- *
- * pindex layout (13954591): 0x05 "SER", a
- * big-endian length of the rest past 0x20, a big-endian row count at 0x20,
- * then per row 4 bytes, three length-prefixed (little-endian) ASCII strings
- * (type, name, path) and 21 fixed bytes: offset (be64), decoded size (be32),
- * stored size (be32), four flag bytes and the selector (0 .resources,
- * 1 .patch). An entry's name is its path, or its name when the path is empty.
- */
+/* modstock.c -- see modstock.h. Parses the installed game's two pindex files into one row table; a row's bytes are
+ * one positional read, inflated when stored smaller than decoded, and loose files come from <doom>\base\<path>,
+ * then <doom>\<path>. Nothing here writes a file. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -64,8 +54,6 @@ static unsigned char (*g_sha)[32];
 static unsigned char *g_sha_done;
 static volatile LONG g_slices_hashed, g_reads;
 static volatile LONG64 g_bytes_hashed;
-
-/* ------------------------------------------------------------ helpers ---- */
 
 static __inline char mst_fold(char c)
 {
@@ -215,8 +203,6 @@ static void mst_free(void *p, int heap)
     else free(p);
 }
 
-/* ------------------------------------------------------------- loading ---- */
-
 static void mst_free_table(void)
 {
     int c, s;
@@ -304,6 +290,10 @@ static int mst_grow(void **p, size_t *cap, size_t need, size_t elem)
     return 1;
 }
 
+/* pindex layout (13954591): 0x05 "SER", a big-endian length of the rest past 0x20, a big-endian row count at 0x20,
+ * then per row 4 bytes, three length-prefixed (little-endian) ASCII strings (type, name, path) and 21 fixed bytes:
+ * offset (be64), decoded size (be32), stored size (be32), four flag bytes, the selector (0 .resources, 1 .patch).
+ * A row's name is its path, or its name when the path is empty. */
 static int mst_parse_pindex(int container, const unsigned char *d, size_t len, size_t *rows_cap, size_t *names_cap)
 {
     unsigned rows, r;
@@ -434,8 +424,6 @@ static int mst_ready(void)
     return InterlockedCompareExchange(&g_state, 0, 0) == MST_READY;
 }
 
-/* ------------------------------------------------------------- slices ---- */
-
 static HANDLE mst_archive(const mst_row *r)
 {
     HANDLE h = g_files[r->container][r->selector];
@@ -532,8 +520,6 @@ static uint32_t mst_name_range(const char *name, uint32_t *count)
     return first;
 }
 
-/* ------------------------------------------------------------- loose files ---- */
-
 /* The loose file of `source` under the game's folder (which 1) or its base
  * folder (which 0), malloc'd; NULL for a name that is not a stock source. */
 static char *mst_loose_path(const char *source, int which)
@@ -564,8 +550,6 @@ static int mst_loose_sha(const char *path, char hex[SH_MB_HASH_HEX + 1], unsigne
     InterlockedAdd64(&g_bytes_hashed, (LONG64)*size);
     return 1;
 }
-
-/* --------------------------------------------------------------- the ops ---- */
 
 /* *out = a copy of `name` when it is a stock source. */
 static int mst_copy_source(const char *name, char **out)
@@ -619,10 +603,8 @@ int sh_modstock_match(const char *request, unsigned long long size, const char *
         free(stripped);
         if (hit) return SH_MB_STOCK_OK;
     }
-    /* A renamed copy: rows of the same decoded size and extension, hashed
-     * lazily in (size, extension, archive, name) order until one matches,
-     * every candidate (each slice is hashed once per process, so the game's
-     * own rows bound the work). */
+    /* A renamed copy: rows of the same decoded size and extension, hashed lazily in (size, extension, archive,
+     * name) order until one matches; each slice is hashed once per process, so the game's rows bound the work. */
     if (size > 0xffffffffull) return SH_MB_STOCK_ABSENT;
     ext = mst_ext_hash(request, strlen(request));
     {
@@ -645,7 +627,6 @@ int sh_modstock_match(const char *request, unsigned long long size, const char *
     return SH_MB_STOCK_ABSENT;
 }
 
-/* ------------------------------------------------- derived programs ---- */
 /* The render programs the product derives from the installed game's own (modprog.h) are answered here as entries
  * of the container SH_MODPROG_CONTAINER, so the builder and the server treat them as installed content. */
 
@@ -895,8 +876,6 @@ int sh_modstock_list(const char *prefix, void (*fn)(void *context, const char *p
     sh_modprog_list(folded, fn, context);
     return SH_MB_STOCK_OK;
 }
-
-/* ------------------------------------------------------- registration ---- */
 
 static int op_match(void *c, const char *request, unsigned long long size, const char *sha, char **src)
 { (void)c; return sh_modstock_match(request, size, sha, src); }

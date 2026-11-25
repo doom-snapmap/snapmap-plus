@@ -1,23 +1,9 @@
-/* script_combat_sigs_test.c -- the engine sites of the mod-script combat
- * calls and of the damage, pain and projectile hooks
- * (src/backend/script/script_combat_sigs.c, script_api_combat.c,
- * script_hooks.c), checked on each build 13954591 executable given on the
- * command line:
- *   - every private signature resolves to one match at its recorded RVA, and
- *     each detour window is whole, position-independent instructions;
- *   - the call graph the hooks rely on: idAI2::Damage calls Damage_Apply, which
- *     calls the OnDamage dispatcher; Event_LaunchProjectileAtTarget calls
- *     idProjectile::Launch; the ae_radiusDamage handler calls RadiusDamage;
- *     SetPainReaction writes ai +0x5060;
- *   - the FX manager's stop of one action reads the fields the hard stop
- *     rule reads, and its fade branch is the code the rule skips;
- *   - the FX manager's request of one action reads the fields the sound
- *     request rule reads, its head and re-arm are as described, and the
- *     update starts a sound item again and stores its new handle over the old;
- *   - idProjectile's vtable (by its RTTI name) holds Explode at +0xAA0;
- *   - the painType_t, soundChannel_t and fxCondition_t tables are found by
- *     sh_script_combat_enum_find with the names and values the calls use.
- * Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
+/* script_combat_sigs_test.c -- the engine sites of the mod-script combat calls and of the damage, pain and projectile
+ * hooks (script_combat_sigs.c, script_api_combat.c, script_hooks.c), checked on each build 13954591 executable given
+ * on the command line. Every private signature resolves to one match at its recorded RVA, each detour window is whole
+ * position-independent instructions, and the call graph holds (idAI2::Damage -> Damage_Apply -> the OnDamage
+ * dispatcher, SetPainReaction writes ai +0x5060, idProjectile's vtable holds Explode at +0xAA0). The FX manager's stop
+ * and request read the fields the hard stop and sound request rules read, and the enum tables are found by name. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -272,9 +258,8 @@ static void check_image(const char *path)
             CHECK(slot - image_base == rva[SH_COMBAT_SIG_AI_DAMAGE]);
             CHECK(call_in(base, rva[SH_COMBAT_SIG_AI_DAMAGE], 0x40, damage) != 0);
         }
-        /* c_actor_damage passes no hit. The body takes the hit (its 7th argument) and the count the slot gives it
-         * (1), and copies hits only from a hit that is not NULL; its Damage_Calculate counts no hit as one and gives
-         * a record with none the default location. Both images, the same offsets. */
+        /* c_actor_damage passes no hit: the body takes the hit (7th argument) and the count (1) and copies only a
+         * non-NULL hit, and Damage_Calculate counts no hit as one and gives the record the default location. */
         {
             uint32_t calc = vk ? 0x3FB1D0u : 0x3FA6B0u;
             const uint8_t *b = base + damage, *c = base + calc;

@@ -15,9 +15,7 @@ void get_int_array(const std::wstring &json, const wchar_t *key, std::vector<int
 // Strings of a JSON array value; a non-string element ends the read.
 void get_string_array(const std::wstring &json, const wchar_t *key, std::vector<std::wstring> &out);
 bool get_double(const std::wstring &json, const wchar_t *key, double *out);
-// The top-level object's "~type" value from a prefab file, or "" when it has
-// none. Skips nested values, strings and the // and /* */ comments the
-// engine's pretty writer emits. "idSnapMap" = module prefab, "idSnapEntityPrefab"
-// = object prefab.
+// The top-level "~type" of a prefab file, or "" when absent ("idSnapMap" = module,
+// "idSnapEntityPrefab" = object). Skips nested values, strings and comments.
 std::string top_level_type(const std::string &text);
 }

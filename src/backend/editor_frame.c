@@ -1,13 +1,5 @@
-/* editor_frame.c -- see editor_frame.h.
- *
- * The hook has the EXACT prototype of the target, so the stolen-prologue trampoline preserves the
- * engine's calling convention. We add nothing to the frame except a bounded check on most frames,
- * and, on the one frame a request is serviced, a single engine call.
- *
- * ORDER: the engine's own Think runs FIRST, unconditionally, and our work runs after it returns.
- * That is the whole point of the file -- servicing before it would put our call ahead of the state
- * the frame is about to establish, which is the nested-context mistake this exists to avoid.
- */
+/* editor_frame.c -- see editor_frame.h. The hook has the target's exact prototype; the engine's own Think
+ * runs first and requests are serviced after it returns, so no call lands ahead of the frame's state. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -31,35 +23,26 @@
 #include "../fault_shield/recovery.h"   /* a failed reload's dialogs are the product's */
 #include "../common/text.h"
 
-/* EditorFrame prologue steal window. The signature's own 33 bytes, every one of them whole and
- * position-independent (register/rsp/rbp only; no RIP-relative operand and no relative branch), so
- * the window can be taken at either of two instruction boundaries. 25 is the smaller: through
- * `sub rsp,0x90`, stopping before the `mov qword [rbp-0x39],-2`. We take 25 rather than 33 because
- * a steal only has to be big enough for the jump the hook writes, and a shorter window is a smaller
- * bet on the disassembly being right about every byte after it. */
+/* EditorFrame prologue steal window. The signature's 33 bytes are whole and position-independent (no
+ * RIP-relative operand, no relative branch), so the window ends at either of two instruction boundaries;
+ * 25 (through `sub rsp,0x90`) is taken because a steal only has to hold the hook's jump. */
 #define EDITOR_FRAME_STOLEN 25
 
-/* Editor object field offsets. Read from the pinned build's decompile of the frame function itself
- * (the state id is `param_1[0x46c3]`, i.e. +0x23618) and cross-checked against an independent
- * corpus that live-drove this same reload. Field LAYOUTS are identical between the two shipped
- * executables -- only code and data addresses move -- so these do not need deriving, unlike the
- * singleton's address. Every read through them is SEH-guarded regardless. */
+/* Editor object field offsets, identical in both executables; every read through them is SEH-guarded. */
 #define ED_MAP_PTR_OFF    0x204C8   /* the live idSnapMap*; null until a map is open */
-#define ED_DEACT_OFF      0x2120D   /* byte: a deactivate/shutdown is deferred to the frame loop */
-#define ED_STATE_OFF      0x23618   /* int: current editor state id; 0 = no state running */
-#define ED_SUBSTATE_OFF   0x224DC   /* int: 5 = mid-transition, do not disturb */
+#define ED_DEACT_OFF      0x2120D   /* byte: deactivate deferred to the frame loop */
+#define ED_STATE_OFF      0x23618   /* int: state id; 0 = none running */
+#define ED_SUBSTATE_OFF   0x224DC   /* int: 5 = mid-transition */
 
 typedef void (*editor_frame_fn)(void *editor, void *arg);
 typedef int  (*ef_load_map_fn)(void *editor, void *id_str);
 
 static editor_frame_fn g_frame_orig  = NULL;
 static ef_load_map_fn  g_load_map    = NULL;
-/* The entry as resolved, kept because installing the hook overwrites the prologue that
- * identifies it. The fault shield needs the same address and scans later. */
+/* The entry as resolved, kept because installing the hook overwrites the prologue that identifies it. */
 static void           *g_frame_entry = NULL;
-/* The INLINE idSnapEditorLocal OBJECT, not a pointer to one -- it is in-place constructed at a data
- * global, exactly as iface_engine.c documents. So this address IS the `this` LoadMap wants; there is
- * no dereference step, and adding one would read the object's first field as a pointer. */
+/* The inline idSnapEditorLocal object, constructed in place at a data global (see iface_engine.c). This
+ * address is the `this` LoadMap wants; dereferencing it would read the first field as a pointer. */
 static uintptr_t       g_editor_obj  = 0;
 
 /* ReadLocalSavedMapText(localId, idStr *text, ...) and IdStrAssignCStr(idStr *, const char *). */
@@ -75,7 +58,7 @@ static DWORD       g_borrow_thread = 0;
 /* A LoadMap fault turns off the reload only: a later call would meet the same engine state. */
 static volatile LONG  g_reload_faulted = 0;
 
-/* One queued request of each kind, with the map and load generation it was made for. */
+/* One queued request of each kind, tagged with the map and load generation it was made for. */
 typedef struct ef_save_request {
     void *map;
     unsigned long generation;
@@ -97,18 +80,10 @@ static volatile LONG  g_reload_pending = 0;
 static SRWLOCK g_reload_lock = SRWLOCK_INIT;
 static ef_reload_request g_reload_request;
 
-/* ------------------------------------------------------------------ the saved-map id ------------
- * LoadMap names a map by its save-directory id. Local SnapMap saves live one folder per map at
- *
- *     <Saved Games>\id Software\DOOM\base\savegame.user\<account id>\SNAPMAPS<20 hex>
- *
- * and that 20-hex suffix IS the id. Each account has its own numeric folder under savegame.user,
- * and "Saved Games" is a known folder in its own right that can be relocated, so it is asked for,
- * with the profile root as the fallback. The walk is wide: a profile path need not be ASCII.
- *
- * A copied save folder is NOT a second map: the engine keys a save by the `localId` inside its
- * game.details, so both list entries open the same map. The reload borrows an existing slot and
- * relies on the branch answer (rawmap.c) to keep Save from writing over it. */
+/* LoadMap names a map by its save-directory id: the 20-hex suffix of a folder
+ * <Saved Games>\id Software\DOOM\base\savegame.user\<account id>\SNAPMAPS<20 hex>. "Saved Games" is a
+ * relocatable known folder (profile root as the fallback), and the engine keys a save by the `localId`
+ * in its game.details, so the reload borrows an existing slot and the branch answer (rawmap.c) keeps Save off it. */
 
 /* The id must be exactly 20 hex digits. Checked because it is about to be handed to an engine
  * function as a name: anything else means we misread the directory layout. */
@@ -184,10 +159,8 @@ static int newest_saved_map_id(char *out, size_t cap)
             if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
             if (!valid_map_id(fd.cFileName + 8)) continue;   /* skip "SNAPMAPS" */
 
-            /* A correctly-named folder is NOT a saved map. Deleting a map in DOOM removes
-             * game.details and map.decl but leaves both .verify sidecars, so the tree fills with
-             * folders that pass every name check and hold no data. Require the two files that
-             * actually constitute a save. */
+            /* A correctly-named folder is not a saved map: deleting a map in DOOM leaves empty folders
+             * with their .verify sidecars, so require game.details and map.decl. */
             decl = sh_wtextf(L"%s\\%s\\%s\\map.decl", base, acct.cFileName, fd.cFileName);
             details = sh_wtextf(L"%s\\%s\\%s\\game.details", base, acct.cFileName, fd.cFileName);
             whole = decl && details && GetFileAttributesW(decl) != INVALID_FILE_ATTRIBUTES &&
@@ -210,11 +183,8 @@ static int newest_saved_map_id(char *out, size_t cap)
     return found && out[0] != '\0';
 }
 
-/* ------------------------------------------------------------------ editor state --------------- */
-
-/* Is the editor LIVE and holding a map? The map pointer alone SURVIVES leaving the editor, still
- * holding the last map at the main menu; ED_STATE_OFF == 0 is what separates "a map is open" from
- * "a map was open". */
+/* Is the editor live and holding a map? The map pointer survives leaving the editor, so a zero
+ * ED_STATE_OFF is what says no map is open. */
 static int ef_editor_live_with_map(void *editor)
 {
     __try {
@@ -240,8 +210,6 @@ static void *ef_live_map(void *editor)
     __except (EXCEPTION_EXECUTE_HANDLER) { map = NULL; }
     return map;
 }
-
-/* ------------------------------------------------------------------ the rawmap save ------------- */
 
 static void ef_service_rawmap_save(void *editor)
 {
@@ -275,7 +243,7 @@ static void ef_service_rawmap_save(void *editor)
     free(request.destination);
 }
 
-/* Why a rawmap save cannot happen right now, or NULL if it can. NO SIDE EFFECTS and no logging. */
+/* Why a rawmap save cannot happen right now, or NULL if it can. No side effects and no logging. */
 static const char *ef_rawmap_save_blocker(void)
 {
     if (g_frame_orig == NULL || g_editor_obj == 0)  return "Saving rawmaps is unavailable on this game build";
@@ -286,11 +254,8 @@ static const char *ef_rawmap_save_blocker(void)
     return NULL;
 }
 
-/* ------------------------------------------------------------------ the reload ------------------ */
-
-/* The idStr LoadMap actually needs. It reads ONLY the data pointer at +0x10; the length at +0x08 is
- * set too. A 0x30-byte zeroed block is the engine's own idStr footprint; nothing here constructs or
- * frees an engine string. */
+/* The idStr LoadMap needs: it reads only the data pointer at +0x10 (length at +0x08 is set too) in a
+ * zeroed 0x30-byte block, the engine's idStr footprint; nothing constructs or frees an engine string. */
 typedef struct ef_idstr {
     unsigned char pad0[8];
     int           len;
@@ -320,17 +285,16 @@ static void ef_service_reload(void *editor)
     request = g_reload_request;
     ReleaseSRWLockExclusive(&g_reload_lock);
 
-    /* The request belongs to the map that was open when it was made. */
+    /* The request belongs to the map open when it was made. */
     if (map != request.map || sh_rawmap_load_generation() != request.generation) {
         backend_log("EF: rawmap open cancelled -- a different map was opened first");
         sh_rawmap_tell("The rawmap was not opened: a different map opened first. Load it again.");
         return;
     }
 
-    /* The mods the rawmap names, checked on this frame and before the engine sees a byte: a map
-     * whose mods are missing goes to the rawmap hold (the download question, or a refusal naming
-     * them) instead of LoadMap, where SnapMap's validator would throw the player out. This reads
-     * the file, so a file moved or replaced since the click is refused here. */
+    /* Check the rawmap's mods before the engine sees a byte: a map with missing mods goes to the rawmap
+     * hold instead of LoadMap, where SnapMap's validator would throw the player out. This reads the
+     * file, so one moved or replaced since the click is refused here. */
     if (!sh_rawmap_prepare_reload(&reason)) {
         char *said = sh_textf("EF: reload not started -- %s", reason ? reason : "");
         backend_log(said ? said : "EF: reload not started");
@@ -365,7 +329,7 @@ static void ef_service_reload(void *editor)
     backend_log(line);
 }
 
-/* Why the editor cannot open a rawmap now, or NULL. NO SIDE EFFECTS. */
+/* Why the editor cannot open a rawmap now, or NULL. No side effects. */
 static const char *ef_reload_blocker(void)
 {
     if (g_frame_orig == NULL || g_load_map == NULL || g_editor_obj == 0)
@@ -380,20 +344,18 @@ static const char *ef_reload_blocker(void)
     return NULL;
 }
 
-/* ------------------------------------------------------------------ the detour ------------------ */
-
 static void sh_editor_frame_detour(void *editor, void *arg)
 {
     g_frame_orig(editor, arg);     /* the engine's own frame, first and unconditionally */
 
     if (editor == NULL) return;
 
-    /* One read unless a map was just opened (logs its world-area cell size). */
+    /* One read per frame; logs a newly opened map's world-area cell size. */
     sh_world_area_cell_editor_tick();
 
     /* A queued fly-to advances one phase per frame; idle costs one read. */
     sh_fly_to_tick(editor);
-    /* A publish held at the publish screens' FINISH closes them and starts (S7 at FINISH); idle, one read. */
+    /* A publish held at the publish screens' FINISH closes them and starts ; idle, one read. */
     sh_modpublish_editor_tick(editor);
     /* A staged module prefab installs, then follows its grab, one step per frame. */
     sh_module_prefab_tick(editor);
@@ -412,8 +374,6 @@ static void sh_editor_frame_detour(void *editor, void *arg)
 
     ef_service_reload(editor);
 }
-
-/* ------------------------------------------------------------------ install + API --------------- */
 
 int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
                             const uint8_t *module_base)
@@ -524,12 +484,7 @@ int sh_editor_frame_carrier_install(void *read_text_fn, int status_ok, void *ass
     return 1;
 }
 
-void *sh_editor_frame_target(void)
-{
-    return g_frame_entry;
-}
-
-/* Set *msg (malloc'd, the old one freed) to `text` when msg is given. */
+/* Set *msg (malloc'd, freeing the prior value) to `text` when msg is given. */
 static void ef_msg(char **msg, const char *text)
 {
     if (!msg) return;

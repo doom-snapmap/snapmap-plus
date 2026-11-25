@@ -1,9 +1,5 @@
-/* script_api_body_test.c -- sync_partner, wounds_open and break_constraint of
- * mod scripts (src/backend/script/script_api_body.c) over a fake type table
- * shaped like the game's (idSyncEntity.activeParticipants, the gore
- * component's wound lists, an idAnimator_AF's physics constraints) and real
- * structs: a helper body bound in a sync with its target and the player, a
- * stock entity with none of the parts, and the constraint removal. */
+/* script_api_body_test.c -- sync_partner, wounds_open and break_constraint of mod scripts
+ * (src/backend/script/script_api_body.c) over a fake game type table and real structs. */
 #include "heap_out.h"
 #include <windows.h>
 #include <stddef.h>

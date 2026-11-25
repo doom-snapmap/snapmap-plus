@@ -1,9 +1,7 @@
 /* config.h -- backend-owned persistent Snapmap+ settings service.
  *
- * Runtime preferences live in %LOCALAPPDATA%\snapmap-plus\config.json. The backend is the sole file
- * owner; callers use registered keys, and the frontend reaches the same service through the append-only
- * shared interface slots.
- */
+ * Preferences live in %LOCALAPPDATA%\snapmap-plus\config.json; the backend is the sole file owner and
+ * the frontend reaches it through the shared interface slots. */
 #ifndef SH_CONFIG_H
 #define SH_CONFIG_H
 

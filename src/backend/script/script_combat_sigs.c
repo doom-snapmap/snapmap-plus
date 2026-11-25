@@ -1,54 +1,18 @@
-/* script_combat_sigs.c -- the private signatures of the mod-script combat
- * calls and of the damage, pain and projectile hooks, and the enum-table
- * finder. Kept apart so the two-image test (tests/script_combat_sigs_test.c)
- * links them without the engine side. Order matches enum sh_combat_sig.
+/* script_combat_sigs.c -- the private signatures of the mod-script combat calls and of the damage, pain and
+ * projectile hooks, plus the enum-table finder, in the order of enum sh_combat_sig. Kept apart so
+ * tests/script_combat_sigs_test.c links them without the engine side.
  *
- * Build 13954591 (shared Ghidra, snaphak-re logs/shared-ghidra/SC6-*; each
- * pattern is the only match in each executable, at the recorded RVA):
- *   CombatDamageApply   VK 0x1403F9C40  GL 0x1403F9120  idAI2::Damage_Apply(ai, record): applies the record
- *                       idAI2::Damage built and Damage_Calculate settled (amount +0x1A30, scale +0x630,
- *                       direction +0x634, decl +0x628, zone per hit +0x1920), then calls the OnDamage
- *                       dispatcher (entity, attacker spawn id, scale * amount). 14-byte window.
- *   CombatSetPain       VK 0x140748710  GL 0x140748020  SetPainReaction(ai, painType, ms): writes the
- *                       current reaction at ai +0x5060; called by the pain states as a pain starts.
- *                       15-byte window.
- *   CombatProjLaunch    VK 0x140F3A380  GL 0x140F39840  idProjectile::Launch(projectile, owner, origin*,
- *                       axis*, ...): every projectile launch (AI weapons, ae_launchProjectile*, players)
- *                       stores the owner at +0x4788. 15-byte window.
- *   CombatRadiusDamage  VK 0x1403A21E0  GL 0x1403A1AF0  RadiusDamage(game, origin*, inflictor, attacker,
- *                       parms*, scale, bool, ignore): the ae_radiusDamage handler's call.
- *   CombatEntStartFx    VK 0x14082C270  GL 0x14082B430  idEntity StartFX(entity, condition, extraCondition):
- *                       unless the entity's +0x3EA bit 0 is set, the game clock and the FX manager's start by
- *                       condition (entity +0x30, time, condition, extra, tag -1). In every entity class's
- *                       vtable; what the game's own code calls on an effect entity.
- *   CombatEntStopFx     VK 0x14082D1D0  GL 0x14082C390  idEntity StopFX(entity, condition, extraCondition): the
- *                       FX manager's stop by condition (entity +0x30, time, condition, extra, not immediate).
- *   CombatPlayerDamage  VK 0x140DC3880  GL 0x140DC30A0  idPlayer::Damage(player, inflictor, attacker, parms
- *                       (decl + 0x70), scale, direction*, hit*): slot 130 of the player's vtable in both images. It takes the
- *                       direction of a decl with radialDmgUseInflictorToTargetDir from the inflictor and warns
- *                       when there is none; the `damage` event carries none.
- *   CombatFxActionStop  VK 0x1416EEEF0  GL 0x1416EF870  idFXManager's stop of one action (manager, action index,
- *                       fx time, immediate, recycle): returns when the action is not requested (flags bit 1);
- *                       with a fade-out time, not immediate and not fading yet it pulls the fade-out start to
- *                       now, sets the fading bit and returns (the fade branch, +0x90); otherwise it ends the
- *                       action by its type and clears it. Called by the stop by condition (VK 0x1416EF740), the
- *                       stop of all, the restart and the item update at the end of an action's time. Detoured;
- *                       16-byte window.
- *   CombatFxActionRequest VK 0x1416ECC80 GL 0x1416ED600 idFXManager's request of one action (manager, action
- *                       index, six more: eight arguments, four on the stack): item = decl items + index * 0x570,
- *                       action = actions + index * 0x128; returns at once when the action is requested (flags bit
- *                       1), the item loops (+0x25), does not force a loop restart (+0x26) and the action is not
- *                       fading (bit 0x10); otherwise it re-arms the action in place (clears bits 0x04 and 0x10,
- *                       sets 0x08 and 0x02, new times) and never stops the action's sound. The update then starts
- *                       a sound item again while bit 0x04 is clear and stores the new handle at action +0xB0 over
- *                       the old one. Detoured; 19-byte window.
- *   CombatAiDamage      VK 0x140424D30  GL 0x140423B90  idAI2's Damage(ai, inflictor, attacker, parms, scale,
- *                       direction*, hit*): slot 130 of idAI2's vtable (VK 0x142035B30, GL 0x14204F900) in both
- *                       images, the same virtual as the player's. It passes its arguments on to the idAI2 body
- *                       (VK 0x1403F8C40 / GL 0x1403F8120) with a hit count of 1; the body records the damage and
- *                       its calculate (VK 0x1403FB1D0) applies the team rule: in a SnapMap mode an attacker of the
- *                       victim's own team, other than TEAM_NONE, does no damage. Compared, not called directly:
- *                       a demon whose vtable holds it is damaged through it (snaphak-re R-TG1). */
+ * Build 13954591; each pattern is the only match in each executable (VK / GL addresses):
+ *   CombatDamageApply     0x1403F9C40 / 0x1403F9120  idAI2::Damage_Apply(ai, record); detoured, 14-byte window
+ *   CombatSetPain         0x140748710 / 0x140748020  SetPainReaction(ai, painType, ms); detoured, 15 bytes
+ *   CombatProjLaunch      0x140F3A380 / 0x140F39840  idProjectile::Launch; stores the owner at +0x4788
+ *   CombatRadiusDamage    0x1403A21E0 / 0x1403A1AF0  RadiusDamage, the ae_radiusDamage handler's call
+ *   CombatEntStartFx      0x14082C270 / 0x14082B430  idEntity StartFX(entity, condition, extraCondition)
+ *   CombatEntStopFx       0x14082D1D0 / 0x14082C390  idEntity StopFX(entity, condition, extraCondition)
+ *   CombatPlayerDamage    0x140DC3880 / 0x140DC30A0  idPlayer::Damage, slot 130 of the player's vtable
+ *   CombatFxActionStop    0x1416EEEF0 / 0x1416EF870  idFXManager's stop of one action; detoured, 16 bytes
+ *   CombatFxActionRequest 0x1416ECC80 / 0x1416ED600  idFXManager's request of one action; detoured, 19 bytes
+ *   CombatAiDamage        0x140424D30 / 0x140423B90  idAI2's Damage, slot 130 of idAI2's vtable */
 #include <stddef.h>
 #include <string.h>
 #include <windows.h>
@@ -96,11 +60,7 @@ const sig_entry SH_COMBAT_SIGNATURES[] = {
     { NULL, NULL, 0, 0 }
 };
 
-/* ------------------------------------------------------------ names */
-
-/* painType_t of build 13954591 (the enum table is identical on both renderers;
- * tests/script_combat_sigs_test.c compares it). */
-
+/* painType_t names (identical on both renderers; tests/script_combat_sigs_test.c compares them). */
 static const char *const k_pain[SH_COMBAT_PAIN_COUNT] = {
     "PAIN_NONE", "PAIN_TWITCH", "PAIN_TWITCH_HEAVY", "PAIN_FALTER_LIGHT", "PAIN_INTERRUPT", "PAIN_STUN_LOOP",
     "PAIN_FALTER", "PAIN_PUSHBACK", "PAIN_STUN", "PAIN_STAGGER", "PAIN_STAGGER_VULNERABLE", "PAIN_KNOCKDOWN",
@@ -112,7 +72,7 @@ const char *sh_script_combat_pain_name(int reaction)
     return reaction >= 0 && reaction < SH_COMBAT_PAIN_COUNT ? k_pain[reaction] : NULL;
 }
 
-/* soundChannel_t of build 13954591 (identical tables on both renderers). */
+/* soundChannel_t names (identical on both renderers). */
 static const char *const k_channels[] = {
     "any", "voice", "voice2", "body", "body2", "body3", "body_loop", "weapon", "weapon_alert", "weapon_ambient",
     "weapon_ambient2", "weapon_loop", "weapon_charge_loop", "special_fire_loop", "item", "item2"
@@ -126,8 +86,6 @@ int sh_script_combat_channel(const char *name)
         if (!_stricmp(name, k_channels[i])) return i;
     return -1;
 }
-
-/* ------------------------------------------------------------- enum tables */
 
 #define ENUM_STRIDE 0x18u
 
@@ -169,8 +127,8 @@ uint32_t sh_script_combat_enum_find(const uint8_t *base, uint64_t pointer_base, 
     nt = (const IMAGE_NT_HEADERS64 *)(base + ((const IMAGE_DOS_HEADER *)base)->e_lfanew);
     image_base = pointer_base ? pointer_base : nt->OptionalHeader.ImageBase;
     flen = strlen(first);
-    /* Each initialized, non-executable section: qword-aligned pointers to
-     * `first` followed, one entry later, by a pointer to `second`. */
+    /* Scan each initialized, non-executable section for qword-aligned pointers to `first` followed, one entry
+     * later, by a pointer to `second`. */
     for (i = 0; i < nsec; i++) {
         size_t va = sec[i].VirtualAddress, sz = sec[i].Misc.VirtualSize, k;
         if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) continue;

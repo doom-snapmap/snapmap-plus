@@ -1,9 +1,5 @@
-/* modmap_test.c -- the open map's entities, wires and Timeline references
- * (modmap.c): each entity's placed names follow the save-time closure's rule
- * (their union is exactly sh_modmanifest_placed_names over the same text),
- * the wire run-length list decodes into pairs, a reference to a set is a wire
- * with one end in it or a Timeline outside it naming one of its entities, and
- * malformed text is refused.
+/* modmap_test.c -- the open map's entities, wires and Timeline references (modmap.c): placed names equal
+ * sh_modmanifest_placed_names over the same text, wires decode into pairs, and malformed text is refused.
  *
  *   modmap_test.exe
  */
@@ -48,10 +44,8 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count, 
     return 0;
 }
 
-/* Two mod entities (4 and 7), a relay (5) wired to and from them, a wire
- * between the two (inside any set holding both), a Timeline (9) naming 7, an
- * encounter (8) whose entity reference names 4 (not a Timeline: not
- * reported), a module instance, and edit values that are names too. */
+/* Two mod entities (4 and 7), a relay (5) wired to and from them, a wire between the two, a Timeline (9) naming 7,
+ * an encounter (8) whose reference names 4 (not a Timeline: not reported), a module instance, and edit-value names. */
 static const char MAP[] =
     "{\"entities\":["
     "{\"displayName\":\"\",\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/kguard00/guard\","

@@ -57,10 +57,9 @@ static void *fake_materialize(void *list, const char *name, char make_default, c
     return NULL;
 }
 
-/* The authored update: the engine's 16-byte head (PUSH RDI; SUB RSP,0x110;
- * MOV RAX,[RIP+cookie]), then it records self and self's backing, and returns.
- * The counter compare and the list LEA sit at the engine's offsets and are
- * only decoded at install. Data lives in the same page from 0x800. */
+/* The authored update: the engine's 16-byte head (PUSH RDI; SUB RSP,0x110; MOV RAX,[RIP+cookie]), then it records self
+ * and self's backing and returns, with the counter compare and list LEA at the engine's offsets (decoded only at
+ * install) and data in the same page from 0x800. */
 enum { DATA = 0x800, COOKIE = DATA, SEEN_SELF = DATA + 8, SEEN_BACKING = DATA + 16, LIST = 0x900 };
 
 static void put_rel(uint8_t *code, size_t disp_at, size_t next, size_t target)

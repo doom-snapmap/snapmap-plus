@@ -1,11 +1,6 @@
-/* parmslots.c -- a render parm always gets a slot: the detour of idParmState::AllocParmState (parmslots.h).
- *
- * AllocParmState(state, idDeclRenderParm *) returns the parm's slot: the one a parm of the same name already
- * holds, else the first empty slot of the kind's range, else Error6 ("failed to allocate %s parm state"). `state`
- * begins with the 0x93F holder pointers; a holder is the decl (name pointer +0x08, kind +0x6C). The detour asks
- * sh_parmslots_decide before the engine: the engine places the parm whenever it can, a parm that would be refused
- * is given a shared slot and the engine's function is not called for it (the holder table keeps the slot's first
- * parm, so the parm that shares is found by name at no later call; it is decided again, to the same slot). */
+/* parmslots.c -- the detour of idParmState::AllocParmState that gives every render parm a slot (parmslots.h).
+ * `state` begins with 0x93F holder pointers (decl name +0x08, kind +0x6C); a sharing parm is not recorded there,
+ * so each later call for it is decided again, to the same slot. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdarg.h>
@@ -39,14 +34,6 @@ static void ps_log(const char *fmt, ...)
     _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
     va_end(ap);
     backend_log(line);
-}
-
-static void *clean(const sig_result *r, size_t n, const char *name)
-{
-    size_t i;
-    for (i = 0; i < n; ++i)
-        if (r[i].name && !strcmp(r[i].name, name) && r[i].status == SIG_OK) return (void *)r[i].addr;
-    return NULL;
 }
 
 /* A slot's holder, read from the engine's table. An unreadable holder counts as held and unnamed. */
@@ -103,19 +90,13 @@ static int alloc_detour(void *state, void *decl)
     return slot;
 }
 
-long sh_parmslots_shared(int *spill_slot)
-{
-    if (spill_slot) *spill_slot = (int)InterlockedCompareExchange(&g_spill, -1, -1);
-    return InterlockedCompareExchange(&g_shared, 0, 0);
-}
-
 int sh_parmslots_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     void *target, *tramp;
     unsigned i;
     (void)module_base;
     if (g_alloc) return 1;
-    target = clean(results, count, "ParmStateAlloc");
+    target = sig_pointer(results, count, "ParmStateAlloc");
     if (!target) {
         ps_log("PARMS: AllocParmState did not resolve on this executable; a full parm range stays the engine's error");
         return 0;

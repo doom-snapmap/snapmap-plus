@@ -1,14 +1,6 @@
-/* modswf_test.c -- the cooked-movie route (modswf.c).
- *
- * Offline: the movie-request predicate, and the replacement Load driven
- * against synthetic engine functions (a served movie takes the engine's
- * below-2 path; everything else, and a failed open, goes to the original).
- * The builder admits .bswf under generated/swf/ only, names it swf/<stem>.swf,
- * and applies the shadow and mods/<id>/ rules to it.
- * With build 13954591 executables as arguments: FileResourceLoad resolves
- * uniquely, its four calls decode to the recorded functions, the open-into
- * helper opens through +0x148, and exactly one read-only qword holds the
- * Load (the idFileResource vtable +0x40). Run via run-tests.ps1. */
+/* modswf_test.c -- tests for the cooked-movie route (modswf.c), the builder's .bswf rules and, with build
+ * 13954591 executables as arguments, the FileResourceLoad signature and vtable slot (+0x40). Run via
+ * run-tests.ps1. */
 #include "heap_out.h"
 #include <windows.h>
 #include <stdint.h>
@@ -26,8 +18,6 @@ void backend_log(const char *message) { (void)message; }
 
 static int g_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
-
-/* ------------------------------------------------------------ synthetic engine */
 
 typedef struct fake_file { void **vtbl; const char *name; int destroyed; } fake_file;
 typedef struct fake_resource { void *vtbl; const char *name; char pad[0x28]; fake_file *file; } fake_resource;
@@ -175,8 +165,6 @@ static void test_routing(void)
     CHECK(r == 7 && n_orig == 1);
 }
 
-/* ------------------------------------------------------------ builder */
-
 static void logical(const char *request, const char *type, const char *name)
 {
     char t[64], n[512];
@@ -234,9 +222,8 @@ static void test_builder(void)
     logical("generated/swf/x.bswf", "swf", "swf/x.swf");
     logical("generated/swf/screens_tech/vega_flat.bimage", "file", "generated/swf/screens_tech/vega_flat.bimage");
 
-    /* A stock screen replaced by bytes of the mod's own is a binary at a DOOM
-     * path under native/: no structure to merge, so it is a replacement
-     * (SPEC-distribution 3.10), served only to maps that use the mod. */
+    /* A stock screen replaced by the mod's own bytes is a binary at a DOOM path under native/: nothing to
+     * merge, so it is a replacement served only to maps that use the mod. */
     GetTempPathA(sizeof tmp, tmp);
     _snprintf_s(g_dir, sizeof g_dir, _TRUNCATE, "%ssh_modswf_test_%lu\\alex.screens", tmp, GetCurrentProcessId());
     put("mod.json", "{\"version\": \"1.0.0\", \"name\": \"Screens\", "
@@ -264,8 +251,6 @@ static void test_builder(void)
         RemoveDirectoryA(g_dir);
     }
 }
-
-/* ------------------------------------------------------------ images */
 
 static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
 {

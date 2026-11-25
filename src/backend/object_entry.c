@@ -1,23 +1,8 @@
-/* Object Mode entry drop length (see object_entry.h).
- *
- * Build 13954591 evidence:
- *   TAB: the Module Mode focus ray (VK FUN_141257870 / GL FUN_141256d70, the
- *     ModulePickFocus reader) stores the nearest module hit as the FPS view's
- *     pending point (VK FUN_1412b48c0 / GL FUN_1412b3fa0: view+0x84 flag,
- *     +0x88 point). idSnapFPSView vtable slot 1 (VK FUN_1412b3f30 / GL
- *     FUN_1412b3610), called by the camera's mode switch (VK FUN_1412400f0),
- *     hands that point to the entry solver VK FUN_1412b3780 / GL FUN_1412b2e60.
- *   The solver starts at (point.x, point.y, union of module world bounds max z
- *     + 100) and box-traces (-16,-16,-87)..(16,16,3) down the editor collision
- *     world in segments of 18364, restarting 1 unit below each hit, until a
- *     segment misses. It keeps the last hit (then a 256-unit placement-surface
- *     check, a +/-2048 surface search or the module's start entity, +87), or
- *     the camera's previous FPS position when the first segment misses.
- *   ObjectEntryDrop VK 0x1412b3823 / GL 0x1412b2f03: MOVSS xmm9,[rip+disp32]
- *     reading 18364.0 (VK 0x14238e388 / GL 0x1423a80d8). It is that
- *     constant's only reader on both executables, and the only place the
- *     solver gets its segment length.
- * Only this instruction's disp32 is repointed, at a product-owned float. */
+/* Object Mode entry drop length (see object_entry.h), build 13954591. The Module Mode focus ray stores the
+ * nearest module hit as the FPS view's pending point (view+0x84 flag, +0x88 point), which the camera mode switch
+ * hands to the entry solver (VK FUN_1412b3780 / GL FUN_1412b2e60). The solver box-traces down in segments of
+ * 18364 until one misses; ObjectEntryDrop (VK 0x1412b3823 / GL 0x1412b2f03, MOVSS xmm9,[rip+disp32]) is the
+ * only reader of that constant (VK 0x14238e388 / GL 0x1423a80d8), so only its disp32 is repointed. */
 #include "object_entry.h"
 #include <string.h>
 
@@ -52,11 +37,6 @@ static drop_page *g_page;
 static sh_patch_handle g_patch;
 static int g_live;
 
-static const sig_result *binding(const sig_result *r,size_t n,const char *name)
-{
-    size_t i;for(i=0;i<n;i++)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)return r+i;
-    return NULL;
-}
 static int read_float(uintptr_t at,float *out)
 {
     __try {*out=*(const volatile float*)at;return 1;}
@@ -75,12 +55,12 @@ int sh_object_entry_install(const sig_result *results,size_t count)
     const sig_result *site;uintptr_t constant=0;int32_t old_disp,new_disp;
     const char *why;char line[320];
     if(g_live)return 1;
-    site=binding(results,count,"ObjectEntryDrop");
+    site=sig_ok(results,count,"ObjectEntryDrop");
     if(!site){why="the entry drop load was not found";goto unavailable;}
     if((why=sh_object_entry_check((const unsigned char*)site->addr,&constant)))goto unavailable;
     /* The load's disp32 is relative to the instruction's end, site + 9. */
     if(!g_page&&!(g_page=(drop_page*)sh_near_page_alloc(site->addr+9))){why="no page within reach of the entry drop load";goto unavailable;}
-    /* Written before the patch: the redirected load never reads an empty page. */
+    /* Written before the patch so the redirected load never reads an empty page. */
     g_page->drop=SH_OBJECT_ENTRY_DROP;
     memcpy(&old_disp,(const void*)(site->addr+5),4);
     if(!sh_object_entry_disp(site->addr,(uintptr_t)&g_page->drop,&new_disp)){why="the page is out of reach";goto release;}
@@ -98,6 +78,5 @@ unavailable:
     backend_log(line);
     return 0;
 }
-int sh_object_entry_live(void){return g_live;}
 float sh_object_entry_drop(void){return g_live&&g_page?g_page->drop:SH_OBJECT_ENTRY_NATIVE_DROP;}
 #endif

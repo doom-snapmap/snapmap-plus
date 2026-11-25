@@ -11,7 +11,7 @@ import (
 )
 
 // Directory junctions do not require the symlink privilege on Windows.
-func TestMigrationRefusesDirectoryJunction(t *testing.T) {
+func TestCopyMissingFileRefusesDirectoryJunction(t *testing.T) {
 	src, dst, outside := t.TempDir(), t.TempDir(), t.TempDir()
 	writeF(t, filepath.Join(src, "linked", "file"), "source")
 	link := filepath.Join(dst, "linked")
@@ -45,29 +45,10 @@ func TestMigrationRefusesDirectoryJunction(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Remove(link)
-	if _, err := copyTreeMissing(src, dst); err == nil {
+	if err := copyMissingFile(filepath.Join(src, "linked", "file"), filepath.Join(dst, "linked", "file")); err == nil {
 		t.Fatal("migration followed a destination junction")
 	}
-	if exists(filepath.Join(outside, "file")) || fullyMirrored(src, dst) {
+	if exists(filepath.Join(outside, "file")) {
 		t.Fatal("junction destination was written or accepted")
-	}
-}
-
-func TestMigrationKeepsUnreadableSource(t *testing.T) {
-	newDataDirs(t)
-	path := filepath.Join(oldUserContentDir(), "prefabs", "locked.json")
-	writeF(t, path, "saved prefab")
-	h, err := syscall.CreateFile(syscall.StringToUTF16Ptr(path),
-		syscall.GENERIC_READ, 0, nil, syscall.OPEN_EXISTING, 0, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	migrateUserData()
-	if fullyMirrored(oldUserContentDir(), appDataDir()) {
-		t.Error("unreadable source was accepted as mirrored")
-	}
-	syscall.CloseHandle(h)
-	if got := readF(t, path); got != "saved prefab" {
-		t.Fatal("read failure lost the source")
 	}
 }

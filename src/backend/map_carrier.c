@@ -15,8 +15,6 @@
 #define CR_PARTS 3
 static const char *const cr_parts[CR_PARTS] = {"mods", "settings", "nav"};
 
-/* ------------------------------------------------------------ scanning */
-
 static size_t cr_ws(const char *s, size_t n, size_t i)
 {
     while (i < n && sh_shard_is_ws(s[i])) i++;
@@ -130,8 +128,6 @@ static int cr_key_is(const char *s, const cr_member *m, const char *key)
     return m->key_to - m->key_from == kl && !memcmp(s + m->key_from, key, kl);
 }
 
-/* ------------------------------------------------------------ the view */
-
 typedef struct cr_root_ctx { sh_carrier_view *v; } cr_root_ctx;
 
 static int cr_root_visit(void *ctx, const char *s, const cr_member *m)
@@ -153,7 +149,7 @@ static int cr_root_visit(void *ctx, const char *s, const cr_member *m)
     return 1;
 }
 
-typedef struct cr_inner_ctx { sh_carrier_view *v; int format_ok; int bad; } cr_inner_ctx;
+typedef struct cr_inner_ctx { sh_carrier_view *v; int format_seen; int bad; } cr_inner_ctx;
 
 static int cr_inner_visit(void *ctx, const char *s, const cr_member *m)
 {
@@ -161,7 +157,9 @@ static int cr_inner_visit(void *ctx, const char *s, const cr_member *m)
     sh_carrier_view *v = c->v;
     char first = s[m->value_from];
     if (cr_key_is(s, m, "format")) {
-        c->format_ok = (m->value_to - m->value_from == 1 && (first == '1' || first == '2'));   /* 2: units (SPEC-distribution 2.7) */
+        if (c->format_seen++) { c->bad = 1; return 0; }
+        if (m->value_to - m->value_from == 1 && first >= '0' && first <= '9')
+            v->format = first - '0';
         return 1;
     }
     if (cr_key_is(s, m, "mods")) {
@@ -212,10 +210,11 @@ int sh_carrier_view_read(const char *json, size_t len, sh_carrier_view *view)
         ic.v = &v;
         if (!cr_object(json, v.value_to, v.value_from, cr_inner_visit, &ic) || ic.bad) {
             v.state = SH_CARRIER_MALFORMED;
+            v.format = 0;
             strcpy_s(v.why, sizeof v.why, "a part has the wrong type or appears twice");
-        } else if (!ic.format_ok) {
+        } else if (v.format != SH_CARRIER_FORMAT[0] - '0') {
             v.state = SH_CARRIER_MALFORMED;
-            strcpy_s(v.why, sizeof v.why, "its format is not 1 or 2");
+            strcpy_s(v.why, sizeof v.why, "its format is not " SH_CARRIER_FORMAT);
         }
     }
     if (v.state == SH_CARRIER_MALFORMED) {
@@ -259,8 +258,6 @@ void sh_carrier_describe(const sh_carrier_view *v, char *out, size_t cap)
                 v->settings.present ? "settings " : "", v->nav.present ? "nav " : "",
                 (v->mods.present || v->settings.present || v->nav.present) ? "" : "no parts");
 }
-
-/* ------------------------------------------------------------ strip / put */
 
 static char *cr_cut(const char *json, size_t len, size_t from, size_t to, size_t *out_len)
 {
@@ -361,7 +358,7 @@ char *sh_carrier_put(const char *json, size_t len, const char *part, const char 
 #define CR_LIT(s) CR_EMIT((s), sizeof(s) - 1)
     CR_EMIT(src, before);
     if (!empty_root) CR_LIT(",");
-    CR_LIT("\"" SH_CARRIER_KEY "\":{\"format\":2");
+    CR_LIT("\"" SH_CARRIER_KEY "\":{\"format\":" SH_CARRIER_FORMAT);
     for (i = 0; i < CR_PARTS; i++) {
         if (!pv[i]) continue;
         CR_LIT(",\"");
@@ -382,8 +379,6 @@ char *sh_carrier_put(const char *json, size_t len, const char *part, const char 
     if (out_len) *out_len = w;
     return out;
 }
-
-/* ------------------------------------------------------------ small readers */
 
 int sh_carrier_array_next(const char **cursor, const char *end, const char **elem, size_t *elem_len)
 {
@@ -450,9 +445,7 @@ int sh_carrier_object_string(const char *obj, const char *end, const char *key, 
     return 1;
 }
 
-/* ------------------------------------------------------------ earlier shapes */
-
-/* The variable families earlier builds wrote (map_carrier.h, sh_map_old_shape). */
+/* The unsupported variable-name families (map_carrier.h, sh_map_old_shape). */
 static const char *const cr_old_families[] = {
     "smpkg.", "smpbind.", "smpref.", "smpmod1.", "smpprod1.", "smp.render.v1", "smp.bounds.v1", "smnav1."
 };
@@ -472,7 +465,8 @@ static int cr_is_name_value(const char *json, const char *quote)
 
 int sh_map_old_shape(const char *json, size_t len)
 {
-    size_t f, from = 0, to = 0;
+    size_t f;
+    sh_carrier_view v;
     if (!json || !len) return SH_MAP_OLD_NONE;
     for (f = 0; f < sizeof cr_old_families / sizeof cr_old_families[0]; f++) {
         size_t m = strlen(cr_old_families[f]), at = 0;
@@ -481,9 +475,8 @@ int sh_map_old_shape(const char *json, size_t len)
             if (!hit) break;
             at = (size_t)(hit - json) + 1;
             if (hit > json && hit[-1] == '"' && cr_is_name_value(json, hit - 1)) {
-                /* A variable's name: its info object's snapVarInfo_t follows.
-                 * An entity or an
-                 * object an author named so is not an earlier shape. */
+                /* A variable's name is followed by its info object's snapVarInfo_t; an entity or object an
+                 * author named so is not an unsupported shape. */
                 const char *q = (const char *)memchr(hit, '"', len - (size_t)(hit - json));
                 size_t w = q ? len - (size_t)(q + 1 - json) : 0;
                 if (w > 256) w = 256;
@@ -491,10 +484,10 @@ int sh_map_old_shape(const char *json, size_t len)
             }
         }
     }
-    /* Rows of the member's "mods" part that name an "id" or a "bundle", or a mod as "<salt>@<build>" (format 1, before
-     * units). */
-    if (sh_carrier_part(json, len, "mods", &from, &to) == 1) {
-        const char *cursor = json + from, *end = json + to, *elem;
+    if (!sh_carrier_view_read(json, len, &v)) return SH_MAP_OLD_NONE;
+    if (v.format == 1) return SH_MAP_OLD_FORMAT;
+    if (v.state == SH_CARRIER_PRESENT && v.mods.present) {
+        const char *cursor = json + v.mods.from, *end = json + v.mods.to, *elem;
         size_t elem_len;
         while (sh_carrier_array_next(&cursor, end, &elem, &elem_len) == 1) {
             if (*elem != '{') continue;

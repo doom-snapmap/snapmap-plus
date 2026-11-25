@@ -25,8 +25,7 @@ static int safe_path(const char *s)
     }
     return s!=begin&&strcmp(begin,".")&&strcmp(begin,"..");
 }
-/* Parse a dimension-bearing directory or basename without accepting trailing
- * garbage through the saved module-name parser. */
+/* Parses a dimension-bearing directory or basename; trailing garbage is not accepted. */
 static const char *dimensions(const char *p,sh_grid_size *size)
 {
     const char *end=p;char name[112];size_t n;
@@ -67,8 +66,8 @@ static int request(const char *name,sh_grid_size *size,char source[768],int *typ
                 }
             }
         }
-        /* The modern room's compressed probe is requested relative to its
-         * private module directory. Preserve the installed image bytes. */
+        /* The modern room's compressed probe is requested relative to its private module directory; the installed
+         * image bytes are kept. */
         if(size->kind==SH_GRID_MODERN&&!strcmp(end,"/lightprobes/light_probe_1_compressed.bimage")){
             snprintf(source,768,"%s%s",stock,end);*type=ASSET_COPY;return 1;
         }
@@ -76,9 +75,8 @@ static int request(const char *name,sh_grid_size *size,char source[768],int *typ
         if(*end=='/'&&safe_path(name)){
             const char *leaf=p+26,*stock_leaf=strrchr(stock,'/')+1;
             size_t leaf_len=(size_t)(end-leaf);
-            /* Native Blueprint geometry derives both the directory and the
-             * basename from snapModuleInfo's private name. Translate both
-             * before reading the installed source. */
+            /* Native Blueprint geometry derives both the directory and the basename from snapModuleInfo's private
+             * name; both are translated before the installed source is read. */
             if(!strncmp(end+1,leaf,leaf_len)&&end[1+leaf_len]=='_')
                 snprintf(source,768,"%s/%s%s",stock,stock_leaf,end+1+leaf_len);
             else snprintf(source,768,"%s%s",stock,end);
@@ -108,16 +106,12 @@ static int request(const char *name,sh_grid_size *size,char source[768],int *typ
     return 0;
 }
 
-/* ------------------------------------------------------------ module stand-ins (R-DS6) */
-
 static sh_grid_standin_fn g_standin;
 void sh_grid_asset_set_standins(sh_grid_standin_fn fn){g_standin=fn;}
 
-/* A file the native module loader derives from the name of a module that stands in as a Grid Room (its collision,
- * auxiliary geometry, light probe and navigation below maps/modules/<logical>/, and its palette render model), as the
- * same file of that Grid Room: the stand-in's whole room is the room's of its size under the module's own name, so the
- * map's instance keeps its moduleName. The module's decl and its snapModuleInfo are the content cache's (they carry
- * the absent module's bounds and portals) and are not translated. 1 with the room's name in `out`. */
+/* Maps a file the native module loader derives from a stand-in module's name (collision, auxiliary geometry, light
+ * probe, navigation, palette render model) to the same file of the Grid Room of its size. The decl and snapModuleInfo
+ * are the content cache's and are not translated. Returns 1 with the room's name in `out`. */
 int sh_grid_asset_standin_name(const char *name,char *out,size_t cap)
 {
     static const char *const prefixes[]={"maps/modules/","generated/maps/modules/"};
@@ -136,7 +130,7 @@ int sh_grid_asset_standin_name(const char *name,char *out,size_t cap)
         if(!starts(name,prefixes[i]))continue;
         rest=name+strlen(prefixes[i]);
         if(!starts(rest,"mods/"))return 0;
-        /* The module's logical name is the longest leading run of folders the cache knows as a stand-in. */
+        /* The logical name is the longest leading run of folders the cache knows as a stand-in. */
         for(k=strlen(rest);k>5;k--){
             if(rest[k]!='/')continue;
             if(k>=sizeof logical)continue;
@@ -145,7 +139,8 @@ int sh_grid_asset_standin_name(const char *name,char *out,size_t cap)
             if(!sh_grid_name(&size,room,sizeof room))return 0;
             tail=rest+k+1;
             leaf=strrchr(logical,'/');leaf=leaf?leaf+1:logical;ll=strlen(leaf);
-            /* Its own basename is the room's: hall/hall_floor_collision.bcm -> 1024_1024_432/1024_1024_432_floor_... */
+            /* The module's own basename becomes the room's: hall/hall_floor_collision.bcm to
+             * 1024_1024_432/1024_1024_432_floor_... */
             if(!strncmp(tail,leaf,ll)&&(tail[ll]=='_'||tail[ll]=='.'))
                 r=snprintf(out,cap,"%s%s/%s%s",prefixes[i],room+13,strrchr(room,'/')+1,tail+ll);
             else r=snprintf(out,cap,"%s%s/%s",prefixes[i],room+13,tail);

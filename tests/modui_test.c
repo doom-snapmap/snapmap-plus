@@ -1,17 +1,6 @@
-/* modui_test.c -- the Mods tab's backend (modui.c) against the real store,
- * serving index and map manifest in a temporary folder (the one shape: mods
- * keyed by salt, the player's own at the root, a downloaded map's in its
- * place): the document's shape on an empty store (payload v4, no migration
- * state), the main-thread refusal, Refresh's result, an install through the
- * tab, a hand-made folder salted at Refresh, a copy made a mod of its own, the
- * informational same-files hint, the plain causes of a failed build and of
- * folders in an earlier shape, a downloaded map's place group, the open map's rows by salt with the asset rule's
- * states, Use in this map, Remove from map and Uninstall with their dry runs
- * against a fake editor, the console verbs with their --yes gate, the Files
- * view, New mod (the message saying Refresh picks up edits), the doctor, the
- * vocabulary rule over every sentence a player reads (no salt, hash,
- * "bundle", "key", "pointer", "surface", "legacy", "migrate" or build number),
- * and that every key the page's fixture uses is a key the backend writes.
+/* modui_test.c -- tests for the Mods tab backend (modui.c) against the real store, serving index and map
+ * manifest in a temporary folder: the document shape, the tab actions and console verbs, the attention
+ * sentences, the player vocabulary rule and that every key the page fixture uses is one the backend writes.
  *
  *   modui_test.exe <tests\fixtures\mods\alex.r2-imp> <tests\fixtures\mods_tab_payload_v4.json>
  */
@@ -138,8 +127,6 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     for (i = 0; i < n && i < 8; i++) strcpy_s(g_act_last[i], sizeof g_act_last[i], bundle_hashes[i]);
     return 0;
 }
-
-/* ---- engine stand-ins ------------------------------------------------------------------------ */
 
 static const char *const STOCK[] = {
     "generated/decls/snapeditorentitydef/demons/demon_base.decl",
@@ -536,8 +523,6 @@ static const char *doctor(int verify)
     return sh_modui_doctor(verify, doctor_line, NULL) == 1 ? g_doctor : NULL;
 }
 
-/* ---- document access ------------------------------------------------------------------------- */
-
 static char *fetch(void)
 {
     int needed = 0;
@@ -672,13 +657,9 @@ static void union_add(const char *doc)
     g_union[g_union_len] = 0;
 }
 
-/* Every "key": the page's fixture uses must be written by the backend. The
- * members of "registries" and "requirements" are a mod's own data (cvar
- * names, bank names), not the payload's keys, and are skipped; so are the
- * members of the shapes this suite's store does not make (a game sound bank's
- * state, a clash between two mods' edits, a derived edit's counts and a
- * received folder's replacements: modserve_test, modregistry_test and
- * modsound_test build those), whose own key is still checked. */
+/* Every "key": the page's fixture uses must be written by the backend. Members of "registries" and
+ * "requirements" (a mod's own data) and of shapes this store does not make (built by modserve_test,
+ * modregistry_test and modsound_test) are skipped, though their own key is checked. */
 static void keys_match_fixture(const char *fixture_path, const char *doc)
 {
     size_t len = 0;
@@ -725,8 +706,6 @@ static void keys_match_fixture(const char *fixture_path, const char *doc)
     CHECK(seen > 25 && missing == 0);
     free(text);
 }
-
-/* ---- maps ------------------------------------------------------------------------------------ */
 
 /* A local save's map.decl as the game writes it: a 4-byte checksum, then a
  * zlib stream (here stored blocks) of the map text. */
@@ -951,8 +930,6 @@ static void row_build(const char *key, char *out, size_t cap)
     sh_ms_list_free(&l);
 }
 
-/* ---- the tests ------------------------------------------------------------------------------- */
-
 int main(int argc, char **argv)
 {
     char fixture[MAX_PATH], payload[MAX_PATH], tmp[MAX_PATH], src[MAX_PATH], path[MAX_PATH * 2], saves[MAX_PATH * 2];
@@ -1005,12 +982,12 @@ int main(int argc, char **argv)
         call.op = SH_MODS_LIST;
         CHECK(sh_modui_slot(NULL, &call) == 0);
         call.op = SH_MODS_FETCH;
-        CHECK(sh_modui_slot(NULL, &call) == 1 && call.out && call.out[0]);   /* the earlier document remains */
+        CHECK(sh_modui_slot(NULL, &call) == 1 && call.out && call.out[0]);   /* the previous document remains */
         sh_iface_text_free(call.out);
         call.out = NULL;
         call.op = SH_MODS_GENERATION;
         CHECK(sh_modui_slot(NULL, &call) == 1 && call.generation != 0 && !call.out);
-        call.op = 5;                                                   /* the retired WAIT */
+        call.op = 5;                                                   /* the WAIT op is unknown */
         CHECK(sh_modui_slot(NULL, &call) == 0);
     }
     g_main = 1;
@@ -1064,7 +1041,7 @@ int main(int argc, char **argv)
         free(doc);
         bind_fakes();
     }
-    /* the retired action numbers (verify, prune, remove, migrate, the recycle bin's) are unknown */
+    /* the removed action numbers (verify, prune, remove, migrate, the recycle bin's) are unknown */
     {
         static const int retired[] = { 2, 5, 6, 7, 8, 9, 14, 15, 17, 19 };
         int r;
@@ -1209,14 +1186,14 @@ int main(int argc, char **argv)
         CHECK(bundle_has(doc, "broken", "\"state\":\"attention\""));
         CHECK(row_str(doc, "broken", "cause", cause, sizeof cause) && !strncmp(cause, "This mod could not be built: ", 29));
         if (cause[0]) printf("    broken: %s\n", cause);
-        /* An earlier shape: the one sentence, never advice to edit mod.json by hand. */
+        /* A mod in an older shape gets the one sentence, never advice to edit mod.json by hand. */
         CHECK(row_str(doc, "old_shape", "cause", cause, sizeof cause) &&
               !strcmp(cause, "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
         if (cause[0]) printf("    old_shape: %s\n", cause);
         CHECK(row_str(doc, "packaged", "cause", cause, sizeof cause) &&
               !strcmp(cause, "This mod was made for an earlier version of Snapmap+. This version does not read it yet."));
         {
-            /* An earlier version's builder part: the same sentence. */
+            /* An older builder part gets the same sentence. */
             char older[MAX_PATH * 2];
             _snprintf_s(older, sizeof older, _TRUNCATE, "%s\\older_block", g_root);
             CreateDirectoryA(older, NULL);
@@ -1510,9 +1487,8 @@ int main(int argc, char **argv)
             CHECK(!has(doc, "\"update\":\"This map uses another version"));   /* nothing left to update */
             free(doc);
 
-            /* R-LB1 F6 (the owner's ruling): the author publishes the map in this session. The publish's save pins a
-             * copy of its rows for the published copy alone: the slot it writes and the open map keep their local
-             * rows, so the author's own map never says it uses another version of their own mod. */
+            /* The author publishes the map in this session: the publish's save pins a copy of its rows for the
+             * published copy alone, so the open map never says it uses another version of the author's own mod. */
             {
                 char *saved;
                 size_t sl = 0;

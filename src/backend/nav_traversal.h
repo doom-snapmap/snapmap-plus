@@ -1,17 +1,6 @@
-/* Select per-demon climb and leap animations from the installed universal
- * traversal table. Paths are read at runtime because naming differs by demon.
- *
- * A reachability identifies one demon and references a traversalPoint, which
- * selects traversalAnimNames. For mask M from
- * TraversalMonsterTypeToTraversalFlags:
- *   travel_flags = (0x1000 | (M << 7) | 1) << 16
- *   traversalPoint.d30 = 0x02000000 | (M << 12) | 0x908
- * Each supported demon needs its own link. MARINE is excluded; the Cyberdemon
- * has no traversal enum entry or usable animation.
- *
- * Nominal distances select clips; the engine warps them to actual endpoints.
- * Missing animation rows and stretch/squash limits can refuse a selection.
- */
+/* Selects per-demon climb and leap animations from the installed universal traversal table. For mask M from
+ * TraversalMonsterTypeToTraversalFlags, travel_flags = (0x1000 | (M << 7) | 1) << 16 and traversalPoint.d30 =
+ * 0x02000000 | (M << 12) | 0x908; MARINE and the Cyberdemon have no traversal enum entry and are excluded. */
 #ifndef SNAPMAP_PLUS_NAV_TRAVERSAL_H
 #define SNAPMAP_PLUS_NAV_TRAVERSAL_H
 
@@ -25,25 +14,20 @@
 #define SH_TRAV_PATH_CAP       128     /* traversalAnimNames records are 128 bytes */
 #define SH_TRAV_NAME_CAP       32
 
-/* The six distances the table NAMES its LEDGE rows after. */
+/* The six distances the table names its LEDGE rows after. */
 #define SH_TRAV_DISTANCES      6
 extern const int SH_TRAV_DISTANCE[SH_TRAV_DISTANCES];
 
-/* The stretch envelope, from the shipped corpus: p99 is 2.0 and the largest
- * observed is 2.25. 2.0 is the refusal threshold, so a generated climb never
- * asks the engine for more warp than shipped data already does. */
+/* The stretch envelope: a climb needing more than 2.0 warp is refused; shipped data peaks at 2.25. */
 #define SH_TRAV_MAX_STRETCH    2.0f
 #define SH_TRAV_MIN_SQUASH     0.18f
 
-/* Which way the traversal goes. The table names rows LEDGE_UP_<d>,
- * LEDGE_DOWN_<d> and LEAP_ACROSS_<d>. ACROSS selects on the HORIZONTAL span of a
- * gap where the other two select on a vertical drop. */
+/* Which way the traversal goes, naming rows LEDGE_UP_<d>, LEDGE_DOWN_<d> and LEAP_ACROSS_<d>. ACROSS selects on
+ * the horizontal span of a gap, the others on a vertical drop. */
 enum { SH_TRAV_UP = 0, SH_TRAV_DOWN = 1, SH_TRAV_ACROSS = 2 };
 
-/* Leap limits use their own envelope: shipped spans range from 149 to 982
- * units and stretch more than climbs. offset.x is negative (-18..-132),
- * placing take-off behind the lip. Limit vertical slope separately.
- */
+/* Leap limits use their own envelope: shipped spans range from 149 to 982 units, and offset.x is negative
+ * (-18..-132), placing take-off behind the lip. */
 #define SH_TRAV_LEAP_MAX_STRETCH   3.5f
 #define SH_TRAV_LEAP_MIN_SPAN      149.0f
 #define SH_TRAV_LEAP_MAX_SPAN      982.0f
@@ -58,39 +42,30 @@ typedef struct sh_trav_monster {
     unsigned d30;                           /* 0x02000000 | (M<<12) | 0x908 */
 } sh_trav_monster;
 
-/* Reads the decl. Passed in rather than called directly for the same reason
- * nav_bake takes one: only the resource-provider hook can do it. */
+/* Reads the decl; supplied by the caller because only the resource-provider hook can. */
 typedef unsigned char *(*sh_trav_reader)(const char *name, size_t *out_len);
 
 /* Load the effective table. Returns 1 on success. Repeated calls reuse the
  * table until a source invalidation retires it. */
 int sh_trav_load(sh_trav_reader read_decl);
-/* Forget source-derived rows under the same lock used by readers. The next
- * load reads the new effective table; no native resources are called here. */
+/* Forgets source-derived rows under the readers' lock; the next load reads the effective table. */
 void sh_trav_invalidate(void);
 
-/* True once a table is loaded. With no table, no traversal can be emitted and
- * every platform out of step range is simply an island. */
+/* True once a table is loaded; with none, no traversal is emitted. */
 int sh_trav_ready(void);
 
-/* The demons the traversal system knows, in traversalMonsterType_t order. The
- * player (MARINE) is deliberately absent, and so is the Cyberdemon -- it is not
- * in the enum at all. */
+/* The demons the traversal system knows, in traversalMonsterType_t order, without MARINE or the Cyberdemon. */
 int  sh_trav_monster_count(void);
 const sh_trav_monster *sh_trav_monster_at(int i);
 
-/* Choose the nearest available nominal, with ties to the smaller. Returns 1
- * with the path and floor-side offset, or 0 for unavailable animations,
- * invalid inputs or distances outside the stretch/squash envelope. ACROSS
- * uses horizontal distance.
- */
+/* Chooses the nearest available nominal distance (ties to the smaller) and returns 1 with the path and
+ * floor-side offset, or 0 for no animation, invalid input or a distance outside the stretch/squash envelope. */
 int sh_trav_select(const sh_trav_monster *m, int direction, float drop,
                    char *out_path, size_t path_cap,
                    float *out_offset_x, int *out_distance, int *out_travel_time);
 
 #ifdef SH_TRAV_TESTING
-/* Parse a table out of a buffer instead of the install, so the tests can drive
- * a synthetic decl. NO GAME BYTES: the tests write their own. */
+/* Parses a table from a buffer instead of the install, so tests can drive a synthetic decl. */
 int sh_trav_test_parse(const char *text, size_t len);
 void sh_trav_test_reset(void);
 int sh_trav_test_row_count(void);

@@ -25,7 +25,7 @@ int log_rotate_if_large_w(const wchar_t *path, unsigned long long cap_bytes)
     memcpy(previous, path, len * sizeof(wchar_t));
     memcpy(previous + len, L".prev", 6 * sizeof(wchar_t));
 
-    /* Remove the older roll because MoveFile does not overwrite it. */
+    /* Remove the existing roll because MoveFile does not overwrite it. */
     DeleteFileW(previous);
     return MoveFileW(path, previous) ? 1 : 0;
 }

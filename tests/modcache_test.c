@@ -1,10 +1,5 @@
-/* modcache_test.c -- the map content cache (modcache.h) and the publishing key (modkey.h).
- *
- * Units composed from the cache into what the serving index serves; one copy of each file on disk however many maps
- * and namespaces use it (hard links); compositions deterministic across machines; a local mod serving a unit by exact
- * hash only, checked again after it changes; stand-ins and the notice for an absent object, then the full composition
- * once it arrives; the sweep (kept maps, maps only played, the open map); the notice sentences; format 2 rows; the
- * key's signature, claim secrets and DPAPI file.
+/* modcache_test.c -- the map content cache (modcache.h) and the publishing key (modkey.h): composition, hard links,
+ * stand-ins and notices for absent objects, the sweep, format 2 rows, and the key's signature, claim secrets and file.
  *
  *   modcache_test.exe
  */
@@ -33,7 +28,7 @@ static int failures;
 
 void backend_log(const char *message) { (void)message; }
 
-/* ------------------------------------------------------------ serving-layer doubles modmanifest.c links */
+/* Serving-layer doubles that modmanifest.c links. */
 static sh_modmanifest_list g_current_rows;
 int sh_modserve_active(void) { return 1; }
 int modserve_activate_bundles(const char *const *bundle_hashes, int count) { (void)bundle_hashes; (void)count; return 0; }
@@ -71,7 +66,7 @@ static int game_where(void *ctx, const char *request, char sha[SH_MB_HASH_HEX + 
 static int script_ok(const char *file, int entry, const char *text, size_t len, int *line, char **what, char **todo)
 { (void)file; (void)entry; (void)text; (void)len; (void)line; (void)what; (void)todo; return 1; }
 
-/* ------------------------------------------------------------ fixtures (modunit_test.c's pack) */
+/* Fixtures: modunit_test.c's pack. */
 
 static void put_binary(const char *folder, const char *rel, const char *name, size_t pad, unsigned seed)
 {
@@ -220,8 +215,6 @@ static char *read_text(const char *path)
     return (char *)sh_mb_read_file(path, 1u << 24, &len);
 }
 
-/* ------------------------------------------------------------ tests */
-
 /* A local save slot as the game writes it: <saves>\<profile>\SNAPMAPS<id>\map.decl (a 4-byte checksum, then zlib of
  * the map's JSON, written here as stored DEFLATE blocks) and game.details naming its cloud item. `text` NULL writes
  * a map.decl that does not decode. */
@@ -274,7 +267,7 @@ static void test_pointer_sources(void)
 static void test_net_retry(void)
 {
     printf("-- a unit file stopped by the network is tried again, four times, the pause doubling\n");
-    CHECK(sh_cache_net_retry_ms(MODNET_E_NET, 0) == 250);   /* winhttp 12030: the connection reset (R-LV4) */
+    CHECK(sh_cache_net_retry_ms(MODNET_E_NET, 0) == 250);   /* winhttp 12030: the connection reset */
     CHECK(sh_cache_net_retry_ms(MODNET_E_NET, 3) == 2000);
     CHECK(sh_cache_net_retry_ms(MODNET_E_NET, 4) == -1);    /* the tries are spent */
     CHECK(sh_cache_net_retry_ms(MODNET_E_TIMEOUT, 1) == 500);
@@ -331,7 +324,7 @@ static void test_rows_format2(void)
           !strcmp(back.build, SH_MODMANIFEST_LOCAL_BUILD));
     free(v);
     sh_modmanifest_row_free(&back);
-    /* A format 1 row ("<salt>@<build>") is an earlier shape: it is not read. */
+    /* A format 1 row ("<salt>@<build>") is an earlier shape and is not read. */
     {
         const char *old = "{\"mod\":\"" SALT "@3333333333333333333333333333333333333333333333333333333333333333\",\"name\":\"x\",\"size\":1,\"names\":[]}";
         CHECK(!sh_modmanifest_parse_value(old, strlen(old), &back, err, sizeof err));
@@ -368,7 +361,7 @@ static void test_notices(void)
         if (t && strcmp(t, singles[c])) fprintf(stderr, "  got: %s\n", t);
         free(t);
     }
-    /* Several causes: the most actionable cause's sentence names every object (SPEC 8, S4's example). */
+    /* Several causes: the most actionable cause's sentence names every object (SPEC 8). */
     t = sh_cache_notice_text(many, 3);
     CHECK(t && !strcmp(t, "This map is playing without 3 objects from 2 mods (the Tyrant, the Marauder and the Hell Guard): the mod "
                           "store could not be reached. Open it again later to get them."));
@@ -381,7 +374,7 @@ static void test_notices(void)
     t = sh_cache_object_name("entities/ai/demon/hell_guard");
     CHECK(t && !strcmp(t, "Hell Guard"));
     free(t);
-    /* Row 9: a whole-mod row (root "*") is named by the mod itself, alone and in a list. */
+    /* A whole-mod row (root "*") is named by the mod itself, alone and in a list. */
     t = sh_cache_object_name("*");
     CHECK(t && !t[0]);
     free(t);
@@ -411,7 +404,7 @@ static void test_notices(void)
         CHECK(t && !strcmp(t, "This map is playing without the Crate from a mod, which is not on this computer."));
         free(t);
     }
-    /* P2-11: names too long for the game's dialog give way to the count, never over 250 bytes. */
+    /* Names too long for the game's dialog give way to the count, never over 250 bytes. */
     {
         static char longname[2][80];
         sh_cache_absent big[3];
@@ -439,7 +432,7 @@ static void test_notices(void)
             free(t);
         }
     }
-    /* P2-2: a 410 on a download is the newer Snapmap+ (S6), not a store that could not be reached (S4). */
+    /* A 410 on a download is the newer Snapmap+ (S6), not a store that could not be reached (S4). */
     CHECK(sh_cache_net_cause(MODNET_E_RETIRED) == SH_CACHE_ABSENT_NEWER);
     CHECK(sh_cache_net_cause(MODNET_E_UNAVAILABLE) == SH_CACHE_ABSENT_UNREACHABLE);
     CHECK(sh_cache_net_cause(MODNET_E_NOT_FOUND) == SH_CACHE_ABSENT_NOT_IN_STORE);
@@ -526,7 +519,7 @@ static void test_cache(const char *top)
         CHECK(links_of(path) >= 3);   /* the blob and both compositions */
     }
 
-    /* Deterministic: another machine composes the same bytes from the same units (D22a). */
+    /* Deterministic: another machine composes the same bytes from the same units. */
     CreateDirectoryA(mods2, NULL);
     sh_cache_set_mods_root(mods2);
     download(&crate, &b, pack, 1);
@@ -549,7 +542,7 @@ static void test_cache(const char *top)
         load_rows(rows, 1, placed, 2);
         CHECK(sh_cache_composed(chash, &complete) && !complete);
         {
-            /* the causes of what stands in (R-LB1 F5: a host waits only while someone could get it): not asked, S2 */
+            /* the causes of what stands in: a host waits only while someone could get it, so not asked, S2 */
             unsigned mask = 0;
             CHECK(sh_cache_absent_causes(chash, &mask) && mask == (1u << SH_CACHE_ABSENT_OFFLINE));
             CHECK(!sh_cache_absent_causes("0000000000000000000000000000000000000000000000000000000000000000", &mask) &&
@@ -565,9 +558,8 @@ static void test_cache(const char *top)
         if (t) printf("  %s\n", t);
         free(t);
         CHECK(!sh_cache_take_notice());   /* once */
-        /* R-LV4: the load after a fetch says the fetch's answer, not "not on this computer": the store could not be
-         * reached (a closed port on this computer), the composition records it, and the load that asks nothing
-         * repeats it. */
+        /* The load after a fetch says the fetch's answer, not "not on this computer": the store could not be reached,
+         * the composition records it, and the load that asks nothing repeats it. */
         {
             modnet_io io;
             memset(&io, 0, sizeof io);
@@ -585,7 +577,7 @@ static void test_cache(const char *top)
                 unsigned mask = 0;
                 CHECK(sh_cache_absent_causes(chash, &mask) && mask == (1u << SH_CACHE_ABSENT_UNREACHABLE));   /* S4 */
             }
-            /* B2: no name resolves (this computer is not connected): S2, not S4. */
+            /* No name resolves (this computer is not connected): S2, not S4. */
             CHECK(modnet_set_base_url("https://snapmapplus-offline-test.invalid/"));
             CHECK(sh_cache_prepare(chash, &io) == 0);
             CHECK(modnet_set_base_url(NULL));
@@ -606,10 +598,9 @@ static void test_cache(const char *top)
         CHECK(!sh_cache_take_notice());
     }
 
-    /* R-DS5: the stand-ins keep what the map saved of each placed entity. Its definition keeps the entity's class, and
-     * a palette row names it with the map's reference slot counts, inheriting DOOM's own row of that class and those
-     * counts (or the class's row with the counts written over it), so the map validator finds the entity in the
-     * palette and its slots match: the map loads. */
+    /* The stand-ins keep what the map saved of each placed entity: its definition keeps the class, and a palette row
+     * with the map's slot counts inherits DOOM's row of that class (or the class's row with the counts written over
+     * it), so the validator finds the entity and the map loads. */
     {
         char mods5[MAX_PATH * 2];
         static const char map[] =
@@ -697,10 +688,9 @@ static void test_cache(const char *top)
         }
     }
 
-    /* D-A30: a placed mod module whose unit cannot be had (its height under the grid room's least, 432, is raised to it). The row records its bounds and portals (read from its decl
-     * by sh_cache_module_record when the row is pinned); the composition serves the product's blank room of that
-     * size at the module's name with those bounds and portals (the map's door slots keep their count), and a module
-     * info for the module palette. The record survives the row's write and read, so a save keeps it. */
+    /* A placed mod module whose unit cannot be had stands in as the product's blank room of its size (height raised
+     * to the grid room's least, 432), with the bounds and portals the row recorded through sh_cache_module_record;
+     * the record survives the row's write and read. */
     {
         char mods6[MAX_PATH * 2], *rec, *arr, *room = NULL;
         static const char decl[] =
@@ -776,9 +766,8 @@ static void test_cache(const char *top)
         t = read_text(path);
         CHECK(t && strstr(t, "inherit = \"ind_dlc/ind_totally_blank_room_4x\";"));
         free(t);
-        /* R-LV4: the map did not open ("world collision is not served"): the module stands in as the grid room of its
-         * size under its own name, so the room route builds it (grid_room_asset.h); a composition already on disk
-         * marks it too (a later start, a load that composes nothing). */
+        /* After a map that did not open ("world collision is not served"), the module stands in as the grid room of its
+         * size under its own name (grid_room_asset.h); a composition already on disk marks it too. */
         {
             sh_grid_size size;
             memset(&size, 0, sizeof size);
@@ -808,7 +797,7 @@ static void test_cache(const char *top)
         free(rec);
     }
 
-    /* A local mod serves a stranger's unit only by exact hash (D21), checked again when the file changes (D51). */
+    /* A local mod serves a stranger's unit only by exact hash, checked again when the file changes. */
     {
         char mods4[MAX_PATH * 2], local[MAX_PATH * 2], img[MAX_PATH * 3];
         sh_mb_bundle lb;
@@ -849,7 +838,7 @@ static void test_cache(const char *top)
         CreateDirectoryA(saved, NULL);
         CreateDirectoryA(played, NULL);
         sh_cache_set_map_folders(saved, played);
-        /* The local saves are this test's own folder, empty for now. */
+        /* The local saves are this test's own folder, empty at first. */
         _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\player\\saves", top);
         CreateDirectoryA(saves, NULL);
         sh_saved_maps_set_root(saves);
@@ -878,13 +867,12 @@ static void test_cache(const char *top)
         free(map);
         CHECK(sh_cache_sweep(0, NULL, 0, &st));
         CHECK(st.units_removed == 0 && st.served_removed == 0);   /* both compositions are some kept map's */
-        /* Add to my mods (5.15): the played map's row staged as a mod folder of copies, its author text named
-         * "(my copy)" with no builder block; refusals for a row no map has, a unit that spells its namespace (D29) and
-         * a unit whose files are not here. */
+        /* Add to my mods: the played map's row staged as a mod folder of copies, its author text named "(my copy)" with
+         * no builder block; refused for a row no map has, a unit that spells its namespace, or a unit without its files. */
         {
             sh_cache_copy copy;
             char *why = NULL, staged_dir[MAX_PATH * 2];
-            /* The crates' binaries spell their namespace: staged as they are (D29 as built; serving maps it, D12). */
+            /* The crates' binaries spell their namespace: staged as they are; serving maps it. */
             CHECK(sh_cache_stage_copy(chash, &copy, &why) == 1 && !why && copy.objects == 2 &&
                   !strcmp(copy.name, "Crates and barrels (my copy)") && !strcmp(copy.salt, SALT));
             if (copy.dir) {
@@ -993,9 +981,8 @@ static void test_cache(const char *top)
         CHECK(t && !strncmp(t, "Map content: ", 13) && strstr(t, "for 2 maps."));
         if (t) printf("  %s\n", t);
         free(t);
-        /* A download cut short (a joiner left the lobby, the game closed) leaves partial files: one of a kept map's
-         * unit resumes the next time; one of content no kept map names goes once nothing wrote it for an hour; a
-         * fresh one (a download running now) stays. */
+        /* A download cut short leaves partial files: a kept map's resumes the next time, one no kept map names goes
+         * once nothing wrote it for an hour, and a fresh one (a download running) stays. */
         {
             static const char stale[] = "1111111111111111111111111111111111111111111111111111111111111111.zip.part";
             static const char fresh[] = "2222222222222222222222222222222222222222222222222222222222222222.part";
@@ -1020,7 +1007,7 @@ static void test_cache(const char *top)
             CHECK(st.partials_removed == 1);
             CHECK(GetFileAttributesA(one_path) == INVALID_FILE_ATTRIBUTES);     /* no kept map's, untouched: gone */
             CHECK(GetFileAttributesA(kept_part) != INVALID_FILE_ATTRIBUTES);    /* the crate's: resumes */
-            CHECK(GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES);         /* written now: a running download */
+            CHECK(GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES);         /* just written: a running download */
             DeleteFileA(kept_part);
             DeleteFileA(path);
         }
@@ -1036,7 +1023,7 @@ static void test_cache(const char *top)
             download(&barrel, &b, pack, 1);
             CHECK(sh_cache_sweep(1, held, 1, &st) && sh_cache_unit_state(barrel.hash, NULL, NULL, NULL) == 1);
         }
-        /* R-DS6: a map saved offline exists only in its local slot (My Maps), and its unit stays; its cloud copy in
+        /* A map saved offline exists only in its local slot (My Maps), and its unit stays; its cloud copy in
          * saved-maps is the same map, reported once. A slot that does not decode may use anything: nothing goes. */
         {
             sh_modmanifest_row barrel_row;
@@ -1058,8 +1045,8 @@ static void test_cache(const char *top)
             CHECK(t && strstr(t, "for 2 maps."));
             if (t) printf("  %s\n", t);
             free(t);
-            /* R-LV6: a map saved by an earlier Snapmap+ (a row with "id", "version" and "bundle", before units existed)
-             * names no unit: it reads, and does not keep the sweep from removing anything. */
+            /* A row with "id", "version" and "bundle" (a map saved before units existed) names no unit: it reads, and does
+             * not keep the sweep from removing anything. */
             {
                 const char *old = "{\"entities\":[],\"snapmap-plus\":{\"format\":1,\"mods\":[{\"id\":\"bare-hands\","
                                   "\"version\":\"1.2.0\",\"bundle\":\"f34fd3eba67a6817553afe4bbde142f87c58716dfdf67de5a5ca230f9fb47fb7\","
@@ -1080,7 +1067,7 @@ static void test_cache(const char *top)
                     CHECK(sh_cache_sweep(1, NULL, 0, &st) && st.unreadable == 0);
                     CHECK(DeleteFileA(path));
                 }
-                /* B9: a member that does not read leaves what the map uses unknown: the sweep removes nothing. */
+                /* A member that does not read leaves what the map uses unknown: the sweep removes nothing. */
                 {
                     const char *bad = "{\"entities\":[],\"snapmap-plus\":{\"format\":2,\"mods\":7}}";
                     FILE *g = NULL;
@@ -1092,7 +1079,7 @@ static void test_cache(const char *top)
             }
             write_slot(saves, "FEDCBA98765432100123", "", NULL, 64);
             _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\aaaa_bbbb_map.decl", saved);
-            CHECK(DeleteFileA(path));   /* the crate is now no map's ... */
+            CHECK(DeleteFileA(path));   /* the crate is no map's ... */
             CHECK(sh_cache_sweep(1, NULL, 0, &st));
             CHECK(st.unreadable == 1 && st.units_removed == 0 && sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);
             _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\76561198000000001\\SNAPMAPSFEDCBA98765432100123\\map.decl", saves);
@@ -1125,9 +1112,8 @@ int sh_modprog_read(const char *path, unsigned char **bytes, size_t *len)
     return SH_MB_STOCK_OK;
 }
 
-/* N13: a unit naming a pointer into the product's own container (source "snapmapplus") is checked against what this
- * product derives: a path it does not derive, or derives with other bytes, makes the unit absent with the S6 cause (the
- * object stands in and the notice says a newer Snapmap+ is needed); the product's own bytes compose in full. */
+/* A unit naming a pointer into the product's own container (source "snapmapplus") is checked against what this product
+ * derives: a path or bytes it does not derive make the unit absent with the S6 cause; the product's own bytes compose. */
 static void n13_variant(const char *top, int variant, const char *pointer, int expect_complete)
 {
     char pack[MAX_PATH * 2], mods[MAX_PATH * 2], path[MAX_PATH * 3], newhash[65], *t, *text;
@@ -1199,15 +1185,15 @@ static void test_product_pointer(const char *top)
                 PRODUCT_FILE, sha);
     n13_variant(top, 3, pointer, 1);
     /* a file the product names by its bytes' hash (a look's image) that this process has not derived yet: the unit's own
-     * material derives it when it serves, so the unit is whole (R-HD1) */
+     * material derives it when it serves, so the unit is whole */
     n13_variant(top, 4, "\"game\":[{\"path\":\"generated/image/snapmapplus/look/0123456789abcdef.bimage\","
                         "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source\":\"snapmapplus\"}]", 1);
-    /* a name of that place without the hash's shape is no such file: refused as before */
+    /* a name of that place without the hash's shape is no such file: refused */
     n13_variant(top, 5, "\"game\":[{\"path\":\"generated/image/snapmapplus/look/not_a_hash.bimage\","
                         "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source\":\"snapmapplus\"}]", 0);
 }
 
-/* 5.17 and B3: what this computer's published maps claim is kept by the sweep through a bound provider; a composition
+/* What this computer's published maps claim is kept by the sweep through a bound provider; a composition
  * folder still being built ("<chash>.staging-...") is removed only when nothing wrote it for an hour. */
 static char g_held_hash[SH_CACHE_HASH_HEX + 1];
 static size_t held_provider(char (**out)[SH_CACHE_HASH_HEX + 1])
@@ -1275,7 +1261,7 @@ static void test_sweep_held(const char *top)
     age_path(inner);
     age_path(aged);
     CHECK(sh_cache_sweep_kept(0, &st));
-    CHECK(GetFileAttributesA(fresh) != INVALID_FILE_ATTRIBUTES);   /* written just now: being built */
+    CHECK(GetFileAttributesA(fresh) != INVALID_FILE_ATTRIBUTES);   /* just written: being built */
     CHECK(GetFileAttributesA(aged) == INVALID_FILE_ATTRIBUTES);    /* nothing wrote it for an hour */
     CHECK(sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == 1);
 
@@ -1287,7 +1273,7 @@ static void test_sweep_held(const char *top)
     sh_mb_free(&b);
 }
 
-/* Manager Q8, D6a: a local row whose mod folder is not on this computer loads with its objects stood in and one
+/* A local row whose mod folder is not on this computer loads with its objects stood in and one
  * sentence; the content step hands it to the cache as a row of no units under the composition hash of none. */
 static void test_local_standins(const char *top)
 {
@@ -1309,7 +1295,7 @@ static void test_local_standins(const char *top)
     CreateDirectoryA(mods, NULL);
     sh_cache_set_mods_root(mods);
     (void)sh_cache_take_notice();
-    /* The composition hash of none is 2.13's formula with no unit (modserve.c computes the same for the resolver). */
+    /* The composition hash of none is the formula with no unit (modserve.c computes the same for the resolver). */
     CHECK(sh_modmanifest_composition_hash(SALT, NULL, 0, none));
     n = (size_t)_snprintf_s((char *)want_text, sizeof want_text, _TRUNCATE, "snapmap-plus/composition/1\n1\n%s\n", SALT);
     sh_mb_sha256_hex(want_text, n, want);
@@ -1413,7 +1399,7 @@ static void test_local_standins(const char *top)
     CHECK(t && !strcmp(t, "This map is playing without 2 objects from Crates and barrels (the Crate and the Barrel): your folder "
                           "of it cannot be used. The Mods tab says why."));
     free(t);
-    /* W22: a row with no name is "a mod" in the sentence, never its salt. */
+    /* A row with no name is "a mod" in the sentence, never its salt. */
     {
         sh_modmanifest_row nameless;
         memset(&nameless, 0, sizeof nameless);
@@ -1472,7 +1458,7 @@ static void test_key(const char *top)
     CHECK(sh_key_load_or_create(folder, &back, &why) && back);
     if (back) {
         CHECK(!strcmp(sh_key_public(back), sh_key_public(k)));
-        CHECK(sh_key_claim_secret(back, "item-1", s3) && !strcmp(s1, s3));   /* the key restores its claims (D8) */
+        CHECK(sh_key_claim_secret(back, "item-1", s3) && !strcmp(s1, s3));   /* the key restores its claims */
     }
     sh_key_free(back);
     sh_key_free(k);

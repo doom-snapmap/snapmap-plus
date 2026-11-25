@@ -1,28 +1,8 @@
-/* modscript_test -- mod scripts in the builder, the serving index and the
- * archives (docs/architecture.md "Mod scripts").
- *
- * The builder admits assets/mods/<salt>/scripts/<name>.lua and scripts/lib/
- * <name>.lua as kind script and refuses, with the file (and line), a .lua
- * anywhere else, compiled Lua, a NUL byte, text that is not UTF-8, a syntax
- * error, an entry file without "api = 1", a literal require of a module the mod does
- * not carry (another mod's included), a name in another mod's namespace, and
- * any script when no compile check is registered. The static pass records
- * what the scripts bind in the builder block ("scripts"), which survives a
- * write and a load. A new folder's
- * first install lowercases every path below assets\ and rewrites mods/<folder>/
- * inside its .lua like any text (DECISIONS 13, 6); the serving index lists the
- * scripts with their recorded hashes and serves those bytes; the publish
- * archive carries the scripts under their lower-case game names with no new
- * member kind. A rawmap export carries them in the unit that binds them
- * (units/<hash>.json names them by path, files/<sha256> holds the bytes); its
- * import puts them into the content cache, installs nothing, and with
- * "Play maps whose mods include scripts" off refuses with SH_MODUI_SCRIPTS_OFF
- * and puts nothing in the cache (map and prefab). A mod whose scripts register
- * an input records "node" and the serving index serves its Script node row
- * (the entityDef and Toybox row, never in the author's folder, with the
- * row's strings), so a placed node names the mod's build; an author file at
- * the row's paths is refused. The example and probe fixture mods
- * (tests\fixtures\scripts) build without errors or warnings.
+/* modscript_test -- mod scripts in the builder, the serving index and the archives (docs/architecture.md "Mod
+ * scripts"). The builder admits scripts/<name>.lua and scripts/lib/<name>.lua and refuses misplaced or compiled
+ * .lua, a NUL byte, non-UTF-8 text, a syntax error, an entry without "api = 1" and a require of a module the mod
+ * does not carry; the index, publish archive and rawmap export carry the scripts, and an import with scripts off
+ * refuses with SH_MODUI_SCRIPTS_OFF. A script that registers an input is served as a Script node row.
  *
  *   modscript_test.exe <tests\fixtures\scripts> */
 #include "cache_paths.h"
@@ -221,7 +201,7 @@ static void test_builds(void)
     good_mod(dir, sizeof dir);
     CHECK(build(dir, &b));
     if (b.errors) fprintf(stderr, "  %s\n", sh_mb_first_cause(&b));
-    /* the entry spells the engine's name of its own mod once (line 5): D14 warns, one warning, and still builds */
+    /* the entry spells the engine's name of its own mod once (line 5): one warning, and it still builds */
     CHECK(b.script_files == 2 && b.warnings == 1 && b.first_warning && strstr(b.first_warning, "line 5 writes mods/" SALT "/ai/door"));
     CHECK(b.scripts && !strcmp(b.scripts, "{\"dynamic\":1,\"entities\":[{\"events\":[\"spawn\",\"think\"],\"name\":\"ai/door\"}],"
                                          "\"files\":2,\"inputs\":[\"switch_used\"],\"node\":true,\"outputs\":[\"open_door\"]}"));
@@ -688,11 +668,9 @@ static void test_store(void)
 /* The serving layer's side of the provider is not used here. */
 void sh_script_set_map_provider(sh_script_map_mods_fn fn, void *context) { (void)fn; (void)context; }
 
-/* The scope lists the builds a map declares; a mod's scripts are read for the
- * build the listing names. The listing of the player's own map names the root's
- * build, whatever build its row recorded (modui.c); a stranger's names the
- * row's own, which nothing holds when the root's mod was rebuilt. A script
- * file edited since the build is not kept and is named, not run. */
+/* A mod's scripts are read for the build the scope lists: the root's for the player's own map, the row's own
+ * for a stranger's (which nothing holds once the root's mod was rebuilt). A script edited since the build is
+ * named, not run. */
 static void test_map_scripts(void)
 {
     static const char OLD[] = "00000000000000000000000000000000000000000000000000000000000000aa";
@@ -755,9 +733,8 @@ static void test_map_scripts(void)
     sh_mb_free(&b);
 }
 
-/* SPEC 5.23, the scripts setting at the runtime's map open: with scripts turned off for content from elsewhere, a
- * map's composition (its pinned rows) runs no script whatever path opened the map, while the player's own folder
- * always does. The policy is the gates' own predicate, injected (sh_script_source_set_policy). */
+/* With scripts off for content from elsewhere, a map's composition (its pinned rows) runs no script whatever
+ * path opened the map, while the player's own folder always does. The policy is injected (sh_script_source_set_policy). */
 static int g_foreign_on;
 static int foreign_allowed(void) { return g_foreign_on; }
 static void test_scripts_setting_at_open(void)

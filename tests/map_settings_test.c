@@ -1,6 +1,5 @@
-/* The open map's settings (map_settings.h): read from the map's member at
- * load, written into the member at save, held between. The variables earlier
- * builds wrote are not read (map_carrier_test refuses them). */
+/* The open map's settings (map_settings.h): read from the map's member at load, written into the member at save, held
+ * between. Settings named in author variables are not read (map_carrier_test refuses such maps). */
 #include <windows.h>
 #include <assert.h>
 #include <stdio.h>
@@ -73,7 +72,7 @@ int main(void)
         HeapFree(GetProcessHeap(), 0, b);
         take(member, &s, &r);
         assert(r.member && !r.refused && !r.failed);
-        assert(sh_map_render_unlocked(&s.render) && sh_map_bounds_enabled(&s.bounds) && s.bounds.limit == SH_BOUNDS_CEILING);
+        assert(sh_map_render_unlocked(&s.render) && sh_map_bounds_overrides(&s.bounds) && s.bounds.limit == SH_BOUNDS_CEILING);
         /* Putting what the member already says changes nothing. */
         assert(!put(member, &s, &r) && !r.failed);
         /* Both off: nothing is written, and an existing member part goes. */
@@ -93,16 +92,15 @@ int main(void)
      * settings part, or a malformed one, is both off. */
     {
         take(MAPM("0", "", SET("\"render\":\"garbage\",\"bounds\":\"1;20000\"")), &s, &r);
-        assert(r.member && r.refused == 1 && !sh_map_render_unlocked(&s.render) && s.bounds.limit == 20000.0f);
-        take(MAPM("0", "", ",\"snapmap-plus\":{\"format\":1,\"mods\":[]}"), &s, &r);
-        assert(!r.member && !sh_map_render_unlocked(&s.render) && !sh_map_bounds_enabled(&s.bounds));
-        take(MAPM("0", "", ",\"snapmap-plus\":{\"format\":1,\"settings\":[]}"), &s, &r);
+        assert(r.member && r.refused == 2 && !sh_map_render_unlocked(&s.render) && s.bounds.limit == 0);
+        take(MAPM("0", "", ",\"snapmap-plus\":{\"format\":2,\"mods\":[]}"), &s, &r);
+        assert(!r.member && !sh_map_render_unlocked(&s.render) && !sh_map_bounds_overrides(&s.bounds));
+        take(MAPM("0", "", ",\"snapmap-plus\":{\"format\":2,\"settings\":[]}"), &s, &r);
         assert(!r.member && !sh_map_render_unlocked(&s.render));
-        /* A variable with an earlier build's name is the author's text here:
-         * nothing reads it (the game refuses such a map before this runs). */
+        /* A variable named like a setting is the author's text here: nothing reads it. */
         s = on;
         take(MAP("1", VAR("smp.render.v1", "4;0")), &s, &r);
-        assert(!r.member && !sh_map_render_unlocked(&s.render) && !sh_map_bounds_enabled(&s.bounds));
+        assert(!r.member && !sh_map_render_unlocked(&s.render) && !sh_map_bounds_overrides(&s.bounds));
     }
 
     /* A map with neither stays byte-identical both ways. */
@@ -111,7 +109,7 @@ int main(void)
         static const char empty[] = MAP("0", "");
         s = on;
         take(plain, &s, &r);
-        assert(!r.failed && !r.member && !sh_map_render_unlocked(&s.render) && !sh_map_bounds_enabled(&s.bounds));
+        assert(!r.failed && !r.member && !sh_map_render_unlocked(&s.render) && !sh_map_bounds_overrides(&s.bounds));
         assert(!put(plain, &off, &r) && !r.failed);
         b = put(empty, &on, &r);
         assert(b && !strcmp(b, MAPM("0", "", BOTH)));
@@ -157,7 +155,7 @@ int main(void)
         assert(!sh_map_render_unlocked(&cur.render));     /* not until the parse succeeded */
         sh_map_settings_loaded(1);
         sh_map_settings_current(&cur);
-        assert(sh_map_render_unlocked(&cur.render) && !sh_map_bounds_enabled(&cur.bounds));
+        assert(sh_map_render_unlocked(&cur.render) && !sh_map_bounds_overrides(&cur.bounds));
         /* The editor's Apply. */
         sh_map_settings_set_bounds(&on.bounds);
         b = sh_map_settings_on_save(MAP("0", ""), strlen(MAP("0", "")), &n);
@@ -168,22 +166,22 @@ int main(void)
         assert(!sh_map_settings_prepare_load(MAPM("0", "", BOTH), strlen(MAPM("0", "", BOTH)), &n));
         sh_map_settings_loaded(1);
         sh_map_settings_current(&cur);
-        assert(sh_map_render_unlocked(&cur.render) && sh_map_bounds_enabled(&cur.bounds));
+        assert(sh_map_render_unlocked(&cur.render) && sh_map_bounds_overrides(&cur.bounds));
         /* A failed parse of another map. */
         assert(!sh_map_settings_prepare_load(MAP("0", ""), strlen(MAP("0", "")), &n));
         sh_map_settings_loaded(0);
         sh_map_settings_current(&cur);
-        assert(sh_map_render_unlocked(&cur.render) && sh_map_bounds_enabled(&cur.bounds));
+        assert(sh_map_render_unlocked(&cur.render) && sh_map_bounds_overrides(&cur.bounds));
         /* A vanilla map never inherits them, and saves as the engine wrote it. */
         (void)sh_map_settings_prepare_load(MAP("0", ""), strlen(MAP("0", "")), &n);
         sh_map_settings_loaded(1);
         sh_map_settings_current(&cur);
-        assert(!sh_map_render_unlocked(&cur.render) && !sh_map_bounds_enabled(&cur.bounds));
+        assert(!sh_map_render_unlocked(&cur.render) && !sh_map_bounds_overrides(&cur.bounds));
         assert(!sh_map_settings_on_save(MAP("0", ""), strlen(MAP("0", "")), &n));
         /* That launch was refused: the editor map's come back, once. */
         assert(sh_map_settings_restore_previous());
         sh_map_settings_current(&cur);
-        assert(sh_map_render_unlocked(&cur.render) && sh_map_bounds_enabled(&cur.bounds));
+        assert(sh_map_render_unlocked(&cur.render) && sh_map_bounds_overrides(&cur.bounds));
         assert(!sh_map_settings_restore_previous());
         /* Invalid values are refused. */
         render.unlocked = 5;
@@ -192,7 +190,7 @@ int main(void)
         assert(cur.render.unlocked == 1);
         sh_map_settings_reset();
         sh_map_settings_current(&cur);
-        assert(!sh_map_render_unlocked(&cur.render) && !sh_map_bounds_enabled(&cur.bounds));
+        assert(!sh_map_render_unlocked(&cur.render) && !sh_map_bounds_overrides(&cur.bounds));
         assert(!sh_map_settings_restore_previous());
     }
     puts("map_settings_test: passed");

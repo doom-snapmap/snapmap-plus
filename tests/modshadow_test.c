@@ -1,22 +1,11 @@
-/* modshadow_test -- the shadow safety rules (modserve.c) measured against a
- * player's real mod store in the one shape (read in place and never
- * written): the serving index resolves
- * the conflicts between the mods (one provider serves, list decls are
- * composed), and the editor plan and every bundle's gameplay plan run
- * against a registry stand-in that knows exactly the decls the game's
- * SnapMap archive holds. The report names, per bundle, every conflict
- * it takes part in and every animWeb a registration pass withdraws because its
- * models block names a model nothing provides.
+/* modshadow_test -- runs the serving index, the editor plan and every bundle's gameplay plan over a player's
+ * real mod store (read in place, never written) against a registry stand-in holding the game's decl names.
+ * The report names each bundle's conflicts and every animWeb withdrawn for naming a model nothing provides.
  *
- * Inputs (the test is skipped without the first two; the tree holds game
- * files, so it is not in the repository):
- *   SH_MODSHADOW_DATA        a data root holding mods\ in the one shape (a copy
- *                            in the current shape; nothing is written)
- *   SH_MODSHADOW_GAME_NAMES  "type<TAB>name" lines, lower case, one per decl
- *                            and resource of snap_gameresources (the decl
- *                            registry a SnapMap session has)
- *   SH_MODSHADOW_DOOM        the DOOM install the builds read the game's files
- *                            from (default D:\SteamLibrary\steamapps\common\DOOM)
+ * Inputs (skipped without the first two; the tree holds game files, so it is not in the repository):
+ *   SH_MODSHADOW_DATA        a data root holding mods\ (nothing is written)
+ *   SH_MODSHADOW_GAME_NAMES  "type<TAB>name" lines, lower case, one per decl and resource of snap_gameresources
+ *   SH_MODSHADOW_DOOM        the DOOM install the builds read from (default D:\SteamLibrary\steamapps\common\DOOM)
  *   SH_MODSHADOW_ECHO        set to echo every MODS: line */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"

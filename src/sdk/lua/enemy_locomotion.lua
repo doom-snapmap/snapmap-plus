@@ -1,139 +1,21 @@
--- enemy_locomotion.lua: how a demon of the Enemy SDK gets from one place to another.
---
--- A brain never moves a demon itself; it asks a locomotion mode. The modes:
---
---   ground   the engine's own navigation (every DOOM 2016 demon): the adapter's move_to.
---   perch    holding on a wall or a ceiling, the way DOOM Eternal's Arachnotron "hangs out".
---   fly      not built in; one more provider (see the end of this header).
---
--- Perch is a sequence the brain drives and the library serves. Eternal's own is: the demon's
--- reposition step scores candidate spots with its positioning parameters and picks one; the demon
--- WALKS to the spot's floor point with the ordinary move system; "using the hangout" means having
--- arrived there (the move finished, the spot still valid, within a short distance); it holds on the
--- surface; and the brain's graph decides when it leaves. DOOM 2016 has no body physics for walls or
--- ceilings (aiMovementMode_t has no wall mode), so the library holds the demon itself: it places
--- the demon every frame with its up along the surface's normal, and the adapter's surface_hold
--- takes the demon off the engine's ground physics while it does. A SnapMap map carries no hangout
--- spots, so the library finds them by tracing (plus any Perch object the map's author placed).
---
--- THE CONTRACT (perch). Distances are the game's units (inches), times are seconds. Nothing here
--- caps the number of spots, demons or searches; the library never ends a perch on its own.
---
---   Choosing (a query: changes nothing)
---     L:find_all("perch", e, target, parms) -> { spot, ... }   every valid candidate, best first
---     L:find("perch", e, target, parms)     -> spot | nil      the first of those
---     L.perch_spots(L, e, target, parms)    -> the same list, without the cooldown
---     The list is empty while the demon's cooldown runs (parms.ignoreCooldown = true skips that),
---     while the demon is not on the ground, and for a brain built without the "perch" mode. A spot:
---       id        a stable name for the place (the same wall or ceiling cell gives the same id)
---       pos       where the demon's origin goes while it holds: a body radius off the surface
---       normal    the surface's normal, pointing out of it
---       kind      "wall" or "ceiling"
---       node      the ground point the demon WALKS to (the engine's navigation ground under the
---                 spot); `base` is the same point under its older name
---       path      the length of the engine's own path to the node (nil without a path query)
---       travel    path / walk speed, seconds (nil when no walk speed is known)
---       visibility the share of the target's sample points the spot sees (0..1; nil without a target)
---       distance  from pos to the target's position (nil without a target)
---       score     the library's own order: distance to the target (distance from the demon without
---                 one), nearest first. The caller's scorer replaces it; the data is what it needs.
---     parms, all optional, honoured when present:
---       minDistanceFromEnemy, maxDistanceFromEnemy   pos to the target
---       minVisibility           visible share required; absent means at least one sample clear,
---                               0 means no line of sight is required
---       visibilityHeights       the target-origin heights sampled (default 16, 48, 80)
---       maxTravelTime           path / walk speed; applied only when a walk speed is known
---       walkSpeed               inches per second (else spec.perch.walk_speed, else A.walk_speed(e))
---       maxDetour               a walk longer than this times the straight line is behind something
---                               (default L.DETOUR = 3)
---       bodyRadius, searchRadius, height   override the spec's body_radius, reach, height
---       ignoreCooldown, stats   stats is a table that receives the rejected count per reason
---     MaxAIAtPoint is not a parameter: a hangout is held by one demon (the engine says its
---     hangouts always are), so a spot another demon holds is never returned.
---
---   Reserving
---     L:reserve(e, spot) -> true | false, reason   the demon holds the spot from the choice on. One
---                         demon per spot; a demon holds one spot (reserving another drops the
---                         first unless it is mounted). Release is automatic when the demon dies (a
---                         holder the adapter's alive() calls dead is treated as gone), when the
---                         brain calls L:forget(e) (removed demon), and at the end of a dismount.
---     L:release(e)        give the spot up: a walk not yet mounted is dropped at once; a mounted
---                         demon begins its dismount (its spot is free when that ends).
---     L:forget(e)         the demon is gone: drop everything without any dismount.
---     L:reservation(e) -> spot | nil      L:holder(spot) -> demon | nil
---
---   The walk and the arrival (the brain's own, with the engine's move system)
---     the brain sends the ordinary move to spot.node. L:at_node(e, radius) -> bool, distance is
---     the engine's "using the hangout" test: the demon is on the ground, holds the reservation, its
---     move has finished and it is within radius (default spec.perch.arrive_radius, 24) of the node.
---     L:spot_valid(e, spot, target, parms) -> true | false, reason: the spot is still free (or the
---     demon's), still has room for the body and a free jump, and still sees the target by
---     parms.minVisibility. The stand-in for "the current cover is valid".
---
---   Mounting and holding
---     L:mount(e, spot, facing) -> true | false, reason   the jump from where the demon stands onto
---                         the surface, with no second walk. The demon must be within
---                         spec.perch.mount_reach (144) of the node. `facing` is a facing index
---                         (number) or a point to face (table); it reserves the spot when the demon
---                         does not hold it. Cooldown starts. Then the library places the demon every
---                         frame until it leaves.
---     L:go(e, spot)       the older all-in-one: reserve, walk to the node, mount on arrival.
---     L:tick(e, dt)       each frame; the mount, the hold and the dismount run in it.
---     L:arrived(e) -> bool    the demon is held on the surface.
---     L:seconds_at_spot(e) -> seconds held | nil     a query only: nothing ends because of it.
---
---   Facing (the wall idle's discrete facings)
---     L:facing_count()                         how many (spec.perch.facings, 8)
---     L:facing_index(e, point, count)          the index of the facing toward a point, 0..count-1
---     L:facing(e)                              the index the demon holds now (nil when none is set)
---     L:set_facing_index(e, i) -> bool         hold facing i; L:face(e, point) holds a point exactly
---     L.facing_index_of(spot, point, count), L.facing_direction(spot, i, count)   the same maths
---                                              for a spot not yet held
---     Index 0 faces up the surface on a wall and along +x on a ceiling; indices grow
---     counter-clockwise looking at the surface from outside.
---
---   Leaving and the ground
---     L:leave(e, on_grounded)   begin the dismount; on_grounded(e) is called the frame the demon
---                         stands on the ground again (at once when it never left it). Cooldown
---                         restarts.
---     L:grounded(e) -> bool     true when the library is not placing the demon (not mounting,
---                         holding or dismounting): the brain's own moves are the engine's again.
---     L:traversing(e) -> bool   true while the jump up or the jump down is under way (the stand-in
---                         for "a traversal clip is playing").
---     L:mode(e) / L:support(e)  "ground" or "perch"; "floor", "wall" or "ceiling" with its normal.
---
---   Cooldown (the library's alone)
---     L:cooldown_left(e) -> seconds. It starts at mount and again at leave (the engine sets its
---     lastHangoutTime on entering and leaving the state), lasts spec.perch.cooldown_seconds (15),
---     and find_all honours it. The brain keeps no cooldown clock of its own.
---
--- WHAT IS MEASURED AND WHAT IS ASSUMED. Measured, each call: a wall or ceiling by a trace from the
--- demon's surroundings (rays round it at head height, and up from each ray's mid point); room for
--- the body (a demon-blocking trace along the normal), a free jump (a demon-blocking trace from the
--- node to the spot, so a Blocking Box with Block Demons counts), the walk (the engine's path query,
--- which knows the map's blocking volumes and the navigation Snapmap+ bakes for them), the target's
--- visibility (traces from the spot to sample points above the target's origin) and its distance.
--- Assumed: the body radius (96) and the head height the rays start at (220), the sample heights, a
--- walk speed when the adapter has none, that a detour above L.DETOUR is a way blocked rather than
--- long, that the jump is a straight line with an arc (mount_seconds, 1), and that the wall pose is
--- the surface's normal. Not measured: the engine's silhouette visibility (the share of sample
--- points stands in), its dead-end test, and whether a held pose looks right: only a live game says.
+-- enemy_locomotion.lua: how a demon of the Enemy SDK gets from one place to another: a brain asks a locomotion mode
+-- (ground: the adapter's move_to; perch: holding on a wall or ceiling; more through L.register) and never moves the
+-- demon itself. DOOM 2016 has no wall or ceiling body physics (aiMovementMode_t has no wall mode), so perch places
+-- the demon every frame with its up along the surface normal while the adapter's surface_hold takes it off the
+-- ground physics; spots come from tracing plus any placed Perch object. Distances are game units (inches), times are
+-- seconds, and a perch never ends by itself.
 --
 -- Adapter calls used: position, now, trace, ground_below, entities_near, move_to, move_done, stop, place,
 -- surface_hold; optional: trace_demon, path_to(e, point), walk_speed(e), alive(e), definition, forward.
---
--- A new mode (flight, swimming) is one more provider:
---   L.register("fly", { find =, go =, tick =, arrived =, leave =, find_all = })
--- find_all is optional (find alone is wrapped into a list of one); comes_down = true says that
--- leave takes time and the demon is back on the ground when the provider sets it so.
 
 local L = {}
 L.__index = L
 
 L.providers = {}
+-- Registers a mode provider { find =, go =, tick =, arrived =, leave =, find_all = (optional), comes_down = true when
+-- leave takes time and the provider puts the demon back on the ground }.
 function L.register(mode, provider) L.providers[mode] = provider end
 
--- ---------------------------------------------------------------------------------- vectors
 local function v(x, y, z) return { x = x, y = y, z = z } end
 local function add(a, b) return v(a.x + b.x, a.y + b.y, a.z + b.z) end
 local function sub(a, b) return v(a.x - b.x, a.y - b.y, a.z - b.z) end
@@ -167,7 +49,6 @@ function L.surface_angles(normal, toward)
   return { pitch = pitch, yaw = yaw, roll = roll }
 end
 
--- ---------------------------------------------------------------------------------- the object
 --- A locomotion object for one brain. A: the adapter. spec: { modes = { "ground", "perch" },
 -- perch = { cooldown_seconds =, body_radius =, reach =, height =, rays =, mount_seconds =,
 -- mount_reach =, arrive_radius =, facings =, walk_speed =, spot_def = "info/perch" } }.
@@ -194,9 +75,15 @@ function L:has(mode)
   return false
 end
 
+-- The demon's mode ("ground" or "perch") and its support ({ kind = "floor", "wall" or "ceiling", normal }).
 function L:mode(e) return self:st(e).mode end
 function L:support(e) return self:st(e).support end
 
+-- Every valid destination of `mode` for demon e, best first; a perch list is empty while the demon's cooldown runs
+-- (parms.ignoreCooldown skips that) or it is not on the ground. L:find returns the first. Perch parms, all optional:
+-- minDistanceFromEnemy, maxDistanceFromEnemy, minVisibility (absent: one sample clear; 0: none needed),
+-- visibilityHeights (default 16, 48, 80), maxTravelTime, walkSpeed (else spec.perch.walk_speed, else A.walk_speed(e)),
+-- maxDetour (default L.DETOUR), bodyRadius, searchRadius, height, ignoreCooldown, stats (receives rejects per reason).
 function L:find_all(mode, e, target, parms)
   if not self:has(mode) then return {} end
   local p = L.providers[mode]
@@ -207,18 +94,22 @@ function L:find_all(mode, e, target, parms)
 end
 function L:find(mode, e, target, parms) return self:find_all(mode, e, target, parms)[1] end
 
+-- Sends the demon to a destination from find (perch: reserve, walk to the node, mount on arrival); false when a perch
+-- cannot be reserved.
 function L:go(e, dest)
   local s = self:st(e)
   if s.mode ~= dest.mode and s.mode ~= "ground" then L.providers[s.mode].leave(self, e) end
   s.mode = dest.mode
   return L.providers[dest.mode].go(self, e, dest)
 end
+-- Call each frame: the mode's mount, hold and dismount run here; a dead perch holder is forgotten.
 function L:tick(e, dt)
   local A = self.A
   if A.alive and self.state[e] and self.state[e].perch and not A.alive(e) then self:forget(e); return end
   local p = L.providers[self:st(e).mode]
   if p.tick then p.tick(self, e, dt) end
 end
+-- True when the demon has reached its destination (perch: it is held on the surface).
 function L:arrived(e) return L.providers[self:st(e).mode].arrived(self, e) end
 
 --- Begin giving the demon back to the ground. on_grounded(e) is called the frame it stands there.
@@ -250,7 +141,6 @@ function L:grounded(e)
   return p.phase == "approach"
 end
 
--- ---------------------------------------------------------------------------------- ground
 L.register("ground", {
   find = function(self, e, target, parms) return { mode = "ground", pos = parms.pos or self.A.position(target) } end,
   go = function(self, e, dest) self.A.move_to(e, dest.pos, dest.flags) end,
@@ -258,7 +148,6 @@ L.register("ground", {
   leave = function() end,
 })
 
--- ---------------------------------------------------------------------------------- perch
 local PERCH = { cooldown_seconds = 15, body_radius = 96, reach = 1024, height = 220, rays = 16,
                 mount_seconds = 1.0, mount_reach = 144, arrive_radius = 24, facings = 8,
                 spot_def = "info/perch" }
@@ -266,9 +155,8 @@ local function perch_parm(self, key) return (self.spec.perch or {})[key] or PERC
 L.DETOUR = 3     -- a spot whose walk is more than this many times the straight line is behind something
 local SIGHT_HEIGHTS = { 16, 48, 80 }
 
--- A trace's answer as "what was hit, or nil": the adapter answers nil or { hit = false } for a
--- clear line. Demon traces (stopped by Blocking Boxes with Block Demons too) when the adapter
--- has them.
+-- A trace's answer as "what was hit, or nil" (the adapter answers nil or { hit = false } for a clear line); demon
+-- traces, which Blocking Boxes with Block Demons also stop, when the adapter has them.
 local function hit(tr) if tr and tr.hit ~= false and tr.normal then return tr end return nil end
 local function solid(A, from, to, opts)
   if A.trace_demon then return hit(A.trace_demon(from, to, opts)) end
@@ -287,6 +175,7 @@ local function holder_of(self, id)
   if h ~= nil and not live(self.A, h) then self.claims[id] = nil; return nil end
   return h
 end
+-- The demon holding `spot`, or nil; and the spot demon e holds, or nil.
 function L:holder(spot) return spot and holder_of(self, spot.id) or nil end
 function L:reservation(e) return self:st(e).reserved end
 
@@ -369,8 +258,12 @@ local function make_spot(self, e, target, parms, hit_pos, normal, id)
            score = distance or len(sub(pos, A.position(e))) }
 end
 
---- Every spot the demon could perch on now, best first (see the contract). The cooldown is not
--- looked at here: find_all does that.
+--- Every spot the demon could perch on now, best first; find_all applies the cooldown. A spot is { mode, id (stable
+-- per wall or ceiling cell), pos (origin while held, a body radius off the surface), normal (out of the surface),
+-- kind ("wall" or "ceiling"), node (the ground point the demon walks to; base is the same point), path (engine path
+-- length to the node, nil without path_to), travel (path / walk speed, seconds), visibility (0..1 share of the
+-- target's sample points seen), distance (pos to the target), score (ascending: distance to the target, else from
+-- the demon) }.
 function L.perch_spots(self, e, target, parms)
   parms = parms or {}
   local A, out, seen = self.A, {}, {}
@@ -408,7 +301,8 @@ function L.perch_spots(self, e, target, parms)
   return out
 end
 
--- ---- reserving ------------------------------------------------------------------------
+-- The demon holds `spot` from now on (one demon per spot, one spot per demon); returns true, or false and a reason.
+-- The hold ends when the demon dies, on L:forget and at the end of a dismount.
 function L:reserve(e, spot)
   local s = self:st(e)
   local h = holder_of(self, spot.id)
@@ -425,6 +319,7 @@ function L:reserve(e, spot)
   return true
 end
 
+-- Gives the spot up: an unmounted walk is dropped at once, a mounted demon begins its dismount.
 function L:release(e)
   local s = self:st(e)
   local p = s.perch
@@ -435,6 +330,7 @@ function L:release(e)
   if s.mode == "perch" then s.mode = "ground" end
 end
 
+-- The demon is gone: drops everything without a dismount.
 function L:forget(e)
   local s = self.state[e]
   if not s then return end
@@ -443,6 +339,8 @@ function L:forget(e)
   self.state[e] = nil
 end
 
+-- Seconds of cooldown left; it starts at mount and at leave, lasts spec.perch.cooldown_seconds (15) and find_all
+-- honours it.
 function L:cooldown_left(e)
   local t = self:st(e).cooldown_until
   if not t then return 0 end
@@ -450,7 +348,8 @@ function L:cooldown_left(e)
 end
 local function start_cooldown(self, e) self:st(e).cooldown_until = self.A.now() + perch_parm(self, "cooldown_seconds") end
 
--- ---- the walk and the arrival ---------------------------------------------------------
+-- True and the distance when e holds its reservation, its move has finished and it is within radius (default
+-- arrive_radius, 24) of the spot's node; otherwise false.
 function L:at_node(e, radius)
   local s, A = self:st(e), self.A
   local spot = s.reserved
@@ -462,6 +361,8 @@ function L:at_node(e, radius)
   return d <= (radius or perch_parm(self, "arrive_radius")), d
 end
 
+-- True, or false and a reason, when the spot is free or e's, has room for the body and (unmounted) a free jump, and
+-- still sees the target by parms.minVisibility.
 function L:spot_valid(e, spot, target, parms)
   parms = parms or {}
   spot = spot or self:st(e).reserved
@@ -477,7 +378,8 @@ function L:spot_valid(e, spot, target, parms)
   return true
 end
 
--- ---- facings --------------------------------------------------------------------------
+-- Facings are spec.perch.facings (8) discrete directions along the surface: index 0 faces up a wall or along +x on a
+-- ceiling, and indices grow counter-clockwise seen from outside.
 local function frame(spot)
   local n = unit(spot.normal)
   local up = v(0, 0, 1)
@@ -485,6 +387,7 @@ local function frame(spot)
   return n, ref
 end
 
+-- The facing index toward `point` for a spot not yet held, or nil.
 function L.facing_index_of(spot, point, count)
   if not spot or not point then return nil end
   local n, ref = frame(spot)
@@ -495,6 +398,7 @@ function L.facing_index_of(spot, point, count)
   return math.floor(ang / (360 / count) + 0.5) % count
 end
 
+-- The direction of facing `index` of `count` on a spot.
 function L.facing_direction(spot, index, count)
   local n, ref = frame(spot)
   local a = math.rad(index * 360 / count)
@@ -508,10 +412,12 @@ local function facing_spot(self, e)
   return (s.perch and s.perch.dest) or s.reserved
 end
 
+-- The facing index toward `point` on the spot e holds or walks to.
 function L:facing_index(e, point, count)
   return L.facing_index_of(facing_spot(self, e), point, count or self:facing_count())
 end
 
+-- The facing index the demon holds now, or nil when none is set.
 function L:facing(e)
   local p = self:st(e).perch
   if not p or not p.face then return nil end
@@ -519,6 +425,7 @@ function L:facing(e)
   return L.facing_index_of(spot, add(spot.pos, p.face), self:facing_count())
 end
 
+-- Holds facing `index`; false when the demon is not on a perch.
 function L:set_facing_index(e, index)
   local p = self:st(e).perch
   if not p then return false end
@@ -532,7 +439,6 @@ function L:face(e, point)
   if p and point then p.face = sub(point, p.dest.pos) end
 end
 
--- ---- mounting, holding, dismounting ---------------------------------------------------
 local function begin_mount(self, e, s, spot, facing)
   local A = self.A
   local p = { dest = spot, phase = "mount", t = 0, from = A.position(e) }
@@ -544,6 +450,8 @@ local function begin_mount(self, e, s, spot, facing)
   start_cooldown(self, e)
 end
 
+-- Jumps from the node onto `spot` (the demon must be within mount_reach, 144, of it), reserving it if needed; `facing`
+-- is an index or a point. Returns true, or false and a reason; the cooldown starts and tick places the demon after.
 function L:mount(e, spot, facing)
   local s, A = self:st(e), self.A
   if not self:has("perch") then return false, "no perch mode" end
@@ -555,6 +463,7 @@ function L:mount(e, spot, facing)
   return true
 end
 
+-- Seconds held on the surface, or nil; a query only.
 function L:seconds_at_spot(e)
   local p = self:st(e).perch
   if not p or p.phase ~= "hold" then return nil end

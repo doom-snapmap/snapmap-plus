@@ -1,61 +1,29 @@
 /* script_api_ai.c -- the AI calls of mod scripts (script_api_ai.h).
  *
- * The Lua side checks every argument and the caller's ownership first, then
- * makes its engine calls through the seam (sh_script_ai_engine), and never
- * raises after an engine call. The engine side (below SH_SCRIPT_PURE) fills
+ * The Lua side checks every argument and the caller's ownership first, then makes its engine calls through
+ * the seam (sh_script_ai_engine) and never raises after one. The engine side (below SH_SCRIPT_PURE) fills
  * the seam on build 13954591, both renderers.
  *
- * Engine paths (VK / GL, evidence in snaphak-re logs/shared-ghidra/SC5):
- *   commands      the catalogue events, run with ProcessEventArgs
- *                 (VK 0x140B47350 / GL 0x140B46940) on the demon;
- *   park          IsRunningScript (VK 0x14042FBC0 / GL 0x14042EE60) detoured;
- *   release       the park slot marked released: the detour gives the engine's
- *                 own answer until the next park clears the mark;
- *   anim_variable the anim web's set-variable-by-name (VK 0x14170A950 / GL
- *                 0x14170B3C0) on the animator at ai +0x222B8, the name made an
- *                 atom by the engine's atom call (the pain site's);
- *   enemy         idEntityPtr at ai+0x25050, resolved by VK 0x1403935E0 /
- *                 GL 0x140392E10;
- *   awareness     GetAwareness(ai+0x29A88, entity) VK 0x1404A9E30 /
- *                 GL 0x1404A85B0, the AIAWARE_ word of the entity's record;
- *   sight         the isEntityVisible event (the perception's own sight
- *                 state, which the engine refreshes from its traces);
- *   move status   *(*(ai+0x23198)+0xD20), as Shared_MoveDone (VK
- *                 0x1403D7DF0) and Shared_MoveFailedAny (>= 5) read it;
- *   path          the move FSM's path query Shared_TargetDistanceFilter
- *                 calls: VK 0x140515300 / GL 0x140514030 (moveFSM, query,
- *                 goal, navTolerance, out reachable point, out length,
- *                 flag) -> 0 or 1 found, 2 still searching, above 2 none;
- *   trigger       the weapon's trigger word, as Shared_TriggerPulled reads
- *                 it (weapon +0x8F8 + 4 * [+0x8D4], 0 = pulled);
- *   can_see       isEntityVisible (the perception saw the entity within the
- *                 last second: its record's last-seen time, VK 0x1404AA3E0)
- *                 and the world trace from the demon's eye to 40 inches above
- *                 the entity's origin (world geometry, players and demons);
- *   recoil        the float at ai+0x24EB0, which the recoil play multiplies
- *                 into the recoil animator's weight (VK 0x1403D9300);
- *   weapon_ready  the weapon holder's next-pull time for the active trigger
- *                 against the game clock, the "cooldown" test of the can-fire
- *                 check (VK 0x1404439D0);
- *   aim_point     the set-focus-to-position ae_selectAimFocusPoint uses
- *                 (VK 0x14041BBA0 / GL 0x14041AD60), foci 0, 2 and 3;
- *   animation_fits    the node's animations (VK 0x141712C60) and their total root
- *                 motion (VK 0x1415C5290), tested with the world trace, the
- *                 ground under the end point and the path query;
- *   path_points   the path query above, its computed path read through a
- *                 detour of the path length (VK 0x14050EA60 / GL 0x14050D790);
- *   firing_position, spline_clear  compositions of the path query, the world
- *                 trace and the ground under a point (sh_ai_*_run);
- *   monster_type  the getMonsterType event (the behaviour decl's
- *                 aiMonsterType_t, VK 0x14040D070);
- *   pain_string   the pain request's string (VK 0x1403F5440 / GL 0x1403F4920,
- *                 [rbp+0x88], compared with each pain anim's +0x48 string),
- *                 replaced at its last write by a stub (sh_ai_pain_stub_build);
- *   block_pain    a detour of the threat table's row check (VK 0x1406E08D0 /
- *                 GL 0x1406DFD00) refusing a blocked reaction's rows;
- *   wound_damage_counts  a detour of idGoreComponent::DamageActivatesWound
- *                 (VK 0x1408FC8E0 / GL 0x1408FB910) that counts each wound's
- *                 own damage (sh_wound_count_step). */
+ * Engine paths (VK / GL):
+ *   commands      the catalogue events, via ProcessEventArgs (VK 0x140B47350 / GL 0x140B46940)
+ *   park          IsRunningScript (VK 0x14042FBC0 / GL 0x14042EE60) detoured; release marks the slot
+ *   anim_variable the anim web's set-variable-by-name (VK 0x14170A950 / GL 0x14170B3C0), animator at ai+0x222B8
+ *   enemy         idEntityPtr at ai+0x25050, resolved by VK 0x1403935E0 / GL 0x140392E10
+ *   awareness     GetAwareness(ai+0x29A88, entity) VK 0x1404A9E30 / GL 0x1404A85B0
+ *   sight         the isEntityVisible event; can_see adds the last-seen time (VK 0x1404AA3E0) and a world trace
+ *   move status   *(*(ai+0x23198)+0xD20), as Shared_MoveDone (VK 0x1403D7DF0) reads it; >= 5 is failed
+ *   path          the move FSM's path query (VK 0x140515300 / GL 0x140514030): 0 or 1 found, 2 searching, >2 none
+ *   trigger       the weapon's trigger word (weapon +0x8F8 + 4 * [+0x8D4], 0 = pulled)
+ *   recoil        the float at ai+0x24EB0, multiplied into the recoil animator's weight (VK 0x1403D9300)
+ *   weapon_ready  the weapon holder's next-pull time against the game clock (VK 0x1404439D0)
+ *   aim_point     the set-focus-to-position of ae_selectAimFocusPoint (VK 0x14041BBA0 / GL 0x14041AD60)
+ *   animation_fits  the node's animations (VK 0x141712C60) and root motion (VK 0x1415C5290), then traces
+ *   path_points   the path query's computed path, read through a detour of the path length
+ *                 (VK 0x14050EA60 / GL 0x14050D790)
+ *   monster_type  the getMonsterType event (VK 0x14040D070)
+ *   pain_string   the pain request's string (VK 0x1403F5440 / GL 0x1403F4920), swapped for a stub
+ *   block_pain    a detour of the threat table's row check (VK 0x1406E08D0 / GL 0x1406DFD00)
+ *   wound_damage_counts  a detour of idGoreComponent::DamageActivatesWound (VK 0x1408FC8E0 / GL 0x1408FB910) */
 #include <windows.h>
 #include <limits.h>
 #include <math.h>
@@ -352,11 +320,11 @@ typedef struct ai_rec {
     int        facing;           /* a face order is standing: 1 an entity, 2 a position */
     sh_script_handle face_ent;
     float      face_pos[3];
-    unsigned   hand_noted;       /* equip told the author of a weapon outside the weapon hand (a bit per hand) */
-    unsigned   turn_noted;       /* hold told the author of an idle turn with no turnParms entry (a bit per turn type) */
-    sh_script_handle focus_noted; /* the last entity the focus guard refused and said so (one line per entity) */
-    char      *wait_dest;        /* an animation order held back while a step of the engine's is in flight */
-    char      *wait_via;         /* (malloc'd node names; wait_dest NULL: none) */
+    unsigned   hand_noted;       /* equip notes already given, a bit per hand */
+    unsigned   turn_noted;       /* hold notes already given, a bit per idle turn type */
+    sh_script_handle focus_noted; /* the last entity the focus guard refused and reported */
+    char      *wait_dest;        /* a held-back animation order (malloc'd node names; NULL: none) */
+    char      *wait_via;
     int        wait_kind;        /* its SH_AI_ORDER_ kind */
     int        eternal_interrupts; /* ai:eternal_interrupts(): orders carry DOOM Eternal's interrupt mode */
 } ai_rec;
@@ -616,14 +584,9 @@ static void *other_entity(lua_State *L, int idx, const char *call)
     return h ? g_engine->entity((sh_script_handle)h) : NULL;
 }
 
-/* The focus guard (ai:focus, ai:aim_at, ai:face on an entity): an entity is
- * handed to the engine as a focus only when its origin is a point of the world
- * (finite, within the +-1e7 a position must lie in) and it is not the demon
- * itself. DOOM 2016's focus update (idFocusInfo::Update, VK 0x1404C78C0 and
- * 0x1404C9380, GL 0x1404C6290 and 0x1404C7D50) checks the point it is given
- * for NaN only; an infinite or absurd
- * point (or the demon's own, a zero direction) reaches its joint chain, which
- * then prints "has an NaN focus point!" every frame the focus is kept. */
+/* The focus guard: an entity is a focus only when its origin is finite and within +-1e7 and it is not the
+ * demon itself. idFocusInfo::Update (VK 0x1404C78C0 / 0x1404C9380, GL 0x1404C6290 / 0x1404C7D50) checks for
+ * NaN only, so an absurd point reaches the joint chain and logs "has an NaN focus point!" every frame. */
 static int focus_entity_ok(void *ai, void *ent)
 {
     float o[3];
@@ -837,10 +800,8 @@ static int l_move_to(lua_State *L)
     return 1;
 }
 
-/* ai:move_to_entity(e, [tolerance], [flags]): a move to the entity's
- * position, given again whenever the entity has moved AI_FOLLOW_MIN inches
- * (or the tolerance, when larger) from where the last order pointed, or the
- * last move ended. The engine's own move-to-entity overshoots its target. */
+/* ai:move_to_entity(e, [tolerance], [flags]): a move to the entity's position, reissued when it has moved
+ * AI_FOLLOW_MIN inches (or the tolerance, if larger) from the last order's point or the last move ended. */
 static int l_move_to_entity(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -904,9 +865,7 @@ static int l_move_done(lua_State *L)
     return 2;
 }
 
-/* ai:face(target): an entity (keep facing it) or a position (turn once). */
-/* face's options: { travel = inches }, how far a turn clip's root may step
- * from where it starts. 0 when absent. */
+/* face's options: { travel = inches }, how far a turn clip's root may step from where it starts. 0 when absent. */
 static double face_travel(lua_State *L, int idx)
 {
     double travel = 0;
@@ -925,16 +884,11 @@ static double face_travel(lua_State *L, int idx)
     return travel;
 }
 
-/* ai:face(target, [options]). A position turns the demon with a move to its
- * own origin that aligns with the target, so the engine picks a turn clip;
- * an entity sets the focus, unless travel is given, which turns toward where
- * the entity stands now. The move's tolerance is the engine's arrival radius
- * of the clip query (transitionQueryParms_t +0x6C, VK 0x1404FC0B0 / GL
- * 0x1404FADE0), and for a turn in place the query rejects a clip whose root
- * ends farther than 1.0 to 1.3 times max(1, that radius) from its start
- * (ANIMQUERY_REJECT_OVERSHOOT, VK 0x141AD9E90 / GL 0x141AF40E0). The default
- * is exact (0.1); { travel = inches } passes the inches as the radius, so a
- * demon's own stepping turns are chosen. */
+/* ai:face(target, [options]): an entity sets the focus (or, with travel, turns toward where it stands); a
+ * position turns with a move to the demon's own origin so the engine picks a turn clip. The move tolerance is
+ * the clip query's arrival radius (transitionQueryParms_t +0x6C, VK 0x1404FC0B0 / GL 0x1404FADE0); a turn in
+ * place rejects a clip ending past 1.0 to 1.3 times max(1, radius) (VK 0x141AD9E90 / GL 0x141AF40E0), and
+ * travel passes its inches as that radius (default 0.1). */
 static int l_face(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -985,10 +939,8 @@ static int l_face(lua_State *L)
     return 0;
 }
 
-/* ai:turn_done() -> the demon faces its last face() target within
- * AI_TURN_DONE_DEG degrees (true when no face order stands; nil while the
- * target entity is gone). Made of the facing and the target's position:
- * 2016's turn has no completion flag a script can read. */
+/* ai:turn_done() -> the demon faces its last face() target within AI_TURN_DONE_DEG degrees (true when no face
+ * order stands; nil while the target is gone). Computed from the facing, as 2016's turn has no completion flag. */
 static int l_turn_done(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -1077,8 +1029,7 @@ static int sight_to(void *ai, const float *from, void *target, const float targe
     return g_engine->sight(ai, from, to, target);
 }
 
-/* ai:can_see(e) -> the demon's perception has seen e within the last second
- * and nothing in the world stands between its eyes and e now */
+/* ai:can_see(e) -> the perception saw e within the last second and no world geometry blocks the eyes' view */
 static int l_can_see(lua_State *L)
 {
     void *ai, *e;
@@ -1152,8 +1103,7 @@ static int path_of(void *ai, sh_script_handle h, const float goal[3], int n, flo
     return g_engine->path(ai, goal, key, len);
 }
 
-/* ai:path_length(pos) -> inches along the navigation; nil, "searching"
- * while the engine is still finding the path (ask again next think); nil,
+/* ai:path_length(pos) -> inches along the navigation; nil, "searching" while the engine finds the path, nil,
  * "no path" when it cannot get there. */
 static int l_path_length(lua_State *L)
 {
@@ -1189,15 +1139,9 @@ static int l_can_reach(lua_State *L)
     return 1;
 }
 
-/* ai:find_position(parms) -> pos, or nil, "searching" | "none".
- * Made of the navigation path query and the world trace: `count` points on
- * the circle of radius `ideal` around the target (its enemy when
- * parms.target is omitted); a point counts when the demon's eyes would see
- * the target from there (unless parms.visible is false) and a path reaches
- * it; the one with the lowest score |distance to target - ideal| + path
- * length * path_weight wins, skipping those whose path is longer than
- * max_path. parms: target, min, max, ideal, count (2 or more), path_weight,
- * max_path, visible. */
+/* ai:find_position(parms) -> pos, or nil, "searching" | "none". Scores `count` points on a circle of radius
+ * `ideal` around the target (default its enemy) by |distance - ideal| + path length * path_weight, keeping
+ * those that see the target (unless visible is false) and have a path no longer than max_path. */
 static int l_find_position(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -1262,14 +1206,9 @@ static int l_find_position(lua_State *L)
 
 /* ---- the weapon: which hand, which item
  *
- * The game fires a demon's weapons from its fire control, which runs only
- * while the hand its aibehavior decl names in weaponSlot (default the right
- * hand) holds a weapon; it then fires the weapon of each hand. equip puts an
- * inventory item in the hand its own decl's equipSlot names. So trigger,
- * trigger_pulled and weapon_ready act on the weapon in one hand: the one a
- * script names ("left" or "right"), else the demon's weapon hand; equip takes
- * the item by its decl name (or its inventory index) and answers the hand it
- * went to. */
+ * The game's fire control runs only while the hand named by weaponSlot in the aibehavior decl (default right)
+ * holds a weapon, and equip puts an item in the hand its decl's equipSlot names. So trigger, trigger_pulled
+ * and weapon_ready act on the named hand's weapon, else the weapon hand. */
 
 static const char *hand_name(int hand)
 {
@@ -1606,11 +1545,9 @@ int sh_ai_position_kind(const char *word)
 
 /* ------------------------------------ per-demon records other threads read */
 
-/* One record per demon with a pain string or a block standing. Engine
- * threads read the records without a lock, so they never move: the table is
- * the engine's own size (one record per entity the game can hold at once,
- * SH_SCRIPT_ENGINE_ENTITIES), readers look only below the high-water mark,
- * and a record whose demon is gone is reused. */
+/* One record per demon with a pain string or a block standing. Engine threads read the records without a lock,
+ * so the table never moves: it holds one record per entity the game can hold (SH_SCRIPT_ENGINE_ENTITIES),
+ * readers stay below the high-water mark, and a gone demon's record is reused. */
 #define AI_PAIN_RECORDS SH_SCRIPT_ENGINE_ENTITIES
 typedef struct ai_pain_rec {
     void *volatile        ai;
@@ -1619,7 +1556,7 @@ typedef struct ai_pain_rec {
     volatile LONG         until[SH_AI_PAIN_REACTIONS];   /* game ms; 0 none */
 } ai_pain_rec;
 static ai_pain_rec g_pain[AI_PAIN_RECORDS];
-static volatile LONG g_pain_used;   /* records below this were ever made: the engine's threads look only there */
+static volatile LONG g_pain_used;   /* high-water mark: engine threads read only below it */
 
 void sh_ai_pain_records_reset(void)
 {
@@ -1989,12 +1926,9 @@ int sh_ai_spline_run(const sh_script_ai_engine *e, void *ai, const sh_ai_spline_
     return 1;
 }
 
-/* SH_AI_TF_NAV_LINE: the clip's end on the world's floor (within a step of
- * where the clip puts it) and the straight line to it clear of the world at
- * knee and chest height, players and demons passed through, as DOOM
- * Eternal's navigation trace sees the ground (no actor is part of it). A
- * clip that ends where it starts needs no line and no floor test: the demon
- * stands there (a zero-length navigation trace passes). 1 fits, 0 not. */
+/* SH_AI_TF_NAV_LINE: the clip's end is on the world's floor (within a step) and the straight line to it is
+ * clear of world geometry at knee and chest height, actors ignored. A clip ending where it starts needs
+ * neither test. 1 fits, 0 not. */
 static int nav_line(const sh_script_ai_engine *e, void *ai, const float at[3], const float end[3])
 {
     float above[3], g[3], from[3], to[3], h[2] = { AI_KNEE, AI_CHEST };
@@ -2019,8 +1953,8 @@ int sh_ai_anim_key(int key_base, const char *node, int index)
     return key_base + (int)((h % (SH_AI_KEY_SPAN / 64)) * 64) + (index & 63);
 }
 
-/* DOOM Eternal's animation query (Shared_AnimationValid, 0x1409FCA40) tries every animation of the node in an order
- * it shuffles at each query and answers with the first that passes; `seed` gives that order here (0: in order). */
+/* Mirrors DOOM Eternal's Shared_AnimationValid (0x1409FCA40): the node's animations are tried in a shuffled
+ * order and the first that passes wins; `seed` sets the order (0: in order). */
 int sh_ai_anim_valid_run(const sh_script_ai_engine *e, void *ai, const char *node, unsigned tests, int side,
                          unsigned seed, int key_base, int *index)
 {
@@ -2122,10 +2056,8 @@ int sh_ai_anim_valid_run(const sh_script_ai_engine *e, void *ai, const char *nod
     do { if (g_engine && !g_engine->op) sh_script_refuse(L, "\"%s\" is not available in this session (Snapmap+ could not find " \
                                              "the game function it needs; see the backend log)", call); } while (0)
 
-/* ai:weapon_use(name): the demon's weapon-use behaviour becomes the entry
- * of that name in its behaviour decl's weaponUseBehaviorList (the recoil
- * clip and its weights, the trigger-hold times). true when selected, false
- * when the list has no such entry. */
+/* ai:weapon_use(name): selects the entry of that name in the behaviour decl's weaponUseBehaviorList; true when
+ * selected, false when the list has no such entry. */
 static int l_weapon_use(lua_State *L)
 {
     const char *name;
@@ -2182,21 +2114,11 @@ static int l_aim_point(lua_State *L)
     return 0;
 }
 
-/* ---- the engine's own fire control, aim focus and idle
- *
- * The game fires a demon's weapon by itself: its fire control (per frame, per
- * weapon) pulls the trigger when the fire mode asks for it and the fire
- * check passes, holds it for a burst whose length and pauses come from the
- * weapon decl's skillSettings, and releases it. These calls set and read
- * that machine's own state; none of them keeps a copy of it or decides
- * anything the engine decides. */
+/* ---- the engine's own fire control, aim focus and idle: the fire control pulls the trigger when the fire mode
+ * asks and the fire check passes, holds it for a burst from the weapon decl's skillSettings, then releases it. */
 
-/* ai:fire_mode(mode): the fire control's mode, by the game's aiFireMode_t
- * name ("FIREWHENREADY" or "AIFIREMODE_FIREWHENREADY": HOLDFIRE,
- * WEAPON_EXPLICIT_RELEASE, WEAPON, FIREWHENREADY, SPRAYWHENREADY) or number.
- * Sets it with the game's setFireMode event and answers true when the engine
- * ran it. ai:fire_mode() reads it: the mode the script events set and the
- * mode the animation events set, as enum names. */
+/* ai:fire_mode(mode): sets the fire control's aiFireMode_t (by name, with or without AIFIREMODE_, or number)
+ * with the setFireMode event; true when it ran. ai:fire_mode() reads the script-set and animation-set modes. */
 static int l_fire_mode(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -2240,16 +2162,9 @@ static int refuse_no_hand(lua_State *L, const char *call)
                             "name the hand, \"left\" or \"right\"", call);
 }
 
-/* ai:pull_trigger([check], [hand]): the engine pulls the trigger of the
- * weapon in `hand` through the demon's fire control, as its animation event
- * ae_aIPullTrigger does: the fire control draws the burst from the weapon
- * decl and holds the trigger for it. With check = true the event's checkValid
- * is set, which runs the fire gate first (the sight, cooldown, range and
- * muzzle tests of CheckPullTrigger) and pulls only when the gate passes.
- * The game's bare pullTrigger events are not used: they pull the weapon past
- * the fire control, no burst is drawn, and a demon in the WEAPON fire mode
- * releases the trigger in its next think without a shot. Answers whether the
- * trigger is held afterwards (nil when the hand holds no weapon). */
+/* ai:pull_trigger([check], [hand]): pulls the weapon's trigger through the fire control with the ae_aIPullTrigger
+ * event; check = true runs CheckPullTrigger's fire gate first. The bare pullTrigger events skip the fire
+ * control, so a WEAPON-mode demon releases without a shot. Answers whether the trigger is held (nil: no weapon). */
 static int l_pull_trigger(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -2269,8 +2184,7 @@ static int l_pull_trigger(lua_State *L)
     {
         sh_ai_arg a[3];
         a[0] = arg_anim();
-        /* the slot as the engine's equip slot parser reads it (its name table: "left_hand", "right_hand"; the
-         * enum spelling EQUIP_LEFT_HAND is refused with "invalid slot" and nothing is pulled) */
+        /* the slot as the equip slot parser reads it: "left_hand" or "right_hand" (EQUIP_LEFT_HAND is refused) */
         a[1] = arg_s('s', hand == SH_AI_HAND_LEFT ? "left_hand" : "right_hand");
         a[2] = arg_b(check);
         run(ai, SH_AI_EV_AE_PULL_TRIGGER, a, 3, NULL);
@@ -2294,16 +2208,9 @@ static int l_release_trigger(lua_State *L)
     return 0;
 }
 
-/* ai:muzzle_on_target([test], [hand]) -> on_target, info. The engine's own
- * muzzle test (the one the fire gate and the burst's keep-firing check run: a
- * ray from the weapon's muzzle tag against a sphere at the aim focus point),
- * with `test` "pull" (the default), "firing" or "plain" for its three radius
- * weights. info holds what the test reads: focus_valid (false when the demon
- * has no aim focus: the test then fails), point, radius (the sphere's, before
- * the weight), precision ("NORMAL", "PRECISE" or "MAX"), require_muzzle
- * (whether the fire gate asks the test at all), and the two switches
- * tracking and body_rotation. on_target is nil when the engine's test cannot
- * be called in this session. */
+/* ai:muzzle_on_target([test], [hand]) -> on_target, info. Runs the engine's muzzle test (a ray from the muzzle
+ * tag against a sphere at the aim focus) with radius weight "pull" (default), "firing" or "plain"; info holds
+ * the focus state it reads. on_target is nil when the test cannot be called in this session. */
 static int l_muzzle_on_target(lua_State *L)
 {
     static const char *const precision[3] = { "NORMAL", "PRECISE", "MAX" };
@@ -2336,17 +2243,9 @@ static int l_muzzle_on_target(lua_State *L)
     return 2;
 }
 
-/* ai:focus(target, [aim_point]): the engine's aim focus, which the fire
- * gate needs (with no valid focus the muzzle test fails and a parked demon
- * fires nothing). An entity is tracked (setFocus, aiming, kept in view) at
- * the aim point named (an aimPoint_t name with or without AIMPOINT_:
- * "CENTER", the default, or "BEST", the one the game's own focus on an
- * enemy and DOOM Eternal's take); a position is a fixed aim point (the
- * game's set-focus-to-position); nil clears the aim focus. ai:aim_at
- * (entity or nil) and ai:aim_point (position or nil) are the same two
- * orders under their older names. An entity that fails the focus guard
- * (focus_entity_ok) clears the aim focus instead, and the call answers false;
- * true when the focus was handed. */
+/* ai:focus(target, [aim_point]): sets the aim focus the fire gate needs (without one the muzzle test fails).
+ * An entity is tracked at the named aimPoint_t (default CENTER); a position is a fixed aim point; nil clears
+ * it. An entity failing focus_entity_ok clears the focus and answers false, else true. */
 static int l_focus(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -2393,20 +2292,10 @@ static int l_focus(lua_State *L)
     return 1;
 }
 
-/* ai:hold([turn]): stand the demon still the engine's way. Its pending move
- * request is ended with the engine's ClearMove (the call every scripted
- * action starts with, so the idle watchdog that trips on a request nobody
- * finishes has none to count), and the engine's idle is ordered with a turn
- * in place type: AIIDLETURN_ "RELAXED", "COMBAT" (the default, the one stock
- * demons use in combat) or "INCOVER". The engine then turns the body toward
- * the aim focus itself when the focus leaves the aim tracker's yaw limit. The
- * idle is ordered without an end (time -1): the engine's idle action expires
- * at its first update when its time is 0, and its end clears the turn flag
- * the order set, so a timed idle of 0 never turns the body. The demon's next
- * order (a move, an animation, another hold) ends it. The turn needs a
- * turnParms entry for that type in the demon's aibehavior decl and body
- * rotation on: hold answers true when both hold, else false and a sentence
- * saying which fails (the demon still stands). */
+/* ai:hold([turn]): ends the pending move with ClearMove and orders the engine's idle with a turn type
+ * ("RELAXED", "COMBAT" default, "INCOVER"), so the body turns toward the aim focus past the tracker's yaw
+ * limit. The idle has no end (time -1): a timed idle of 0 expires at its first update and never turns. Answers
+ * true when a turnParms entry for the type exists and body rotation is on, else false and which fails. */
 static int l_hold(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -2427,9 +2316,7 @@ static int l_hold(lua_State *L)
     ai = self_ai(L, "hold", &h);
     if (!ai || !(r = park(ai, h))) { lua_pushnil(L); return 1; }
     if (step_in_flight(ai, &st) && st.idle_turn == turn) {
-        /* The demon is held with this turn type already and the engine's own
-         * turn in place is in flight: the order stands. Ending the turn's
-         * move here would leave its step without one. */
+        /* held with this turn type already and its turn in place is in flight: the order stands */
         ran = 1;
     } else {
         if (g_engine->clear_move) g_engine->clear_move(ai);
@@ -2463,11 +2350,9 @@ static int l_hold(lua_State *L)
     return 2;
 }
 
-/* ai:tracking([on]) and ai:body_rotation([on]): the aim focus's head and
- * aim tracking switch (the aim point is valid only while it is on) and the
- * body rotation switch (the engine's turn in place needs it); the game's
- * enableHeadTracking and enableBodyRotation events. With no argument they
- * answer the switch. */
+/* ai:tracking([on]) and ai:body_rotation([on]): the head and aim tracking switch (the aim point is valid only
+ * while on) and the body rotation switch (turn in place needs it), via enableHeadTracking and
+ * enableBodyRotation. With no argument they answer the switch. */
 static int switch_call(lua_State *L, const char *call, int ev, int body)
 {
     sh_script_handle h = 0;
@@ -2493,16 +2378,10 @@ static int switch_call(lua_State *L, const char *call, int ev, int body)
 static int l_tracking(lua_State *L) { return switch_call(L, "tracking", SH_AI_EV_ENABLE_HEAD_TRACKING, 0); }
 static int l_body_rotation(lua_State *L) { return switch_call(L, "body_rotation", SH_AI_EV_ENABLE_BODY_ROTATION, 1); }
 
-/* ai:laser_add(tag, [ribbon]): give the demon's laser targeter a laser on
- * model tag `tag`. The game draws a laser only for an entry of its laser
- * list, and makes entries only inside two stock state classes; a demon that
- * never runs those has none, so its ae_setLaserState rows and ai:laser
- * switch nothing. The laser is drawn as a ribbon from the tag along the tag's
- * direction to what it hits: the ribbon decl of the demon's
- * aicomponent_lasertargeter decl (laserPinpoint_ribbonDecl), or `ribbon`, a
- * ribbon decl of this mod. It starts off; ai:laser, ai:laser_state and the
- * clips' ae_setLaserState rows switch it by the tag's name. Answers true, or
- * false and why. */
+/* ai:laser_add(tag, [ribbon]): gives the laser targeter a laser on model tag `tag`, drawn as a ribbon (the
+ * aicomponent_lasertargeter decl's laserPinpoint_ribbonDecl, or `ribbon`) from the tag to what it hits. The
+ * game makes laser list entries only in two stock state classes, so other demons have none. It starts off;
+ * answers true, or false and why. */
 static int l_laser_add(lua_State *L)
 {
     const char *tag = check_tag(L, 2, "laser_add", "a model tag");
@@ -2532,14 +2411,9 @@ static int l_laser_remove(lua_State *L)
     return 1;
 }
 
-/* ai:rear_footsteps(front, rear): the footstep table of the demon's rear
- * feet. The game picks a demon's footstep table by its gait (the entityDef's
- * footstepEffectTable, _SlowWalk, _Sprint, ...) and plays the same one for
- * all four foot events; a demon whose rear feet sound different (a metal
- * leg, hooves behind paws) names the pair here: where the game would play
- * `front` for ae_leftRearFoot or ae_rightRearFoot it plays `rear`. Both are
- * footstep tables (projectileImpactEffect decls) of this mod or the game.
- * Call it once per gait table. Answers true, or false and why. */
+/* ai:rear_footsteps(front, rear): plays footstep table `rear` instead of `front` for ae_leftRearFoot and
+ * ae_rightRearFoot (the game plays one table per gait for all four feet). Both are projectileImpactEffect
+ * decls; call it once per gait table. Answers true, or false and why. */
 static int l_rear_footsteps(lua_State *L)
 {
     const char *front, *rear;
@@ -2563,10 +2437,8 @@ static int l_rear_footsteps(lua_State *L)
     return 2;
 }
 
-/* ai:held([hand]) -> the decl of the inventory item the demon holds in `hand`
- * now (the mod's own name without its prefix, as equip takes it), or nil when
- * the hand is empty. The engine's answer: a clip's ae_equipInventoryItem
- * changes the held item without the script ordering it. */
+/* ai:held([hand]) -> the decl of the item held in `hand` (the mod's own name, as equip takes it), or nil when
+ * empty. It asks the engine because a clip's ae_equipInventoryItem can change the item. */
 static int l_held(lua_State *L)
 {
     char decl[512];
@@ -2583,15 +2455,9 @@ static int l_held(lua_State *L)
     return 1;
 }
 
-/* ai:posed_legs(): the demon's clips pose its legs themselves (they rotate
- * thigh, shin and foot, as DOOM Eternal's clips do) and its model carries the
- * game's leg rig. The game's own clips animate the rig's target and pole
- * joints instead, so a layer added on top of a clip cannot be carried in
- * them. From this call on, every frame, the rig's targets and poles are taken
- * from the legs as the blended clips pose them, before the game moves them
- * by the ground: on a flat floor the legs are the clips' own with every
- * layer, on a slope or a step the feet follow the ground. Call it once after
- * the demon spawned. Answers true, or false and why. */
+/* ai:posed_legs(): for a demon whose clips pose thigh, shin and foot themselves (as Eternal's do), takes the
+ * leg rig's targets and poles every frame from the blended clips' legs before the game grounds them, so added
+ * layers carry through and feet still follow slopes. Call once after spawn; answers true, or false and why. */
 static int l_posed_legs(lua_State *L)
 {
     void *ai;
@@ -2606,14 +2472,9 @@ static int l_posed_legs(lua_State *L)
     return 2;
 }
 
-/* ai:fk_reference_pose(): the demon's fk effectors take their reference pose
- * (where the effector sits before the aim and look solve turn its chain) from
- * the poseReferenceAnim its fkGraph names, as DOOM Eternal's do; the game
- * takes it from the clip of the anim web's current leaf, so the head and the
- * cannon of a demon whose clips differ there jump in the tick a blend's new
- * clip becomes the heavier one. Effectors that name no poseReferenceAnim keep
- * the current leaf in both games. Call it once after the demon spawned.
- * Answers true, or false and why. */
+/* ai:fk_reference_pose(): the fk effectors take their reference pose from the poseReferenceAnim their fkGraph
+ * names, as Eternal's do, instead of the web's current leaf (which makes head and cannon jump when a blend's
+ * new clip turns heavier). Call once after spawn; answers true, or false and why. */
 static int l_fk_reference_pose(lua_State *L)
 {
     void *ai;
@@ -2627,14 +2488,9 @@ static int l_fk_reference_pose(lua_State *L)
     return 2;
 }
 
-/* ai:wound_damage_counts(true|false): with true, a gore wound of the demon
- * opens on the damage that landed inside its own clipping spheres: each hit
- * the game's gates pass for the wound adds its damage to that wound's own
- * counter, and the wound opens when the counter reaches its threshold. The
- * game counts the health the wound's whole damage group has lost instead, so
- * two wounds on one group open together on a hit inside either (script_api_ai.h,
- * "Wound damage counts"). false, or never calling it, keeps the game's rule;
- * true again keeps the counts so far. Answers true, or false and why. */
+/* ai:wound_damage_counts(true|false): with true, each gore wound opens on the damage that landed in its own
+ * clipping spheres (a per-wound counter against its threshold), where the game counts the whole damage
+ * group's lost health (script_api_ai.h, "Wound damage counts"). false keeps the game's rule and the counts. */
 static int l_wound_damage_counts(lua_State *L)
 {
     void *ai;
@@ -2651,14 +2507,9 @@ static int l_wound_damage_counts(lua_State *L)
     return 2;
 }
 
-/* ai:eternal_interrupts(): from now on the demon's animation orders carry the
- * interrupt mode DOOM Eternal's AI command carries (sh_ai_order_interrupt):
- * a change and a forced via nest over a blend that still runs, as DOOM
- * Eternal's do, where the game's script orders wait (a change) or end the
- * running blend at once (a forced via: the pose jumps). A node whose
- * customFlags carry AW_CF_USE_MULTIPLE_INTERRUPT nests in both games
- * whatever the mode. Call it once after the demon spawned. Answers true, or
- * false and why. */
+/* ai:eternal_interrupts(): the demon's animation orders carry Eternal's interrupt mode (sh_ai_order_interrupt),
+ * so a change and a forced via nest over a running blend instead of waiting or jumping the pose. Nodes with
+ * AW_CF_USE_MULTIPLE_INTERRUPT nest in either mode. Call once after spawn; answers true, or false and why. */
 static int l_eternal_interrupts(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -2676,22 +2527,14 @@ static int l_eternal_interrupts(lua_State *L)
     return 1;
 }
 
-/* Whether a non-demon entity has a gore component wound_hides can serve (an
- * idGoreEntity of a mod: its model and its gore component sit where a
- * demon's do, in the idAnimatedEntity part and at the component's owner).
- * Set by script_api_body.c; NULL keeps wound_hides to demons. */
+/* Whether a non-demon entity has a gore component wound_hides can serve (an idGoreEntity of a mod). Set by
+ * script_api_body.c; NULL keeps wound_hides to demons. */
 static int (*g_gore_owner_test)(void *ent);
 void sh_script_ai_set_gore_owner_test(int (*fn)(void *ent)) { g_gore_owner_test = fn; }
 
-/* ai:wound_hides(wound, { mesh, ... }): the meshes of the demon's model that
- * go when the game shows the gore wound. A wound of the game shows meshes
- * (its meshKits) and cuts the model with spheres; it has no list of meshes
- * to hide, which a demon whose wounds replace a piece of skin by a wound
- * mesh needs. The game hides meshes by name for a damage group's armour
- * (hideMeshes); this call hides the named meshes the same way at the moment
- * the game shows the wound. `wound` is a gorewounds decl of this mod or the
- * game; the meshes are names of the model's own meshes. Call it once per
- * wound, after the demon spawned. Answers true, or false and why. */
+/* ai:wound_hides(wound, { mesh, ... }): hides the named meshes of the model, as a damage group's armour
+ * hideMeshes does, when the game shows the gorewounds decl `wound` (which has no hide list of its own).
+ * Call once per wound after spawn; answers true, or false and why. */
 static int l_wound_hides(lua_State *L)
 {
     sh_script_handle h = (sh_script_handle)sh_script_check_entity(L, 1, "wound_hides");
@@ -2748,14 +2591,9 @@ static const char *check_node(lua_State *L, int idx, const char *call, const cha
     return s;
 }
 
-/* ai:animation_fits(node, tests, [side], [seed]) -> true, index | false | nil, "searching"
- * Whether one of the node's animations fits where the demon stands: its root
- * motion, turned by the demon's facing, tested by the words of `tests`
- * (TF_NAV_DIRECT, TF_NAV_ENDPOINT, TF_CLAMP_TO_GROUND, TF_BOUNDS,
- * TF_EYE_VISIBILITY, TF_MUZZLE_VISIBILITY, TF_TRANSLATION_TO_ENEMY_FORCE,
- * TF_AVOID_ENEMY_FOV, or VALIDATE_ANIM_DELTA). `side` picks one animation
- * (0 first); without it every animation is tried, in order, or with `seed`
- * (a whole number above 0) in an order shuffled by it. */
+/* ai:animation_fits(node, tests, [side], [seed]) -> true, index | false | nil, "searching". Tests the node's
+ * animations' root motion, turned by the demon's facing, with the TF_* words of `tests` (see k_tests); `side`
+ * picks one animation, else all are tried in order or shuffled by `seed` (above 0). */
 static int l_anim_valid(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -2822,9 +2660,8 @@ static void force_via_drop(int i)
 
 static void force_via_reset(void) { while (g_nforce) force_via_drop(g_nforce - 1); }
 
-/* Every frame: once a forced via node plays, the web is asked for the
- * destination (ssaction_ChangeAnimState) and goes there when the clip ends
- * (sh_ai_force_via_next). */
+/* Every frame: once a forced via node plays, the web is asked for the destination (ssaction_ChangeAnimState)
+ * and goes there when the clip ends (sh_ai_force_via_next). */
 static uint32_t g_seen_frame;
 
 static void force_via_step(void)
@@ -2832,8 +2669,7 @@ static void force_via_step(void)
     int i;
     uint32_t frame;
     if (!g_engine) return;
-    /* The frame count starts again with each map: the per-demon pain
-     * records and forced animations of the last map are dropped. */
+    /* the frame count restarts with each map, which drops the per-demon records */
     frame = g_engine->frame();
     if (frame < g_seen_frame) {
         sh_ai_pain_records_reset();
@@ -2858,9 +2694,7 @@ static void force_via_step(void)
             force_via_drop(i--);
             break;
         case SH_AI_FORCE_VIA_ASK_DEST:
-            /* The forced node plays: the destination is asked now, so the web
-             * leaves the node for it when the clip ends. A forced clip the web
-             * is not asked to leave holds its last frame for good. */
+            /* the forced node plays: asking for the destination now lets the web leave it when the clip ends */
             f->asked = 1;
             (void)sh_script_ai_anim(ai, f->handle, f->dest, NULL, SH_AI_ORDER_VIA_DEST, 0);
             break;
@@ -2870,10 +2704,8 @@ static void force_via_step(void)
     }
 }
 
-/* ai:force_animation_via(dest, via, [blend]): play `via` now whatever the web is
- * doing (blending `blend` seconds), then go to `dest` when it ends. Observed
- * like force_animation: animation_event VIA_BLEND_IN_START, VIA_BLEND_OUT_START,
- * DEST_REACHED. */
+/* ai:force_animation_via(dest, via, [blend]): plays `via` now whatever the web is doing (blending `blend`
+ * seconds), then goes to `dest`; animation_event reports VIA_BLEND_IN_START, VIA_BLEND_OUT_START, DEST_REACHED. */
 static int l_anim_force_via(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -2923,8 +2755,8 @@ static void push_points(lua_State *L, float (*p)[3], int n)
     for (i = 0; i < n; i++) { push_vec(L, p[i]); lua_rawseti(L, -2, i + 1); }
 }
 
-/* ai:path_points(pos) -> the points of the navigation path, nil, "searching"
- * while the engine is still finding it, nil, "no path" when there is none */
+/* ai:path_points(pos) -> the points of the navigation path, nil, "searching" while the engine finds it, nil,
+ * "no path" when there is none */
 static int l_path_points(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -2953,12 +2785,9 @@ static int l_path_points(lua_State *L)
     return 2;
 }
 
-/* ai:firing_position(parms) -> pos | nil, "searching" | nil, "none"
- * parms: target (an entity or a position; its enemy when omitted), kind
- * ("any", "new", "superior", "reposition"), min, max, ideal (inches from the
- * target), visible (the place must see the target; true when omitted),
- * count (candidates, 2 or more), path_weight, parms (the positioning profile it
- * came from; carried, not read). */
+/* ai:firing_position(parms) -> pos | nil, "searching" | nil, "none". parms: target (default its enemy), kind
+ * ("any", "new", "superior", "reposition"), min, max, ideal, visible (default true), count, path_weight and
+ * parms (carried, not read). */
 static int l_firing_position(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -3021,8 +2850,7 @@ static int l_firing_position(lua_State *L)
     return 2;
 }
 
-/* The length of the array a Lua list field holds (its [1], [2], ... or its
- * "times[1]" keys as converted tables write them), -1 when it is not a table. */
+/* The length of the array a Lua list field holds (its [1], [2], ... or "times[1]" keys), -1 when not a table. */
 static int list_len(lua_State *L, int idx, const char *field, const char *prefix)
 {
     int n = 0;
@@ -3047,9 +2875,8 @@ static int list_len(lua_State *L, int idx, const char *field, const char *prefix
     return n;
 }
 
-/* A control table's knots from a Lua table: { times = {...}, values = {...} }
- * (arrays, or keys "times[1]" and "values[1]" as converted tables write
- * them). A value missing for the last time is 0. Reads `cap` at most. */
+/* A control table's knots from { times = {...}, values = {...} } (arrays, or "times[1]" keys). A value missing
+ * for the last time is 0. Reads `cap` at most. */
 static int read_list(lua_State *L, int idx, const char *field, const char *prefix, float *out, int cap)
 {
     int n = 0, i;
@@ -3160,11 +2987,9 @@ static void check_spline(lua_State *L, int idx, sh_ai_spline_query *q)
     lua_pop(L, 1);
 }
 
-/* ai:spline_clear(target, spline, seconds, [flags]) -> true, points | false
- * The curve from the demon to where the target will be `seconds` ahead (its
- * velocity), bent by the spline's control table across the line (roll 90:
- * to the left, -90: to the right); clear when no world geometry is in the
- * way and, with flags "TF_NAV_GROUND", every point stands on the ground. */
+/* ai:spline_clear(target, spline, seconds, [flags]) -> true, points | false. Tests the curve from the demon to
+ * where the target will be `seconds` ahead, bent by the spline's table (roll 90 left, -90 right): clear when no
+ * world geometry blocks it and, with "TF_NAV_GROUND", every point stands on the ground. */
 static int l_spline_clear(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -3280,10 +3105,9 @@ static int l_block_pain(lua_State *L)
     return 0;
 }
 
-/* ai:request_pain(reaction [, damage]): ask the engine for pain reaction `reaction` ("PAIN_FALTER", ...) now, as
- * its own pain start does for a hit: the pain graph picks the clip, `damage` (default 0) gives the intensity
- * against the demon's health, the alert cycle plays it. Not asked while the demon plays a pain at least as
- * strong, nor while the reaction is blocked (block_pain). true when the alert cycle took it; false and why. */
+/* ai:request_pain(reaction [, damage]): asks the engine for a pain reaction as its own pain start does for a hit
+ * (the pain graph picks the clip, `damage` sets the intensity). Refused while a pain at least as strong plays or
+ * the reaction is blocked (block_pain). true when the alert cycle took it; false and why. */
 static int l_request_pain(lua_State *L)
 {
     const char *name;
@@ -3319,9 +3143,8 @@ int sh_script_ai_park(void *ai, sh_script_handle h)
     return g_engine && ai && park(ai, h) != NULL;
 }
 
-/* The order as the engine's event. A demon given DOOM Eternal's interrupts
- * (r->eternal_interrupts) then has its web's interrupt blend mode set to the
- * one DOOM Eternal's command would have carried (sh_ai_order_interrupt). */
+/* The order as the engine's event; a demon with eternal_interrupts then gets the web's interrupt blend mode
+ * Eternal's command would carry (sh_ai_order_interrupt). */
 static int anim_send(void *ai, ai_rec *r, const char *dest, const char *via, int kind, int blend_ms)
 {
     sh_ai_arg a[4];
@@ -3346,9 +3169,8 @@ static int anim_send(void *ai, ai_rec *r, const char *dest, const char *via, int
     return ok;
 }
 
-/* An order that is not forced, given now. An idle order that stands ends
- * with it; a turn in place the engine has asked for under that order and
- * not begun is ended first, so that no step begins behind the order. */
+/* An order that is not forced. An idle order that stands ends with it, and a turn in place asked for under it
+ * and not begun is ended first so no step begins behind the order. */
 static int anim_give(void *ai, ai_rec *r, const char *dest, const char *via, int kind)
 {
     sh_ai_step_state st;
@@ -3360,15 +3182,9 @@ static int anim_give(void *ai, ai_rec *r, const char *dest, const char *via, int
     return anim_send(ai, r, dest, via, kind, 0);
 }
 
-/* The engine ends a step stage of its animFSM (a turn in place, a step or an
- * arrival of a move) when the animWeb command it gave for it ends. A
- * script's order goes to the web round that command: the web leaves for the
- * script's node, the command never ends, and the animFSM waits in the stage,
- * starting no turn and no move, until the engine restarts it after a second
- * in its idle. So an order is held back while such a step is in flight and
- * given when it has ended (the web plays the step out before it follows a
- * new order in any case); a forced order is given at once and the step's
- * command is ended the engine's way. */
+/* A step stage of the engine's animFSM ends when its animWeb command ends, but a script order sends the web
+ * away so the command never ends and the FSM stalls for a second. So an order is held back while a step is in
+ * flight and given when it ends; a forced order is given at once and the step's command is ended. */
 int sh_script_ai_anim(void *ai, sh_script_handle h, const char *dest, const char *via, int force, int blend_ms)
 {
     ai_rec *r;
@@ -3414,7 +3230,7 @@ static void anim_wait_step(void)
 
 /* ---- destructibles: DOOM Eternal's activation of a gore breakable's pieces (script_api_ai.h) */
 
-/* The map's destructibles: any number of defs, each with any number of pieces (no count of the product's own). */
+/* The map's destructibles: any number of defs, each with any number of pieces. */
 typedef struct { char *def; sh_ai_destruct_spec spec; } ai_destruct_def;
 static ai_destruct_def *g_dd;
 static int g_dd_cap;
@@ -3612,16 +3428,7 @@ static float dd_field(lua_State *L, int idx, const char *key, float lo, float hi
     return opt_num_field(L, idx, key, 0.0f, "destructible", lo, hi);
 }
 
-/* destructible(def, spec): a breakable entityDef `def` of this mod is DOOM
- * Eternal's destructible `spec` names: when the game's gore spawns one, its
- * pieces start where its model places them and fly and spin by DOOM
- * Eternal's law, and the hit does not reach them when spec.ignore_external
- * (DESTRUCT_FLAG_IGNORE_EXTERNAL_FORCE). spec: { ignore_external, max_speed
- * (units/s), max_spin (rad/s), pieces = { { preset, min, max (units/s),
- * spin_min, spin_max (rad/s), pitch, yaw, bottom (degrees), random, owner,
- * dir = {x, y, z}, speed (units/s), spin (rad/s) }, ... } } in the
- * breakable's piece order. Call it when the script starts. Answers true, or
- * false and why when the preset cannot be applied. */
+/* Register the per-piece impulses to apply when this entity breaks. */
 static int l_destructible(lua_State *L)
 {
     const char *def = sh_script_check_name(L, 1, "destructible", 0, NULL);
@@ -3691,10 +3498,9 @@ static int l_destructible(lua_State *L)
     return 1;
 }
 
-/* ai:snapmap_order(): the order SnapMap's Follow action gave the demon, taken as the stock FSM takes it (the
- * entry leaves the demon's temp memory): nil when none waits, else a table with kind "path" (target: the first
- * node of the path), "entity" (target: the entity to follow) or "position" (pos: the point). A demon its own
- * script drives follows it; the stock FSM never sees the entry. */
+/* ai:snapmap_order(): takes the order SnapMap's Follow action gave the demon out of its temp memory: nil when
+ * none waits, else { kind = "path" (target: first node), "entity" (target) or "position" (pos) }. The stock
+ * FSM never sees the entry. */
 static int l_snapmap_order(lua_State *L)
 {
     static const char *const kinds[4] = { NULL, "path", "entity", "position" };
@@ -3722,10 +3528,8 @@ static int l_snapmap_order(lua_State *L)
     return 1;
 }
 
-/* ai:release(): the demon goes back to its own behaviour (the park, above)
- * until the script's next command; whatever the script had left standing
- * (a held order, a forced via, a facing, a move) goes with it, so nothing of
- * the script's takes the demon back on its own. */
+/* ai:release(): hands the demon back to its own behaviour (the park, above) until the script's next command,
+ * dropping any held order, forced via, facing or move. */
 static int l_release(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -3748,10 +3552,8 @@ static int l_release(lua_State *L)
     return 1;
 }
 
-/* ai:anim_variable(name, value): the demon's anim web variable `name` (a
- * name its web's blends read, as "hangoutIndex" in anim[hangoutIndex])
- * becomes `value`, by the engine's own set-by-name. true when set, false when
- * the web has no variable of that name. */
+/* ai:anim_variable(name, value): sets the anim web variable `name` (as "hangoutIndex" in anim[hangoutIndex])
+ * by the engine's set-by-name; true when set, false when the web has no such variable. */
 static int l_anim_variable(lua_State *L)
 {
     const char *name;
@@ -3778,11 +3580,9 @@ static int l_anim_variable(lua_State *L)
     return 1;
 }
 
-/* ai:relations() -> { { entity =, respect =, emotion =, awareness = [, unlimited = true] }, ... }: the demon's
- * social relations as DOOM 2016's senses keep them every think (script_api_ai.h, sh_ai_relation), in the engine's
- * order (the most hostile emotion first), with its awareness of each entity ("unaware" .. "confirmed"). Players,
- * bots and demons alike; who is hostile is the engine's (its faction graph, the SnapMap teams, who hurt it). nil
- * when the engine's table cannot be read. */
+/* ai:relations() -> { { entity =, respect =, emotion =, awareness = [, unlimited = true] }, ... }: the senses'
+ * relation table (script_api_ai.h, sh_ai_relation) in the engine's order (most hostile first) with the demon's
+ * awareness of each entity. nil when the table cannot be read. */
 static int l_relations(lua_State *L)
 {
     sh_ai_relation rows[SH_AI_REL_MAX];
@@ -4221,8 +4021,7 @@ static int e_trigger_state(void *ai, int hand)
     return v;
 }
 
-/* The engine's fire control (the object at ai +0x22278), the aim focus and the
- * muzzle test's inputs, read at the reflected paths of script_api_ai.h. */
+/* The engine's fire control (at ai +0x22278), the aim focus and the muzzle test's inputs (script_api_ai.h paths). */
 static int e_fire_modes(void *ai, int *state, int *anim)
 {
     int v = -1;
@@ -4308,9 +4107,8 @@ static int e_step_state(void *ai, sh_ai_step_state *out)
     return v;
 }
 
-/* The context's set-active-wait-handle with no handle: the command it holds
- * gets its done event and the status INTERRUPTED, as when another command
- * takes its place. */
+/* The context's set-active-wait-handle with no handle: the held command gets its done event and the status
+ * INTERRUPTED, as when another command takes its place. */
 static int e_step_interrupt(void *ai)
 {
     int v = -1;
@@ -4325,9 +4123,8 @@ static int e_step_interrupt(void *ai)
     return v;
 }
 
-/* The game's spawn inits the gore component unless the behaviour decl's
- * monster type is the generic one; a mod's demon has no type of its own in
- * the game's list, so it is generic. The same call, with the same values. */
+/* The game's spawn inits the gore component unless the behaviour decl's monster type is generic; a mod's demon
+ * is generic, so this makes the same call with the same values. */
 typedef void (*ai_gore_init_fn)(void *gore, void *ai, void *damage, void *a, void *graph, void *b, void *c);
 static ai_gore_init_fn g_gore_init;
 static const int32_t *g_gore_cvar;
@@ -4396,13 +4193,11 @@ static uint32_t e_frame(void) { return sh_script_hooks_frame(); }
 
 /* ---------------------------------------------------------------- park */
 
-/* One slot per parked demon. The engine's FSM threads read it without a
- * lock, so it never moves: the engine's own size (one slot per entity the game
- * can hold at once), read only below the high-water mark; a slot whose demon
- * is gone is reused. */
+/* One slot per parked demon. The engine's FSM threads read it without a lock, so it never moves: it has one
+ * slot per entity the game can hold, is read only below the high-water mark, and reuses a gone demon's slot. */
 #define AI_PARKED_MAX SH_SCRIPT_ENGINE_ENTITIES
 static sh_ai_park_slot g_parked[AI_PARKED_MAX];   /* sh_ai_park_drives, _release, _take */
-static volatile LONG g_parked_used;   /* slots below this were ever used */
+static volatile LONG g_parked_used;   /* high-water mark of used slots */
 
 /* The slot of `ai` while it is the same entity (its spawn id matches), -1
  * none. FSM worker threads and the game thread; reads only. */
@@ -4419,19 +4214,17 @@ static int parked_slot(void *ai)
     return -1;
 }
 
-/* A script drives the demon now: parked and not released. */
+/* A script drives the demon: parked and not released. */
 static int script_drives(void *ai)
 {
     int slot = parked_slot(ai);
     return slot >= 0 && sh_ai_park_drives(&g_parked[slot], spawn_id_of(ai));
 }
 
-/* What the engine's FSM is told about a parked demon this tick
- * (sh_ai_park_holds): the demon's own fields, read as the FSM threads read
- * them. Unreadable fields leave it parked. */
+/* What the engine's FSM is told about a parked demon this tick (sh_ai_park_holds), from the demon's own fields;
+ * unreadable fields leave it parked. */
 #define AI_HEALTH_CUR        (0x2B290u + 0x1Cu)  /* idAI2: idAIHealth +0x2B290, current +0x1C (script_api_common.c) */
-#define AI_PAIN_JOINT_GROUP  0x8510u             /* idAI2: damageInfo.painJointGroupIndex, -1 when the hit named none
-                                                  * (VK 0x140403DD0 / GL its twin read it as [0x10A2]) */
+#define AI_PAIN_JOINT_GROUP  0x8510u             /* idAI2: damageInfo.painJointGroupIndex, -1 when none (VK 0x140403DD0) */
 static int parked_now(void *ai, LONG pain_until)
 {
     float health = 1.0f;
@@ -4444,10 +4237,8 @@ static int parked_now(void *ai, LONG pain_until)
     return sh_ai_park_holds(!(health <= 0.0f), group >= 0 || pain_until != 0, reaction);
 }
 
-/* IsRunningScript(ai): for a parked demon whose spawn id still matches (the
- * same entity, not a new one in its memory) and that is not released, what
- * the park holds now; else the engine's answer. FSM worker threads; reads
- * only. */
+/* IsRunningScript(ai): for a parked, unreleased demon whose spawn id still matches, what the park holds; else
+ * the engine's answer. FSM worker threads; reads only. */
 static uint64_t irs_detour(void *ai)
 {
     int slot = parked_slot(ai);
@@ -4456,12 +4247,9 @@ static uint64_t irs_detour(void *ai)
     return g_irs_orig(ai);
 }
 
-/* The move system's transition query (job threads). A parked demon turns on
- * the spot with its own clips, stepping ones too: the engine's query rejects
- * a turn clip whose root travels (its overshoot rule, made for a goal the
- * demon must stop at), and the request carries the engine's own bit that
- * lifts the rule. It is set for the turn of a demon a script drives; every
- * other move, and every demon no script drives, is the engine's as it was. */
+/* The move system's transition query (job threads). The engine's overshoot rule rejects a turn clip whose
+ * root travels, so the request's own bit that lifts the rule is set for the turn of a demon a script drives;
+ * every other move is left to the engine. */
 typedef int (*ai_move_fn)(void *move, void *request, void *out, int kind);
 static ai_move_fn g_move_target, g_move_orig;
 
@@ -4526,19 +4314,10 @@ static int commit_detour(void)
     return 1;
 }
 
-/* ---- the engine's pain and death on a parked demon
- *
- * The engine starts a pain reaction and a death the same way: it asks the
- * demon's alert cycle FSM to take a transition (pain, light pain, stagger,
- * dying). A parked demon's alert cycle is in ExecuteDoomscript, which has no
- * link for any of them, so the request was refused: the pain was lost, and a
- * dead demon was found outside the dying cycle by its think and forced dead
- * with no death clip. The request is detoured: when it is refused with one of
- * those codes for a parked demon, the park opens (IsRunningScript answers
- * false), the alert cycle is asked to leave ExecuteDoomscript by its own link
- * (the same request with no code) and the code is asked again, inside the
- * engine's call. The park holds again when the reaction has played or, if the
- * alert cycle still refused, after SH_AI_PAIN_TAKE_MS. */
+/* ---- the engine's pain and death on a parked demon: requests to the alert cycle FSM, which refuses them while
+ * a parked demon's cycle sits in ExecuteDoomscript. The request is detoured: on such a refusal the park opens
+ * (IsRunningScript answers false), the cycle is asked to leave and the code is asked again inside the engine's
+ * call. The park holds again once the reaction has played or after SH_AI_PAIN_TAKE_MS. */
 typedef int      (*ai_pain_code_fn)(void *ai);
 typedef uint8_t  (*ai_fsm_request_fn)(void *fsm, int code);
 typedef void    *(*ai_fsm_get_fn)(void *owner);
@@ -4648,9 +4427,8 @@ static void *controlling_fsm_of(void *ai)
     return fsm;
 }
 
-/* A dying request on a demon this product parked (released or not), said in the backend log with what became of
- * it, where the alert cycle FSM stood and what the park told the engine: the bench reads it beside the engine's "dead
- * but not ALERTCYCLE_DYING" line (R-TG1). */
+/* Logs a dying request on a parked demon (released or not): what became of it, where the alert cycle FSM stood
+ * and what the park told the engine. */
 static void dying_note(void *fsm, const char *how, uint8_t taken)
 {
     int i, used = (int)g_parked_used;
@@ -4670,14 +4448,11 @@ static void dying_note(void *fsm, const char *how, uint8_t taken)
     }
 }
 
-/* Leave ExecuteDoomscript inside the caller's request. Its way out to ac_default (Shared_NotExecutingScript, true once
- * the park opens) is a STATE link, which the FSM takes only at its own next update: neither the plain request
- * (FSMEVENT links) nor the state-link request (VK 0x14064C900) takes it inside a call (R-TG1 tg1vk48, vk49: the alert
- * cycle stayed in ExecuteDoomscript, IsRunningScript false). A dead demon's think finds it outside the dying cycle
- * before that update ("dead but not ALERTCYCLE_DYING"). So the alert cycle is moved into ac_default the way the
- * engine's own entrance move enters a state (SH_AI_SIG_FSM_MOVE): a move record with idTransitionCode and code 5, taken
- * through the FSM's vtable +0xA8 with the game time; from ac_default the code the engine asked is accepted (the
- * FSMEVENT link to ac_pain_or_death, then ac_Dying or the pain). Only an alert cycle in ExecuteDoomscript is moved. */
+/* Leave ExecuteDoomscript inside the caller's request. The way out to ac_default is a STATE link the FSM takes
+ * only at its next update (neither the plain request nor the state-link request, VK 0x14064C900, takes it in a
+ * call), by which time a dead demon's think reports "dead but not ALERTCYCLE_DYING". So the cycle is moved into
+ * ac_default as the engine's entrance move does (SH_AI_SIG_FSM_MOVE): a move record with idTransitionCode and
+ * code 5 through the FSM's vtable +0xA8 with the game time. Only a cycle in ExecuteDoomscript is moved. */
 typedef void (*ai_game_time_fn)(void *game, int *out);
 typedef void (*ai_fsm_take_fn)(void *fsm, void *move, int *time, uint8_t now, uint8_t forced);
 static ai_game_time_fn g_game_time;
@@ -4761,9 +4536,8 @@ static uint8_t fsm_request_detour(void *fsm, int code)
     return taken;
 }
 
-/* Every frame (the game thread): the park opened for a refused request holds
- * again when the reaction plays, the demon is dead or the time is up; until
- * then a pain the alert cycle still refused is asked for again. */
+/* Every frame (the game thread): the park opened for a refused request holds again when the reaction plays, the
+ * demon is dead or the time is up; until then a still-refused pain is asked for again. */
 static void pain_take_step(void)
 {
     int i, used = (int)g_parked_used, now = 0;
@@ -4797,17 +4571,10 @@ static void pain_take_commit(void)
                       "a scripted demon's pain and death");
 }
 
-/* ---- a pain a script asks for (ai:request_pain)
- *
- * The engine starts a pain only for a frame's damage: the pain start (SH_AI_SIG_PAIN_START) runs its gates, has
- * the pain graph choose the clip (CheckPainAnim), writes the pending request at ai +0x8678 and asks the alert
- * cycle's FSM for the request's transition (232 pain, 233 light, 237/238 stagger), whose pain state then reads the
- * request. DOOM 2016's own scripted pain (PinkyCombat_Charge's pushback, VK 0x14062FA00) builds that request with
- * no hit. request_pain runs the pain start's steps with its own calls (script_api_ai.h, SH_AI_PS_*): a hit from
- * the demon's enemy (from the front when it has none) naming no joint, the intensity of `damage` against the
- * demon's health, and the damage info of the demon's last request. The script event enterPainState (1450) is not
- * that route: its handler (VK 0x1414A1FAA, idAI2's event jump table) writes the pain field only, with no state to
- * end it. */
+/* ---- a pain a script asks for (ai:request_pain): repeats the engine's pain start (SH_AI_SIG_PAIN_START) with
+ * its own calls (script_api_ai.h, SH_AI_PS_*): the gates, CheckPainAnim's clip choice, the request at ai +0x8678
+ * and the alert cycle's transition (232 pain, 233 light, 237/238 stagger). The enterPainState event (1450; VK
+ * 0x1414A1FAA) only writes the pain field with no state to end it, so it is not used. */
 typedef int      (*ps_intensity_fn)(void *ai, void *damage_info, float damage);
 typedef int      (*ps_dir_fn)(void *dirs, const float *dir, int n);
 typedef void    *(*ps_group_fn)(void *ai, int *out, uint16_t joint);
@@ -5081,9 +4848,8 @@ static int                g_threat_failed, g_plen_failed, g_pain_failed;
 #define AI_ANIM_FRAMES      0x58u    /* idMD6Anim: the frame data the delta reads (NULL: none) */
 #define AI_HOLDER_SLOT_BASE 4        /* holder + (slot + 4) * 0x10: the next-pull time */
 
-/* The game clock the weapon holder and the threat table read: idGameLocal
- * vtable +0x810 (game, out, group 1) -> int milliseconds, the slot the
- * next-pull writer's own pattern calls. Any thread; 1 when read. */
+/* The game clock the weapon holder and the threat table read: idGameLocal vtable +0x810 (game, out, group 1)
+ * gives int milliseconds. Any thread; 1 when read. */
 #define AI_GAME_CLOCK_SLOT 0x810u
 static int gm_clock(int *ms)
 {
@@ -5122,11 +4888,8 @@ static int e_ground(const float pos[3], float out[3])
     return c && c->ground && c->ground(pos, out);
 }
 
-/* The engine's world trace from `from` to `to`, passing through every player
- * and demon it meets (at most AI_WORLD_HOPS of them; the first trace passes
- * `ai`): 1 with the world's hit in *t, 0 nothing of the world hit, -1
- * unreadable. A navigation trace's view of the line (world_clear,
- * world_ground). */
+/* The engine's world trace from `from` to `to`, passing through up to AI_WORLD_HOPS players and demons
+ * (the first trace passes `ai`): 1 with the world's hit in *t, 0 nothing hit, -1 unreadable. */
 #define AI_WORLD_HOPS 6
 static int world_trace(void *ai, const float from[3], const float to[3], sh_script_trace *t)
 {
@@ -5555,10 +5318,8 @@ typedef void *(*ai_foot_table_fn)(void *actor, int foot);
 static ai_foot_table_fn g_foot_target, g_foot_orig;
 static int g_foot_failed;
 
-/* One record per demon that named rear tables, found by the demon and its
- * spawn id; the pairs are decl pointers (decls outlive the map). The detour
- * reads it on the game's threads without a lock, so it never moves: the
- * engine's own size, as the parked list. */
+/* One record per demon that named rear tables (pairs of decl pointers, which outlive the map). The detour
+ * reads it on the game's threads without a lock, so it never moves and is sized like the parked list. */
 #define AI_FOOT_PAIRS 8      /* the gait tables an actor has: walk, slow walk, crouch, sprint and their friendly forms */
 typedef struct {
     void *volatile ai;
@@ -5585,11 +5346,9 @@ static void *foot_table_detour(void *actor, int foot)
     return table;
 }
 
-/* The game lets a blend skip a front foot's event (ae_leftFoot and
- * ae_rightFoot carry EVENTFLAG_CANSKIP) and not a rear foot's, so every
- * clip of a blended walk fires its own rear-foot row and the rear table
- * plays several times a step. The rear events take the front feet's skip
- * bit, once; no model of the game itself fires a rear-foot event. */
+/* A blend may skip a front foot's event (ae_leftFoot and ae_rightFoot carry EVENTFLAG_CANSKIP) but not a rear
+ * foot's, so a blended walk would play the rear table several times a step. The rear events take the front
+ * feet's skip bit, once. */
 #define AI_EVENTFLAG_CANSKIP 1
 static void rear_feet_skip_as_front(void)
 {
@@ -6038,13 +5797,9 @@ static int dd_phys_vec(void *ent, size_t slot, float *out, int n)
     return 1;
 }
 
-/* Break the breakable as the game does, put every piece back where the
- * model places it (the break moves each up to 20 units an axis and turns it
- * at random), then give each piece DOOM Eternal's velocity and spin: the
- * momentum the engine integrates, mass x velocity and the world inertia x
- * spin (its integration takes spin = O^T J O L, J the inverse body inertia).
- * `add`: on top of what the game's own hit gave (a decl that takes the
- * external force). */
+/* Breaks the breakable as the game does, puts every piece back where the model places it (the break moves each
+ * up to 20 units an axis and turns it), then gives each Eternal's velocity and spin as momentum (mass x velocity,
+ * world inertia x spin). `add`: on top of the game's own hit (a decl that takes the external force). */
 static void destruct_activate(void *brk, const sh_ai_destruct_spec *spec, void *owner, const float *hit, int add)
 {
     uint8_t *phys = (uint8_t *)brk + SH_AI_BRK_PHYSICS, **bodies;
@@ -6160,7 +5915,7 @@ typedef uint8_t (*ai_daw_fn)(void *gore, void *wound, void *record, void *group_
                              float max_health);
 static ai_daw_fn g_daw_target, g_daw_orig;
 static int g_daw_failed;
-static volatile LONG g_daw_any;   /* a demon asked in this session: until then the detour only calls through */
+static volatile LONG g_daw_any;   /* a demon asked: until then the detour only calls through */
 
 static uint8_t daw_detour(void *gore, void *wound, void *record, void *group_decl, int group, int lost,
                           float max_health)
@@ -6248,8 +6003,7 @@ static const sh_script_ai_engine k_engine = {
     e_interrupt_blend, e_destructible, e_weapon_use, e_wound_damage_counts, e_snapmap_order,
     e_release, e_anim_variable, e_relations, e_off_limits, e_world_clear, e_world_ground, e_request_pain
 };
-/* The table the calls use: k_engine less the calls whose game parts this
- * executable lacks (those calls then refuse plainly). */
+/* The table the calls use: k_engine less the calls whose game parts this executable lacks (they then refuse). */
 static sh_script_ai_engine g_live;
 
 
@@ -6287,8 +6041,7 @@ int sh_script_ai_install(const uint8_t *module_base)
                "expected one (another tool may have changed it).");
         return 0;
     }
-    /* The parts of the calls the Tyrant's brain added; a missing one takes
-     * only its own call away. */
+    /* the remaining game functions: a missing one takes only its own call away */
     g_live = k_engine;
     for (i = SH_AI_SIG_PATH_SITE + 1; i < SH_AI_SIG_COUNT; i++) {
         if (sig_resolve_one(module_base, &SH_AI_SIGNATURES[i], &r[i]) != SIG_OK) {
@@ -6329,9 +6082,7 @@ int sh_script_ai_install(const uint8_t *module_base)
     else { g_live.trigger_state = NULL; g_live.weapon_ready = NULL; }
     if (r[SH_AI_SIG_INVENTORY_ITEM].addr) g_inventory_item = (void *(*)(void *, int))r[SH_AI_SIG_INVENTORY_ITEM].addr;
     else g_live.item = NULL;
-    /* The fire calls read engine memory at offsets the code they come from
-     * proves (each signature below contains them); a missing one takes only
-     * its own calls away. */
+    /* the fire calls read engine memory at offsets their signatures contain */
     if (!r[SH_AI_SIG_FIRE_THINK].addr) g_live.fire_modes = NULL;
     if (!r[SH_AI_SIG_MUZZLE_TEST].addr || !r[SH_AI_SIG_CHECK_PULL].addr) g_live.focus_state = NULL;
     if (r[SH_AI_SIG_MUZZLE_TEST].addr) g_muzzle = (uint64_t (*)(void *, int, void *))r[SH_AI_SIG_MUZZLE_TEST].addr;
@@ -6339,9 +6090,8 @@ int sh_script_ai_install(const uint8_t *module_base)
     if (r[SH_AI_SIG_CLEAR_MOVE].addr) g_clear_move = (void (*)(void *, int))r[SH_AI_SIG_CLEAR_MOVE].addr;
     else g_live.clear_move = NULL;
     if (!r[SH_AI_SIG_IDLE_ACTION].addr) g_live.idle_turn_entry = NULL;
-    /* The lasers: the add and remove, the component's place in an idAI2 (the
-     * ae_setLaserState handler holds it), the two reads of the add that prove
-     * where the ribbon decl sits, and the engine's atom call (the pain site). */
+    /* the lasers: add and remove, the component's place in an idAI2 (in the ae_setLaserState handler), two reads
+     * of the add that prove where the ribbon decl sits, and the engine's atom call (the pain site) */
     site = (const uint8_t *)r[SH_AI_SIG_LASER_ADD].addr;
     if (site && r[SH_AI_SIG_LASER_REMOVE].addr && r[SH_AI_SIG_LASER_STATE].addr && r[SH_AI_SIG_PAIN_STRING_SITE].addr &&
         !memcmp(site + SH_AI_LASER_ADD_DECL_AT, k_ai_laser_decl_read, sizeof k_ai_laser_decl_read) &&
@@ -6366,9 +6116,8 @@ int sh_script_ai_install(const uint8_t *module_base)
         ps_resolve(site);
     } else ai_log("Mod scripts: a demon a script drives will play no pain reaction or death clip in this session.");
     if (!g_ps.check) g_live.request_pain = NULL;
-    /* The step calls read the stage where the move update reads it and end a
-     * command with the context's own call; without either an order is given
-     * as it comes. */
+    /* the step calls read the stage where the move update does and end a command with the context's call;
+     * without either, an order is given as it comes */
     if (r[SH_AI_SIG_CMD_SET_WAIT].addr && r[SH_AI_SIG_MOVE_STAGE].addr && r[SH_AI_SIG_IDLE_ACTION].addr)
         g_cmd_set_wait = (void (*)(void *, void *))r[SH_AI_SIG_CMD_SET_WAIT].addr;
     else {
@@ -6386,9 +6135,8 @@ int sh_script_ai_install(const uint8_t *module_base)
         g_mesh_index = (ai_mesh_index_fn)(site + SH_AI_MESH_SITE_INDEX + 5 + rel32_at(site + SH_AI_MESH_SITE_INDEX + 1));
         g_mesh_hide = (ai_mesh_hide_fn)(site + SH_AI_MESH_SITE_HIDE + 5 + rel32_at(site + SH_AI_MESH_SITE_HIDE + 1));
     } else g_live.wound_hides = NULL;
-    /* Posed legs: the rig's entry, the two-bone component's evaluate (its
-     * address names the component, its call the solve) and the demon's way
-     * to its rig runtime (the setup site's two displacements). */
+    /* posed legs: the rig's entry, the two-bone component's evaluate (its address names the component, its call
+     * the solve) and the demon's way to its rig runtime (the setup site's two displacements) */
     site = (const uint8_t *)r[SH_AI_SIG_RIG_SITE].addr;
     if (r[SH_AI_SIG_RIG_ENTRY].addr && r[SH_AI_SIG_RIG_RUN].addr && r[SH_AI_SIG_RIG_BLOCK].addr &&
         r[SH_AI_SIG_RIG_EVAL].addr && r[SH_AI_SIG_RIG_SOLVE].addr && site &&
@@ -6402,8 +6150,7 @@ int sh_script_ai_install(const uint8_t *module_base)
         g_rig_model_off = (uint32_t)rel32_at(site + SH_AI_RIG_SITE_MODEL);
         g_rig_anim_off = (uint32_t)rel32_at(site + SH_AI_RIG_SITE_ANIM);
     } else g_live.posed_legs = NULL;
-    /* The fk reference pose and the web's current leaf it calls first (the
-     * call at +0xA7 must reach the leaf the signature found). */
+    /* the fk reference pose and the web's current leaf it calls first (the call at +0xA7 must reach that leaf) */
     site = (const uint8_t *)r[SH_AI_SIG_FK_REFERENCE].addr;
     if (site && r[SH_AI_SIG_WEB_LEAF].addr && site[SH_AI_FKREF_LEAF_CALL] == 0xE8 &&
         site + SH_AI_FKREF_LEAF_CALL + 5 + rel32_at(site + SH_AI_FKREF_LEAF_CALL + 1) ==
@@ -6426,8 +6173,8 @@ int sh_script_ai_install(const uint8_t *module_base)
      * detour reads are the sigs test's) */
     if (r[SH_AI_SIG_DAMAGE_WOUND].addr) g_daw_target = (ai_daw_fn)r[SH_AI_SIG_DAMAGE_WOUND].addr;
     else g_live.wound_damage_counts = NULL;
-    /* The anim web's variables: the set-by-name (its offsets are the signature's own bytes) and the engine's atom
-     * call (the pain site), which makes the name the web's rows compare. */
+    /* the anim web's set-by-name (its offsets are the signature's own bytes) and the engine's atom call (the pain
+     * site), which makes the name the web's rows compare */
     if (r[SH_AI_SIG_WEB_SCALAR_SET].addr && g_intern)
         g_web_scalar_set = (ai_web_scalar_set_fn)r[SH_AI_SIG_WEB_SCALAR_SET].addr;
     else g_live.anim_variable = NULL;

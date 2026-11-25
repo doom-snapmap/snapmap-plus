@@ -1,54 +1,12 @@
-/* parity_test.c -- one map, every mode: a placed object resolves through the same data in each (PLATFORM, "The mod
- * system works by principle"; docs/architecture.md, "Mode parity").
- *
- * The modes a map is met in, each driven through the product's own steps:
- *   editor       the author's own map open in the editor (its saved rows and placed names: the listing rule
- *                sh_modmanifest_listing, map scope mode EDITOR)
- *   editor-play  Play from the editor (the same listing, mode PLAY)
- *   launch       the author's own map played from My Maps (its rows alone, mode PLAY)
- *   pub-author   the published map on the author's machine: its rows pinned (modpin.h), composed from the author's
- *                folder; Play (the author hosting a co-op lobby, or playing their published map)
- *   kept-author  that published map opened in the editor on the author's machine (the local mod of its namespace is
- *                installed beside the composition)
- *   pub-player   the published map on a player's machine with none of its mods: the units arrive (as the archive
- *                brings them) and are composed; Play (a hub play, a co-op joiner, Download to My Maps then Play)
- *   kept-player  that copy opened in the editor (no local mod)
- * A joiner composes the host's units by hash with the same code as pub-player (SPEC-distribution D22a), and the host
- * serves pub-author's or pub-player's composition.
- *
- * What is compared. From the map's placed names, every file the placed objects reach: a name resolves to every file
- * of that name an installed build provides (by request, by provided name, by stem across extensions, a name require
- * takes by its scripts\lib file), and a file served in a mode reaches every such name its served bytes spell (texts
- * and binaries alike). A script spells what its runtime can read: its string literals, never a comment, and a literal
- * reaches a script only as require loads one (scripts\lib\<name>.lua); an entry script is reached by the entity it
- * binds (R-UC1).
- * This reference closure is the data's, not the builder's: it reads the bytes, never the recorded needs, so a need
- * the builder or the unit walk misses still shows. For every file reached in any mode, each mode's answer (the
- * SHA-256 of the bytes served, or nothing) must be the same. Also: every entityDef of a namespace a Play mode does not
- * declare is hidden from the level's templates (sh_modserve_level_hides), so the engine never caches a failed load of
- * it in one mode and reuses it in another; and a declared build's requirements are live in every mode. And in every
- * mode on its own, whatever the others answer: every image a served material draws with (its served bytes scanned as
- * the builder scans a decl) is served there, the game's own, or an engine image; a name of a mod or one the product
- * derives (a look's parameter and colour images) that nothing serves is DRAWS BLACK (R-HD1). Each mode starts from a
- * fresh process state: a new index, and nothing the product derived in an earlier mode.
- *
- * What it cannot see: names the engine builds at run time from parts (a board square's _sq<N>, a bank's event ids),
- * which have their own rules (the square rule and the bank-per-event rule of modunit.h), and engine caching of a name
- * the map does not reach.
- *
- *   parity_test.exe                                   the fixture cases (the suite)
- *   parity_test.exe mods=<folder> placed=<a>,<b>[,...] [map=<map text>] [doom=<install>] [out=<report>]
- *                   [attach=<salt>[,<salt>...]]
- *                                                     a real mod set: <folder> is COPIED to a scratch folder first
- *                                                     (nothing in it is written); exit 1 on any divergence. attach=
- *                                                     uses each mod named in the map as a whole before it is saved (a
- *                                                     map-level row, the Mods tab's Use in this map); placed= may then
- *                                                     be empty
- *
- * To look into a divergence: PARITY_DEBUG=1 lists what each mode reached, PARITY_TOKENS=1 the mod names each served
- * file spells, PARITY_REG=1 the registries and scope per mode, PARITY_DUMP=<part of a request> writes that file's served
- * bytes per mode beside the work folder, PARITY_LOG=1 prints the product's log.
- */
+/* parity_test.c -- one map, every mode: a placed object resolves through the same data in editor, editor-play,
+ * launch, pub-author, kept-author, pub-player and kept-player (docs/architecture.md, "Mode parity"). For every
+ * file the placed objects reach, each mode's served SHA-256 must match; each mode also hides undeclared
+ * namespaces' entityDefs (sh_modserve_level_hides) and serves every image its materials draw with, else the
+ * surface DRAWS BLACK. Each mode starts from fresh process state. */
+/* Usage: parity_test.exe runs the fixture cases; with mods=<folder> placed=<a>,<b>[,...] [map=<text>] [doom=<install>]
+ * [out=<report>] [attach=<salt>,...] it checks a copy of a real mod set and exits 1 on any divergence. PARITY_DEBUG,
+ * PARITY_TOKENS, PARITY_REG and PARITY_LOG (set to 1) and PARITY_DUMP=<request part> print diagnostics. */
+#include "heap_out.h"
 #include "cache_paths.h"
 #include <windows.h>
 #include <stdint.h>
@@ -71,7 +29,7 @@
 #include "../src/backend/script/script_runtime.h"
 #include "../src/backend/nav_bake.h"
 
-/* ------------------------------------------------------------ links the serving layer needs offline */
+/* links the serving layer needs offline */
 void backend_log(const char *message)
 {
     if (message && getenv("PARITY_LOG")) printf("  log: %s\n", message);
@@ -110,7 +68,7 @@ static int fixture_game(void *ctx, const char *request, char sha[SH_MB_HASH_HEX 
 static int failures;
 #define CHECK(expr) do { if (!(expr)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); failures++; } } while (0)
 
-/* ------------------------------------------------------------ small sets */
+/* small sets */
 /* A set of strings: insertion order in v, a hash index beside it. */
 typedef struct pset { char **v; size_t n, cap; size_t *slot; size_t nslot; } pset;
 static size_t ps_hash(const char *x) { size_t h = 1469598103934665603ull; for (; *x; x++) h = (h ^ (unsigned char)*x) * 1099511628211ull; return h; }
@@ -155,17 +113,15 @@ static int ps_add(pset *s, const char *x)
 static void ps_free(pset *s) { size_t i; for (i = 0; i < s->n; i++) free(s->v[i]); free(s->v); free(s->slot); memset(s, 0, sizeof *s); }
 /* The files the last run served in the editor mode (the fixtures look into it). */
 static pset g_last_served;
-/* The DOOM files the installed mods change (native/: replacements and edited decls, the conductor among them): the
- * engine reads them in every map that declares their mod, whatever it places. A surface (DOOM's own bytes at DOOM's
- * name: an unchanged native/ copy, or a campaign file the builder's closure points at) changes nothing a map reads
- * until a name asks for it, so it is no seed: the closure reaches it by the names served bytes spell. */
+/* The DOOM files the installed mods change (native/ replacements, edited decls, the conductor): the engine reads
+ * them in every map that declares their mod. A surface (DOOM's own bytes at DOOM's name) changes nothing until a
+ * name asks for it, so it is no seed; the closure reaches it by the names served bytes spell. */
 static pset g_doom_seeds, g_surfaces;
-/* The DOOM decls a mod edits (a registry: the product serves DOOM's text with the mod's edits, and a unit's copy keeps
- * the edits for what the unit carries, R-DS5). */
+/* The DOOM decls a mod edits (a registry): the product serves DOOM's text with the mod's edits, and a unit's copy
+ * keeps the edits for what the unit carries. */
 static pset g_registries;
 
-/* ------------------------------------------------------------ the name universe (every installed file, by the names
- * that reach it) */
+/* the name universe: every installed file, by the names that reach it */
 typedef struct uentry { char *key; char *request; } uentry;
 typedef struct universe { uentry *v; size_t n, cap; int sorted; } universe;
 static universe g_u;
@@ -293,7 +249,7 @@ static void u_served(void *ctx, const char *request, uint64_t size, const char *
     u_add_file(request, NULL);
 }
 
-/* ------------------------------------------------------------ tokens a file's bytes spell */
+/* tokens a file's bytes spell */
 static int tok_char(unsigned char c)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '/' ||
@@ -342,7 +298,7 @@ static void script_names(const unsigned char *p, size_t n, pset *names, pset *mo
     (void)sh_mb_script_literals((const char *)p, n, script_literal, &sp);
 }
 
-/* ------------------------------------------------------------ one mode's answers */
+/* one mode's answers */
 typedef struct answer { char *request; char sha[SH_MB_HASH_HEX + 1]; } answer;   /* sha "" = nothing served */
 typedef struct mode_run {
     const char *name;
@@ -401,12 +357,9 @@ static void shadow_seed(void *ctx, const char *request, uint64_t size, const cha
 
 static void print_line(void *ctx, const char *line) { (void)ctx; printf("     %s\n", line); }
 
-/* ------------------------------------------------------------ what a served material draws with
- * Every image a served material names (its served bytes, as the engine parses them: a look compiled, the builder's own
- * reference scan) must be answered in the mode that serves the material: a file the mode serves (the mod's own, a
- * surface, or one the product derives, which no build lists: a look's parameter and colour images), or the game's own.
- * The mode comparison cannot see a hole every mode shares (nothing everywhere is no divergence), and a name no build
- * lists never joins the universe; a pitch-black surface was exactly that (R-HD1). */
+/* What a served material draws with: every image it names must be answered in the mode that serves the material,
+ * by a file the mode serves (including images the product derives, which no build lists) or the game's own. The
+ * mode comparison cannot see a hole every mode shares, and a name no build lists never joins the universe. */
 typedef struct draw_ctx { pset *images; } draw_ctx;
 static void draw_need(void *ctx, const char *type, const char *name, size_t n)
 {
@@ -564,7 +517,7 @@ static void mode_answer(mode_run *m, const char *request)
     m->n++;
 }
 
-/* ------------------------------------------------------------ a world: a mods root, built and indexed */
+/* a world: a mods root, built and indexed */
 typedef struct world {
     char root[MAX_PATH * 2];
     sh_mb_bundle *builds;
@@ -735,7 +688,7 @@ static void check_hidden(mode_run *m, const world *w, const sh_modmanifest_list 
     }
 }
 
-/* ------------------------------------------------------------ the parity run of one map */
+/* the parity run of one map */
 #define NMODES 7
 typedef struct parity {
     mode_run m[NMODES];
@@ -820,10 +773,8 @@ static size_t run_parity(const char *label, const char *author_root, const char 
         free(v);
     }
 
-    /* Each mode starts from a fresh process state (world_index: nothing the product derived in an earlier mode is left,
-     * a new index): a mode met first in its own process must serve what the map draws without help from another (an
-     * editor mode deriving a look's images early hid a published map's refusal on a clean player, and a shared hole
-     * hid a pitch-black surface, R-HD1). */
+    /* Each mode starts from a fresh process state (world_index): a mode met first in its own process must serve
+     * what the map draws without the derived files of another mode. */
     world_index(&A);
     declare(&rows, (const char *const *)placed, np, SH_MODSERVE_MODE_EDITOR);
     mode_reach(&p.m[0], (const char *const *)placed, np);
@@ -963,14 +914,13 @@ static size_t run_parity(const char *label, const char *author_root, const char 
         const char *ref = p.m[0].a[k].sha;
         int anywhere = 0, q6 = 1, unit_reach = 0;
         for (i = 0; i < NMODES; i++) anywhere |= p.m[i].a[k].sha[0] != 0;
-        /* Q6 (open, report 4.5): own play serves the whole local build (editor, editor-play, launch), a published map
-         * its units (pub-author, pub-player, kept-player). A file whose answer splits exactly along that line, that is
-         * a DOOM decl the mod edits (its edits cut to the units) or that no unit mode reaches (only the whole build's
-         * registry names it), is that divergence, told apart from a unit's defect. */
+        /* Q6: own play serves the whole local build (editor, editor-play, launch), a published map its units
+         * (pub-author, pub-player, kept-player). A file whose answer splits along that line, being a DOOM decl the
+         * mod edits or one no unit mode reaches, is that divergence and not a unit defect. */
         for (i = 1; i < 3; i++) q6 &= !strcmp(p.m[i].a[k].sha, ref);
         for (i = 5; i < NMODES; i++) q6 &= !strcmp(p.m[i].a[k].sha, p.m[3].a[k].sha);
         q6 &= strcmp(p.m[3].a[k].sha, ref) != 0;
-        /* kept-author is the published map in its author's editor: the local mod fills the names the units lack (D26),
+        /* kept-author is the published map in its author's editor: the local mod fills the names the units lack,
          * so it answers as either side */
         q6 &= !strcmp(p.m[4].a[k].sha, ref) || !strcmp(p.m[4].a[k].sha, p.m[3].a[k].sha);
         for (i = 3; i < NMODES; i++) if (i != 4) unit_reach |= ps_has(&p.m[i].reached, p.all.v[k]);
@@ -1042,7 +992,7 @@ static size_t run_parity(const char *label, const char *author_root, const char 
     return unexpected;
 }
 
-/* ------------------------------------------------------------ fixtures */
+/* fixtures */
 #define SA "pa1salt1"
 #define SB "pb2salt2"
 #define SC "pc3salt3"
@@ -1152,10 +1102,9 @@ static void case_two_mods(void)
     mt_remove_tree(work);
 }
 
-/* A demon's head drawn with a layered look (the Graphics SDK's `type layered`, as Doomforge writes a converted head):
- * the served material names the look's parameter image and colour images, which the product derives from it and no
- * build lists. Every mode, each from a fresh process, must serve them: the Tyrant's head drew pitch black when none
- * did (R-HD1). */
+/* A demon's head drawn with a layered look (the Graphics SDK's `type layered`): the served material names the
+ * look's parameter and colour images, which the product derives and no build lists. Every mode, each from a fresh
+ * process, must serve them. */
 static void case_look(void)
 {
     char work[MAX_PATH], author[MAX_PATH * 2], player[MAX_PATH * 2], json[4096];
@@ -1178,8 +1127,7 @@ static void case_look(void)
     mt_remove_tree(work);
 }
 
-/* ------------------------------------------------------------ every root kind and seed rule, in today's shape
- * The fixture DOOM: the files below are DOOM's with these bytes (the builder identifies a native/ copy against them and
+/* The fixture DOOM: the files below are DOOM's with these bytes (the builder identifies a native/ copy against them and
  * derives a decl copy's edits from them); every other name outside mods/ is DOOM's with no bytes to read. */
 #define K_CONDUCTOR "generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl"
 #define K_PLAYER    "generated/decls/entitydef/player/coop.decl"
@@ -1367,7 +1315,7 @@ static void case_kinds(void)
         sh_modmanifest_list_free(&cur);
     }
     /* One of two demons the conductor pairs: own play serves the whole build's conductor, a published map the unit's
-     * cut of it (R-DS5). The difference is Q6's, told apart, and nothing else diverges. */
+     * cut of it. The difference is Q6's and nothing else diverges. */
     CHECK(kinds_run("one demon of two the mod's conductor pairs", author, player,
                     "{\"entities\":[{\"inherit\":\"mods/" SD "/imp_red\"}],\"instances\":[]}") == 0);
     CHECK(g_last_q6 > 0);
@@ -1375,12 +1323,9 @@ static void case_kinds(void)
     mt_remove_tree(work);
 }
 
-/* Two demons of one pack, each with its entry script and brain, a library both require, and graphs a brain names by a
- * literal it passes on (require(B.SPEC.graph)), as Doomforge writes an Eternal pack. The shared library's comment names
- * the other demon's graph, and a graph's data names the other demon's entry script by its word ("beta" in a list of AI
- * types): neither is a name the runtime loads (it reads no comment, and require loads only scripts/lib/<name>.lua; an
- * entry script runs for the entity it binds). A map placing one demon serves the same in every mode, and the reference
- * still follows the graph the brain names (R-UC1: the three-demon pack's plasmacombat.lua and arachnotron.lua). */
+/* Two demons of one pack with entry scripts, brains, a shared library and graphs a brain names by a passed-on
+ * literal (require(B.SPEC.graph)). A comment or graph data naming the other demon is no name the runtime loads,
+ * so one placed demon serves the same in every mode while the reference follows the graph its brain names. */
 #define SQ "pi9salt9"
 static void case_pack_scripts(void)
 {

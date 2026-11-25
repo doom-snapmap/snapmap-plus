@@ -1,7 +1,5 @@
-/* Recover a failed editor load by driving the normal exit to the map browser.
- * The Frame catch alone can resume with an incomplete render world and fault
- * again. The main-thread Frame hook opens StartMenu, requests exit, and waits
- * for editor teardown. It also runs the damaged-save guard. */
+/* Recover a failed editor load by driving the normal exit to the map browser: the main-thread Frame hook
+ * opens StartMenu, requests exit, and waits for teardown. It also runs the damaged-save guard. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -29,16 +27,14 @@ static frame_t orig_frame = NULL;
 typedef void (*clear_dialog_t)(void *shell, void *params);
 static clear_dialog_t g_clear_dialog;
 
-/* Cache resolved global addresses before the frame hook runs. Unresolved
- * globals disable their dependent operations; avoid scanning in the frame path. */
+/* Resolved global addresses cached before the frame hook runs; an unresolved one disables its operations. */
 static uint8_t *g_editor_at      = NULL;   /* the inline idSnapEditorLocal object */
 static uint8_t *g_load_state_at  = NULL;   /* load_state -- 3 == RUNNING */
 static uint8_t *g_last_err_at    = NULL;   /* the engine's last formatted Error/FatalError text */
 static uint8_t *g_shell_slot_at  = NULL;   /* .data slot holding idMenuShellLocal* */
 static uint8_t *g_suppr_a_at     = NULL;   /* throw-gate suppressor A */
 
-/* Resolve suppressor B through its instruction anchor; skip an unresolved
- * address. The caller guards this access with SEH. */
+/* Clear suppressor B, resolved through its instruction anchor; the caller guards the access with SEH. */
 static void write_suppressor_b(void)
 {
     uintptr_t b;
@@ -49,16 +45,14 @@ static void write_suppressor_b(void)
         *(volatile int32_t *)b = 0;
 }
 
-/* Frame's first 15 bytes on both build 13954591 executables: five pushes and
- * MOV EAX,0x11DC0, all position-independent. They are compared before the
- * detour, so a function another program changed is never patched. */
+/* Frame's first 15 bytes on both executables (five pushes and MOV EAX,0x11DC0, position-independent),
+ * compared before the detour so a changed function is never patched. */
 #define FRAME_STOLEN 15
 static const uint8_t k_frame_prologue[FRAME_STOLEN] = {
     0x40, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0xB8, 0xC0, 0x1D, 0x01, 0x00
 };
 
-/* Frame's first FRAME_STOLEN bytes as the install compares them; the build-image test (fault_shield_sites_test) runs
- * this same function on each executable's own Frame. SEH-guarded: unreadable counts as different. */
+/* 1 when Frame's first FRAME_STOLEN bytes match; SEH-guarded, so unreadable counts as different. */
 int recovery_frame_prologue_ok(const void *target)
 {
     int intact = 0;
@@ -111,12 +105,9 @@ void recovery_arm(void)
     if (InterlockedExchange(&g_armed, 1) == 0) { g_state = 1; g_frames = 0; }
 }
 
-/* Drive exit only with a live editor, RUNNING load state, and a menu screen.
- * Play transitions tear down the screen; calling StartMenu Begin then would
- * dereference null. Waits are bounded by RECOVER_BUDGET_FRAMES. The exit
- * prompt is answered Yes: the editor's state is not trusted after the fault,
- * and the sentence the player was shown (SHIELD_RECOVERED_TEXT) says that
- * unsaved changes are lost. */
+/* Drive exit only with a live editor, RUNNING load state, and a menu screen, since StartMenu Begin
+ * dereferences null once a play transition tears the screen down. Waits are bounded by
+ * RECOVER_BUDGET_FRAMES, and the exit prompt is answered Yes because editor state is untrusted after a fault. */
 static void recovery_tick(void)
 {
     if (!g_armed) return;
@@ -225,18 +216,11 @@ static void keep_throw_gate_open(void)
     } __except (EXCEPTION_EXECUTE_HANDLER) { /* unreadable page -> skip */ }
 }
 
-/* The damaged-save guard.
- *
- * GDM 0x1D offers to delete a save the engine could not load: the guard
- * dismisses it through the shell's own ClearDialog (no button action runs, so
- * nothing is deleted) and then says why the map did not open. After a load
- * Snapmap+ itself refused, the engine's "damaged" notice (0x34) and its offer to
- * replace the map with its published version (0xB0) are dismissed the same
- * way: the map is sound, Snapmap+ has already said why it did not open, and the
- * published version must not overwrite it. The browser's scan that deletes
- * unreadable slots is replaced elsewhere (saved_map_guard.c). */
-/* A refusal applies to the dialogs the same failed load raises: the load
- * returns, the editor exits and the browser reacts within a few frames. */
+/* The damaged-save guard. GDM 0x1D offers to delete a save the engine could not load; the guard dismisses
+ * it through the shell's own ClearDialog (no button action runs) and says why the map did not open.
+ * After a load Snapmap+ refused, the "damaged" notice (0x34) and the offer to replace the map with its
+ * published version (0xB0) are dismissed the same way. */
+/* A refusal covers the dialogs the same failed load raises within the next REFUSAL_FRAMES frames. */
 #define REFUSAL_FRAMES 600
 static volatile LONG g_refusal_frames;
 
@@ -361,17 +345,14 @@ static int64_t frame_detour(void *self)
     return result;
 }
 
-/* Change FatalError's level immediate (MOV ECX,7 at +0x27; the byte at +0x28)
- * from 7 to 6, so its throw takes the recoverable engine path that Frame's
- * catch handles. The wrapper's whole signature, which ends in that MOV, was
- * checked at its recorded address; code_patch checks the byte again. Direct
- * dispatcher calls and failures outside Frame may still exit. */
+/* Change FatalError's level immediate (MOV ECX,7 at +0x27; the byte at +0x28) from 7 to 6, so its throw
+ * takes the recoverable path that Frame's catch handles; code_patch checks the byte. Direct dispatcher
+ * calls and failures outside Frame may still exit. */
 #define FATALERROR_LEVEL_OFF 0x28
 static sh_patch_handle g_fatal_patch;
 static const uint8_t k_fatal_level_seven = 0x07, k_fatal_level_six = 0x06;
 
-/* The level byte the downgrade expects at FatalError +FATALERROR_LEVEL_OFF; the build-image test runs this on each
- * executable's own FatalError wrapper. SEH-guarded. */
+/* 1 when the level byte at FatalError +FATALERROR_LEVEL_OFF is the expected 7; SEH-guarded. */
 int recovery_fatalerror_site_ok(const void *fatalerror)
 {
     int ok = 0;

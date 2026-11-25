@@ -97,9 +97,9 @@ static void test_poll_reads_during_play(void)
     assert(sh_cheat_keep_poll(&k, 1, spawns_of) == 1 && g_reads == 2);
 }
 
-/* R-LV7 Q5: the editor's return from Play frees the player and sets the editor active in one call, so the next
- * check sees the editor active: the keep ends there and the freed player is never read. The same when the
- * editor's state cannot be read, and at CancelMapChange (sh_cheat_keep_end). */
+/* The editor's return from Play frees the player and sets the editor active in one call, so the next check sees the
+ * editor active: the keep ends there and the freed player is never read. The same holds when the editor's state
+ * cannot be read, and at CancelMapChange (sh_cheat_keep_end). */
 static void test_the_end_of_play_reads_nothing(void)
 {
     sh_cheat_keep k;

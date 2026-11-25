@@ -1,14 +1,10 @@
-/* modserve_test.c -- the installed-mod index and provider (modserve.c)
- * against a fixture mods tree written to a temporary folder: admission,
- * failure isolation (size mismatch, unvalidated state, namespace, unbuilt
- * folder), a shadow conflict, two builds of one salt, a map's composition,
- * lookups and their cost, provider precedence against navigation, the Grid
- * Room and built-in defaults (the real overrides.c), probe claims, the
- * registration plan's dependency order and blocking, plan runs through fake
- * engine operations, the save-time bundle closure and a rescan. */
+/* modserve_test.c -- the installed-mod index and provider (modserve.c) against a fixture mods tree in a temporary
+ * folder: admission and failure isolation, shadow conflicts, builds of one salt, compositions, lookups, provider
+ * precedence, the registration plan and its runs through fake engine operations, bundle closure and rescan. */
 #define WIN32_LEAN_AND_MEAN
-#include "cache_paths.h"
 #include "map_cvars.h"
+#include "heap_out.h"
+#include "cache_paths.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -360,7 +356,7 @@ static void build_fixture(void)
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\empty-group\\deeper", g_root);
         mkdirs(path);
     }
-    /* A hand-dropped folder that was never built. */
+    /* A hand-dropped folder with no build. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\unbuilt\\mod.json", g_root);
     write_file(path, "{}", 2);
 }
@@ -454,8 +450,8 @@ static double now_ns(void)
 
 /* ------------------------------------------------------------------ tests */
 
-/* Index listeners: every call site keeps its own link, so any number of
- * listeners is called after each table, in the order they were added. */
+/* Index listeners: every call site keeps its own link, so each listener is called after each table in
+ * registration order. */
 static int g_heard[8], g_heard_n;
 static void heard0(void) { g_heard[g_heard_n++ & 7] = 0; }
 static void heard1(void) { g_heard[g_heard_n++ & 7] = 1; }
@@ -579,8 +575,8 @@ static void test_unopened_shadows(void)
     CHECK(sh_modserve_each_unopened_shadow(NULL, NULL) == 0);
 }
 
-/* A rescan that serves the same bytes keeps opened and settled shadows
- * settled: the engine still holds what the earlier table served. */
+/* A rescan that serves the same bytes keeps opened and settled shadows settled: the engine still holds what the
+ * table served. */
 static void test_unopened_after_rescan(void)
 {
     unopened_seen u;
@@ -634,8 +630,7 @@ static void test_precedence(void)
     CHECK(provider_text("generated/decls/snapEditorEntityDef/mods/alexpink/imp.decl", 1, text, sizeof text));
     /* Mode 2 is never served. */
     CHECK(!provider_text(A_SEDEF, 2, text, sizeof text));
-    /* A bundle shadow of a built-in name wins over the built-in default (the
-     * player's expanded Lift tile from the retired overrides layer). */
+    /* A bundle shadow of a built-in name wins over the built-in default (the player's expanded Lift tile). */
     CHECK(provider_text(LIFT, 0, text, sizeof text) && !strcmp(text, "MODLIFT"));
     /* Map navigation wins. */
     CHECK(provider_text(NAV_NAME, 0, text, sizeof text) && !strcmp(text, "NAV"));
@@ -679,7 +674,7 @@ static void test_plan(void)
     CHECK(step_index(&p, "entityDef", "mods/alexpink/fireball") < 0);   /* gameplay only */
     CHECK(step_index(&p, "entityDef", "monster/imp") < 0);   /* shadows are never registered */
     for (i = 0; i < p.count; ++i) CHECK(_stricmp(p.steps[i].type, "baseModel"));   /* raw: no step */
-    /* The editor plan keeps every step for the session (lane MG2). */
+    /* The editor plan keeps every step for the session. */
     CHECK(p.steps[sedef].persist == 1 && p.steps[ent].persist == 1 && p.steps[md6].persist == 1);
     CHECK(!strcmp(p.steps[md6].reg_path, "md6def/mods/alexpink/imp.md6.decl"));
     CHECK(p.steps[bsedef].blocked && strstr(p.steps[bsedef].blocked, "mods/bobskins/missing.md6"));
@@ -696,10 +691,8 @@ static void test_plan(void)
     CHECK(step_index(&p, "snapEditorEntityDef", "mods/alexpink/imp") < 0);
     CHECK(step_index(&p, "md6Def", "mods/alexpink/imp.md6") < step_index(&p, "entityDef", "mods/alexpink/imp"));
     CHECK(step_index(&p, "entityDef", "mods/bobskins/thing") < 0);   /* not named */
-    /* A map pass keeps what the editor closure holds unless the engine holds it
-     * permanently (2), as the editor pass would: every served file of the
-     * root build, which has rows, the fireball included (the row-less 1.1.0
-     * build in the composition does not serve its path with no map open). */
+    /* A map pass keeps what the editor closure holds unless the engine holds it permanently (2): every served file of
+     * the root build, the fireball included (the row-less 1.1.0 composition serves nothing with no map open). */
     for (i = 0; i < p.count; ++i) CHECK(p.steps[i].persist == 2);
     CHECK(p.steps[step_index(&p, "entityDef", "mods/alexpink/fireball")].persist == 2);
     sh_modserve_plan_free(&p);
@@ -835,10 +828,8 @@ static void test_rescan(void)
 
 /* ------------------------------------------------------------------ requirements */
 
-/* A fake cvar system: the two blacklist gates as ints (as the engine's
- * matchers read them) and a few other cvars as text, one of them read-only.
- * A queued set lands only on drain; the cvar events, the console lines and
- * the registrations share one event sequence. */
+/* A fake cvar system: the two blacklist gates as ints and a few other cvars as text (one read-only). A queued set
+ * lands only on drain; cvar events, console lines and registrations share one event sequence. */
 static int g_gate_val[2], g_gate_pending[2], g_gate_has_pending[2];
 static int g_gate_mode;          /* SH_MODSERVE_GATE_SET, _QUEUED, or 0 to refuse */
 static int g_gate_reads, g_gate_sets, g_gate_drains, g_gate_lines;
@@ -1215,8 +1206,8 @@ static void test_requirements_general(void)
     CHECK(log_has("MODS: requirements: afirst00: command \"echo first on\""));
     CHECK(log_has("MODS: requirements: afirst00: command \"bind x \"say hi\"\""));
     CHECK(log_has("MODS: editor: requirement ro_locked=1 (clocked0) is not live: the engine marks it read-only"));
-    /* Only the bundles whose requirements are not live are blocked. A mod whose cvar lost to another is served all the
-     * same (D-A24): its row registers, only its value is not applied. */
+    /* Only the bundles whose requirements are not live are blocked. A mod whose cvar lost to another is served all
+     * the same: its row registers, only its value is not applied. */
     sh_modserve_plan_editor(&p);
     CHECK(p.count == 5);
     log_clear();
@@ -1290,8 +1281,8 @@ static void test_requirements_by_map(void)
     sh_modserve_scope_enable(1);
     CHECK(sh_modserve_index_build(root) == 3);
 
-    /* The map uses bmine000 only, in the editor: its row decides; the earlier install it does not use (a Toybox
-     * row) asks nothing here, its requirements applying only in maps that use it (manager, 2026-11-24). */
+    /* The map uses bmine000 only, in the editor: its row decides; an install it does not use (a Toybox row) asks
+     * nothing here, its requirements applying only in maps that use it. */
     list[0] = h_b;
     log_clear();
     (void)sh_modserve_scope_set(list, 1, 1);
@@ -1307,15 +1298,14 @@ static void test_requirements_by_map(void)
     CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) == 1 && !strcmp(g_text_val[0], "60") && r.live == 1);
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0);
 
-    /* Two rows asking one cvar: the first row wins, in either order, whatever
-     * the install order (bmine000 was installed before cmine000). */
+    /* Two rows asking one cvar: the first row wins, in either order, whatever the install order. */
     list[0] = h_c;
     list[1] = h_b;
     (void)sh_modserve_scope_set(list, 2, 1);
     CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[0], "30"));
     {
-        /* Both mods' rows register in the map (D-A24): the one that lost the cvar is not blocked, so its placed
-         * entity resolves and the map opens; the first row's value applies. */
+        /* Both mods' rows register in the map: the one that lost the cvar is not blocked, so its placed entity resolves
+         * and the map opens; the first row's value applies. */
         sh_modserve_plan pm;
         sh_modserve_plan_editor(&pm);
         log_clear();
@@ -1343,10 +1333,8 @@ static void test_requirements_by_map(void)
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
 
-/* No count of the product's own on the providers of one path (decision 26):
- * seventy mods carry the same game file, and a map that uses only the last of
- * them is served by it. Before, a path kept 63 alternates and the scope looked
- * at 64 candidates, so the seventieth never served. */
+/* A path has no cap on its providers: seventy mods carry the same game file, and a map that uses only the last of
+ * them is served by it. */
 #define MANY_DECL "generated/decls/entitydef/monster/revenant.decl"
 static void test_many_providers(void)
 {
@@ -1381,11 +1369,9 @@ static void test_many_providers(void)
     sh_modserve_scope_enable(0);
 }
 
-/* No count of the product's own on the texts one path composes, nor on its pick (decision 26): seventy mods add one
- * whitelist entry each to the same game list. Every entry is composed with scope off (the static composition took
- * 64 texts), with all seventy declared (the scope's took 64), and the memo of a composition tells apart two sets that
- * differ only past the 64th provider (its key was a 64-bit mask, so the seventieth's absence served the body with
- * it). The pick among them also looks at all seventy: only the last one's needs resolve. */
+/* The texts one path composes, and the pick among them, have no cap: seventy mods add one whitelist entry each to
+ * the same game list. Every entry composes with scope off and with all seventy declared, the memo tells apart two
+ * sets that differ only past the 64th provider, and the pick resolves only the last one's needs. */
 #define MANY_WL "generated/decls/damage/many_list.decl"   /* a list of a decl of the maps (not an editor tweak) */
 static void test_many_composed(void)
 {
@@ -1437,7 +1423,7 @@ static void test_many_composed(void)
         if (!strstr(body, want)) { printf("  all declared: %s not composed\n", want); all = 0; }
     }
     CHECK(all);
-    CHECK(sh_modserve_scope_set(list, 69, 1) >= 0);   /* the seventieth no longer declared */
+    CHECK(sh_modserve_scope_set(list, 69, 1) >= 0);   /* the seventieth not declared */
     CHECK(open_text(MANY_WL, body, sizeof body) == 1);
     CHECK(strstr(body, "\"entry_68\"") != NULL && !strstr(body, "\"entry_69\""));
     CHECK(sh_modserve_scope_set(list, 70, 1) >= 0);   /* and again: the memo keeps each set's own text */
@@ -1447,7 +1433,7 @@ static void test_many_composed(void)
     sh_modserve_scope_enable(0);
 }
 
-/* ------------------------------------------------------------------ conflicts (lane MG2) */
+/* ------------------------------------------------------------------ conflicts */
 
 char *sh_modserve_test_compose(const char *const *texts, int n, int *added);
 
@@ -1652,11 +1638,9 @@ static void test_ungated_raw(void)
     (void)sh_modserve_index_build(root);
 }
 
-/* A surface model the game loaded at boot with the blacklists on (the stock
- * spider mesh, ADD-V7a D1): the gated reload offers it once the bundle's
- * requirements are live, and that reload, outside any watermark, runs inside
- * its own keeper. The surface material the mesh names is still in no plan
- * and no early-decl list (ADD-L11 holds for decls). */
+/* A surface model the game loaded at boot with the blacklists on (the stock spider mesh): the gated reload offers
+ * it once the bundle's requirements are live, and that reload, outside any watermark, runs inside its own keeper.
+ * The surface material the mesh names stays in no plan and no early-decl list. */
 #define GS_MESH "generated/basemodel/md6/characters/monsters/gs/body.bmd6model"
 #define GS_MAT  "generated/decls/material/models/monsters/gs/body.decl"
 #define GS_ENT  "generated/decls/entitydef/mods/gsmod000/thing.decl"
@@ -1749,12 +1733,9 @@ static void test_surface_gated_reload(void)
     (void)sh_modserve_index_build(root);
 }
 
-/* A boot that builds the mod folders (ADD-V7b D1): the game loads the stock
- * surface mesh while the index is still empty, so the open never reaches the
- * provider and the mesh is never marked ungated. The index built after it
- * offers the never-opened surface once the gates are live, once, and not
- * again after a rescan. Its own mesh path: the earlier tables stay chained
- * (prev), and a mesh an earlier table settled counts as settled. */
+/* A boot that builds the mod folders: the game loads the stock surface mesh while the index is empty, so the mesh
+ * is never marked ungated. The index built after it offers that mesh once the gates are live, once, and not again
+ * after a rescan; the chained tables (prev) settle it. */
 static void test_surface_built_after_boot(void)
 {
     static const fx_file gs[] = {
@@ -1850,11 +1831,9 @@ static int rf_visit(void *context, const sh_modserve_refresh_item *it)
     return it->kind == SH_MODSERVE_RF_DECL || !s->keep_raw;
 }
 
-/* A rescan that changed a bundle's files: the diff against the replaced
- * table classifies changed, new and gone requests; the refresh visit offers
- * exactly the changed decls, models and images and the gone shadows, in plan
- * rank order with gone shadows after the decls and raw files last; marks
- * carry over a rescan of the same bytes; a settled decl is no early decl. */
+/* A rescan that changed a bundle's files classifies requests as changed, new or gone against the replaced table.
+ * The refresh visit offers exactly the changed decls, models and images and the gone shadows, in plan rank order
+ * (gone shadows after decls, raw files last); marks carry over a rescan of the same bytes. */
 static void test_refresh(void)
 {
     static const fx_file v1[] = {
@@ -1902,11 +1881,8 @@ static void test_refresh(void)
     mkdirs(root);
     make_bundle(root, "rfmod000", "rfmod000", '1', "\"" RF_SH "\", \"" RF_SH_GONE "\", \"" RF_SHROW "\"", v1, 14, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
-    /* The first table of this root replaces another root's: every file is
-     * new. Shadows the earlier tables served and no table serves since are
-     * still pending as gone (the engine holds their bundles' text), and the
-     * new shadows are pending too (the engine may hold the game's text for
-     * them); new names of the mod are not. Settle them. */
+    /* The first table of this root replaces another root's, so every file is new. Gone and new shadows stay pending
+     * (the engine may hold their text); new names of the mod are not. Settle them. */
     sh_modserve_last_diff(&d);
     CHECK(d.changed == 0 && d.added == 14 && d.changed_decls == 3 && d.pending > 0);
     /* The mod's own editor row is added; the shadow of a stock row counts as a changed row. */
@@ -1939,7 +1915,7 @@ static void test_refresh(void)
     CHECK(sh_modserve_index_rescan() == 1);
     sh_modserve_last_diff(&d);
     CHECK(d.changed == 4 && d.changed_decls == 2 && d.changed_models == 1 && d.changed_images == 0);
-    /* A changed anim is reloaded in place at the next map pass (lane L2c), not a restart. */
+    /* A changed anim is reloaded in place at the next map pass, not a restart. */
     CHECK(d.changed_anims == 1 && d.changed_restart == 0 && d.changed_map == 0);
     CHECK(d.added == 2 && d.added_decls == 2 && d.added_rows == 1 && d.added_active == 1 && d.changed_rows == 0);
     /* The shadowed stock editor row that went counts as a gone row too (the
@@ -2002,9 +1978,9 @@ static void test_refresh(void)
     (void)sh_modserve_index_build(root);
 }
 
-/* R-DS5: a native/ replacement of a DOOM static model is reloaded in place when the open map's scope changes who
- * serves it, as an md6 model is (OpenGL keeps a session prop loaded across maps and drew DOOM's bytes in a map that
- * declares the replacement). The refresh offers it as a model, and the engine's list entry is found by its name. */
+/* A native/ replacement of a DOOM static model is reloaded in place when the open map's scope changes who serves
+ * it, as an md6 model is: OpenGL keeps a session prop loaded across maps. The refresh offers it as a model, and
+ * the engine's list entry is found by its name. */
 static void test_static_model_refresh(void)
 {
     static const fx_file sm[] = {
@@ -2108,8 +2084,8 @@ static void test_compose_unit(void)
         }
         free(out);
     }
-    /* A winner whose aliases bag holds an entry composes with a text whose
-     * aliases bag is empty (the stock text), as the reverse order already did. */
+    /* A winner whose aliases bag holds an entry composes with a text whose aliases bag is empty (the stock text),
+     * as in the reverse order. */
     t[0] = MD6_HEAD MD6_STOCK MD6_TAIL("\t\talias {\n\t\t\tname \"mods/b/control\"\n\t\t\tanim \"md6/mods/b/control.md6anim\"\n\t\t}\n");
     t[1] = MD6_HEAD MD6_STOCK MD6_TAIL("");
     out = sh_modserve_test_compose(t, 2, &added);
@@ -2144,9 +2120,8 @@ static void test_compose_unit(void)
     CHECK(sh_modserve_test_compose(t, 2, &added) == NULL);
     t[0] = AW_TEXT(""); t[1] = AW_TEXT("\tlayers {\n\t}\n");
     CHECK(sh_modserve_test_compose(t, 2, &added) == NULL);
-    /* Two copies of the stock lift door md6Def that differ only in an event
-     * bag compose without adding a ';' anywhere: the engine's md6Def parser
-     * refuses `"doors" = "";` (issue 160). */
+    /* Two copies of the stock lift door md6Def that differ only in an event bag compose without adding a ';' anywhere:
+     * the engine's md6Def parser refuses `"doors" = "";`. */
     t[0] = LIFT_HEAD LIFT_TAIL;
     t[1] = LIFT_HEAD "\t\tanim \"md6/mods/f1/kick.md6anim\" {\n\t\t\tevent \"ae_startFX\" {\n\t\t\t\tframe 3\n\t\t\t\trow 0\n\t\t\t\tlocked 0\n\t\t\t}\n\t\t}\n" LIFT_TAIL;
     out = sh_modserve_test_compose(t, 2, &added);
@@ -2204,10 +2179,9 @@ static void test_conflicts(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\conflicts\\mods", top);
     mkdirs(root);
     {
-        /* The owner's tree, reduced: one authored boss mod at the root and
-         * the build a map pinned as a composition, with the same animWeb bytes,
-         * another boss pack carrying it with one line different, and two more
-         * bosses, all appending to the conductor and the whitelist. */
+        /* A reduced real tree: one authored boss mod at the root and the build a map pinned as a composition, with the
+         * same animWeb bytes, another boss pack carrying it with one line different, and two more bosses, all appending
+         * to the conductor and the whitelist. */
         static const fx_file cy[] = {
             { CYB_AW, AW_TEXT("\tcustomFlags AW_CF_IDLE_CYCLE\n"), -1, "animWeb", "zion/boss/cyberdem_ai", NULL, 'a' },
             { CONDUCTOR, CONDUCTOR_CYBER, -1, "entityDef", "ai/conductor/coop/snapmap_default", NULL, 'c' },
@@ -2334,7 +2308,7 @@ static void test_conflicts(void)
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
 
-/* ------------------------------------------------------------------ editor row references (lane MG2) */
+/* ------------------------------------------------------------------ editor row references */
 
 static char g_refs[2048];
 static void collect_ref(void *c, const char *type, const char *name, const char *row)
@@ -2389,7 +2363,7 @@ static void test_editor_refs(void)
     sh_modserve_plan_free(&p);
 }
 
-/* ------------------------------------------------------------------ resource watermark (lane MG2) */
+/* ------------------------------------------------------------------ resource watermark */
 
 /* The engine's list-of-lists, as the purge driver walks it: a list holds its
  * class name at +0x10, the next list at +0x18, entries at +0x20, count at
@@ -2454,7 +2428,7 @@ static void test_watermark(void)
     la.count = 5;
 }
 
-/* ------------------------------------------------------------------ what kept decls hold (triage F6) */
+/* ------------------------------------------------------------------ what kept decls hold */
 
 /* The engine's lists with their type at +0x08 (the class at +0x10); a
  * resource holds its name at +0x08 and its level at +0x28. */
@@ -2472,10 +2446,9 @@ typedef struct kh_list {
 #define KH_MD6   "generated/decls/md6def/mods/khmod000/s/body.md6.decl"
 #define KH_MESH  "generated/basemodel/md6/mods/khmod000/body.bmd6model"
 
-/* A pickup's web kept at level 4 by a pass after the map's own load parsed it
- * at level 1, so the clip that parse created is older than the pass's
- * watermark (report X1): everything a level-4 decl names is raised by name,
- * through the files of the index that provide its needs, once it exists. */
+/* A pickup's web kept at level 4 by a pass after the map's own load parsed it at level 1: the clip that parse
+ * created predates the pass's watermark, so everything a level-4 decl names is raised by name, through the index
+ * files that provide its needs, once it exists. */
 static void test_kept_holds(void)
 {
     static const fx_file files[] = {
@@ -2526,8 +2499,7 @@ static void test_kept_holds(void)
     idle.name = "md6/stock/body_idle.md6anim"; idle.level = 1;
     other.name = "md6/stock/other.md6anim"; other.level = 1;
     loose_clip.name = "md6/stock/loose.md6anim"; loose_clip.level = 1;
-    /* The model's default clip, which the builder records beside the mesh
-     * and the skeleton the cooked mesh names (triage F7). */
+    /* The model's default clip, which the builder records beside the mesh and the skeleton the cooked mesh names. */
     bind.name = "md6/stock/body.md6skl/_default.md6anim"; bind.level = 1;
     anims[0] = &idle; anims[1] = &other; anims[2] = &loose_clip; anims[3] = &bind; la.count = 4;
     /* A resource of another type under a held name is not the one held. */
@@ -2567,7 +2539,7 @@ static void test_kept_holds(void)
     CHECK(sh_modserve_holds_raise(NULL, &h) == 0);
 }
 
-/* ------------------------------------------------------------------ models kept decls hold (X2) */
+/* ------------------------------------------------------------------ models kept decls hold */
 
 #define HM_ENT   "generated/decls/entitydef/mods/hmmod000/snapmaps/props/rock.decl"
 #define HM_LOOSE "generated/decls/entitydef/mods/hmmod000/snapmaps/props/loose.decl"
@@ -2586,11 +2558,9 @@ static int hm_visit(void *context, const char *name, void *resource)
     return 1;
 }
 
-/* A mod prop's model (report X2): the entityDef is kept for the session, its
- * model is loaded per map at the entity's spawn. The product loads each model
- * a kept decl needs while the model's file serves: one not held yet, a default
- * box, or one a map heap holds; never one already held whole, a stock model,
- * one whose file this scope does not serve, or one only an unkept decl needs. */
+/* A kept entityDef's models are loaded while their files serve: one not held yet, a default box, or one a map heap
+ * holds; never one held whole, a stock model, one whose file this scope does not serve, or one only an unkept
+ * decl needs. */
 static void test_held_models(void)
 {
     static const fx_file files[] = {
@@ -2657,9 +2627,8 @@ static void test_held_models(void)
         memset(&seen, 0, sizeof seen);
         CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 1 && seen.res[0] == &rock_model);
 
-        /* Whole at level 1, loaded in process heap 0: the holds raise keeps it,
-         * no load. Loaded under a map heap: loaded again (F9's gate would leave
-         * it to the purge, and the next load may be where its file is not served). */
+        /* Whole at level 1, loaded in process heap 0: the holds raise keeps it, no load. Loaded under a map heap: loaded
+         * again (a gate would leave it to the purge, and the next load may be where its file is not served). */
         rock_model.level = 1; rock_model.state = 0x60;
         memset(&seen, 0, sizeof seen);
         CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 0);
@@ -2706,7 +2675,7 @@ static void test_held_models(void)
     sh_modserve_attrib_reset();
 }
 
-/* ------------------------------------------------------------------ editor closure after an in-session install (R-315) */
+/* ------------------------------------------------------------------ editor closure after an in-session install */
 
 #define CL_ROW   "generated/decls/snapeditorentitydef/mods/clmod000/tile.decl"
 #define CL_ENT   "generated/decls/entitydef/mods/clmod000/tile.decl"
@@ -2731,13 +2700,9 @@ static int cl_visit(void *context, const sh_modserve_refresh_item *it)
     return 1;
 }
 
-/* A mod booted with older rows, then installed again in-session with rows
- * that need new decls: every file of a bundle with rows, and everything a row
- * needs, is the editor closure (a row-less bundle's decl is not); a refresh applies that part on its own (inside the engine side's
- * watermark) and the rest after; a map or refresh plan keeps the closure's
- * new decls and runs them first; a later part does not load what needs a
- * failed kept decl; and the keeper visits every reference a registered row
- * names, its attachments' models included. */
+/* A mod installed again in-session with rows that need new decls: the editor closure is every file of a bundle with
+ * rows plus what a row needs. A refresh applies it first inside the engine side's watermark, runs the new decls
+ * first, skips what needs a failed kept decl, and its keeper visits every reference a registered row names. */
 static void test_editor_closure(void)
 {
     static const fx_file v1[] = {
@@ -2899,12 +2864,10 @@ static void test_editor_closure(void)
     (void)sh_modserve_index_build(root);
 }
 
-/* A renderParm is registered and parsed before any material that names it
- * (snaphak-re ADD-G5): a material's parm keys are bare names, so no need
- * orders them, and the engine keeps a renderParm's slot and kind from its
- * first parse. The material comes first in its bundle's file list; the
- * renderParms (one in the same bundle, one in another declared bundle) still
- * come first in the map plan, its run, the kept part of a split and a refresh. */
+/* A renderParm is registered and parsed before any material that names it: a material's parm keys are bare names,
+ * so no need orders them, and the engine keeps a renderParm's slot and kind from its first parse. The renderParms
+ * (one in the material's bundle, one in another declared bundle) come first in the map plan, its run, the kept
+ * part of a split and a refresh. */
 #define RP_MAT   "generated/decls/material2/mods/rpmat000/skull_key.decl"
 #define RP_OWN   "generated/decls/renderparm/mods/rpmat000/own_parm.decl"
 #define RP_OTHER "generated/decls/renderparm/mods/rpparm00/other_parm.decl"
@@ -2939,9 +2902,8 @@ static void test_renderparm_first(void)
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\renderparm\\mods", top);
     mkdirs(root);
-    /* The mod's own renderParms, and a stock renderParm the pack carries as a
-     * stock pointer at its game path (a surface): the game parses that one
-     * itself, so it is in no plan (ADD-L11). */
+    /* The mod's own renderParms, and a stock renderParm the pack carries as a stock pointer at its game path (a
+     * surface): the game parses that one itself, so it is in no plan. */
     g_fx_restore = RP_SURF;
     make_bundle(root, "rpmat000", "rpmat000", 'a', NULL, m1, 3, NULL);
     g_fx_restore = NULL;
@@ -2998,7 +2960,7 @@ static void test_renderparm_first(void)
     (void)sh_modserve_index_build(root);
 }
 
-/* ------------------------------------------------------------------ surfaces (ADD-L11) */
+/* ------------------------------------------------------------------ surfaces */
 
 #define SF_SURF  "generated/decls/material/models/monsters/sf/body.decl"     /* a surface */
 #define SF_SKIN  "generated/decls/material/mods/sfmod000/skin.decl"
@@ -3096,11 +3058,9 @@ static void sf_leave(void)
     (void)sh_modserve_index_build(root);
 }
 
-/* A surface (a stock pointer at the game's own path: the game's bytes under
- * the game's name) is served but in no plan (map, editor, refresh), no
- * refresh list, no early-shadow or gated-reload list and no row reference;
- * and an in-place reload or re-parse outside a watermark opens its own
- * keeper (report ADD-G6). */
+/* A surface (a stock pointer at the game's own path) is served but in no plan, refresh list, early-shadow or
+ * gated-reload list, and no row reference; an in-place reload or re-parse outside a watermark opens its own
+ * keeper. */
 static void test_surfaces_never_parsed(void)
 {
     char root[MAX_PATH], h[65], seen_raw[1024];
@@ -3159,11 +3119,11 @@ static void test_surfaces_never_parsed(void)
     sf_leave();
 }
 
-/* R-GS3: the decls the product derives for a mod (an SDK effect's emitter, a derived particle and its table, a
- * platform program) are stock pointers to names no archive lists, so they are planned as the mod's own decls are,
- * needs first, in the map pass and the editor pass; a game surface still is not. The fake engine loads a step as the
- * engine does, reading its file through the provider: in a fresh process nothing has compiled the effect yet, so
- * the derived particle and table exist only once the read compiles the file that needs them. */
+/* The decls the product derives for a mod (an SDK effect's emitter, a derived particle and its table, a platform
+ * program) are stock pointers to names no archive lists, so they are planned like the mod's own decls, needs first,
+ * in the map pass and the editor pass; a game surface is not. The fake engine reads a step's file through the
+ * provider, so in a fresh process the derived particle and table exist only once the read compiles the file that
+ * needs them. */
 #define PD_FX   "generated/decls/fx/mods/pdmod000/blast.decl"
 #define PD_EMIT "generated/decls/entitydef/snapmapplus/effect/mods/pdmod000/blast.decl"
 #define PD_PRT  "generated/decls/particle/snapmapplus/sdk/0123456789abcdef.decl"
@@ -3230,7 +3190,7 @@ static int ph_read(const char *request, unsigned char **bytes, size_t *len)
 }
 
 /* A file the product names by its bytes' hash (a look's image) is served with no build listing it, once the product
- * has registered it (its material compiled); nothing else is served without an index entry (R-HD1). */
+ * has registered it (its material compiled); nothing else is served without an index entry. */
 static void test_product_hashed_served(void)
 {
     char missing[MAX_PATH];
@@ -3350,11 +3310,9 @@ static void test_product_decls_planned(void)
     (void)sh_modserve_index_build(root);
 }
 
-/* What a cold hub launch runs, with the engine faked: the parse's map pass,
- * then the gate's pre-load pass (the editor rows and their closure, then
- * what the declared builds still lack), then what the level load runs (its
- * palette's editor pass and any map pass). Only the first two register, and
- * the surface is in none of them. */
+/* What a cold hub launch runs, with the engine faked: the parse's map pass, the gate's pre-load pass (the editor
+ * rows and their closure, then what the declared builds still lack), then the level load's palette editor pass and
+ * map pass. Only the first two register, and the surface is in none of them. */
 static void test_launch_preload(void)
 {
     char root[MAX_PATH], h[65];
@@ -3384,7 +3342,7 @@ static void test_launch_preload(void)
      * builds, which the parse's pass already settled. */
     CHECK(sh_modserve_plan_editor(&ed) == 5);
     n = sh_modserve_plan_unvisited(&ed);
-    CHECK(n == 3);   /* the rows and the other mod's entityDef; the declared closure was the map pass's */
+    CHECK(n == 3);   /* the rows and the other mod's entityDef; the declared closure belongs to the map pass */
     g_calls[0] = 0;
     CHECK(sh_modserve_plan_run(&ed, &g_fake, "launch") == ed.count);
     CHECK(strstr(g_calls, "R:snapEditorEntityDef:mods/sfmod000/thing;") && strstr(g_calls, "R:snapEditorEntityDef:mods/sfother0/rock;"));
@@ -3407,11 +3365,10 @@ static void test_launch_preload(void)
     sf_leave();
 }
 
-/* ------------------------------------------------------------------ refusals (issue 132) */
+/* ------------------------------------------------------------------ refusals */
 
-/* The engine side of the issue-132 pass: the archives hold the campaign md6Defs
- * (stock_exists 1), but the engine's own lookup (decl_found) finds only what
- * SnapMap loaded; one parse the engine refuses although the load reports
+/* The engine side of the refusal pass: the archives hold the campaign md6Defs (stock_exists 1), but the engine's
+ * own lookup (decl_found) finds only what SnapMap loaded; one parse the engine refuses although the load reports
  * success. */
 static char g_console_seen[4096];
 static void rf_console(const char *line)
@@ -3451,7 +3408,7 @@ static void rf_refusal(void *c, char *out, size_t cap)
               "Could not find animweb decl: 'gone'", _TRUNCATE);
 }
 static const sh_modserve_engine_ops g_rf = { NULL, rf_source, fake_register, rf_load, rf_stock, NULL, rf_found, rf_refusal };
-/* The same engine without the lookup: the archives decide, as before. */
+/* The same engine without the lookup: the archives decide. */
 static const sh_modserve_engine_ops g_rf_old = { NULL, rf_source, fake_register, rf_load, rf_stock };
 
 static void rf_reconstruct(void *res) { ((fake_res *)res)->level = 1; }
@@ -3502,22 +3459,20 @@ static void test_refusals(void)
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\refusals\\mods", top);
     mkdirs(root);
-    /* A pack whose animWebs name models (the issue-132 "SP doors", in the one
-     * shape: its own names under its salt). */
+    /* A pack whose animWebs name models (the campaign "SP doors": its own names under its salt). */
     make_bundle(root, "dzpack00 folder", "dzpack00", '9', NULL, files, 4, NULL);
     hash64('9', hash);
     hashes[0] = hash;
     CHECK(sh_modserve_index_build(root) == 1);
 
-    /* The check alone: the engine lookup decides a load now. */
+    /* The check alone: the engine lookup decides a load. */
     CHECK(HO(model, sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/med_station.decl", &g_rf, HO_P(0))) == 1 &&
           !strcmp(model, "zion/objects/props_set/kiosks/wallhealthstation.md6"));
     CHECK(HO(model, sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/turret.decl", &g_rf, HO_P(0))) == 1 &&
           !strcmp(model, "zion/objects/weapons/turret_campaign.md6"));
     CHECK(HO(model, sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/fine.decl", &g_rf, HO_P(0))) == 0);
     CHECK(HO(model, sh_modserve_animweb_check("generated/decls/md6def/zion/none.md6.decl", &g_rf, HO_P(0))) == -1);
-    /* Without the lookup the archives answer, which is what let issue 132's
-     * campaign models through. */
+    /* Without the lookup the archives answer, which lets campaign models through. */
     CHECK(HO(model, sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/med_station.decl", &g_rf_old, HO_P(0))) == 0);
 
     g_console_seen[0] = 0;
@@ -3696,13 +3651,10 @@ static void test_refused_dependency(void)
 
 /* ------------------------------------------------------------------ first parse of a permanent decl (lane P52) */
 
-/* The engine side of the P52 crash: the menu collectibles' unlockModel
- * 'spidermastermind' is permanent (level 4), and the md6Def it names was
- * created by this map pass at level 1. In the first crash the bundle arrived
- * after boot (taken here as a decl created by reference, state 2); in the
- * second it was installed at boot, so the game had parsed the unlockModel
- * through the provider before the Init promotion (state 0). DeclSourceFind
- * knows neither decl, so the plan reaches the load. */
+/* The menu collectibles' unlockModel 'spidermastermind' is permanent (level 4), and the md6Def it names was created
+ * by this map pass at level 1: as a decl created by reference (state 2) when the bundle arrived after boot, or parsed
+ * through the provider before the Init promotion (state 0) when it was installed at boot. DeclSourceFind knows
+ * neither decl, so the plan reaches the load. */
 typedef struct pf_res { const char *type, *name; unsigned level, state; int parses; } pf_res;
 static pf_res g_pf[2];
 static int pf_source(void *c, const char *type, const char *name) { (void)c; (void)type; (void)name; return 0; }
@@ -3755,7 +3707,7 @@ static void test_permanent_first_parse(void)
     CHECK(sh_modserve_load_left_to_engine(4, 0xc2, 0) == 1);       /* upper state bits are not the parse */
     CHECK(sh_modserve_load_left_to_engine(4, 0x00, 0) == 1);       /* parsed (the second crash) */
     CHECK(sh_modserve_load_left_to_engine(4, 0x50, 0) == 1);
-    CHECK(sh_modserve_load_left_to_engine(4, 0x01, 0) == 0);       /* failed or defaulted: as before */
+    CHECK(sh_modserve_load_left_to_engine(4, 0x01, 0) == 0);       /* failed or defaulted: not left to the engine */
     CHECK(sh_modserve_load_left_to_engine(4, 0x03, 0) == 0);
     CHECK(sh_modserve_load_left_to_engine(1, 0x00, 0) == 0);       /* map-scoped: purged with what it names */
     CHECK(sh_modserve_load_left_to_engine(1, 0x02, 0) == 0);
@@ -3795,8 +3747,7 @@ static void test_permanent_first_parse(void)
         g_pf[1].type = "md6Def"; g_pf[1].name = "mods/pfspider/spider_mastermind.md6";
         g_pf[1].level = 1; g_pf[1].state = 0x00; g_pf[1].parses = 0;
 
-        /* Round 1's unlockModel is a surface (the game's bytes at the game's
-         * name): no plan holds it at all (ADD-L11). */
+        /* Round 1's unlockModel is a surface (the game's bytes at the game's name): no plan holds it at all. */
         CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == (round ? 1 : 2) && unknown == 0);
         CHECK((step_index(&p, "unlockModel", "mods/pfspider/spidermastermind") < 0) == round);
         log_clear();
@@ -3832,18 +3783,14 @@ static void test_permanent_first_parse(void)
     }
 }
 
-/* ------------------------------------------------------------------ registration re-parses a held decl (lane P53) */
+/* ------------------------------------------------------------------ registration re-parses a held decl */
 
-/* What the engine does that the earlier fake engines did not model:
- * DeclRegisterFile re-parses an existing resource of the registered name on the
- * spot (VK FUN_141559a30 -> FUN_141561af0 -> DeclParseSource), and an
- * unlockModel's model field is set by DeclFind(md6Def, name, create), at the
- * level the pass creates objects at. Observed live with a hardware watchpoint on
- * the unlockModel's +0x70: the store came from op_register_file during the map
- * activation, the md6Def it stored was at level 1, the purge at START MISSION
- * freed it, and the shell map load after Play faulted reading it (VK RVA
- * 0x33a130). This fake engine binds the same way, so the test fails if a pass
- * that does not keep its decls re-parses a permanent decl by registration. */
+/* DeclRegisterFile re-parses an existing resource of the registered name on the spot (VK FUN_141559a30 ->
+ * FUN_141561af0 -> DeclParseSource), and an unlockModel's model field is set by DeclFind(md6Def, name, create) at
+ * the level the pass creates objects at. A map pass that re-parses a permanent unlockModel therefore binds it to a
+ * level-1 md6Def that the START MISSION purge frees (the shell map load after Play faulted reading it, VK RVA
+ * 0x33a130). This fake engine binds the same way, so the test fails if a pass that does not keep its decls
+ * re-parses a permanent decl by registration. */
 typedef struct hr_res {
     const char *type, *name;
     unsigned level, state;
@@ -3980,7 +3927,7 @@ static void test_registration_reparse_of_held_permanent(void)
     CHECK(log_has("map: unlockModel 'mods/hrspider/spidermastermind' (hrspider) left to the game: permanent, already parsed "
                   "(state 0x00 lifetime 4); not registered by this pass, whose registration would re-parse it in place"));
     CHECK(!log_has("map: unlockModel 'mods/hrspider/spidermastermind' (hrspider) READY"));
-    /* The md6Def, new to the engine, is registered and loaded as before (level 1). */
+    /* The md6Def, new to the engine, is registered and loaded (level 1). */
     CHECK(strstr(g_calls, "R:md6Def:mods/hrspider/spider_mastermind.md6;") != NULL);
     CHECK(g_hr[1].held && g_hr[1].level == 1);
     /* A held map-scoped decl is still registered: what it binds dies with it. */
@@ -4009,7 +3956,7 @@ static void test_registration_reparse_of_held_permanent(void)
     CHECK(strstr(g_calls, "R:animWeb:mods/hrspider/airlock;") != NULL);
     sh_modserve_plan_free(&p);
 
-    /* A permanent decl whose earlier parse failed is registered as before. */
+    /* A permanent decl whose parse failed is registered. */
     hr_reset(4, 0x01, 0);
     CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 3);
     log_clear();
@@ -4100,7 +4047,7 @@ static void remove_tree(const char *dir)
     if (w[0]) remove_tree_w(w);
 }
 
-/* ------------------------------------------------------------------ map scope (lane P25, additive phase 2) */
+/* ------------------------------------------------------------------ map scope */
 
 #define SC_COOP   "generated/decls/entitydef/player/coop.decl"
 #define SC_IMAGE  "generated/image/models/hands/arms.bimage"
@@ -4121,10 +4068,9 @@ static int scope_refresh(void *context, const sh_modserve_refresh_item *it)
     return it->gates_live ? 1 : 0;   /* as the engine: a gated change waits */
 }
 
-/* Two layers: a map serves the bundles it declares by hash, then the game.
- * An undeclared bundle offers its names in the editor and with no map open,
- * never its shadows, and serves nothing in Play. A mod.json "scope" no longer
- * chooses; editor-time content still serves in every map. */
+/* Two layers: a map serves the bundles it declares by hash, then the game. An undeclared bundle offers its names in
+ * the editor and with no map open, never its shadows, and serves nothing in Play; a mod.json "scope" does not
+ * choose, and editor-time content serves in every map. */
 static void test_scope(void)
 {
     static const fx_file hands[] = {
@@ -4175,7 +4121,7 @@ static void test_scope(void)
     /* The new shadows this table brings are pending as at any rescan: settle them first. */
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    /* Off (as every earlier test): everything serves. */
+    /* Off: everything serves. */
     CHECK(sh_modserve_lookup(SC_COOP, NULL) && sh_modserve_lookup(SC_IMAGE, NULL) && sh_modserve_lookup(SC_MAPED, NULL));
     CHECK(log_has("MODS: scope: eeditor0 shadows editor-time content (" SC_SET "); its editor tweaks serve in every map"));
     CHECK(log_has("MODS: scope: meditor0 shadows editor-time content (" SC_MAPED "); its editor tweaks serve in every map"));
@@ -4215,8 +4161,8 @@ static void test_scope(void)
         sh_modserve_each_unopened_shadow(unopened_visit, &u);
         CHECK(!strstr(u.order, "player/coop"));
     }
-    /* No map: no undeclared bundle's requirement applies (manager, 2026-11-24): ahands00's is not live, and
-     * rrows000's row registers without its own (g_label stays the game's). */
+    /* No map: no undeclared bundle's requirement applies: ahands00's is not live, and rrows000's row registers without
+     * its own (g_label stays the game's). */
     CHECK(sh_modserve_requirements_apply(&g_gates, "hub", &r) == 0 && r.commands == 0 && !strcmp(g_text_val[1], "0") &&
           !strcmp(g_text_val[3], ""));
     CHECK(sh_modserve_bundle_scope(h_rows, &si) && !si.listed && si.requirements && !si.requirements_live);
@@ -4251,20 +4197,20 @@ static void test_scope(void)
     g_events[0] = 0;
     CHECK(sh_modserve_requirements_apply(&g_gates, "map", &r) == 0 && !strcmp(g_text_val[3], "") && !strcmp(g_text_val[1], "0"));
     CHECK(ev_first("C:echo hands on") < 0);
-    /* Its Play: the same, so the editor and the map's Play agree (the editor no longer keeps a Toybox mod's
-     * requirements live for a map that does not use it). */
+    /* Its Play: the same, so the editor and the map's Play agree (the editor keeps a Toybox mod's requirements live
+     * only for a map that uses it). */
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0);
     CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) >= 0 && !strcmp(g_text_val[3], ""));
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0);
     CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) >= 0 && !strcmp(g_text_val[3], ""));
     {
         /* The map places the row's object, so it declares rrows000: its requirement applies, and the row the
-         * editor read without it is offered to be read again (it was first opened while not live). */
+         * editor read without it is offered to be read again (first opened while not live). */
         unsigned char *bytes = NULL;
         size_t n = 0;
         unopened_seen u;
         const char *one[1];
-        CHECK(sh_modserve_open(SC_ROW, &bytes, &n) == 1);   /* the editor reads the row now, without the requirement */
+        CHECK(sh_modserve_open(SC_ROW, &bytes, &n) == 1);   /* the editor reads the row without the requirement */
         HeapFree(GetProcessHeap(), 0, bytes);
         one[0] = h_rows;
         CHECK(sh_modserve_scope_set(one, 1, 1) >= 1);
@@ -4312,8 +4258,8 @@ static void test_scope(void)
     CHECK(sh_modserve_scope_set(list, 1, 1) == 1 && sh_modserve_lookup(SC_COOP, NULL));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    /* The build a map-level row is rewritten to: a local row (the author's own map) follows the root folder; a
-     * pinned row never resolves to a local folder (D21). */
+    /* The build a map-level row is rewritten to: a local row (the author's own map) follows the root folder; a pinned
+     * row never resolves to a local folder. */
     {
         sh_modserve_bundle_ref ref;
         sh_modmanifest_row row;
@@ -4339,7 +4285,7 @@ static void test_scope(void)
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 2);
     CHECK(sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_PLAY);
     CHECK(sh_modserve_lookup(SC_COOP, NULL) && !sh_modserve_lookup(SC_NEW, NULL) && !sh_modserve_lookup(SC_ROW, NULL));
-    CHECK(sh_modserve_lookup(SC_SET, NULL));   /* editor-time content, as before */
+    CHECK(sh_modserve_lookup(SC_SET, NULL));   /* editor-time content serves */
     CHECK(sh_modserve_bundle_scope(h_rows, &si) && si.play && !si.names_live);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
@@ -4365,9 +4311,8 @@ static void test_scope(void)
     CHECK(ev_first("C:echo hands off") >= 0 && !strcmp(g_text_val[1], "0") && !strcmp(g_text_val[3], ""));
     (void)h_maped;
 
-    /* A level load sees an installed mod's names only when its map declares the
-     * mod (R-ED1): the engine keeps what the editor registered, and a level load
-     * templates every entityDef it holds (level_templates.h). */
+    /* A level load sees an installed mod's names only when its map declares the mod: the engine keeps what the editor
+     * registered, and a level load templates every entityDef it holds (level_templates.h). */
     printf("-- map scope: a level load sees only the mods its map declares\n");
     {
         char h_names[65];
@@ -4393,10 +4338,9 @@ static void test_scope(void)
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
 
-/* Lane P31, phase 2: a shadow path is served by the provider the open map
- * declares, by hash, also when the static winner is another (two installs of
- * the same bytes); among several declared providers with different bytes the
- * map's row order decides, never the install. */
+/* A shadow path is served by the provider the open map declares, by hash, also when the static winner is another
+ * (two installs of the same bytes); among several declared providers with different bytes the map's row order
+ * decides, never the install. */
 static void test_scope_providers(void)
 {
     static const fx_file bare[] = { { SC_COOP, "entityDef coop { bare }", -1, "entityDef", "player/coop", NULL, '9' } };
@@ -4442,7 +4386,7 @@ static void test_scope_providers(void)
     CHECK(sh_modserve_lookup_indexed(SC_COOP, &hit) && !strcmp(hit.bundle_id, "abare000"));   /* the static winner */
     CHECK(sh_modserve_conflict_info(SC_DECL, &ci) && ci.game && !strcmp(ci.served_id, "xone0000"));
 
-    /* Only breq0000 is declared (P27: alex.bare-hands-req attached, alex.bare-hands not): its copy serves, re-parsed now. */
+    /* Only breq0000 is declared (alex.bare-hands-req attached, alex.bare-hands not): its copy serves, re-parsed. */
     list[0] = h_req;
     CHECK(sh_modserve_scope_set(list, 1, 1) == 1);
     CHECK(sh_modserve_lookup(SC_COOP, &hit) && !strcmp(hit.bundle_id, "breq0000") && strstr(hit.disk_path, "breq0000") != NULL);
@@ -4470,7 +4414,7 @@ static void test_scope_providers(void)
     CHECK(strstr(g_report, "requirements: abare000: cvar r_fancy=1: not active for this map (the open map does not use it; "
                            "the cvar has this value because breq0000 asks it)\n") != NULL);
     CHECK(!strstr(g_report, "abare000: cvar r_fancy=1: live"));
-    /* Its gate is live now: the re-parse that waited for it runs. */
+    /* Its gate goes live: the re-parse that waited for it runs. */
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
     CHECK(strstr(seen.order, "breq0000:player/coop:gone=0:gates=1;") != NULL);
@@ -4498,7 +4442,7 @@ static void test_scope_providers(void)
           !strcmp(ci.reason, "the first of the map's rows"));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    CHECK(!strstr(seen.order, "monster/revenant"));   /* the same bytes as before */
+    CHECK(!strstr(seen.order, "monster/revenant"));   /* the same bytes: not read again */
     list[0] = h_two; list[1] = h_one;
     CHECK(sh_modserve_scope_set(list, 2, 1) >= 1);
     CHECK(sh_modserve_lookup(SC_DECL, &hit) && !strcmp(hit.bundle_id, "ytwo0000"));
@@ -4524,7 +4468,7 @@ static void test_scope_providers(void)
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
 
-/* ------------------------------------------------------------------ additive phase 2 (lane L2a) */
+/* ------------------------------------------------------------------ provider precedence by map */
 
 #define AD_P     "generated/decls/entitydef/player/coop.decl"            /* a game name several keys shadow */
 #define AD_HELP  "generated/decls/entitydef/mods/zlocal00/helper.decl"
@@ -4563,7 +4507,7 @@ static void ad_determinism_root(const char *root, int alpha_at, int beta_at, int
     if (local) make_bundle(root, "zlocal00", "zlocal00", 'f', "\"" AD_P "\", \"" SC_DECL "\"", zl, 3, "{\"installedAt\": 999}");
 }
 
-/* The text the provider serves for `request` now, "" when nothing does. */
+/* The text the provider serves for `request`, "" when nothing does. */
 static const char *ad_served(const char *request)
 {
     static char text[256];
@@ -4687,7 +4631,7 @@ static void test_additive_same_key(void)
     list[0] = h1;
     CHECK(sh_modserve_scope_set(list, 1, 1) == 2);
     CHECK(!strcmp(ad_served(AD_THING), "entityDef thing { one }"));
-    /* In the editor the root folder's build, inert, still serves the names the composition lacks (D26). */
+    /* In the editor the root folder's build, inert, still serves the names the composition lacks. */
     CHECK(sh_modserve_lookup(AD_OLD, NULL) && sh_modserve_lookup(AD_NEW, NULL));
     CHECK(sh_modserve_bundle_scope(h2, &si) && si.inert && !si.listed && si.names_live);
     CHECK(sh_modserve_bundle_scope(h1, &si) && si.listed && si.rank == 0);
@@ -4726,8 +4670,8 @@ static void test_additive_same_key(void)
     CHECK(sh_modserve_scope_set(list, 2, 1) == 2 && !strcmp(ad_served(AD_THING), "entityDef thing { one }"));
     CHECK(sh_modserve_bundle_scope(h2, &si) && si.inert);
 
-    /* The row resolver (DECISIONS 1 and 11, D21): a local row follows the root folder whatever build it records; a
-     * pinned row is its composition only, and a local folder never stands in for it. */
+    /* The row resolver: a local row follows the root folder whatever build it records; a pinned row is its
+     * composition only, and a local folder never stands in for it. */
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, "kfork000");
     strcpy_s(row.build, sizeof row.build, h1);   /* the composition's build: the root holds another */
@@ -4753,11 +4697,9 @@ static void test_additive_same_key(void)
     sh_modserve_scope_enable(0);
 }
 
-/* Two builds of one salt whose shared paths need different things: the
- * root folder's md6Def needs skeleton A, a map's composition needs skeleton B and
- * a decl only that copy carries. With the map that brought its copy open, the
- * holds by name keep B (not A) and the plan orders the copy's needs first; with
- * no map the root folder's needs answer. */
+/* Two builds of one salt whose shared paths need different things: the root folder's md6Def needs skeleton A, a
+ * map's composition needs skeleton B and a decl only that copy carries. With that map open the holds keep B and
+ * the plan orders the copy's needs first; with no map the root folder's needs answer. */
 #define C3_MD6 "generated/decls/md6def/mods/c3mod000/body.md6.decl"
 #define C3_ENT "generated/decls/entitydef/mods/c3mod000/thing.decl"
 #define C3_DEP "generated/decls/entitydef/mods/c3mod000/dep.decl"
@@ -4824,11 +4766,9 @@ static void test_serving_build_needs(void)
     sh_modserve_attrib_reset();
 }
 
-/* Two builds of one salt, both with requirements (V1 run 2, in the one
- * shape: the root folder's build and a composition holding an older one).
- * Paths whose bytes the two builds share have one static winner; every step
- * must be gated by the build that serves its path for the listing, not by
- * the static winner's. */
+/* Two builds of one salt, both with requirements (the root folder's build and a composition holding an older one).
+ * Paths whose bytes the two builds share have one static winner; every step must be gated by the build that
+ * serves its path for the listing, not by the static winner's. */
 #define TB_MD6   "generated/decls/md6def/mods/twobuild/gun.md6.decl"
 #define TB_ENT   "generated/decls/entitydef/mods/twobuild/gun.decl"
 #define TB_SEDEF "generated/decls/snapeditorentitydef/mods/twobuild/gun.decl"
@@ -4875,7 +4815,7 @@ static void test_two_builds_requirements(void)
     sh_modserve_scope_enable(1);
 
     /* No map open (boot, the editor's palette): the root build's rows, all ready, registered without the mod's
-     * requirements, which apply only in a map that uses it (manager, 2026-11-24). */
+     * requirements, which apply only in a map that uses it. */
     CHECK(sh_modserve_scope_set(NULL, 0, 1) >= 0);
     CHECK(sh_modserve_bundle_scope(h_new, &si) && si.newest && !si.requirements_live);
     CHECK(sh_modserve_bundle_scope(h_old, &si) && !si.newest && !si.requirements_live);
@@ -4896,7 +4836,7 @@ static void test_two_builds_requirements(void)
     CHECK(sh_modserve_bundle_scope(h_old, &si) && si.listed && si.requirements_live);
     CHECK(sh_modserve_bundle_scope(h_new, &si) && si.inert && !si.requirements_live);
     CHECK(!strcmp(ad_served(TB_ENT), "entityDef gun { old }"));
-    CHECK(sh_modserve_lookup(TB_OLD, NULL) && sh_modserve_lookup(TB_NEW, NULL));   /* the editor also shows the root's names (D26) */
+    CHECK(sh_modserve_lookup(TB_OLD, NULL) && sh_modserve_lookup(TB_NEW, NULL));   /* the editor also shows the root's names */
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
     log_clear();
     CHECK(sh_modserve_plan_bundles(list, 1, &p, NULL) == 3);
@@ -4929,9 +4869,8 @@ static void test_two_builds_requirements(void)
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
 
-/* Derived edits among the declared bundles only (DESIGN-additive 2.4): each
- * bundle's edited copy of the conductor is never served; the game's text with
- * the declared bundles' edits is, never an undeclared local mod's. */
+/* Derived edits among the declared bundles only: each bundle's edited copy of the conductor is never served; the
+ * game's text with the declared bundles' edits is, never an undeclared local mod's. */
 /* The game's conductor, the text the edits apply to (modregistry.h). */
 #define CONDUCTOR_BASE CONDUCTOR_HEAD "\t\t\tnum = 2;\r\n" CONDUCTOR_STOCK_ITEMS CONDUCTOR_TAIL
 /* The game's whitelist, for a bundle that carries its own copy (a registry file, its diff the bundle's edits). */
@@ -5036,9 +4975,9 @@ static void test_additive_compose(void)
     CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "talismanguard/hammer") && !strstr(text, "spider_mastermind"));
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     {
-        /* A bundle whose conductor edits are its block's, and which also carries its own copy of another registry
-         * file (the encounter whitelist): both apply, the copy's diff never replaces the block's edits (the two-demon
-         * pack of R-DS3 lost its conductor rows this way, so its demons had no type in the author's own map). */
+        /* A bundle whose conductor edits are its block's, and which also carries its own copy of another registry file
+         * (the encounter whitelist): both apply, the copy's diff never replaces the block's edits (a two-demon pack lost
+         * its conductor rows otherwise, leaving its demons with no type in the author's own map). */
         static const fx_file wl[] = { { WHITELIST, WL_A, -1, "snapPropertyInspector_WhiteListEncounterDecl",
                                          "single_encounters_white_list_inspector", NULL, 'w' } };
         static char edits[4096];
@@ -5077,10 +5016,8 @@ static void test_additive_compose(void)
         CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
         CHECK(sh_modserve_index_build(root) == 3);
     }
-    /* Converted first-generation packages (their Toybox rows shadow editor
-     * decls) follow the declared rule like any mod (owner 2026-11-09): in
-     * Play of a map that declares neither, nothing of them serves; a map
-     * that declares both composes them. */
+    /* Converted first-generation packages (their Toybox rows shadow editor decls) follow the declared rule like any
+     * mod: in Play of a map that declares neither, nothing of them serves; a map that declares both composes them. */
     {
         static const fx_file lg1[] = {
             { CONDUCTOR, CONDUCTOR_GUARD, -1, "entityDef", "ai/conductor/coop/snapmap_default", NULL, 'd' },
@@ -5116,11 +5053,9 @@ static void test_additive_compose(void)
     sh_mb_set_stock_ops(NULL);
 }
 
-/* ONE-SHAPE rules 1, 2, 4 and 6 at the serving index: a mod is its salt,
- * whatever its folder is called; the root holds one build per salt; a pinned
- * row is served by its composition (the content cache) at its hash, the
- * author's own map (a local row) by the root's at any hash; a folder in an
- * earlier shape or whose build failed serves nothing, with a plain cause. */
+/* The serving index: a mod is its salt, whatever its folder is called; the root holds one build per salt; a pinned
+ * row is served by its composition (the content cache) at its hash, the author's own map (a local row) by the
+ * root's at any hash; a folder in an unsupported shape or whose build failed serves nothing, with a plain cause. */
 #define SP_THING "generated/decls/entitydef/mods/kown0000/thing.decl"
 static void sp_modjson(const char *root, const char *folder, const char *text)
 {
@@ -5162,7 +5097,7 @@ static void test_salt_and_root(void)
     /* A copy of the author's folder (same salt, built later): one build per salt at the root. */
     make_bundle(root, "My doors (copy)", "kown0000", 'e', NULL, stray, 1, "{\"installedAt\": 300}");
     g_bundle_name = NULL;
-    /* Earlier shapes and unbuilt or failed folders. */
+    /* Folders not in the current shape, unbuilt or failed. */
     sp_modjson(root, "format-one", "{\"name\": \"Old\", \"snapmap-plus\": {\"format\": 1, \"key\": \"old\", \"bundle\": \""
                "0000000000000000000000000000000000000000000000000000000000000000\", \"files\": []}}");
     sp_modjson(root, "retired-id", "{\"id\": \"local.thing\", \"name\": \"Retired\"}");
@@ -5225,7 +5160,7 @@ static void test_salt_and_root(void)
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm));
     CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
     /* A pinned row is its composition only: at the composition's hash it resolves there, at the root's own hash or
-     * any other it is missing (a local folder never stands in for a map's units, D21). */
+     * any other it is missing (a local folder never stands in for a map's units). */
     row.pinned = 1;
     strcpy_s(row.build, sizeof row.build, hd);
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hd) && !strcmp(ref.place, SH_MODSERVE_CONTENT) &&
@@ -5250,7 +5185,7 @@ static void test_salt_and_root(void)
     CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING &&
           !strcmp(cause, "This map uses Salted, which is installed but cannot be used: not built yet (Refresh in the Mods tab "
                          "builds it)."));
-    /* A row that names no salt (an earlier shape the detour let through). */
+    /* A row that names no salt. */
     memset(&row, 0, sizeof row);
     CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING &&
           !strcmp(cause, "This map names a mod this version does not read."));
@@ -5261,9 +5196,9 @@ static void test_salt_and_root(void)
     CHECK(sh_modserve_index_build(g_root) >= 0);
 }
 
-/* mods\maps\ held the builds earlier versions downloaded per map (places, retired with D4). The index never reads
- * it: a folder holding a mod.json below it yields no bundle and nothing in the listing, while a mod below another
- * organizing folder (mapsets\) indexes as any other. */
+/* mods\maps\ holds per-map downloads the index never reads: a folder holding a mod.json
+ * below it yields no bundle and nothing in the listing, while a mod below another organizing folder (mapsets\)
+ * indexes as any other. */
 static void test_retired_places_not_read(void)
 {
     static const fx_file gone[] = {
@@ -5304,7 +5239,7 @@ static void test_retired_places_not_read(void)
     CHECK(sh_modserve_index_build(g_root) >= 0);
 }
 
-/* Manager Q8, D6a: a local row whose mod folder is not here resolves to the stand-in composition of its salt, named
+/* A local row whose mod folder is not here resolves to the stand-in composition of its salt, named
  * by the composition hash of none (SHA-256 of "snapmap-plus/composition/1\n1\n<salt>\n"); the root folder, once
  * installed, wins again. */
 static void test_local_row_standin(void)
@@ -5415,11 +5350,9 @@ static void test_resource_lock(void)
     DeleteCriticalSection(&g_fake_cs);
 }
 
-/* The asset rule (sh_modserve_row_served): a row is served by the admitted
- * folder at its hash that provides every name it lists; missing with no
- * folder at that hash (worded as any missing mod, also when the key is
- * installed at another hash); incomplete, naming the first missing names,
- * when the folder lacks one. */
+/* The asset rule (sh_modserve_row_served): a row is served by the admitted folder at its hash that provides every
+ * name it lists; with no folder at that hash it is missing (worded as any missing mod, also when the key is
+ * installed at another hash), and when the folder lacks a name it is incomplete, naming the first missing names. */
 static void test_row_served(void)
 {
     char tmp[MAX_PATH], root[MAX_PATH], top[MAX_PATH], cause[400], *slash;
@@ -5480,7 +5413,7 @@ static void test_row_served(void)
         CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0);
         CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
         CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) >= 0);
-        /* A pinned row is its composition only: no composition is installed, so the folder never serves it (D21). */
+        /* A pinned row is its composition only: no composition is installed, so the folder never serves it. */
         row.pinned = 1;
         CHECK(!sh_modserve_row_build(&row, &ref));
         CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING);
@@ -5526,12 +5459,8 @@ static void test_row_served(void)
     CHECK(sh_modserve_index_build(g_root) >= 0);
 }
 
-/* The names a map's placed entities give the save closure: no file at one of
- * DOOM's own names pulls its mod into a map, whether the map names it or reaches
- * it through another file's needs. A replacement of a DOOM binary (native/,
- * D-A3, D-A27), a decl edit of a DOOM name (owner, 2026-11-19: a mod applies only
- * in the maps it is set in) and an editor tweak (local) are declared by a row
- * only; R-LV4 saw an edit applied where the map did not set its mod. */
+/* No file at one of DOOM's own names pulls its mod into a map's save closure, however the map reaches it. A DOOM
+ * binary replacement (native/), a decl edit of a DOOM name and an editor tweak (local) are declared by a row only. */
 typedef struct dep_seen { char names[512]; int bundles; } dep_seen;
 static void dep_visit(void *context, const char *id, const char *hash, unsigned long long size,
                       const char *name)
@@ -5581,7 +5510,7 @@ static void test_composition_serves_its_map(void)
     CHECK(sh_modserve_index_build(g_root) >= 6);
 }
 
-/* D26: in the editor, the root folder's build of a salt the map declares by a composition is inert but serves the
+/* In the editor, the root folder's build of a salt the map declares by a composition is inert but serves the
  * names under its salt that the composition does not carry (the Toybox shows the installed version's objects); on a
  * path both carry the composition wins; in Play the root build serves nothing. */
 static void test_composition_overlay(void)
@@ -5631,8 +5560,7 @@ static void test_composition_overlay(void)
 }
 
 /* The provider-miss reporter of a unit composition (block "units_of") reports a request under its namespace that
- * nothing serves, but never a board member (squares or quarters) or a name of a kind no build carries (R-LV2: the
- * Tyrant's unit reported 4 quarters and 90 .tga source names that the whole pack does not serve either). */
+ * nothing serves, but never a board member (squares or quarters) or a name of a kind no build carries. */
 static int g_miss_calls;
 static void miss_spy(const char *salt, const char *unit, const char *request, const char *by)
 {
@@ -5677,7 +5605,7 @@ static void test_miss_reporter_skips_probes(void)
     CHECK(sh_modserve_note_miss("mods/ecompos1/effect/texture/misc/rays.tga") == 0);
     CHECK(g_miss_calls == 0);
     CHECK(sh_modserve_note_miss("generated/image/mods/ecompos1/effect/texture/misc/rays.bimage") == 1 && g_miss_calls == 1);
-    /* R-LB1: the engine's probes of names the build never carried are not noted. A sound name in a field typed
+    /* The engine's probes of names the build never carried are not noted. A sound name in a field typed
      * idDeclEntityDef (a wave blast's emitterSound) is asked for as an entityDef; a carried skeleton's default clip is
      * asked for under both roots, and the engine defaults it when nothing holds it. */
     printf("-- the engine's probes of names the build never carried (another type of a carried name, a skeleton's "
@@ -5713,10 +5641,9 @@ static int sn_visit(void *context, const sh_modserve_refresh_item *it)
     return 1;
 }
 
-/* R-LB1 (R-LV9's clean-player run): a pinned row's composition is made with stand-ins while its unit downloads, at the
- * row's own composition hash, then made again in full at that hash when the unit arrives. The stand-in's own names
- * are the product's, never the unit's: the rescan's refresh does not ask the engine to read the stand-in's row again
- * (it was logged as a file the unit lacked and reported to the store), and a read of one is never a miss. */
+/* A pinned row's composition is made with stand-ins while its unit downloads, then again in full at that hash when
+ * the unit arrives. The stand-in's names are the product's: the rescan's refresh does not ask the engine to read
+ * the stand-in's row again, and a read of one is never a miss. */
 static void test_standin_names_after_real(void)
 {
     char top[MAX_PATH], root[MAX_PATH], served[MAX_PATH], path[MAX_PATH];
@@ -5847,8 +5774,8 @@ static void ns_bank(unsigned char out[42], uint32_t bank_id, uint32_t event)
     out[37] = 2; v = 0; memcpy(out + 38, &v, 4);                                    /* a Sound with an empty body */
 }
 
-/* SPEC-distribution D12: a sound decl's event takes the namespace at serve, and a namespace a file spells is mapped
- * to the mod's, length for length. */
+/* A sound decl's event takes the namespace at serve, and a namespace a file spells is mapped to the mod's, length
+ * for length. */
 static void test_namespace_maps(void)
 {
     unsigned char a[42], b2[42], text[] = "x mods/oldsalt1/a mods/oldsalt1/oldsalt1_play_x #str_oldsalt1_k xoldsalt1/ "
@@ -5900,9 +5827,8 @@ static void test_namespace_maps(void)
     }
 }
 
-/* Per-build bank stems (DESIGN-additive 6): a bundle's bank is served under
- * <stem>.<hash16>.bnk with its BKHD id rewritten, and its decl naming the
- * bank follows; another build of the key is another bank to Wwise. */
+/* Per-build bank stems: a bundle's bank is served under <stem>.<hash16>.bnk with its BKHD id rewritten, and its
+ * decl naming the bank follows; another build of the key is another bank to Wwise. */
 static void test_bank_stems(void)
 {
     static const char DECL[] = "sound mods/bbank000/bbank000_hit {\r\n\tbank = \"bbank000_sfx.bnk\";\r\n\tevent = \"play_bbank000_hit\";\r\n}";
@@ -5978,9 +5904,8 @@ static void test_bank_stems(void)
         write_file(stray, "old", 3);
         write_file(tmp, "part", 4);
         {
-            /* A game serving another mods folder (the player's own, under
-             * the name every game used before, or a mark named for another
-             * folder) does not stop the prune of this one. */
+            /* A game serving another mods folder (the player's own, or a mark named for another folder) does not stop the
+             * prune of this one. */
             HANDLE other = CreateMutexW(NULL, FALSE, L"Local\\snapmap-plus-served");
             HANDLE elsewhere = CreateMutexW(NULL, FALSE, L"Local\\snapmap-plus-served-0123456789abcdef");
             CHECK(other && elsewhere);
@@ -6035,11 +5960,9 @@ static void test_index_retire(void)
     sh_modserve_attrib_reset();
 }
 
-/* An undeclared folder mixing an editor tweak with an addition and a cvar
- * requirement (modbundle_test test_classes builds one): the tweak serves in
- * every map, Play included; the addition and the requirement follow the
- * declared rule, so in Play of a map that declares nothing they are off
- * (DESIGN-additive 2.3 and 2.6). Declared, everything serves. */
+/* An undeclared folder mixing an editor tweak with an addition and a cvar requirement (modbundle_test test_classes
+ * builds one): the tweak serves in every map, Play included; the addition and the requirement follow the declared
+ * rule, so in Play of a map that declares nothing they are off. Declared, everything serves. */
 #define MX_SET  "generated/decls/snapeditorsettings/mixed.decl"
 #define MX_NEW  "generated/decls/entitydef/mods/xmixed00/thing.decl"
 #define PU_NEW  "generated/decls/entitydef/mods/ypure000/thing.decl"
@@ -6153,13 +6076,11 @@ static void test_store_root_utf8(void)
     CHECK(sh_modserve_index_build(g_root) >= 5);
 }
 
-/* ------------------------------------------------------------------ what a kept pass looks up (triage F8b) */
+/* ------------------------------------------------------------------ what a kept pass looks up */
 
-/* An in-editor pass registers while the previous map's level-1 objects are
- * alive; a decl it keeps binds to them through the engine's lookup. The
- * engine side's ResourceLookup detour notes each return while a pass is
- * open (the stand-in here calls note as the hook does); the close raises
- * what is still listed at level 1, and the set is emptied. */
+/* An in-editor pass registers while the previous map's level-1 objects are alive; a decl it keeps binds to them
+ * through the engine's lookup. The ResourceLookup detour notes each return while a pass is open, and the close
+ * raises what is still listed at level 1, then empties the set. */
 static void test_pass_lookups(void)
 {
     static kh_res old_skel, old_mat, stock, freed, later;
@@ -6229,14 +6150,11 @@ static void test_pass_lookups(void)
     CHECK(sh_modserve_lookups_close(&head, &out) == 1 && out.looked_up == 0 && later.level == 1);
 }
 
-/* ------------------------------------------------------------------ what kept objects load (triage F9) */
+/* ------------------------------------------------------------------ what kept objects load */
 
-/* The engine side's detours report the engine's load nesting (enter/leave
- * around ResourceGenericLoad) and what ResourceLookup returns inside a load
- * (found); the stand-ins here call them as the hooks do. A Play's spawn loads
- * the chainsaw gore md6Def, whose load loads its mesh, whose load creates
- * its material; nothing is kept then. A later pass keeps the md6Def by name,
- * and the close follows the recorded pairs to the mesh and the material. */
+/* The stand-ins call the engine side's load-nesting detours (enter/leave around ResourceGenericLoad, ResourceLookup's
+ * result) as the hooks do. A Play's spawn loads the gore md6Def, its mesh and material, keeping none; a later pass
+ * keeps the md6Def by name and the close follows the recorded pairs to the mesh and the material. */
 static void test_load_attribution(void)
 {
     static kh_res def, mesh, mat, img, stock, perm, other, child, found, outside, gone, nest[70];
@@ -6323,9 +6241,8 @@ static void test_load_attribution(void)
     CHECK(sh_modserve_attrib_keep(&outside) == 0 && outside.level == 1);
     CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && out.raised_at_load == 2 && out.raised == 0);
 
-    /* A load that allocates from a map heap is never raised, by any keep: the
-     * map's next load releases what it allocated (the gore skeleton's joints,
-     * G1). The keep names it; once it loads again in process heap 0 it is. */
+    /* A load that allocates from a map heap is never raised, by any keep: the map's next load releases what it
+     * allocated (the gore skeleton's joints). The keep names it; once it loads again in process heap 0 it is. */
     {
         static kh_res gore;
         char left[300];
@@ -6363,7 +6280,7 @@ static void test_load_attribution(void)
         sh_modserve_attrib_leave(depth);
         CHECK(kept && sh_modserve_attrib_keep(&gore) == 1 && gore.level == 4);
         sh_modserve_attrib_leave(d0);
-        /* Kept at level 4 now, a later load of it with a map's heap selected
+        /* Kept at level 4, a later load of it with a map's heap selected
          * moves to process heap 0; process heap 0, an unknown heap, a
          * resource the product does not keep, or one back at level 1 do not. */
         CHECK(sh_modserve_kept_has(&gore) && sh_modserve_kept_load_moves(&gore, 2) == 1);

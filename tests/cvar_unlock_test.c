@@ -79,7 +79,7 @@ int main(void)
     set_hash(CVARSYS_DEV_HASH_OFF, g_dev_buckets, g_dev_chain, 16);
     assert(cvu_registration_state(g_sys, &n, &len) == CVU_REG_DONE && n == NCVARS && len == NCVARS);
 
-    /* A full hash smaller than the developer hash would let old masks overrun it. */
+    /* A full hash smaller than the developer hash would be overrun by the developer masks. */
     set_hash(CVARSYS_FULL_HASH_OFF, g_full_buckets, g_full_chain, 8);
     assert(alias_dev_to_full(g_sys) == 0);
     assert(memcmp(g_sys + CVARSYS_DEV_HASH_OFF, g_sys + CVARSYS_FULL_HASH_OFF, SIZEOF_IDHASHINDEX) != 0);

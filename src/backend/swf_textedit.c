@@ -1,7 +1,5 @@
-/* Ctrl+C/Ctrl+V for focused SWF text fields. Copy reads the selected text; paste
- * splices through engine idStr assignment and leaves numeric validation to the
- * editor. Missing assignment support disables paste only. The stock key handler
- * always runs after our guarded clipboard work. */
+/* Ctrl+C/Ctrl+V for focused SWF text fields: copy reads the selection, paste splices through engine idStr
+ * assignment (without it only paste is disabled). The stock key handler runs after our guarded clipboard work. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -14,19 +12,19 @@
 #include "backend_log.h"
 
 #define SIG_SWF_ONKEY     "SwfTextOnKeyCall"
-#define SWF_ONKEY_STOLEN  15u   /* push rbp/rsi/rdi/r14/r15 (8) + sub rsp,imm32 (7) = 15 whole, PIC bytes */
+#define SWF_ONKEY_STOLEN  15u   /* push x5 (8) + sub rsp,imm32 (7): whole PIC bytes */
 
 /* Recheck object offsets against the signed onKey::Call when porting builds. */
-#define TF_TEXTINST_OFF   0xC0    /* "TextField" script object -> its idSWFTextInstance (param_3[0x18]) */
-#define TI_TEXT_OFF       0x38    /* idSWFTextInstance -> the live text idStr */
-#define TI_LEN_OFF        0x40    /* idSWFTextInstance -> character count (caret/END bound) */
-#define TI_SELSTART_OFF   0x124   /* selection anchor (== caret unless shift-selecting) */
+#define TF_TEXTINST_OFF   0xC0    /* TextField object -> idSWFTextInstance */
+#define TI_TEXT_OFF       0x38    /* instance -> live text idStr */
+#define TI_LEN_OFF        0x40    /* instance -> character count */
+#define TI_SELSTART_OFF   0x124   /* selection anchor */
 #define TI_SELEND_OFF     0x128   /* caret / selection end */
 
 /* idStr.data@+0x10 is always a pointer, including short strings whose data
  * points to self+0x1C. Do not substitute a length-based inline-data branch. */
-#define IDSTR_LEN_OFF     0x08    /* int len (chars, excl NUL) */
-#define IDSTR_DATA_OFF    0x10    /* char* data -- always a pointer (inline base buffer @ +0x1c, or heap) */
+#define IDSTR_LEN_OFF     0x08    /* int length, no NUL */
+#define IDSTR_DATA_OFF    0x10    /* char* data, inline buffer or heap */
 
 /* idSWFScriptValue stores type@+0, payload@+8, with a 0x10-byte stride. */
 #define SWFV_STRIDE       0x10
@@ -42,8 +40,8 @@
 #define SC_V              0x2f
 
 
-#define TI_MULTILINE_OFF  0x140   /* nonzero = ENTER inserts a newline (gates the stock 0x1c/0x9c case) */
-#define TI_MAXCHARS_OFF   0x280   /* character cap; the stock focus path truncates when text exceeds it */
+#define TI_MULTILINE_OFF  0x140   /* nonzero: ENTER inserts a newline */
+#define TI_MAXCHARS_OFF   0x280   /* character cap */
 
 /* idStr size -- +0x1c inline base buffer + STR_ALLOC_BASE(20), matching the ctor's 0x80000014 flags. */
 #define IDSTR_SIZE        0x30
@@ -54,10 +52,9 @@
 /* Clipboard read cap. Heap-allocated (see paste_at_selection) -- never put this on the hook's stack. */
 #define CLIP_MAX          (64 * 1024)
 
-/* The handler also receives non-text objects. Its type check compares an interned
- * pointer, so our own "TextField" literal would fail. Decode the engine pointer
- * from MOV RDX,[RIP+disp32] at onKey::Call+0x4B and validate the opcode first. */
-#define TF_STRPTR_INSN_OFF   0x4Bu                  /* offset of the `mov rdx,[rip+rel32]` in onKey::Call */
+/* The handler also receives non-text objects and compares an interned type pointer, so our own "TextField"
+ * literal would fail; decode the engine's from MOV RDX,[RIP+disp32] at onKey::Call+0x4B after checking the opcode. */
+#define TF_STRPTR_INSN_OFF   0x4Bu                  /* offset of that mov in onKey::Call */
 static const uint8_t TF_STRPTR_INSN[3] = { 0x48, 0x8B, 0x15 };
 #define TF_STRPTR_INSN_LEN   7u                     /* 3 opcode + 4 rel32 */
 #define SWFOBJ_ISTYPE_SLOT   1                      /* vtable[1](obj, internedTypeName) -> bool */
@@ -349,11 +346,4 @@ void sh_swf_textedit_install(const uint8_t *module_base)
     backend_log(g_idstr_assign != NULL
                 ? "swf-textedit: ready (Ctrl+C copies / Ctrl+V pastes the focused SWF text field)"
                 : "swf-textedit: ready, COPY ONLY (idStr assign unresolved -- Ctrl+V disabled)");
-}
-
-void sh_swf_textedit_uninstall(void)
-{
-    if (g_orig_onkey == NULL) return;
-    if (sh_uninstall_detour((void *)g_orig_onkey)) g_orig_onkey = NULL;
-    else backend_log("swf-textedit: restore failed; original callback retained");
 }

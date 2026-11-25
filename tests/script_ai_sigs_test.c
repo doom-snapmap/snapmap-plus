@@ -1,34 +1,8 @@
-/* script_ai_sigs_test.c -- the engine sites the AI calls of mod scripts
- * depend on (src/backend/script/script_ai_sigs.c, script_api_ai.c), checked
- * on each build 13954591 executable given on the command line:
- *   - every private signature resolves to one match at its recorded RVA;
- *   - IsRunningScript's detour window is whole, position-independent
- *     instructions and is the bytes the installer compares;
- *   - the path site's calls and load reach the path key, the path query and
- *     the query's first word at the recorded addresses;
- *   - idAI2's GetType (vtable slot 0) returns the typeinfo the demon check
- *     reads;
- *   - the move FSM status (Shared_MoveFailedAny) and the weapon trigger
- *     (Shared_TriggerPulled) are read at the offsets the calls use;
- *   - the calls the Tyrant's brain needs: the recoil play reads ai+0x24EB0;
- *     the next-pull writer's fire-decl call, slot table and clock slot; the
- *     aim focus call; the pain request's two loads (the stub's window), its
- *     atomic-string set and its later compare of each anim's +0x48 string
- *     with [rbp+0x88]; the threat row and path length detour windows; the
- *     animation and root-motion functions; the monster type names against
- *     the executable's own enum table;
- *   - the fire calls: the muzzle test reads the focus fields the calls read
- *     (+0xEE9B, +0xE020, +0x11AE4, +0x11AE8), ClearMove takes the animFSM,
- *     the fire control's think reads its two fire modes at +0x1C and +0x20,
- *     the idle action stores idleTurnType at animFSM +0xBF0 after reading
- *     the behaviour decl's turnParms (+0xC120, +0x528, +0x530), the fire gate
- *     asks requireMuzzleOnTarget at +0x27, and the fire mode and idle turn
- *     names against the executable's own enum tables;
- *   - wound damage counts: DamageActivatesWound's window, its unique
- *     signature, the registers its arguments land in, the threshold helper
- *     it calls with the wound and the max health (+0x214, +0x210), the one
- *     read of the lost health, and the frame damage queue's record layout.
- * Run via run-tests.ps1 with -Doom / -DoomAlt. */
+/* script_ai_sigs_test.c -- the engine sites the AI calls of mod scripts depend on (script_ai_sigs.c, script_api_ai.c),
+ * checked on each build 13954591 executable given on the command line (run-tests.ps1 -Doom / -DoomAlt). Each private
+ * signature resolves to one match at its recorded RVA and each detour window is whole position-independent
+ * instructions. The calls, offsets and record layouts the brain, fire, pain and wound-damage code read are checked
+ * against the executable, and the monster type, fire mode and idle turn names against its own enum tables. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -412,10 +386,9 @@ static void check_image(const char *path)
         CHECK(found == 1 && SH_AI_OFF_WEB_ANIMATOR == 0x222B8u);
     }
     if (rva[SH_AI_SIG_FSM_MOVE]) {
-        /* the entrance move (script_ai_sigs.c AiFsmMove), which the dying park repeats into ac_default: it finds the
-         * FSM by name (owner vtable +0x60), reads the FSM's states at +0x38 with their count at +0x40, loads
-         * idTransitionCode's vtable (by its RTTI name), stores code 5 and takes the move through the FSM's vtable
-         * +0xA8 (fsm, move at rsp+0x50, time at rsp+0x38, 1, 1); idAI2's entrance animation calls it */
+        /* the entrance move (script_ai_sigs.c AiFsmMove): finds the FSM by name (owner vtable +0x60), reads its states at
+         * +0x38 (count +0x40), loads idTransitionCode's vtable by RTTI name, stores code 5 and moves through the FSM's
+         * vtable +0xA8 (fsm, move at rsp+0x50, time at rsp+0x38, 1, 1) */
         const uint8_t *m = base + rva[SH_AI_SIG_FSM_MOVE];
         uint32_t vt = rel_target(base, rva[SH_AI_SIG_FSM_MOVE] + SH_AI_FSM_MOVE_VT_LEA, 7, 3), col = 0, td = 0;
         uint64_t meta = 0;

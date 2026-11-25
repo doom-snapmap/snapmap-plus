@@ -1,9 +1,5 @@
-/* script_api_game_test.c -- the calls that reach the whole game
- * (src/backend/script/script_api_game.c) against a fake engine: engine
- * events by name with every kind of value and result, SnapMap events fired
- * and heard, cvars set and put back at map end, decls read and written
- * through the reflection of reflect_fake.h and put back at map end, and each
- * refusal's sentence. */
+/* script_api_game_test.c -- the calls that reach the whole game (src/backend/script/script_api_game.c) against a
+ * fake engine: engine and SnapMap events, cvars and decls set and put back at map end, and each refusal's sentence. */
 #include "map_cvars.h"
 #include "heap_out.h"
 #include <windows.h>
@@ -356,8 +352,8 @@ static void test_cvars(void)
     sh_script_map_end();                                 /* put back as they were before the map */
     CHECK(!strcmp(g_cvars_fake[0].value, "1066") && !strcmp(g_cvars_fake[1].value, "doom") && !strcmp(g_cvars_fake[2].value, "0.5"));
 
-    /* SPEC 5.23, who owns a cvar's restore: one the player (or the console, or a mod's requirement) changed after the
-     * script's set is theirs and stays; one still at the script's value is put back */
+    /* a cvar the player, the console or a mod's requirement changed after the script's set stays theirs; one still at
+     * the script's value is put back */
     run("api = 1\nconsole_variable('g_gravity', 400) console_variable('ai_name', 'tyrant')\n");
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
     CHECK(strstr(g_journal, "\"name\":\"g_gravity\",\"was\":\"1066\",\"set\":\"400\"") != NULL);
@@ -414,8 +410,7 @@ static void test_cvars(void)
         refused(body, "found no cvar named xxxxxxxx");
     }
 
-    /* a quit or crash mid-map: the journal it left puts back what the game kept in its saved settings (a value that is
-     * not the cvar's default) and leaves alone what the game did not keep */
+    /* a quit or crash mid-map: the journal puts back what the game kept in its saved settings (a non-default value) */
     cvar_put("g_gravity", "400");                        /* saved settings: the script's value came back with the game */
     cvar_put("g_scale", "0.5");                          /* not saved: back at its default, not the script's 2 */
     CHECK(sh_script_game_cvar_recover("{\"format\":1,\"cvars\":[{\"name\":\"g_gravity\",\"was\":\"900\",\"set\":\"400\"},"
@@ -458,7 +453,7 @@ static void test_decls(void)
     CHECK(g_enc.value == 9);
 }
 
-/* The restore finds a decl again by its class and name (SPEC 5.23). */
+/* The restore finds a decl again by its class and name. */
 static void *o_res_find(void *c, const char *cls, const char *name)
 {
     (void)c;

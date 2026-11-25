@@ -3,17 +3,16 @@
 #ifndef BACKEND_CLIPBOARD_H
 #define BACKEND_CLIPBOARD_H
 
-/* Copy NUL-terminated UTF-8 text to the clipboard as Unicode text. Return 1
- * after ownership transfers to Windows, or 0 for invalid input or failure. */
+/* Copies NUL-terminated UTF-8 text to the clipboard as Unicode text. Returns 1 after ownership transfers to
+ * Windows, or 0 for invalid input or failure. */
 int sh_clipboard_set(const char *text);
 
-/* Read the clipboard's Unicode text into out as UTF-8, cut at a character
- * boundary to fit cap-1 bytes and NUL-terminated. Return 1 after a read, or 0
- * for invalid input, no text, or failure. */
+/* Reads the clipboard's Unicode text into out as UTF-8, cut at a character boundary to fit cap-1 bytes and
+ * NUL-terminated. Returns 1 after a read, or 0 for invalid input, no text, or failure. */
 int sh_clipboard_get(char *out, int cap);
 
-/* The longest prefix of `len` UTF-8 bytes of `text` that fits in `cap` bytes
- * without splitting a character. */
+/* Returns the longest prefix of `len` UTF-8 bytes of `text` that fits in `cap` bytes without splitting a
+ * character. */
 int sh_clipboard_utf8_fit(const char *text, int len, int cap);
 
 #endif /* BACKEND_CLIPBOARD_H */

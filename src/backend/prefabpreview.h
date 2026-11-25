@@ -1,10 +1,6 @@
-/* Asynchronous cooked-geometry previews for the Prefab Details viewport.
- * Resolve installed resources and decode positions, normals and indices into
- * a bounded neutral mesh for WebView2. Payloads are read on demand; this path
- * does not decode textures, skeletons or animation: an md6 model is drawn in its
- * cooked bind pose without its damage-kit surfaces, and any model above
- * PP_PREVIEW_TRIANGLES is clustered down to it.
- */
+/* Asynchronous cooked-geometry previews for the Prefab Details viewport: installed resources are resolved and
+ * positions, normals and indices decoded into a bounded neutral mesh for WebView2. Textures, skeletons and
+ * animation are not decoded; an md6 model is drawn in its bind pose, and models above PP_PREVIEW_TRIANGLES are clustered. */
 #ifndef BACKEND_PREFABPREVIEW_H
 #define BACKEND_PREFABPREVIEW_H
 
@@ -62,10 +58,9 @@ int sh_prefabpreview_resolve_defaults(const char *inherit_name, char *out_model,
  * names a cooked .md6mesh). */
 int sh_prefabpreview_is_mesh_name(const char *name);
 
-/* File fallback for the model the editor draws for a palette row: renderInfo.renderModelName and
- * renderInfo.size from the installed snapEditorEntityDef `sedef_name` and its inherits (derived
- * wins; the row's own name, never an attachment's). Returns SH_PREFAB_DEFAULT_MODEL and/or
- * SH_PREFAB_DEFAULT_SIZE. */
+/* File fallback for the model the editor draws for a palette row: renderInfo.renderModelName and renderInfo.size
+ * from the installed snapEditorEntityDef `sedef_name` and its inherits (derived wins; the row's own name, never an
+ * attachment's). Returns SH_PREFAB_DEFAULT_MODEL and/or SH_PREFAB_DEFAULT_SIZE. */
 int sh_prefabpreview_editor_model(const char *sedef_name, char *out_model, size_t out_capacity,
                                   float out_size[3]);
 

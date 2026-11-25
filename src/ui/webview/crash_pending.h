@@ -36,7 +36,20 @@ inline bool newest_first(const std::string &a, const std::string &b)
     return a > b;
 }
 
-/* Reclassify whenever any retained filename changes, including older arrivals. */
+enum class scan { skip, startup, periodic };
+
+class scan_clock {
+    bool started = false;
+public:
+    scan tick(bool page_ready, unsigned frame) {
+        if (!page_ready) return scan::skip;
+        if (started) return frame % 60 == 0 ? scan::periodic : scan::skip;
+        started = true;
+        return scan::startup;
+    }
+};
+
+/* Remembers the retained filenames; changed() is true when the set differs, so any change reclassifies. */
 class inventory {
     std::vector<std::string> seen;
 public:

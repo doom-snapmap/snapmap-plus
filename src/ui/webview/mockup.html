@@ -110,7 +110,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           <div class="menu-note" id="menuNavmeshNote">Checking...</div>
         </div>
       </div>
-      <!-- Settings: the publishing key (publishing_key.js; SPEC-distribution 4.2), never the Mods tab. -->
+      <!-- Settings: the publishing key (publishing_key.js), never the Mods tab. -->
       <div class="menu">
         <button type="button" class="menu-label" data-menu="settings" aria-haspopup="menu" aria-expanded="false">Settings</button>
         <div class="menu-popup" id="menu-settings" role="menu" hidden>
@@ -346,10 +346,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     </div>
   </div>
 
-  <!-- Mods tab (mods_tab.js): Your mods and one group per downloaded map, the selected mod's details,
-       and the player's actions. The host runs modsAction (builds off the game's thread) and follows each with a
-       fresh list; showing the tab and Refresh ask for a rescan (there is no folder watcher). Nothing
-       polls. Diagnostics are the console's sh_mods doctor. -->
+  <!-- Mods tab (mods_tab.js): your mods and one group per downloaded map, with the selected mod's details.
+       The host runs each modsAction off the game's thread and follows it with a fresh list; showing the tab
+       and Refresh ask for a rescan (no folder watcher, nothing polls). -->
   <div class="content" id="panel-mods" role="tabpanel" aria-labelledby="tab-mods" style="display:none;">
     <div class="split-workspace primary-split" data-split-workspace>
     <div class="panel left-pane">
@@ -1003,13 +1002,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     return {matched:rows.length, mounted:windowPerf.mounted, ms:uiPerfNow()-started};
   }
 
-  // Timelines tree. A timeline's folder is the part of its display name before the first "/"
-  // (so "Arena/Wave 1" sits in "Arena"): folders travel with the map inside the names, need no
-  // extra storage, and read the same in the in-game logic view. A folder with nothing in it yet
-  // exists only in this window until a timeline is dropped into it. Moves, renames and folder
-  // deletions are display-name writes through setDisplayNames; the list follows the entity rescan.
-  // The visible-row, Shift-range and drop planning helpers are the Prefabs tab's pure functions
-  // (pfVisibleRows / pfRangeRows / pfPlanMove) fed with eids as item names.
+  // Timelines tree. A timeline's folder is the part of its display name before the first "/", so folders
+  // travel with the map; an empty folder exists only in this window, and moves, renames and deletions are
+  // display-name writes through setDisplayNames. Row, range and drop planning reuse the Prefabs tab's
+  // pfVisibleRows / pfRangeRows / pfPlanMove with eids as item names.
   var tlFolders = [];          // empty folders kept for this window (names)
   var tlOpenFolders = {};      // folder name -> true, kept in the timelines.open_folders setting
   var tlListSeen = false;      // prune that set against the map only once a list has arrived
@@ -1276,7 +1272,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       return 'text';
     if (typeName && typeName.indexOf('idDecl') === 0) return 'decl';
     if (TL_DECL_ALIASES[typeName]) return 'decl';
-    return 'enum';   // catch-all (matches the original's enum default: a non-builtin, non-decl type name)
+    return 'enum';   // catch-all: a non-builtin, non-decl type name
   }
   // Reduce declaration pointer types to their serialized short-name key; apply explicit aliases.
   function tlDeclResclass(typeName) {
@@ -1454,10 +1450,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     // Without a schema for this position, preserve the raw-pair display.
     var pairs = tlArgPairs(argVal);
     if (pairs.length === 0) return '<div class="ev-arg-row"><label>' + label + '</label><span class="arg-val muted">(read only)</span></div>';
-    // ONE pair -- prefer the SCHEMA label over the raw pair label (tlArgPairs would give the coincidental
-    // on-disk key, not the parameter's actual name -- less useful, even if not wrong).
+    // One pair: the schema label, not the raw on-disk key tlArgPairs would give.
     if (pairs.length === 1) return '<div class="ev-arg-row"><label>' + label + '</label><span class="arg-val">' + esc(pairs[0].value) + '</span></div>';
-    // multiple pairs (a raw multi-field object with no clean 1:1 schema mapping) -- each keeps its own raw key.
+    // Several pairs (a raw multi-field object with no 1:1 schema mapping): each keeps its raw key.
     var out = '';
     for (var p = 0; p < pairs.length; p++) out += '<div class="ev-arg-row"><label>' + esc(pairs[p].label) + '</label><span class="arg-val">' + esc(pairs[p].value) + '</span></div>';
     return out;
@@ -1540,7 +1535,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var argSchema = schema && schema.args[a];
       argsObj['item[' + a + ']'] = tlCommitArgValue(ev.args[a], argSchema);
     }
-    argsObj['\nnum'] = ev.args.length;   // args' count key is "\nnum" (leading newline) -- matches the engine's own raw dump spelling for THIS pseudo-list specifically; events/entityEvents below use plain "num" (verified against the engine's real dump -- NOT a typo, an asymmetry in the dump itself).
+    argsObj['\nnum'] = ev.args.length;   // the args list's count key is "\nnum" (leading newline), unlike the plain "num" of events/entityEvents below, as in the engine's own dump
     var out = { eventCall: { '\neventHandle_t eventDef': ev.eventDef || '', args: argsObj } };
     var t = String(ev.time).trim();
     if (/^\d+$/.test(t)) out.eventTime = parseInt(t, 10);
@@ -1714,7 +1709,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var saveBtn = document.getElementById('saveTimelineBtn');
     if (revertBtn) revertBtn.disabled = true;
     if (saveBtn) saveBtn.disabled = true;
-    renderTimelineList();   // drops the now-stale highlighted row
+    renderTimelineList();   // drops the stale highlighted row
   }
   function renderTimelineEditor(d) {
     var head = document.getElementById('tlHead');
@@ -1839,7 +1834,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var fly = document.getElementById('flyToBtn'); if (fly) fly.disabled = !(selCount() === 1 && primaryEid >= 0);
   }
   // Fly to entity: Object mode, camera placed in front of the entity, cursor on it. Releasing Lock
-  // position first, since a lock would pin the eye back where it was.
+  // position first, because a lock would pin the eye in place.
   function flyToEntity(eid) {
     if (typeof eid !== 'number' || eid < 0) return;
     var lock = document.getElementById('camLockChk');
@@ -2033,7 +2028,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
   function hideEditor() { showPlaceholder(EMPTY_ENTITIES); }
   // Close entity editing and clear selection after Play/reload. IDs can be reused, so
-  // an old editable snapshot might otherwise overwrite an unrelated new entity.
+  // a stale editable snapshot might otherwise overwrite an unrelated new entity.
   function closeEntityEditor() {
     selectedEids = {};
     anchorEid = -1;
@@ -2323,7 +2318,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       document.getElementById('verText').textContent = 'Snapmap+ ' + (d.version || '');
       showFeaturesOff(d.featuresOff || '');
       allEntities = d.entities || [];
-      // drop selections for entities that no longer exist
+      // drop selections for entities that are gone
       var exist = {}; for (var i=0;i<allEntities.length;i++) exist[allEntities[i].eid]=true;
       for (var k in selectedEids) if (selectedEids[k] && !exist[k]) delete selectedEids[k];
       var entityPerf = renderList();
@@ -2351,7 +2346,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       // not read in full.
       if (!d.ok) { showState(d); return; }
       if (!d.auto) { showState(d); return; }   // explicit (non-auto) refresh always applies
-      if (!isDirty()) { showState(d); return; }   // panel clean -- apply the whole snapshot as before
+      if (!isDirty()) { showState(d); return; }   // panel clean -- apply the whole snapshot
       // Preserve dirty fields, but accept a backend inherit correction when that field is
       // untouched. Otherwise a later save could undo portable Timeline normalization.
       var inhBox = document.getElementById('fInherit');
@@ -2422,7 +2417,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       // A timeline opened before the catalogue came rendered its arguments without names.
       if (tlModel) renderTlBody();
     } else if (d.kind === 'eventDocs') {
-      // New description data is used the next time the box opens or renders (the open timeline now).
+      // New description data is used the next time the box opens or renders (including the open timeline).
       var docItems = d.items || [];
       eventDocsByName = {};
       for (var edi = 0; edi < docItems.length; edi++) {
@@ -2599,6 +2594,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                                                           : fsFailText(d, '"' + d.oldName + '"'), 'err');
     } else if (d.kind === 'deleteFolderResult') {
       if (d.result === 1) toast('Folder deleted', 'ok');
+      else if (d.result === 2) toast('Run the Snapmap+ installer to check the prefabs in this folder, then try again.', 'err');
       else if (d.result === 0) toast('The folder "' + d.name + '" was not deleted: a prefab in it has the same name as one in the root list. Rename one of them and try again.', 'err');
       else toast('The folder "' + d.name + '" could not be deleted. Try again; if it keeps failing, use Send feedback.', 'err');
     } else if (d.kind === 'movePrefabResult') {
@@ -2725,9 +2721,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     renderPrefabTree();
   }
   // --- prefab tree (pure) ---
-  // Rows in display order: a folder head, then its items when open, then the root items. A filter
-  // matches a NAME or any TAG (cross-folder search is what tags are for) and opens the
-  // folders it matches in; folders with no match are left out while filtering.
+  // Rows in display order: a folder head, its items when open, then the root items. A filter matches a name
+  // or any tag and opens the folders it matches in; folders with no match are left out.
   function pfVisibleRows(data, tags, filter, openFolders) {
     filter = (filter || '').toLowerCase();
     var match = function(inFolder, n){
@@ -2825,7 +2820,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     for (var i = 0; i < mods.length; i++) if (mods[i].installed !== true) missing++;
     return {count: mods.length, missing: missing, mods: mods};
   }
-  // A mod by the name it was recorded with; a mod recorded without one is never named by its salt.
+  // A mod by its recorded name; a mod recorded without one is never named by its salt.
   function pfModLabel(m) { return m.id && m.id !== m.salt ? m.id : 'an unnamed mod'; }
   // A recorded mod's state, in the Mods tab's words for a mod and the open map: Not installed; else, with
   // `mapState` (the Mods tab's mapStateOf, by the mod's namespace), In this map or Not in this map; else
@@ -2916,7 +2911,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (openBody) h += '</div></div>';
     tree.innerHTML = rows.length ? h : '<div class="list-empty">No matches.</div>';
     tree.scrollTop = scroll;
-    // Drop selected rows that no longer exist (deleted, renamed or moved files); a filtered-out
+    // Drop selected rows that are gone (deleted, renamed or moved files); a filtered-out
     // row stays selected. A one-prefab selection keeps its details; an empty set clears them.
     var keep = [];
     for (var si = 0; si < pfSel.length; si++) {
@@ -3039,10 +3034,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
 
   // ---- Limits: what the selected prefab adds to the map's budget (prefab_budget.js) ----
-  // The backend's table (one block per palette row and per resident module) arrives once and again
-  // after a palette rebuild; usage arrives when the tab opens, on each selection and whenever the map's
-  // usage or the held prefab changes, and each arrival re-renders the rows. Only the selected prefab is
-  // ever summed, and its sum is memoized by folder/name, file signature and table generation.
+  // The backend's table (per palette row and resident module) and the map's usage each re-render the rows.
+  // Only the selected prefab is summed, memoized by folder/name, file signature and table generation.
   var pfBudgetTable = null, pfBudgetLive = null, pfBudgetAsked = false, pfBudgetSel = null;
   var pfBudgetHeld = null;   // {name, folder, kind} of the prefab held in the 3D view, from budgetUsage
   var pfUsageKey = null;     // the last usage the host sent; a change asks the Mods tab for the map's mods again
@@ -3144,10 +3137,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       item.appendChild(k); item.appendChild(n); raw.appendChild(item);
     });
   }
-  // The backend's module check for the selected module prefab (module_prefab_map.h): a line, with the
-  // alert icon, naming the modules this editor cannot build, so the player sees it before Load. The
-  // backend refuses such a placement anyway; the line only explains it ahead of time. No check (no
-  // editor open, an older backend) shows nothing.
+  // The backend's module check for the selected module prefab (module_prefab_map.h): a line with the alert
+  // icon naming the modules this editor cannot build, shown before Load; the backend refuses them anyway.
+  // No check (no editor open) shows nothing.
   // The mods the selected prefab records (Prefab Details): each with whether it is installed, and
   // what Load / Place does about the missing ones. A prefab without mods hides the section.
   var pfModsShown = null;   // the selected prefab's mods, drawn again when the open map's mods change
@@ -3216,9 +3208,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (fp) fp.style.display = 'none';
   }
   // --- preview legend ---
-  // The 3D preview's legend: a key button at the bottom left that opens the colour list upwards.
-  // Collapsed by default; it stays open across object-prefab selections until the button, Escape or
-  // a press elsewhere in the preview closes it. A module prefab's footprint has no legend at all.
+  // The 3D preview's legend: a key button at the bottom left that opens the colour list upwards. It starts
+  // collapsed and stays open across object-prefab selections until the button, Escape or a press in the
+  // preview closes it; a module prefab's footprint has none.
   function pfLegendSetOpen(btn, panel, open) {
     open = !!open;
     panel.hidden = !open;
@@ -3426,10 +3418,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   declFocusOverlay.addEventListener('mousedown', function(e){
     if (e.target === declFocusOverlay) setDeclFocus(false);
   });
-  // Prevent native text drag/drop from moving selected declaration text. This does
-  // not block ordinary drag selection. Capture-phase handling allows only the
-  // intentional tree drags: the Prefabs tree (files between folders) and the Timelines
-  // tree (display-name folders).
+  // Prevent native text drag/drop from moving selected declaration text (ordinary drag selection still works).
+  // The capture-phase handler lets only the Prefabs and Timelines tree drags through.
   function inPrefabTree(t) { return !!(t && t.closest && t.closest('#prefabTree, #timelineList')); }
   document.addEventListener('dragstart', function(e){ if (!inPrefabTree(e.target)) e.preventDefault(); }, true);
   document.addEventListener('drop',      function(e){ if (!inPrefabTree(e.target)) e.preventDefault(); }, true);
@@ -3558,15 +3548,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   document.getElementById('menuDark').addEventListener('click', function(){ applyTheme(true, true); closeMenus(); });
 
   // ---- File menu: rawmap load / save ----
-  // Load Rawmap opens the picked file in the editor at once, after a confirm; a refusal shows the
-  // backend's reason. Save writes the open map to the save path.
-  // Mirrors st.saveTarget, so the click handler sends the opposite of what is set.
+  // Load Rawmap opens the picked file after a confirm (a refusal shows the backend's reason); Save writes
+  // the open map to the save path. RAWMAP_KEEP_HERE mirrors st.saveTarget, so a click sends the opposite.
   var RAWMAP_KEEP_HERE = false;
   var RAWMAP_SAVE_PATH = '';
   var RAWMAP_LOAD_PATH = '';
 
-  // Show the tail of a path. Full paths are far too long for a menu, and the filename plus its parent
-  // folder is what actually distinguishes two rawmaps from each other.
+  // Show the tail of a path: the filename plus its parent folder tells two rawmaps apart and fits a menu.
   function rawmapShortPath(p) {
     if (!p) return '(default)';
     var parts = p.split('\\');
@@ -3574,8 +3562,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     return '...\\' + parts.slice(-2).join('\\');
   }
 
-  // Just the file name. The menu item names the opened rawmap, and a full path there would
-  // stretch the popup far wider than every other item in it.
+  // Just the file name; a full path would stretch the popup far wider than its other items.
   function rawmapBaseName(p) {
     if (!p) return '';
     var parts = String(p).split(/[\\/]/);
@@ -3631,9 +3618,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         if (title) row.title = title;   // the full path on hover
         return row;
       };
-      // "Load Path" / "Save Path", not "Load" / "Save". These sit directly under the clickable
-      // Load Rawmap and Save Rawmap items, where a bare verb reads as one more action rather than
-      // the label of a field -- the one word is what makes them read as settings.
+      // "Load Path" / "Save Path", not a bare verb: directly under the clickable Load and Save items,
+      // a bare verb would read as one more action rather than the label of a field.
       note.appendChild(mk('Load Path:', st.load, st.load));
       // Say whether this is the default file or one they picked, so "where does Save go"
       // needs no second thought and no second control.
@@ -3884,7 +3870,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var modsUi = modsTab.create({
     document: document,
     byId: function(id){ return document.getElementById(id); },
-    // Organizing folders close for the session only: the retired mods.collapsed_groups setting is neither read nor written.
+    // Organizing folders close for the session only; no setting stores them.
     post: post, toast: toast,
     // The Files view highlights a file's text with the Decl Text editor's tokens.
     tokens: function(text){ var t = declLanguage.tokenize(text); declLanguage.parse(t); return t; },
@@ -3968,7 +3954,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         post({cmd:'budgetUsage'});
       }
       if (which === 'timelines') tlMaybeAutoRefresh();
-      if (which === 'mods') { modsUi.show(); post({cmd:'budgetUsage'}); }   // rescan on demand: tab open, Refresh, and after each action; the map's limits tell it when the map changes
+      if (which === 'mods') { modsUi.show(); post({cmd:'budgetUsage'}); }   // rescan on demand (tab open, Refresh, each action); the map's limits report map changes
       else modsUi.hide();                     // the script log is asked for only while the tab shows
       // The selected catalog is cached after its first fetch, so later visits do not cross the bridge.
       if (which === 'assets') { abActive = abTabMount; abOpenCatalog(abTabMount); }
@@ -4282,11 +4268,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
   var AB_MAX_HITS = 400;              /* cap the filter result DOM; the filter is what narrows */
 
-  /* Cross-platform texture rectangles from a contributor-tested library. Local
-   * checks verified transcription against VMTR rows, not console rendering. Add
-   * entries only with platform evidence; unlisted rectangles remain unknown.
-   * Identity is the rectangle, independent of whether SnapMap has a named decl.
-   * Format: name|w|h|x|y|hasDecl; virtualmapping = (w,h,x,y) / 245760. */
+  /* Cross-platform texture rectangles from a contributor-tested library; unlisted rectangles stay unknown,
+   * so add entries only with platform evidence. Identity is the rectangle, whether or not SnapMap has a
+   * named decl. Format: name|w|h|x|y|hasDecl; virtualmapping = (w,h,x,y) / 245760. */
   var AB_XPLAT_RAW = [
     'material/snapmap/dynamic_block_textured_hell_cave_facade|3840|3840|88320|138240|1',
     'models/mapobjects/ca/ca_mp_sacrilegious/ca_hell_hellsack_flat|3840|3840|92160|203520|0',
@@ -4625,9 +4609,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     return abXplatOf(name) || abRectCache[(name || '').toLowerCase()] || null;
   }
 
-  /* Triplanar tiling uses ramp1 = 426 / texture repeat period in world units.
-   * The material default is one repeat per 426 units, so an absent override is
-   * visibly stretched on small blocks. Scale periods by atlas aspect for
+  /* Triplanar tiling uses ramp1 = 426 / texture repeat period in world units; the material default of one
+   * repeat per 426 units stretches visibly on small blocks, so periods scale by atlas aspect for
    * nonsquare textures. The stored X component is mirrored below. */
   var AB_RAMP_CONST = 426;
   /* Suggested repeat periods; computed rates round-trip through decimal text. */
@@ -4839,8 +4822,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
              why:'Browse and copy the name -- there is nothing to apply an image to directly.'}];
   }
 
-  /* --- a mount ---------------------------------------------------------------------------------
-   * `mode` is 'tab' (open browsing) or 'modal' (scoped to the Entities-tab selection). */
+  /* A mount: `mode` is 'tab' (open browsing) or 'modal' (scoped to the Entities-tab selection). */
   function abMount(host, mode) {
     var m = {host:host, mode:mode, type:'material', dir:'', q:'', sel:null, carrier:'cm',
              pvTimer:null, pvTries:0, kbSelectTimer:null};
@@ -5717,9 +5699,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         inner = I + '   "customMaterial" : ' + neStr(VM_BLOCK_MATERIAL) + ',\n'
               + neParms(nePar, I + '   ');
       } else {
-        /* By-name carrier. ramp1/bloommaskscale are inert here -- confirmed in-editor that only
-         * Virtual Mapping carries the triplanar program that reads them -- so this stays a bare
-         * customMaterial write with no parms attached. */
+        /* By-name carrier. ramp1/bloommaskscale are inert here (only Virtual Mapping carries the triplanar
+         * program that reads them), so this stays a bare customMaterial write with no parms. */
         inner = I + '   "customMaterial" : ' + neStr(name);
       }
       return I + '"renderModelInfo" : {\n' + inner + '\n' + I + '},\n' + pos;
@@ -5731,8 +5712,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       /* carrier 'm' is the geometry-only choice; 'mod' pairs the collision in. */
       var clip = (carrier === 'm') ? null : abModuleClip(name);
       if (!clip) return geo + ',\n' + pos;
-      /* No `type` line: the inherited CLIPMODEL_AUTO honours clipModelName (confirmed solid in
-       * game with AUTO left in place), so naming the clip model is the whole edit. */
+      /* No `type` line: the inherited CLIPMODEL_AUTO honours clipModelName, so naming the clip model is the
+       * whole edit. */
       return geo + ',\n'
            + I + '"clipModelInfo" : {\n'
            + I + '   "clipModelName" : ' + neStr(clip) + '\n'
@@ -5885,7 +5866,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (abNewFromModal) abCloseModal();
   }
 
-  /* --- mounts ---------------------------------------------------------------------------------- */
+  /* The two browser mounts: the Assets tab and the modal. */
   var abTabMount = abMount(document.getElementById('abTabHost'), 'tab');
   var abModalMount = abMount(document.getElementById('abModalHost'), 'modal');
   initSplitWorkspaces();
@@ -5937,7 +5918,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (!document.hidden && document.getElementById('panel-timelines').style.display !== 'none') tlMaybeAutoRefresh();
   });
   // remove entity tab `idx` (the tl-tab-del click), re-pointing `active` so it stays a valid index (or 0 if
-  // the timeline is now empty -- renderTlBody's own tabs.length===0 check handles that display).
+  // the timeline is empty -- renderTlBody's own tabs.length===0 check handles that display).
   function tlRemoveTab(idx) {
     if (!tlModel || idx < 0 || idx >= tlModel.tabs.length) return;
     tlMarkDirty();
@@ -6449,8 +6430,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         var fel = head.parentNode, fname = fel.getAttribute('data-folder-name') || '';
         var filterEl = document.getElementById('prefabFilter');
         if (filterEl && filterEl.value) return;   // a filter shows matching folders open; nothing to toggle
-        // The tree only holds the rows of open folders, so a toggle re-renders rather than
-        // flipping the class (which showed an empty body).
+        // The tree holds only the rows of open folders, so a toggle re-renders instead of flipping the class.
         pfSetFolderOpen(fname, !fel.classList.contains('pf-open'));
         renderPrefabTree();
         return;
@@ -6707,10 +6687,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     }
     return {text: q + ' was sent to the editor; if it is not in hand, press Ctrl+V in the 3D view to place it', level: 'ok'};
   }
-  // A module prefab's save or placement that did not go as asked. The backend's message is shown when it
-  // is a whole sentence (it says which of several outcomes happened: over the limits and put back, or
-  // left as one undo step, or module prefabs off until a restart); a short internal phrase never is, and
-  // the page's own sentence for the result says what happened and what to do.
+  // A module prefab's save or placement that did not go as asked. The backend's message is shown only when
+  // it is a whole sentence (it distinguishes the outcomes); a short internal phrase never is, and the
+  // page's own sentence for the result says what happened and what to do.
   function pfModuleSentence(m) { return typeof m === 'string' && /^[A-Z"]/.test(m) && /[.?]$/.test(m) ? m : ''; }
   function pfModulePlaceToast(d) {
     var q = '"' + d.name + '"', own = pfModuleSentence(d.message);
@@ -6842,8 +6821,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // ---- crash-report dialog (auto-opens when the backend leaves a crash record) ----
   var crModal = document.getElementById('crashModal');
   var crashRecord = null, crashInFlight = false;
-  // 'vulkan'/'opengl' -> the name people actually write; anything else (including a record written
-  // before the field existed) -> '' so the caller simply omits the line.
+  // 'vulkan'/'opengl' -> the name people actually write; anything else (including a record
+  // without the field) -> '' so the caller simply omits the line.
   function rendererLabel(r){ return r === 'vulkan' ? 'Vulkan' : (r === 'opengl' ? 'OpenGL' : ''); }
   // branded header: reuse the menubar's own inline logo (copy the src -- never duplicate the data URI)
   (function(){
@@ -6901,8 +6880,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var lines = [];
     if (desc) lines.push(desc, '');
     lines.push('--- Crash details (recorded automatically) ---');
-    // Spell out what the kind MEANS: a bare "classB" told a triager nothing, and reports of faults the
-    // shield had already recovered from were indistinguishable from real crashes on the tracker.
+    // Spell out what the kind means, so a triager can tell a recovered fault from a real crash.
     lines.push('Kind: ' + (rec.kind || 'unknown') +
                (rec.kind === 'classB' ? ' (fault caught and recovered -- the game kept running)'
                                       : ' (the game process did not survive)'));

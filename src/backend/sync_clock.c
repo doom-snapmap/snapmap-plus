@@ -1,18 +1,8 @@
-/* sync_clock.c -- the engine side of the sync clock (sync_clock.h).
- *
- * The re-anchor (sync_clock_sigs.c) is prepared at boot and committed at the first Play that serves a mod; with no
- * mod served no hook is committed. The detour passes every call through unchanged unless its precision differs from
- * the player's (the loop's own `precise` for an idAI2 under the cvar's default mode 1, read through the cvar's value
- * at idCVar +0x30, which is what the loop reads: VK 0x145B133E0, GL 0x144418A60). Only then is the animator looked
- * up in the set of animators on the player's clock, rebuilt once per pass of the loop (a pass is one `now` and one
- * rate): every player's idPlayer.mostRecentSyncEntity, followed by its spawn id; while that sync entity
- * isCurrentlyWorking, its activeParticipants give each participant (instance, a reference) and its role
- * (data->type); the rule (sync_clock_rule.c) keeps them when the TARGET is a mod's entity. Everything runs on the
- * main thread: the loop is called from idGameLocal's frame, the gates from the serving layer.
- *
- * Read live (R-LV5, Vulkan, the Tyrant's from-above kill): idPlayer.syncMaster stays empty during a glory kill;
- * mostRecentSyncEntity names the demon's sync entity (mods/<salt>/syncmelee/<demon>_N) from the kill's start, and
- * its isCurrentlyWorking is set for the kill's length and cleared at its end. */
+/* sync_clock.c -- the engine side of the sync clock (sync_clock.h), all on the main thread. The detour (committed
+ * at the first Play serving a mod) passes calls through unless the precision differs from the player's (cvar value
+ * at idCVar +0x30; VK 0x145B133E0, GL 0x144418A60), then looks the animator up in the player-clock set, rebuilt once
+ * per loop pass from each idPlayer.mostRecentSyncEntity while it isCurrentlyWorking. During a glory kill
+ * idPlayer.syncMaster stays empty, so mostRecentSyncEntity is the only route to the demon's sync entity. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -45,14 +35,14 @@ typedef void *(*animator_fn)(void *entity);
 
 /* Where the fields live in this session, placed through the game's type tables. */
 typedef struct sc_layout {
-    uint32_t player_sync;     /* idPlayer.mostRecentSyncEntity: an idManagedClassPtr, its spawn id at +0 */
-    uint32_t working;         /* idSyncEntity.isCurrentlyWorking: a bool */
-    uint32_t participants;    /* idSyncEntity.activeParticipants: an idList (elements +0, count +8) */
-    uint32_t part_size;       /* one idActiveSyncParticipant */
-    uint32_t part_instance;   /* idActiveSyncParticipant.instance: an idManagedClassPtr */
-    uint32_t part_data;       /* idActiveSyncParticipant.data: an idSyncParticipant * */
-    uint32_t data_type;       /* idSyncParticipant.type: a participantType_t */
-    int32_t  target;          /* the TARGET member of that enum */
+    uint32_t player_sync;     /* idPlayer.mostRecentSyncEntity (idManagedClassPtr, spawn id at +0) */
+    uint32_t working;         /* idSyncEntity.isCurrentlyWorking */
+    uint32_t participants;    /* idSyncEntity.activeParticipants (idList: elements +0, count +8) */
+    uint32_t part_size;       /* sizeof idActiveSyncParticipant */
+    uint32_t part_instance;   /* .instance (idManagedClassPtr) */
+    uint32_t part_data;       /* .data (idSyncParticipant *) */
+    uint32_t data_type;       /* idSyncParticipant.type */
+    int32_t  target;          /* participantType_t TARGET */
 } sc_layout;
 
 static void *g_tramp;
@@ -91,8 +81,6 @@ static int av_only(DWORD code)
 {
     return code == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH;
 }
-
-/* ----------------------------------------------------------------- reads */
 
 static int sc_mode(void)
 {
@@ -210,8 +198,6 @@ static int sc_on_player_clock(const void *animator, const int *now, int hz)
     return 0;
 }
 
-/* --------------------------------------------------------------- detour */
-
 static void reanchor_detour(void *animator, const int *now, int hz, int old_hz, char precise, char is_ai)
 {
     if (precise && g_live) {
@@ -224,8 +210,6 @@ static void reanchor_detour(void *animator, const int *now, int hz, int old_hz, 
     }
     g_reanchor(animator, now, hz, old_hz, precise, is_ai);
 }
-
-/* --------------------------------------------------------------- install */
 
 int sh_sync_clock_install(const uint8_t *module_base)
 {
@@ -266,8 +250,6 @@ static int sc_commit(void)
     sc_log("MODS: sync-clock: the animation re-anchor is detoured");
     return 1;
 }
-
-/* ------------------------------------------------------------ the layout */
 
 /* The offset of cls.name, which must classify as `kind`; its classified place in *loc when asked (freed by the
  * caller). 0 with why. */
@@ -313,8 +295,6 @@ static int sc_place(const char **why)
     g_layout = L;
     return 1;
 }
-
-/* ---------------------------------------------------------- the gates */
 
 typedef struct sc_served { int any; } sc_served;
 
@@ -369,8 +349,6 @@ void sh_sync_clock_map_end(void)
     g_nset = 0;
     g_sync_id = SH_SCRIPT_SPAWN_ID_NONE;
 }
-
-/* ------------------------------------------------------------ the console */
 
 void sh_sync_clock_command(sh_sc_line_fn line, void *context)
 {

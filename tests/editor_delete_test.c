@@ -1,14 +1,6 @@
-/* Offline model of DOOM's EntityMode delete path for editor_delete.c.
- *
- * The doubles below follow the native functions the adapter calls and the
- * frame that finishes a deletion: the Selection capability builder includes
- * the hovered entity, the Delete Selection action adds the hovered entity
- * before destroying the selection, and the next EntityMode updates run
- * Exit/Enter, the "Delete Selection" commit and the return to idle. Reading a
- * released slot's declaration is counted as the access violation it would be
- * in the game. Offsets are copied here on purpose so a layout change in the
- * adapter cannot silently change the model too.
- */
+/* Offline model of DOOM's EntityMode delete path for editor_delete.c. Reading a released slot's declaration
+ * counts as the access violation it would be in the game; offsets are copied here so an adapter layout change
+ * cannot silently change the model. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -368,7 +360,7 @@ static void product_clear_selection(int honor_guard)
     if (cur() == T_IDLE || cur() == T_SELECTED) *i32(mode(), T_MODE_CUR) = T_IDLE;
 }
 
-/* Today's window path: the single-entity leaf for each ID, the idle write when
+/* The window path: the single-entity leaf for each ID, the idle write when
  * the selection is empty, then the page's clear. */
 static void legacy_window_delete(const int *ids, int n)
 {
@@ -413,9 +405,8 @@ static int run(const int *ids, int n, sh_editor_delete_result *r)
 
 /* ----------------------------------------------------------------- tests -- */
 
-/* The model reproduces issue #111's consumer for today's window path: the
- * page's clear moves Selection to idle, and Empty Enter reads the deleted
- * hovered entity. This is the failure the adapter must remove. */
+/* The model reproduces the failure on the window path: the page's clear moves Selection to idle, and Empty
+ * Enter reads the deleted hovered entity. */
 static void legacy_leaf_loop_reaches_stale_hover_consumer(void)
 {
     world_reset();
@@ -494,8 +485,7 @@ static void hovered_target_is_cleared_by_the_native_action(void)
     CHECK(hover() == -1 && !alive(3) && !alive(4));
 }
 
-/* Issue #111's sequence through the adapter: a window selection, a window
- * delete with the cursor on the target, then the page's clear. */
+/* Through the adapter: a window selection, a window delete with the cursor on the target, then the page's clear. */
 static void window_select_delete_clear_has_no_stale_reads(void)
 {
     world_reset(); bind_model();
@@ -511,8 +501,7 @@ static void window_select_delete_clear_has_no_stale_reads(void)
     CHECK(cur() == T_IDLE && hover() == -1 && sel_count() == 0);
 }
 
-/* Without the integration guard the page's clear strands the pending commit:
- * Selection never runs its commit phase. This documents the requirement. */
+/* Without the integration guard the page's clear strands the pending commit: Selection never runs its commit phase. */
 static void unguarded_product_clear_strands_the_native_commit(void)
 {
     world_reset(); bind_model();
@@ -543,7 +532,7 @@ static void protected_target_refuses_and_restores_selection_and_substate(void)
     CHECK(sel_count() == 2 && g_sel_ids[0] == 8 && g_sel_ids[1] == 2);
     CHECK(cur() == T_SELECTED && *i32(mode(), T_MODE_PREV) == T_SELECTED);
     CHECK(*i32(selsub(), T_SUB_PHASE) == 0);
-    /* Capabilities were rebuilt for the restored selection, not left for the targets. */
+    /* Capabilities are rebuilt for the restored selection. */
     CHECK(log_count(C_CAPS) == 2);
     CHECK((*(uint8_t *)(selsub() + T_SELSUB_CAPS) & 2) != 0);
     CHECK(g_null_reads == 0);
@@ -752,7 +741,7 @@ static void prior_non_target_selection_is_counted_and_kept_alive(void)
     CHECK(g_count_at_delete == 1);
 }
 
-/* A selection left holding a released ID (today's leaf path can do this) is
+/* A selection left holding a released ID (the leaf path can do this) is
  * never handed back to the capability builder, which would read its missing
  * declaration. */
 static void released_prior_selection_is_not_restored(void)
@@ -923,10 +912,8 @@ static void decode_rejects_wrong_shape_extra_site_and_out_of_image(void)
     CHECK(sh_editor_delete_decode_clear_hover(NULL, g_image, sizeof g_image) == 0);
 }
 
-/* The selected-ID array and the action's lists outlive the call, so every
- * native call runs on the process heap, as inside DOOM's editor frame. A
- * console command's map heap is what Play releases before Ctrl+Z frees the
- * array ("Memory corruption before block!"). */
+/* The selected-ID array and the action's lists outlive the call, so every native call runs on the process
+ * heap; a console command's map heap is released by Play before Ctrl+Z frees the array. */
 static void native_calls_run_inside_the_process_heap_scope(void)
 {
     world_reset(); bind_model();

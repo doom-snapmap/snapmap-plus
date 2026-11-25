@@ -1,10 +1,5 @@
-/* event_registry.c -- the `sh_event` console command: the live engine event
- * registry, read through the decl manager's event interface.
- *
- *   sh_event info <name>       an event's number, format and argument types
- *   sh_event list [filter]     the live event registry, one event per line
- *
- * Reads only; build 13954591 layout. commands.c registers h_sh_event. */
+/* The `sh_event` console command: `info <name>` prints an event's number, format and argument types; `list [filter]`
+ * prints the live event registry, read through the decl manager's event interface. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,9 +23,8 @@ typedef void *(*ev_vfn_name)(void *self, const char *name);
 typedef void *(*ev_vfn_index)(void *self, int index);
 typedef int (*ev_vfn_count)(void *self);
 
-/* An access violation in a registry call stops that call with no result; any
- * other exception (an idException is a C++ throw) is named in one line and
- * goes on to the engine's own handler, never swallowed. */
+/* An access violation in a registry call stops that call with no result; any other exception (an idException is a
+ * C++ throw) is named in one line and passed on to the engine's own handler. */
 static int ev_filter(DWORD code)
 {
     if (code == EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_EXECUTE_HANDLER;
@@ -64,7 +58,7 @@ static void *ev_find(const char *name)
     __try { return find(evmgr, name); } __except (ev_filter(GetExceptionCode())) { return NULL; }
 }
 
-/* Copy a NUL-terminated engine string; returns 0 when unreadable. */
+/* Copies a NUL-terminated engine string; returns 0 when unreadable. */
 static int ev_read_cstr(const char *src, char *dst, size_t cap)
 {
     if (!dst || cap == 0) return 0;
@@ -116,9 +110,8 @@ static void *ev_at(void *evmgr, int i)
     __try { return at(evmgr, i); } __except (ev_filter(GetExceptionCode())) { return NULL; }
 }
 
-/* The live registry as UTF-8 lines "name\tformat\ttypes\tnames\n". Returns
- * the bytes needed excluding the NUL, writing at most cap bytes (always NUL
- * terminated when cap > 0); 0 when the registry is not reachable. */
+/* The live registry as UTF-8 lines "name\tformat\ttypes\tnames\n". Returns the bytes needed excluding the NUL, writing
+ * at most cap bytes (NUL terminated when cap > 0); 0 when the registry is not reachable. */
 static int ev_registry_text(char *out, int cap)
 {
     void *evmgr = ev_manager();

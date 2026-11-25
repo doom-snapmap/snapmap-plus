@@ -1,7 +1,5 @@
-/* script_hooks.c -- see script_hooks.h. The pure part (the mod table, the
- * owner match, the tick's and gates' decisions) builds alone with
- * SH_SCRIPT_PURE for tests/script_hooks_test.c; the engine part needs the
- * backend. */
+/* script_hooks.c -- see script_hooks.h. The pure part (mod table, owner match, tick and gate decisions) builds
+ * alone with SH_SCRIPT_PURE; the engine part needs the backend. */
 #include <windows.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -18,10 +16,8 @@ typedef struct mod_slot {
     char *name;              /* malloc'd display name */
 } mod_slot;
 
-/* The table grows with the map's scripted mods. Each slot is allocated once
- * and kept for the session, so a slot pointer read under the lock stays
- * valid; hooks on job threads read it (a record's mod salt), so the slot
- * array itself is read under g_mods_lock. */
+/* Slots are allocated once and kept for the session, so a slot pointer read under the lock stays valid; the
+ * slot array is read under g_mods_lock because job-thread hooks read it. */
 static mod_slot **g_mods;
 static int g_nslots, g_cslots;
 static int g_mod_count;
@@ -483,11 +479,9 @@ static int prologue_ok(void)
     return same;
 }
 
-/* The frame time from the game clock (idGameLocal vtable +0x220, the
- * scripts' game time, script_api_common.h): the game milliseconds since the
- * previous script frame (0 for the first). g_last_frame holds the previous
- * frame's game milliseconds plus one (0: none yet). An unreadable clock is
- * said once and script time stands still for that frame. */
+/* The frame time from the game clock (idGameLocal vtable +0x220): game milliseconds since the previous
+ * script frame, 0 for the first. g_last_frame holds the previous milliseconds plus one (0: none yet); an
+ * unreadable clock is logged once and script time stands still for that frame. */
 static double frame_seconds(void)
 {
     static volatile LONG logged;
@@ -737,23 +731,16 @@ static void *own(const sig_result *r, int i)
 
 /* ---- damage, death, pain, animation notify and projectile hooks ----------
  *
- * Six detours, committed with the frame hook at the first Play with scripts
- * and never unhooked. Each calls the engine's own function, then posts one
- * record to the queue of the mod whose entity it concerns (script_queue.h):
- * no Lua runs inside them, and they may run on AI prethink and animWeb job
- * threads. On a client the first tick closes the scripts, so nothing they
- * post is ever delivered there.
- *   OnDamage dispatcher  (entity, attacker spawn id, amount): every entity class's damage taken; the
- *                        amount is what the engine applied. When an idAI2 applies it, the record its
- *                        Damage_Apply holds (the per-thread context below) adds the damage decl, the
- *                        damage zone of the first hit and the direction.
+ * Six detours, committed with the frame hook at the first Play with scripts and never unhooked. Each calls the
+ * engine's own function, then posts one record to the queue of the mod whose entity it concerns (script_queue.h);
+ * no Lua runs inside them, and they may run on AI prethink and animWeb job threads.
+ *   OnDamage dispatcher  (entity, attacker spawn id, amount): damage taken by every entity class; for an idAI2
+ *                        the Damage_Apply record (per-thread context) adds the decl, first-hit zone, direction.
  *   Damage_Apply         (ai, record): sets the context, calls through, clears it.
  *   idAI2::Killed        (ai, inflictor, attacker, parms, ...): the death, once per entity.
- *   SetPainReaction      (ai, reaction, ms): a pain reaction started; reported with the decl and attacker
- *                        of the entity's last hit.
+ *   SetPainReaction      (ai, reaction, ms): a pain reaction started, with the last hit's decl and attacker.
  *   OnAnimNotify         (entity, message): an md6 row ae_notify "<message>" ran.
- *   idProjectile::Launch (projectile, owner, origin, axis, ...): a projectile an entity of a scripted
- *                        mod launched (its weapon, ai:fire, an md6 row). */
+ *   idProjectile::Launch (projectile, owner, origin, axis, ...): a projectile a scripted mod's entity launched. */
 
 typedef void (*on_damage_fn)(void *entity, uint32_t attacker_spawn_id, float amount);
 typedef void (*damage_apply_fn)(void *ai, void *record);
@@ -984,9 +971,8 @@ static void combat_hook_set(int which, const char *what, uintptr_t addr, void *d
     if (addr) memcpy(c->bytes, (const void *)addr, stolen);
 }
 
-/* Commit every resolved combat hook (the Play gate, main thread, with the
- * frame hook). A hook that cannot be committed leaves its event unreported:
- * one line says which. */
+/* Commit every resolved combat hook (Play gate, main thread). A hook that cannot be committed leaves its event
+ * unreported and logs one line. */
 static void commit_combat_hooks(void)
 {
     int i, failed = 0;
@@ -1053,9 +1039,7 @@ static void resolve_combat_hooks(const sig_result *r, const uint8_t *module_base
     combat_hook_set(CH_LAUNCH, "projectile launch",
                     sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_PROJECTILE_LAUNCH], &s) == SIG_OK ? s.addr : 0,
                     (void *)launch_detour, SH_COMBAT_LAUNCH_STOLEN);
-    /* The boot check: every target found by its signature on this
-     * executable; what is missing is a feature-registry row now, not a
-     * surprise at the first Play. */
+    /* The boot check: a target missing by signature on this executable becomes a feature-registry row. */
     {
         char missing[160], why[220];
         size_t used = 0;

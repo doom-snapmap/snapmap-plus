@@ -1,4 +1,4 @@
-/* Preserve exact doorway alignment when a dimension variant meets a module. */
+/* Keeps exact doorway alignment when a dimension variant meets a module. */
 #include <windows.h>
 #include <math.h>
 #include <string.h>
@@ -61,9 +61,8 @@ static unsigned char *editor_map(void *editor)
     map=*(unsigned char**)edit;
     return map==*(unsigned char**)(e+0x204c8)?map:NULL;
 }
-/* Return a translation only for equal-size, opposite-facing doorways. The
- * bounded difference is the error introduced by 128-unit XY rounding, not an
- * expanded connection tolerance. The native connection test stays exact. */
+/* Returns a translation only for equal-size, opposite-facing doorways. The bounded difference is the error from
+ * 128-unit XY rounding, not an expanded connection tolerance; the native connection test stays exact. */
 static int correction(const portal_view *moving,const portal_view *fixed,float delta[3])
 {
     int i;
@@ -104,8 +103,8 @@ static void finish_snap(unsigned char *snap,unsigned char *editor)
         for(k=0;k<i;++k)if(selected[k]==selected[i])return;
     }
     if(!j)return;
-    /* Move only the user's current module selection, as one rigid group.
-     * Entity-local positions, door sizes and every stationary room are intact. */
+    /* Only the user's current module selection moves, as one rigid group; entity-local positions, door sizes and every
+     * stationary room are unchanged. */
     for(i=0;i<n;++i){
         unsigned char copy[0x98];memcpy(copy,record(map,selected[i]),sizeof copy);
         for(k=0;k<3;++k)*(float*)(copy+0xc+k*4)+=delta[k];
@@ -145,8 +144,8 @@ static unsigned char align_exact(void *edit,const float *point,unsigned index,in
                 (variant(record(map,(int)index))||variant_target(map,point));
         } __except(EXCEPTION_EXECUTE_HANDLER){enabled=0;}
     }
-    /* This native operation resets the instance origin before calculating its
-     * exact target. Suppress only its final XY quantization, on this thread. */
+    /* This native operation resets the instance origin before calculating its exact target; only its final XY
+     * quantization is suppressed, on this thread. */
     g_exact=previous||enabled;
     __try {result=g_align(edit,point,index,door,direction);}
     __finally {g_exact=previous;}
@@ -171,9 +170,8 @@ static int selection_needs_exact(void *edit,float step)
         }
     }
     if(!off_grid)return 0;
-    /* A stock neighbor can inherit a fractional origin from a resized room.
-     * Preserve the accepted rigid selection in maps containing such a room;
-     * stock-only maps retain native confirmation behavior. */
+    /* A stock neighbor can inherit a fractional origin from a resized room; the accepted rigid selection is kept in
+     * maps containing such a room, and stock-only maps keep native confirmation. */
     n=*(int*)(map+0x758);
     for(i=0;i<n;++i)if(variant(record(map,i)))return 1;
     return 0;
@@ -185,24 +183,21 @@ static void confirm_exact(void *edit,float step)
         __try {enabled=selection_needs_exact(edit,step);}
         __except(EXCEPTION_EXECUTE_HANDLER){enabled=0;}
     }
-    /* Add, move and duplicate confirmation quantize again after snapping.
-     * Keep native dirty marking and remainder cleanup, but retain the exact
-     * accepted origins instead of breaking the connection on mouse release. */
+    /* Add, move and duplicate confirmation quantize again after snapping; native dirty marking and remainder cleanup
+     * run, but the exact accepted origins are kept so the connection holds on mouse release. */
     g_exact=previous||enabled;
     __try {g_confirm(edit,step);}
     __finally {g_exact=previous;}
 }
-static void *clean(const sig_result *r,size_t n,const char *name)
-{size_t i;for(i=0;i<n;++i)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)return (void*)r[i].addr;return NULL;}
 int sh_grid_snap_install(const sig_result *r,size_t n,const uint8_t *base)
 {
-    void *snap=clean(r,n,"GridPortalSnap"),*align=clean(r,n,"GridPortalAlign"),*quantize=clean(r,n,"GridQuantizeOrigin");
-    void *confirm=clean(r,n,"GridConfirmOrigins");
+    void *snap=sig_pointer(r,n,"GridPortalSnap"),*align=sig_pointer(r,n,"GridPortalAlign"),*quantize=sig_pointer(r,n,"GridQuantizeOrigin");
+    void *confirm=sig_pointer(r,n,"GridConfirmOrigins");
     if(g_snap||g_align||g_quantize||g_confirm)return g_snap&&g_align&&g_quantize&&g_confirm&&
         hook_is_installed((void*)g_snap)&&hook_is_installed((void*)g_align)&&
         hook_is_installed((void*)g_quantize)&&hook_is_installed((void*)g_confirm);
-    g_bounds=(bounds_fn)clean(r,n,"GridPortalBounds");g_direction=(direction_fn)clean(r,n,"GridPortalDirection");
-    g_replace=(replace_fn)clean(r,n,"GridReplaceInstance");g_reconnect=(reconnect_fn)clean(r,n,"GridReconnectPortals");
+    g_bounds=(bounds_fn)sig_pointer(r,n,"GridPortalBounds");g_direction=(direction_fn)sig_pointer(r,n,"GridPortalDirection");
+    g_replace=(replace_fn)sig_pointer(r,n,"GridReplaceInstance");g_reconnect=(reconnect_fn)sig_pointer(r,n,"GridReconnectPortals");
     g_editor=(unsigned char*)glb_resolve(base,"editor_singleton",NULL);
     if(!snap||!align||!quantize||!confirm||!g_bounds||!g_direction||!g_replace||!g_reconnect||!g_editor)return 0;
     /* Each stolen prefix is 15 whole, register/stack-only bytes in both images. */

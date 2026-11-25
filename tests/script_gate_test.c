@@ -1,17 +1,8 @@
-/* script_gate_test.c -- the engine side of the mod-script gates
- * (src/backend/script/script_hooks.c and the serving provider of
- * script_source.c, built without SH_SCRIPT_PURE) against a faked engine:
- * the main-thread id, the load screen, the editor singleton and the frame
- * function's prologue are memory the test owns, the hook layer and the
- * serving index are stand-ins, and the runtime is real. Every map load and
- * every Play passes the gates:
- *   - a map with no mods, at the first gate of a session (nothing logged yet):
- *     both gates do nothing, without a fault, and no frame hook is prepared;
- *   - a map with a mod without scripts: the same;
- *   - a map with a scripted mod: the map gate prepares nothing, the Play gate
- *     prepares its scripts and installs the frame hook once, and the next map
- *     gate ends them;
- *   - a plain map after the scripted one does nothing again. */
+/* script_gate_test.c -- the engine side of the mod-script gates (script_hooks.c and the serving provider of
+ * script_source.c, built without SH_SCRIPT_PURE) against a faked engine: main-thread id, load screen, editor
+ * singleton and frame prologue are test memory, the hook layer and serving index are stand-ins, the runtime is real.
+ * A map with no mods or only unscripted mods does nothing and prepares no frame hook; a scripted mod's Play gate
+ * prepares its scripts and installs the frame hook once, the next map gate ends them, and a plain map then does nothing. */
 #undef SH_SCRIPT_PURE
 #include "../src/backend/script/script_hooks.c"
 #include "../src/backend/script/script_source.c"

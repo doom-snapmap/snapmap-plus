@@ -1,12 +1,6 @@
-/* Audit of every fixed-length detour window against a supported executable.
- * For each site the backend detours, resolve its target the way the backend
- * does (signature, signature + offset, the target of a call inside a
- * signature, or the pinned frame RVA), decode the prologue with x64_len, and
- * require: the fixed length is an instruction boundary; and, when the
- * trampoline replays the window, no RIP-relative operand or relative branch
- * lies inside it except the one instruction the hook relocates.
- * A build change that moves a boundary or brings a relative operand into a
- * window fails here. Run via run-tests.ps1 with -Doom / -DoomAlt. */
+/* Audits every fixed-length detour window against a supported executable: each window ends on an instruction
+ * boundary, and a replayed window holds no relative operand except the one the hook relocates.
+ * Run via run-tests.ps1 with -Doom / -DoomAlt. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -44,10 +38,10 @@ enum site_kind { SITE_SIG, SITE_CALL_IN_SIG, SITE_FRAME_RVA, SITE_SLOT, SITE_ISB
                  SITE_LEVEL /* the call in a private signature of level_templates_sigs.c */,
                  SITE_KILL /* the private signature of kill_score_sigs.c */ };
 enum site_policy {
-    REPLAYS,          /* the trampoline runs: the window must be position independent */
-    NEVER_REPLAYED,   /* the detour replaces the function; the trampoline never runs */
-    RELOCATES_AT,     /* one RIP-relative LEA, 64-bit load, E8 or near or short Jcc at reloc is rewritten by the hook */
-    STUB_PADDING      /* a never-replayed stub: its ret at reloc is followed by int3 padding */
+    REPLAYS,          /* the window must be position independent */
+    NEVER_REPLAYED,   /* the trampoline never runs */
+    RELOCATES_AT,     /* the hook rewrites the one relative instruction at reloc */
+    STUB_PADDING      /* a never-replayed stub: its ret at reloc is followed by int3 */
 };
 
 typedef struct site {
@@ -160,7 +154,7 @@ static const site SITES[] = {
     { "fault_shield/load_screen_stop.c", "CancelMapChange", SITE_SIG, 0, 15, REPLAYS, 0 },
     { "fault_shield/saved_map_guard.c", "DeleteBadSaveSlots", SITE_SIG, 0, 19, NEVER_REPLAYED, 0 },
     { "fault_shield/recovery.c", "Frame (RVA_FRAME)",       SITE_FRAME_RVA, 0, 15, REPLAYS, 0 },
-    /* Decoded at install since 88f7a5b; listed so the table is complete. */
+    /* Decoded at install; listed so the table is complete. */
     { "algo.c",               "AlgoMatMul",                 SITE_DECODED, 0, 0, NEVER_REPLAYED, 0 },
     { "algo.c",               "AlgoInverse",                SITE_DECODED, 0, 0, NEVER_REPLAYED, 0 },
     { "algo.c",               "AlgoPackRGBA",               SITE_DECODED, 0, 0, NEVER_REPLAYED, 0 },
@@ -445,10 +439,8 @@ static void check_image(const char *path)
     }
 }
 
-/* Source census: every file that prepares a detour, and how many preparation
- * calls it contains. A new or removed call fails here until SITES and this
- * table are updated together, so no detour escapes the window audit.
- * hook.c and patch.c hold the definitions; smoke.c detours its own scratch code. */
+/* Source census: every file that prepares a detour and its call count, so a detour added or removed fails
+ * until SITES and this table agree. */
 static const struct { const char *file; int calls; } CENSUS[] = {
     { "backend\\algo.c", 1 }, { "backend\\apply_engine.c", 1 }, { "backend\\commands.c", 2 },
     { "backend\\editor_frame.c", 2 }, { "backend\\engine_dialog.c", 1 },

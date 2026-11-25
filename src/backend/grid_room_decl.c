@@ -244,9 +244,8 @@ static int aliases(node *root,const sh_grid_size *size)
         }
     }return 1;
 }
-/* Built-in module lights: every light/... entity plus the SnapMap dynamic
- * point. One reader computes their target geometry for both the generated
- * variant declaration (map load and Play) and the live editor resize. */
+/* Built-in module lights: every light/... entity plus the SnapMap dynamic point. One reader computes their target
+ * geometry for both the generated variant declaration and the live editor resize. */
 static int builtin_light(const char *kind)
 {return kind&&(!strncmp(kind,"light/",6)||!strcmp(kind,"snapmaps/light/dynamic_point"));}
 static int orientation(node *edit,float axis[9])
@@ -396,8 +395,7 @@ int sh_grid_flight_warp(const sh_grid_size *size,const char *source,size_t lengt
         name=member(member(edit,"clipModelInfo"),"clipModelName");
         path=unquote(name?name->value:NULL);
         if(kind&&path&&!strcmp(kind,"volume/flight")&&!strcmp(path,identity)){
-            /* All measured stock owners omit rotation. A future rotated
-             * resource needs its own verified change of basis. */
+            /* Every stock owner omits rotation; a rotated resource would need its own change of basis. */
             if(!member(edit,"spawnOrientation")&&vec(edit,"spawnPosition",p)){
                 sh_grid_point(&w,p,q);result=w;
                 for(a=0;a<3;++a)for(k=0;k<w.axis[a].count;++k){

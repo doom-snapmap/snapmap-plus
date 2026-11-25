@@ -3,20 +3,18 @@
 
 #include "grid_room.h"
 
-/* Rebuild a stock snapModule or snapModuleInfo body. Return a malloc-owned
- * NUL-terminated body, or NULL on unsupported geometry or invalid syntax.
- * All input is read from the owner's installation; the product embeds none. */
+/* Rebuilds a stock snapModule or snapModuleInfo body from the installed source. Returns a malloc-owned
+ * NUL-terminated body, or NULL on unsupported geometry or invalid syntax. */
 char *sh_grid_decl(const sh_grid_size *size, const char *source, size_t length,
                    int module_info, size_t *out_length);
 
-/* Private resource aliases retain their installed source after a dimensions
- * prefix. This never aliases a door model or an unrelated module's resource. */
+/* Private resource aliases keep their installed source after a dimensions prefix; a door model or an unrelated
+ * module's resource is never aliased. */
 int sh_grid_resource_name(const sh_grid_size *size, const char *source,
                            char *out, size_t capacity);
 
-/* Recover the installed, unrotated flight volume's local coordinate warp.
- * The declaration and collision share one exact resource identity. Unknown
- * orientations and ambiguous owners are refused. */
+/* Recovers the installed, unrotated flight volume's local coordinate warp; the declaration and collision share one
+ * resource identity. Unknown orientations and ambiguous owners are refused. */
 int sh_grid_flight_warp(const sh_grid_size *size, const char *module_source,
                          size_t length, const char *resource, sh_grid_warp *out);
 
@@ -26,15 +24,12 @@ typedef struct sh_grid_builtin_light {
     float visible_range,shadow_range;
     int has_radius,has_visible,has_shadow;
 } sh_grid_builtin_light;
-/* Read the installed module's own lights (every light/... entity and the
- * SnapMap dynamic point) and compute absolute target geometry with the same
- * function sh_grid_decl uses for the generated variant, so a resized room and
- * a loaded one end with identical values. Authored map entities are never
- * inputs to this resource-level transform. */
+/* Reads the installed module's own lights (every light/... entity and the SnapMap dynamic point) and computes
+ * absolute target geometry with the function sh_grid_decl uses for the generated variant, so a resized room and a
+ * loaded one end with identical values. Authored map entities are never inputs. */
 int sh_grid_decl_lights(const sh_grid_size *size,const char *source,size_t length,
                        sh_grid_builtin_light *out,size_t capacity,size_t *count);
-/* The same built-in lights read without any transform, for inspecting a
- * generated variant declaration (what a saved map loads). */
+/* The same built-in lights read without any transform, for inspecting a generated variant declaration. */
 int sh_grid_decl_light_values(const char *source,size_t length,
                               sh_grid_builtin_light *out,size_t capacity,size_t *count);
 

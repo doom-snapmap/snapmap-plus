@@ -1,8 +1,7 @@
-/* attach_tags_test.c -- the pure half of attachment tags (attach_tags_rule.c): the namespace test every lookup
- * makes, the md6Def props reader, the build's registries rows and every entry or prop it leaves out with its
- * warning, the per-Play registry (only a mod's own props, first rows kept, found by name in any case or slash)
- * and the chain rule it reuses from clip events on fake models. The engine site is in attach_tags_sigs_test and
- * detour_windows_test. */
+/* attach_tags_test.c -- the pure half of attachment tags (attach_tags_rule.c): the namespace test, the md6Def props
+ * reader, the build's registry rows with each skipped entry's warning, the per-Play registry, and the chain rule
+ * reused from clip events on fake models. The engine site is covered by attach_tags_sigs_test and detour_windows_test. */
+#include "../src/common/text.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,7 +12,7 @@ static int g_checks, g_failed;
 
 #define SALT "abcd1234"
 
-/* ------------------------------------------------------------ warnings */
+/* warnings */
 
 static char g_lines[16][640];
 static int g_nlines;
@@ -35,7 +34,7 @@ static int said(const char *part)
     return 0;
 }
 
-/* --------------------------------------------------- the mod's md6Defs */
+/* the mod's md6Defs */
 
 typedef struct fake_def { const char *name, *text; } fake_def;
 static const fake_def *g_defs;
@@ -46,7 +45,7 @@ static int read_def(void *context, const char *name, char **text, size_t *len)
     int i;
     (void)context;
     for (i = 0; i < g_ndefs; i++) {
-        if (!sh_ce_name_eq(g_defs[i].name, name)) continue;
+        if (!sh_path_eq(g_defs[i].name, name)) continue;
         if (!g_defs[i].text) return -1;
         *len = strlen(g_defs[i].text);
         *text = (char *)malloc(*len + 1);

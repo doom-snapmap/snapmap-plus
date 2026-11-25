@@ -34,8 +34,6 @@ static const char *value_words(lua_State *L, int arg)
     }
 }
 
-/* ------------------------------------------------------------- decls */
-
 typedef struct decl_ud {
     void *ptr;
     const char *type;   /* the type as the script named it, kept in the userdata after the struct */
@@ -149,8 +147,6 @@ static void open_decl(lua_State *L)
     lua_setfield(L, -2, "__metatable");
     lua_pop(L, 1);
 }
-
-/* ------------------------------------------------------------ events */
 
 static const char *arg_word(char t)
 {
@@ -376,11 +372,8 @@ static int l_event_args(lua_State *L)
     return 1;
 }
 
-/* ----------------------------------------------------------- signals */
-
 static int g_signals_wanted;   /* a script of this map handles a SnapMap event */
 
-/* Copy the event's key (lower case, without snap_event_). */
 /* The event's key: lower case, without snap_event_ (malloc'd, any length), or NULL without memory. */
 static char *signal_key(const char *s)
 {
@@ -523,7 +516,7 @@ static int l_cvar(lua_State *L)
     }
 }
 
-/* entities() -> every entity of the map now, players first */
+/* entities() -> every entity of the map, players first */
 static int l_entities(lua_State *L)
 {
     const sh_script_engine *e = sh_script_api_engine();
@@ -563,7 +556,6 @@ void sh_script_api_game_register(void)
 }
 
 #ifndef SH_SCRIPT_PURE
-/* ============================================================ the engine */
 #include <windows.h>
 #include "../backend_log.h"
 #include "../hook.h"

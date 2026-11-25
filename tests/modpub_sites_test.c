@@ -1,12 +1,7 @@
-/* modpub_sites_test.c -- the published-map gates' and the publish hooks' bind checks (modpub_sites.c
- * sh_modpub_check_sites and sh_modpublish_check_sites, the functions the DLL's two binds run) against each build
- * 13954591 executable given on the command line:
- *   - every site resolves at its recorded RVA, as the boot resolves it (sig_resolve_all), with the shell global;
- *   - every byte check holds on the executable's own code, and what it decodes lands inside the image (the lobby's
- *     leave slot included, which the binds treat as optional);
- *   - the lobby's parameters slot CacheReady calls is the one modlobby.c reads (+0x2B8);
- *   - a changed byte is refused by name.
- * Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
+/* modpub_sites_test.c -- the published-map gates' and publish hooks' bind checks (sh_modpub_check_sites,
+ * sh_modpublish_check_sites) against each build 13954591 executable given on the command line: every site resolves
+ * at its recorded RVA, every byte check holds on the executable's own code, the lobby's parameters slot is the one
+ * modlobby.c reads (+0x2B8), and a changed byte is refused by name. Run via run-tests.ps1 with -Doom / -DoomAlt. */
 #include "image_sites.h"
 #include "engine_globals.h"
 #include "modpublished.h"
@@ -102,7 +97,7 @@ static void check_image(const char *path)
         }
     }
 
-    /* The cloud-save request's read of the slot: the published copy is made there (R-LB1 F6). */
+    /* The cloud-save request's read of the slot: the published copy is made there. */
     {
         const uint8_t *call = image_site(base, results, n, "CloudSaveSlotReadCall", vk);
         const uint8_t *read = image_site(base, results, n, "ReadLocalSavedMapText", vk);
@@ -120,7 +115,7 @@ static void check_image(const char *path)
     }
 
     /* The cloud-save request's metadata read and the declChecksum hash: the published copy's metadata names its own
-     * text (R-LB1 F6). */
+     * text. */
     {
         const uint8_t *meta = image_site(base, results, n, "CloudSaveMetaReadCall", vk);
         const uint8_t *create = image_site(base, results, n, "NewSavedMapDeclChecksumCall", vk);
@@ -140,7 +135,7 @@ static void check_image(const char *path)
         }
     }
 
-    /* The publish screens' FINISH step (modpublish.c eng_bind_finish, R-LB1 S7). */
+    /* The publish screens' FINISH step (modpublish.c eng_bind_finish). */
     {
         sh_modpublish_finish_sites fs;
         sh_modpublish_finish_bound fb;

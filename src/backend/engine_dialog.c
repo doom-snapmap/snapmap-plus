@@ -1,14 +1,5 @@
-/* Native modal dialogs with custom descriptor text. Raise through the shell
- * wrapper so its screen-pending flag and lock are set. The shell is read from
- * its global slot (shell_ptr_slot) at every use, so a rebuilt shell is never
- * held stale. The manager queue pointer is at +0x900, its count at
- * +0x908, and each descriptor spans 0x1b0 bytes.
- *
- * The queued idStr is already constructed: assign through the native helper
- * rather than constructing over it. A descriptor carries no answer;
- * DialogAction reports the button action ID. For supported GDM IDs using the
- * default path, params[3] and params[4] select the two close-only actions.
- */
+/* Native modal dialogs with custom descriptor text, raised through the shell wrapper so its screen-pending flag and
+ * lock are set. The shell is read from its global slot at every use; DialogAction reports the button action ID. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -22,62 +13,46 @@
 #include "hook.h"
 #include "engine_globals.h"
 
-/* Build 13954591 (Vulkan RVAs; the signatures carry both renderers'): AddDialog
- * 0x102E4E0, AddDialogWrapper 0xFCC6A0, ShowDialog 0x1034180, the descriptor
- * constructor 0x102DDF0 and DialogAction 0x1031CB0. Params +0x98 is the
- * source file, the GDM switch has eight cases, the text object sits at +0x18
- * with its length at +0x20, and DialogAction sends actions 0x4a and 0x4b to
- * its close-only case. */
+/* Build 13954591 (Vulkan RVAs; the signatures carry both renderers'): AddDialog 0x102E4E0, AddDialogWrapper 0xFCC6A0,
+ * ShowDialog 0x1034180, descriptor constructor 0x102DDF0, DialogAction 0x1031CB0. Manager queue at +0x900, count at
+ * +0x908; descriptors span 0x1b0 bytes (text object +0x18, length +0x20); params +0x98 is the source file, and
+ * params[3]/params[4] select the button actions for supported GDM IDs on the default path. */
 
-/* Descriptor layout. */
 #define ED_DESC_STRIDE        0x1B0u
-#define ED_DESC_GDM_ID        0x00u   /* int   */
-#define ED_DESC_BUTTON_SET    0x04u   /* int   */
-#define ED_DESC_CLEARED       0x08u   /* byte: set once the dialog is answered/dismissed */
-#define ED_DESC_WAIT_CLEAR    0x09u   /* byte: `m.waitClear` -- NOT an answer (see above)  */
-#define ED_DESC_TEXT          0x18u   /* idStr, by value                                  */
-#define ED_DESC_TEXT_LENGTH   0x20u   /* int, the field ShowDialog tests                  */
+#define ED_DESC_GDM_ID        0x00u   /* int */
+#define ED_DESC_BUTTON_SET    0x04u   /* int */
+#define ED_DESC_CLEARED       0x08u   /* byte: set once answered or dismissed */
+#define ED_DESC_WAIT_CLEAR    0x09u   /* byte: m.waitClear, not an answer */
+#define ED_DESC_TEXT          0x18u   /* idStr, by value */
+#define ED_DESC_TEXT_LENGTH   0x20u   /* int, the field ShowDialog tests */
 
-/* Menu-manager layout. */
 #define ED_MGR_QUEUE_PTR      0x900u
 #define ED_MGR_QUEUE_COUNT    0x908u
 #define ED_MGR_ACTIVE         0x8F0u
 
-/* Zeroed AddDialog parameter block. Reserve enough space for all fields read
- * by the supported default GDM path; the native call does not write to it.
- */
+/* Zeroed AddDialog parameter block, sized for every field the default GDM path reads; the native call does not write to it. */
 #define ED_PARAMS_BYTES       0x100u
 #define ED_PARAM_GDM_ID       0u      /* int index */
 #define ED_PARAM_BUTTON_SET   1u      /* int index */
-#define ED_PARAM_ACTION_0     3u      /* int index; the FIRST button's action id  */
-#define ED_PARAM_ACTION_1     4u      /* int index; the SECOND button's action id */
+#define ED_PARAM_ACTION_0     3u      /* int index: first button's action */
+#define ED_PARAM_ACTION_1     4u      /* int index: second button's action */
 #define ED_PARAM_SOURCE_FILE  0x26u   /* int index; a const char * spans 0x26..0x27 */
 #define ED_PARAM_SOURCE_LINE  0x28u   /* int index; log formatting only */
 
-/* Actions 0x4a and 0x4b both reach DialogAction's close-only branch through
- * its jump table. They are unused by the audited AddDialog cases, allowing distinct answers without an extra native
- * action. Also check the GDM ID when observing them.
- */
+/* Actions 0x4a and 0x4b both reach DialogAction's close-only branch through its jump table and are unused by the
+ * AddDialog cases, giving distinct answers; check the GDM ID when observing them. */
 #define ED_ACTION_ACCEPT      0x4Au
 #define ED_ACTION_DECLINE     0x4Bu
 
-/* DialogAction prologue steal window:
- *     40 55                 push rbp                        (2)
- *     56                    push rsi                        (1)
- *     57                    push rdi                        (1)
- *     41 56                 push r14                        (2)
- *     41 57                 push r15                        (2)
- *     48 8D AC 24 50 79 FF FF  lea rbp, [rsp-0x86B0]        (8)
- * = 16 bytes. All register/rsp-relative; the next instruction pair is a stack
- * probe whose `call` is rel32, so the window stops exactly before it. */
+/* DialogAction prologue steal window: push rbp, rsi, rdi, r14, r15 and `lea rbp,[rsp-0x86B0]` (8 bytes) = 16 bytes,
+ * all register/rsp-relative; the next instruction pair is a stack probe with a rel32 call, so the window ends before it. */
 #define ED_DIALOGACTION_STOLEN 16
 
 
 typedef void (*ed_add_wrapper_fn)(void *shell, void *params);
 typedef void (*ed_assign_cstr_fn)(void *idstr, const char *text);
-/* The dispatcher takes two further arguments the engine never reads for any
- * action id; they are declared and forwarded so the detour is call-compatible
- * with the site that invokes it rather than with a shortened reading of it. */
+/* The dispatcher takes two further arguments the engine never reads; they are forwarded so the detour stays
+ * call-compatible with the site that invokes it. */
 typedef void (*ed_action_fn)(void *mgr, void *params, int action, void *parms,
                              int flag);
 
@@ -91,9 +66,7 @@ static int                g_installed;
 /* The answer, as the engine reported it. -1 = no button dispatched yet. */
 static volatile LONG g_answer = -1;
 
-/* Track one dialog with a monotonic ticket so stale callers cannot poll a
- * later occupant of the slot.
- */
+/* One dialog is tracked with a monotonic ticket so stale callers cannot poll a later occupant of the slot. */
 static volatile LONG g_ticket;
 static volatile LONG g_pending_id = -1;
 static char          g_pending_key[256];
@@ -104,22 +77,12 @@ static int ed_read_byte(const void *base, unsigned offset, unsigned char *out);
 
 static void *ed_manager(void);
 
-static const sig_result *ed_result(const sig_result *results, size_t count,
-                                   const char *name)
-{
-    size_t i;
-    if (!results || !name) return NULL;
-    for (i = 0; i < count; i++)
-        if (results[i].name && strcmp(results[i].name, name) == 0)
-            return &results[i];
-    return NULL;
-}
 
 /* The signature's address, when it resolved at its recorded RVA. */
 static void *ed_clean(const sig_result *results, size_t count, const char *name,
                       const uint8_t *module_base)
 {
-    const sig_result *r = ed_result(results, count, name);
+    const sig_result *r = sig_lookup(results, count, name);
     if (!r || r->status != SIG_OK || !r->addr) return NULL;
     if (r->addr != (uintptr_t)module_base + r->rva) return NULL;
     return (void *)r->addr;
@@ -145,11 +108,9 @@ static int ed_read_byte(const void *base, unsigned offset, unsigned char *out)
     }
 }
 
-/* Assign text to our queued descriptor. Tests use this same path. Returns 1
- * if the descriptor matched and its text was replaced.
- */
 static void *ed_find_descriptor(int gdm_id);
 
+/* Assigns the pending text to our queued descriptor. Returns 1 if the descriptor matched and its text was replaced. */
 static int ed_inject(void *descriptor)
 {
     int id = 0;
@@ -170,10 +131,8 @@ static int ed_inject(void *descriptor)
     return 1;
 }
 
-/* Observe the button action and callback parameter copy, then forward
- * unchanged. Match params[0] to our GDM ID before accepting either close-only
- * action.
- */
+/* Observes the button action, then forwards unchanged; params[0] must match our GDM ID before either close-only
+ * action counts. */
 static void ed_action_detour(void *mgr, void *params, int action, void *parms,
                              int flag)
 {
@@ -195,7 +154,7 @@ static void ed_action_detour(void *mgr, void *params, int action, void *parms,
     if (g_action_original) g_action_original(mgr, params, action, parms, flag);
 }
 
-/* The shell as it is now, or NULL before the menu shell exists. */
+/* The current shell, or NULL before the menu shell exists. */
 static void *ed_shell(void)
 {
     void *const volatile *slot = g_shell_slot;
@@ -207,8 +166,7 @@ static void *ed_shell(void)
     }
 }
 
-/* The dialog manager lives at shell+8; the wrapper reads it there to call
- * AddDialog, and the queue we search for our descriptor belongs to it. */
+/* The dialog manager lives at shell+8; its queue holds our descriptor. */
 static void *ed_manager(void)
 {
     void *shell = ed_shell();
@@ -256,9 +214,7 @@ int sh_engine_dialog_install(const sig_result *results, size_t count,
     g_clear_wrapper = (ed_add_wrapper_fn)clear;
     g_assign_cstr = (ed_assign_cstr_fn)assign;
 
-    /* ShowDialog is deliberately NOT hooked: the text goes into the queued
-     * descriptor right after the raise, which needs no detour on the engine's
-     * own render path. */
+    /* ShowDialog is not hooked: the text goes into the queued descriptor right after the raise. */
     g_action_original = (ed_action_fn)hook_prepare(action, (void *)ed_action_detour,
                                                   ED_DIALOGACTION_STOLEN);
     if (!g_action_original || hook_commit((void *)g_action_original) != B2_PATCH_OK) {
@@ -290,7 +246,7 @@ int sh_engine_dialog_queue_idle(const void *shell)
         if (!queue || count < 0 || count > 64) return 0;
         last = count ? (size_t)(count - 1) * ED_DESC_STRIDE + ED_DESC_CLEARED : 0;
         if ((uintptr_t)queue > UINTPTR_MAX - last) return 0;
-        /* Even an empty queue must name readable, initialized storage. */
+        /* Even an empty queue must name readable storage. */
         (void)*(const volatile unsigned char *)queue;
         for (i = 0; i < count; i++)
             if (queue[(size_t)i * ED_DESC_STRIDE + ED_DESC_CLEARED] != 1) return 0;
@@ -308,8 +264,8 @@ int sh_engine_dialog_can_ask(void)
         !sh_engine_dialog_queue_idle(shell)) return 0;
     __try {
         manager = *(const unsigned char *const *)((const unsigned char *)shell + 8);
-        /* Cleared descriptors still own callbacks until native Think removes them.
-         * The active widget must also be hidden before a new modal can use it. */
+        /* Cleared descriptors own callbacks until native Think removes them, and the active widget must be hidden
+         * before a new modal can use it. */
         return *(const int *)(manager + ED_MGR_QUEUE_COUNT) == 0 &&
                manager[ED_MGR_ACTIVE] == 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -327,9 +283,7 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
 
     if (!sh_engine_dialog_can_ask() || !text || !text[0]) return 0;
 
-    /* Reclaim a tracked slot when its descriptor has left the queue,
-     * including after menu teardown or external dismissal.
-     */
+    /* Reclaims a tracked slot whose descriptor has left the queue (menu teardown or external dismissal). */
     {
         LONG held = InterlockedCompareExchange(&g_pending_id, 0, 0);
         if (held >= 0) {
@@ -340,8 +294,7 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
         }
     }
 
-    /* The descriptor's inline idStr is 256 bytes and the copy is by value, so
-     * anything longer would be truncated by the engine rather than by us. */
+    /* The descriptor's inline idStr is 256 bytes, copied by value. */
     if (strlen(text) >= sizeof(g_pending_key)) return 0;
     strcpy_s(g_pending_key, sizeof(g_pending_key), text);
     InterlockedExchange(&g_injected, 0);
@@ -351,17 +304,14 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
     memset(params, 0, sizeof(params));
     params[ED_PARAM_GDM_ID]     = gdm_id;
     params[ED_PARAM_BUTTON_SET] = button_set;
-    /* Give the two buttons distinct close-only actions so the dispatcher
-     * identifies the answer.
-     */
+    /* Distinct close-only actions let the dispatcher identify the answer. */
     params[ED_PARAM_ACTION_0]   = ED_ACTION_ACCEPT;
     params[ED_PARAM_ACTION_1]   = ED_ACTION_DECLINE;
     memcpy(&params[ED_PARAM_SOURCE_FILE], &source, sizeof(source));
     params[ED_PARAM_SOURCE_LINE] = __LINE__;
 
-    /* The wrapper takes the native lock and marks the shell screen dialog-
-     * pending; a direct AddDialog call would omit input readiness.
-     */
+    /* The wrapper takes the native lock and marks the shell screen dialog-pending; a direct AddDialog call would omit
+     * input readiness. */
     __try {
         g_add_wrapper(shell, params);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -370,7 +320,7 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
         return 0;
     }
 
-    /* The wrapper queues its descriptor synchronously; assign its text now. */
+    /* The wrapper queues its descriptor synchronously; assign its text immediately. */
     desc = ed_find_descriptor((int)gdm_id);
     if (!desc) {
         InterlockedExchange(&g_pending_id, -1);
@@ -378,15 +328,14 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
         return 0;
     }
     if (!ed_inject(desc)) {
-        /* Default GDM wording cannot authorize the requested operation. Forget
-         * the claim before cancellation so reentrant actions cannot accept it. */
+        /* Default GDM wording cannot authorize the request; the claim is dropped before cancellation so reentrant
+         * actions cannot accept it. */
         InterlockedExchange(&g_pending_id, -1);
         __try {
             g_clear_wrapper(shell, params);
             backend_log("engine-dialog: custom text failed; the native dialog was cancelled");
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            /* Physical queue/widget admission remains busy until native teardown,
-             * even though no consent ticket owns this failed question. */
+            /* Queue and widget admission stay busy until native teardown, though no ticket owns this question. */
             backend_log("engine-dialog: custom text and cancellation failed; no consent ticket issued");
         }
         return 0;
@@ -399,7 +348,7 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
     return (int)InterlockedIncrement(&g_ticket);
 }
 
-/* Find our descriptor in the live queue. NULL means it is no longer there. */
+/* Finds our descriptor in the live queue; NULL when absent. */
 static void *ed_find_descriptor(int gdm_id)
 {
     void *mgr = ed_manager();
@@ -435,18 +384,14 @@ int sh_engine_dialog_poll(int ticket)
         return SH_ENGINE_DIALOG_LOST;
     if (id < 0) return SH_ENGINE_DIALOG_LOST;
 
-    /* Read the dispatched answer first: the engine may remove the descriptor
-     * in the same frame.
-     */
+    /* The dispatched answer is read first: the engine may remove the descriptor in the same frame. */
     answer = InterlockedCompareExchange(&g_answer, 0, 0);
     if (answer >= 0) {
         InterlockedExchange(&g_pending_id, -1);
         return answer ? SH_ENGINE_DIALOG_ACCEPTED : SH_ENGINE_DIALOG_DECLINED;
     }
 
-    /* Without a dispatched action, a present descriptor is pending and a
-     * missing one is declined.
-     */
+    /* Without a dispatched action, a present descriptor is pending and a missing one is declined. */
     desc = ed_find_descriptor(id);
     if (!desc) {
         InterlockedExchange(&g_pending_id, -1);
@@ -507,9 +452,8 @@ void sh_engine_dialog_release(int ticket)
     if (ticket <= 0 || ticket != (int)InterlockedCompareExchange(&g_ticket, 0, 0)) return;
     id = InterlockedExchange(&g_pending_id, -1);
     InterlockedExchange(&g_answer, -1);
-    /* Retire the claim before the native clear: a reentrant button action must
-     * never authorize the abandoned request. An already-polled answer has no
-     * pending ID, so releasing it cannot clear a later native question. */
+    /* The claim is dropped before the native clear so a reentrant button action cannot authorize the abandoned
+     * request; an already-polled answer has no pending ID, so releasing it cannot clear a later question. */
     if (id < 0 || !g_clear_wrapper || !(shell = ed_shell()) || !(descriptor = ed_find_descriptor((int)id))) return;
     if (ed_read_byte(descriptor, ED_DESC_CLEARED, &cleared) && cleared == 1) return;
     params[ED_PARAM_GDM_ID] = (unsigned)id;

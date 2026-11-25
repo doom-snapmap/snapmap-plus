@@ -1,70 +1,33 @@
-/* modregistry.h -- derived edits applied per map.
- *
- * A mod that edits a game file carries the edited copy at the game's name;
- * the builder records the structural diff against the game's text in the
- * product block's "edits" (decl_tree.h) and the copy is never served. The
- * serving index (modserve.c, ms_scope_compute) collects, for the current
- * listing, every game file a serving bundle edits, and serves what this file
- * generates as a synthetic file at the game's name: the game's text with
- * every declared bundle's operations applied in row order. Identical
- * operations merge, additions union, and a field or keyed entry two bundles
- * set to different values is the map's choice (the manifest's "choices",
- * slot "<type>/<decl name>/<path>") else the first in row order, one line.
- * Every game file goes through the same apply; the rules per file are the
- * encounter conductor's (entitydef/ai/conductor/coop/snapmap_default) and the
- * editor's encounter pickers':
- *
- *   conductor   each aiTypeList item a bundle adds whose aiType holds a number
- *               that is not a stock SPAWN_AI_TYPE_* bit is a ported demon: it
- *               gets a spawn type of its own here per map (the lowest free
- *               above the stock bits, 1 << 19 .. 1 << 29, in row order, then
- *               by encounter decl name). The stock flags the item names beside
- *               its number say which stock demon it stands in for
- *               (`aiType = "SPAWN_AI_TYPE_BARON 1048576";`): they are never
- *               served (the item serves its own type alone) and the kill score
- *               reads them (sh_modserve_spawn_type_standin). Every number a
- *               bundle wrote is served as its assigned type wherever that
- *               bundle wrote it: its own snapAiEncounter memberTypes and
- *               snapAiScore aiTypes, and every memberType or aiType its edits
- *               of game files set (a globalAIMods row; a stock encounter's
- *               member, which the edits of several bundles compose as the
- *               union of their types: decl_tree.c). With every free type
- *               taken, a further ported demon shares the type of the first
- *               one standing in for the same stock demon (else the first
- *               one), with one line. A type the map pinned comes first: a
- *               choice whose slot is SH_MR_PIN "<bit>/<encounter decl name>"
- *               with the mod's salt as its key gives that encounter's demon
- *               that bit when it is free (a save pins every declared mod's
- *               types on its row, modmanifest.c), so a mask the map saved
- *               keeps naming the same demon whatever other mods are
- *               installed.
- *   pickers     the Single Demon Encounter, Encounter List and Miniboss
- *               pickers (SH_MR_GROWN_LISTS) offer every single-demon
- *               encounter the caller lists (the installed mods' own: a grown
- *               list never declares a mod, modserve.c), after the game's.
- *   AI Filter   with those (the editor), the AI Filter's "Include AI" flag
- *               picker (SH_MR_FLAG_PICKER) offers every ported demon the map
- *               gives a type, as the spawnAIType_t member of its bit
- *               (sh_modregistry_flag_name: the product adds one member per
- *               free bit to the game's enum, typeinfo.c), labelled with its
- *               encounter's strings. The widget offers, reads and writes only
- *               members of the enum by name (13954591, both renderers: a
- *               value whose enumValue names no member gets no checkbox, a
- *               word of the saved text that names none is ignored, a bit
- *               with no member is not written).
- */
+/* modregistry.h -- derived edits applied per map: the game's text with every declared bundle's recorded edits applied
+ * in row order, served as a synthetic file at the game's name, plus the encounter conductor's spawn-type bits. */
 #ifndef SNAPMAP_PLUS_MODREGISTRY_H
 #define SNAPMAP_PLUS_MODREGISTRY_H
 
 #include <stddef.h>
 #include "modbundle.h"
 
+/* A mod that edits a game file carries the edited copy at the game's name; the builder records the structural diff in
+ * the product block's "edits" (decl_tree.h) and the copy is never served. The serving index (modserve.c,
+ * ms_scope_compute) collects every game file a serving bundle edits for the current listing; identical operations
+ * merge, additions union, and a field or keyed entry two bundles set differently is the map's choice (the manifest's
+ * "choices", slot "<type>/<decl name>/<path>") else the first in row order, with one line. */
+
+/* The conductor: each aiTypeList item a bundle adds whose aiType holds a number that is not a stock SPAWN_AI_TYPE_*
+ * bit is a ported demon and gets its own spawn type per map (the lowest free of 1 << 19 .. 1 << 29, in row order, then
+ * encounter decl name). That number is served as the assigned type wherever the bundle wrote it (its encounters,
+ * scores and game-file edits); the stock flags beside it say which demon it stands in for, are never served and feed
+ * the kill score (sh_modserve_spawn_type_standin). A further demon past the free types shares the type of the first
+ * one standing in for the same stock demon. */
 #define SH_MR_BIT_FIRST 19   /* above SPAWN_AI_TYPE_ZOMBIE_UNWILLING, 1 << 18 */
 #define SH_MR_BIT_LAST  29   /* below SPAWN_AI_TYPE_ANY, 1 << 30 */
 
 #define SH_MR_CLASH_SOURCES 8
 
-/* The AI Filter's "Include AI" flag picker (snappropertyinspector_bitflag). */
+/* The AI Filter's "Include AI" flag picker (snappropertyinspector_bitflag): with `grown` given (the editor) it offers
+ * every ported demon the map gives a type, as the spawnAIType_t member of its bit (sh_modregistry_flag_name: one
+ * member per free bit added to the game's enum, typeinfo.c), labelled with its encounter's strings. The widget offers,
+ * reads and writes only members of the enum by name (13954591, both renderers): a value naming no member gets no
+ * checkbox, a saved word naming none is ignored, and a bit with no member is not written. */
 #define SH_MR_FLAG_PICKER "generated/decls/snappropertyinspector_bitflag/spawnaitypebitflaginspector.decl"
 /* A pinned type's choice slot: SH_MR_PIN "<bit>/<encounter decl name>", the mod's salt its key. */
 #define SH_MR_PIN "spawnAIType_t/"
@@ -72,9 +35,9 @@
  * buf, or NULL when `bit` is not one of the free bits. */
 const char *sh_modregistry_flag_name(unsigned bit, char *buf, size_t cap);
 
-/* The editor's encounter pickers an installed mod's single-demon encounters
- * grow: the Single Demon Encounter, the Encounter List and the Miniboss
- * event's boss list (snappropertyinspector_whitelistencounterdecl[list]). */
+/* The editor's encounter pickers an installed mod's single-demon encounters grow, after the game's: the Single Demon
+ * Encounter, the Encounter List and the Miniboss event's boss list (snappropertyinspector_whitelistencounterdecl[list]).
+ * A grown list never declares a mod (modserve.c). */
 #define SH_MR_GROWN_LIST_COUNT 3
 extern const char *const SH_MR_GROWN_LISTS[SH_MR_GROWN_LIST_COUNT];
 
@@ -112,7 +75,7 @@ typedef struct sh_mr_entry {
     int source;
     unsigned authored, bit;
     unsigned standin;          /* the stock spawn-type bits the item names beside its number, 0 for none */
-    int shared;                /* 1 when no free type was left and it serves another entry's bit */
+    int shared;                /* 1 when no free type is left and it serves another entry's bit */
     int pinned;                /* 1 when the map's pin gave it its bit */
     char *def;                 /* malloc'd */
     char *encounter;           /* malloc'd, NULL for none */
@@ -138,14 +101,12 @@ typedef struct sh_mr_result {
     sh_mr_entry *entries; int nentries;
     sh_mr_rewrite *rewrites; int nrewrites;
     sh_mr_clash *clashes; int nclashes;
-    char **lines; int nlines;  /* what was generated and every clash, one line each */
+    char **lines; int nlines;  /* what is generated and every clash, one line each */
 } sh_mr_result;
 
-/* Generate every target from `n` sources; a target that is one of
- * SH_MR_GROWN_LISTS also offers `grown[0..ngrown)` (encounter decl names),
- * and with `grown` given (the editor) SH_MR_FLAG_PICKER offers every entry's
- * type. `choices` carry the map's pins (SH_MR_PIN). Returns 1 (0 out of
- * memory). */
+/* Generate every target from `n` sources; a target in SH_MR_GROWN_LISTS also offers `grown[0..ngrown)` (encounter
+ * decl names), and with `grown` given (the editor) SH_MR_FLAG_PICKER offers every entry's type. `choices` carry the
+ * map's pins (SH_MR_PIN). Returns 1 (0 out of memory). */
 int  sh_modregistry_generate(const sh_mr_source *src, int n, const sh_mr_target *targets, int ntargets,
                              const sh_mr_choice *choices, int nchoices, const char *const *grown, int ngrown,
                              sh_mr_result *out);
@@ -172,37 +133,31 @@ int  sh_modregistry_stock_bit(unsigned value);
 /* The value of a SPAWN_AI_TYPE_* flag name (`n` characters, any case), with 1;
  * 0 for another word. Values of the game's spawnAIType_t (13954591). */
 int  sh_modregistry_spawn_flag(const char *word, size_t n, unsigned *bit);
-/* A spawn-type value (a memberType or aiType string without its quotes, `n`
- * characters): *own the first number that is not a stock bit (0 for none),
- * *standin the stock bits its other words name (flag names or stock numbers).
- * Returns 1 when it holds such a number. */
+/* A spawn-type value (a memberType or aiType string without its quotes, `n` characters): *own the first number that
+ * is not a stock bit (0 for none), *standin the stock bits its other words name. Returns 1 when it holds such a
+ * number. */
 int  sh_modregistry_type_words(const char *value, size_t n, unsigned *own, unsigned *standin);
-/* An edits JSON array (decl_tree.h) with every number `from[i]` inside the
- * memberType or aiType value of an operation's statement written as `to[i]`
- * (the statements are JSON strings: their quotes read \"). Malloc'd; NULL
+/* An edits JSON array (decl_tree.h) with every number `from[i]` inside the memberType or aiType value of an
+ * operation's statement written as `to[i]` (the statements are JSON strings: their quotes read \"). Malloc'd; NULL
  * when nothing changed. */
 char *sh_modregistry_rewrite_edits(const char *edits, size_t len, const unsigned *from, const unsigned *to, int n,
                                    size_t *out_len);
-/* `text` with `names[0..n)` added to the list block `list` directly inside
- * its `edit` block (`item[i] = "name";`, num raised), each name the list does
- * not already hold (any case). Malloc'd; NULL when nothing was added or the
- * text has no such list. */
+/* `text` with `names[0..n)` added to the list block `list` directly inside its `edit` block (`item[i] = "name";`, num
+ * raised), each name the list does not already hold (any case). Malloc'd; NULL when nothing was added or the text has
+ * no such list. */
 char *sh_modregistry_append_list(const char *text, size_t len, const char *list, const char *const *names, int n,
                                  size_t *out_len);
 /* One value of a bitflag inspector: its enum member's name and its two string ids ("" or NULL leaves one out). */
 typedef struct sh_mr_flag { const char *value, *label, *description; } sh_mr_flag;
-/* `text` with `flags[0..n)` added to the `values` list directly inside its
- * `edit` block (`item[i] = { enumValue = ...; label = ...; description = ...; }`,
- * num raised), each value the list does not already hold. Malloc'd; NULL when
+/* `text` with `flags[0..n)` added to the `values` list directly inside its `edit` block (`item[i] = { enumValue = ...;
+ * label = ...; description = ...; }`, num raised), each value the list does not already hold. Malloc'd; NULL when
  * nothing was added or the text has no such list. */
 char *sh_modregistry_append_flags(const char *text, size_t len, const sh_mr_flag *flags, int n, size_t *out_len);
 /* The string of `key` (a scalar `key = "..."`) anywhere in a decl text, in
  * buf without its quotes; 0 when the text sets none. */
 int  sh_modregistry_decl_string(const char *text, size_t len, const char *key, char *buf, size_t cap);
-/* The encounter a Toybox placeable spawns: an entityDef text of class
- * idPlaceableSnapAIEncounter, its encounterToSpawn in buf. 0 for any other
- * entityDef (the editor's pickers grow with these encounters only, never with
- * the encounters a mod adds to the lists SnapMap chooses from). */
+/* The encounter a Toybox placeable spawns: an entityDef text of class idPlaceableSnapAIEncounter, its
+ * encounterToSpawn in buf. 0 for any other entityDef (the editor's pickers grow with these encounters only). */
 int  sh_modregistry_placeable_encounter(const char *text, size_t len, char *buf, size_t cap);
 
 /* ------------------------------------------------------------ choices --- */
@@ -210,18 +165,15 @@ int  sh_modregistry_placeable_encounter(const char *text, size_t len, char *buf,
 /* 1 when `slot` reads as "<type>/<decl name>/<path>": printable, no blank,
  * quote or backslash, at least three '/'-separated parts (any length). */
 int  sh_modregistry_slot_valid(const char *slot);
-/* The open map's choice for a slot: key NULL or "" removes it. Recorded in the
- * map's manifest (saved with the map) and given to the serving index, which
- * recomputes the map's generated files. Returns the bundles whose serving
- * changed (>= 0), or -1 when the slot or key is not valid. The caller applies
- * a change as after any scope change (modui's scope apply). */
+/* The open map's choice for a slot (key NULL or "" removes it), recorded in the map's manifest and given to the
+ * serving index, which recomputes the map's generated files. Returns the bundles whose serving changed (>= 0), or -1
+ * when the slot or key is not valid; the caller applies a change as after any scope change (modui's scope apply). */
 int  sh_modregistry_choices_set(const char *slot, const char *key);
 /* 1 with the key chosen for `slot`, 0 when the map has no choice for it. */
 int  sh_modregistry_choices_get(const char *slot, char *key, size_t cap);
-/* The console verb `sh_mods choose "<game file>/<path>" "<mod name>"` (an empty
- * name clears): the mod is one the open map uses, named by its name, its
- * folder or its salt (sh_modserve_listed_mod). One line for the console in
- * *out (malloc'd), naming the mod by its name. Returns as sh_modregistry_choices_set. */
+/* The console verb `sh_mods choose "<game file>/<path>" "<mod name>"` (an empty name clears): the mod is one the open
+ * map uses, named by its name, its folder or its salt (sh_modserve_listed_mod). One console line in *out (malloc'd);
+ * returns as sh_modregistry_choices_set. */
 int  sh_modregistry_choose_command(const char *slot, const char *mod, char **out);
 
 #endif /* SNAPMAP_PLUS_MODREGISTRY_H */

@@ -89,9 +89,8 @@ static void requests(void)
             assert(sh_grid_asset_open(bad[i],read_source,release,&r,&out,&bytes)==-1&&calls==r.calls);}}
     assert(!sh_grid_asset_open("maps/modules/classic/classic_blank_room.decl",read_source,release,&r,&out,&bytes));
 }
-/* R-LV4: a mod module whose unit is absent did not open (its world collision was asked for at its own name, and its
- * stand-in served only its decl). Every file the module loader derives from a stand-in's name is the grid room's of
- * its recorded size; its decl and catalog are not translated, and nothing else is. */
+/* A mod module whose unit is absent opens through a stand-in: every file the loader derives from its name is
+ * the grid room's of its recorded size; its decl and catalog are not translated, and nothing else is. */
 static int fake_standin(const char *logical,sh_grid_size *size)
 {
     if(strcmp(logical,"mods/lv4modst/rooms/hall"))return 0;

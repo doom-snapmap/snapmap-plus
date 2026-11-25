@@ -1,9 +1,5 @@
-/* Tests which map object the Play navigation snapshot reads.
- *
- * A conversion reads the map being converted. The editor's map stands in only
- * when it is that object, or when the converted map is unreadable and the
- * editor's map places exactly the converted modules -- never an earlier
- * session's different map. An omitted Blocking Box axis inherits the
+/* Tests which map object the Play navigation snapshot reads: the converted map, with the editor's map standing in
+ * only when it is that object or places exactly the converted modules. An omitted Blocking Box axis inherits the
  * entityDef size (nav_entitydef) during a conversion. */
 #include <windows.h>
 #include <stdio.h>
@@ -113,7 +109,7 @@ static int take(fake_world *w, const int *build, const int *edit, sh_nav_snapsho
     return sh_nav_snapshot_take(&src, &g_map, r);
 }
 
-/* Editor preview and Build Navmesh: no conversion, the edit map as before. */
+/* Editor preview and Build Navmesh: no conversion, the edit map is read. */
 static void test_no_conversion_reads_the_editor(void)
 {
     fake_world w = world();
@@ -149,8 +145,7 @@ static void test_launch_without_editor_reads_the_conversion(void)
     CHECK(r.why[0] == 0);
 }
 
-/* The editor's map is still set from an earlier session. The conversion wins
- * and the old map is never even read. */
+/* A stale editor map is still set: the conversion wins and that map is never read. */
 static void test_stale_editor_map_is_not_read(void)
 {
     fake_world w = world();
@@ -289,7 +284,7 @@ static void test_modules_match(void)
     CHECK(sh_nav_snapshot_modules_match(&m, NULL, 0, 0, NULL, 0));
 }
 
-/* ---- inherited size through the real reader ---------------------------- */
+/* inherited size through the real reader */
 
 static int inherited_only(unsigned entity, float size[3], void *ctx)
 {
@@ -363,11 +358,9 @@ static void test_omitted_axis_inherits_during_conversion(void)
     sh_nav_map_free(&m);
 }
 
-/* The converted copy carries world positions (live: the platform corner at
- * module-local (-1024, 256, 512) read back as world (128, -2688, 512) in a
- * room at (1152, -2944, 0)). Taking a converted snapshot returns its floors
- * and walls to module-local space with the room's origin and orientation; the
- * editor's own map is already local and is left alone. */
+/* The converted copy carries world positions: taking a converted snapshot returns its floors and walls to
+ * module-local space with the room's origin and orientation. The editor's own map is already local and is
+ * left alone. */
 static void to_world(const sh_nav_instance *in, const float p[3], float out[3], int vector)
 {
     static const int xy[8][4] = {{1,0,0,1},{0,-1,1,0},{-1,0,0,-1},{0,1,-1,0},

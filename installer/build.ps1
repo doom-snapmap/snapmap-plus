@@ -1,7 +1,5 @@
 # Build the installer with Windows version resources and its application manifest.
-# The release workflow passes the tag through -Version. goversioninfo is a pinned
-# build tool; resource.syso is regenerated and is not a module dependency.
-# See README.md for usage. Keep this script ASCII for PowerShell 5.1.
+# The release workflow passes the tag through -Version; keep this script ASCII for PowerShell 5.1.
 param(
     [string]$Version = "dev",
     [string]$Out = "snapmap-plus.exe"

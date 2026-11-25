@@ -1,28 +1,9 @@
--- enemy_target.lua: who a demon fights, chosen as DOOM 2016's own demons choose (the Enemy SDK's generic tier).
---
--- DOOM 2016 keeps every demon's social relations in its senses and rebuilds them every think, whatever drives the
--- demon: one row per entity it perceives (players and bots alike, other demons), with a respect and an emotion that
--- its faction graph gives (a SnapMap team makes the faction "team_<n>_demon", players "team_<n>_player") and that
--- what it perceives raises (being hurt by someone makes them hated). ai:relations() reads those rows. The engine
--- never picks an enemy from them by itself: its state machines do, with the condition Shared_SocialRelationAvailable,
--- and a demon whose brain is a script runs none of them. This module is that condition (VK 0x1405F4930, read):
---
---   rows      the relations whose respect and emotion lie in the condition's bands, within 10,000 units (a row
---             with no entity of its own is not range-limited), as the senses' GetRelations gives them (VK
---             0x1404AAA30 / GL 0x1404A91B0);
---   filters   playersOnly / noPlayers (a bot is a player), the awareness band, filterOutOffLimits;
---   the pick  the nearest of the most hostile emotion present (VK 0x1404AAD10 / GL 0x1404A9490), its distance squared
---             in single precision: an entity at no measurable point is never picked (T.measurable).
---
--- A source game whose condition narrows the range gives it: range (units, instead of the 10,000) and flat (distance on
--- the ground plane); DOOM Eternal's class has maxRange, rangeString and use2DChecks for them.
---
--- The bands' defaults are the class's own (its constructor, VK 0x141302930): respect RESPECT_MIN..RESPECT_MAX,
--- emotion EMOTION_MIN..EMOTION_MAX, awareness AIAWARE_UNAWARE..AIAWARE_MAX. A source game's brain names the same
--- condition with the same fields (DOOM Eternal's class has them, its emotion list one longer); a band is read by
--- its name, so a name this game lacks leaves that bound at its default.
---
--- The team rule, bots and infighting are therefore the engine's: nothing here reads a team or lists players.
+-- enemy_target.lua: who a demon fights, chosen as DOOM 2016's own demons choose (the Enemy SDK's generic tier). It
+-- reproduces the condition Shared_SocialRelationAvailable (VK 0x1405F4930) that the engine's state machines use and a
+-- scripted demon never runs: rows from ai:relations() (senses' GetRelations VK 0x1404AAA30 / GL 0x1404A91B0) whose
+-- respect, emotion and awareness lie in the bands and within 10,000 units, then playersOnly / noPlayers filters and
+-- the nearest of the most hostile emotion (VK 0x1404AAD10 / GL 0x1404A9490, distance squared in single precision).
+-- Band defaults are the class's constructor (VK 0x141302930); a source game's condition may narrow range and flat.
 
 local T = {}
 
@@ -39,12 +20,10 @@ T.AWARE = { unaware = 0, lost = 1, suspected = 2, confirmed = 3, max = 4 }
 -- EMOTION_DESTROY_AT_ALL_COSTS..EMOTION_DISLIKE, at AIAWARE_CONFIRMED).
 T.COMBAT = { minEmotion = "EMOTION_DESTROY_AT_ALL_COSTS", maxEmotion = "EMOTION_DISLIKE",
              awareness_min = "AIAWARE_CONFIRMED" }
--- The band the generic tier gives a demon its first enemy in: the combat band, where the demon's perception seeing the
--- entity now (A.can_see: its sight state, seen within the last second, and a clear line) counts as confirmed. 2016's
--- perception raises awareness from its sight stimulus (the record's stimulus update VK 0x140651360), but a demon's
--- relation rows and awareness words are refreshed in turns and by events (the senses update VK 0x1404AE3C0: at spawn,
--- on an encounter's spawn, on the AI manager's turn), and nothing forces a scripted demon's awareness in single player
--- without co-op tracking: a hostile the demon sees is engaged at once, as a stock demon's alert cycle does on sight.
+-- The band the generic tier gives a demon its first enemy in: the combat band, where an entity the demon sees now
+-- (A.can_see: sight state, seen within the last second, a clear line) counts as confirmed. Relation rows and
+-- awareness are refreshed only in turns and by events (senses update VK 0x1404AE3C0) and nothing forces a scripted
+-- demon's awareness in single player, so a hostile it sees is engaged at once.
 T.FIND = { minEmotion = "EMOTION_DESTROY_AT_ALL_COSTS", maxEmotion = "EMOTION_DISLIKE",
            awareness_min = "AIAWARE_CONFIRMED", sight_confirms = true }
 
@@ -75,10 +54,8 @@ local function is_player(x)
   return ok and v == true
 end
 
---- The relations of demon e that condition p admits, in the engine's order: { { entity, respect, emotion,
--- awareness, distance }, ... } with numbers for the words. The rows are the engine's: the adapter's A.relations when
--- it has one, else Snapmap+'s own e:relations() (a brain library emitted before the adapter had the call still gets
--- the engine's rows); none when this Snapmap+ cannot read them.
+--- The engine's relation rows of demon e, from the adapter's A.relations, else from e:relations(); nil when neither
+-- can read them.
 local function rows_of(A, e)
   if A.relations then return A.relations(e) end
   local ok, has = pcall(function() return e.relations end)
@@ -87,6 +64,8 @@ local function rows_of(A, e)
 end
 T.rows_of = rows_of
 
+--- The relations of demon e that condition p admits: { { entity, respect, emotion, awareness, distance }, ... } with
+-- numbers for the words.
 function T.relations(A, e, p)
   p = p or {}
   local b = T.band(p)
@@ -111,17 +90,16 @@ function T.relations(A, e, p)
   return out
 end
 
--- 2016 measures the pick's distance squared in single precision against FLT_MAX (VK 0x1404AAD10: the best starts at
--- 3.4028235e38 and only a smaller square replaces it), so a row whose entity stands at no measurable point (NaN,
--- infinite, or so far that the square overflows a float) is never the pick, though it counts as a relation. Such a
--- row can only be one with no range (r.unlimited): a ranged row fails the range first.
+-- 2016 starts the pick's best at FLT_MAX (VK 0x1404AAD10) and only a smaller squared distance replaces it, so a row
+-- whose entity is at no measurable point (NaN, infinite, or a square past a float) is never picked but still counts
+-- as a relation. Only a row with no range (r.unlimited) can be unmeasurable: a ranged row fails the range first.
 local FLT_MAX = 3.4028234663852886e38
 local function measurable(d) return type(d) == "number" and d == d and d * d < FLT_MAX end
 T.measurable = measurable
 
 --- 2016's pick among admitted relations: the nearest measurable row of the most hostile emotion present, or nil.
--- The most hostile emotion is the first row's in the engine's order, measurable or not, so a bucket whose rows are
--- all unmeasurable gives no pick (it does not give way to a less hostile one).
+-- The most hostile emotion counts whether or not its rows are measurable, so a bucket of only unmeasurable rows gives
+-- no pick (it does not give way to a less hostile one).
 function T.pick(list)
   local worst
   for _, r in ipairs(list) do

@@ -57,7 +57,7 @@ to install (or to update when a newer version is out), and takes any command abo
 func main() {
 	args, plain := stripPlain(os.Args[1:])
 	setupOutput(plain)
-	// Remove replaced installer images and retire earlier releases' bookkeeping files, at every start.
+	// Remove replaced installer images and remove bookkeeping files a previous install placed that this release does not ship, at every start.
 	startupCleanup()
 	// A stale installer updates itself before it touches the game, and the new image does the work.
 	if relaunched, code := selfUpdateFirst(os.Args[1:]); relaunched {

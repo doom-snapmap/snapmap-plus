@@ -1,26 +1,9 @@
-/* modzip.h -- the product's ZIP form: one writer and one reader, shared by
- * the rawmap and prefab exports (modexport.c) and the mod store's build
- * archives.
- *
- * The writer stores every entry (method 0) with its CRC-32, a fixed DOS time
- * (1980-01-01, so the same content is byte-identical) and the UTF-8 flag on a
- * non-ASCII name. It writes ZIP64 records exactly where a value does not fit
- * the classic field (an entry of 4 GiB or more, an offset past 4 GiB, 65,535
- * entries or more, a directory past 4 GiB), so an archive of any size and any
- * number of files can be written, and an archive that fits is the ordinary
- * ZIP it always was. The reader reads both. It trusts no field of an archive:
- * at open it checks the end record, the ZIP64 locator and end record when the
- * classic fields point to them, the directory's bounds, and for every entry
- * the method (stored (0) or deflate (8) only), the encryption flag, the ZIP64
- * extra field a marker needs (well formed, holding exactly the values the
- * markers ask for), a stored entry's equal sizes, a local record and data
- * that lie before the directory, a name
- * without NUL that sh_zip_name_ok accepts, and no two names that differ only
- * in case; anything else refuses the whole archive with one sentence ending
- * "Ask whoever shared it to export it again". A read then checks the local
- * record, bounds the bytes it allocates by `max`, and checks the CRC-32. A
- * reader may also stand over a plain folder (dir set, entries added with
- * sh_zip_reader_add): each entry is then a file under that folder. */
+/* modzip.h -- the product's ZIP form: one writer and one reader, shared by the rawmap and prefab exports
+ * (modexport.c) and the mod store's build archives. The writer stores every entry (method 0) with its CRC-32 and
+ * a fixed DOS time so the same content is byte-identical, and writes ZIP64 records only where a value does not fit.
+ * The reader trusts no field: at open it checks the end records, the directory bounds and every entry's method
+ * (stored or deflate), flags, extra fields, name and offsets, and refuses a bad archive with one sentence; a read
+ * bounds its allocation by `max` and checks the CRC-32. A reader may stand over a plain folder (dir set). */
 #ifndef SNAPMAP_PLUS_MODZIP_H
 #define SNAPMAP_PLUS_MODZIP_H
 

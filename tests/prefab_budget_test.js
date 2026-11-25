@@ -1,6 +1,5 @@
-/* The Prefabs tab's Limits arithmetic (prefab_budget.js) against the live-measured editor rows of build
-   13954591, plus the page contract: one scene parse shared with the preview, Limits under the preview,
-   requests only for the selected prefab. Pure ASCII. */
+/* The Prefabs tab's Limits arithmetic (prefab_budget.js) against editor rows of build 13954591, plus the page
+   contract: one scene parse shared with the preview, Limits under the preview, requests only for the selection. */
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -15,7 +14,7 @@ function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
 function near(a, b) { return Math.abs(a - b) < 1e-9; }
 
 const LIMITS = [768, 14284, 10384, 2038, 672, 1000, 8192, 8192, 0, 0, 500000, 64];
-const USAGE = [32, 67, 91, 1, 30, 0, 1, 0, 1552, 12, 2545, 0];   /* test1 baseline, R-002 */
+const USAGE = [32, 67, 91, 1, 30, 0, 1, 0, 1552, 12, 2545, 0];   /* test1 baseline */
 const C90 = 'maps/modules/ind_connections/c_ind_90.decl';
 const table = {
   gen: 3, limits: LIMITS, usage: USAGE, reached: 0,
@@ -42,9 +41,8 @@ const table = {
   modules: {},
   aliases: {c_ind_90: C90}
 };
-/* c_ind_90 as read live: 1 floor, 8 walls, 2 portals; card KB 2926/808/50; GAME soundenv, spawnnode,
-   3 flight (template block 50 + 250 KB, 2 entities); VIEW light/probe, light/point, speaker on the
-   filter mask 0x420001. */
+/* c_ind_90: 1 floor, 8 walls, 2 portals; card KB 2926/808/50; GAME soundenv, spawnnode, 3 flight (template
+   block 50 + 250 KB, 2 entities); VIEW light/probe, light/point, speaker on the filter mask 0x420001. */
 table.modules[C90] = {own: [0, 0, 33, 0, 0, 0, 0, 0, 2926, 808, 50, 0], templ: [0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 300, 0],
                       view: [0, 3, 6, 1, 1, 0, 0, 0, 0, 0, 150, 0], mask: 0x420001,
                       parts: [[0x1, 0, [0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 250, 0]],
@@ -58,7 +56,7 @@ function ent(inherit, className, edit) {
   return {entityDef: {className: className || 'idEntity', inherit: inherit, state: {edit: edit || {}}}};
 }
 
-/* Single rows reproduce the measured placement deltas of R-002. */
+/* Single rows reproduce the measured placement deltas. */
 check(same(budget.sum([ent('snapmaps/placeablesnapaiencounter/imp')], [], table).block, [1, 1, 2, 0, 1, 0, 0, 0, 0, 0, 1500, 1]), 'imp_enc');
 check(same(budget.sum([ent('snapmaps/props/new/crate01')], [], table).block, [1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 25, 0]), 'crate01');
 check(same(budget.sum([ent('snapmaps/volume/blocking', 'idVolume_Blocking')], [], table).block, [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 10, 0]),
@@ -96,9 +94,8 @@ check(same(unk.unknownModules, ['maps/modules/x/not_resident.decl']) && same(unk
       'an unknown module is reported once and adds nothing');
 check(budget.leaf('maps/modules/ind_dlc/ind_totally_blank_room_4x.decl') === 'ind_totally_blank_room_4x', 'leaf');
 
-/* A module prefab file: each entity filtered by its instance's saved layerMask | autoView, and the
-   module's template groups filtered by the same mask (live: a door on the disabled layer 0x1000000
-   is not counted). */
+/* A module prefab file: each entity is filtered by its instance's saved layerMask | autoView, and the module's
+   template groups by the same mask (a door on the disabled layer 0x1000000 is not counted). */
 const fileDoc = {
   instances: [{moduleName: C90, layerMask: 1}, {moduleName: C90, layerMask: 0x400001}],
   instanceEntities: {keyValues: [0, 2, 3, 4], values: [10, 11, 12, 13]},
@@ -123,7 +120,7 @@ check(budget.sum([Object.assign(ent('snapmaps/props/new/crate01'), {layerMask: 0
 check(same(budget.sum([], [{name: C90}], table).block, budget.sum([], [C90], table).block),
       'without a saved mask the palette default blocks are used');
 
-/* Meter formulas: the HUD ratios, R-002 baseline. */
+/* Meter formulas: the HUD ratios. */
 const r = budget.meterRatios(USAGE, LIMITS);
 check(near(r.network, 30 / 672), 'NETWORK = network / limit');
 check(near(r.objects, (1552 + 12 + 2545) / 500000), 'OBJECTS = max(entities, KB sum over the KB limit sum)');
@@ -225,6 +222,10 @@ check(viewport.includes('function load(sceneText, parsedDoc)'), 'the viewport ac
 check(host.includes('cmd == L"budgetTable"') && host.includes('cmd == L"budgetUsage"') && host.includes('ui_budget_poll();'),
       'host routes budget requests and re-sends the table after a rebuild');
 check(host.includes('\\"sig\\":\\""'), 'prefabDetail carries a content signature');
+
+const budgetPoll = host.match(/static void ui_budget_poll\(\)\s*\{([\s\S]*?)\n\}/)[1];
+check(budgetPoll.includes('SH_BUDGET_GENERATION') && !budgetPoll.includes('SH_BUDGET_TABLE'),
+      'polling an unchanged table does not allocate a copy');
 
 if (failures) { console.error(failures + ' prefab budget check(s) failed'); process.exit(1); }
 console.log('prefab_budget_test: OK');

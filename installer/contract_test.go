@@ -13,8 +13,8 @@ import (
 // migration the DOOM folder holds exactly the detected build's pair and nothing else of ours, and the
 // data folder holds the two executables, install.json and the player's own data.
 
-// ourStandIn is a stand-in for a DLL of an earlier Snapmap+ release: it carries the marker every
-// Snapmap+ DLL does, and bytes no current bundle has.
+// ourStandIn is a stand-in for a DLL a previous install placed that this release does not ship: it
+// carries the Snapmap+ marker and bytes no current bundle has.
 func ourStandIn(name string) string {
 	return "MZ stand-in for " + name + " .\\snapmap-plus\\ of an earlier release"
 }
@@ -118,8 +118,8 @@ func TestContractFromSnapHak(t *testing.T) {
 	wantDoom(t, "SnapHak install", r.doom, "XINPUT1_4.dll", currentUIDll, "bink2w64.dll", "superscriptx64.dll", "dinput8.dll.doomforge.rollback")
 	wantData(t, "SnapHak install", r.data)
 	for _, rel := range []string{`prefabs\arena.json`, `strings\en.json`, "rawmap.json"} {
-		if !exists(filepath.Join(r.data, rel)) {
-			t.Errorf("%s did not come across", rel)
+		if !exists(filepath.Join(profile, "snaphak", rel)) || exists(filepath.Join(r.data, rel)) {
+			t.Errorf("%s was moved from the original profile", rel)
 		}
 	}
 	if err := cmdUninstall(flags{yes: true}); err != nil {
@@ -127,13 +127,13 @@ func TestContractFromSnapHak(t *testing.T) {
 	}
 	wantDoom(t, "uninstall", r.doom, "bink2w64.dll", "superscriptx64.dll", "dinput8.dll.doomforge.rollback")
 	wantData(t, "uninstall", r.data)
-	if exists(statePath(r.data)) || !exists(filepath.Join(r.data, "prefabs", "arena.json")) {
+	if exists(statePath(r.data)) || !exists(filepath.Join(profile, "snaphak", "prefabs", "arena.json")) {
 		t.Error("uninstall kept install.json or removed the player's prefabs")
 	}
 }
 
 // From v0.2.1-beta.19 on the April 2024 build: the 2018 pair it left goes, whether recorded or not,
-// and the April 2024 pair is installed from a bundle that no longer carries the 2018 files.
+// and the April 2024 pair is installed from a bundle that does not carry the 2018 files.
 func TestContractFromBeta19Layout(t *testing.T) {
 	for _, recorded := range []bool{true, false} {
 		t.Run(map[bool]string{true: "recorded", false: "unrecorded"}[recorded], func(t *testing.T) {
@@ -178,8 +178,8 @@ func TestContractFromBeta19Layout(t *testing.T) {
 }
 
 // From v0.2.1-beta.20: both pairs, backups of our own DLLs in DOOM, a backup of a file that was not
-// ours, and every retired bookkeeping file. The update leaves the contract, and uninstall restores the
-// file that was there before Snapmap+.
+// ours, and every bookkeeping file a previous install placed that this release does not ship. The
+// update reaches the contract, and uninstall restores the file that was there before Snapmap+.
 func TestContractFromBeta20Layout(t *testing.T) {
 	r := newUpdateRig(t, "v1.0.0-beta.2")
 	stable := filepath.Join(r.data, selfExeAsset)
@@ -217,8 +217,8 @@ func TestContractFromBeta20Layout(t *testing.T) {
 		}
 	})
 	for _, want := range []string{"with both DOOM builds' files, backups in the DOOM folder and retired installer records", "Tidying the data folder",
-		"installer-files.json (folded into install.json)", "snapmap-plus.exe.old", "Other programs' files Snapmap+ had replaced",
-		"Other programs' files (left in place):", "dinput8.dll.doomforge.rollback", `override-backups\ (an empty folder of an earlier release)`} {
+		"installer-files.json (retired installer record)", "snapmap-plus.exe.old", "Other programs' files Snapmap+ had replaced",
+		"Other programs' files (left in place):", "dinput8.dll.doomforge.rollback", `override-backups (empty folder)`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
@@ -303,8 +303,8 @@ func TestContractFreshInstall(t *testing.T) {
 	wantData(t, "fresh install", r.data)
 }
 
-// An old bundle that still carries the 2018 pair installs only the detected build's pair, so it can
-// never put the other build's files back.
+// A bundle that carries the 2018 pair installs only the detected build's pair, so it never puts the
+// other build's files back.
 func TestContractOldUniversalBundleCannotRepollute(t *testing.T) {
 	r := newUpdateRig(t, "v1.0.0-beta.2")
 	m := newMockGitHub(t)

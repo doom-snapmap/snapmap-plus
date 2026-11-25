@@ -4,9 +4,7 @@
 
 #include <stddef.h>
 
-/* What the player is told after a recovered fault: the text Error(6) carries
- * to the engine's own error report, and the crash record's engine text, which
- * the Snapmap+ window shows with its offer to send a report. No '%'. */
+/* The text Error(6) carries to the engine's error report and the crash record's engine text. No '%'. */
 extern const char SHIELD_RECOVERED_TEXT[];
 
 int  recovery_install(void);   /* install the Frame detour; return 1 on success */
@@ -15,22 +13,19 @@ void recovery_arm(void);       /* the VEH calls this after surviving a bad-load 
  * until that idCommonLocal::Frame call returns, 0 otherwise, -1 without the hook. */
 void recovery_note_redirect(void);
 int  recovery_redirected_this_frame(void);
-/* The install's own byte checks, so a test can run them on the real executables: Frame's stolen prologue, and
- * the level byte (7) the FatalError downgrade expects. 1 when the bytes are as expected. */
+/* The install's byte checks: Frame's stolen prologue and the FatalError level byte (7); 1 when as expected. */
 int recovery_frame_prologue_ok(const void *frame);
 int recovery_fatalerror_site_ok(const void *fatalerror);
 void log_engine_error_text(void); /* the VEH's C++-throw path records a masked FatalError's verbatim text */
 int  shield_last_engine_msg(char *out, size_t n); /* SEH-guarded read of the engine's last-error text; 1 if non-empty */
-/* The sentence shown after the save guard dismisses the engine's offer to
- * delete a save it could not load (GDM 0x1D). It claims only what the
- * dismissal guarantees: no button ran, so the game did not delete it. */
+/* The sentence shown after the save guard dismisses the engine's offer to delete a save it could not
+ * load (GDM 0x1D); no button ran, so nothing was deleted. */
 extern const char SHIELD_DAMAGED_SAVE_TEXT[];
 /* Show one sentence in the engine's own notice on a later frame (the newest
  * wins). Main thread. */
 void shield_tell(const char *text);
-/* Snapmap+ refused the map being loaded (rawmap.c's parse refusal): for the
- * next frames the guard dismisses the engine's "damaged save" notice and its
- * offer to replace the map with the published version. Any thread. */
+/* Snapmap+ refused the map being loaded: for the next frames the guard dismisses the engine's "damaged
+ * save" notice and its offer to replace the map with the published version. Any thread. */
 void shield_note_refused_load(void);
 
 #endif /* SHIELD_RECOVERY_H */

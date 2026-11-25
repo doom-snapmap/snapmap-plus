@@ -1,12 +1,6 @@
-/* level_templates_sigs.c -- the private signatures of level_templates.c, kept apart so the two-image test
- * (tests/level_templates_sigs_test.c) links them without the engine side.
- *
- * Build 13954591, read in Ghidra (logs/shared-ghidra/ed1/): inside idGameLocal::LoadMap's snapshot-template walk,
- * the first copy of the entityDef resource list (mov [rbp-0x60],0x870000 and the cleared idList, then
- * xor r8d,r8d; lea rdx,[rbp-0x70]; lea rcx,[manager]; call copy; the count test) and the second copy after
- * "When creating template for entity def %s, additional entity defs were loaded" (the count compare, the warning
- * call, the same three argument loads and call, then the template's release). Both sequences are byte-identical in
- * the two executables apart from their relative operands, and each is the only match in each. */
+/* level_templates_sigs.c -- the signatures of level_templates.c, kept apart so the test links them without the
+ * engine side. They cover the two entityDef list copies in idGameLocal::LoadMap's template walk; each matches
+ * once in both executables. */
 #include <stddef.h>
 #include "level_templates.h"
 

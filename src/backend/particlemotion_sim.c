@@ -1,10 +1,6 @@
-/* particlemotion_sim.c -- the simulation and the quad placement of particlemotion.h. No engine here: the detour
- * (particlemotion.c) and the test (tests/particlemotion_test.c) link it alike.
- *
- * The forces and the integrator are DOOM Eternal's `gpuparticlesimulate` commands (25216728, read from the
- * program): VORTEXGRID 1, VORTEX 2, ACCELERATION 7, BROWNIAN 9, VELOCITYFIELD 13, ATTRACTOR_POINT / AXIS / PLANE
- * 15 to 17, EMITTER_DRAG 47 (the emitter taken at rest), INTEGRATE 20. Doomforge's
- * doom2016/effects/particle_motion.py is the same arithmetic in Python; change both together. */
+/* particlemotion_sim.c -- the particle simulation and quad placement of particlemotion.h; pure, no engine calls.
+ * The forces follow DOOM Eternal's `gpuparticlesimulate` commands (VORTEX, ACCELERATION, BROWNIAN, ATTRACTOR_*,
+ * EMITTER_DRAG, INTEGRATE); Doomforge's doom2016/effects/particle_motion.py is the same arithmetic, so change both. */
 #include <math.h>
 #include <string.h>
 
@@ -64,8 +60,8 @@ int sh_motion_collides(const sh_motion *m)
     return m && m->collide_thickness > 0.0f;
 }
 
-/* Eternal's COLLISION_TEST, RESPONSE and KILL (simulate commands 10 to 12) against the first plane the next step
- * crosses: changes p and v; 1 when the particle dies. */
+/* Tests the first plane the next step crosses (simulate commands 10 to 12: test, response, kill), changing p and
+ * v. Returns 1 when the particle dies. */
 static int collide(const sh_motion *m, const sh_motion_planes *pl, float t, float dt, float scale, float p[3],
                    float v[3])
 {
@@ -87,8 +83,6 @@ static int collide(const sh_motion *m, const sh_motion_planes *pl, float t, floa
     }
     return 0;
 }
-
-/* ------------------------------------------------------------------------------------ parents and children */
 
 int sh_family_role(const uint8_t *stage)
 {
@@ -200,8 +194,8 @@ static float uniform(uint32_t seed, uint32_t step, uint32_t axis)
 
 static float fract(float x) { return x - floorf(x); }
 
-/* Eternal's VEL_SPHERE (its initialise program's command 10): a direction even over the sphere, the size the
- * radius x sqrt(u). The three numbers are drawn under a step index no integration step reaches. */
+/* Applies the launch speed factor and adds the launch ball (Eternal's VEL_SPHERE, command 10): a direction even over
+ * the sphere, the size the radius x sqrt(u). The numbers are drawn under a step index no integration step reaches. */
 void sh_motion_launch(const sh_motion *m, uint32_t seed, float v0[3])
 {
     float a, z, k, s;
@@ -219,8 +213,8 @@ void sh_motion_launch(const sh_motion *m, uint32_t seed, float v0[3])
     v0[2] += z * s;
 }
 
-/* Eternal's vortex noise: per unit cell a random axis, the field its cross product with the offset from the
- * cell's centre under a smooth kernel. */
+/* The vortex noise field: per unit cell a random axis, the field its cross product with the offset from the cell's
+ * centre under a smooth kernel. */
 static void noise(const float q[3], float out[3])
 {
     float c[3], f[3], p[3], g[3], d, len2, w;

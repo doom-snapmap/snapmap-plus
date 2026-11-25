@@ -8,11 +8,9 @@ import (
 	"sync"
 )
 
-// Everything the installer prints goes through ui, so every command and the interactive prompt share one
-// shape: a titled section per phase with a rule under it, two-column key and value lines, indented file
-// lists, one marker-prefixed result line per step, and prompts set apart by a blank line. Colour is used only
-// on a console stream that accepted virtual-terminal processing; --plain and NO_COLOR turn it off, and any
-// other writer (a pipe, a file, a test buffer) never receives an escape code.
+// Everything the installer prints goes through ui: titled sections, key and value lines, file lists,
+// marker-prefixed result lines and prompts. Colour is used only on a console stream that accepted
+// virtual-terminal processing; --plain and NO_COLOR turn it off, and any other writer never gets an escape code.
 
 // Result markers, two ASCII characters each so the text after them lines up.
 const (

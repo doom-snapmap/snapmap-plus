@@ -357,7 +357,7 @@ static void test_custom_text_failure(void)
         reset();
         previous = sh_engine_dialog_ask(0x29, 6, "Earlier question");
         CHECK(previous > 0);
-        queue_reset(); /* The earlier descriptor has fully retired. */
+        queue_reset(); /* The first descriptor has fully retired. */
         g_fail_assign = 1;
         g_fail_clear = cancel_faults;
         CHECK(!sh_engine_dialog_ask(0x29, 6, "Install package?"));

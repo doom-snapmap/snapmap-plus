@@ -1,47 +1,39 @@
-/* File-based previews for materials and direct images. Resolve installed
- * index/resource records, then decode DEFLATE and BCn on the CPU. This
- * complements the VMTR atlas route and never changes game files.
- */
+/* File-based previews for materials and direct images, decoded on the CPU from installed resource records.
+ * Complements the VMTR atlas route; never writes game files. */
 #ifndef BACKEND_IMGPREVIEW_H
 #define BACKEND_IMGPREVIEW_H
 
-/* Startup note for the log. Nothing needs setting up: resource indexes are parsed lazily on the
- * first request, and optional Wwise/.vmtr catalog metadata waits for its category. Returns 1. */
+/* Startup log note; always returns 1. Resource indexes parse lazily on the first request. */
 int sh_imgpreview_install(void);
 
-/* Resolve a material name through its decl to an image, or accept a direct image name, decode it to
- * RGBA, and publish through sh_preview_publish. Returns SH_PREVIEW_PUBLISHED, SH_PREVIEW_STALE, or
- * SH_PREVIEW_FAILED with the plain reason the Assets tab shows in *why. Call it only AFTER the
- * megatexture route has declined for a material request. */
+/* Resolves a material name through its decl to an image (or takes a direct image name), decodes it to RGBA
+ * and publishes via sh_preview_publish. Returns SH_PREVIEW_PUBLISHED, _STALE or _FAILED (reason in *why);
+ * call it only after the megatexture route declined a material request. */
 int sh_imgpreview_produce(const char *name, unsigned long generation, const char **why);
 
-/* Decode exactly the named Image record. Unlike the producer above, this never treats a same-named
- * Material as authoritative and is called before any VMTR work for a typed Image selection. */
+/* Decodes exactly the named Image record, never a same-named Material; called before any VMTR work for a
+ * typed Image selection. */
 int sh_imgpreview_produce_image(const char *name, unsigned long generation, const char **why);
 
 /* The SH_ASSET_* type ids live in the shared ABI header -- the UI sends one across the iface. */
 #include "../common/snapmap_plus_iface.h"
 
-/* Every installed asset name of one type for the Assets browser, one per line, as owned interface
- * text (sh_iface_text_free); NULL for an invalid kind, unavailable data or when memory runs out
- * ("" when the kind has no names). Base index metadata is compacted after parsing; the Wwise sound
- * union and decl-less .vmtr material union are loaded only for those kinds. */
+/* Every installed asset name of one type, one per line, as owned interface text (sh_iface_text_free); NULL
+ * for an invalid kind, unavailable data or out of memory, "" when the kind has no names. The Wwise and
+ * .vmtr unions load only for their kinds. */
 char *sh_imgpreview_list(int kind);
 
-/* Check a selectable name against the installed catalog without calling the
- * engine. Use this before native find-or-create lookups, whose missing-name
- * behavior can raise an engine error. Returns 1 when indexed.
- */
+/* Checks a name against the installed catalog without calling the engine; use it before native
+ * find-or-create lookups, which raise an engine error for a missing name. Returns 1 when indexed. */
 int sh_imgpreview_has(int kind, const char *name);
 
-/* Internal cooked-geometry record kind. It is intentionally outside SH_ASSET_*: baseModel rows are
- * implementation payloads behind an md6Def, not names the Assets browser should offer directly. */
+/* Internal cooked-geometry record kind, outside SH_ASSET_*: baseModel rows sit behind an md6Def and are
+ * never offered by the Assets browser. */
 #define SH_IMGPREVIEW_BASEMODEL_KIND 250
 
 /* Read one exact installed-resource payload by indexed kind/name. The caller owns *out_bytes and frees
  * it with free(). `max_bytes` is a hard allocation/decompression ceiling; oversize and missing records
- * fail without allocating. This is the read-only bridge used by the Prefab Details renderer, which
- * decodes geometry lazily without copying any game asset into Snapmap+ itself. */
+ * fail without allocating. Read-only; used by the Prefab Details renderer. */
 int sh_imgpreview_read_payload(int kind, const char *name, size_t max_bytes,
                                unsigned char **out_bytes, size_t *out_len);
 

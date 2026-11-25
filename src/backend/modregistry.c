@@ -1,7 +1,6 @@
-/* modregistry.c -- see modregistry.h. The per-map apply of the declared
- * bundles' derived edits (decl_tree.c) and the conductor's spawn-type bits.
- * No engine calls and no index access: the serving index (modserve.c)
- * collects the sources and serves the result. */
+/* modregistry.c -- see modregistry.h. The per-map apply of the declared bundles' derived edits (decl_tree.c) and the
+ * conductor's spawn-type bits; no engine calls and no index access (the serving index, modserve.c, collects the
+ * sources and serves the result). */
 #include <windows.h>
 #include <ctype.h>
 #include <stdint.h>
@@ -617,11 +616,9 @@ static int mr_count(const char *text, size_t len, const char *needle)
     return c;
 }
 
-/* The body's clip blocks, counted by structure: an `anim "<clip>" {` block
- * directly inside the top-level `events` block. An alias row names its clip
- * with the same word but has no block, and the composer may write it across
- * several lines, so a line test miscounts it (V2c: 228 for 227). Quoted text
- * is skipped; `//` comments run to the line end. */
+/* The body's clip blocks, counted by structure: an `anim "<clip>" {` block directly inside the top-level `events`
+ * block. An alias row names its clip without a block and may span lines, so a line test miscounts it; quoted text is
+ * skipped and `//` comments run to the line end. */
 int sh_modregistry_body_clips(const char *text, size_t len)
 {
     size_t i = 0;
@@ -696,10 +693,6 @@ static char *mr_unquote(const sh_dt_node *n)
     return sh_textn(v, len);
 }
 
-/* The conductor's rule: each aiTypeList item a source added whose aiType
- * holds a number that is not a stock bit gets a bit assigned per map (its
- * stock words are the demon it stands in for), and that source's encounters
- * and scores are served with it. */
 /* The bit a map pinned for a source's encounter (a choice SH_MR_PIN "<bit>/<encounter>" keyed by the source's
  * salt), 0 for none. */
 static unsigned mr_pin(const sh_mr_choice *choices, int nchoices, const char *key, const char *encounter)
@@ -835,7 +828,7 @@ static int mr_conductor(sh_dt *t, const sh_mr_source *src, int n, const sh_mr_ch
     }
     /* A pin no listed demon claims is a demon of this map whose content is not here (its mod's folder is absent,
      * modmanifest.c keeps its pin at a save): its type stays out of the others' reach while a free one is left, so
-     * the map's AI Filters and the demon keep their type when the content is back (R-LB1). */
+     * the map's AI Filters and the demon keep their type when the content is back. */
     {
         unsigned reserved = 0;
         size_t pl = strlen(SH_MR_PIN);

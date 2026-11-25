@@ -341,8 +341,7 @@ int main(void)
     boxes[1].obstacle_only=1;n=bake(2,24,80);
     CHECK(n>0);CHECK(!contains(n,256,256,16));
     for(i=0;i<n;i++)CHECK(source[i]==0);
-    /* Sweeps use actual bottoms and continuous clipping. A one-unit wall
-     * between old sample locations must not disappear. */
+    /* Sweeps use actual bottoms and continuous clipping: a one-unit wall between sample locations must not disappear. */
     {
         double s[3]={0,64,0},e[3]={512,64,0};
         box(0,173,0,174,128,0,200);

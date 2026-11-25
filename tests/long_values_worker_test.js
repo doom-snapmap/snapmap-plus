@@ -1,12 +1,10 @@
 'use strict';
-/* The long-values flow of prefab_mods_test against the mod store Worker's local runtime:
- *   node tests/long_values_worker_test.js <miniflare module> <snapmap-web checkout>
- * The Worker (snapmap-web api/worker.js) runs under Miniflare on a loopback port;
- * prefab_mods_test.exe (built by run-tests.ps1) then builds a mod with a 2,000-character
- * name and author, a 10,000-character homepage and a carried file 60 folders deep whose
- * request path is 5,000 bytes, in mods folders under a long path; archives and publishes
- * it to that Worker, saves and reads a map's rows naming it, downloads it into the map's
- * place and installs it, each value whole (SMP_LONG_ONLY, SMP_STORE_URL). */
+/* Runs the long-values flow of prefab_mods_test against the mod store Worker (snapmap-web api/worker.js) under
+ * Miniflare on a loopback port:  node tests/long_values_worker_test.js <miniflare module> <snapmap-web checkout>
+ * prefab_mods_test.exe (built by run-tests.ps1) builds a mod with a 2,000-character name and author, a 10,000-character
+ * homepage and a carried file 60 folders deep (request path 5,000 bytes), archives and publishes it to the Worker,
+ * saves and reads a map's rows naming it, then downloads and installs it, each value whole
+ * (SMP_LONG_ONLY, SMP_STORE_URL). */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');

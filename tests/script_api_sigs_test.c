@@ -1,16 +1,6 @@
-/* script_api_sigs_test.c -- the engine sites the mod-script API calls
- * (src/backend/script/script_api_common.c), checked on each build 13954591
- * executable given on the command line:
- *   - every private signature resolves to one match at its recorded RVA;
- *   - the class vtables the API compares against carry their RTTI names
- *     (idAI2, idPlayer, idAIHealth), and idAIHealth's +0x58 is Heal and +0xD8
- *     the GetHealth that reads a float at +0x1C;
- *   - idGameLocal vtable +0x220 (the game clock) forwards to the time object
- *     at +0x49D210, slot +0xC8;
- *   - the trace query's immediate branch tests the result pointer and the
- *     game's trace manager is the one at idGameLocal +0xE0878 the laser
- *     hazard passes (lea/add rcx,0xE0878 before its call).
- * Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
+/* script_api_sigs_test.c -- checks, on each build 13954591 executable given on the command line, the engine sites
+ * the mod-script API calls (src/backend/script/script_api_common.c): signatures, class vtables, the game clock and the
+ * trace query. Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

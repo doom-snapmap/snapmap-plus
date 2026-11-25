@@ -67,8 +67,7 @@ func detectLegacy(doom string) []string {
 
 // removeLegacy reports files it removed and leaves locked files behind.
 // It prunes empty Qt plugin directories but retains the snaphak directory.
-func removeLegacy(doom string, files []string) []string {
-	var removed []string
+func removeLegacy(doom string, files []string) {
 	list := ui.List("Removed files")
 	for _, rel := range files {
 		if err := os.Remove(filepath.Join(doom, rel)); err != nil {
@@ -77,14 +76,12 @@ func removeLegacy(doom string, files []string) []string {
 			}
 			continue
 		}
-		removed = append(removed, rel)
 		list.Add(rel)
 	}
 	list.Close()
 	removeIfEmpty(filepath.Join(doom, "plugins", "platforms"))
 	removeIfEmpty(filepath.Join(doom, "plugins"))
 	removeIfEmpty(filepath.Join(doom, "platforms"))
-	return removed
 }
 
 // dropLegacyBackups removes recorded legacy DLL backups so uninstall does not

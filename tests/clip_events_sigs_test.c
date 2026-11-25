@@ -1,13 +1,9 @@
-/* clip_events_sigs_test.c -- the engine sites clip events detours (src/backend/clip_events_sigs.c,
- * clip_events.c), checked on each build 13954591 executable given on the command line:
- *   - each event lookup resolves at its recorded RVA with its first call reaching its own table query;
- *   - each query's pattern is the only match in the executable, at its recorded RVA; the window lookup's
- *     pattern is the only match; the filtered lookups' shared pattern matches exactly the two of them, and
- *     either one checked at the other's RVA is refused (its call reaches the other query);
- *   - the walk the detour relies on: after the first query the lookup loads the parent at +0x98, queries it
- *     with the same function and merges into the caller's list with one merge function shared by all three;
- *   - each detour window is whole instructions with no RIP-relative operand or relative branch.
- * Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
+/* clip_events_sigs_test.c -- the engine sites clip events detours (src/backend/clip_events_sigs.c, clip_events.c) on
+ * each build 13954591 executable named on the command line: each event lookup resolves at its recorded RVA with its
+ * first call reaching its own table query, and every query pattern is unique (the filtered pair's shared pattern
+ * matches exactly those two, each refused at the other's RVA). After the first query the lookup loads the parent at
+ * +0x98, queries it the same way and merges through one function shared by all three; each detour window is whole
+ * instructions with no RIP-relative operand or relative branch. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

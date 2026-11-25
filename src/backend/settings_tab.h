@@ -1,18 +1,6 @@
-/* The Snapmap+ tab of the native Settings / Properties panel (editor state 5).
- *
- * Native Populate(panel, category) knows two categories (0 and 1); LB/RB and
- * the diamond notches select them modulo 2. This module owns the panel's hooks
- * (Enter, Exit, Populate, Apply, Reset, the dirty query and the property-change
- * slot), adds a third category for Snapmap+ mod settings and lets features
- * register groups of rows into it. Each group keeps a map-owned draft that
- * native Apply commits and native Cancel / Revert discards.
- *
- * The tab shows one header title (SH_SETTINGS_TAB_TITLE) and then the rows of
- * every active group; the panel has no label-only row, so groups are not
- * titled on screen and row labels must name what they set.
- *
- * When the third category cannot be installed, the same rows appear at the
- * end of category 0. sh_settings_tab_current_mode() reports which. */
+/* The Snapmap+ tab of the native Settings / Properties panel (editor state 5): a third category where features
+ * register groups of rows, each with a map-owned draft that native Apply commits and Cancel / Revert discards. If the
+ * category cannot be installed the rows go at the end of category 0. */
 #ifndef SH_SETTINGS_TAB_H
 #define SH_SETTINGS_TAB_H
 #include <stddef.h>
@@ -25,22 +13,10 @@
 typedef enum sh_settings_tab_mode {
     SH_SETTINGS_TAB_OFF = 0,     /* panel hooks unavailable */
     SH_SETTINGS_TAB_GROUP_END,   /* groups appended to category 0 */
-    SH_SETTINGS_TAB_GROUP_TOP,   /* unused: rows ahead of the native title overlap it */
     SH_SETTINGS_TAB_CATEGORY     /* groups in their own third category */
 } sh_settings_tab_mode;
 
 typedef struct sh_settings_rows sh_settings_rows;   /* valid only during populate */
-
-typedef struct sh_settings_float {
-    const char *name;        /* native row name (shown as the row text) */
-    const char *label;       /* "#str_..." label id */
-    const char *help;        /* "#str_..." help id */
-    float min, max, small_step, large_step;
-    /* Nonzero creates the row with the native wrap: a step past one limit
-     * lands on the other. adjust then sees that jump and decides which wraps
-     * to keep. Zero (the usual case) makes the native step stop at the limit. */
-    int wrap;
-} sh_settings_float;
 
 typedef struct sh_settings_bool {
     const char *name;        /* native row name (shown as the row text) */
@@ -65,42 +41,19 @@ typedef struct sh_settings_group {
     void *user;
 } sh_settings_group;
 
-/* Engine-thread rows. draft and base belong to the group and must stay valid
- * while the panel is open; after a successful commit the tab copies draft to
- * base, and Cancel / Revert copies base to draft. adjust (optional) receives the native widget value
- * and may rewrite *draft (clamping, snapping, dependent fields). */
-int sh_settings_tab_add_float(sh_settings_rows *rows, const sh_settings_float *row,
-                              float *draft, float *base,
-                              void (*adjust)(void *user, float *draft, float value));
-
-/* A native on/off row (the toggle rows of the editor settings). draft and
- * base hold 0 or 1 and follow the same draft, commit and revert rules as the
- * float rows. Returns 0 when the toggle row creator is unavailable. */
+/* Groups own their drafts and base values for the lifetime of the native toggle rows. */
 int sh_settings_tab_add_bool(sh_settings_rows *rows, const sh_settings_bool *row,
                              int *draft, int *base);
 
 /* Register before the panel is first opened; groups keep registration order.
  * The descriptor is copied. Returns 0 when full or invalid. */
 int sh_settings_tab_register_group(const sh_settings_group *group);
-/* Shorthand for a group with only a populate callback: rows are drafted and
- * shown but nothing is committed unless the rows' owner does so itself. */
-int sh_settings_tab_register(const char *title, sh_settings_populate_fn populate);
-
 /* Install byte checks over a Populate call site: 1 when it is an E8 whose target holds the 16-byte dirty prefix
  * (target returned), and 1 when it is an E8 to the given SettingsPanelClear. */
 int sh_settings_tab_check_dirty(uintptr_t call, uintptr_t *target);
 int sh_settings_tab_check_clear(uintptr_t call, uintptr_t clear);
 int sh_settings_tab_install(const sig_result *results, size_t count);
-sh_settings_tab_mode sh_settings_tab_current_mode(void);
 
 /* Pure helpers shared with the tests. */
 int sh_settings_tab_wrap(int category, int delta, int count);
-/* A native float row created with its wrap flag set wraps past its limits.
- * Given the value shown before a step and the widget's new value, returns the
- * limit the user was stepping toward when the step jumped from one end of
- * [min, max] to the other, else value unchanged. The tab now creates its rows
- * with the wrap flag clear (the native step clamps), so this is only a
- * documented helper for rows created by other code. */
-float sh_settings_tab_unwrap(float previous, float value, float min, float max,
-                             float small_step, float large_step);
 #endif

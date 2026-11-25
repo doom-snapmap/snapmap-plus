@@ -302,10 +302,8 @@ static int ti_game_ready(void)
     return ready;
 }
 
-/* Build the default tree of the entityDef `key` names, as idSnapTypeInfoCache::Build
- * builds each entry: create the type's default entity through the game, write
- * its state to text, destroy it, parse the text. Inside process heap 0, so the
- * tree's nodes outlive every map. `why` names the failure. */
+/* Builds the default tree of the entityDef `key` names as idSnapTypeInfoCache::Build does (create, write state
+ * to text, destroy, parse), inside process heap 0 so the nodes outlive every map. `why` names the failure. */
 static void *ti_build(const void *key, char *why, size_t cap)
 {
     sh_process_heap_scope heap;
@@ -360,7 +358,7 @@ static void *ti_build(const void *key, char *why, size_t cap)
                     obj ? "writing or parsing the entity's state" : entity ? "creating the entity" : "finding the decl");
         ok = 0;
     }
-    /* A fault while its state was written leaves the default entity alive. */
+    /* A fault while the state was written leaves the default entity alive. */
     if (entity && destroy) {
         __try { destroy(game, entity); }
         __except (ti_av_only(GetExceptionCode())) { }
@@ -440,10 +438,8 @@ static int ti_tree_eq(const void *mine, const void *game, int *nodes, char *why,
     }
 }
 
-/* Once per boot, when the game's cache has entries: build stock types the
- * product's way and compare them with the game's entries. The table serves
- * only after this passes. Returns g_ok; -1 while the cache is still empty or
- * the game object is not there yet (sh_typeinfo_check_due). */
+/* Once per boot, builds stock types the product's way and compares them with the game's cache entries; the
+ * table serves only after this passes. Returns g_ok, or -1 while sh_typeinfo_check_due is false. */
 static int ti_self_check(void)
 {
     int n, picks[SELF_CHECK_TYPES], i, k = 0, nodes[SELF_CHECK_TYPES];
@@ -496,8 +492,8 @@ static int ti_self_check(void)
     return g_ok;
 }
 
-/* The tree for `key`, from the table or built now. NULL (with one line) when
- * it cannot be built; the game's own path then answers as before. */
+/* The tree for `key`, from the table or built on first use. NULL (with one line) when
+ * it cannot be built; the game's own path then answers. */
 static void *ti_resolve(const void *key)
 {
     char why[256];

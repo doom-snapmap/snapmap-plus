@@ -1,4 +1,5 @@
 /* mp_json.c -- see mp_json.h. */
+#include "../common/text.h"
 #include "mp_json.h"
 
 #include <stdlib.h>
@@ -10,15 +11,6 @@ typedef struct mpj_in {
     const char *s, *end;
     int depth;
 } mpj_in;
-
-static char *mpj_dupn(const char *s, size_t n)
-{
-    char *d = (char *)malloc(n + 1);
-    if (!d) return NULL;
-    memcpy(d, s, n);
-    d[n] = 0;
-    return d;
-}
 
 mpj *mpj_new(mpj_type t)
 {
@@ -33,7 +25,7 @@ mpj *mpj_new_int(long long x)
     mpj *v = mpj_new(MPJ_NUM);
     if (!v) return NULL;
     snprintf(buf, sizeof buf, "%lld", x);
-    v->text = mpj_dupn(buf, strlen(buf));
+    v->text = sh_textn(buf, strlen(buf));
     if (!v->text) { free(v); return NULL; }
     return v;
 }
@@ -46,7 +38,7 @@ mpj *mpj_new_float(double x)
     if (!isfinite(x)) x = 0.0;
     if (x == floor(x) && fabs(x) < 1e15) snprintf(buf, sizeof buf, "%.1f", x);
     else snprintf(buf, sizeof buf, "%.9g", x);
-    v->text = mpj_dupn(buf, strlen(buf));
+    v->text = sh_textn(buf, strlen(buf));
     if (!v->text) { free(v); return NULL; }
     return v;
 }
@@ -55,7 +47,7 @@ mpj *mpj_new_str(const char *raw)
 {
     mpj *v = mpj_new(MPJ_STR);
     if (!v) return NULL;
-    v->text = mpj_dupn(raw ? raw : "", raw ? strlen(raw) : 0);
+    v->text = sh_textn(raw ? raw : "", raw ? strlen(raw) : 0);
     if (!v->text) { free(v); return NULL; }
     return v;
 }
@@ -120,7 +112,7 @@ int mpj_set(mpj *obj, const char *key, mpj *v)
             return 1;
         }
     }
-    k = mpj_dupn(key, strlen(key));
+    k = sh_textn(key, strlen(key));
     if (!k || !mpj_grow(obj)) { free(k); mpj_free(v); return 0; }
     obj->keys[obj->n] = k;
     obj->items[obj->n++] = v;
@@ -142,7 +134,6 @@ int mpj_is_num(const mpj *v) { return v && v->type == MPJ_NUM; }
 
 int mpj_str_is(const mpj *v, const char *s) { return v && v->type == MPJ_STR && s && !strcmp(v->text, s); }
 
-/* ----------------------------------------------------------------- parse */
 
 static void mpj_ws(mpj_in *in)
 {
@@ -157,7 +148,7 @@ static char *mpj_strtok(mpj_in *in)
     start = ++in->s;
     while (in->s < in->end) {
         unsigned char c = (unsigned char)*in->s;
-        if (c == '"') { char *r = mpj_dupn(start, (size_t)(in->s - start)); in->s++; return r; }
+        if (c == '"') { char *r = sh_textn(start, (size_t)(in->s - start)); in->s++; return r; }
         if (c == '\\') {
             in->s++;
             if (in->s >= in->end) return NULL;
@@ -248,7 +239,7 @@ static mpj *mpj_value(mpj_in *in)
                                    *in->s == 'E' || *in->s == '+' || *in->s == '-')) in->s++;
         v = mpj_new(MPJ_NUM);
         if (!v) return NULL;
-        v->text = mpj_dupn(start, (size_t)(in->s - start));
+        v->text = sh_textn(start, (size_t)(in->s - start));
         if (!v->text) { free(v); return NULL; }
         return v;
     }
@@ -276,12 +267,12 @@ mpj *mpj_clone(const mpj *v)
     c = mpj_new(v->type);
     if (!c) return NULL;
     c->b = v->b;
-    if (v->text && !(c->text = mpj_dupn(v->text, strlen(v->text)))) { mpj_free(c); return NULL; }
+    if (v->text && !(c->text = sh_textn(v->text, strlen(v->text)))) { mpj_free(c); return NULL; }
     for (i = 0; i < v->n; i++) {
         mpj *item = mpj_clone(v->items[i]);
         if (!item || !mpj_grow(c)) { mpj_free(item); mpj_free(c); return NULL; }
         if (v->type == MPJ_OBJ) {
-            c->keys[c->n] = mpj_dupn(v->keys[i], strlen(v->keys[i]));
+            c->keys[c->n] = sh_textn(v->keys[i], strlen(v->keys[i]));
             if (!c->keys[c->n]) { mpj_free(item); mpj_free(c); return NULL; }
         }
         c->items[c->n++] = item;
@@ -289,59 +280,40 @@ mpj *mpj_clone(const mpj *v)
     return c;
 }
 
-/* ----------------------------------------------------------------- dump */
 
-typedef struct mpj_out { char *p; size_t n, cap; int bad; } mpj_out;
-
-static void mpj_put(mpj_out *o, const char *s, size_t n)
-{
-    if (o->bad) return;
-    if (o->n + n + 1 > o->cap) {
-        size_t cap = o->cap ? o->cap : 4096;
-        char *p;
-        while (o->n + n + 1 > cap) cap *= 2;
-        p = (char *)realloc(o->p, cap);
-        if (!p) { o->bad = 1; return; }
-        o->p = p; o->cap = cap;
-    }
-    memcpy(o->p + o->n, s, n);
-    o->n += n;
-    o->p[o->n] = 0;
-}
-
-static void mpj_emit(mpj_out *o, const mpj *v)
+static void mpj_emit(sh_text_buf *o, const mpj *v)
 {
     int i;
     switch (v->type) {
-    case MPJ_NULL: mpj_put(o, "null", 4); break;
-    case MPJ_BOOL: if (v->b) mpj_put(o, "true", 4); else mpj_put(o, "false", 5); break;
-    case MPJ_NUM: mpj_put(o, v->text, strlen(v->text)); break;
-    case MPJ_STR: mpj_put(o, "\"", 1); mpj_put(o, v->text, strlen(v->text)); mpj_put(o, "\"", 1); break;
+    case MPJ_NULL: sh_text_append(o, "null", 4); break;
+    case MPJ_BOOL: if (v->b) sh_text_append(o, "true", 4); else sh_text_append(o, "false", 5); break;
+    case MPJ_NUM: sh_text_append(o, v->text, strlen(v->text)); break;
+    case MPJ_STR: sh_text_append(o, "\"", 1); sh_text_append(o, v->text, strlen(v->text)); sh_text_append(o, "\"", 1); break;
     case MPJ_ARR:
     case MPJ_OBJ:
-        mpj_put(o, v->type == MPJ_OBJ ? "{" : "[", 1);
+        sh_text_append(o, v->type == MPJ_OBJ ? "{" : "[", 1);
         for (i = 0; i < v->n; i++) {
-            if (i) mpj_put(o, ",", 1);
+            if (i) sh_text_append(o, ",", 1);
             if (v->type == MPJ_OBJ) {
-                mpj_put(o, "\"", 1);
-                mpj_put(o, v->keys[i], strlen(v->keys[i]));
-                mpj_put(o, "\":", 2);
+                sh_text_append(o, "\"", 1);
+                sh_text_append(o, v->keys[i], strlen(v->keys[i]));
+                sh_text_append(o, "\":", 2);
             }
             mpj_emit(o, v->items[i]);
         }
-        mpj_put(o, v->type == MPJ_OBJ ? "}" : "]", 1);
+        sh_text_append(o, v->type == MPJ_OBJ ? "}" : "]", 1);
         break;
     }
 }
 
 char *mpj_dump(const mpj *v, size_t *len)
 {
-    mpj_out o;
+    sh_text_buf o;
     memset(&o, 0, sizeof o);
     if (len) *len = 0;
     if (!v) return NULL;
     mpj_emit(&o, v);
-    if (o.bad || !o.p) { free(o.p); return NULL; }
+    if (o.oom || !o.p) { free(o.p); return NULL; }
     if (len) *len = o.n;
     return o.p;
 }

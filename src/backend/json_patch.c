@@ -445,8 +445,7 @@ static int json_walk_upsert_reflist(const char *doc, size_t doclen, const char *
 
             char full_leaf[JSON_CHAIN_CAP * 2 + 128];
             size_t off = 0;
-            /* Insert before the num key, not its value, to avoid duplicating the key
-             * or placing new members after its colon. */
+            /* Insert before the num key, not its value, so the key is not duplicated. */
             size_t seg1 = (size_t)(num_key - vs);     /* [vs .. "num" key start) -- kept verbatim */
             size_t tail = (size_t)(ve - num_ve);      /* [num's value end .. ve) -- kept verbatim */
             if (seg1 + nlen + 6 + strlen(numrepl) + tail + 1 > sizeof full_leaf) return 0;

@@ -70,9 +70,6 @@ func TestLegacyMigrationOnInstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	if len(rec.LegacyRemoved) == 0 {
-		t.Error("record should note the original-SnapHak files that were removed")
-	}
 	if len(rec.Backups) != 0 {
 		t.Errorf("no genuine file was overwritten -- Backups should be empty, got %v", rec.Backups)
 	}
@@ -135,7 +132,7 @@ func TestDetectLegacySingleMarker(t *testing.T) {
 	}
 }
 
-// An update must discard a legacy-runtime backup created before migration existed.
+// An update discards a recorded backup of the original SnapHak's DLL.
 func TestLegacyBackupDropped(t *testing.T) {
 	syntheticProcessGuard(t, false)
 	tmp := t.TempDir()
@@ -143,7 +140,7 @@ func TestLegacyBackupDropped(t *testing.T) {
 	ogFootprint(t, doom)
 	t.Setenv("LOCALAPPDATA", filepath.Join(tmp, "appdata"))
 
-	// simulate the pre-migration state: our v1 is installed, the original's DLL sits in a backup
+	// our v1 is installed and the original's DLL sits in a backup
 	bak := filepath.Join(doom, "XINPUT1_3.dll.snaphak-bak")
 	writeF(t, bak, "OG")
 	if err := saveRecord(&installRecord{

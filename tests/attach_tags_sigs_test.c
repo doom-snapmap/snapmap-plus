@@ -1,11 +1,7 @@
-/* attach_tags_sigs_test.c -- the engine site attachment tags detours (src/backend/attach_tags_sigs.c,
- * attach_tags.c), checked on each build 13954591 executable given on the command line:
- *   - the tag-info lookup resolves at its recorded RVA and its 48-byte pattern is the only match in the
- *     executable;
- *   - the shape the detour relies on: the prologue is the three register saves of the 15-byte window, then the
- *     walk of the first argument's idList (its count at +0x08 compared against zero);
- *   - the detour window is whole instructions with no RIP-relative operand or relative branch.
- * Run via run-tests.ps1 with -Doom / -DoomAlt; each image in its own process. */
+/* attach_tags_sigs_test.c -- the tag-info lookup detour (src/backend/attach_tags_sigs.c, attach_tags.c) on each
+ * build 13954591 executable named on the command line: it resolves at its recorded RVA with a unique 48-byte pattern,
+ * and its 15-byte window is the three register saves then the idList walk (count at +0x08 compared against zero),
+ * whole instructions with no RIP-relative operand or relative branch. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>

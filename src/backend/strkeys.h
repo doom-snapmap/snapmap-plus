@@ -1,14 +1,6 @@
-/* strkeys.h -- which strings keys are string edits (DECISIONS 9).
- *
- * A mod's strings key (mod.json "strings", without the "#str_" a decl writes)
- * that the game's language table or the product's built-in table already
- * defines is an edit of that string: it stays unprefixed, any mod may carry
- * it, and it applies the way that mod's other edits apply (strids.c). Every
- * other key is the mod's own and carries its "<salt>_" prefix.
- *
- * The game's keys are compiled in as hashes (strkeys_game.h, generated from
- * the supported build's English table); the built-in keys are the baked set
- * (strids_baked.h). Pure: no engine calls. Keys compare without case. */
+/* strkeys.h -- which mod.json strings keys are edits of an existing string (one the game's table, strkeys_game.h,
+ * or the baked set, strids_baked.h, defines): those stay unprefixed; every other key takes its "<salt>_" prefix.
+ * Pure, no engine calls; keys compare without case. */
 #ifndef SNAPMAP_PLUS_STRKEYS_H
 #define SNAPMAP_PLUS_STRKEYS_H
 

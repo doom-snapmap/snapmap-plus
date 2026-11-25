@@ -1,27 +1,11 @@
-/* editor_delete.h -- delete editor entities through DOOM's own Delete Selection.
- *
- * The window's old route destroyed each ID with the engine's single-entity
- * leaf. That leaf releases the slot but leaves hover, the selected-ID array,
- * capability bits, the undo commit and the idle transition to its callers, and
- * it skips the native eligibility checks. This module instead runs the native
- * selected-Delete action on exactly the requested entities, under the same
- * gates the native input dispatcher applies, and leaves the commit ("Delete
- * Selection") and the return to idle to the native state machine on the
- * following frames.
- *
- * Main thread only. Target release is synchronous: when a request dispatches,
- * the native action has released every target before the call returns. The
- * native undo commit and the return to idle complete on later EntityMode
- * updates, which the engine drives; this module queues nothing across frames.
- *
- * Every native call from the selection setup to the action runs inside a
- * verified process-heap scope, as DOOM's own Delete key does inside the editor
- * frame. Those calls grow editor-owned lists (the selected-ID array, the wire
- * animation list) on the caller's current heap; from a console command that is
- * the map heap, which Play releases, and the next Ctrl+Z then frees the
- * released selected-ID array and DOOM exits with "Memory corruption before
- * block!". A request whose scope cannot be verified is refused unchanged.
- */
+/* editor_delete.h -- delete editor entities through DOOM's own Delete Selection, on the main thread only.
+ * The native selected-Delete action runs on exactly the requested entities under the native dispatcher's
+ * gates, and releases every target before returning; the undo commit ("Delete Selection") and the return to
+ * idle finish natively on later frames, and nothing is queued across frames. The engine's single-entity leaf is
+ * not used: it leaves hover, the selected-ID array, capability bits, the undo commit and the idle transition undone. */
+
+/* Every native call from the selection setup to the action runs inside a verified process-heap scope
+ * (see editor_delete.c): a request whose scope cannot be verified is refused unchanged. */
 #ifndef BACKEND_EDITOR_DELETE_H
 #define BACKEND_EDITOR_DELETE_H
 
@@ -36,7 +20,7 @@ enum sh_editor_delete_status {
     SH_EDITOR_DELETE_DISPATCHED  =   1, /* native action released every target; its commit is pending */
     SH_EDITOR_DELETE_UNAVAILABLE =   0, /* an engine boundary did not resolve */
     SH_EDITOR_DELETE_NOT_MAIN    =  -1, /* called off the engine main thread */
-    SH_EDITOR_DELETE_NOT_READY   =  -2, /* no editor/map/screen, the editor is changing state, or no process-heap scope */
+    SH_EDITOR_DELETE_NOT_READY   =  -2, /* no editor/map/screen, changing state, or no heap scope */
     SH_EDITOR_DELETE_NOT_ENTITY  =  -3, /* the editor is not in EntityMode */
     SH_EDITOR_DELETE_BUSY        =  -4, /* see busy for the native owner of the selection */
     SH_EDITOR_DELETE_INVALID     =  -5, /* empty/oversized request, or a dead/out-of-range/built-in filter ID */
@@ -64,15 +48,14 @@ typedef struct sh_editor_delete_result {
     int targets;        /* distinct valid targets */
     int released;       /* targets whose slot has no declaration after the action */
     int first_id;       /* first offending ID for INVALID/PORTAL, else -1 */
-    int deselected;     /* previously selected non-targets dropped by a dispatch */
-    int hover_cleared;  /* a non-target hover was cleared before the action */
-    int wire_cleared;   /* a hovered connection touching a target was cleared */
+    int deselected;     /* selected non-targets dropped by a dispatch */
+    int hover_cleared;  /* a non-target hover cleared before the action */
+    int wire_cleared;   /* a hovered connection touching a target cleared */
     int rolled_back;    /* a refusal after selection setup restored the prior state */
 } sh_editor_delete_result;
 
-/* Native boundaries and the product guard. install() binds production
- * addresses; tests bind models. Return-value bytes follow the engine's
- * al-only boolean convention. */
+/* Native boundaries and the product guard: install() binds production addresses, tests bind models.
+ * Byte returns follow the engine's al-only boolean convention. */
 typedef struct sh_editor_delete_engine {
     uint8_t *editor;                                            /* inline editor object */
     void (*clear_selection)(void *selection);                   /* ClearSelection */
@@ -88,41 +71,32 @@ typedef struct sh_editor_delete_engine {
     int  first_placed;          /* IDs below this are the map's built-in filters; never deleted */
 } sh_editor_delete_engine;
 
-/* The map's 56 built-in filters hold IDs 0..55 in both executables. The save's
- * snapshot releases all 56 from their group, so a map missing one faults the
- * save; install() refuses them (tests bind their own bound). */
+/* The map's 56 built-in filters hold IDs 0..55 in both executables; the save's snapshot releases all
+ * 56, so a map missing one faults the save and install() refuses them. */
 #define SH_EDITOR_DELETE_FIRST_PLACED 56
 
-/* Bind every boundary at once. Return 1 when all required callbacks (the heap
- * scope included) and the editor are present; otherwise unbind and return 0.
- * Passing null unbinds. */
+/* Bind every boundary at once: 1 when all required callbacks (heap scope included) and the editor are
+ * present, else unbind and return 0. Null unbinds. */
 int sh_editor_delete_bind(const sh_editor_delete_engine *engine);
 
-/* Resolve SelectionDeleteAction, SelectionCapabilities, GridPropertiesBlocked,
- * AddToSelection, ClearSelection and the MemLocal heap scope from shared
- * signature results, decode the hover-clear callee from the action, and bind. editor is the inline editor
- * object (sh_iface_engine_editor_base). manipulation_in_progress may be null.
- * Return 1 when bound. */
+/* Resolve the delete, capability, blocked, selection and MemLocal heap-scope boundaries from shared
+ * signature results, decode the hover-clear callee from the action, and bind. editor is the inline
+ * editor object (sh_iface_engine_editor_base); manipulation_in_progress may be null. Returns 1 when bound. */
 int sh_editor_delete_install(const sig_result *results, size_t n, const uint8_t *module_base,
                              const uint8_t *editor, int (*manipulation_in_progress)(void));
 
-/* Delete ids through the native action. Main thread only. Every refusal
- * before the action leaves the editor as it was, except that a cleared hover
- * waits for the next native pick and released IDs are not put back into the
- * selection. FAULT without rolled_back, and INCOMPLETE, can leave partial
- * changes (see the ABI contract in snapmap_plus_iface.h). Returns
- * result.status. */
+/* Delete ids through the native action; returns result.status. A refusal before the action leaves the
+ * editor untouched except for a cleared hover; FAULT without rolled_back, and INCOMPLETE, can leave
+ * partial changes (ABI contract in snapmap_plus_iface.h). */
 int sh_editor_delete_batch(const int *ids, int count, sh_editor_delete_result *out);
 
-/* 1 while a native editor action owns the selection: Selection waits to
- * commit, idle is outside its normal phase, or an action is queued. Product
- * selection and EntityMode writes must wait; the engine finishes alone. */
+/* 1 while a native editor action owns the selection (Selection waits to commit, idle is outside its
+ * normal phase, or an action is queued); product selection and EntityMode writes must wait. */
 int sh_editor_delete_native_pending(void);
 
-/* Find the single hover-clear call inside a native Delete Selection body and
- * return its callee when the callee lies inside the image and has the expected
- * shape, else 0. The callee's own bytes are shared with an adjacent twin in
- * both executables, so it is identified through this call, never by a scan. */
+/* Returns the callee of the single hover-clear call inside a native Delete Selection body when it lies
+ * inside the image and has the expected shape, else 0. An adjacent twin shares its bytes in both
+ * executables, so it is identified through this call, never by a scan. */
 uintptr_t sh_editor_delete_decode_clear_hover(const uint8_t *action, const uint8_t *image,
                                               size_t image_size);
 

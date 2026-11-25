@@ -1,15 +1,8 @@
-/* modserve.c -- see modserve.h. The index, the open path, the registration
- * plan and the queries. No engine calls: those live in modserve_engine.c
- * behind sh_modserve_engine_ops, so this file builds into the native tests.
- *
- * Table shape: one open-addressing array of {hash, key, file} sized to a
- * power of two at least twice the key count. Keys are lowercase with '/'.
- * A lookup folds the request while hashing (FNV-1a 64), probes linearly and
- * compares folded bytes, so the provider path never copies or allocates.
- * Keys per file: the request path; for a decl also its decltree/ spelling
- * (DeclRegisterFile reads the source through that name); and the engine's
- * sanitised spelling when it differs (the resource name builder turns every
- * character outside a-z 0-9 $ . / into '_').
+/* modserve.c -- see modserve.h. The index, the open path, the registration plan and the queries; engine calls
+ * live in modserve_engine.c behind sh_modserve_engine_ops.
+ * The table is an open-addressing array of {hash, key, file}, a power of two at least twice the key count,
+ * with lowercase '/' keys (FNV-1a 64 folded lookup, no copy or allocation). A file has up to three keys: its
+ * request path, for a decl its decltree/ spelling, and the engine's sanitised spelling when it differs.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -75,11 +68,11 @@ typedef struct ms_file {
     int refusal_cause;                    /* one plus the refused file, during the dependency walk */
     int stock_fallback;                   /* verified stock file at this request: 1 yes, -1 no */
     volatile LONG reparse_tried;          /* the early-decl pass re-parsed it (main thread) */
-    int settled;                          /* an earlier table served these bytes and the engine read them */
-    volatile LONG opened_ungated;         /* first served while its bundle's cvar requirements were not live */
-    volatile LONG refresh;                /* 1: its bytes changed at a rescan and the engine may hold the old ones */
+    int settled;                          /* the previous table served these bytes and the engine read them */
+    volatile LONG opened_ungated;         /* served while its bundle's cvar requirements were not live */
+    volatile LONG refresh;                /* 1: changed at a rescan; the engine may hold the old bytes */
     volatile LONG refresh_gen;            /* 0 changed; N: inherits (N levels up) from a changed or gone decl */
-    volatile LONG refresh_new;            /* a new gameplay decl of a mod this session registered: register it now */
+    volatile LONG refresh_new;            /* a new gameplay decl of a registered mod: register it now */
     int editor_closure;                   /* an editor row, or a served file a row needs at any depth (ms_mark_editor_closure) */
     /* Map scope: the other providers of a path several admitted bundles
      * provide, in winner order (x->alts), so the file that serves the path is
@@ -89,18 +82,15 @@ typedef struct ms_file {
     volatile LONG scope_alt;              /* a winner's path: the file serving it for the listing, or -1 (the game's) */
     volatile LONG scope_last;             /* a winner's path: the last file that served it under scope, or -1 */
     struct ms_body *volatile scope_body;  /* the picked file: the text composed from the declared providers, or NULL */
-    struct ms_body *scope_composed;       /* a winner: the texts composed for earlier listings (memo, build lock) */
+    struct ms_body *scope_composed;       /* a winner: the texts composed so far (memo, build lock) */
     int scope_why;                        /* a winner: why its path is served as it is (MS_WHY_*) */
-    /* Registries (modregistry.h, ms_registry_files): a synthetic file per
-     * registry path, of the product's pseudo-bundle, never "served" itself;
-     * it is reached from the winner of its path, or is the path's key when
-     * no bundle carries a file there. */
+    /* Registries (modregistry.h, ms_registry_files): a synthetic file per registry path, of the product's
+     * pseudo-bundle, never "served"; reached from its path's winner, or the path's key with no other file. */
     int registry;                         /* a registry's synthetic file: 1 + its position among them, else 0 */
     int registry_keyed;                   /* that file is the key of its path */
     int registry_of;                      /* a winner at a registry's path: 1 + that registry's file, else 0 */
-    /* A decl the bundle carries at a game name with other bytes: an edited
-     * copy whose derived edits the product block records ("edits"). Never
-     * served, keyed, planned or refreshed; the game file is generated. */
+    /* A decl at a game name with other bytes: an edited copy whose derived edits the product block records
+     * ("edits"). Never served, keyed, planned or refreshed. */
     int edit;
     /* A material served as its look compiles (modlook.h; malloc'd, freed with the index), derived on first ask.
      * look_state 0 not asked, 1 served as the file holds it, 2 the compiled text. */
@@ -113,8 +103,7 @@ typedef struct ms_file {
 typedef struct ms_body {
     const unsigned char *p;
     size_t len;
-    const int *from;                      /* the providers it was composed from, in order (the pick first, then the
-                                           * map's rows): the memo's key, exact for any number of providers */
+    const int *from;                      /* the providers composed, in order: the memo's key */
     int nfrom;
     int added;
     struct ms_body *next;
@@ -124,19 +113,16 @@ typedef struct ms_body {
 typedef struct ms_conflict {
     const char *request;
     const char *providers;                /* "a@1, b@2" in index order */
-    const char *reason;                   /* why the winner was chosen, or how the text was composed */
+    const char *reason;                   /* why the winner was chosen, or how the text is composed */
     int winner;                           /* the file that serves the path */
     int count;                            /* providers */
-    int composed;                         /* 1: the list entries of every provider were merged */
+    int composed;                         /* 1: every provider's list entries are merged */
 } ms_conflict;
 
 typedef struct ms_req_cvar { const char *name, *value; } ms_req_cvar;   /* canonical value text */
 
-/* One mod folder. Its identity is its salt (`id`, the builder block's
- * "salt", ONE-SHAPE rule 1); where it sits is its area: the root of the
- * store (place NULL) or the content cache's compositions (place
- * SH_MODSERVE_CONTENT, one per pinned map row). The root holds one build per
- * salt. */
+/* One mod folder, identified by its salt (`id`, the builder block's "salt"). It sits at the store root (place
+ * NULL, one build per salt) or in the content cache's compositions (place SH_MODSERVE_CONTENT, one per pinned map row). */
 typedef struct ms_bundle {
     const char *dir, *folder, *id, *hash, *name;
     const char *extra;                    /* the author block's other keys as JSON, or NULL */
@@ -148,11 +134,10 @@ typedef struct ms_bundle {
     ms_req_cvar *req_cvars; int req_ncvars;
     const char **req_act; int req_nact;   /* console lines run when its requirements go live */
     const char **req_deact; int req_ndeact;   /* and when they stop */
-    volatile LONG req_lost_to;            /* 1 + the bundle decided before it that asks one of its cvars at another
-                                             value (ms_req_conflicts), or 0 */
-    volatile LONG req_live;               /* every cvar requirement read back as asked (read on any thread) */
-    const char *req_cause;                /* why they are not live (main thread; the index's arena: a plan step
-                                             may name it), or NULL */
+    volatile LONG req_lost_to;            /* 1 + the earlier bundle asking one of its cvars at another value
+                                             (ms_req_conflicts), or 0 */
+    volatile LONG req_live;               /* every cvar requirement read back as asked (any thread) */
+    const char *req_cause;                /* why they are not live (main thread; index arena), or NULL */
     double installed_at;
     char *cause;                          /* why it serves nothing (malloc'd), or NULL */
     /* Map scope (modserve.h). */
@@ -181,7 +166,7 @@ static const char *ms_label(const ms_bundle *b)
 
 #define MS_SV_NEW     1                   /* names under its salt */
 #define MS_SV_SHADOW  2                   /* files at game names that differ from the game's */
-#define MS_SV_RESTORE 4                   /* surfaces: the game's own bytes under the game's name */
+#define MS_SV_RESTORE 4                   /* surfaces: the game's own bytes */
 #define MS_SV_EDITOR  8                   /* editor tweaks: editor-only types at game names */
 #define MS_SV_ALL     (MS_SV_NEW | MS_SV_SHADOW | MS_SV_RESTORE | MS_SV_EDITOR)
 
@@ -192,8 +177,7 @@ typedef struct ms_slot { uint64_t h; const char *key; int file; } ms_slot;
 
 typedef struct ms_chunk { struct ms_chunk *next; size_t used, cap; char data[1]; } ms_chunk;
 
-/* A request the replaced table served and this one does not (refresh), with
- * what the refresh needs copied into this table's arena. */
+/* A request the previous table served and this one does not, with what the refresh needs copied into the arena. */
 typedef struct ms_gone {
     const char *type, *name, *request, *bundle_id;
     int is_shadow;
@@ -215,15 +199,14 @@ typedef struct ms_index {
     unsigned refusals, refusal_revision;
     uint64_t refused_entities;
     double build_ms;
-    struct ms_index *prev;                /* the table this one replaced (sh_modserve_index_retire frees it later) */
+    struct ms_index *prev;                /* the previous table (sh_modserve_index_retire frees it) */
     const char **reg_ids; int nreg_ids;   /* salts a registration pass registered a decl of, this session */
     ms_gone *gone; int ngone;             /* refresh: requests no longer served (pending gone shadows carried) */
     sh_modserve_diff diff;                /* refresh: this table against prev */
-    volatile LONG expanded;               /* refresh: the inheritance closure was marked */
-    /* Registries: the product's pseudo-bundle at bundles[nbundles] (one past
-     * the count, so no bundle walk sees it), its files reg_first.., the
-     * game's texts of the fixed registries (read once), and the texts
-     * generated per serving set (memo, arena) with the one the listing uses. */
+    volatile LONG expanded;               /* refresh: the inheritance closure is marked */
+    /* Registries: the product's pseudo-bundle at bundles[nbundles] (past the count, so no bundle walk sees it),
+     * its files from reg_first, the game's texts of the fixed registries (read once), and the texts generated
+     * per serving set (memo, arena) with the one the listing uses. */
     int reg_bundle, reg_first, reg_count;
     int reg_made;                         /* the pseudo-bundle exists (its cause is freed with the table) */
     const char **reg_xtext;               /* per registry file: the game's text (read once) */
@@ -366,11 +349,8 @@ static void ms_index_free(ms_index *x)
 
 /* ------------------------------------------------------------------ names */
 
-/* A surface: a stock pointer at the game's own path (the game's bytes
- * under the game's name, modbundle.h sh_mb_stock_restore). No pass
- * registers, re-parses or refreshes one; the gated reload alone
- * loads a surface model or image again when the game loaded it before its
- * bundle's requirements were live. */
+/* A surface: a stock pointer at the game's own path (modbundle.h sh_mb_stock_restore). Only the gated reload
+ * touches one, loading a surface model or image again when the game loaded it before its requirements were live. */
 static int ms_surface(const ms_file *f) { return f->is_restore != 0; }
 
 static __inline char ms_fold(char c)
@@ -403,9 +383,8 @@ static int ms_folded_eq(const char *key, const char *s)
     }
 }
 
-/* The engine's sanitised resource name: every character outside a-z 0-9 $ . /
- * becomes '_'. Input is already folded. */
-/* `out` holds strlen(in) + 1 bytes. */
+/* The engine's sanitised resource name: every character outside a-z 0-9 $ . / becomes '_'. Input is already
+ * folded; `out` holds strlen(in) + 1 bytes. */
 static int ms_sanitize(const char *in, char *out)
 {
     size_t i;
@@ -520,11 +499,8 @@ static int ms_jmember(ms_json *c, char *key, size_t cap, const char **v, const c
     return 1;
 }
 
-/* A string value decoded into the arena; NULL when it is not a string, holds
- * a NUL or exceeds the bound. */
-/* A JSON string value, decoded; NULL when it is not one or (for a field of
- * a fixed form, as a hash) its text is longer than `max` (MS_ANY_SIZE: any
- * length). */
+/* A JSON string value decoded into the arena; NULL when it is not a string, holds a NUL or is longer than `max`
+ * (MS_ANY_SIZE: any length). */
 static char *ms_jstr(ms_index *x, const char *v, const char *ve, size_t max)
 {
     size_t n = 0, cap = (size_t)(ve - v) + 1;
@@ -572,11 +548,8 @@ static char *ms_pkey_heap(const char *type, const char *name)
 
 /* ------------------------------------------------------------------ files */
 
-/* Bundle trees hold engine paths deep enough to pass MAX_PATH below
- * %LOCALAPPDATA%, so files are opened through the wide API with the \\?\
- * prefix. `path` is UTF-8, absolute, with '\' separators: every store
- * path in this file is, from the root sh_ms_root resolves (modstore.c) to
- * the folder names the scan reads, as the store and the record spell them. */
+/* Bundle trees can pass MAX_PATH, so files are opened through the wide API with the \\?\ prefix. `path` is
+ * UTF-8, absolute, with '\' separators, as every store path in this file is. */
 static wchar_t *ms_wide(const char *path)
 {
     size_t at = path[0] && path[1] == ':' && path[2] == '\\' ? 4 : 0;
@@ -672,8 +645,8 @@ static void ms_fail(ms_bundle *b, const char *fmt, ...)
     if (!b->cause) b->cause = _strdup("out of memory");
 }
 
-/* A bundle whose content waits for its requirements: it sets cvars, or an
- * earlier install holds one of them at another value. Lines alone never wait. */
+/* A bundle whose content waits for its requirements: it sets cvars, or an earlier bundle holds one at another
+ * value. Console lines alone never wait. */
 static int ms_req_needs(const ms_bundle *b) { return b->req_ncvars > 0 || b->req_lost_to != 0; }
 
 static int ms_rank(const char *type)
@@ -827,18 +800,15 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     /* a file the product names by its bytes' hash (a look's image, an SDK decl) is one by its shape alone: it is not
      * derived yet while the index is built, and ms_open derives it when first asked */
     f->product = f->is_restore && (sh_mb_product_hashed(request) || (f->is_decl && ms_product_request(request)));
-    /* Namespace: new names live under mods/<salt>/ (ONE-SHAPE rule 1, the
-     * builder's sh_mb_salt_paths_check). Raw files (and skins decls, which
-     * are named by their mesh path) may sit deeper, below a folder of their
-     * own. */
+    /* Namespace: new names live under mods/<salt>/ (sh_mb_salt_paths_check); raw files and skins decls may sit
+     * deeper, below a folder of their own. */
     if (!f->is_shadow && !f->is_restore) {
         char ns[96];
         int inside;
         _snprintf_s(ns, sizeof ns, _TRUNCATE, "mods/%s/", b->id);
         if (f->is_decl && _stricmp(ptype, "skins")) inside = !strncmp(f->pname, ns, strlen(ns));
         else if (!_stricmp(ptype, "soundBank")) {
-            /* A bank lives in the one folder Wwise lists, so its namespace is
-             * its stem: <salt>_<rest>, as the builder requires
+            /* A bank lives in the one folder Wwise lists, so its namespace is its stem <salt>_<rest>
              * (sh_mb_bank_stem). */
             char stem[SH_MB_BANK_STEM_MAX + 1], bid[80];
             size_t k;
@@ -946,23 +916,16 @@ static void ms_parse_requirements(ms_index *x, ms_bundle *b, const char *v, cons
     }
 }
 
-/* Map scope: a shadow the editor itself needs before any map is open. The
- * editor's decl types (snapEditorEntityDef, snapEditorSettings, the asset and
- * entity banks, the property inspectors, the palette and its groups) and the
- * editor's own movies; a bundle shadowing one is "always" unless its mod.json
- * says otherwise. */
+/* Map scope: a shadow the editor needs before any map is open (its decl types and movies); a bundle shadowing
+ * one is "always" unless its mod.json says otherwise. */
 static int ms_editor_time(const char *request)
 {
     return sh_mb_editor_time(request);
 }
 
-/* A file at one of DOOM's own names: a replacement of a DOOM binary (native/,
- * class REPLACE), an edit of a DOOM decl, an editor tweak, or a registry the
- * product generates from the declared mods' edits. A mod applies only in the
- * maps it is set in (PLATFORM, Isolation; owner 2026-11-19): such a file serves
- * only where a row declares its mod (an editor tweak, local, everywhere), so
- * reaching DOOM's name never pulls the mod into a map, its listing or its save.
- * Only the mod's own names do. */
+/* A file at one of DOOM's own names (a binary replacement, a decl edit, an editor tweak or a generated registry).
+ * It serves only where a row declares its mod (an editor tweak, local, everywhere), so it never pulls the mod
+ * into a map, its listing or its save. */
 static int ms_doom_shadow(const ms_file *f)
 {
     return f->is_shadow;
@@ -999,8 +962,7 @@ static char *ms_trim(char *s)
     return s;
 }
 
-/* The retired author keys (ONE-SHAPE rule 6; modbundle.c mb_retired_key
- * refuses the same ones). */
+/* The author keys the builder refuses (the same set as modbundle.c mb_retired_key). */
 static const char *const g_ms_retired[] = { "id", "key", "shadows", "stock", "scope", "player", "extends", "replaces",
                                             "legacy", "composes", "schema", NULL };
 
@@ -1146,9 +1108,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     }
     b->name = ms_trim(name);
     b->installed_at = built;
-    /* The shape (ONE-SHAPE rule 6), in the order the builder's
-     * sh_mb_descriptor_state_why words it. */
-    /* Every earlier shape is the one sentence (DECISIONS 21), as the builder says it. */
+    /* The shape check follows the order of the builder's sh_mb_descriptor_state_why; an unsupported shape gets
+     * the builder's one sentence. */
     if ((block_v && (!block_object || format != (double)SH_MB_FORMAT)) || retired) ms_fail(b, SH_MB_EARLIER);
     else if (block_v && (!salt || !sh_salt_valid(salt, strlen(salt))))
         ms_fail(b, "The part of mod.json Snapmap+ writes is damaged. Delete the \"" SH_MB_BLOCK_KEY "\" block and press "
@@ -1396,12 +1357,9 @@ static int ms_add_generated(ms_index *x, ms_bundle *b, const char *request, cons
     return 1;
 }
 
-/* A mod whose scripts register an input serves its Script node row
- * (script_node.h): the entityDef mods/<salt>/script and its Toybox row, made
- * by the product from the salt, the mod's name and its Toybox category, never
- * written into the author's folder and never part of the build hash, so every
- * machine that holds the build serves the same row. A placed node is then an
- * entity of the mod's own entityDef, and a saved map records the mod. */
+/* A mod whose scripts register an input serves its Script node row (script_node.h): the entityDef
+ * mods/<salt>/script and its Toybox row, made from the salt, name and category. Neither is written into the
+ * author's folder or the build hash, so every machine holding the build serves the same row. */
 static void ms_script_node_row(ms_index *x, ms_bundle *b)
 {
     sh_script_node_row row;
@@ -1458,19 +1416,12 @@ static char *ms_walk_child(const WIN32_FIND_DATAW *fd, const char *rel)
     return name;
 }
 
-/* The serving side of the store's walk (ONE-SHAPE rule 4, modstore.c): every
- * folder under the store root that holds mod.json (or a package.json, which
- * is refused), at any depth: a folder without one is an organizing folder and
- * is entered, as deep as it goes; a mod folder is not entered. At the top,
- * "maps" (the per-map download folders of earlier versions, retired with D4)
- * is never read. `rel` is the folder's path below the root, a bundle's name;
- * `place` its area (NULL: the root; the content cache's compositions are the
- * area SH_MODSERVE_CONTENT). The folders still to read wait on the heap, in the order a
- * depth-first walk reads them. This scan only reads: salting and building are
- * the store's (ms_sync). */
+/* The serving side of the store's walk (modstore.c): every folder under the store root holding mod.json (or a
+ * refused package.json), at any depth; a folder without one is entered, a mod folder is not. The scan only
+ * reads, salting and building are the store's (ms_sync). */
 typedef struct ms_scan_item {
-    char *dir, *rel;         /* the folder and its path below the root (malloc'd) */
-    const char *place;       /* its area (the index's arena), NULL at the root */
+    char *dir, *rel;         /* the folder and its path below the root, a bundle's name (malloc'd) */
+    const char *place;       /* its area (SH_MODSERVE_CONTENT for compositions; index arena), NULL at the root */
     int kind;                /* MS_SCAN_FOLDER: list it; MS_SCAN_CHILD: a folder found in a listing */
     int top;                 /* a child of the store root itself */
 } ms_scan_item;
@@ -1532,8 +1483,7 @@ static void ms_scan_child(ms_index *x, ms_scan_item *at, ms_scan_list *stack)
     char *probe;
     int is_mod, mark_files = x->nfiles, mark_needs = x->nneeds;
     ms_bundle *b;
-    /* mods\maps\ held the builds earlier versions downloaded per map (places, retired with D4: a map's content is
-     * its units in the content cache now). Nothing there is read. */
+    /* The top-level mods\maps\ folder is never read. */
     if (!at->place && at->top && !_stricmp(leaf, SH_MODSERVE_RETIRED_PLACES)) return;
     probe = sh_textf("%s\\mod.json", at->dir);
     is_mod = probe && ms_file_size(probe) >= 0;
@@ -1544,7 +1494,7 @@ static void ms_scan_child(ms_index *x, ms_scan_item *at, ms_scan_list *stack)
         free(probe);
     }
     if (!is_mod) {
-        /* Not a mod folder: an organizing folder, looked into now. */
+        /* Not a mod folder: an organizing folder, listed next. */
         if (ms_scan_push(stack, at->dir, at->rel, at->place, MS_SCAN_FOLDER, 0)) at->dir = at->rel = NULL;
         return;
     }
@@ -1621,11 +1571,9 @@ static int ms_same_area(const ms_bundle *a, const ms_bundle *b)
     return !_stricmp(a->place, b->place);
 }
 
-/* One build per salt at the root (ONE-SHAPE rules 1 and 4). Of two admitted
- * folders of one salt the one built first keeps it (built time, then folder
- * path); the other serves nothing until the store's next scan makes it a new
- * mod. Compositions are one per map row. Runs before ms_resolve, which drops a
- * refused bundle's files. */
+/* One build per salt at the root: of two admitted folders of one salt the one built first keeps it (built
+ * time, then folder path) and the other serves nothing until the store's next scan. Compositions are one per
+ * map row. Runs before ms_resolve. */
 static void ms_one_per_area(ms_index *x)
 {
     int i, k;
@@ -1669,9 +1617,8 @@ static int ms_newer(const ms_index *x, int a, int b)   /* bundle a newer than bu
     return strcmp(ba->folder, bb->folder) > 0;
 }
 
-/* Of two builds of one salt, the one that serves with no map declaring it
- * (ONE-SHAPE rule 4): the root folder's over a composition, else the newer.
- * A composition never serves over the folder its author edits. */
+/* Of two builds of one salt, the one that serves with no map declaring it: the root folder's over a
+ * composition, else the newer. */
 static int ms_preferred(const ms_index *x, int a, int b)
 {
     const ms_bundle *ba = &x->bundles[a], *bb = &x->bundles[b];
@@ -1679,40 +1626,12 @@ static int ms_preferred(const ms_index *x, int a, int b)
     return ms_newer(x, a, b);
 }
 
-/* ------------------------------------------------------------------ decl list composition
- *
- * Several mods often shadow one stock list decl to append their own entries:
- * every boss pack adds its demon to the encounter conductor's aiTypeList and
- * its encounter to the whitelist inspectors' validEncounters. Serving one
- * pack's copy drops the others' entries; serving none drops them all. When
- * every provider's text parses in the strict assignment grammar
- *
- *   text  := '{' stmt* '}'
- *   stmt  := key '=' value [';'] | key ['='] '{' stmt* '}' [';']
- *   key   := word | "string"     value := word | "string" | ( group )
- *
- * or in the bare statement grammar of md6Def and animWeb texts
- *
- *   stmt  := key value | key [name] '{' stmt* '}'     (no '=' or ';')
- *
- * and the texts agree everywhere except inside lists (a block holding
- * `num = N;` and only `item[i]` members) or bags (a block whose members
- * repeat a key, such as the `anim "clip" { ... }` blocks of an md6Def's
- * events or its `alias { ... }` rows), the served text is the winner's with
- * every other provider's list items or bag entries appended that the winner
- * lacks (matched by value, by a named block's key and name, or by a block
- * item's first scalar member such as aiType), lists renumbered and `num` set
- * to the count. Any other difference, a provider that lists an existing item
- * with different content, or a text outside the grammar leaves the winner's
- * bytes as they are. Removal cannot be expressed (no stock text is read
- * here), so composition is a union.
- *
- * A `key = value` statement keeps its `;` terminator only when its source
- * statement had one: an md6Def's meshKits pairs (`"doors" = ""`) have none,
- * and the engine's md6Def parser refuses the text when one is added
- * (snapmap-plus #160). An appended item takes the terminator convention of
- * the block it joins, and a renumbered list's `num` keeps the winner's. The
- * canonical text used for equality and identity ignores terminators. */
+/* Decl list composition: several mods shadow one stock list decl to append entries. When every provider's text
+ * parses in the assignment grammar (`key = value;`, `key { }`) or the bare md6Def/animWeb one (`key value`,
+ * `key [name] { }`) and the texts differ only in lists (`num = N;` plus `item[i]`) or bags (blocks repeating a
+ * key), the winner's text is served with the others' missing entries appended and lists renumbered; any other
+ * difference keeps the winner's bytes (a union, no removal). A `key = value` keeps its ';' only if its source
+ * had one: md6Def meshKits pairs have none and the engine's parser refuses an added one. */
 
 #define MC_DEPTH 32
 
@@ -2107,13 +2026,9 @@ static int mc_merge(mc_ctx *c, mc_node *base, const mc_node *other, int *added)
         int bag = o->block && !o->eq && (mc_count_key(other, o) != 1 || mc_count_key(base, o) != 1 ||
                                          mc_word_n(o) != o->key_n);
         if (bag) {
-            /* A bag entry (`anim "clip" { }`, `alias { }`): matched by its
-             * identity among the base entries of the same key word. */
-            /* A key that repeats within one text (`event "ae_sound"` rows,
-             * `alias { }` rows) is matched by its whole text; a unique named
-             * block (`anim "clip"`) by its key and name. A key the winner
-             * lacks is new, not a repeat: two new clips with the same rows
-             * (a door's kick and its reverse) are two entries, not one. */
+            /* A bag entry (`anim "clip" { }`, `alias { }`) is matched among the base entries of its key word:
+             * a key repeating within one text by its whole text, a unique named block by key and name.
+             * A key the winner lacks is new, so two new clips with the same rows are two entries. */
             int exact = mc_count_key(other, o) > 1 || mc_count_key(base, o) > 1;
             char *id = exact ? mc_text(o, NULL) : mc_identity(o);
             int found = -1, same_word = 0;
@@ -2145,10 +2060,8 @@ static int mc_merge(mc_ctx *c, mc_node *base, const mc_node *other, int *added)
         if (b->block && o->block) { if (!mc_merge(c, b, o, added)) return 0; }
         else if (!mc_equal(b, o)) return 0;
     }
-    /* Members only the base has are another edit of the same kind, unless
-     * they are bag entries of a key word the other text also holds, or the
-     * other's block is empty (the stock `aliases { }`): an empty bag holds
-     * nothing to disagree with, as it does when the winner's is the empty one. */
+    /* Members only the base has are a disagreement, unless they are bag entries of a key word the other text also
+     * holds or the other's block is empty (the stock `aliases { }`), which holds nothing to disagree with. */
     for (k = 0; k < base->nkids; ++k) {
         int found = 0;
         const mc_node *bk = base->kids[k];
@@ -2193,9 +2106,8 @@ static char *ms_compose(const unsigned char *const *texts, const size_t *lens, i
     return out.p;
 }
 
-/* The texts of `files[0..n)` composed in that order (ms_compose), a file whose bytes an earlier one carries left
- * out; NULL when fewer than two texts differ or they do not compose (a file is not a decl or cannot be read). Any
- * number of providers and any size: no count or size of the product's own. */
+/* The texts of `files[0..n)` composed in that order (ms_compose), skipping a file whose bytes an earlier one
+ * carries; NULL when fewer than two texts differ or they do not compose (a file is not a decl or unreadable). */
 static char *ms_compose_files(const ms_index *x, const int *files, int n, size_t *len, int *added)
 {
     const unsigned char **texts = (const unsigned char **)calloc((size_t)(n ? n : 1), sizeof *texts);
@@ -2234,22 +2146,11 @@ char *sh_modserve_test_compose(const char *const *texts, int n, int *added)
 }
 #endif
 
-/* ------------------------------------------------------------------ conflict winner
- *
- * When several bundles provide one path with different bytes, which one
- * serves is decided per map among the bundles the map declares
- * (ms_scope_compute): no installed mod takes precedence
- * over another, and nothing about the install (time, folder, who delivered it)
- * counts. In order:
- *   1. the provider with the fewest needs the declared bundles do not provide
- *      (needs the game satisfies count alike for every provider, so the
- *      difference is what one copy names that nothing declared supplies);
- *   2. the bytes most declared providers carry;
- *   3. the order of the map's rows.
- * The static winner below (the same rules over every admitted bundle, then the
- * root folder's build of one salt, then the salt and the hash) serves only with map
- * scope off and is the first candidate for a path no declared bundle provides.
- * Two builds of one salt are never a conflict: each map declares its own. */
+/* Conflict winner: when several bundles provide one path with different bytes, the map decides among the bundles
+ * it declares (ms_scope_compute), never by install time or folder. In order: 1. the provider with the fewest
+ * needs no declared bundle provides; 2. the bytes most declared providers carry; 3. the order of the map's rows.
+ * The static winner (the same rules over every admitted bundle, then the root build of a salt, then salt and
+ * hash) serves only with map scope off and is the first candidate for a path no declared bundle provides. */
 
 typedef struct ms_avail { char **keys; int n; } ms_avail;   /* sorted "type\x01name" and request keys of admitted files */
 
@@ -2310,8 +2211,8 @@ static int ms_static_before(const ms_index *x, int a, int b)
 /* Index of the winning key in keys[i..j), and the reason. */
 static int ms_pick(const ms_index *x, const ms_avail *av, const ms_key *keys, int i, int j, const char **reason)
 {
-    /* Every provider takes part (no count of its own, decision 26): past the stack's room the counts are allocated;
-     * without memory the first provider wins, with a log line. */
+    /* Every provider takes part: past the stack's room the counts are allocated; without memory the first
+     * provider wins, with a log line. */
     int k, best = i, s_unres[64], s_share[64], *unres = s_unres, *share = s_share, m = j - i, tie_un = 1, tie_sh = 1,
         tie_key = 1;
     if (m > 64) {
@@ -2359,12 +2260,9 @@ static int ms_conflict_cmp(const void *a, const void *b)
     return strcmp(*(const char *const *)a, ((const ms_conflict *)b)->request);
 }
 
-/* Map scope: the other providers of a path, recorded on its winner in the
- * order the static winner rules rank them (`ordered` 1, different bytes), the
- * root folder's build first (`ordered` 2, builds of one salt) or in index order
- * (identical bytes), so that the provider the open map declares serves the
- * path (ms_scope_compute). Every alternate (no count of its own, decision 26);
- * without memory the path keeps only its winner, with a log line. */
+/* Map scope: the other providers of a path, recorded on its winner so the one the open map declares serves
+ * (ms_scope_compute). Order: the static winner rules (`ordered` 1, different bytes), the root build first
+ * (`ordered` 2, builds of one salt), else index order. Without memory the path keeps only its winner, logged. */
 static void ms_record_alts(ms_index *x, const ms_avail *av, const ms_key *keys, int i, int j, int winner, int ordered)
 {
     ms_key stack[64], *rest = j - i <= 64 ? stack : (ms_key *)malloc(sizeof(ms_key) * (size_t)(j - i));
@@ -2637,11 +2535,9 @@ static int ms_provider(const ms_index *x, const char *type, const char *name)
     return at;
 }
 
-/* A need's served provider: the file whose provides (type, name) match, else
- * the file at one of the request paths the engine would ask for that name
- * (the bundle builder's own resolution: decl text spells the mod id with
- * '-', the engine derives binary names with '_', and image names carry a
- * source extension). Resolved once per index build. */
+/* A need's served provider: the file whose provides (type, name) match, else the file at a request path the
+ * engine would ask for that name (decl text spells the mod id with '-', binary names use '_', image names carry
+ * a source extension). Resolved once per index build. */
 static int ms_need_provider(const ms_index *x, const char *type, const char *name)
 {
     char *cand[2];
@@ -2662,20 +2558,11 @@ static void ms_resolve_needs(ms_index *x)
     for (i = 0; i < x->nneeds; ++i) x->needs[i].file = ms_need_provider(x, x->needs[i].type, x->needs[i].name);
 }
 
-/* The editor closure: every served file of an admitted bundle that adds
- * editor rows, and every served file one of those needs, at any depth.
- * Whatever the engine creates while it registers, parses or reloads one of
- * these is kept for the session, as a boot-time editor pass keeps its rows'
- * closure, so every pass treats them the same way (sh_modserve_step.persist,
- * the closure part of sh_modserve_each_refresh_part). The whole bundle counts,
- * not only what its rows need today: a later build's row can name a decl a
- * map pass already registered (seen live: an open map's activation had made
- * the keycard md6Def a new row attaches, at level 1, and the keeper could
- * only raise the decl, not its model). Needs are closed under this mark, so a
- * closure decl's parents and models are in it too. A path two builds of one
- * salt carry (the root folder and a composition) is marked on its winner, and
- * the needs of every build of it are followed: the mark is made once per
- * index, before any map says which build it serves. */
+/* The editor closure: every served file of an admitted bundle that adds editor rows, and every served file one
+ * of those needs, at any depth. What the engine creates while registering, parsing or reloading one is kept for
+ * the session (sh_modserve_step.persist). The whole bundle counts, since a later row can name a decl a map pass
+ * already registered. A path two builds of one salt carry is marked on its winner and the needs of every
+ * build are followed; the mark is made once per index, before any map says which build it serves. */
 static void ms_mark_editor_closure(ms_index *x)
 {
     int *queue, nq = 0, qh = 0, i, k, a;
@@ -2710,20 +2597,16 @@ static void ms_mark_editor_closure(ms_index *x)
 
 /* ------------------------------------------------------------------ build and publish */
 
-/* Map scope: the file that serves winner `f`'s path for the current listing
- * (ms_scope_compute: a bundle the open map declares, else what the editor or
- * the hub may serve, else nobody, -1, and the game's bytes answer). With map
- * scope off the static winner serves. Read lock-free. */
+/* Map scope: the file that serves winner `f`'s path for the current listing (ms_scope_compute), or -1 when the
+ * game's bytes answer; with map scope off the static winner serves. Read lock-free. */
 static int ms_scoped(const ms_index *x, int f)
 {
     if (!InterlockedCompareExchange((volatile LONG *)&g_scope_on, 0, 0)) return f;
     return (int)InterlockedCompareExchange((volatile LONG *)&x->files[f].scope_alt, 0, 0);
 }
 
-/* The file whose recorded needs describe winner `f` for the open map: the
- * build that serves its path now (a map's own copy of a salt, not the root
- * folder's), or `f` itself when nothing serves the path in this scope (the
- * engine may still hold what an earlier scope parsed). */
+/* The file whose needs describe winner `f` for the open map: the build serving its path (a map's own copy of a
+ * salt, not the root's), or `f` itself when nothing serves it in this scope (the engine may still hold it). */
 static const ms_file *ms_serving_file(const ms_index *x, int f)
 {
     int s = ms_scoped(x, f);
@@ -2846,7 +2729,7 @@ static int ms_kind(const ms_file *f)
     if (f->is_decl) return SH_MODSERVE_RF_DECL;
     if (f->ptype && !_stricmp(f->ptype, "baseModel")) return SH_MODSERVE_RF_MODEL;
     /* A static model (a .bmodel) is reloaded in place like an md6 model: a session-held one (OpenGL keeps DOOM's
-     * props for the session) otherwise keeps the bytes it was first read with across maps (R-DS5). */
+     * props for the session) otherwise keeps the bytes it was first read with across maps. */
     if (f->ptype && !_stricmp(f->ptype, "model")) return SH_MODSERVE_RF_MODEL;
     if (f->ptype && !_stricmp(f->ptype, "image")) return SH_MODSERVE_RF_IMAGE;
     /* Held anims (level 4) are reloaded in place at a map pass;
@@ -2896,9 +2779,8 @@ static int ms_id_registered(const ms_index *t, const char *id)
     return 0;
 }
 
-/* What the new table carries from the one it replaces, so no later question
- * reads an earlier table: the salts registered this session, and per file
- * whether an earlier table served the same bytes the engine read. */
+/* What the new table carries from the old one, so no later question reads the old table: the salts registered
+ * this session, and per file whether the old table served the same bytes the engine read. */
 static void ms_carry_forward(ms_index *x, const ms_index *old)
 {
     int i, j, cap = 0;
@@ -2927,10 +2809,9 @@ static void ms_carry_forward(ms_index *x, const ms_index *old)
     }
 }
 
-/* Per served request path, the new table against the one it replaces. Marks
- * of unchanged bytes carry over; changed decls, models and images become
- * pending; a gone shadow decl is pending (the engine re-reads the game's
- * bytes); a gone new name stays registered until DOOM restarts. */
+/* Per served request path, the new table against the old one. Marks of unchanged bytes carry over; changed
+ * decls, models and images and gone shadow decls become pending; a gone new name stays registered until
+ * DOOM restarts. */
 static ms_body *ms_reg_body(const ms_index *x, int file);
 static void ms_diff(ms_index *x, const ms_index *old)
 {
@@ -2945,21 +2826,17 @@ static void ms_diff(ms_index *x, const ms_index *old)
         if (o < 0) {
             d->added++;
             if (f->ptype && !strcmp(f->ptype, "script")) d->changed_scripts++;
-            /* A new editor row that shadows a stock one is a palette change too:
-             * the refresh below re-parses it, and the palette must be built
-             * again to show the mod's row (the removal side counts it as well). */
+            /* A new editor row that shadows a stock one is a palette change too; the palette is built again
+             * to show it. */
             if (f->is_sedef && f->is_shadow && f->ptype && f->pname) d->changed_rows++;   /* it replaces the stock row */
             if (f->is_decl && !f->is_shadow) {
                 d->added_decls++;
                 if (f->is_sedef) d->added_rows++;
                 else if (!ms_surface(f) && ms_id_registered(old, x->bundles[f->bundle].id)) { f->refresh_new = 1; d->added_active++; }
             } else if (f->is_shadow && ms_scoped(x, i) >= 0) {
-                /* A shadow the previous table did not serve replaces a stock
-                 * file the engine may already hold parsed from its own bytes
-                 * (a mod installed after boot, or reinstalled after an
-                 * uninstall): pending like a changed file, so the refresh
-                 * re-parses or reloads it now instead of at the next restart.
-                 * A shadow the map scope withdraws changes nothing yet. */
+                /* A shadow the previous table did not serve replaces a stock file the engine may already hold
+                 * parsed: pending like a changed file, so the refresh re-parses or reloads it. A shadow the
+                 * map scope withdraws changes nothing yet. */
                 kind = ms_kind(f);
                 if (kind && f->ptype && f->pname && !ms_surface(f)) f->refresh = 1;
                 if (kind == SH_MODSERVE_RF_DECL) d->changed_decls++;
@@ -2997,9 +2874,8 @@ static void ms_diff(ms_index *x, const ms_index *old)
         d->gone++;
         /* A shadow the map scope had withdrawn: the engine holds the game's bytes already. */
         if (of->is_shadow && !of->is_restore && ms_scoped(old, i) < 0) continue;
-        /* A removed editor row, the mod's own or a shadow of a stock one: re-parsed
-         * without the mod's bytes it resolves no entityDef, or the game's own row,
-         * so the palette must be built again without it. */
+        /* A removed editor row (the mod's own or a shadow of a stock one) resolves no entityDef or the game's
+         * row, so the palette is built again without it. */
         if (of->is_sedef && of->ptype && of->pname) d->gone_rows++;
         if (of->is_decl && of->is_shadow && !of->is_restore && of->ptype && of->pname) {
             d->gone_shadows++;
@@ -3010,9 +2886,8 @@ static void ms_diff(ms_index *x, const ms_index *old)
                 ms_log("refresh: out of memory; a removed editor row stays in the palette");
         } else if (of->is_decl) d->gone_names++;
     }
-    /* Registries: a rescan that changes the text a registry
-     * generates for the listing (a mod rebuilt with other edits) marks the path that serves it, as a changed
-     * decl is marked. */
+    /* Registries: a rescan that changes the text a registry generates for the listing marks the path that
+     * serves it, as a changed decl is marked. */
     for (i = 0; i < x->reg_count; ++i) {
         int nf = x->reg_first + i, of = -1, j, target = -1;
         const ms_body *nb = ms_reg_body(x, nf), *ob = NULL;
@@ -3030,7 +2905,7 @@ static void ms_diff(ms_index *x, const ms_index *old)
         d->changed++;
         d->changed_decls++;
     }
-    /* Gone shadows an earlier rescan left pending, still not served. */
+    /* Gone shadows a previous rescan left pending, still not served. */
     for (i = 0; i < old->ngone; ++i) {
         const ms_gone *g = &old->gone[i];
         int n;
@@ -3041,13 +2916,9 @@ static void ms_diff(ms_index *x, const ms_index *old)
     }
 }
 
-/* ------------------------------------------------------------------ map scope */
-
-/* The current map's listing: the bundle hashes it
- * declares, in the order of its rows, written by sh_modserve_scope_set under
- * g_build_lock and g_scope_lock and read by the index build under the same
- * build lock. The per-bundle and per-path results it gives are read
- * lock-free by every lookup. */
+/* Map scope: the current map's listing, the bundle hashes it declares in row order. Written by
+ * sh_modserve_scope_set under g_build_lock and g_scope_lock and read by the index build under the build lock;
+ * the per-bundle and per-path results are read lock-free by every lookup. */
 static SRWLOCK g_scope_lock = SRWLOCK_INIT;
 static char (*g_scope_hashes)[SH_MODSERVE_HASH_HEX + 1];
 static int g_scope_n, g_scope_cap;
@@ -3075,11 +2946,8 @@ static const char *const g_why_text[] = {
     "generated by Snapmap+ from the mods in use (a registry)",
 };
 
-/* Editor-time content: a bundle whose shadows include the editor's own decls
- * or movies. Those files are editor tweaks: client-side,
- * they serve in every map this editor opens, a downloaded map included, and
- * nothing else of the bundle follows them: its names, surfaces, other shadows,
- * edits and requirements obey the declared rule like any bundle's. */
+/* Editor-time content: a bundle whose shadows include the editor's own decls or movies. Those editor tweaks
+ * serve in every map the editor opens; the rest of the bundle obeys the declared rule like any bundle's. */
 static int ms_scope_always(const ms_bundle *b) { return b->scope_editor != NULL; }
 
 /* The file class a bundle's serve flags admit. */
@@ -3156,23 +3024,12 @@ static ms_body *ms_scope_compose(ms_index *x, int winner, const int *d, int nd)
     return m->p ? m : NULL;
 }
 
-/* ------------------------------------------------------------------ registries
- *
- * Derived edits (modregistry.h). The index carries one
- * synthetic file per game file an admitted bundle's product block "edits"
- * names (the conductor, the player body and entity, weapons, FSM states,
- * whitelists, ...). Each belongs to the product's pseudo-bundle
- * (bundles[nbundles], never counted, never admitted), is never "served" (no
- * bundle walk, need, closure or name lookup sees it) and has no disk file:
- * its bytes are the text generated for the current listing (ms_reg_memo.body,
- * read through scope_body like a composed text): the game's text with the
- * serving bundles' edits applied. A bundle's edited copy itself (ms_file.edit)
- * is never served. Where a bundle serves its own file at
- * that name (a shadow), that winner points at the synthetic file
- * (registry_of), the shadow's diff against the game's text is that bundle's
- * edits, and the scope pick moves to the synthetic file; elsewhere the
- * synthetic file is the path's own key (registry_keyed). With no text for the
- * listing the game's file answers. */
+/* Registries (modregistry.h): the index carries one synthetic file per game file an admitted bundle's "edits"
+ * names. Each belongs to the product's pseudo-bundle (bundles[nbundles], never counted or admitted), is never
+ * "served" and has no disk file; its bytes are the text generated for the current listing (ms_reg_memo.body,
+ * read through scope_body), the game's text with the serving bundles' edits applied. Where a bundle shadows
+ * that name, its winner points at the synthetic file (registry_of) and the scope pick moves there; elsewhere
+ * the synthetic file is the path's key (registry_keyed). With no text for the listing the game's file answers. */
 
 typedef struct ms_reg_memo {
     uint64_t sig;                         /* the serving set and the choices it was generated for */
@@ -3282,14 +3139,9 @@ static void ms_mark_edits(ms_index *x)
     }
 }
 
-/* The single-demon encounters of the installed mods (their root folders'
- * builds): each snapAiEncounter a mod's own Toybox placeable spawns (an
- * idPlaceableSnapAIEncounter entityDef's encounterToSpawn), never the
- * encounters a mod adds to the lists SnapMap chooses from (a port's wave
- * encounters). The editor's encounter pickers offer them (SH_MR_GROWN_LISTS,
- * the owner's rule: an installed mod grows SnapMap's lists, and a grown list
- * never declares a mod; a map is modded only when it references the mod's
- * entity). */
+/* The single-demon encounters of the installed mods' root builds (each snapAiEncounter a mod's own Toybox
+ * placeable spawns, via idPlaceableSnapAIEncounter encounterToSpawn), offered by the editor's pickers
+ * (SH_MR_GROWN_LISTS); a grown list never declares a mod, only referencing the mod's entity does. */
 static char *ms_reg_text(const ms_file *f, size_t *len);
 
 static int ms_registry_grown(ms_index *x)
@@ -3759,10 +3611,9 @@ int sh_modserve_spawn_pins(void (*fn)(void *context, const char *salt, const cha
     return n;
 }
 
-/* The registries of the current listing (caller holds the scope and build
- * locks): the bundles that serve and edit a game file, in row order
- * (editor-time bundles after the rows, by key), memoized. With map scope off
- * nothing is generated. Returns 1 when the generated texts changed. */
+/* The registries of the current listing, memoized (caller holds the scope and build locks): the bundles that
+ * serve and edit a game file, in row order, editor-time bundles after the rows. Nothing is generated with map
+ * scope off. Returns 1 when the generated texts changed. */
 static int ms_registry_compute(ms_index *x, int on)
 {
     ms_bundle **set;
@@ -3785,7 +3636,7 @@ static int ms_registry_compute(ms_index *x, int on)
             ms_bundle *b = &x->bundles[i];
             if (!b->admitted || !b->reg_relevant || b->inert) continue;
             if (b->rank < 0) continue;
-            set[n++] = b;   /* every serving bundle: no count of its own (decision 26) */
+            set[n++] = b;   /* every serving bundle */
         }
         qsort(set, (size_t)n, sizeof *set, ms_reg_order);
         for (i = 0; i < n; ++i) {
@@ -3834,17 +3685,11 @@ static ms_body *ms_reg_rewrite(const ms_index *x, int file)
     return NULL;
 }
 
-/* Set every admitted bundle's serve flags from the listing and the mode, then
- * choose the file serving each path (caller holds g_scope_lock and the build
- * lock). Declared bundles serve everything they carry. A build of a salt the
- * map declares at another hash is inert. With no map open, or in the editor,
- * an undeclared bundle serves the names under its salt for the Toybox (only
- * the root folder's build) and its surfaces, never its shadows; in Play and
- * in a map launched outside the editor it serves nothing. An editor-time
- * bundle (ms_scope_always) serves as before. With `mark`, every path whose
- * served bytes changed is marked pending as at a rescan (shadows: also when
- * the game's bytes come back; names: only when another build's bytes replace
- * the ones last served). Returns the bundles whose serving changed. */
+/* Set every admitted bundle's serve flags from the listing and the mode, then choose the file serving each
+ * path (caller holds g_scope_lock and the build lock). Declared bundles serve everything they carry; a build
+ * of a salt the map declares at another hash is inert. An undeclared bundle serves its names (root build only)
+ * and surfaces for the Toybox, never its shadows, with no map open or in the editor, and nothing in Play. With
+ * `mark`, a path whose served bytes changed is marked pending as at a rescan. Returns the bundles changed. */
 static int ms_scope_compute(ms_index *x, int mark)
 {
     int i, k, changed = 0, marked = 0, on = InterlockedCompareExchange(&g_scope_on, 0, 0) != 0;
@@ -3853,10 +3698,8 @@ static int ms_scope_compute(ms_index *x, int mark)
     ms_avail av = { NULL, 0 };
     if (!x) return 0;
     for (i = 0; i < x->nbundles; ++i) x->bundles[i].inert = 0;
-    /* The declared bundles, by hash, in row order (ms_bundle_by_hash picks the
-     * root's folder, else the composition); a later row (or the
-     * placed closure) naming another build of a salt already declared is not
-     * one. */
+    /* The declared bundles, by hash, in row order (ms_bundle_by_hash picks the root's folder, else the
+     * composition); a later row naming another build of a salt already declared is not one. */
     {
         LONG *rank = (LONG *)malloc(sizeof(LONG) * ((size_t)x->nbundles + 1));
         if (!rank) return 0;
@@ -3866,7 +3709,7 @@ static int ms_scope_compute(ms_index *x, int mark)
             if (b < 0 || rank[b] >= 0) continue;
             for (i = 0; i < x->nbundles && !dup; ++i)
                 dup = rank[i] >= 0 && !strcmp(x->bundles[i].id, x->bundles[b].id) &&
-                      /* the stand-ins of the names a local folder no longer has join that folder's build */
+                      /* the stand-ins of the names a local folder lacks join that folder's build */
                       !(ms_standin_supplement(x, b) && !x->bundles[i].place);
             if (!dup) rank[b] = next++;
         }
@@ -3878,9 +3721,9 @@ static int ms_scope_compute(ms_index *x, int mark)
             for (k = 0; k < x->nbundles && !inert; ++k)
                 if (k != i && rank[k] >= 0 && rank[i] < 0 && !strcmp(x->bundles[k].id, b->id)) {
                     inert = 1;
-                    /* D26: in the editor, the root folder's build of a salt the map names by units (its composition)
-                     * serves the names the units do not carry, so the Toybox shows the local version's objects; the
-                     * units win on every path they carry (the declared composition is preferred per path below). */
+                    /* In the editor, the root build of a salt the map names by units (its composition) serves
+                     * the names the units do not carry, so the Toybox shows the local version's objects; the
+                     * units win on every path they carry. */
                     overlay = !play && b->root_build && x->bundles[k].place &&
                               !strcmp(x->bundles[k].place, SH_MODSERVE_CONTENT);
                 }
@@ -3889,10 +3732,9 @@ static int ms_scope_compute(ms_index *x, int mark)
             else if (inert) sv = 0;
             else if (play || !b->root_build) sv = ms_scope_always(b) ? MS_SV_EDITOR : 0;
             else sv = (ms_scope_always(b) ? MS_SV_EDITOR : 0) | MS_SV_NEW | MS_SV_RESTORE;
-            /* Requirements are cvars: only a declared bundle's apply (manager, 2026-11-24, SPEC 5.10). An
-             * undeclared mod's Toybox rows register without them (its steps are not blocked for it), and once a
-             * placement declares the mod its requirements apply and what was read without them is read again
-             * (ms_stale). A composition serves only for its map (ONE-SHAPE rule 4). */
+            /* Only a declared bundle's requirements apply: an undeclared mod's Toybox rows register without
+             * them, and once a placement declares the mod they apply and what was read without them is read
+             * again (ms_stale). */
             roff = on && rank[i] < 0;
             b->inert = inert;
             was_sv = InterlockedExchange(&b->sv, sv);
@@ -3903,13 +3745,12 @@ static int ms_scope_compute(ms_index *x, int mark)
         }
         free(rank);
     }
-    /* Requirement conflicts among the bundles whose requirements now apply: the
-     * open map's rows first, in row order (ms_req_conflicts). */
+    /* Requirement conflicts among the bundles whose requirements apply: the open map's rows first, in row
+     * order (ms_req_conflicts). */
     if (ms_req_conflicts(x)) changed++;
-    /* Registries from the bundles that now serve (ms_registry_compute). */
+    /* Registries from the bundles that serve (ms_registry_compute). */
     if (ms_registry_compute(x, on)) changed++;
-    /* Every provider of a path takes part (no count of its own, decision 26):
-     * the per-path arrays are sized once to the most providers any path has. */
+    /* The per-path arrays are sized once to the most providers any path has. */
     int pmax = 64, s_cand[64], s_d[64], s_unres[64], s_share[64], s_order[64];
     long s_ok[64], s_ook[64];
     int *h_cand = s_cand, *h_d = s_d, *h_unres = s_unres, *h_share = s_share, *h_order = s_order;
@@ -3927,7 +3768,7 @@ static int ms_scope_compute(ms_index *x, int mark)
             h_ok = longs; h_ook = longs + pmax;
         }
     }
-    /* Each path: the file that serves it now. */
+    /* Each path: the file that serves it. */
     for (i = 0; i < x->nfiles; ++i) {
         ms_file *f = &x->files[i];
         int *cand = h_cand, nc = 0, *d = h_d, nd = 0, best = -1, why = MS_WHY_NONE, q, declared = 0;
@@ -3955,7 +3796,7 @@ static int ms_scope_compute(ms_index *x, int mark)
             }
             if (nd == 1) best = d[0], why = declared ? MS_WHY_ONE : MS_WHY_ALWAYS;
             else if (nd > 1 && !declared) {
-                /* Only editor-time bundles: the static order and composition, as before phase 2. */
+                /* Only editor-time bundles: the static order and composition. */
                 best = d[0];
                 why = MS_WHY_ALWAYS;
                 for (k = 1; k < nd; ++k) if (!ms_pick_same(x, d[0], NULL, d[k], NULL)) break;
@@ -4043,9 +3884,8 @@ static int ms_scope_compute(ms_index *x, int mark)
         if (f->is_shadow) {
             if (ms_pick_same(x, (int)was, was_body, best, body)) continue;
         } else {
-            /* A name: withdrawn, the engine keeps what it parsed; served again,
-             * it is read again only when other bytes than the last served
-             * ones serve it now (another build of its salt). */
+            /* A name: withdrawn, the engine keeps what it parsed; served again, it is read again only when
+             * other bytes than the last served ones serve it (another build of its salt). */
             LONG last = InterlockedCompareExchange(&f->scope_last, 0, 0);
             if (best < 0) continue;
             (void)InterlockedExchange(&f->scope_last, best);
@@ -4272,7 +4112,7 @@ int sh_modserve_scope_relevant(void)
     AcquireSRWLockShared(&g_scope_lock);
     any = g_scope_n > 0;
     ReleaseSRWLockShared(&g_scope_lock);
-    /* Every admitted bundle is scoped now: a map serves only what it declares. */
+    /* Every admitted bundle is scoped: a map serves only what it declares. */
     return any || (x && x->admitted > 0);
 }
 
@@ -4605,7 +4445,7 @@ int sh_modserve_bank_events(unsigned char *bytes, size_t len, const uint32_t *fr
 
 /* The bank event ids of bundle `b`'s own sound decls, as the author's bank holds them and as the engine posts them:
  * a decl served as mods/<salt>/<dir>/<salt>_<leaf> starts the event play_<salt>_<leaf>, which the author's bank
- * names play_<leaf> (modauthor.h; SPEC-distribution D12). *from and *to malloc'd; the count, 0 when it has none. */
+ * names play_<leaf> (modauthor.h). *from and *to malloc'd; the count, 0 when it has none. */
 static size_t ms_sound_events(const ms_index *x, const ms_bundle *b, uint32_t **from, uint32_t **to)
 {
     char root[SH_MB_ID_MAX + 40];
@@ -4731,11 +4571,9 @@ int sh_modserve_served_prune(void)
     int removed = 0, other = 0;
     AcquireSRWLockShared(&g_build_lock);
     x = g_index;
-    /* Another game instance on this account that uses this same mods folder
-     * may serve files this table does not name (it read the folder at another
-     * time): the folder is left whole. The mark is named for the folder, as
-     * its store lock is (store_lock.h), so a game using another mods folder,
-     * or a test's own folder, is never mistaken for one. */
+    /* Another game instance using this same mods folder may serve files this table does not name, so the
+     * folder is left whole. The mark is named for the folder like its store lock (store_lock.h), so a game on
+     * another folder is never mistaken for one. */
     wroot = x && x->root && x->root[0] ? sh_mb_wpath(x->root) : NULL;
     if (wroot && sh_store_lock_name(wroot, name, 64)) {
         wchar_t hex[17];
@@ -4908,11 +4746,9 @@ static void ms_bank_stems(ms_index *x)
                 continue;
             }
             bytes = ms_read_whole(f->disk, MS_ANY_SIZE, &len);
-            /* The bank's own hash names it: two builds
-             * with one bank's bytes share it, and Wwise loads it once. Its
-             * events take the mod's namespace first (ms_sound_events), and
-             * the hash is of those bytes, so a bank written with its events
-             * under the namespace is served as the same bank. */
+            /* The bank's own hash names it, so two builds with one bank's bytes share it and Wwise loads it
+             * once. Its events take the mod's namespace first (ms_sound_events) and the hash is of those
+             * bytes. */
             if (bytes && nev && sh_modserve_bank_events(bytes, len, ev_from, ev_to, nev)) {
                 char sha[SH_MB_HASH_HEX + 1];
                 sh_mb_sha256_hex(bytes, len, sha);
@@ -5009,9 +4845,8 @@ int sh_modserve_index_build(const char *mods_root)
     ms_mark_editor_closure(x);
     for (i = 0; i < x->nbundles; ++i) x->admitted += x->bundles[i].admitted;
     ms_registry_relevant(x);
-    /* The build of each salt that serves for the Toybox with no map
-     * declaring it: the root folder's (ONE-SHAPE rule 4; ms_one_per_area left
-     * one per salt). A salt held only in compositions offers no rows. */
+    /* The build of each salt that serves for the Toybox with no map declaring it is the root folder's; a salt
+     * held only in compositions offers no rows. */
     for (i = 0; i < x->nbundles; ++i) {
         ms_bundle *b = &x->bundles[i];
         b->root_build = b->admitted && !b->place;
@@ -5231,10 +5066,8 @@ int sh_modserve_lookup_indexed(const char *request, sh_modserve_hit *out)
     return r;
 }
 
-/* The bytes of one indexed file (process heap), or NULL: a stock pointer's
- * installed bytes, else the file at its indexed size. A pointer the reader
- * cannot answer falls back to a copy in the bundle folder with the same
- * hash. */
+/* The bytes of one indexed file (process heap), or NULL: a stock pointer's installed bytes, else the file at
+ * its indexed size. A pointer the reader cannot answer falls back to a same-hash copy in the bundle folder. */
 static unsigned char *ms_file_raw(const ms_file *f, size_t *len)
 {
     unsigned char *buf = NULL;
@@ -5276,12 +5109,11 @@ void sh_modserve_set_product_reader(int (*read)(const char *request, unsigned ch
     InterlockedExchangePointer((PVOID volatile *)&g_product_reader, (PVOID)read);
 }
 
-/* A file the product names by its bytes' hash (sh_mb_product_hashed: a look's parameter or colour image, an SDK decl)
- * that no build of the index lists: the bytes the product registered when a served material, effect or environment
- * that names it compiled in this process (sdk.h). Only such a compile can spell the name, so it is served wherever
- * that file serves, in every mode, without a pointer (a build records no need of a look's images, modbundle.c
- * mb_need_cb), and a product that derives other bytes names and serves its own. Without this the engine met no file
- * and the layered program read no numbers: the surface drew black (R-HD1). 1 served, 0 not such a file. */
+/* A file the product names by its bytes' hash (sh_mb_product_hashed: a look's parameter or colour image, an SDK
+ * decl) that no build lists: the bytes the product registered when a served material, effect or environment
+ * naming it compiled in this process (sdk.h). It is served wherever that file serves, in every mode, without a
+ * pointer (a build records no need of a look's images, modbundle.c mb_need_cb); without it the engine meets no
+ * file and the surface draws black. 1 served, 0 not such a file. */
 static int ms_open_derived(const char *request, unsigned char **bytes, size_t *length)
 {
     int (*owns)(const char *) = (int (*)(const char *))InterlockedCompareExchangePointer((PVOID volatile *)&g_product_owner,
@@ -5300,12 +5132,9 @@ void sh_modserve_set_material_filter(sh_modserve_material_fn fn)
     InterlockedExchangePointer((PVOID volatile *)&g_material_filter, (PVOID)fn);
 }
 
-/* The text a mod's material decl is served as instead of its file when the filter changes it (modlook.h: a look
- * compiled to the engine's material, an old program's keys moved), or NULL when the file is served as it is. Derived
- * from the file's bytes on the first ask and kept with the index, so every open and the ledger see the same bytes; like
- * a composed text, the ledger identifies it by those bytes, while the build's identity of the file (its SHA-256) stays
- * the author's file. A mistake in a look was refused by the build: here the file is served as it holds it, with one
- * log line. A stock pointer is the game's own material and is never changed. */
+/* The text a mod's material decl is served as instead of its file when the filter changes it (modlook.h), or
+ * NULL when the file is served as it is. Derived on the first ask and kept with the index, so every open and
+ * the ledger see the same bytes; a refused look is served as the file holds it, with one log line. */
 static const unsigned char *ms_look_of(const ms_file *f, size_t *len)
 {
     ms_file *m = (ms_file *)f;
@@ -5463,12 +5292,11 @@ int sh_modserve_serve_identity(const char *request, const char **bundle_hash, co
     return r;
 }
 
-/* A decl the product derives from a mod's file (a particle, its material, a table, an environment's fx) exists in the
- * product only once that file has been compiled in this process (sdk.h: compiling registers what it derives), and a
- * plan loads it before the file that needs it. So a read of such a pointer that finds nothing first compiles the
- * served files that need it (through the material filter, ms_look_of), and the pointers that need it in turn, then
- * reads again. A need names the file by its provided name or by the request it resolved to (an image is needed as
- * <name>.tga and provided as <name>). Returns how many files it compiled. */
+/* A decl the product derives from a mod's file (a particle, its material, a table, an environment's fx) exists
+ * only once that file has been compiled in this process (sdk.h), and a plan loads it before the file that needs
+ * it. So a read of such a pointer that finds nothing first compiles the served files that need it (through
+ * ms_look_of), and the pointers that need it in turn, then reads again. A need names the file by its provided
+ * name or its resolved request. Returns how many files it compiled. */
 static int ms_derive(const ms_index *x, const ms_file *f, int depth)
 {
     int i, k, n = 0;
@@ -5532,10 +5360,9 @@ static int ms_open(const char *request, unsigned char **bytes, size_t *length)
         }
         if (InterlockedCompareExchange(&g_cache_enabled, 0, 0)) ms_cache_put(f, buf, len);
     }
-    /* A render program's files are named once each (the first 64): which of
-     * them the engine opened shows which variant this GPU binds. A file first
-     * served before its bundle's requirement gates were live was resolved by
-     * the engine against the cut-content blacklists (modserve.h). */
+    /* A render program's files are named once each (the first 64), which shows which variant this GPU binds. A
+     * file served before its bundle's requirement gates were live was resolved against the cut-content
+     * blacklists (modserve.h). */
     first = InterlockedIncrement((volatile LONG *)&f->opens) == 1;
     if (first && ms_req_needs(ms_gate_of(x, f)) &&
         !InterlockedCompareExchange((volatile LONG *)&ms_gate_of(x, f)->req_live, 0, 0))
@@ -5598,12 +5425,9 @@ int sh_modserve_probe_claims(const char *path)
     return 1;
 }
 
-/* Free the tables two or more generations behind the published one
- * (modserve.h). Everything a later question needs from them was carried into
- * the newer tables at their build (ms_carry_forward, the gone list), so only
- * a reader still inside one holds it: a provider call in flight, a plan, or a
- * caller that kept a pointer from the table before the published one, which
- * stays. */
+/* Free the tables two or more generations behind the published one (modserve.h). Later questions need nothing
+ * from them (ms_carry_forward, the gone list), so only a reader still inside one (a provider call, a plan)
+ * blocks the free; the table just before the published one stays for callers holding a pointer. */
 int sh_modserve_index_retire(void)
 {
     ms_index *x, *t, *next;
@@ -5664,18 +5488,12 @@ static int ms_need_blocks(const char *name)
     return !strncmp(name, "mods/", 5) || strstr(name, "/mods/") != NULL;
 }
 
-/* A decl a plan may register: every decl a bundle provides except shadows,
- * edited copies and surfaces (a shadow is served by the provider when the
- * game parses it, never reloaded by a plan). A surface (a stock pointer at the game's own path: the game's
- * bytes under the game's name, sh_mb_stock_restore) is never planned by any
- * pass: the provider serves it whenever the game parses it, at the game's
- * own time and level, so no pass registers or re-parses it. The one exception
- * is a pointer to a decl the product derives (ms_product_planned). */
-/* A pointer to a decl the product derives (an SDK effect's emitter, a derived particle, material, table or fx, a
- * platform program, its permutations and render parms) restores a name no archive lists: below the engine's lifecycle
- * state 2 DeclFind finds a name only through a registered source (VK 0x14155ae90), so such a pointer is planned as a
- * mod's own decl is, its needs first (R-GS3). MS_PLAN_PRODUCT_PROGRAMS 0 is the fallback (D-A22): the SDK's derived
- * decls only, the programs and render parms left to the engine's demand load as before. */
+/* A decl a plan may register: every decl a bundle provides except shadows, edited copies and surfaces. A shadow
+ * or a surface (a stock pointer at the game's own path, sh_mb_stock_restore) is served by the provider when the
+ * game parses it and is never planned, except a pointer to a decl the product derives (ms_product_planned: an
+ * SDK effect, a derived particle, material, table or fx, a platform program). Such a name is in no archive and
+ * below engine lifecycle state 2 DeclFind finds a name only through a registered source (VK 0x14155ae90), so
+ * it is planned as a mod's own decl is, needs first (MS_PLAN_PRODUCT_PROGRAMS 0: SDK decls only). */
 #define MS_PLAN_PRODUCT_PROGRAMS 1
 static int ms_product_planned(const ms_file *f)
 {
@@ -5790,11 +5608,8 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
         s->reg_path = f->reg;
         s->bundle_id = x->bundles[f->bundle].id;
         s->rank = f->rank;
-        /* The editor plan keeps every step for the session: a row is kept, and
-         * what its parse points at must outlive the purges around Play. A
-         * decl an editor row needs is kept by whichever pass registers it
-         * first (a map pass, or a refresh after an in-session install), as
-         * the boot editor pass would have kept it. */
+        /* The editor plan keeps every step for the session, since what a row's parse points at must outlive
+         * the purges around Play; a decl an editor row needs is kept by whichever pass registers it first. */
         s->persist = persist_sedefs ? 1 : f->editor_closure ? 2 : 0;
         s->shadow = f->is_shadow;   /* surfaces are never planned (ms_plannable) */
         s->blocked = cause[order[i]];
@@ -5832,8 +5647,7 @@ int sh_modserve_plan_editor(sh_modserve_plan *out)
 }
 
 /* The bundle at `hash`, the hash half of the row resolver (ms_row_build): the root's folder at that hash, else the
- * content cache's composition of that hash (modcache.h), which a pinned row names and which no other folder carries
- * (R-LV2: without it a pinned row's composition resolved but was never activated or ranked by the map scope). */
+ * content cache's composition of that hash (modcache.h), which a pinned row names and no other folder carries. */
 static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only)
 {
     int i, round, at = -1;
@@ -5896,12 +5710,9 @@ int sh_modserve_plan_bundles(const char *const *bundle_hashes, int n, sh_modserv
     return r;
 }
 
-/* The editor rows of the bundles a map names, checked against the built
- * palette at load. A row counts as missing when the palette lacks
- * it and no editor pass has visited it yet (reg_state 0): a row registered
- * before an earlier build that is still absent was rejected by the builder's
- * admission, and another rebuild would not admit it. Bundles are selected as
- * sh_modserve_plan_bundles selects them, superseded builds included. */
+/* The editor rows of the bundles a map names, checked against the built palette at load. A row is missing when
+ * the palette lacks it and no editor pass has visited it (reg_state 0): a registered row still absent was
+ * rejected by the builder's admission. Bundles are selected as in sh_modserve_plan_bundles. */
 int sh_modserve_map_rows_sync(const char *const *bundle_hashes, int n, const sh_modserve_palette_ops *ops,
                               sh_modserve_rows_sync *out)
 {
@@ -5987,20 +5798,12 @@ static unsigned char *ms_file_bytes(const ms_file *f, size_t *len)
     return ms_file_raw(f, len);
 }
 
-/* 1 with the first model an animWeb's models or modelInfos block names that
- * no served bundle file provides as an md6Def and the engine cannot find; 0
- * when every model resolves (or the text cannot be read, or the engine cannot
- * tell). The engine's parse looks each model up with DeclFind and no
- * makeDefault, and a miss throws an idLexerException that the parse catches
- * itself: the web keeps what it had parsed so far (nothing past the props
- * block), is not marked failed, and the load reports success (13954591, both
- * renderers). `strict` is a load now: the engine's own lookup (decl_found)
- * decides, since the game archives also hold campaign md6Defs SnapMap cannot
- * load (issue 132: designsystems/med_station naming the campaign
- * wallhealthstation.md6). Otherwise (a stock shadow the engine parses later,
- * on demand) a model the registry or the game archives know counts as
- * resolved, since the registry does not know a stock decl whose source is not
- * registered yet (the player hands' md6Def at map activation). */
+/* 1 with the first model an animWeb's models or modelInfos block names that no served bundle file provides as an
+ * md6Def and the engine cannot find; 0 when every model resolves (or the text cannot be read, or the engine
+ * cannot tell). The engine's parse looks each model up with DeclFind and no makeDefault; a miss throws an
+ * idLexerException the parse catches itself, so the web keeps what it parsed and the load reports success
+ * (13954591, both renderers). `strict` (a load) trusts only decl_found, as the game archives also hold campaign
+ * md6Defs SnapMap cannot load; otherwise a model the registry or the archives know counts as resolved. */
 static int ms_animweb_unresolved(const ms_index *x, const ms_file *f, const sh_modserve_engine_ops *ops,
                                  int strict, char **model)
 {
@@ -6267,13 +6070,10 @@ static void ms_aset_free(ms_aset *s)
     memset(s, 0, sizeof *s);
 }
 
-/* Resources whose last load ran with a map heap selected (sh_modserve_attrib_enter
- * with heap != 0): what the load allocated with the current heap (an MD6
- * skeleton's joints, VK 0x1416d0770 at +0x40) belongs to that heap, which the
- * next map load releases whatever the resource's level (the
- * chainsaw gore skeleton raised by name kept its object and lost its joints,
- * a fault at VK 0x16f7f0b). No keep raises one; the purge and the next load recreate
- * it whole. A load in process heap 0 clears the mark. */
+/* Resources whose last load ran with a map heap selected (sh_modserve_attrib_enter with heap != 0): what the
+ * load allocated with the current heap (an MD6 skeleton's joints, VK 0x1416d0770 at +0x40) belongs to that
+ * heap, which the next map load releases whatever the resource's level. No keep raises one; the purge and the
+ * next load recreate it whole. A load in process heap 0 clears the mark. */
 static ms_aset g_mapheap;
 static unsigned g_left_n;
 static char g_left_first[300];
@@ -6413,9 +6213,8 @@ int sh_modserve_watermark_raise(const void *head_slot, const sh_modserve_waterma
     return ok;
 }
 
-/* Every resource the engine's lists hold: fn(context, list class, resource, name). */
-/* Collected under the lock; the callback (a reload, a re-parse) runs after it
- * is released, since GenericLoad under the lock was not analysed. */
+/* Every resource the engine's lists hold: fn(context, list class, resource, name). Collected under the lock;
+ * the callback (a reload, a re-parse) runs after it is released, since GenericLoad under the lock is unverified. */
 typedef struct ms_res_item { const char *list; void *res; const char *name; } ms_res_item;
 typedef struct ms_res_items { ms_res_item *v; size_t n, cap; int oom; } ms_res_items;
 static void ms_each_res_one(void *context, const unsigned char *list, unsigned char *res)
@@ -6803,16 +6602,11 @@ static int ms_bundle_carries_key(const ms_index *x, const ms_bundle *b, const ch
 }
 
 /* 1 when the engine's request is a probe of a name the mod's build never carried, read from what the composition
- * carries (R-LB1). The unit walk keeps every decl of a name a kept text spells, whatever its type (modunit.c
- * uw_reach_spelled), and a model whole, its skeleton's default clip included whenever the build holds one (modbundle.c
- * mb_model_needs). So
- *   - a decl request whose name the composition carries as a decl of another type
- *     (generated/decls/entityDef/mods/<x>/<name>.decl where <name> is a sound decl: a field typed idDeclEntityDef,
- *     such as a wave blast's emitterSound, names it), and
- *   - the default clip of a skeleton the composition carries (<cooked|generated>/anim/<skeleton>.md6skl/
- *     _default.bmd6anim: the engine probes it for every model it loads and makes a default clip when nothing holds it)
- * are the engine's lookups, never a file a unit lost. Any other file of a carried name (an image beside its material,
- * a skeleton beside its mesh) is still a miss. */
+ * carries. The unit walk keeps every decl of a name a kept text spells, whatever its type (modunit.c
+ * uw_reach_spelled), and a model whole (modbundle.c mb_model_needs), so two requests are the engine's lookups,
+ * never a file a unit lost: a decl request whose name the composition carries as a decl of another type (a field
+ * typed idDeclEntityDef names a sound decl), and the default clip of a carried skeleton (<cooked|generated>/anim/
+ * <skeleton>.md6skl/_default.bmd6anim, probed for every model). Any other file of a carried name is still a miss. */
 static int ms_miss_is_probe(const ms_index *x, const ms_bundle *b, const char *request)
 {
     char *key = ms_miss_key(request), *tail;
@@ -6841,11 +6635,11 @@ int sh_modserve_note_miss(const char *request)
     sh_modserve_miss_fn fn = g_miss_fn;
     int i, b, fresh = 1;
     if (!request || !ms_request_salt(request, salt)) return 0;
-    /* A stand-in's own name is the product's, never a file a unit lost (R-LB1). */
+    /* A stand-in's own name is the product's, never a file a unit lost. */
     if (sh_modserve_standin_name(request)) return 0;
-    /* A board's squares a unit leaves out are left out on purpose: the engine draws a family with absent squares
-     * (R-DS2 5.1), and its level-1 quarters (_q<N>) no build carries (R-LV2). A request of a kind no build can carry
-     * (an image's source spelling, .tga) is the engine's probe before the cooked name, never a file a unit lost. */
+    /* A board's squares a unit leaves out are left out on purpose (the engine draws a family with absent
+     * squares), and no build carries its level-1 quarters (_q<N>). A request of a kind no build can carry is
+     * the engine's probe, never a file a unit lost. */
     {
         size_t n = strlen(request);
         if (n > 6 && !_stricmp(request + n - 6, ".mega2")) return 0;
@@ -7003,10 +6797,8 @@ int sh_modserve_attrib_close(const void *head_slot, int forget, sh_modserve_attr
         }
     }
     ok = ms_res_walk(head_slot, ms_attrib_raise_one, &w, NULL);
-    /* The pairs: all forgotten before a purge. Otherwise only those a later
-     * keep can still follow stay: a parent not kept yet and not permanent
-     * (the engine's own level-4 objects, most of what the boot loads, are
-     * never raised, and a kept parent's pairs were followed just now). */
+    /* The pairs: all forgotten before a purge, else only those a later keep can still follow stay: a parent not
+     * kept yet and not permanent (the engine's own level-4 objects are never raised). */
     free(g_pairs);
     g_pairs = NULL;
     g_pairs_cap = g_pairs_n = 0;
@@ -7027,10 +6819,9 @@ done:
 }
 
 
-/* What kept decls hold (sh_modserve_holds_raise). A (type, name) key: the
- * type case-insensitive, the name folded as the raw-name match folds it
- * (case, a backslash as '/', '-' as '_': the engine's binary names spell a
- * source path's '-' as '_', ms_sanitize). */
+/* What kept decls hold (sh_modserve_holds_raise): a (type, name) key, the type case-insensitive and the name
+ * folded as the raw-name match folds it (case, '\' as '/', '-' as '_', as the engine's binary names spell
+ * a source path's '-'; ms_sanitize). */
 typedef struct ms_hold {
     const char *type, *name;
     int file;              /* the file that describes it for the open map, or -1 */
@@ -7111,10 +6902,8 @@ static int ms_holds_closure(const ms_index *x, const void *head_slot, ms_hold **
     w.root = (unsigned char *)calloc((size_t)x->nfiles, 1);
     queue = (int *)malloc(sizeof *queue * (size_t)x->nfiles);
     if (!cands || !w.root || !queue) goto done;
-    /* The roots: decls of admitted bundles the product serves (a surface is
-     * the game's own decl, kept at the game's level), each described by the
-     * build that serves its path for the open map (ms_serving_file): a map
-     * that brought its own copy of a salt holds what that copy needs. */
+    /* The roots: decls of admitted bundles the product serves (a surface is the game's own decl), each
+     * described by the build that serves its path for the open map (ms_serving_file). */
     for (i = 0; i < x->nfiles; ++i) {
         const ms_file *f = &x->files[i];
         if (!f->is_decl || !f->served || ms_surface(f) || !f->ptype || !f->pname || !x->bundles[f->bundle].admitted) continue;
@@ -7175,16 +6964,10 @@ done:
     return ok;
 }
 
-/* Everything a level-4 decl of a served bundle holds, by name: the needs the
- * builder recorded for its file and, through every need another file of the
- * index provides (a served decl or model, a closure pointer), that file's
- * needs, at any depth. A decl the pass keeps may have been parsed before its
- * watermark (an open map's own load created the chainsaw pickup's web at level
- * 1 and its parse created the clip; the pass then raised the web, and the
- * clip, older than the watermark, stayed at 1 and was freed under the web by
- * the Play purge), so the watermark alone cannot keep what it
- * holds. Each named resource found at level 1 is raised to 4; one the engine
- * does not hold yet is raised by the first pass after it is created. */
+/* Everything a level-4 decl of a served bundle holds, by name: the needs the builder recorded for its file and,
+ * through every need another file of the index provides, that file's needs, at any depth. A decl the pass keeps
+ * may predate its watermark, so the watermark alone cannot keep what it holds. Each named resource found at
+ * level 1 is raised to 4; one not held yet is raised by the first pass after it is created. */
 int sh_modserve_holds_raise(const void *head_slot, sh_modserve_holds *out)
 {
     const ms_index *x = g_index;
@@ -7249,11 +7032,9 @@ static void ms_held_model_one(void *context, const unsigned char *list, unsigned
     i = (size_t)(h - w->set);
     w->res[i] = res;
     state = *(const unsigned char *)(res + MS_RES_STATE);
-    /* Held for the session and whole: nothing to do. Loaded at level 1 in
-     * process heap 0: the holds raise keeps it. The default box (the engine's
-     * model for a file it could not read: loaded where the file was not
-     * served), or one whose load allocated from a map heap
-     * (sh_modserve_keepable), is loaded again. */
+    /* Held whole or at level 1 in process heap 0 (the holds raise keeps it): nothing to do. The default box
+     * (the engine's model for a file it could not read) or one loaded from a map heap
+     * (sh_modserve_keepable) is loaded again. */
     if (state & (MS_RES_FAILED | MS_RES_DEFAULT)) w->load[i] = 1;
     else if (*(const unsigned *)(res + MS_RES_LEVEL) == 4) w->load[i] = 0;
     else w->load[i] = ms_aset_has(&g_mapheap, (uintptr_t)res) ? 1 : 0;
@@ -7412,10 +7193,9 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
         {
             int known = ops->source_registered(ops->context, s->type, s->name) == 1;
             char *model = NULL;
-            /* An animWeb whose models block names a model nothing provides is
-             * refused by the engine's parse (a C++ throw per load). Its file
-             * is withdrawn from serving: a stock decl it shadowed serves
-             * again, and a new name is never registered. */
+            /* An animWeb whose models block names a model nothing provides is refused by the engine's parse
+             * (a C++ throw per load): its file is withdrawn, a stock decl it shadowed serves again, and a new
+             * name is never registered. */
             if (!_stricmp(s->type, "animWeb") && ms_animweb_unresolved(x, f, ops, !known, &model)) {
                 ms_refuse_file(x, f);
                 if (f->withdrawn == 2) {
@@ -7669,11 +7449,9 @@ static int ms_req_accepted(const ms_bundle *b)
            !InterlockedCompareExchange((volatile LONG *)&b->req_off, 0, 0);
 }
 
-/* The order in which requirements are decided: bundles the open map declares
- * first, in its row order (rank), then the others (every bundle while map scope
- * is off) oldest install first. 1 when bundle `a`
- * is decided after bundle `b`. Install order never decides between two of a
- * map's own rows, so every player of the map gets the same result. */
+/* The order requirements are decided in: bundles the open map declares first, in row order, then the others
+ * (every bundle with map scope off) oldest install first. 1 when `a` is decided after `b`. Install order
+ * never decides between a map's own rows, so every player of the map gets the same result. */
 static int ms_req_after(const ms_index *x, int a, int b)
 {
     LONG ra = InterlockedCompareExchange((volatile LONG *)&x->bundles[a].rank, 0, 0);
@@ -7735,12 +7513,9 @@ static char *ms_req_lost_text(const ms_index *x, const ms_bundle *b)
                     b->req_cvars[k].value, ms_label(w), w->req_cvars[m].value);
 }
 
-/* Requirement conflicts for the current listing (caller holds the build lock:
- * ms_scope_compute). Only bundles whose requirements apply contend, in
- * decision order (ms_req_after); one asking a cvar that a bundle decided
- * before it asks at another value loses. A bundle the open map does not use
- * never takes a cvar from one of its rows, and a row never loses to an
- * install. Returns the bundles whose outcome changed. */
+/* Requirement conflicts for the current listing (caller holds the build lock: ms_scope_compute). Bundles whose
+ * requirements apply contend in decision order (ms_req_after); one asking a cvar that an earlier-decided
+ * bundle asks at another value loses, so a row never loses to an install. Returns the bundles changed. */
 static int ms_req_conflicts(ms_index *x)
 {
     int *order, n, i, j, changed = 0;
@@ -7800,10 +7575,8 @@ static void ms_active_drop(int i)
     g_nactive--;
 }
 
-/* A bundle's cvars are live when each one's entry is live at its value.
- * Caller holds g_req_lock (shared is enough: it writes only the bundle). */
-/* Set the bundle's requirements cause to `text` (NULL: none), kept in the
- * arena; an unchanged text keeps the string it has. */
+/* Set the bundle's requirements cause to `text` (NULL: none), kept in the arena; an unchanged text keeps the
+ * string it has. */
 static void ms_req_cause_set(ms_index *x, ms_bundle *b, const char *text)
 {
     if (!text) { b->req_cause = NULL; return; }
@@ -7812,6 +7585,8 @@ static void ms_req_cause_set(ms_index *x, ms_bundle *b, const char *text)
     if (!b->req_cause) b->req_cause = "requirements are not live";
 }
 
+/* A bundle's cvars are live when each one's entry is live at its value. Caller holds g_req_lock (shared is
+ * enough: it writes only the bundle). */
 static void ms_req_mark_bundle(ms_index *x, ms_bundle *b)
 {
     int k, unmet = 0;
@@ -7853,10 +7628,8 @@ static void ms_req_mark_bundle(ms_index *x, ms_bundle *b)
 
 static int ms_req_has_text(const ms_bundle *b) { return b->admitted && b->req_text != NULL; }
 
-/* At index build, after the scope decided the conflicts (ms_req_conflicts):
- * the log lines (once per bundle and requirements text) and the liveness the
- * held state already gives, so a bundle whose cvars a pass made live serves
- * as live. */
+/* At index build, after ms_req_conflicts: the log lines (once per bundle and requirements text) and the
+ * liveness the held state already gives, so a bundle whose cvars a pass made live serves as live. */
 static void ms_req_index(ms_index *x, const ms_index *old)
 {
     int *order, n = 0, i, k;
@@ -7918,8 +7691,8 @@ int sh_modserve_requirements_held(void)
     return any;
 }
 
-/* "a=0, b=1" of the entries selected by `pick` (1 needed, 2 not live, 3 changed and live). */
-/* The held cvars `pick` selects as "name=value, ...", whole (malloc'd; "" when none). */
+/* The held cvars `pick` selects (1 needed, 2 not live, 3 changed and live, 4 flagged) as "name=value, ...",
+ * whole (malloc'd; "" when none). */
 static char *ms_held_names(int pick, const unsigned char *flag)
 {
     int i;
@@ -8160,7 +7933,7 @@ finish:
             memmove(&g_held[i], &g_held[i + 1], sizeof *g_held * (size_t)(g_nheld - i - 1));
             g_nheld--;
         }
-    /* Lines of bundles whose requirements start now, after their cvars. */
+    /* Lines of bundles whose requirements start, after their cvars. */
     for (i = 0; x && i < x->nbundles; ++i) {
         ms_bundle *b = &x->bundles[i];
         ms_active *a;
@@ -8235,16 +8008,13 @@ int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates
     if (!plan || !x) return 0;
     for (i = 0; i < plan->count; ++i) {
         sh_modserve_step *s = &plan->steps[i];
-        /* The gates of the build that serves the step's path for the open
-         * map (ms_scoped), not of the path's static winner: with two builds
-         * of one key installed the winner can be the build the map does not
-         * use, whose requirements are off (req_off). */
+        /* The gates of the build that serves the step's path for the open map (ms_scoped), not of the static
+         * winner, which with two builds installed can be the build the map does not use (req_off). */
         int g = ms_scoped(x, s->file);
         const ms_bundle *b = ms_gate_of(x, &x->files[g >= 0 ? g : s->file]);
-        /* A step registered while its requirements were live stays ready. A mod whose cvar lost to another mod the map
-         * uses (D-A24) is still served: its decls register and its rows place; only its value is not applied, and the
-         * log and the Mods tab say which mod's value the map uses. A mod the open map does not declare registers its
-         * rows without its requirements, which apply only in a map that uses it (req_off): nothing of it waits. */
+        /* A step registered while its requirements were live stays ready. A mod whose cvar lost to another mod
+         * the map uses is still served (only its value is not applied), and a mod the map does not declare
+         * registers its rows without its requirements (req_off): nothing of it waits. */
         if (ms_req_needs(b) && !InterlockedCompareExchange((volatile LONG *)&b->req_lost_to, 0, 0) &&
             !InterlockedCompareExchange((volatile LONG *)&b->req_off, 0, 0) &&
             !InterlockedCompareExchange((volatile LONG *)&b->req_live, 0, 0) && !s->blocked &&
@@ -8391,7 +8161,7 @@ int sh_modserve_root_lacks(const char *salt, const char *name)
     if (!(lower = _strdup(name))) return 0;
     ms_lower(lower);
     /* The asset rule's own test (sh_modserve_row_served_for: the folder carries it or the index resolves it), with
-     * the stand-ins of an earlier load left out: they are what a lacking name is given, never what it has. */
+     * the stand-ins left out: they are what a lacking name is given, never what it has. */
     lacks = !ms_bundle_carries(x, at, lower) && !ms_row_name_resolves_here(x, lower);
     if (!lacks && x->refusals) {
         const ms_bundle *b = &x->bundles[at];
@@ -8438,10 +8208,9 @@ int sh_modserve_bundle_state(const char *bundle_hash, char **cause)
     return -1;
 }
 
-/* The served file a placed name (lowercase) resolves to: an entityDef of
- * that name, else any served decl of that name, else a module instance's
- * moduleName (a snapModule decl is served as a raw file named by its own
- * path). -1 when no admitted bundle provides it. */
+/* The served file a placed name (lowercase) resolves to: an entityDef of that name, else any served decl of
+ * that name, else a module instance's moduleName (a snapModule decl is a raw file named by its own path).
+ * -1 when no admitted bundle provides it. */
 static int ms_name_file(const ms_index *x, const char *lower)
 {
     int f = ms_provider(x, "entitydef", lower), k, m, nm;
@@ -8449,10 +8218,8 @@ static int ms_name_file(const ms_index *x, const char *lower)
     for (k = 0; f < 0 && k < x->nfiles; ++k)
         if (x->files[k].served && x->files[k].pname && !strcmp(x->files[k].pname, lower) &&
             (x->files[k].is_decl || (x->files[k].ptype && !strcmp(x->files[k].ptype, "snapModule")))) f = k;
-    /* A model an entity's edit state names (renderModelInfo.model, a .lwo or
-     * .bmodel path) is provided under its cooked request, or under
-     * generated/model/ for an md6 collision model (sh_mb_model_keys): a
-     * bundle that carries or unlocks that model is one the map depends on. */
+    /* A model an entity's edit state names (renderModelInfo.model, a .lwo or .bmodel path) is provided under
+     * its cooked request, or generated/model/ for an md6 collision model (sh_mb_model_keys). */
     nm = f < 0 ? sh_mb_model_keys(lower, keys, 2) : 0;
     for (m = 0; f < 0 && m < nm; ++m) {
         ms_lower(keys[m]);
@@ -8476,10 +8243,9 @@ int sh_modserve_static_model_same(const char *request, const char *list_name)
     return same;
 }
 
-/* A name a manifest row lists resolves when the placed-name rule finds it
- * (ms_name_file), or any served file provides it under any type, or it is a
- * served request path itself. Rows written by a save hold placed names; rows
- * read from a mod.json hold every provided name. */
+/* A name a manifest row lists resolves when the placed-name rule finds it (ms_name_file), any served file
+ * provides it under any type, or it is a served request path. Saved rows hold placed names; mod.json rows hold
+ * every provided name. */
 static int ms_row_name_resolves(const ms_index *x, const char *lower);
 
 /* ms_row_name_resolves without the stand-in compositions (ms_standin_supplement). */
@@ -8523,8 +8289,8 @@ static int ms_bundle_carries(const ms_index *x, int b, const char *lower)
     return hit;
 }
 
-/* The composition hash of no unit for `salt` (SPEC-distribution 2.13, modmanifest.c sh_modmanifest_composition_hash
- * with a count of 0): SHA-256 of "snapmap-plus/composition/1\n1\n", the namespace and "\n". 0 when it cannot be made. */
+/* The composition hash of no unit for `salt` (modmanifest.c sh_modmanifest_composition_hash with a count of 0):
+ * SHA-256 of "snapmap-plus/composition/1\n1\n", the namespace and "\n". 0 when it cannot be made. */
 static int ms_none_hash(const char *salt, char out[SH_MODMANIFEST_HASH_CAP])
 {
     char text[64];
@@ -8535,8 +8301,7 @@ static int ms_none_hash(const char *salt, char out[SH_MODMANIFEST_HASH_CAP])
 }
 
 /* 1 when bundle `b` is a stand-in composition (a row of no units, named by the composition hash of none) that
- * supplements the root folder of its salt: the stand-ins of the names a local row lists and its folder no longer has
- * (manager, 2026-11-24: no guard stops a map from loading). */
+ * supplements the root folder of its salt: the stand-ins of the names a local row lists and its folder lacks. */
 static int ms_standin_supplement(const ms_index *x, int b)
 {
     char none[SH_MODMANIFEST_HASH_CAP];
@@ -8571,15 +8336,15 @@ static int ms_row_build(const ms_index *x, const sh_modmanifest_row *row)
     if (!x || !row || !sh_salt_valid(row->salt, strlen(row->salt))) return -1;
     strcpy_s(salt, sizeof salt, row->salt);
     ms_lower(salt);
-    /* A pinned row is served by its composition only: a local mod never stands in for a map's units (D21); its
-     * files serve the composition by exact hash instead (modcache.h). */
+    /* A pinned row is served by its composition only: a local mod never stands in for a map's units
+     * (modcache.h). */
     if (row->pinned) return ms_salt_in(x, salt, row->build, SH_MODSERVE_CONTENT);
     if (row->build[0]) at = ms_salt_in(x, salt, row->build, "");
     if (at >= 0) return at;
     if ((at = ms_salt_in(x, salt, NULL, "")) >= 0) return at;
-    /* D6a (manager Q8): a local row whose namespace no local folder serves (the author's map opened on another
-     * computer, the mod folder deleted) plays with its objects stood in: the content cache's stand-in composition of
-     * its salt, which carries no unit and is named by the composition hash of none (modcache.h). */
+    /* A local row whose namespace no local folder serves (the author's map opened on another computer, the mod
+     * folder deleted) plays with its objects stood in: the content cache's stand-in composition of its salt,
+     * named by the composition hash of none (modcache.h). */
     {
         char none[SH_MODMANIFEST_HASH_CAP];
         if (ms_none_hash(salt, none)) return ms_salt_in(x, salt, none, SH_MODSERVE_CONTENT);
@@ -8990,35 +8755,24 @@ int sh_modserve_script_files(const char *salt, sh_modserve_script_fn fn, void *c
     return n;
 }
 
-/* Early decls: the provider is published seconds into the process, after
- * the signature scan, while the engine is already parsing its boot decls on
- * the main thread. A shadow it parsed before then holds the game's bytes
- * until something re-parses it; which shadows, and how many, depends on the
- * race (the boss packs' aiFSMManager states were served in 3 of 18 boots).
- * Offered: winners of admitted bundles that shadow a stock decl, never
- * opened through the provider, never tried, not withdrawn. Restored stock
- * decls are the game's own bytes and are not offered. */
-/* An earlier table served these bytes or re-parsed them: an open on the
- * provider thread can land in the table a rescan is replacing, after the
- * rescan copied the marks. */
-
-/* The bundle has cvar requirements and they are all live now. */
+/* The bundle has cvar requirements and they are all live. */
 static int ms_gates_live_for(const ms_index *x, const ms_file *f)
 {
     const ms_bundle *b = ms_gate_of(x, f);
     return ms_req_needs(b) && InterlockedCompareExchange((volatile LONG *)&b->req_live, 0, 0);
 }
 
-/* What the engine holds for this file may not be the bundle's: never opened
- * through the provider (and not settled by an earlier table), or first opened
- * before the bundle's requirement gates were live and live now. */
+/* What the engine holds for this file may not be the bundle's: never opened through the provider (and not
+ * settled by the previous table), or first opened before the bundle's requirement gates were live and live now. */
 static int ms_stale(const ms_index *x, const ms_file *f)
 {
     if (!InterlockedCompareExchange((volatile LONG *)&f->opens, 0, 0)) return !f->settled;
     return InterlockedCompareExchange((volatile LONG *)&f->opened_ungated, 0, 0) && ms_gates_live_for(x, f);
 }
 
-
+/* Early decls: a shadow the engine parsed before the provider was published holds the game's bytes. Offered:
+ * winners of admitted bundles that shadow a stock decl, never opened through the provider, never tried, not
+ * withdrawn; restored stock decls are not offered. */
 int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context)
 {
     const ms_index *x = g_index;
@@ -9060,15 +8814,11 @@ int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context)
             (_stricmp(f->ptype, "baseModel") && _stricmp(f->ptype, "image")) || (eff = ms_scoped(x, i)) < 0)
             continue;
         ef = (ms_file *)&x->files[eff];
-        /* A surface (the game's own model or image) is offered too: one the
-         * game loaded at boot with the blacklists on holds no materials for
-         * its blacklisted names until it is loaded again with them off (the
-         * stock spider mesh, ADD-V7a D1). This is the one pass that touches
-         * a surface; no plan registers or re-parses one. A surface
-         * never opened through the provider is offered as well, as ms_stale
-         * offers a decl: on a boot that builds the mod folders the game loads
-         * the mesh while the index is still empty, so the open never reaches
-         * the provider and is never marked ungated (ADD-V7b D1). */
+        /* A surface (the game's own model or image) is offered too: one the game loaded at boot with the
+         * blacklists on holds no materials for its blacklisted names until it is loaded again with them off.
+         * This is the one pass that touches a surface. One never opened through the provider is offered as
+         * well, as ms_stale offers a decl, since a boot that builds the mod folders loads the mesh while the
+         * index is empty and the open never reaches the provider. */
         if (InterlockedCompareExchange(&ef->reparse_tried, 0, 0) || !ms_gates_live_for(x, ef) ||
             !(InterlockedCompareExchange(&ef->opened_ungated, 0, 0) ||
               (ms_surface(ef) && !InterlockedCompareExchange(&ef->opens, 0, 0) && !ef->settled)))
@@ -9082,9 +8832,8 @@ int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context)
 
 /* ------------------------------------------------------------------ refresh */
 
-/* The parent a decl's text names at its top level (`inherit = "name"`), else
- * 0. Comments and strings are skipped; only depth 1 of the outer block. */
-/* The decl's top-level inherit name (malloc'd), or NULL. */
+/* The parent a decl's text names at its top level (`inherit = "name"`, malloc'd), else NULL. Comments and
+ * strings are skipped; only depth 1 of the outer block counts. */
 static char *ms_top_inherit(const unsigned char *t, size_t n)
 {
     size_t i = 0;
@@ -9114,13 +8863,9 @@ static char *ms_top_inherit(const unsigned char *t, size_t n)
     return NULL;
 }
 
-/* Mark every served decl that inherits, at any depth, from a decl whose
- * served bytes changed or that is gone: the engine resolves a decl's parent
- * when the child is parsed, so a parent re-parsed alone leaves its parsed
- * children with the old values. Served decls of the parents' types are read
- * once (a stock pointer from the installed game); a stock decl no bundle
- * serves cannot be found here and keeps its parse until a map reload purges
- * it or DOOM restarts. Main thread, once per table; returns the decls marked. */
+/* Mark every served decl that inherits, at any depth, from a decl whose served bytes changed or is gone: the
+ * engine resolves a parent when the child is parsed, so a parent re-parsed alone leaves parsed children stale.
+ * Main thread, once per table; returns the decls marked. */
 int sh_modserve_refresh_expand(void)
 {
     ms_index *x = (ms_index *)g_index;
@@ -9206,8 +8951,7 @@ static int ms_gates_ok(const ms_index *x, const ms_file *f)
 }
 
 /* A stand-in's own name (modserve.h SH_MODSERVE_STANDIN_DIR) once the open map declares a unit composition of its
- * salt: the real content serves the row now, so nothing asks the engine to read the stand-in again (R-LB1: a read of it
- * was logged as a file the unit lacked and reported to the store). */
+ * salt: the real content serves the row, so nothing asks the engine to read the stand-in again. */
 static int ms_standin_superseded(const ms_index *x, const char *request)
 {
     char salt[SH_MODSERVE_HASH_HEX + 1];

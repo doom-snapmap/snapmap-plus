@@ -3,7 +3,7 @@
 #
 #   tests\run-tests.ps1
 #   tests\run-tests.ps1 -Doom <DOOMx64vk.exe 13954591> -DoomAlt <DOOMx64.exe 13954591>
-#   tests\run-tests.ps1 -Skip map_published_test
+#   tests\run-tests.ps1 -Skip nav_bake_test
 #
 # The default suite needs no game or built DLL. -Doom and -DoomAlt take the two
 # executables of the supported build (13954591, no unpacking needed) and add
@@ -82,7 +82,7 @@ $tests = @(
     @{ name = "modregistry_test"; src = 'modregistry_test.c ..\src\backend\modserve.c ..\src\backend\modstore.c ..\src\backend\modregistry.c ..\src\backend\modregistry_choices.c ..\src\backend\modmanifest.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\modbundle.c ..\src\backend\script\script_sdk_lua.c ..\src\backend\script\script_node_row.c ..\src\backend\strkeys.c ..\src\backend\modsalt.c ..\src\backend\modauthor.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\backend\sha256.c'; defs = '/DSH_MODSERVE_PURE'; libs = 'shell32.lib ole32.lib'; arg = $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'snapmap-plus\mods' } else { "" }) }
     @{ name = "process_heap_scope_test"; src = 'process_heap_scope_test.c'; arg = "" }
     @{ name = "engine_dialog_test"; src = 'engine_dialog_test.c ..\src\backend\engine_dialog.c'; defs = '/DSH_ENGINE_DIALOG_TESTING'; arg = "" }
-    @{ name = "navmesh_test"; src = 'navmesh_test.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\sha256.c'; defs = '/DSH_NAVMESH_TESTING'; arg = "" }
+    @{ name = "navmesh_test"; src = 'navmesh_test.c ..\src\backend\navmesh.c ..\src\backend\aas_edit.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\sha256.c'; defs = '/DSH_NAVMESH_TESTING'; arg = "" }
     @{ name = "map_uses_test"; src = 'map_uses_test.c ..\src\backend\map_uses.c ..\src\backend\nav_regions.c ..\src\backend\grid_room.c ..\src\backend\mp_json.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\sha256.c'; arg = (Join-Path $here 'fixtures\maps') }
     @{ name = "nav_regions_test"; src = 'nav_regions_test.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\sha256.c'; defs = '/DSH_NAVR_TESTING'; arg = "" }
     @{ name = "nav_snapshot_test"; src = 'nav_snapshot_test.c ..\src\backend\nav_snapshot.c ..\src\backend\nav_entitydef.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\sha256.c'; arg = "" }
@@ -432,11 +432,12 @@ foreach ($t in @($tests | Where-Object { -not $_.skip -and -not $_.buildOnly }))
     $runJobs += @{ dir = $cwd; cmd = "`"$exe`" $argText"; log = (Join-Path $obj ($t.name + ".run.log")); name = $t.name; serial = $t.serial }
 }
 $nativeCount = $runJobs.Count
-$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "decl_enum_values_test.js", "decl_language_test.js", "ui_assets_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js", "feedback_channel_test.js", "feedback_renderer_test.js", "feedback_game_test.js", "issues_retest_test.js", "worker_body_test.js", "rawmap_menu_test.js", "delete_result_test.js", "prefab_tree_test.js", "timeline_tree_test.js", "timeline_eventcall_test.js", "prefab_budget_test.js", "mods_tab_test.js", "mods_inmap_test.js", "publishing_key_test.js", "prefab_mods_test.js", "prefab_details_test.js", "prefab_rename_test.js", "timeline_target_test.js", "page_keys_test.js", "page_messages_test.js", "multilayer_gen_test.js", "programs_rp_test.js", "script_sdk_lua_test.js", "player_words_test.js")
+$jsTests = @("author_example_test.js", "decl_overlay_test.js", "decl_index_order_test.js", "decl_enum_values_test.js", "decl_language_test.js", "ui_assets_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js", "feedback_channel_test.js", "feedback_renderer_test.js", "feedback_game_test.js", "issues_retest_test.js", "worker_body_test.js", "rawmap_menu_test.js", "delete_result_test.js", "prefab_tree_test.js", "timeline_tree_test.js", "timeline_eventcall_test.js", "prefab_budget_test.js", "mods_tab_test.js", "mods_inmap_test.js", "publishing_key_test.js", "prefab_mods_test.js", "prefab_details_test.js", "prefab_rename_test.js", "timeline_target_test.js", "page_keys_test.js", "page_messages_test.js", "multilayer_gen_test.js", "programs_rp_test.js", "script_sdk_lua_test.js", "player_words_test.js")
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $Only.Count -and $node) {
     foreach ($jsTest in $jsTests) {
-        $runJobs += @{ dir = $cwd; cmd = "`"$($node.Source)`" `"$(Join-Path $here $jsTest)`""; log = (Join-Path $obj ($jsTest + ".run.log")); name = $jsTest }
+        $arg = if ($jsTest -eq "author_example_test.js" -and $Doom) { ' "doom=' + (Split-Path -Parent $Doom) + '"' } else { '' }
+        $runJobs += @{ dir = $cwd; cmd = "`"$($node.Source)`" `"$(Join-Path $here $jsTest)`"$arg"; log = (Join-Path $obj ($jsTest + ".run.log")); name = $jsTest }
     }
 }
 foreach ($j in $runJobs) { $j.weight = $times[$j.name] }

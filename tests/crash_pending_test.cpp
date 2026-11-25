@@ -11,6 +11,14 @@ int main()
     const std::string fatal = "pending-20260910-120000-1.json";
     const std::string later = "pending-20260910-120001.json";
     const std::string older = "pending-20260909-235959.json";
+    scan_clock clock;
+    assert(clock.tick(false, 1) == scan::skip);
+    assert(clock.tick(false, 60) == scan::skip);
+    assert(clock.tick(true, 62) == scan::startup);
+    assert(clock.tick(true, 63) == scan::skip);
+    assert(clock.tick(true, 120) == scan::periodic);
+    assert(clock.tick(false, 180) == scan::skip);
+    assert(clock.tick(true, 240) == scan::periodic);
     inventory seen;
     std::vector<std::string> names = {first};
     assert(seen.changed(names));

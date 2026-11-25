@@ -1,9 +1,7 @@
-/* Signature resolution for the one supported build (signatures.h).
- * A signature resolves at its recorded RVA for the host's renderer, and only
- * when the whole pattern holds there. sig_scan_one is the masked whole-image
- * scan that derives and audits those RVAs; it anchors on the longest fixed run,
- * verifies the full pattern, rejects multiple matches, and stops a section at
- * an unreadable tail. */
+/* Signature resolution (signatures.h): a signature resolves at its recorded RVA for the host's renderer, and
+ * only when the whole pattern holds. sig_scan_one is the masked whole-image scan that derives and audits those
+ * RVAs. */
+#include "safe_read.h"
 #include "signatures.h"
 #include "host_image.h"
 #include <string.h>
@@ -124,16 +122,6 @@ static int collect_exec_sections(const uint8_t *module_base, exec_section *out, 
 }
 
 /* SEH-guarded copy of up to n bytes from src into dst; returns 1 if all read, 0 on access violation. */
-static int sig_safe_read(const uint8_t *src, uint8_t *dst, size_t n)
-{
-    __try {
-        for (size_t i = 0; i < n; i++) dst[i] = src[i];
-        return 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
 static void reset(const sig_entry *sig, sig_result *out)
 {
     out->name = sig->name;
@@ -187,7 +175,7 @@ sig_status sig_scan_one(const uint8_t *module_base, const sig_entry *sig, sig_re
                 pos = (size_t)apos + 1;
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            /* Stop this section on an unreadable page; retain earlier matches. */
+            /* Stops this section at an unreadable page, keeping the matches found so far. */
         }
     }
 
@@ -219,7 +207,7 @@ sig_status sig_resolve_one(const uint8_t *module_base, const sig_entry *sig, sig
     for (s = 0; s < nsec; s++)
         if (rva >= secs[s].vaddr && rva - secs[s].vaddr <= secs[s].vsize &&
             n <= secs[s].vsize - (rva - secs[s].vaddr)) break;
-    if (s == nsec || !sig_safe_read(module_base + rva, live, n)) return out->status;
+    if (s == nsec || !sh_safe_read(module_base + rva, live, n)) return out->status;
     out->rva = rva;
     for (i = 0; i < n; i++)
         if (mask[i] && live[i] != pat[i]) { out->status = SIG_CHANGED; return out->status; }
@@ -243,17 +231,9 @@ size_t sig_resolve_all(const uint8_t *module_base, sig_result *results, size_t c
     return ok;
 }
 
-const sig_result *sig_lookup(const sig_result *results, size_t n, const char *name)
-{
-    for (size_t i = 0; i < n; i++)
-        if (results[i].name && strcmp(results[i].name, name) == 0) return &results[i];
-    return NULL;
-}
-
 uintptr_t sig_addr_by_name(const sig_result *results, size_t n, const char *name)
 {
-    const sig_result *r = sig_lookup(results, n, name);
-    return r && r->status == SIG_OK ? r->addr : 0;
+    return (uintptr_t)sig_pointer(results, n, name);
 }
 
 const char *sig_status_reason(sig_status status)
@@ -268,17 +248,14 @@ const char *sig_status_reason(sig_status status)
     }
 }
 
-/* Engine signatures for DOOM 2016 build 13954591, with each function's RVA in
- * the Vulkan (SHA256 3D8B4393649F80BDAE85C19AE2C985C45EC9AC54F74AB04A18816E30EAD63C21)
- * and OpenGL (SHA256 1BDDECAA4E86850412F96E3117978BCE1EC7BB701AE1B5A33120C21E4421E51E)
- * executables. The two renderers are separate links; no uniform delta is valid.
- * A signature resolves only at its RVA for the host's renderer (a zero RVA: not
- * on that renderer). sig_test proves each pattern matches exactly once, at that
- * RVA, on each executable. Validate entry changes with
- * tests/run-tests.ps1 -Doom <13954591 Vulkan> -DoomAlt <13954591 OpenGL>.
- * CI has no game image and cannot verify these identities. */
+/* Engine signatures for build 13954591: each function's RVA in the Vulkan executable (SHA256
+ * 3D8B4393649F80BDAE85C19AE2C985C45EC9AC54F74AB04A18816E30EAD63C21) and the OpenGL executable (SHA256
+ * 1BDDECAA4E86850412F96E3117978BCE1EC7BB701AE1B5A33120C21E4421E51E); the renderers are separate links, so no
+ * uniform delta holds. A zero RVA means not on that renderer. sig_test proves each pattern matches once, at its
+ * RVA, on each executable (tests/run-tests.ps1 -Doom <Vulkan> -DoomAlt <OpenGL>); CI has no game image to check
+ * them. */
 const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
-    /* Resized-room containment: independently verified on Vulkan and OpenGL. */
+    /* Resized-room containment. */
     { "GridRefreshPlacementSurfaces",
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 89 6C 24 50 "
       "48 89 74 24 58 49 8B E8 48 8B F2 48 8B D9 E8 ?? ?? ?? ?? 8B BE 58 07 00 00 3B 7B 0C", 0x1198880u, 0x1197AB0u },
@@ -286,8 +263,8 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B C4 48 89 58 08 48 89 68 10 57 48 81 EC B0 00 00 00 F3 0F 10 05 ?? ?? ?? ?? 4C 8D 4C 24 40 F3 0F 10 0D ?? ?? ?? ?? 48 8B DA", 0x11EEFC0u, 0x11EE2F0u },
     { "GridModuleRay",
       "40 55 53 57 48 8D 6C 24 90 48 81 EC 70 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 30 80 79 48 00 48 8B DA 48 8B 95 B8 00 00 00 49 8B F9 75 40 48 C7 45 88 00 00 00 00", 0x11EF740u, 0x11EEA70u },
-    /* Native map rendering controls and the environment far-clip read.
-     * Each binding is unique in both independently linked renderer images. */
+    /* Native map rendering controls and the environment far-clip read. Each binding is unique in both renderer
+     * images. */
     { "RenderSettingsEnter",
       "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 20 48 8B 9A 88 10 02 00 48 8B E9 48 8B F2 48 8B BB E0 09 00 00 48 8B CF 48 8B 07 FF 90 E8 00 00 00", 0x118F880u, 0x118EA00u },
     { "RenderSettingsExit",
@@ -300,8 +277,6 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 48 83 EC 20 48 8B 51 48 48 8B D9 48 81 C2 28 36 02 00 0F B6 02 88 01 0F B6 42 01 88 41 01 0F B6 42 02 88 41 02 0F B6 42 03 88 41 03 0F B6 42 04", 0x118EAA0u, 0x118DC30u },
     { "RenderSettingsDirtyCall",
       "E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? C7 44 24 30 16 00 00 00 45 33 C0 48 8D 54 24 30 48 8B CB E8 ?? ?? ?? ?? C6 47 08 01 48 8D 15 ?? ?? ?? ??", 0x118F716u, 0x118E896u },
-    { "RenderAddFloat",
-      "48 8B C4 57 41 56 41 57 48 81 EC 80 00 00 00 48 C7 40 A8 FE FF FF FF 48 89 58 10 48 89 68 18 48 89 70 20 4D 8B F1 4D 8B F8 48 8B EA 48 8B F1 B9 38 01 00 00 E8 ?? ?? ?? ?? 48 8B F8 48 89 84 24 A0 00 00 00 48 85 C0 74 ?? 8B 9E E0 01 00 00 8D 53 01 89 96 E0 01 00 00 48 8B CE E8 ?? ?? ?? ?? 4C 8B C0 44 8B CB", 0x127DBE0u, 0x127D190u },
     { "RenderAddTitle",
       "48 8B C4 57 41 56 41 57 48 81 EC 90 00 00 00 48 C7 40 98 FE FF FF FF 48 89 58 10 48 89 68 18 48 89 70 20 48 8B DA 48 8B E9 B9 20 00 00 00 E8 ?? ?? ?? ??", 0x12807B0u, 0x127FD60u },
     { "RenderClipRead",
@@ -312,12 +287,11 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 56 57 48 8D 6C 24 90 48 81 EC 70 01 00 00 48 C7 44 24 68 FE FF FF FF",
       0x12466A0u, 0x1245CD0u },
     /* Native saved-map builder checks unsigned (idStr length - 1) before
-     * hashing/compression. Vulkan 568cee; independently OpenGL 5682de. */
+     * hashing/compression. */
     { "SnapMapSaveSizeLimit",
       "3D FF FF 9F 00 77 12 48 8B D1 49 8B 4F 10 E8 ?? ?? ?? ?? 89 06 B0 01",
       0x11C538Eu, 0x11C475Eu },
-    /* Saved/published map reader: signed positive length, then 10 MiB ceiling.
-     * Vulkan 581fa3; independently OpenGL 581633. Upper branch is at +21. */
+    /* Saved/published map reader: signed positive length, then 10 MiB ceiling. Upper branch is at +21. */
     { "SnapMapReadSizeLimit",
       "83 F8 01 7D 0A BB 94 01 00 00 E9 ?? ?? ?? ?? 3B 05 ?? ?? ?? ?? "
       "7E 07 BB 93 01 00 00 EB ?? 33 C0 48 89 44 24 38 89 44 24 40 88 44 24 44",
@@ -395,15 +369,10 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 5C 24 08 57 48 83 EC 20 48 8B 1D ?? ?? ?? ?? 48 8B F9 48 85 DB 74 ?? "
       "0F 1F 80 00 00 00 00 48 8B 4B 10",
       0x1572010u, 0x15731A0u },
-    /* Native declaration registration contracts:
-     * DeclRegistryAnchor: decode MOV RCX,[rip+slot] at +0x10 from a clean entry.
-     * DeclRegisterFile: registry vtable +0x38; const idStr *source points to a
-     * constructed 48-byte name. An optional default type guides source scanning.
-     * DeclTypeByName: registry +0x58, short type name -> type manager.
-     * DeclFind: manager/name/makeDefault; callers pass 0 when classifying shadows.
-     * DeclSourceFind: manager/logical name -> source record, without creating a
-     * live decl. Omit .decl; the engine normalizes the name.
-     * grid_room_native validates resolved methods against the live registry vtable. */
+    /* Native declaration registration contracts: DeclRegistryAnchor decodes MOV RCX,[rip+slot] at +0x10;
+     * DeclRegisterFile is registry vtable +0x38 (const idStr *source, a 48-byte name); DeclTypeByName is
+     * registry +0x58; DeclFind is manager/name/makeDefault (0 when classifying shadows); DeclSourceFind maps
+     * manager/name to a source record without creating a decl, so omit .decl. */
     { "DeclRegistryAnchor",
       "40 53 48 83 EC 30 48 8B D9 4C 8D 05 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? "
       "48 8B D3 48 8B 01 FF 90 C0 00 00 00",
@@ -426,16 +395,9 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B C4 55 57 41 54 41 56 41 57 48 8D A8 38 FE FF FF 48 81 EC A0 02 00 00 "
       "48 C7 44 24 20 FE FF FF FF 48 89 58 18 48 89 70 20",
       0x155AC80u, 0x155BF50u },
-    { "ResourceGenericLoad", /* void(idResource*). Read source and run native post-parse.
-                             * Reconstruction belongs to its fallback path, not every load.
-                            * DeclFind normally reaches this through the pending-load path;
-                            * the decl server can use it when the pending bit survives lookup.
-                            * Anchor: 0x900-byte frame and owner-vtable access. Detoured over
-                            * its 20-byte head (MOV RAX,RSP; PUSH RDI; SUB RSP,0x900; MOV
-                            * [RSP+0x40],-2; no relative operand) to attribute nested loads to
-                            * the load that opens them (modserve_engine.c). Vulkan 0x16C6050,
-                            * OpenGL 0x16C6D30: 12 direct callers each, ResourceMaterialize's
-                            * call at +0x249 on both (VK 0x1415728A9, GL 0x141573A39). */
+    { "ResourceGenericLoad", /* void(idResource*): reads a source and runs native post-parse; VK 0x16C6050, GL
+                              * 0x16C6D30. Detoured over its 20-byte head to attribute nested loads to the load
+                              * that opens them (modserve_engine.c). */
       "48 8B C4 57 48 81 EC 00 09 00 00 48 C7 44 24 40 FE FF FF FF 48 89 58 10 "
       "48 89 70 18 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 F0 08 00 00 48 8B F9 "
       "48 89 4C 24 38 48 8B 01 FF 50 10 48 8B C8 E8 ?? ?? ?? ?? 4C 8B C0 48 8B 57 08 "
@@ -445,54 +407,10 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                             * pointer slot and dereference lazily; it may be NULL at startup. */
       "48 8B 05 ?? ?? ?? ?? 48 83 B8 A0 54 0A 00 00 0F 94 C0",
       0xD4A710u, 0xD49DC0u },
-    /* idSnapMap::AddTag("map:branch") -- add-if-absent on the map's tag list.
-     *
-     * WHY THIS FUNCTION MATTERS: the editor's Save command asks the open map whether it carries
-     * "map:new" or "map:branch" and, if it does, routes Save into SAVE AS -- which prompts for a
-     * name and mints a fresh save slot through CreateLocalSavedMapInternal. That is the engine's own
-     * "this is a new map, name it" path, the one Branch and New-from-Template use. Setting the tag on
-     * a map we substituted is therefore the whole of "open a rawmap as a new map": the engine does
-     * the minting, writes its own game.details checksum, and writes its own .verify sidecars, none of
-     * which this project can currently generate.
-     *
-     * The tag is transient state, not published metadata: idSnapMap save-as REMOVES it before
-     * writing and restores it only if the write failed, and the skip-rename branch removes it
-     * outright. It shares the list with publish tags but under the reserved "map:" prefix -- cf. the
-     * cvar snapEdit_allowReservedTags, "Can put reserved tags in publish flow."
-     *
-     * WILDCARDS: two RIP-relative displacements (the stack-cookie load and the lea of the "map:branch"
-     * literal) and one call rel32. NOT unique at 45 bytes -- the prologue through the first lea has a
-     * byte-identical twin at 0x1180590 on the pinned build, which is the kind of near-miss this
-     * project has shipped before. Extended through `add rdi,0x998` -- the tag-list field offset
-     * itself -- which is both the shortest distinguishing run and the most meaningful one.
-     * Verified ONE hit on BOTH shipped builds; the embedded 0x998 matching in both also confirms the
-     * field offset does not move between them. */
-    /* idSnapMap -> JSON, the engine's own "serialize this map for saving" entry point.
-     *
-     * bool SnapMapToJson(void *map, idStr *out, unsigned char compact)
-     *
-     * THIS, not SerializeToJson (0x5F2390), is what to call to get a live map's JSON.
-     * SerializeToJson's first argument is NOT the map: this function builds a ~0x770 temporary
-     * snapshot object on its own stack, populates it from the map, serializes THAT, and destroys it.
-     * Calling SerializeToJson with an idSnapMap* would hand it the wrong object -- which is exactly
-     * the mistake the save shadow's own typedef comment invites, because the shadow only ever sees
-     * the argument the engine already prepared.
-     *
-     * Established from the sole caller (0x568B90), which also settles two long-open questions:
-     *   *param_3 = 0x6f            -> game.details "declVersion": 111
-     *   FUN_141A4A480(json, len)   -> game.details "declChecksum"
-     * so the decl checksum is id's own hash over the serialized JSON. That is why a sweep of 13
-     * stock algorithms over 6 byte ranges against 54 real saves matched nothing.
-     *
-     * WILDCARDS: one RIP-relative displacement (the stack-cookie load). Unique on BOTH shipped
-     * builds at this length; the trailing `E8` anchors the temp-object construction that makes this
-     * function what it is. */
-    { "SnapMapToJson",
-      "40 53 56 57 48 81 EC B0 07 00 00 48 C7 44 24 20 FE FF FF FF "
-      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 A0 07 00 00 "
-      "41 0F B6 F0 48 8B FA 48 8B D9 48 8D 4C 24 30 E8",
-      0x11F8EB0u, 0x11F80D0u },
-
+    /* idSnapMap::AddTag("map:branch"): add-if-absent on the map's tag list. Save becomes Save As when the map
+     * carries "map:new" or "map:branch", so tagging a substituted map opens a rawmap as a new map; save-as
+     * removes the tag before writing and restores it on failure. The prologue has a byte-identical twin at
+     * 0x1180590, so the pattern runs through `add rdi,0x998`. */
     { "SnapMapAddBranchTag",
       "4C 8B DC 57 48 83 EC 60 49 C7 43 B8 FE FF FF FF 49 89 5B 10 49 89 73 18 "
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 58 48 8B F9 48 8D 15 ?? ?? ?? ?? "
@@ -501,55 +419,36 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
 
 
     { "ReadLocalSavedMapText",
-      /* (localId, idStr *text, ...): reads the slot's map.decl through the savegame manager and
-       * inflates it into *text; 4 when the manager's read fails or the text does not inflate.
-       * Detoured by editor_frame.c, steal 17 (the pushes and `lea rbp,[rsp-0x60]`), so a rawmap
-       * reload never reads the saved map whose id it borrows. */
+      /* (localId, idStr *text, ...): reads the slot's map.decl and inflates it into *text, returning 4 when the
+       * read or inflate fails. Detoured by editor_frame.c (steal 17) so a rawmap reload never reads the
+       * borrowed saved map. */
       "40 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 A0 48 81 EC 60 01 00 00 48 C7 45 10 FE FF FF FF "
       "48 89 9C 24 B0 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 50 4C 8B E2 4C 8B F9 E8",
       0x11CBCD0u, 0x11CB0A0u },
     { "DeleteBadSaveSlots",
-      /* idSnapBrowserHelper::DeleteBadSaveSlots(helper, idList<idStr> *names): deletes every save
-       * slot the savegame manager could not read while My Maps was listed, then queues GDM 0x8D.
-       * Replaced by the fault shield's saved_map_guard.c, steal 19, so no slot is deleted. */
+      /* idSnapBrowserHelper::DeleteBadSaveSlots(helper, idList<idStr> *names): deletes the save slots the
+       * savegame manager could not read, then queues GDM 0x8D. Replaced by saved_map_guard.c (steal 19) so no
+       * slot is deleted. */
       "48 8B C4 55 41 56 41 57 48 8D 68 A1 48 81 EC F0 00 00 00 48 C7 44 24 28 FE FF FF FF "
       "48 89 58 08 48 89 70 18 48 89 78 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 37 4C 8B F2 8B 72 08 "
       "40 32 FF 48 8D 4C 24 20 E8",
       0xFCEE30u, 0xFCE320u },
 
     { "WriteLocalSavedMapText",
-      /* Same: no wildcards, unique at 20 bytes by both tools (target 0x576530).
-       * (localId, const idLocalSavedMapModel *, text): serializes the model as the
-       * slot's "metadata" and the text as map.decl. Hooked by modpublish.c, steal 20
-       * (the pushes and lea rbp; the __chkstk call after them stays in place), so
-       * the pattern carries the fixed bytes after the steal as well. */
+      /* (localId, const idLocalSavedMapModel *, text): writes the model as the slot's "metadata" and the text
+       * as map.decl. Hooked by modpublish.c (steal 20; the __chkstk call after it stays), so the pattern
+       * includes the fixed bytes after the steal. No wildcards. */
       "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 20 BE FF FF B8 E0 42 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 45 50 "
       "FE FF FF FF",
       0x11D2DC0u, 0x11D20F0u },
-    { "EditorFrame",       /* idSnapEditorLocal's per-frame Think (0x523140). The FIRST execution point
-                            * this product has on DOOM's own main thread at a frame boundary -- every
-                            * other main-thread route it has is the console command buffer's drain
-                            * callback, which is documented freeze-prone for heavy lifecycle calls (see
-                            * editor_frame.c). Identified by its own state machine: the body reads the
-                            * editor state id at +0x23618 (`param_1[0x46c3]`), gates on the
-                            * mid-transition field +0x224dc, dispatches through the state resolver and
-                            * calls ExitEditor 0x522680 on the confirm path. 11 insns / 33 bytes with
-                            * NO wildcards, PORTABLE (derived 2026-09-07 by tools/signatures/
-                            * extract_sig.py: unique once on Vulkan 0x523140 and once on OpenGL
-                            * 0x522a80). Every byte is register/rsp/rbp-relative -- no RIP-relative and
-                            * no relative branch -- so the whole 33-byte window is a legal steal. */
+    { "EditorFrame",       /* idSnapEditorLocal's per-frame Think: the first execution point on the main thread
+                            * at a frame boundary (editor_frame.c). Editor state id +0x23618, mid-transition
+                            * field +0x224dc; 11 insns / 33 bytes, no wildcards, a legal steal. */
       "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D 68 A1 48 81 EC 90 00 00 00 48 C7 45 C7 FE FF FF FF 48 89 58 18",
       0x1182E80u, 0x1181FE0u },
-    { "EditorLoadMap",     /* idSnapEditorLocal::LoadMap (0x525250) -- reloads/swaps the editor's map IN
-                            * PLACE, without leaving the editor. The stock SnapMap UI exposes no such
-                            * control. Its second argument is an idStr of which LoadMap reads ONLY the
-                            * data pointer at +0x10 (a 20-hex uppercase save-directory id); confirmed by
-                            * decompile, the body's single use is
-                            * `FUN_1405253e0(this, *(void**)(arg+0x10))`. 8 insns / 36 bytes, PORTABLE
-                            * MUST be called from a frame boundary:
-                            * called cold from the menu it is a harmless no-op (the editor subsystem is
-                            * uninitialised), and called from the command-buffer drain it deadlocks the
-                            * main thread. */
+    { "EditorLoadMap",     /* idSnapEditorLocal::LoadMap: swaps the map in place; the idStr id (data at +0x10)
+                            * is a 20-hex uppercase save-directory id. Call it only at a frame boundary: a no-op
+                            * from the menu, a deadlock from the command-buffer drain. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 6C 24 48 48 89 74 24 50 48 8B F2 48 8B D9",
       0x1184F40u, 0x11840A0u },
     { "MenuPump",
@@ -643,11 +542,11 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 57 48 81 EC E0 00 00 00 48 C7 44 24 28 FE FF FF FF",
       0x27DBB0u, 0x27DE00u },
     /* Language-string injection. */
-    { "StridsSortBody",    /* idLangDict radix-sort body (0x1a2b480 wrapper -> JMP here); detour target */
+    { "StridsSortBody",    /* idLangDict radix-sort body (the wrapper JMPs here); detour target */
       "48 89 5C 24 18 55 56 57 48 8D AC 24 10 F8 FF FF",
       0x281D60u, 0x281F50u },
     { "StridsTableLea",    /* idLangDict::GetIndexForId -- carries LEA RCX,[the strids idList global]; the
-                            * build-portable anchor we decode to find the string-table descriptor global */
+                            * build-portable anchor decoded to find the string-table descriptor global */
       "48 89 5C 24 08 57 48 83 EC 20 48 8B DA 48 8B F9 48 85 D2 74 ?? 80 3A 00",
       0x2815A0u, 0x281790u },
     { "StridsInsert",      /* idList<StridEntry>::Append (32-byte element). Long sig: a near-twin idList::
@@ -769,18 +668,14 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 55 56 57 48 81 EC 28 01 00 00 48 C7 44 24 30 FE FF FF FF 48 8B 05 ?? ?? ?? ?? "
       "48 33 C4 48 89 84 24 10 01 00 00 49 8B F1 49 8B E8 48 8B FA 48 8B D9",
       0x18A83C0u, 0x189E880u },
-    { "RenderWorldGetter", /* Render-world registration window has LEA RCX,[rip+slot] at +6.
-                            * Decode then dereference; it is not an object accessor.
-                            * Render vtable and editor-field offsets remain separate contracts
-                            * documented at their consumers in commands.c. */
+    { "RenderWorldGetter", /* Render-world registration window with LEA RCX,[rip+slot] at +6: decode, then
+                            * dereference; not an object accessor. Consumer offsets are in commands.c. */
       "89 B3 A8 02 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? "
       "48 85 C9 74 12 66 C7",
       0x1240438u, 0x123FA68u },
-    { "SwfTextOnKeyCall",   /* void*(self,retbuf,thisObject,parms): SWF text-field onKey::Call.
-                             * TextField+0xC0 gives its instance; parms holds scancode/isDown.
-                             * Re-find via RTTI onKey/onChar classes and differing vtable slot 10,
-                             * then recheck the fields used in swf_textedit.c.
-                             * Newer retail RVA 0x17505E0 is not this table's pinned build. */
+    { "SwfTextOnKeyCall",   /* void*(self,retbuf,thisObject,parms): SWF text-field onKey::Call; TextField+0xC0
+                             * gives its instance, parms holds scancode/isDown. Re-find via the RTTI
+                             * onKey/onChar classes and differing vtable slot 10. */
       "40 55 56 57 41 56 41 57 48 81 EC D0 00 00 00 48 C7 44 24 28 FE FF FF FF "
       "48 89 9C 24 00 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 C0 00 00 00 "
       "49 8B F9 49 8B E8 4C 8B F2 45 33 FF",
@@ -791,36 +686,26 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 74 24 18 57 48 83 EC 40 48 8B F2 48 8B F9 8B 49 18 8B D1 C1 EA 1F 80 E2 01 74 ?? "
       "44 8B 46 18 41 8B C0",
       0x33A380u, 0x339FD0u },
-    { "PrefabCtor",         /* idSnapEntityPrefab *(self). Initializes fields without freeing old
-                             * contents, then constructs the tail at +0x120. Reinitialization
-                             * can abandon dangling staging pointers without double-freeing.
-                             * Newer retail RVA 0x11AC8D0 is a different extraction build. */
+    { "PrefabCtor",         /* idSnapEntityPrefab *(self): initializes fields without freeing prior contents,
+                             * then constructs the tail at +0x120; reinitializing can abandon dangling staging
+                             * pointers without double-freeing. */
       "4C 8B DC 49 89 4B 08 53 48 83 EC 30 49 C7 43 E8 FE FF FF FF 48 8B D9",
       0x11AC8D0u, 0x11AB9E0u },
     { "PrefabPopulate",     /* char(prefab,editor,status*). Build from current selection.
-                             * Re-find through the "Failed to create prefab" error strings.
-                             * Newer retail RVA 0x11ADB30 is not the pinned build. */
+                             * Re-find through the "Failed to create prefab" error strings. */
       "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 40 F7 FF FF "
       "48 81 EC C0 09 00 00 48 C7 85 10 01 00 00 FE FF FF FF 48 89 9C 24 18 0A 00 00",
       0x11ADB30u, 0x11ACD30u },
-    { "PrefabGrabFrame",    /* void(editor,body,frame[12],grabDistance*). PrefabPopulate's grab
-                             * frame: clips the view-centre line (editor+0x170, angles +0x17C)
-                             * against the hovered body's box (+0x2C4 bounds, or +-0.5 x
-                             * +0x400/+0x404/+0x434 when decl+0x3CE & 8), keeps the midpoint
-                             * even on a miss, and copies the body axis +0x294. Callers:
-                             * PrefabPopulate and the selection-grab setup. Re-find via the call
-                             * before PrefabPopulate's "prefab+0x24" store. */
+    { "PrefabGrabFrame",    /* void(editor,body,frame[12],grabDistance*): PrefabPopulate's grab frame; clips the
+                             * view-centre line (editor+0x170) against the hovered body's box (+0x2C4) and
+                             * copies the body axis +0x294. */
       "40 55 53 56 57 41 56 48 8D 6C 24 C9 48 81 EC D0 00 00 00 0F 29 B4 24 C0 00 00 00 "
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 17 F2 0F 10 81 70 01 00 00 48 8B FA "
       "8B 81 78 01 00 00 48 8D 55 AF 48 81 C1 7C 01 00 00",
       0x12164D0u, 0x1215920u },
-    { "EventDispatchBase",  /* idEventArg *(this, ret, const idEventDef *ev, args). The base event
-                             * dispatcher every entity class chains into: switches on ev+0x34 minus
-                             * 0x18 (CMP EAX,0x12D after the pre-dispatch vtable+0x40/+0x38 calls).
-                             * Carries ae_hideHudForContextPrompt (0x123, an empty stub) and
-                             * ae_showHudForContextPrompt (0x124, idPlayerHud::RestoreHudState).
-                             * First 21 bytes are position-independent; the first RIP operand is
-                             * the security cookie at +0x1d. */
+    { "EventDispatchBase",  /* base event dispatcher every entity class chains into (idEventArg *(this, ret, ev,
+                             * args)); switches on ev+0x34 minus 0x18. The first 21 bytes are
+                             * position-independent. */
       "40 55 53 56 57 41 56 41 57 48 8D 6C 24 D1 48 81 EC A8 00 00 00 48 C7 45 DF FE FF FF FF "
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 17 49 8B F9 4D 8B F0 48 8B DA 48 8B F1 45 33 FF "
       "44 89 7D DB 4C 8B 11 49 8B D0 41 FF 52 40 84 C0 74 18 4C 8B 16 4C 8B CF 4D 8B C6 48 8B D3 "
@@ -832,10 +717,9 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 8B 0D ?? ?? ?? ?? "
       "65 48 8B 04 25 58 00 00 00 41 B8 04 00 00 00 48 8B 14 C8 48 8D 1D ?? ?? ?? ??",
       0x31D4A0u, 0x31D020u },
-    { "MemLocalPushHeap",  /* void(self,heapId). Push the 32-entry scope stack at +0x44, depth +0xC4.
-                             * Main-thread-only: heap -1 allocation consults this same gate.
-                             * PushHeap(0) selects the process heap so clipboard data survives
-                             * map teardown. The overflow assertion incorrectly names PopHeap. */
+    { "MemLocalPushHeap",  /* void(self,heapId): pushes the 32-entry scope stack at +0x44 (depth +0xC4).
+                            * Main-thread-only, since heap -1 allocation consults this gate; PushHeap(0) selects
+                            * the process heap so clipboard data survives map teardown. */
       "48 89 5C 24 08 57 48 83 EC 20 8B FA 48 8B D9 E8 ?? ?? ?? ?? 84 C0 74 16 "
       "48 63 83 C4 00 00 00 83 F8 20 7D 15 89 7C 83 44",
       0x3217A0u, 0x3213E0u },
@@ -844,21 +728,15 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                              * SUB [self+0xC4],1 followed by JS identifies the underflow path. */
       "40 53 48 83 EC 20 48 8B D9 E8 ?? ?? ?? ?? 84 C0 74 09 83 AB C4 00 00 00 01 78",
       0x321770u, 0x3213B0u },
-    { "PasteInstantiate",   /* void(prefab,editor). Instantiate staged entities and remap references.
-                             * Selection must be empty: old indices map through the appended
-                             * selection array. Existing entries would silently miswire the paste.
-                             * The native idle action 0x5C calls this and then EnterAddPrefabGrab;
-                             * calling it alone leaves incomplete placement state.
-                             * Re-find via EnterAddPrefabGrab's sole caller, then the preceding
-                             * call with LEA RCX,[editor+0x209A8] and MOV RDX,editor. */
+    { "PasteInstantiate",   /* void(prefab,editor): instantiates staged entities and remaps references; the
+                             * selection must be empty or the paste is miswired. The native idle action 0x5C
+                             * calls it, then EnterAddPrefabGrab. */
       "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 A8 F7 FF FF "
       "48 81 EC 20 09 00 00 48 C7 45 E0 FE FF FF FF 48 89 58 18",
       0x11AF070u, 0x11AE270u },
-    { "EnterAddPrefabGrab",  /* void(mode). Enter add-prefab manipulation after instantiation.
-                             * mode+0x2D0 clears Duplicate (0x04), sets Add Prefab (0x08);
-                             * +0x2D1 |= 1 restores selection, +0x1AC=4 enters manipulation,
-                             * +0xBB8 requests redraw. Siblings differ by flavor masks,
-                             * so preserve the full body when rederiving the paste path. */
+    { "EnterAddPrefabGrab",  /* void(mode): enters add-prefab manipulation: mode+0x2D0 clears Duplicate (0x04)
+                              * and sets Add Prefab (0x08), +0x2D1 |= 1 restores selection, +0x1AC=4 enters
+                              * manipulation, +0xBB8 requests redraw. */
       "80 A1 D0 02 00 00 FB 80 89 D0 02 00 00 08 80 89 D1 02 00 00 01 "
       "C7 81 AC 01 00 00 04 00 00 00 C6 81 B8 0B 00 00 01 C3",
       0x1254B80u, 0x12541A0u },
@@ -867,20 +745,15 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                              * any-register decoder. Profile color 0xFF00FF00 anchors the body. */
       "40 53 48 83 EC 20 48 8B 1D ?? ?? ?? ?? 48 85 DB 74 1E 48 8D 15 ?? ?? ?? ?? B9 00 FF 00 FF",
       0x16890E0u, 0x168A200u },
-    { "SoundPreview",       /* void*(world,outHandle,name), sound-world vtable +0x30.
-                             * Editor audition sets solo/listener state and allocates an emitter;
-                             * stop the previous handle before starting another. An empty/missing
-                             * resolved name clears preview state, but find-or-create can fatal
-                             * on invalid decls: validate names through the asset index first. */
+    { "SoundPreview",       /* void*(world,outHandle,name), sound-world vtable +0x30: editor audition; stop the
+                             * previous handle first. An empty name clears preview state; find-or-create can
+                             * fatal on invalid decls, so validate names via the asset index. */
       "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 41 54 41 56 41 57 48 83 EC 50 "
       "4C 8B E1 4D 8B F0 49 8B C8 4C 8B FA E8 ?? ?? ?? ?? 33 F6 8B E8 39 35 ?? ?? ?? ?? 7E 5E",
       0x185EDD0u, 0x18600C0u },
-    { "Mega2PageDecode",    /* void(header16,payload,NULL,out): CPU-only megatexture page decode.
-                             * Output is five 128x128 RGBA planes at 0x10000-byte intervals;
-                             * plane 0 is albedo. Preclear all 0x50000 output bytes because
-                             * skipped streams remain untouched. Supply at least 0x40000
-                             * zero-filled bytes after payload; the decoder reads past page data.
-                             * Re-find through the renderer Transcode.cpp code path. */
+    { "Mega2PageDecode",    /* void(header16,payload,NULL,out): megatexture page decode into five 128x128 RGBA
+                             * planes 0x10000 apart (plane 0 albedo). Preclear all 0x50000 output bytes and
+                             * zero-fill 0x40000 bytes after payload, which the decoder reads past. */
       "40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 30 01 00 00 48 8D 6C 24 40 "
       "48 C7 45 10 FE FF FF FF 48 89 9D 40 01 00 00 48 8B 05 ?? ?? ?? ??",
       0x1A4BC80u, 0x1A64C70u },
@@ -950,14 +823,13 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 48 83 EC 50 F6 41 68 20 BB 01 00 00 00 89 5C 24 60 74 24 4C 8D 44 24 68",
       0x16C90A0u, 0x16C9D80u },
     { "DeclPureFind",       /* the pure decl lookup the typeinfo probes call -- decl *(ctx [rcx],
-                             * name [rdx]). Distinct from DeclFind (0x17B36F0), which is the registry
+                             * name [rdx]). Distinct from DeclFind, which is the registry
                              * form. */
       "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 48 89 74 24 58 "
       "48 8B DA 48 8B F1",
       0x1572A80u, 0x1573C10u },
-    { "SerializedEntityIndexWrite", /* Swap-removal's moved-entity index write.
-                             * The following
-                             * count decrement and state reset identify this site. */
+    { "SerializedEntityIndexWrite", /* Swap-removal's moved-entity index write; the
+                             * following count decrement and state reset identify this site. */
       "89 A8 64 0B 00 00 8B 97 70 A0 49 00 FF CA E8 ?? ?? ?? ?? "
       "33 D2 C7 86 64 0B 00 00 FF FF FF FF 48 8B CE E8 ?? ?? ?? ??",
       0x3C9011u, 0x3C89B1u },
@@ -971,11 +843,9 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 C7 45 80 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 C8 "
       "0F 29 78 B8 44 0F 29 40 A8 48 8B 05 ?? ?? ?? ??",
       0x921AC0u, 0x920BD0u },
-    { "StaticModelUpdate",  /* idRenderModelStatic vtable +0x78: rebuild or refresh a static render
-                             * model's copy of its backing static model's surfaces. Head through the
-                             * cookie load, the backing test and the dead-surface walk; the counter
-                             * compare (+0x3E2) and the list LEA (+0x3FA) are checked at install
-                             * (static_model_guard.c). Same bytes and offsets on both renderers. */
+    { "StaticModelUpdate",  /* idRenderModelStatic vtable +0x78: refreshes a static render model's copy of its
+                             * backing model's surfaces; the counter compare (+0x3E2) and list LEA (+0x3FA) are
+                             * checked at install (static_model_guard.c). Same bytes on both renderers. */
       "40 57 48 81 EC 10 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 78 "
       "48 83 B9 90 0E 00 00 00 48 8B F9 75 07 32 C0 E9 14 07 00 00 "
       "48 89 9C 24 28 01 00 00 8B 99 00 0B 00 00 83 EB 01",
@@ -991,28 +861,20 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 78 FF FF FF "
       "48 81 EC 88 01 00 00 48 C7 44 24 30 FE FF FF FF",
       0x1695FE0u, 0x1696E60u },
-    { "ResourceLookup",     /* idResourceList find: resource*(list, name, quiet). The find-only
-                             * lookup ResourceMaterialize asks first, before it creates. Detoured
-                             * over its 19-byte head (three pushes, LEA RBP and SUB RSP; no relative
-                             * operand) to record what a kept mod pass looks up. Vulkan 0x1571D50,
-                             * OpenGL 0x1572EE0: same 68 callers, called at the same offsets from
-                             * ResourceMaterialize (+0x77, +0x273) and from itself (+0x225). */
+    { "ResourceLookup",     /* idResourceList find: resource*(list, name, quiet), the find-only lookup
+                             * ResourceMaterialize asks first. VK 0x1571D50, GL 0x1572EE0; detoured over its
+                             * 19-byte head to record what a kept mod pass looks up. */
       "40 55 56 57 48 8D AC 24 60 FE FF FF 48 81 EC A0 02 00 00 48 C7 44 24 28 FE FF FF FF "
       "48 89 9C 24 D0 02 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 90 01 00 00 48 8B F2 "
       "48 8B F9 48 89 4C 24 20 48 8D 4D 60 E8 ?? ?? ?? ?? 90 C6 85 90 00 00 00 00",
       0x1571D50u, 0x1572EE0u },
-    { "ResourceMaterialize", /* idResourceList find-or-load: resource*(list, name, makeDefault,
-                             * quiet). Asks ResourceLookup first, creates an object at the current
-                             * level for an unknown name and loads it through ResourceGenericLoad
-                             * (+0x249). Called, not detoured: the product loads the render models a
-                             * kept decl holds with it (modserve_engine.c, me_hold_models). Vulkan
-                             * 0x1572660, OpenGL 0x15737F0; one match in each image. */
+    { "ResourceMaterialize", /* idResourceList find-or-load: resource*(list, name, makeDefault, quiet); VK
+                              * 0x1572660, GL 0x15737F0. Asks ResourceLookup, loads via ResourceGenericLoad
+                              * (+0x249); called, not detoured. */
       "41 54 41 56 41 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 58 48 89 74 24 60 "
       "48 89 7C 24 68 45 0F B6 F9 45 0F B6 E0 4C 8B F2 48 8B F1 48 8B 49 08 48 85 C9 75 0D 48 8D 0D",
       0x1572660u, 0x15737F0u },
-    /* Native module properties and XYZ inspector. Independently matched on
-     * Vulkan/OpenGL at D0BCA0/D0B3B0, D0A0B0/D09980, D071F0/D06B70 and
-     * D306F0/D2FDB0. No pinned-image RVA fallback is authorized. */
+    /* Native module properties and XYZ inspector; each is unique in both renderer images. */
     { "GridModuleProperties",
       "40 55 56 57 41 56 41 57 48 8D AC 24 70 C0 FF FF B8 90 40 00 00 E8 ?? ?? ?? ?? "
       "48 2B E0 48 C7 44 24 60 FE FF FF FF 48 89 9C 24 C8 40 00 00 "
@@ -1026,8 +888,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "GridSetVec3",
       "40 53 B8 80 40 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 30 FE FF FF FF "
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 70 40 00 00 48 8B D9 8B 02 89 81 00 01 00 00", 0x12A8610u, 0x12A7CF0u },
-    /* Native palette lookup and one-module loader, verified in both images:
-     * Vulkan 5B7380/5B7910, OpenGL 5B6A70/5B7000. */
+    /* Native palette lookup and one-module loader. */
     { "GridFindModule",
       "4C 8B DC 49 89 5B 18 49 89 53 10 57 48 83 EC 40 48 63 41 18 4D 8D 4B 08 "
       "4C 8B 51 10 4D 8D 43 10 48 69 F8 98 00 00 00", 0x1212D20u, 0x1212170u },
@@ -1049,20 +910,18 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 56 57 41 56 41 57 48 81 EC 60 01 00 00 48 C7 44 24 40 FE FF FF FF "
       "48 89 9C 24 98 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 50 01 00 00 "
       "49 8B E9 49 8B F0 48 8B FA 4C 8B F9 48 8B 9C 24 B0 01 00 00", 0x12132F0u, 0x1212700u },
-    /* Replace one compiled instance and recompute native portal connections.
-     * Vulkan 5993A0/59DA90; OpenGL 598B10/59D200. */
+    /* Replace one compiled instance and recompute native portal connections. */
     { "GridReplaceInstance",
       "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B 81 68 07 00 00 "
       "48 8B F9 48 63 DA 48 81 C1 E0 05 00 00", 0x11F4F60u, 0x11F4180u },
     { "GridReconnectPortals",
       "4C 8B DC 41 56 48 81 EC 80 00 00 00 49 C7 43 B0 FE FF FF FF 49 89 5B 10 "
       "49 89 73 18 49 89 7B 20 0F 29 74 24 70 0F 29 7C 24 60", 0x11F95D0u, 0x11F87F0u },
-    /* Native collision resources cached by a module wrapper: VK 5929a0, GL 592030. */
+    /* Native collision resources cached by a module wrapper. */
     { "GridBuildModuleCollision",
       "40 55 56 57 41 56 41 57 48 83 EC 70 48 C7 44 24 20 FE FF FF FF 48 89 9C 24 B8 00 00 00 "
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 49 63 E8 4C 8B FA", 0x11EE530u, 0x11ED860u },
-    /* Native COW edit, local transform setter and bounds transform. Verified
-     * VK 5a0280/545040/554cf0; GL 59f9f0/544960/5541a0. */
+    /* Native COW edit, local transform setter and bounds transform. */
     { "GridEditEntity",
       "48 8B 01 44 8B D2 44 8B CA 41 83 E2 3F 49 C1 E9 06 4C 8B 80 D0 06 00 00 48 63 D2 4B 8B 04 C8 4C 0F AB D0", 0x11FBDC0u, 0x11FB060u },
     { "GridSetEntityTransform",
@@ -1070,7 +929,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "GridWorldBounds",
       "48 8B C4 48 89 58 18 57 48 81 EC A0 00 00 00 0F 29 70 E8 0F 29 78 D8 48 8B 05 ?? ?? ?? ?? "
       "48 33 C4 48 89 44 24 70 F2 0F 10 41 0C 49 8B F8 8B 41 14 48 8B DA 44 8B 41 18", 0x11B3EC0u, 0x11B32A0u },
-    /* Native Blueprint Grid Room properties entry; both renderers verified. */
+    /* Native Blueprint Grid Room properties entry. */
     { "GridBlueprintUpdate",
       "40 53 55 57 48 83 EC 20 F6 41 10 10 49 8B D8 48 8B FA 48 8B E9 75", 0x126D910u, 0x126CF00u },
     { "GridBlueprintHelp",
@@ -1085,18 +944,15 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "4C 8B 01 44 8B CA 4D 85 C0 74 3C 48 63 49 08 41 8B 40 70 3B C8 75 1D 85 C0 7E 17 8D 41 FF 48 63 C8 49 8B 40 68 48 6B D1 78 44 85 4C 02 08 0F 94 C0 C3 3B C8 7D 11 49 8B 40 68 48 6B C9 78", 0x120B230u, 0x120A630u },
     { "GridEntityTree",
       "40 53 48 83 EC 30 4C 8B 81 50 01 00 00 48 8B DA", 0x119FDD0u, 0x119F000u },
-    /* Every undoable editor action ends here: it stores the action's label in
-     * the map object and pushes the undo snapshot. The one notification that
-     * covers placement, move, rotate, resize, duplicate, property edit and
-     * delete. */
+    /* Every undoable editor action ends here: it stores the action's label in the map object and pushes the
+     * undo snapshot. */
     { "EditorCommitEdit",
       "40 53 48 83 EC 20 48 8B D9 48 8B 89 C8 04 02 00 48 83 C1 18 E8 ?? ?? ?? ?? "
       "48 8D 4B 10 48 8B D3 E8 ?? ?? ?? ?? 48 8B 03 BA 01 00 00 00 48 8B CB "
       "48 83 C4 20 5B 48 FF A0 60 01 00 00", 0x1183D60u, 0x1182EC0u },
-    /* EntityMode's Selection substate (idSnapEntityMode_Selection), used by
-     * editor_delete.c to run the native Delete Selection for window requests.
-     * The action's hover-clear callee is decoded from its own call site: that
-     * helper has a byte-identical twin and is not signable. */
+    /* EntityMode's Selection substate (idSnapEntityMode_Selection), used by editor_delete.c to run the native
+     * Delete Selection. The action's hover-clear callee is decoded from its call site because that helper has a
+     * byte-identical twin. */
     { "SelectionDeleteAction", /* Prologue through the
                                 * capability test movzx eax,[rcx+0x58]; test al,2. */
       "40 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 D9 48 81 EC D0 00 00 00 "
@@ -1112,10 +968,9 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "4C 89 64 24 70 8B D6 4C 89 7C 24 40", 0x1266D60u, 0x1266350u },
     { "GridApplyEntityTree",
       "48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 30 48 8B F9 48 8B F2", 0x11A49F0u, 0x11A3C10u },
-    /* Re-applies an entity's type-info tree: GridEntityTree (call +0x17), GridApplyEntityTree
-     * (call +0x25), then the owning tree's destructor (call +0x38) and its sized delete with
-     * 0x48 (call +0x45). Build 13954591 no longer inlines that cleanup in GridEntityTree, so
-     * grid_room_native.c takes the destructor and delete from here. */
+    /* Re-applies an entity's type-info tree: GridEntityTree (call +0x17), GridApplyEntityTree (call +0x25),
+     * then the tree destructor (call +0x38) and sized delete 0x48 (call +0x45); grid_room_native.c takes the
+     * destructor and delete from here. */
     { "GridReapplyEntityTree",
       "40 53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 8B D9 48 8D 54 24 48 E8 ?? ?? ?? ?? 90 "
       "48 8B 54 24 48 48 8B CB E8 ?? ?? ?? ?? 90 48 8B 5C 24 48 48 85 DB 74 15 48 8B CB E8 ?? ?? ?? ?? "
@@ -1226,9 +1081,8 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
      * 13954591 executables at the recorded RVAs. */
     { "WorldAreaCellLoad", /* MOVSS xmm0,[rip+disp32 -> 512.0]; MOVSS [rsp+0x20],xmm0; LEA r9; LEA r8; XOR edx,edx. */
       "F3 0F 10 05 ?? ?? ?? ?? F3 0F 11 44 24 20 4C 8D 4C 24 50 4C 8D 85 E0 01 00 00 33 D2 49 8B CF E8", 0x114FF66u, 0x114F166u },
-    /* Grid Room Size sub-editor refresh after an outside size change
-     * Unique on both build 13954591
-     * executables at the recorded RVAs. */
+    /* Grid Room Size sub-editor refresh after an outside size change. Unique on both build 13954591 executables at
+     * the recorded RVAs. */
     { "GridPropertyDirtyRefresh", /* Property row: context lists +0x58 vs +0x70 (context vt+0x70) set or clear the dirty byte +0xc8 and relabel the row. */
       "40 53 48 83 EC 20 48 8B D9 48 8B 89 D8 00 00 00 48 8B 01 FF 50 70 0F B6 8B C8 00 00 00 84 C9 74 1D 84 C0 74 30 84 C9 74 08 48 8B CB E8 ?? ?? ?? ?? C6 83 C8 00 00 00 00 48 83 C4 20 5B C3 84 C0 75 13 84 C9 75 08 48 8B CB E8 ?? ?? ?? ?? C6 83 C8 00 00 00 01", 0x12A8E30u, 0x12A8510u },
     { "GridMenuOf", /* Widget -> root editor menu (parent chain +0x18/+0xb0); its +0xa10 is idMenuManager_ContextList_Vec. */
@@ -1237,14 +1091,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "4C 8B C1 83 FA FF 75 03 33 C0 C3 48 63 C2 48 63 8C 81 50 03 00 00 41 39 88 D8 04 00 00 7E E9 49 8B 80 D0 04 00 00 48 8B 04 C8 C3", 0xF8F9C0u, 0xF8EEF0u },
     { "ContextListRedraw", /* Context-list screen: redraws its six item rows (name, value text, dirty marker) from the bound context +0x1b8. */
       "40 55 41 54 41 55 41 56 41 57 48 8D AC 24 10 7E FF FF B8 F0 82 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 70 FE FF FF FF 48 89 9C 24 28 83 00 00 48 89 B4 24 30 83 00 00 48 89 BC 24 38 83 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 E0 81 00 00 48 8B D9", 0x127B000u, 0x127A5B0u },
-    /* Object Mode entry drop: the
-     * FPS entry solver's load of its 18364.0 downward trace segment, that
-     * constant's only reader. Unique on both build 13954591 executables. */
+    /* Object Mode entry drop: the FPS entry solver's load of its 18364.0 downward trace segment, that constant's only
+     * reader. Unique on both build 13954591 executables. */
     { "ObjectEntryDrop", /* MOVSS xmm9,[rip+disp32 -> 18364.0]; XORPS xmm7,xmm7; MOVSS xmm8,[rip+disp32 -> 1.0]; MOVSS [rsp+0x60],xmm2. */
       "F3 44 0F 10 0D ?? ?? ?? ?? 0F 57 FF F3 44 0F 10 05 ?? ?? ?? ?? F3 0F 11 54 24 60", 0x12B3823u, 0x12B2F03u },
-    /* Unrestricted placement: the two
-     * tests that refuse an element with no accepted surface unless its
-     * placementFlags allow air. Unique on both build 13954591 executables. */
+    /* Unrestricted placement: the two tests that refuse an element with no accepted surface unless its placementFlags
+     * allow air. Unique on both build 13954591 executables. */
     { "PlaceGateCommit", /* Place/commit group test: CMP dword [r12+rdx+8],0; JNZ +0x27 past TEST byte [def+0x1d0],0x30; JZ refuse. */
       "41 83 7C 14 08 00 75 27 49 8B 46 28 49 63 0C 14 48 8B 00 48 8B 80 A0 06 00 00 48 8B 0C C8 48 8B 41 08 F6 80 D0 01 00 00 30 0F 84", 0x121951Cu, 0x121896Cu },
     { "PlaceGateElement", /* Per-element ghost test: blocked +0x30, module +4 == -1, then CMP [r8+8],0; JNZ +0x2e past TEST [def+0x1d0],0x30. */
@@ -1256,8 +1108,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "80 3D ?? ?? ?? ?? 00 74 2A 44 8B CE 44 8B C5 48 8D 15 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? 44 8B CE 44 8B C5 48 8D 15 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? B9 0A 00 00 00 E8 ?? ?? ?? ?? 48 83 3D ?? ?? ?? ?? 00", 0x1901E63u, 0x18FAD41u },
     { "BootReadPoll", /* UncachedBackgroundRead completion poll: done byte [rsp+0x70], abort [rsi+0x10], MOV ECX,1; CALL Sleep. */
       "0F B6 44 24 70 84 C0 75 1B 0F B6 46 10 84 C0 75 13 B9 01 00 00 00 E8 ?? ?? ?? ?? 0F B6 44 24 70 84 C0 74 E5", 0x1938EA8u, 0x192D818u },
-    /* Module prefabs. Every
-     * entry verified on both build 13954591 executables. */
+    /* Module prefabs. Every entry is unique on both build 13954591 executables. */
     { "SnapMapCtor", /* idSnapMap in-place ctor (0x778 bytes): writes version 0x6f at +0. VK 1245b60, GL 1245190. */
       "4C 8B DC 49 89 4B 08 56 57 41 56 48 83 EC 40 49 C7 43 C8 FE FF FF FF 49 89 5B 18 49 89 6B 20 48 8B F9 C7 01 6F 00 00 00", 0x1245B60u, 0x1245190u },
     { "SnapMapDtor", /* idSnapMap dtor, paired with SnapMapCtor by EditorMapToJson. VK fcdcf0, GL fcd230. */
@@ -1278,23 +1129,18 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 48 83 EC 20 44 8B 51 0C 48 8B DA 41 83 EA 01 74 2B 41 83 FA 01 74 11 33 C9 48 8B 01 FF 50 38 48 8B C3 48 83 C4 20", 0x1257640u, 0x1256B40u },
     { "EditorBudgetUpdate", /* void(editor): recompute the editor budget; writes the limits-reached byte editor+0x236d0. VK 118b070, GL 118a1d0. */
       "40 55 B8 50 41 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 F0 40 00 00 83 3D ?? ?? ?? ?? 00", 0x118B070u, 0x118A1D0u },
-    /* The editor's entity type-info cache (idSnapTypeInfoCache, engine global
-     * snap_typeinfo_cache): one default property tree per entityDef the game
-     * registered before it built the cache. modtypeinfo.c detours Get and its
-     * lookup and builds the trees of the types the cache lacks with the same
-     * engine calls the game's builder uses. */
+    /* The editor's entity type-info cache (idSnapTypeInfoCache, global snap_typeinfo_cache): one default
+     * property tree per registered entityDef. modtypeinfo.c detours Get and Lookup and builds trees for missing
+     * types with the engine's own calls. */
     { "SnapTypeInfoCacheGet", /* tree **(cache [rcx], tree **out [rdx], idSnapEntityEdit *entity [r8]):
-                             * idSnapTypeInfoCache::Get. Searches the cache for the entity's pooled
-                             * entityDef name (+0x58); a hit hands out a copy of the cached tree with the
-                             * instance's text applied, a miss a tree from the instance alone. Detoured
-                             * (17 bytes: seven pushes and mov eax,0x1290; the stack probe call follows). */
+                               * idSnapTypeInfoCache::Get; hands out a copy of the cached tree for the entity's
+                               * entityDef name, or a tree built from the instance on a miss. Detoured. */
       "40 55 56 57 41 54 41 55 41 56 41 57 B8 90 12 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 50 FE FF FF FF "
       "48 89 9C 24 E8 12 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 80 12 00 00 49 8B E8 4C",
       0x1244DD0u, 0x1244400u },
-    { "SnapTypeInfoCacheLookup", /* tree *(cache [rcx], const char **key [rdx]): the lookup-only sibling of
-                             * Get, the cached tree itself or NULL; the two entity refresh paths read it.
-                             * Detoured (16 bytes, up to the call of the search). VK 0x141245000,
-                             * GL 0x141244630. */
+    { "SnapTypeInfoCacheLookup", /* tree *(cache [rcx], const char **key [rdx]): the lookup-only sibling of Get,
+                                  * returning the cached tree or NULL. Detoured (16 bytes, up to the search
+                                  * call); VK 0x141245000, GL 0x141244630. */
       "48 89 5C 24 08 57 48 83 EC 20 48 8B FA 48 8B D9 E8 ?? ?? ?? ?? 3B 03 75 1C 48 8B 17 48 8D 0D ?? ?? ?? ?? "
       "E8 ?? ?? ?? ?? 33 C0 48 8B 5C 24 30 48 83 C4 20 5F C3 48 98 48 8D 04 C0 48 8D 80 DD 05",
       0x1245000u, 0x1244630u },
@@ -1327,35 +1173,27 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                              * text into it; what Build runs on each cache slot. */
       "48 89 5C 24 08 57 48 83 EC 20 48 8B DA 48 8B F9 48 8B 11 E8 ?? ?? ?? ?? 45 33 C9 48 C7 07 00 00 00 00 "
       "45 33 C0 48 8B D3 48 8B CF E8 ?? ?? ?? ?? 48 8B 5C 24 30 48 89 07 48 83 C4 20 5F C3", 0x356770u, 0x356100u },
-    { "GridTreeDestroy",    /* void(tree [rcx]): the property tree destructor the engine runs on every tree
-                             * idSnapTypeInfoCache::Get hands out (then frees the 0x48 bytes); frees the
-                             * tree's node storage (+0x28, by its state byte +0x3b) and releases the entities
-                             * on its list (+0x8, linked at +0x2200) through the game. modtypeinfo.c runs it
-                             * on a product-built tree it drops. */
+    { "GridTreeDestroy",    /* void(tree [rcx]): the property tree destructor for trees Get hands out; frees
+                             * node storage (+0x28, state byte +0x3b) and releases the entities on its list
+                             * (+0x8, linked at +0x2200); modtypeinfo.c runs it on trees it drops. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B D9 E8 ?? ?? ?? ?? 90 "
       "0F B6 43 3B 33 FF 84 C0 74 06 2C 03 3C 01 77 19 48 8B 4B 28", 0x3723A0u, 0x371D80u },
-    { "SnapPaletteBuild",   /* void(palette [rcx], progress [rdx]): rebuild the editor entity palette at
-                             * editor+0x20660 from every snapEditorEntityDef decl. Called once, from editor
-                             * initialization. The tail anchors on its first writes: selected index +0x08 = 0
-                             * and end pointer +0x28 = +0x10. The first 18 bytes are whole and register-only. */
+    { "SnapPaletteBuild",   /* void(palette [rcx], progress [rdx]): rebuilds the editor entity palette at
+                             * editor+0x20660 from every snapEditorEntityDef decl, once at editor init. The
+                             * first 18 bytes are whole and register-only. */
       "48 8B C4 56 57 41 54 41 56 41 57 48 81 EC 70 07 00 00 48 C7 44 24 50 FE FF FF FF "
       "48 89 58 18 48 89 68 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 60 07 00 00 "
       "4C 8B F2 4C 8B F9 33 DB 89 59 08 48 8B 41 10 48 89 41 28", 0x11AA710u, 0x11A9820u },
-    { "SnapPaletteSortCall", /* inside PasteInstantiate (VK 0x1411af070, GL 0x1411ae270): the editor's
-                             * reads of +0x204c8 and +0x204d0, the end-pointer refresh of the palette at
-                             * editor+0x20660, then at offset 37 the E8 to SnapPaletteSort (VK 0x1411ab0a0,
-                             * GL 0x1411aa1b0), the sort of the palette's rows in place. The sort wrapper's
-                             * own bytes are a template shared with other row lists, so it is reached
-                             * through this call. timeline_tile.c verifies the target's prologue before
-                             * detouring it. */
+    { "SnapPaletteSortCall", /* inside PasteInstantiate (VK 0x1411af070, GL 0x1411ae270): at offset 37 the E8 to
+                              * SnapPaletteSort (VK 0x1411ab0a0, GL 0x1411aa1b0); its wrapper is a template
+                              * shared with other lists. */
       "4C 8B F1 48 8B B2 C8 04 02 00 48 8B BA D0 04 02 00 48 8D 8A 60 06 02 00 E8 ?? ?? ?? ?? "
       "49 8D 8C 24 60 06 02 00 E8 ?? ?? ?? ?? 8B 46 50", 0x11AF0F3u, 0x11AE2F3u },
     /* Published-map and offline-play gates (modpublished.c). Unique on both build
      * 13954591 executables; steal windows audited by detour_windows_test. */
     { "PublishedOnSnapPlayDone",   /* idMenuManager_Shell::OnSnapPlay read completion (manager, request,
-                                    * metadata, map): ClearDialog(0x63), progress hide, PushHistorySetCache,
-                                    * PublishedMapLobbyLaunch(manager, 0). Steal 18: 11 bytes of pushes and
-                                    * sub, then the cookie load MOV RAX,[RIP+d32] relocated. */
+                                    * metadata, map): clears the dialog, then PublishedMapLobbyLaunch(manager,
+                                    * 0). Steal 18: 11 bytes of pushes and sub, then the relocated cookie load. */
       "40 53 56 57 48 81 EC E0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 D0 00 00 00",
       0xFA4A80u, 0xFA3FB0u },
     { "PublishedBrowserPlayDone",  /* browser published-play read completion (browser, request, metadata,
@@ -1368,9 +1206,8 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 70 17 00 00 49 8B F9 49 8B D8 48 8B 89 38 0A 00 00 "
       "48 85 C9 74 ?? 48 8B 01 33 D2 FF 50 30 48 8B 0D ?? ?? ?? ?? 48 8B 01", 0xFA1D60u, 0xFA1290u },
     { "CacheMapForLobby",          /* char(manager, id idStr*, revision idStr*): 1 when the in-memory cache
-                                    * holds the map (no read), else the read toward CacheReady and 0. N1a's
-                                    * 28-byte head also matches VK fab300 / GL faa830, so this runs through
-                                    * the cache query. Steal 20. */
+                                    * holds the map, else starts the read and returns 0. Steal 20; another
+                                    * function's 28-byte head also matches (VK fab300 / GL faa830). */
       "40 55 56 57 48 81 EC 80 00 00 00 48 C7 44 24 38 FE FF FF FF 48 89 9C 24 B8 00 00 00 "
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 70 49 8B E8 48 8B F2 48 8B F9 E8 ?? ?? ?? ?? "
       "48 8B 10 48 8B C8 FF 52 38 4C 8B 08 4C 8B C5 48 8B D6 48 8B C8 41 FF 91 B0 01 00 00 "
@@ -1392,8 +1229,8 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 56 57 48 83 EC 70 48 C7 44 24 28 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 "
       "49 8B D8 48 8B FA 48 8B F1 48 8D 4C 24 20 E8 ?? ?? ?? ?? 90 E8 ?? ?? ?? ?? 4C 8B 08 48 8B C8 41",
       0xFA0400u, 0xF9F930u },
-    /* Co-op lobbies for modded maps (modlobby.c, R-CO1). Unique on both build 13954591 executables; read in Ghidra
-     * on each; steal windows audited by detour_windows_test. */
+    /* Co-op lobbies for modded maps (modlobby.c). Unique on both build 13954591 executables; steal windows audited
+     * by detour_windows_test. */
     { "SnapmapLobbyTryToStartMatch", /* idMenuScreen_Shell_SnapmapLobby::TryToStartMatch (screen): the lobby's Start;
                                     * arms the controller's 5 or 15 s countdown. Steal 16. */
       "48 89 74 24 18 48 89 7C 24 20 55 48 8D 6C 24 A9 48 81 EC F0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 "
@@ -1485,10 +1322,9 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "E8 ?? ?? ?? ?? 48 89 44 24 60 48 85 C0 74 0D 48 8B C8 E8 ?? ?? ?? ?? 48 8B F8 EB 02 33 FF 48 8B 4B 38 48 3B CF "
       "74 13 48 85 C9 74 0A 48 8B 01 BA 01 00 00 00 FF 10 48 89 7B 38 33 C0 EB 5B B9 80 01 00 00 E8 ?? ?? ?? ?? "
       "48 89 44 24 60 48 85 C0 74 11 48 8B 53 08 48 8B C8 E8 ?? ?? ?? ?? 48 8B F8", 0x172B3B0u, 0x172C040u },
-    /* Mod sound banks (modsound.c): vtable slots and one direct call, no steal. Re-find through the
-     * strings "sound/soundbanks/%s/" (LoadBanks), "force load success id %6d : %s" (the per-bank
-     * wrapper), the resolver vtable after AudioFileResolverInit, and "s_loadBanks" (its console
-     * function). Frame sizes changed from the 2018 build (0x420 -> 0x2F0, 0x190 -> 0x1C0). */
+    /* Mod sound banks (modsound.c): vtable slots and one direct call, no steal. Re-find through the strings
+     * "sound/soundbanks/%s/" (LoadBanks), "force load success id %6d : %s" (the per-bank wrapper) and
+     * "s_loadBanks" (its console function), and the resolver vtable after AudioFileResolverInit. */
     { "AudioLoadBanks",     /* void(hardware): idSoundHardware_WWise vtable +0x30. Init.bnk, doom_initial, initial.pck,
                              * then ListFiles("sound/soundbanks/pc/", "bnk") through the per-bank wrapper. */
       "40 55 41 54 41 55 41 56 41 57 48 81 EC F0 02 00 00 48 8D 6C 24 30 48 C7 45 10 FE FF FF FF "
@@ -1528,16 +1364,14 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 48 83 EC 20 48 8B 5C 24 50 41 8B C0 41 83 F8 01 4C 8B 43 10 75 0B 8B D1 48 8D 0D ?? ?? ?? ?? EB 09 8B D0 48 "
       "8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 03 BA 01 00 00 00 48 8B CB 48 83 C4 20 5B",
       0x19F5B50u, 0x1A11C00u },
-    { "AudioBankCookieSite", /* inside AudioBankSubmit after its filter: CMP force-load flag; operator new(0x130);
-                              * the cookie ctor(cookie, name); LEA RDX,callback; CALL LoadBank. The cookie ctor (an
-                              * idStrStatic<256> ctor, VK 0x2AF680 / GL 0x2AF840) has 18 byte-identical template
-                              * twins on each image, so modsound takes it from this call and checks the other three
-                              * calls land on the entries above. */
+    { "AudioBankCookieSite", /* inside AudioBankSubmit after its filter: CMP force-load flag; operator
+                              * new(0x130); the cookie ctor; LEA RDX,callback; CALL LoadBank. The ctor (VK
+                              * 0x2AF680 / GL 0x2AF840) has 18 identical twins per image. */
       "83 3D ?? ?? ?? ?? 00 75 4D B9 30 01 00 00 E8 ?? ?? ?? ?? 48 89 44 24 40 48 85 C0 74 0E 48 8B 54 24 60 48 8B C8 E8 "
       "?? ?? ?? ?? 90 48 8D 4C 24 30 48 89 4C 24 20 41 83 C9 FF 4C 8B C0 48 8D 15 ?? ?? ?? ?? 48 8B 4C 24 60 E8",
       0x19F6ADFu, 0x1A12B8Fu },
     { "WeaponHudModeCall", /* WeaponInfo::Update: CALL WeaponHudGameMode; TEST AL,AL; JZ; then the widget's weapon decl
-                            * at RBX+0x1F8 and its +0x641 flag. The beta.19 pattern, unchanged on 13954591; modhud
+                            * at RBX+0x1F8 and its +0x641 flag. modhud
                             * swaps the call's aligned rel32 (no steal). */
       "E8 ?? ?? ?? ?? 84 C0 74 45 48 8B 83 F8 01 00 00 48 85 C0 74 09 80 B8 41 06 00 00 00 75 30", 0xC73F47u, 0xC739C7u },
     { "WeaponHudGameMode", /* bool(game*): game+0x45338 -> +0x18 == 1; modhud checks the decoded call lands here. */
@@ -1553,10 +1387,9 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "4C 8B DC 57 41 56 41 57 48 81 EC 90 00 00 00 48 C7 44 24 20 FE FF FF FF 49 89 5B 10 49 89 6B 18 49 89 73 20 48 8B 05 "
       "?? ?? ?? ??"
       , 0x119AD00u, 0x1199F60u },
-    /* The publish screens' FINISH step (modpublish.c, R-LB1 S7): the MapProperties frame's PUBLISH case calls the
-     * gate (editor, 1, 1), then the screens' close, then PublishStart(editor, state+0x21). The gate call is repointed
-     * at a near relay, where a map with mods is held; the editor dialog's show and the EditorFrame call of its input
-     * are read, never hooked. Each unique on both build 13954591 executables. */
+    /* The publish screens' FINISH step (modpublish.c): the MapProperties PUBLISH case calls the gate (editor,
+     * 1, 1), the screens' close, then PublishStart(editor, state+0x21). The gate call is repointed at a near
+     * relay that holds a map with mods; the dialog's show and EditorFrame's input call are only read. */
     { "PublishFinishGateCall",
       "E8 ?? ?? ?? ?? 84 C0 0F 85 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ?? 0F B6 56 21 48 8B CF E8 ?? ?? ?? ??"
       , 0x1190362u, 0x118F4E2u },
@@ -1565,12 +1398,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 33 C4 48 89 84 24 B8 00 00 00 48 8B F2 48 8B F9 E8 ?? ?? ?? ?? 84 C0 0F 84"
       , 0x128F0E0u, 0x128E730u },
     { "CloudSaveSlotReadCall", /* the cloud-save request's ReadLocalSavedMapText(model->localId, ...): the read the
-                                * published copy is made at (modpublish.c eng_cloud_read, R-LB1 F6). Read, never hooked. */
+                                * published copy is made at (modpublish.c eng_cloud_read). Read, never hooked. */
       "E8 ?? ?? ?? ?? 44 8B F8 85 C0 0F 84 EF 00 00 00"
       , 0x11BE407u, 0x11BD7D7u },
     { "CloudSaveMetaReadCall", /* the cloud-save request's ReadLocalSaveMeta(model->localId, &model, ...): the slot's
                                 * metadata into the model it uploads; relayed so the published copy's declChecksum is
-                                * its own text's (modpublish.c eng_cloud_meta_detour, R-LB1 F6). */
+                                * its own text's (modpublish.c eng_cloud_meta_detour). */
       "E8 ?? ?? ?? ?? 44 8B E0 85 C0 0F 84 C9 00 00 00"
       , 0x11BE673u, 0x11BDA43u },
     { "NewSavedMapDeclChecksumCall", /* CreateLocalSavedMapInternal: model.declChecksum (+0xB8) = id's hash of the
@@ -1604,10 +1437,9 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "41 5E 5E C3 0F B6 89 71 09 00 00 4C 8D 05 ?? ?? ?? ?? 48 89 5C 24 50 48 8D 15 ?? ?? ?? ?? 48 89 7C 24 58 E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? "
       "49 8B BE 88 03 00 00 48 8B 9D 88 03 00 00"
       , 0x6BEE80u, 0x6BE150u },
-    /* Load-time fault recovery (fault_shield/load_screen_stop.c). idCommonLocal::CancelMapChange(common, arg),
-     * common vtable +0x28, reached from idCommonLocal::Frame's idException catch: its
-     * 16 KB stack buffer, then the MOV R8B,1 / MOVZX EBP,DL / MOV RDI,RCX setup.
-     * The first 15 bytes are the stolen window. */
+    /* Load-time fault recovery (fault_shield/load_screen_stop.c): idCommonLocal::CancelMapChange(common, arg),
+     * common vtable +0x28, reached from Frame's idException catch; its 16 KB stack buffer, then the MOV R8B,1 /
+     * MOVZX EBP,DL / MOV RDI,RCX setup. The first 15 bytes are the stolen window. */
     { "CancelMapChange",
       "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 B8 30 40 00 00 E8 ?? ?? ?? ?? "
       "48 2B E0 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 20 40 00 00 41 B0 01 0F B6 EA "
@@ -1634,10 +1466,9 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 4C 24 08 48 89 54 24 10 4C 89 44 24 18 4C 89 4C 24 20 48 83 EC 28 "
       "E8 ?? ?? ?? ?? 48 8B 54 24 30 4C 8D 44 24 38 B9 07 00 00 00",
       0x282B90u, 0x282D80u },
-    /* idParmState::AllocParmState(state, idDeclRenderParm *) -> slot: the kind's range from the decl's +0x6C
-     * (cmp eax, 0x12 over the switch), the slot a holder of the same name has or the first empty one, else Error6
-     * "failed to allocate %s parm state". parmslots.c detours its first 15 bytes (three register saves to the
-     * shadow space, no relative operand) so that a parm past a full range shares a slot instead. */
+    /* idParmState::AllocParmState(state, idDeclRenderParm *) -> slot: takes the kind's range from decl+0x6C,
+     * then the slot a holder of the same name has or the first empty one, else Error6 "failed to allocate %s
+     * parm state". parmslots.c detours its first 15 bytes so a parm past a full range shares a slot. */
     { "ParmStateAlloc",
       "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 48 63 42 6C 48 8D 35 "
       "?? ?? ?? ?? 45 33 F6 48 8B EA 4C 8B D9 45 8B D6 45 8B CE 83 F8 12 0F 87 B4 00 00 00 48 8D 0D",
@@ -1654,7 +1485,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       0x123C660u, 0x123BB00u },
     /* GetProfileUsername(idStr *out): the signed-in Bethesda.net account's name, the one the main menu's "Signed in
      * as" shows; 1 with it assigned, 0 (string untouched) with no account. Takes the lock of its account object, so
-     * main thread only. The publishing key presents it (SPEC-distribution 2.1, D31; R-DS2 5.5, both renderers). */
+     * main thread only. */
     { "GetProfileUsername",
       "40 56 57 41 56 48 83 EC 50 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 70 48 89 AC 24 80 00 00 00 4C 8B F1 "
       "33 DB 89 5C 24 78 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 E8 ?? ?? ?? ?? 48 8B E8 48 85 C0 74 1D",

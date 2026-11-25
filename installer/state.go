@@ -10,24 +10,17 @@ import (
 	"time"
 )
 
-// install.json is the installer's only bookkeeping file. It lives in %LOCALAPPDATA%\snapmap-plus and
-// records the installed version, the DOOM folder, the files placed there, the executables placed in
-// the data folder with their hashes, and the self-update state. The backend and the frontend read the
-// first "version" key of this file for their reports, so Version stays the first field.
+// install.json, in %LOCALAPPDATA%\snapmap-plus, is the installer's only bookkeeping file. The backend and
+// the frontend read its first "version" key, so Version stays the first field.
 const stateName = "install.json"
 
-// The bookkeeping files of earlier releases, folded into install.json and removed when found.
+// Bookkeeping files a previous install placed that this release does not ship; they are folded into
+// install.json and removed.
 const (
 	retiredExecutableRecord = "installer-files.json"    // name -> SHA-256 of the executables placed
 	retiredVersionsRecord   = "installer-versions.json" // name -> {sha256, version}
 	retiredUpdatesSuffix    = ".updates.json"           // <exe>.updates.json: self-update backups
 )
-
-// retiredExecutables are executables earlier releases placed in the data folder that this release does
-// not ship: the copy an install placed is removed (retireExecutables).
-var retiredExecutables = []string{
-	"snapmap-plus-store.exe", // the store migration tool; converting earlier releases' data is not in this release
-}
 
 // installRecord is install.json.
 type installRecord struct {
@@ -37,8 +30,6 @@ type installRecord struct {
 	InstalledAt string   `json:"installed_at"`
 	Files       []string `json:"files"`   // DOOM-relative paths of the pair placed under DoomPath
 	Backups     []backup `json:"backups"` // files that were not ours and were replaced, kept in cache\installer
-	// LegacyRemoved: original-SnapHak files a migration deleted (informational; carried forward).
-	LegacyRemoved []string `json:"legacy_removed,omitempty"`
 	// Executables: the executables this installer placed in the data folder, by file name.
 	Executables map[string]exeEntry `json:"executables,omitempty"`
 	SelfUpdate  *selfUpdateState    `json:"self_update,omitempty"`
@@ -64,8 +55,8 @@ type selfUpdateState struct {
 	SetAside     []setAside `json:"set_aside,omitempty"`     // replaced images still to remove
 }
 
-// setAside is a replaced executable moved out of the way because it was still running. It is removed
-// at the next start while its bytes are unchanged and the executable it was replaced by exists.
+// setAside is a replaced executable moved aside because it was running. It is removed at the next start
+// while its bytes are unchanged and the executable that replaced it exists.
 type setAside struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
@@ -186,16 +177,6 @@ func loadRecord() (*installRecord, error) {
 		return nil, err
 	}
 	dir := filepath.Dir(p)
-	if !stateExists(dir) {
-		// Pre-rename installs kept the record at %LOCALAPPDATA%\open-snaphak\; fall back to it and migrate it
-		// forward, so update / status / uninstall still recognise an existing install after the rename.
-		op := oldRecordPath()
-		od, oerr := os.ReadFile(op)
-		if op == "" || oerr != nil {
-			return nil, errNotInstalled
-		}
-		os.WriteFile(p, od, 0o644)
-	}
 	rec, err := loadStateAt(dir)
 	if err != nil {
 		return nil, err
@@ -258,9 +239,8 @@ func recordSetAside(path, sum, forExe string) error {
 	})
 }
 
-// sweepSetAside removes the replaced images recorded by earlier runs: each one whose bytes are
-// unchanged and whose replacement exists. A locked image stays recorded for the next start; one that
-// changed is forgotten and left alone; one whose replacement is missing is a recovery copy and stays.
+// sweepSetAside removes each recorded replaced image whose bytes are unchanged and whose replacement exists.
+// A locked image stays recorded, a changed one is forgotten, and one without a replacement is kept.
 func sweepSetAside() {
 	dir := appDataDir()
 	if dir == "" || !stateExists(dir) {
@@ -317,8 +297,8 @@ func pruneEmptyDirs(root string) {
 // command that reports it.
 var startupTidy, startupKept []string
 
-// startupCleanup runs at every start: it removes replaced installer images from earlier runs and
-// retires the bookkeeping files of earlier releases into install.json.
+// startupCleanup runs at every start: it removes recorded replaced installer images and folds
+// bookkeeping files a previous install placed into install.json.
 func startupCleanup() {
 	dir := appDataDir()
 	if dir == "" {
@@ -326,7 +306,7 @@ func startupCleanup() {
 	}
 	sweepSetAside()
 	exe, _ := executablePath()
-	startupTidy = append(startupTidy, retireBookkeeping(dir, exe)...)
+	removeLeftovers("", dir, exe)
 }
 
 // reportStartupTidy prints, once, what the start-of-run cleanup removed.
@@ -346,208 +326,4 @@ func reportStartupTidy() {
 	}
 	kept.Close()
 	startupTidy, startupKept = nil, nil
-}
-
-// retireBookkeeping folds installer-files.json and installer-versions.json into install.json and
-// removes them, removes <exe>.updates.json files, and removes the <exe>.old images earlier releases
-// kept beside an executable in the data folder or beside the running image while that executable
-// exists (a locked one is moved into cache\installer and removed at the next start), then the retired
-// executables (retireExecutables). It returns one line per file removed, and adds what it kept to
-// startupKept.
-func retireBookkeeping(dir, running string) []string {
-	var removed []string
-	files := readRetiredExecutables(dir)
-	versions := readRetiredVersions(dir)
-	if len(files) > 0 || len(versions) > 0 {
-		if err := updateStateAt(dir, func(r *installRecord) {
-			if r.Executables == nil {
-				r.Executables = map[string]exeEntry{}
-			}
-			for name, sum := range files {
-				if _, have := r.Executables[name]; have || !executableName(name) || !ownsExecutable(filepath.Join(dir, name), sum) {
-					continue
-				}
-				e := exeEntry{SHA256: sum}
-				if v, ok := versions[name]; ok && strings.EqualFold(v.SHA256, sum) {
-					e.Version = v.Version
-				}
-				r.Executables[name] = e
-			}
-			for name, v := range versions {
-				if e, have := r.Executables[name]; have && e.Version == "" && strings.EqualFold(e.SHA256, v.SHA256) {
-					e.Version = v.Version
-					r.Executables[name] = e
-				}
-			}
-			if len(r.Executables) == 0 {
-				r.Executables = nil
-			}
-		}); err != nil {
-			return removed // keep the old files until their contents can be carried over
-		}
-	}
-	for _, name := range []string{retiredExecutableRecord, retiredVersionsRecord} {
-		if os.Remove(filepath.Join(dir, name)) == nil {
-			removed = append(removed, name+" (folded into install.json)")
-		}
-	}
-	names := map[string]bool{selfExeAsset: true, legacyExeName: true}
-	for _, name := range retiredExecutables {
-		names[name] = true
-	}
-	if rec, err := loadStateAt(dir); err == nil {
-		for name := range rec.Executables {
-			if executableName(name) {
-				names[name] = true
-			}
-		}
-	}
-	exes := []string{}
-	for name := range names {
-		exes = append(exes, filepath.Join(dir, name))
-	}
-	if running != "" && !strings.EqualFold(filepath.Clean(filepath.Dir(running)), filepath.Clean(dir)) {
-		exes = append(exes, running)
-	}
-	for _, exe := range exes {
-		removed = append(removed, retireUpdateLeftovers(dir, exe)...)
-	}
-	gone, kept := retireExecutables(dir)
-	removed = append(removed, gone...)
-	startupKept = append(startupKept, kept...)
-	// Temporary files of an interrupted save.
-	if entries, err := os.ReadDir(dir); err == nil {
-		for _, e := range entries {
-			n := e.Name()
-			if !e.IsDir() && (strings.HasPrefix(n, ".installer-files-") || strings.HasPrefix(n, ".install-json-")) {
-				os.Remove(filepath.Join(dir, n))
-			}
-		}
-	}
-	return removed
-}
-
-// retireUpdateLeftovers removes exe's .updates.json and, while exe exists, its .old images.
-func retireUpdateLeftovers(dir, exe string) []string {
-	var removed []string
-	label := func(p string) string {
-		if strings.EqualFold(filepath.Clean(filepath.Dir(p)), filepath.Clean(dir)) {
-			return filepath.Base(p)
-		}
-		return p
-	}
-	if os.Remove(exe+retiredUpdatesSuffix) == nil {
-		removed = append(removed, label(exe+retiredUpdatesSuffix)+" (folded into install.json)")
-	}
-	st, err := os.Lstat(exe)
-	if err != nil || !st.Mode().IsRegular() {
-		return removed // the .old may be the only copy left: keep it
-	}
-	entries, err := os.ReadDir(filepath.Dir(exe))
-	if err != nil {
-		return removed
-	}
-	for _, e := range entries {
-		if e.IsDir() || !updateBackupName(exe, e.Name()) {
-			continue
-		}
-		old := filepath.Join(filepath.Dir(exe), e.Name())
-		if !plainPath(old) {
-			continue
-		}
-		if os.Remove(old) == nil {
-			removed = append(removed, label(old)+" (an installer an earlier update replaced)")
-			continue
-		}
-		// Still running: move it out of the data folder's top level and remove it next start.
-		if moved, sum := moveAside(old, exe); moved != "" {
-			if recordSetAside(moved, sum, exe) == nil {
-				removed = append(removed, label(old)+" (moved into cache\\installer; it is removed at the next start)")
-			}
-		}
-	}
-	return removed
-}
-
-// retireExecutables removes each retired executable an install placed while its bytes are the recorded
-// ones, and forgets its record entry. A copy whose bytes changed, or one no install recorded, is the
-// player's: it stays, its entry is forgotten, and it is listed as kept. A recorded copy that cannot be
-// removed yet (it is running) keeps its entry, so the next start removes it.
-func retireExecutables(dir string) (removed, kept []string) {
-	rec, err := loadExecutableRecord(dir)
-	if err != nil {
-		return nil, nil
-	}
-	forgot := false
-	for _, name := range retiredExecutables {
-		path := filepath.Join(dir, name)
-		digest, recorded := rec[name]
-		_, statErr := os.Lstat(path)
-		present := statErr == nil
-		switch {
-		case recorded && present && ownsExecutable(path, digest):
-			if os.Remove(path) != nil {
-				kept = append(kept, name+" (in use; it is removed at the next start)")
-				continue
-			}
-			removed = append(removed, name+" (an executable of an earlier release)")
-		case present:
-			kept = append(kept, name+" (not the copy an earlier install placed; Snapmap+ no longer uses it)")
-		}
-		if recorded {
-			delete(rec, name)
-			forgot = true
-		}
-	}
-	if forgot {
-		saveExecutableRecord(dir, rec)
-	}
-	return removed, kept
-}
-
-func readRetiredExecutables(dir string) map[string]string {
-	m := map[string]string{}
-	if data, err := os.ReadFile(filepath.Join(dir, retiredExecutableRecord)); err == nil {
-		json.Unmarshal(data, &m)
-	}
-	return m
-}
-
-func readRetiredVersions(dir string) map[string]exeEntry {
-	m := map[string]exeEntry{}
-	if data, err := os.ReadFile(filepath.Join(dir, retiredVersionsRecord)); err == nil {
-		json.Unmarshal(data, &m)
-	}
-	return m
-}
-
-// moveAside renames a replaced image into the installer cache under a free <name>.old[N] name and
-// returns its new path and SHA-256, or "" when it could not be moved.
-func moveAside(path, forExe string) (string, string) {
-	dir := appDataDir()
-	if dir == "" {
-		return "", ""
-	}
-	sum, err := fileSHA256(path)
-	if err != nil {
-		return "", ""
-	}
-	cache := installerCacheDir(dir)
-	if os.MkdirAll(cache, 0o755) != nil {
-		return "", ""
-	}
-	for i := 1; i <= 10; i++ {
-		name := filepath.Base(forExe) + ".old"
-		if i > 1 {
-			name = fmt.Sprintf("%s%d", name, i)
-		}
-		dst := filepath.Join(cache, name)
-		if _, err := os.Lstat(dst); !os.IsNotExist(err) {
-			continue
-		}
-		if os.Rename(path, dst) == nil {
-			return dst, sum
-		}
-	}
-	return "", ""
 }

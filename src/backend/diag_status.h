@@ -1,20 +1,5 @@
-/* diag_status.h -- the diagnostic build's status export for the development
- * daemon. Built only with build.ps1 -Diag (SH_DIAG); a release build has no
- * such export and none of this code.
- *
- * sh_diag_status is exported at ordinal 300 by xinput1_4_diag.def. It writes
- * one JSON object into out and returns its length, or, when cap is too small,
- * the length it needs (out is then left empty when cap > 0):
- *
- *   {"protocol":1,"version":"<sh_product_version()>","iface_vtbl":<bytes>,
- *    "features_off":["<feature name>",...],
- *    "rawmap":{"opens":<n>,"generation":<n>,"pending":<0|1>,"faulted":<0|1>,
- *              "last":{"seq":<n>,"path":"<utf-8>",
- *                      "state":"queued|opening|opened|refused|failed|faulted",
- *                      "rc":<int>,"reason":"<plain reason or empty>",
- *                      "bytes":<n>,"mods":<n>}}}
- *
- * last.state is "" and last.seq 0 before the first open. Any thread. */
+/* diag_status.h -- the diagnostic build's status export for the development daemon. Built only with
+ * build.ps1 -Diag (SH_DIAG); a release build has none of this code. */
 #ifndef BACKEND_DIAG_STATUS_H
 #define BACKEND_DIAG_STATUS_H
 
@@ -23,26 +8,27 @@
 
 #define SH_DIAG_STATUS_PROTOCOL 1
 
+/* Exported at ordinal 300 (xinput1_4_diag.def); callable from any thread. Writes one JSON object into
+ * out and returns its length, or the length needed when cap is too small (out is then left empty). The
+ * object carries protocol, version, iface_vtbl, features_off and rawmap {opens, generation, pending,
+ * faulted, last {seq, path, state, rc, reason, bytes, mods}}; last.state is "" and last.seq 0 before the first open. */
 int sh_diag_status(char *out, int cap);
 
 /* The object, malloc'd and sized to it; NULL when memory runs out. */
 char *sh_diag_status_build(void);
 
-/* Notes from mod scripts for a development listener (the daemon's entity
- * inspector). A script asks noting() and hands lines to note(text)
- * (script_api_world.c). sh_diag_note_listening is exported as data at ordinal
- * 302: a listener sets it non-zero while it listens. sh_diag_note is exported
- * at ordinal 301 and only counts: the listener hooks its entry and reads mod
- * (the mod's salt), text (the note, NUL-terminated) and len. Game thread. */
+/* Notes from mod scripts for the daemon's entity inspector: a script asks noting() and hands lines to
+ * note(text) (script_api_world.c). sh_diag_note_listening (data, ordinal 302) is set non-zero by a
+ * listener; sh_diag_note (ordinal 301, game thread) only counts, and the listener hooks its entry to read
+ * mod (the mod's salt), text (NUL-terminated) and len. */
 extern volatile long sh_diag_note_listening;
 extern volatile long sh_diag_note_count;
 void sh_diag_note(const char *mod, const char *text, size_t len);
 
-/* A development hold of one demon (the daemon's entity inspector, `inspect_arm hold=`): exported as data at
- * ordinal 303. A listener writes the entity's address; while it matches, the script runtime gives that entity no
- * think (its brain takes no step, gives no order and pulls no trigger), and every other event (damage, pain,
- * death, frame rows) still reaches its scripts. The listener writes NULL to release; a map's close clears it.
- * Game thread reads; one entity at a time. */
+/* A development hold of one demon (inspector `inspect_arm hold=`), exported as data at ordinal 303. While
+ * the listener-written entity address matches, the script runtime gives that entity no think (no step,
+ * order or trigger) but still delivers damage, pain, death and frame rows; NULL releases, a map's
+ * close clears it. The game thread reads; one entity at a time. */
 extern void *volatile sh_diag_hold_entity;
 #endif
 

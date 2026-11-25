@@ -161,7 +161,7 @@ int sh_wound_compile(const char *path, const char *text, size_t len, char **out,
     }
     if (!nparts) { sdk_say(why, why_len, &d, d.root->line, "a wound needs the '%s' that open it, as in '%s chest'.", SDK_W(W_PARTS), SDK_W(W_PARTS)); goto mistake; }
     if (blood && !at[0]) { sdk_say(why, why_len, &d, d.root->line, "a wound that bleeds needs the joint its blood comes from, as in '%s gorefx_chest' (or 'blood none').", SDK_W(F_AT)); goto mistake; }
-    /* 2016's own default wound underneath (wounds/default: its gibs and thresholds), 2016's blood */
+    /* 2016's own default wound underneath (wounds/default: its gibs and thresholds) */
     sdk_printf(&b, "{\n\tinherit = \"wounds/default\";\n\tedit = {\n");
     if (woundtype) put(&b, 2, "woundType = \"%s\";\n", woundtype);
     if (alive) put(&b, 2, "woundFlags = \"%s\";\n", "WOUND_FLAGS_ALLOW_WHEN_ALIVE");
@@ -183,7 +183,7 @@ int sh_wound_compile(const char *path, const char *text, size_t len, char **out,
         sdk_printf(&b, "\t\t\t}\n");
     }
     if (blood & 1) {
-        /* 2016's spray: its most used stock values (the gorewounds census, work/PG1/inventory/surfaces.md 5.1) */
+        /* 2016's spray: its most used stock values (the most used gorewounds values) */
         sdk_printf(&b, "\t\t\tgoreSpray = {\n");
         put(&b, 4, "sprayFX = \"%s\";\n", "FX_GORE_SPRAY_1");
         put(&b, 4, "tagJoint = \"%s\";\n", at);

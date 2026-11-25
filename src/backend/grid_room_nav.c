@@ -1,5 +1,5 @@
-/* Keep the agent box and door clearance fixed while resizing the room floor.
- * BuildAAS still performs the native placement and cross-module merge. */
+/* Resizes the room floor's AAS while the agent box and door clearance stay fixed; BuildAAS still performs the native
+ * placement and cross-module merge. */
 #include "grid_room_nav.h"
 #include <math.h>
 #include <stdlib.h>
@@ -60,12 +60,11 @@ static int position(unsigned char *p,const nav_axis a[3],int shorts)
     }
     return 1;
 }
-/* The supported modules have one tree and no inter-cluster portals or
- * traversal records. Compact vanished narrow strips, all area references,
- * cover membership, visibility rows and native route chains together. */
+/* The supported modules have one tree and no inter-cluster portals or traversal records. Compacts vanished narrow
+ * strips, all area references, cover membership, visibility rows and native route chains together. */
 static int compact(sh_aas *a,const unsigned *remap,unsigned old,unsigned count)
 {
-    unsigned i,j,k,nc=sh_aas_count(a,SH_AAS_L_COVER),out=1,first;
+    unsigned i,j,nc=sh_aas_count(a,SH_AAS_L_COVER),out=1,first;
     unsigned *covers=NULL,*cluster_count=NULL;
     unsigned char *pvs=NULL,*visible=NULL;
     unsigned pvs_bytes=sh_aas_count(a,SH_AAS_L_OBSTACLEPVS),used=0;
@@ -79,18 +78,8 @@ static int compact(sh_aas *a,const unsigned *remap,unsigned old,unsigned count)
     if(!covers||!cluster_count||!pvs||!visible)goto done;
     for(i=0;i<old;i++)if(!i||remap[i]){
         unsigned char *ar=sh_aas_rec(a,SH_AAS_L_AREAS,i);
-        unsigned at=sh_aas_get_u32(ar,16),pos=0,offset=used;
-        memset(visible,0,old);
-        while(pos<old){
-            unsigned token,run;
-            if(at>=pvs_bytes)goto done;
-            token=*sh_aas_rec(a,SH_AAS_L_OBSTACLEPVS,at++);
-            if(token&128){
-                run=token&63;
-                if(token&64){if(at>=pvs_bytes)goto done;run|=(unsigned)*sh_aas_rec(a,SH_AAS_L_OBSTACLEPVS,at++)<<6;}
-                pos+=run+1;
-            }else for(k=0;k<7&&pos<old;k++,pos++)visible[pos]=(unsigned char)((token>>k)&1);
-        }
+        unsigned offset=used;
+        if(!sh_aas_read_pvs(a,sh_aas_get_u32(ar,16),pvs_bytes,visible,old))goto done;
         memset(pvs+used,0,stride);
         if(i)visible[i]=1;
         for(j=0;j<old;j++)if((!j||remap[j])&&visible[j])
@@ -207,8 +196,8 @@ int sh_grid_nav_resize(sh_aas *a,const sh_grid_size *size)
     }
     for(i=1;i<sh_aas_count(a,SH_AAS_L_COVER);i++){
         unsigned char *p=sh_aas_rec(a,SH_AAS_L_COVER,i);
-        /* Cover is a world point/direction, not an agent inset boundary.
-         * These blank-room markers retain their radius and direction. */
+        /* Cover is a world point and direction, not an agent inset boundary; these markers keep their radius and
+         * direction. */
         for(j=0;j<3;j++){
             float v=sh_aas_get_f32(p,j*4);if(!isfinite(v))goto done;
             sh_aas_put_f32(p,j*4,sh_grid_coordinate(&shell,j,v));

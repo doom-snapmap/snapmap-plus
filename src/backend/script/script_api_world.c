@@ -6,30 +6,24 @@
  *   difficulty() -> the game's difficulty, 0 easy .. 4 nightmare
  *   noting() -> true while a development tool listens for notes
  *   note(text) -> hands the listener one line; does nothing when none listens
- * `pos`, `from` and `to` are positions or entities (their positions). These
- * calls only read, so they work on any entity.
+ * `pos`, `from` and `to` are positions or entities (their positions). These calls only read, so they work on any
+ * entity.
  *
  * Engine paths (script_api_common.h):
- *   entities_near   the spawn ids of every entity number (idGameLocal +0x653F8), each resolved through
- *                   the game's spawn-id lookup and measured from its physics origin
- *   trace           the game's trace query run at once (the SnapMap laser hazard's call shape: a point
- *                   trace against the world, players and demons, contents 0x103085). With a radius the
- *                   line is thick: nine parallel traces, one on the line and eight around it at that
- *                   radius, and the nearest hit is the answer. With "demon" as the fifth value the
- *                   line is also stopped by what stops a demon and not a shot: a Blocking Box with
- *                   Block Demons ticked (its contents gain 0x20010), so a script that places or flies
- *                   a demon itself honours the map's blocking volumes.
- *   ground_below      the same trace straight down from 16 inches above pos for 4,096 inches; the first
- *                   surface hit counts when it is flat enough to stand on (normal at least 0.7 up),
- *                   sh_script_api_ground_trace. It does not consult the navigation areas.
- *   difficulty      idGameLocal vtable +0x670, the game's own difficulty (the g_gameDifficulty cvar when
- *                   set, else the game's current difficulty), VK 0x140391A80 / GL 0x140391350.
- *   noting, note    the diagnostic build's listener (diag_status.h): a development tool hooks
- *                   sh_diag_note and sets sh_diag_note_listening. A release build has neither: noting()
- *                   is false and note() does nothing, so a script can leave its notes in place and
- *                   build them only when they are read.
- * The time and log calls (now, after, every, run, wait, print, warn) are the
- * runtime's (script_lib_base.c). */
+ *   entities_near   the spawn ids of every entity number (idGameLocal +0x653F8), each resolved through the game's
+ *                   spawn-id lookup and measured from its physics origin
+ *   trace           the game's trace query run at once (the SnapMap laser hazard's call shape: a point trace against
+ *                   the world, players and demons, contents 0x103085). With a radius the line is thick: nine
+ *                   parallel traces, one on the line and eight around it, and the nearest hit is the answer. With
+ *                   "demon" as the fifth value a Blocking Box with Block Demons ticked (contents gain 0x20010)
+ *                   also stops the line, so a script that places or flies a demon honours the map's blocking volumes
+ *   ground_below    the same trace straight down from 16 inches above pos for 4,096 inches; the first surface hit
+ *                   counts when its normal is at least 0.7 up (sh_script_api_ground_trace); no navigation areas
+ *   difficulty      idGameLocal vtable +0x670 (VK 0x140391A80, GL 0x140391350): the g_gameDifficulty cvar when set,
+ *                   else the game's current difficulty
+ *   noting, note    the diagnostic build's listener (diag_status.h: sh_diag_note, sh_diag_note_listening); a
+ *                   release build has neither, so noting() is false and note() does nothing
+ * The time and log calls (now, after, every, run, wait, print, warn) are the runtime's (script_lib_base.c). */
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>

@@ -1,7 +1,6 @@
-/* The saved-map guard against a faked engine: DeleteBadSaveSlots is handed an
- * idList<idStr> laid out as the engine's, the slot folders are real files in a
- * temporary tree, and the guard must delete nothing, keep a byte-exact copy,
- * and claim only what it verified. */
+/* The saved-map guard against a faked engine: DeleteBadSaveSlots gets an idList<idStr> laid out as the engine's and
+ * real slot folders in a temporary tree, and the guard must delete nothing, keep a byte-exact copy and claim only
+ * what it verified. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,9 +18,6 @@ void *hook_prepare(void *target, void *detour, size_t stolen)
 sh_patch_status hook_commit(void *t) { (void)t; return B2_PATCH_OK; }
 int hook_unpatch(void *t) { (void)t; return 1; }
 static sig_result g_sig;
-const sig_result *sig_lookup(const sig_result *r, size_t n, const char *name)
-{ (void)n; return r && name && !strcmp(name, "DeleteBadSaveSlots") ? r : NULL; }
-
 /* The engine's idStr (0x30 bytes: length at +8, text at +0x10) and idList. */
 typedef struct fake_idstr { void *vt; int len; int pad; const char *data; unsigned char rest[0x18]; } fake_idstr;
 typedef struct fake_list { fake_idstr *items; int count; int cap; } fake_list;

@@ -33,31 +33,12 @@ int main(void)
     a.unlocked=2;assert(!sh_map_render_valid(&a)&&!sh_map_render_unlocked(&a));
     assert(sh_map_render_distance(&a)==SH_RENDER_NATIVE_DISTANCE&&!sh_map_render_encode(&a,text,sizeof text));
     assert(!sh_map_render_valid(NULL)&&!sh_map_render_unlocked(NULL)&&sh_map_render_distance(NULL)==8192);
-    /* Earlier builds stored a distance. 8192 reads as off; every other valid
-     * distance, 0 (the former maximum, and before that "follow") included,
-     * reads as on. */
-    assert(!reads_on("4;8192")&&!reads_on("4;8192.0"));
-    assert(reads_on("4;0")&&reads_on("4;-0")&&reads_on("4;256")&&reads_on("4;60000")&&reads_on("4;200000"));
-    assert(reads_on("4;106240")&&reads_on("4;60000.0"));
-    assert(reads_on("1;60000;70;1500;6500;.35;.4;.45")&&reads_on("1;0;100;1500;6500;0.35;0.4;0.45"));
-    assert(!reads_on("1;8192;70;1500;6500;.35;.4;.45"));
-    assert(reads_on("3;16000;60;500;1500;.1;.2;.3")&&!reads_on("3;8192;70;500;1500;.1;.2;.3"));
-    assert(reads_on("2;1;60000;70;1500;6500;.35;.4;.45")&&!reads_on("2;1;8192;70;1500;6500;.35;.4;.45"));
-    /* A disabled version-2 map is off, not its dormant distance. */
-    assert(!reads_on("2;0;60000;70;1500;6500;.35;.4;.45")&&!reads_on("2;0;0;80;500;1500;.1;.2;.3"));
-    /* Malformed or out-of-range text is refused and leaves the output alone. */
-    assert(refused("2;60000;0;1500;6500;.35;.4;.45")&&refused("2;2;60000;0;1500;6500;.35;.4;.45"));
-    assert(refused("5;1")&&refused("5;60000")&&refused("4;60000;0")&&refused("4;60000junk")&&refused("4;"));
-    assert(refused("4;100")&&refused("4;300000")&&refused("4;nan")&&refused("4;inf")&&refused("4;-5"));
-    assert(refused("3;100;0;1500;6500;.35;.4;.45")&&refused("2;0;60000;0;1500;6500;.35;.4;.45extra"));
-    assert(refused("1;nan;0;1500;6500;.35;.4;.45")&&refused("1;60000;inf;1500;6500;.35;.4;.45"));
-    assert(refused("1;60000;0;1500;6500;.35;.4;.45junk")&&refused("1;60000;0;1500;6500;.35;.4"));
-    assert(refused("")&&refused("on")&&!sh_map_render_decode(NULL,&a)&&!sh_map_render_decode("4;0",NULL));
-    /* Snapmap+'s own settings are the "smp." variables; author strings and
-     * other Snapmap+ carriers are not. */
-    assert(sh_map_render_own_variable("smp.bounds.v1",13)&&sh_map_render_own_variable("smp.render.v1",13));
-    assert(!sh_map_render_own_variable("String 1",8)&&!sh_map_render_own_variable("smpkg.x.0.1.abcd",16));
-    assert(!sh_map_render_own_variable("smp.",4)&&!sh_map_render_own_variable(NULL,13)&&!sh_map_render_own_variable("Smp.x",5));
+    assert(refused("4;8192") && refused("4;-0") && refused("4;60000"));
+    assert(refused("1;60000;70;1500;6500;.35;.4;.45"));
+    assert(refused("2;1;60000;70;1500;6500;.35;.4;.45"));
+    assert(refused("3;16000;60;500;1500;.1;.2;.3"));
+    assert(refused("") && refused("4;0junk") && refused("4;0 "));
+    assert(!sh_map_render_decode(NULL,&a) && !sh_map_render_decode("4;0",NULL));
     /* The fog stretch: r = 200000 / native, floored like the engine's read
      * (256) and never below 1. */
     assert(fabsf(sh_map_render_fog_stretch(60000)-3.3333333f)<1e-5f);

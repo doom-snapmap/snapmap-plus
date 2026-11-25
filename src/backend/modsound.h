@@ -1,79 +1,9 @@
-/* modsound.h -- deliver installed mods' Wwise sound banks to the engine.
- *
- * Why a separate route: Wwise reads a bank with its own CreateFileW under the
- * OS path of base\sound\soundbanks\pc\, never through the file system's
- * +0x148 open that the override provider answers, and the engine lists that
- * folder once in LoadBanks (idSoundHardware_WWise vtable +0x30) and submits
- * each listed name to its per-bank wrapper (filter, then an async LoadBank).
- * A bank a bundle carries is therefore invisible twice: not listed and not
- * readable.
- *
- * The route (build 13954591, both executables; no code is patched):
- *   - open by name: every read-only qword holding AudioFileOpenName (the
- *     resolver's +0x10, two vtables on each executable) is swapped. For a
- *     file name a served bank answers, the replacement opens the bundle's
- *     file with CreateFileW and fills the AkFileDesc the way the engine's
- *     default blocking hook does (size, sector 0, no custom parameter, the
- *     handle, the device id at resolver+0x630), sync open; the engine's own
- *     Close calls CloseHandle on it. Every other name goes to the original.
- *   - submit: the engine's per-bank wrapper (AudioBankSubmit, (hardware,
- *     const char *file name)) for each served bank, on the main thread inside
- *     process heap 0, at the first main-thread pass after the bank is indexed
- *     (the editor entry, a map load, or the index rebuild itself when it runs
- *     on the main thread, as `sh_mods install` does). The wrapper applies
- *     the engine's listed-bank filter and prints its own result line
- *     ("async load success id <signed id> : <name>").
- *   - LoadBanks: its one vtable slot is swapped so `s_loadBanks`,
- *     `s_reloadAudioEvents` and `s_restart` (which rebuilds Wwise) run in
- *     process heap 0 on the main thread and are followed by a fresh submit
- *     of every served bank. Wwise allocates through the engine allocator
- *     with heap -1 (the top of the heap stack), so the engine's own rerun
- *     from the console in the editor put the reloaded stream packages in the
- *     map heap; the map unload at Play freed them and the next streamed
- *     open (by id, through the package list) read a freed package.
- *   - The hardware object is soundSystem+0x140, both decoded from the
- *     s_loadBanks console function (SoundLoadBanksCmd: LEA RCX,[soundSystem];
- *     CALL; MOV RCX,[soundSystem+0x140]; JMP [RAX+0x30]); a submit waits
- *     until hardware+8 bit 1 (Wwise initialised) is set.
- *
- * A bank installed mid-session is submitted at once (the engine's own
- * s_loadBanks submits newly listed banks after boot the same way, live on
- * 13954591). The bank list is taken again at every main-thread pass, each
- * served bank's file looked up in the open map's context, so a map that uses
- * another build of a mod gets that build's banks; a bank already loaded under
- * a name keeps its first bytes until DOOM restarts ("Restart DOOM to hear the
- * new <bank>"). A bank whose mod is removed stays loaded until the game
- * restarts; nothing here unloads.
- *
- * Stock banks on demand. A mod's sound decl at a stock event's name borrows the
- * event; an event filed only by a bank SnapMap's game-mode filter skips
- * (doom_weapon_sp.bnk on 13954591) fails to start until that bank is loaded.
- * Per build, the banks needed are the product block's registries "banks"
- * (the builder's list, modbankinfo.h), each checked against the game's own
- * bank index. At the
- * map pass (modserve_activate_bundles: main thread, before the level load),
- * each bank a declared build needs and this process has not asked for is
- * loaded through the call the per-bank wrapper makes once its filter passes:
- * operator new(0x130), the wrapper's cookie ctor (the bank name), then the
- * async LoadBank(name, callback, cookie, -1, &id). The callback is the
- * product's, which records the outcome and hands the cookie to the engine's
- * own (its "async load success id <id> : <name>" line, then the cookie's
- * delete). The pass waits for the callback inside process heap 0 (Wwise
- * allocates through the top of the main thread's heap stack), at most
- * SH_MODSOUND_STOCK_WAIT_MS. Never the wrapper (its filter refuses the name
- * and answers success), never s_loadBanks, and the game-mode global is not
- * touched. A bank is asked for once per process; it stays loaded (about the
- * bank file's size in memory, 85 MB for doom_weapon_sp.bnk) until the game
- * exits. The outcome is recorded in modbankinfo's per-process states.
- *
- * Logs (backend log; echoed to the console on the main thread):
- *   MODS: sound: bank routes installed (...)
- *   MODS: sound: submitted <file> (<salt>) ...
- *   MODS: sound: opened <file> for Wwise from <salt> (N bytes)    first 32
- *   MODS: sound: Restart DOOM to hear the new <file>: Wwise keeps the bank it loaded first
-
- *   MODS: sound: loaded stock bank <name> (<ms> ms) for <key>
- */
+/* modsound.h -- delivers installed mods' Wwise sound banks to the engine (build 13954591, no code patched): the
+ * swapped open-by-name slots (every read-only qword holding AudioFileOpenName) serve a bank from its bundle's
+ * file, and AudioBankSubmit submits it on the main thread in process heap 0. The LoadBanks slot
+ * (idSoundHardware_WWise vtable +0x30) is swapped so s_loadBanks, s_reloadAudioEvents and s_restart run in heap 0
+ * and resubmit every served bank. Stock banks a build's registries "banks" need load at the map pass through
+ * operator new(0x130), the cookie ctor and the async LoadBank, waiting at most SH_MODSOUND_STOCK_WAIT_MS. */
 #ifndef SH_MODSOUND_H
 #define SH_MODSOUND_H
 
@@ -130,7 +60,7 @@ typedef struct sh_modsound_bank {
     char    *disk_path;     /* UTF-8, owned */
     uint64_t size;
     char     bundle[80];
-    volatile long submitted_gen;   /* the LoadBanks generation it was submitted in, 0 never */
+    volatile long submitted_gen;   /* the LoadBanks generation of its submit; 0 when not submitted */
 } sh_modsound_bank;
 
 typedef struct sh_modsound_table {
@@ -153,11 +83,8 @@ const sh_modsound_bank *sh_modsound_lookup(const sh_modsound_table *t, const wch
 /* Fill the descriptor as the engine's default hook does. */
 void sh_modsound_fill_desc(sh_modsound_file_desc *d, uint64_t size, void *handle, uint32_t device_id);
 
-/* ------------------------------------------------ stock banks on demand */
-
 #define SH_MODSOUND_STOCK_WAIT_MS   3000   /* the map pass waits this long for a stock bank's callback */
 #define SH_MODSOUND_COOKIE_SIZE     0x130u /* the wrapper's operator new for its cookie */
-
 
 /* Decode AudioBankCookieSite (the wrapper's post-filter sequence): 1 with the
  * absolute targets of operator new, the cookie ctor, the callback LEA and the
@@ -188,11 +115,9 @@ int sh_modsound_needs_add(sh_modsound_needs *t, const char *hash, const char *ke
 int sh_modsound_needs_add_registries(sh_modsound_needs *t, const char *hash, const char *key, const char *registries);
 const sh_modsound_need *sh_modsound_needs_find(const sh_modsound_needs *t, const char *hash);
 
-/* The banks whose file changed after the game loaded them this session:
- * Wwise keeps the bytes it loaded first under a name until DOOM restarts.
- * fn(context, the bank's file name, the salt of the mod serving the new
- * bytes) once per bank; returns the count. The Mods tab says "Restart DOOM to
- * hear the new <bank>" from it. Any thread. */
+/* The banks whose file changed after the game loaded them: Wwise keeps the first bytes under a name until DOOM
+ * restarts. Calls fn(context, bank file name, salt of the mod serving the new bytes) once per bank and returns
+ * the count; any thread. */
 int  sh_modsound_restart_banks(void (*fn)(void *context, const char *bank, const char *owner), void *context);
 
 #ifndef SH_MODSOUND_PURE

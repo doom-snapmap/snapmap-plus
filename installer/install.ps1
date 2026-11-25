@@ -1,8 +1,6 @@
 # Identify the installed DOOM 2016 build, download the matching Snapmap+ release and install it.
-# Snapmap+ supports the April 2024 update (Steam build 13954591); the 2018 build gets the final
-# release made for it, v0.2.1-beta.19, installed by that release's own installer.
-# The DOOM folder is found through Steam, or set SNAPMAP_PLUS_DOOM to it first.
-# Keep this script ASCII for Windows PowerShell 5.1.
+# The 2018 build gets v0.2.1-beta.19, installed by that release's own installer; the DOOM folder is
+# found through Steam or SNAPMAP_PLUS_DOOM. Keep this script ASCII for Windows PowerShell 5.1.
 $ErrorActionPreference = "Stop"
 
 $repo = "doom-snapmap/snapmap-plus"
@@ -140,7 +138,7 @@ if ($build -eq "2018") {
         Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
     }
     # Keep the current installer for later commands: it identifies the build on every update,
-    # so the 2018 install keeps receiving $legacyTag instead of a release for the 2024 build.
+    # so a 2018 install keeps receiving $legacyTag.
     Write-Host "Downloading the current snapmap-plus.exe for later updates ..."
     Save-Installer (Get-Release "") $exe
 } else {

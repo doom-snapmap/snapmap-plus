@@ -1,8 +1,6 @@
-/* map_uses_test -- what a map uses of Snapmap+ itself (map_uses.h; PLATFORM, Vanilla stays vanilla).
- *
- * The fixtures are maps the game saved (R-LV4): a cinematic camera, a water volume, two relays wired, and a timeline
- * as the Timelines tab makes it, which stay vanilla; the same map with its Grid Room resized, which needs Snapmap+.
- * A Blocking Box marked for AI navigation (flags.noFlood) gives the map navigation of its own, which needs it too.
+/* map_uses_test -- what a map uses of Snapmap+ itself (map_uses.h; Vanilla stays vanilla). The fixtures are maps the
+ * game saved: a cinematic camera, a water volume, two relays wired and a timeline stay vanilla; the same map with its
+ * Grid Room resized needs Snapmap+, and so does a Blocking Box marked for AI navigation (flags.noFlood).
  * Usage: map_uses_test <tests\fixtures\maps> */
 #include <windows.h>
 #include <stdio.h>

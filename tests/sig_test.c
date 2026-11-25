@@ -1,7 +1,5 @@
-/* Offline signature-resolution checks against a PE mapped by RVA.
- * The image is bound to its SHA-256 identity. On a build 13954591 executable
- * every pattern must match exactly once in the whole image, at the recorded RVA
- * for its renderer, and resolve there; "portable" (or any other image)
+/* Offline signature-resolution checks against a PE mapped by RVA and bound to its SHA-256 identity. On a build 13954591
+ * executable every pattern matches exactly once, at the recorded RVA for its renderer; a "portable" or other image
  * requires uniqueness only. Run via run-tests.ps1. */
 #include <windows.h>
 #include <stdint.h>
@@ -66,11 +64,8 @@ int main(int argc, char **argv)
            identity ? identity->label : "not a supported executable (cross-check only)",
            pinned ? "recorded-RVA" : "portable");
 
-    /* Every entry: the whole-image scan must find exactly one match, on a
-     * supported executable at the recorded RVA for its renderer, and the
-     * run-time resolution (recorded RVA only) must agree. Both passes are
-     * timed: the scan is what a boot used to cost, the recorded check what it
-     * costs now. */
+    /* Every entry: the whole-image scan finds exactly one match (at the recorded RVA on a supported executable) and
+     * the recorded-RVA resolution agrees; both passes are timed. */
     size_t total = sig_db_count();
     sig_result results[SIG_RESULTS_MAX], scanned[SIG_RESULTS_MAX];
     LARGE_INTEGER freq, t0, t1, t2;

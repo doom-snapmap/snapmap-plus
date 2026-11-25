@@ -1,19 +1,7 @@
-/* attach_tags.c -- the engine side of attachment tags (attach_tags.h).
- *
- * The tag-info lookup (attach_tags_sigs.c) is prepared at boot and committed at the first Play whose mods
- * register a prop; with no registration no hook is committed. The detour calls the engine first. A lookup that
- * answers a tag (a record whose int16 at +0x1C is not -1) returns that answer; one that does not returns
- * unless some prop is registered, the prop's name is under mods/ (the one test every stock prop leaves at), the
- * registry has a row for it, a Play runs, and the host model (the props table's owner, props - 0x210) is in the
- * carrier's chain (sh_ce_in_chain). Then the engine's lookup is called again on the carrier's own props table
- * (carrier + 0x210) and its answer is returned when it is a tag, the first answer otherwise. Nothing of a game
- * model is written.
- *
- * The carrier is found by name exactly as clip events finds its own (clip_events.c): the first time one of its
- * props is looked up in a Play, on the main thread through the engine's own find, which loads a served name on
- * demand (sh_modserve_engine_decl), on another thread find only (sh_modserve_engine_decl_held), and checked by
- * its name before each use. The pointer is kept only for that Play: the registry is built at the Play gate and
- * dropped at the next gate. */
+/* attach_tags.c -- the engine side of attachment tags (attach_tags.h): a detour on the tag-info lookup returns
+ * the engine's answer when it is a tag (int16 at +0x1C not -1); otherwise, for a registered mods/ prop whose
+ * host model (props - 0x210) is in the carrier's chain, it asks again on the carrier's props table (carrier
+ * + 0x210). The carrier is found by name on first use in a Play and checked by name before each use. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -30,7 +18,7 @@
 #include "script/script_hooks.h"
 #include "../common/text.h"
 
-#define MODEL_NAME     0x08u    /* idDeclMD6: its decl name */
+#define MODEL_NAME     0x08u
 #define MODEL_PARENT   0x98u    /* idDeclMD6: the md6Def it inherits */
 #define MODEL_PROPS    0x210u   /* idDeclMD6: the props idList the tag-info lookup reads */
 #define TAG_JOINT      0x1Cu    /* tag record: the resolved joint index (int16), -1 for no tag */
@@ -43,7 +31,7 @@ static tag_fn g_lookup;
 static int g_ready;                         /* the lookup resolved and its detour prepared */
 static int g_committed;
 static sh_at_registry *volatile g_reg;      /* this Play's registry, or NULL */
-static sh_at_registry *g_retired;           /* the one before it, freed at the next swap */
+static sh_at_registry *g_retired;           /* the previous registry, freed at the next swap */
 static volatile LONG g_any;
 
 static void at_log(const char *fmt, ...)
@@ -68,8 +56,6 @@ static int av_only(DWORD code)
     return code == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH;
 }
 
-/* ----------------------------------------------------------------- reads */
-
 static int at_parent(void *context, const void *model, const void **parent)
 {
     (void)context;
@@ -90,7 +76,7 @@ static const char *at_name_at(const void *object, size_t offset)
 static int at_still(const void *model, const char *name)
 {
     int same = 0;
-    __try { same = sh_ce_name_eq(*(const char *const *)((const uint8_t *)model + MODEL_NAME), name); }
+    __try { same = sh_path_eq(*(const char *const *)((const uint8_t *)model + MODEL_NAME), name); }
     __except (av_only(GetExceptionCode())) { same = 0; }
     return same;
 }
@@ -167,8 +153,6 @@ static void at_answered(sh_at_row *row, const void *props)
 #endif
 }
 
-/* --------------------------------------------------------------- detour */
-
 static const void *lookup_detour(const void *props, const char *prop, const char *tag)
 {
     const void *r = g_lookup(props, prop, tag), *r2;
@@ -181,8 +165,6 @@ static const void *lookup_detour(const void *props, const char *prop, const char
     at_answered(row, props);
     return r2;
 }
-
-/* --------------------------------------------------------------- install */
 
 int sh_attach_tags_install(const uint8_t *module_base)
 {
@@ -227,8 +209,6 @@ static int at_commit(void)
     return 1;
 }
 
-/* ---------------------------------------------------------- the registry */
-
 typedef struct at_build { sh_at_registry *r; int oom; } at_build;
 
 static void at_add_bundle(void *context, const char *id, const char *hash, const char *registries)
@@ -237,7 +217,7 @@ static void at_add_bundle(void *context, const char *id, const char *hash, const
     sh_modserve_scope_info info;
     char *label;
     if (!registries || !strstr(registries, "\"" SH_AT_REGISTRY_KEY "\"") || !hash) return;
-    /* only the builds the open map serves now */
+    /* only the builds the open map serves */
     if (!sh_modserve_bundle_scope(hash, &info) || !info.names_live) return;
     label = sh_modserve_bundle_label(hash);
     if (sh_at_registry_add(b->r, id, label ? label : id, registries, at_line_log, NULL) < 0) b->oom = 1;
@@ -301,8 +281,6 @@ void sh_attach_tags_map_end(void)
     if (g_reg) at_publish(NULL);
 }
 
-/* ------------------------------------------------------------ the console */
-
 void sh_attach_tags_command(sh_ce_line_fn line, void *context)
 {
     sh_at_registry *reg = (sh_at_registry *)g_reg, *preview = NULL;
@@ -330,7 +308,7 @@ void sh_attach_tags_command(sh_ce_line_fn line, void *context)
         void *obj = NULL;
         unsigned st = 0, level = 0;
         int held;
-        for (k = 0; k < i && !sh_ce_name_eq(reg->rows[k].carrier, w->carrier); k++) {}
+        for (k = 0; k < i && !sh_path_eq(reg->rows[k].carrier, w->carrier); k++) {}
         if (k < i) continue;   /* each carrier once, with its props */
         held = sh_modserve_engine_decl_held(CARRIER_TYPE, w->carrier, &obj, &st, &level);
         text = sh_textf("  %s: \"%s\" over \"%s\": %s", w->label, w->carrier, w->base,
@@ -343,7 +321,7 @@ void sh_attach_tags_command(sh_ce_line_fn line, void *context)
         free(text);
         for (k = i; k < reg->n; k++) {
             const sh_at_row *c = &reg->rows[k];
-            if (!sh_ce_name_eq(c->carrier, w->carrier)) continue;
+            if (!sh_path_eq(c->carrier, w->carrier)) continue;
             text = c->answered ? sh_textf("    \"%s\": answered %ld lookup(s)", c->prop, (long)c->answered)
                                : sh_textf("    \"%s\"", c->prop);
             if (text) line(context, text);

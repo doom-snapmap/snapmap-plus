@@ -1,15 +1,6 @@
-/* mod_pipeline_test -- the three mod layers linked together, the way the
- * backend links them: a folder built by the bundle builder (modbundle.c) is
- * admitted by the serving index (modserve.c); a save writes one smpmod1 row
- * through the serving layer's closure (modmanifest.c); the next load strips
- * the row and activates exactly that bundle's gameplay decls; a skins decl
- * outside the salt's namespace is refused; and a cut-content bundle's
- * requirements are applied before its registration.
- *
- * Engine stand-ins: modserve_activate_bundles runs the real plan against
- * fake registry operations and then the real map-row check against a fake
- * palette (lane M6: rows of a named bundle that the built palette lacks are
- * registered by one rebuild before the map parses). */
+/* mod_pipeline_test -- the mod layers linked as the backend links them: a built bundle (modbundle.c) is served
+ * (modserve.c), a save writes one smpmod1 row (modmanifest.c), and the next load activates exactly that bundle's
+ * gameplay decls; skins outside the salt and cut-content requirements are checked too. Engine stand-ins throughout. */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
 #include <windows.h>
@@ -40,8 +31,6 @@ void backend_log(const char *line)
     if (line && at + n + 2 < sizeof g_log) { memcpy(g_log + at, line, n); g_log[at + n] = '\n'; g_log[at + n + 1] = 0; }
 }
 
-/* ---- stock names (as modbundle_test) -------------------------------------------------------- */
-
 static const char *const STOCK[] = {
     "generated/decls/snapeditorentitydef/demons/demon_base.decl",
     "generated/decls/material/textures/guis/snapmaps/entity_icons/demons/imp_enc.decl",
@@ -63,8 +52,6 @@ static int stock_exists(void *ctx, const char *request)
     return 0;
 }
 
-/* ---- build a folder in place and write its mod.json ------------------------------------------ */
-
 static int build_folder(const char *folder, char **first_cause)
 {
     sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
@@ -80,8 +67,6 @@ static int build_folder(const char *folder, char **first_cause)
     return ok;
 }
 
-/* ---- registry stand-in ---------------------------------------------------------------------- */
-
 #define MAX_REC 1024
 static char g_registered[MAX_REC][160];
 static char g_registered_type[MAX_REC][32];
@@ -89,7 +74,7 @@ static int g_nregistered, g_loads, g_activations;
 static int g_last_steps, g_last_ready, g_last_stock;
 
 /* The engine's own decls: anything without one of these prefixes
- * (acceptance/ is the carrier-1 package's first-generation namespace). */
+ * (acceptance/ is the carrier package's namespace). */
 static int fake_stock(const char *name)
 {
     return strncmp(name, "mods/", 5) && strncmp(name, "custom/", 7) && strncmp(name, "local/", 6) &&
@@ -125,8 +110,6 @@ static int op_load(void *c, const char *type, const char *name, int persist, uns
 }
 static const sh_modserve_engine_ops OPS = { NULL, op_source, op_register, op_load };
 
-/* ---- cvar stand-in: the product's route (idCVar::Set, immediate) ---------------------------- */
-
 static int g_gate[2] = { 1, 1 };         /* g_useImageBlackList, g_useResourceBlackList */
 static int g_gate_reads, g_gate_sets, g_registered_at_first_set = -1;
 static int gate_slot(const char *cvar) { return !strcmp(cvar, "g_useImageBlackList") ? 0 : !strcmp(cvar, "g_useResourceBlackList") ? 1 : -1; }
@@ -149,8 +132,6 @@ static int gate_set(void *c, const char *cvar, const char *value)
     return SH_MODSERVE_GATE_SET;
 }
 static const sh_modserve_gate_ops GATES = { NULL, gate_read, gate_set, NULL };
-
-/* ---- palette stand-in: the engine's own rows plus what a rebuild admitted -------------------- */
 
 static int g_pal_built, g_pal_count, g_rebuilds, g_rebuild_result = 1;
 static char g_pal_rows[MAX_REC][160];
@@ -221,8 +202,6 @@ static int registered_as(const char *type, const char *name)
     return 0;
 }
 
-/* ---- helpers -------------------------------------------------------------------------------- */
-
 static char *read_all(const char *path, size_t *len)
 {
     FILE *f = NULL;
@@ -261,8 +240,6 @@ static const char MAP[] =
     "\"name\":\"\",\"state\":{}}}],"
     "\"instances\":[{\"moduleName\":\"maps/modules/ind_dlc/ind_totally_blank_room_4x.decl\"}],"
     "\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":[" VAR("door_label", "Open") "]}}";
-
-/* ---- 1: a fresh mod, built, served, saved, loaded ------------------------------------------- */
 
 static void fresh_mod(const char *fixture, const char *root)
 {
@@ -323,10 +300,8 @@ static void fresh_mod(const char *fixture, const char *root)
               !strcmp(rows.rows[0].build, SH_MODMANIFEST_LOCAL_BUILD) && !strcmp(rows.rows[0].salt, "alexrimp") && rows.rows[0].size == b.total_size &&
               rows.rows[0].name_count == 1 && !strcmp(rows.rows[0].names[0], "mods/alexrimp/imp_copy"));
         sh_modmanifest_list_free(&rows);
-        /* Load: the row is read (the member itself is stripped last, by the
-         * parse detour, so this step removes nothing) and exactly that bundle's gameplay decls
-         * register. No palette has been built yet (the first editor entry's
-         * build registers the rows), so no rebuild is asked for. */
+        /* Load: the row is read (the parse detour strips the member, not this step) and exactly that bundle's gameplay
+         * decls register. No palette is built yet, so no rebuild is asked for. */
         g_activations = 0;
         g_nregistered = 0;
         g_pal_built = 0;
@@ -341,10 +316,8 @@ static void fresh_mod(const char *fixture, const char *root)
         CHECK(g_last_sync_r == 0 && g_last_sync.rows == 2 && g_last_sync.missing == 0 && g_rebuilds == 0);
         if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
 
-        /* The palette exists and lacks both rows (the bundle arrived after
-         * the build), but the editor holds an entity: the rebuild is refused,
-         * reported, and the rows stay unvisited, so each later load asks
-         * again, once. */
+        /* The palette lacks both rows, but the editor holds an entity: the rebuild is refused and reported, and the
+         * rows stay unvisited, so each later load asks again, once. */
         printf("-- a refused rebuild is asked once per load\n");
         g_pal_built = 1;
         g_pal_count = 0;
@@ -417,13 +390,11 @@ static void skins_namespace(const char *root)
     }
     sh_mb_free(&b);
     CHECK(sh_modserve_index_build(mods) == 1);
-    /* A skins decl in native/ at a path DOOM does not hold is still refused (it is the mod's own, D14). */
+    /* A skins decl in native/ at a path DOOM does not hold is still refused (it is the mod's own). */
     mt_write(folder, "native\\generated\\decls\\skins\\md6\\other\\imp.md6mesh.decl", "{\r\n}");
     CHECK(sh_mb_build(folder, NULL, &r, &b) == 0 && strstr(sh_mb_first_cause(&b), "native/generated/decls/skins/md6/other/imp.md6mesh.decl is not one of DOOM's files, so it is the mod's own; move it to "));
     sh_mb_free(&b);
 }
-
-/* ---- 5: a cut-content bundle's requirements ----------------------------------------------------- */
 
 static const char CUT_DESC[] =
     "{\"name\":\"Cut\","
@@ -454,7 +425,7 @@ static void cut_content(const char *root)
     g_nregistered = 0;
     hashes[0] = b.hash;
     CHECK(modserve_activate_bundles(hashes, 1) == 1);
-    /* Both gates were set before the first DeclRegisterFile, and are 0. */
+    /* Both gates are set before the first DeclRegisterFile, and are 0. */
     CHECK(g_gate_sets == 2 && g_registered_at_first_set == 0 && g_gate[0] == 0 && g_gate[1] == 0);
     CHECK(registered("mods/localcut/cut"));
     CHECK(strstr(g_log, "MODS: map: requirements applied: g_useImageBlackList=0, g_useResourceBlackList=0 "
@@ -469,7 +440,7 @@ int main(int argc, char **argv)
     if (!mt_temp_dir("mod_pipeline", root, sizeof root)) { fprintf(stderr, "no temp folder\n"); return 2; }
     fresh_mod(argv[1], root);
     skins_namespace(root);
-    /* No bundle so far needs a requirement: the gates were never read or set. */
+    /* No bundle so far needs a requirement: the gates are never read or set. */
     CHECK(g_gate_reads == 0 && g_gate_sets == 0);
     cut_content(root);
     mt_remove_tree(root);

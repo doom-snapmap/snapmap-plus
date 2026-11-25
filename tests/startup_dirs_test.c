@@ -1,7 +1,6 @@
-/* The backend's startup creates exactly the user-data root and its prefabs
- * folder, through wide paths: under a base whose name is outside the ANSI code
- * page and whose length passes MAX_PATH, and again over an existing tree.
- * The settings service initializes over the same root. */
+/* The backend's startup creates exactly the user-data root and its prefabs folder through wide paths, under a base
+ * outside the ANSI code page and longer than MAX_PATH and again over an existing tree; the settings service
+ * initializes over the same root. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -215,10 +215,7 @@ static int pp_decode_bmodel(const unsigned char *data, size_t len, pp_mesh *mesh
             if (!pp_u16be(&r, &local) || local >= nv) return 0;
             mesh->indices[mesh->index_count++] = base + local;
         }
-        /* Consume each surface's fixed 32-byte cooked metadata block before reading
-         * the next surface. Otherwise it is mistaken for the next material-
-         * string length.
-         */
+        /* Skip each surface's fixed 32-byte cooked metadata block, or it reads as the next material-string length. */
         if (!pp_take(&r, 32, NULL)) return 0;
     }
     /* The remaining model-level trailer is variable (bounds, joints, and other renderer metadata)
@@ -260,10 +257,9 @@ static int pp_decode_md6_ex(const unsigned char *data, size_t len, pp_mesh *mesh
     for (uint32_t i = 0; i < n; ++i) if (!pp_idstr(&r, &p, NULL)) return 0;
     if (!pp_take(&r, 36, NULL) || !pp_u32be(&r, &n) || n == 0 || n > PP_MAX_SURFACES) return 0;
 
-    /* Surface: name, material, u8, u32 texture sets, u32 vertices, u32 triangles, 24-byte bounds,
-     * 48-byte vertices (big-endian XYZ at +0, packed normal at +0x14, skin data after), u16 indices,
-     * 12 bytes, a morph flag with its optional table, and the blend weights. The vertices are the
-     * bind pose in model units; no skeleton is applied. */
+    /* Surface: name, material, u8, u32 texture sets, vertices, triangles, 24-byte bounds, 48-byte vertices (big-endian
+     * XYZ at +0, packed normal at +0x14), u16 indices, 12 bytes, a morph flag with its table, and blend weights;
+     * the vertices are the bind pose in model units, with no skeleton applied. */
     for (uint32_t s = 0; s < n; ++s) {
         uint32_t texsets = 0, surface_len = 0;
         const unsigned char *surface = NULL;

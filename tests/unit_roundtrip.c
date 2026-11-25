@@ -1,11 +1,6 @@
-/* unit_roundtrip.c -- the product's own map-content client (modcache.c, modnet.c, modkey.c, modunit.c and what they
- * link) driven through a round trip with a mod store (SPEC-distribution 5.3-5.7, 10.2): an author publishes a map's
- * units and claims them with their publishing key; a second player downloads them into a clean content cache and
- * composes the map's row (the composition must be the author's, byte for byte, by its build hash); the second player
- * remixes the map, claiming the same units with their own key (nothing uploads); a second map of another object
- * uploads only the files the store lacks; a player reports a missing file and the author reads it; both unpublish,
- * and the units stay served through the deletion delay. Read-only against the pack; every byte it writes is under
- * <work>.
+/* unit_roundtrip.c -- drives the product's map-content client (modcache.c, modnet.c, modkey.c, modunit.c) through a
+ * publish, download, remix, second-map, missing-file report and unpublish round trip against a mod store. It is
+ * read-only against the pack; every byte it writes is under <work>.
  *
  *   unit_roundtrip store=<url> work=<folder> mod=<built pack folder> doom=<install root> names=<placed A>,<placed B>
  *                  placed=<the entity map 1 places, below the namespace>
@@ -231,7 +226,7 @@ int main(int argc, char **argv)
         sh_modmanifest_list_free(&list);
     }
 
-    /* 2. A second player: a clean cache, the map's row fetched and composed (no question, D21: no local mod). */
+    /* 2. A second player: a clean cache, the map's row fetched and composed (no question: no local mod). */
     sh_cache_set_local(NULL, NULL);
     sh_cache_set_mods_root(root_b);
     {
@@ -265,9 +260,8 @@ int main(int argc, char **argv)
         }
     }
 
-    /* 2a. A player who has most of the files already (another map brought them): the rest arrives in the one request
-     * of the unit's archive, which names only the files this computer lacks (R-DS6; a part file a closed game left
-     * of another transfer is not read). */
+    /* 2a. A player who has most of the files already: the rest arrives in one archive request naming only the files
+     * this computer lacks; a part file left by a closed game is not read. */
     {
         char root_d[MAX_PATH], from[MAX_PATH * 2], to[MAX_PATH * 2], dir[MAX_PATH * 2];
         size_t i, skipped = 0, kept = 0;
@@ -325,7 +319,7 @@ int main(int argc, char **argv)
     }
 
     /* 2b. A third player with no connection to the store: the map loads with a stand-in for the object and one
-     * notice (S4 at a play, whose fetch found the store unreachable, and S4 again at an editor open, which repeats it). */
+     * notice at a play, and an editor open repeats it. */
     {
         char root_c[MAX_PATH], path[MAX_PATH * 2], *n, *placed = sh_textf("mods/%s/%s", g_pack.id, placed_name);
         int complete_c = 1;
@@ -353,7 +347,7 @@ int main(int argc, char **argv)
         free(n);
         code = sh_cache_compose_now(row1.build, SH_CACHE_ABSENT_OFFLINE, &why);
         n = sh_cache_take_notice();
-        /* The open says what the play's fetch learned (R-DS6: a load that asks nothing repeats the recorded cause). */
+        /* The open says what the play's fetch learned (a load that asks nothing repeats the recorded cause). */
         step(code && n && strstr(n, "the mod store could not be reached"), "offline player: one notice at an editor open (S4, as the play learned)", n);
         free(n);
         free(placed);

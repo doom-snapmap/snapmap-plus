@@ -28,7 +28,7 @@ typedef struct model_list {
 typedef struct snapshot { int live_generation; int destroyed; } snapshot;
 
 static uint8_t g_editor[0x20600];
-static int g_live_generation;    /* what the live edit map holds now */
+static int g_live_generation;    /* generation the live edit map holds */
 static int g_destroyed, g_allocated;
 static int g_fault;
 

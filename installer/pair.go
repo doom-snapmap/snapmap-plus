@@ -9,9 +9,8 @@ import (
 )
 
 // The pair goes into DOOM as one change, so the folder never holds one release's backend beside
-// another release's frontend: both files are written beside their targets under temporary names and
-// checked against the manifest, then each target is swapped for its staged file, and a failed swap
-// puts back every target already replaced.
+// another's frontend: both files are staged beside their targets and checked against the manifest,
+// then swapped in, and a failed swap puts back every target already replaced.
 
 // Temporary names in the DOOM folder: a staged new file, and a replaced one until it is removed.
 const (

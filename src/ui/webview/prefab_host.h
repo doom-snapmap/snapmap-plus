@@ -1,19 +1,8 @@
-/* prefab_host.h -- decisions the WebView host makes for the Prefabs tab, kept
- * free of window and engine state so they are testable
- * (tests/prefab_host_test.cpp).
- *
- * Create's precheck: DOOM's copy check (PrefabPopulate) refuses a selection
- * whose hovered entity is not one of the selected ones, the same way it
- * refuses an empty selection, so the host tells the two apart before it asks.
- *
- * A prefab's kind: the file's top-level "~type" decides it, idSnapMap a
- * module prefab and idSnapEntityPrefab an object prefab, with or without the
- * product's snapmapPlus block. The list reads only a tail of each file; the
- * engine writes "~type" second to last, so the last "~type" before the block
- * is the top-level one.
- *
- * The live Limits gate: the host posts the map's usage again only when its
- * text or the held prefab changed. */
+/* prefab_host.h -- decisions the WebView host makes for the Prefabs tab, free of window and engine state
+ * (tests/prefab_host_test.cpp): Create's precheck (PrefabPopulate refuses a hovered entity outside the selection
+ * like an empty selection, so the host tells them apart) and the live Limits gate. A prefab's kind is its top-level
+ * "~type" (idSnapMap = module, idSnapEntityPrefab = object); the list reads a file's tail, where the engine writes
+ * "~type" second to last, so the last one before the snapmapPlus block is the top-level one. */
 #ifndef SNAPMAP_PLUS_PREFAB_HOST_H
 #define SNAPMAP_PLUS_PREFAB_HOST_H
 

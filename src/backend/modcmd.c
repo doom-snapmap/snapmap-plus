@@ -59,9 +59,8 @@ static int mc_read_stock(const char *request)
 
 typedef struct mc_stock { int state; unsigned asked; } mc_stock;   /* state: 0 unprobed, 1 ok, -1 unavailable */
 
-/* The engine provider first, then the installed archives themselves (the
- * stock bridge): SnapMap's provider does not see campaign-only content in
- * gameresources, which is still stock to a bundle that shadows it. */
+/* The engine provider first, then the installed archives (the stock bridge): the provider does not see
+ * campaign-only content in gameresources, which is still stock to a bundle that shadows it. */
 static int mc_stock_exists(void *ctx, const char *request)
 {
     mc_stock *s = (mc_stock *)ctx;
@@ -181,10 +180,8 @@ static char *mc_leaf(const char *folder)
     return out;
 }
 
-/* A folder with no builder block is a new mod: it gets its salt before its
- * first build (sh_ms_assign_salt), its references to mods/<its folder name>/
- * rewritten to mods/<salt>/; the folder keeps its name. A folder that has its
- * salt is left as it is. 0 when refused. */
+/* A folder with no builder block is a new mod: it gets its salt (sh_ms_assign_salt) before its first build, and its
+ * references to mods/<folder name>/ become mods/<salt>/. A folder that has a salt is left as it is; 0 when refused. */
 static int mc_assign_salt(const char *verb, const char *folder)
 {
     char *leaf = mc_leaf(folder), salt[9], *cause = NULL;
@@ -358,10 +355,8 @@ static void mc_list(void)
     sh_ms_list_free(&list);
 }
 
-/* Write a stock resource's bytes to a file, so an author can place a copy of
- * an installed file under a new name in a mod's assets/ tree. The bytes are
- * read through the resource layer's installed-resource reader (the game's
- * own archives, never another mod). An existing file is not replaced. */
+/* Write a stock resource's bytes (read through the installed-resource reader, never another mod) to a file an author
+ * can place in a mod's assets/ tree. An existing file is not replaced. */
 static void mc_copystock(const char *request, const char *dest)
 {
     unsigned char *body = NULL;
@@ -425,12 +420,8 @@ static void mc_verify(const char *key)
     free(cause);
 }
 
-/* ------------------------------------------------------- store client ---- */
-
-/* Console lines from the network worker. Each is logged at once; the
- * console prints them on DOOM's main thread (the main-thread call slot),
- * or at the next sh_mods command when that slot is busy or unavailable.
- * The queue holds every line until it is printed. */
+/* Console lines from the network worker: logged at once, printed on DOOM's main thread (the main-thread call slot)
+ * or at the next sh_mods command when that slot is busy. */
 static CRITICAL_SECTION g_mc_out_cs;
 static INIT_ONCE g_mc_out_once = INIT_ONCE_STATIC_INIT;
 static char **g_mc_out;
@@ -698,7 +689,7 @@ void h_sh_mods(idCmdArgs *a)
         else if (!(folder = mc_resolve_folder(dest_arg))) mc_line("MODS: copystock: the store folder cannot be resolved");
         else mc_copystock(request, folder);
         free(dest_arg);
-    } else if (_stricmp(verb, "build") && _stricmp(verb, "install")) {   /* Rebuild is retired (decision 23) */
+    } else if (_stricmp(verb, "build") && _stricmp(verb, "install")) {
         sh_printf("sh_mods: unknown verb '%s'. %s\n", verb, SH_MODCMD_HELP);
     } else if (!arg[0]) {
         sh_printf("usage: sh_mods %s \"<folder>\"\n", verb);
@@ -716,10 +707,8 @@ void h_sh_mods(idCmdArgs *a)
     free(folder);
 }
 
-/* An export's import builds each carried mod on the thread that imports it
- * (the WebView host's, a rawmap load's worker), so its stock check
- * is the installed-archive bridge, which is thread-safe, not the engine
- * provider. */
+/* An import builds each carried mod on the importing thread (the WebView host's or a rawmap load's worker), so its
+ * stock check is the thread-safe installed-archive bridge, not the engine provider. */
 static int mc_import_stock(void *ctx, const char *request)
 {
     (void)ctx;

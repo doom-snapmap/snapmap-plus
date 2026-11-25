@@ -1,19 +1,6 @@
-/* script_api_test.c -- the entity, animation, world and time calls of mod
- * scripts (src/backend/script/script_api_*.c) against a fake engine: an
- * in-memory world of entities (an AI of the mod, a stock AI, a player, a
- * prop of the mod, a wall), the runtime and the hooks' handle table as the
- * game uses them.
- *
- * Covers: every read and write on the mod's own and on other entities;
- * the plain stop line naming the file and line; the player heal exception; argument refusals worded for
- * an author; removed entities answer nil; spawn and its two caps; players();
- * entities_near order and radius; trace hits, misses, the thick line and the
- * ignored entity; animation requests on an AI (the ssaction events and the
- * subweb a bare state name takes) and on other entities (the stock events);
- * current_animation, animation_event and animation_finished from the node observed each
- * frame; view_angle_to on a player's aim and an entity's facing; now() is
- * the time the tick passes; tint and glow: the three lerpRenderParmFrom
- * events of a request, the look kept between requests, the refusals. */
+/* script_api_test.c -- the entity, animation, world and time calls of mod scripts (src/backend/script/script_api_*.c)
+ * against a fake engine: an in-memory world of entities, the runtime and the hooks' handle table. It covers reads and
+ * writes, refusals, spawn, traces, animation requests, view angles, now(), and tint and glow. */
 #include "heap_out.h"
 #include <windows.h>
 #include <math.h>
@@ -62,7 +49,7 @@ static const sh_script_source g_src = { NULL, src_list, src_read, src_release };
 typedef struct fent {
     uint32_t id;
     int      kind;
-    int      alive;          /* 0: removed (the lookup no longer finds it) */
+    int      alive;          /* 0: removed (the lookup does not find it) */
     float    pos[3], ax[9], vel[3];
     float    cur, max;
     char     def[128];

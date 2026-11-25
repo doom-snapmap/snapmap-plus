@@ -1,13 +1,10 @@
 /* nav_preview_sites_test.c -- the editor navigation overlay's bind checks (nav_preview_sites.h, the code
- * sh_nav_preview_install runs) against each build 13954591 executable given on the command line:
- *   - NavPostProcessSlot, NavRenderLines and the other overlay signatures resolve at their recorded RVAs;
- *   - the slot is the `mov rdx,[rip+rel32]` load the install reads, and its cell lies inside the image;
- *   - the post-process function is a pointer the engine stores at run time, so the image check finds the
- *     function's head instead: exactly one place in the executable begins with the renderer's accepted head
- *     (Vulkan or OpenGL) and none with the other, and the product's head check classifies it;
- *   - the first RIP-relative `lea rcx` in NavRenderLines' first 96 bytes names a place inside the image;
- *   - on OpenGL, the render-target function the install resolves resolves on the image.
- * A changed byte at the slot, a head or the line consumer is refused. Each image runs in its own process. */
+ * sh_nav_preview_install runs) against each build 13954591 executable given on the command line: the overlay
+ * signatures resolve at their recorded RVAs; the slot is the `mov rdx,[rip+rel32]` load the install reads, with its
+ * cell inside the image; the post-process function (a pointer stored at run time) is found by its head, which exactly
+ * one place begins with for the renderer and none for the other; the first RIP-relative `lea rcx` in NavRenderLines'
+ * first 96 bytes names a place inside the image; on OpenGL the render-target function resolves. A changed byte at
+ * the slot, a head or the line consumer is refused. Each image runs in its own process. */
 #include "image_sites.h"
 #include "nav_preview_sites.h"
 

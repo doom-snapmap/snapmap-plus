@@ -1,18 +1,6 @@
-/* particlemotion_planes.c -- the scene's surfaces a colliding particle stage bounces on (particlemotion.h).
- *
- * DOOM Eternal's hard collision tests a particle against the screen's depth on the GPU. A CPU particle of DOOM 2016
- * has no depth to test, and the particle jobs run off the game thread, where the engine's trace is not safe to
- * call. So the surfaces are found where it is: the jobs ask for an emitter's place (lock-free, best effort), the
- * game thread traces it once (sh_planes_service, from the script tick) and publishes the planes in a table the jobs
- * read under a sequence count. A place is the emitter's origin quantized to 8 units and its z axis to 1/8.
- *
- * The planes of a place: the surface under it (a trace 2,048 units down the world's z) and, for an emitter that
- * does not face up (an impact on a wall or a ceiling: its z axis is the surface's normal), the surface behind it (a
- * trace 256 units back along its z axis). A trace starts 8 units off the place, so an emitter born on the surface
- * finds that surface. Eternal's depth test sees every surface on the screen and none off it; these are two, on or
- * off the screen, extended as planes: the cost is written in report R-FXD section 1.
- *
- * Pure: no engine here, so tests/particlemotion_test.c links it with a trace of its own. */
+/* particlemotion_planes.c -- the scene's surfaces a colliding particle stage bounces on (particlemotion.h). Particle
+ * jobs run off the game thread, where the trace is unsafe, so they ask for a place and the game thread traces it once
+ * (sh_planes_service) into a sequence-counted table; places quantize the origin to 8 units and z to 1/8. Pure. */
 #include <intrin.h>
 #include <math.h>
 #include <string.h>
@@ -111,6 +99,8 @@ static void plane_of(const float end[3], const float n[3], sh_motion_planes *out
     out->count = k + 1;
 }
 
+/* Traces 2,048 units down for the surface under the place and, for an emitter not facing up, 256 units back along
+ * its z axis for the surface behind it. */
 void sh_planes_find(sh_planes_trace_fn trace, const float o[3], const float z[3], sh_motion_planes *out)
 {
     float from[3], to[3], end[3], n[3], len;

@@ -1,78 +1,6 @@
-/* modscene_place.h -- a mod's scene node plays its scene at the player who
- * activated it, and puts that player back when the scene ends.
- *
- * A mod's campaign scene node is a SnapMap logic hexagon over an invisible
- * interactable. Its Activate input is an idSnapMapAction_Interaction whose palette
- * row is mods/<salt>/actions/scene_play (IA_ACTIVATE); a placed copy has its own
- * entityDef that inherits that row, so both names are checked. The engine plays
- * the node's sync wherever the node entity stands: the interaction's
- * sync-start helper copies the owner's physics origin and axis into the sync
- * when the link runs, and the sync pulls the player there (R312). During
- * SnapMap Play the backend detours three engine functions (and, for scenes
- * blocks, a fourth: see below):
- *
- *   Interaction DoAction   when the acting row is a mod's scene_play and the
- *                          activator is a player, every target node is moved
- *                          to the player's feet with the player's view yaw
- *                          (pitch and roll 0) before the deferred
- *                          interaction-action event reaches it, and the
- *                          player's origin and view angles are remembered
- *                          for that node. A scene_play row whose activator is
- *                          not a player (a demon in a trigger) or is missing
- *                          is dropped.
- *   Interactable USED      when a remembered node raises
- *                          SNAP_EVENT_INTERACTABLE_USED (On Scene Finished),
- *                          the player is teleported back to the remembered
- *                          origin and view angles before the output fires.
- *   OnActionRequest        an interaction request with no requester is
- *                          refused instead of faulting on the requester's
- *                          name (the R312 level-6 fault, raised by the
- *                          interactable's sync-end reset with an empty user
- *                          handle). This guard applies in every state: the
- *                          engine dereferences that requester unconditionally.
- *
- * A mod's "scenes" block (modscene_decl.h) can change that per node: the
- * scene plays at the node's placed transform instead ("at_node"), or at the
- * player with its first player pose on the player's feet, turned toward the
- * node ("player", "reaim"); entities it lists ("spawn") are queued at the
- * frame the node marks when the node fires and spawned the way idTarget_Spawn
- * spawns (spawn position and orientation set before the spawn chain, then
- * "show") inside the fourth detour, the interaction link's sync-start helper,
- * right after the engine started the node's sync, so a demon and the
- * player's track start on one tick and a sync that does not start spawns
- * nothing; and the return can be switched off ("return"). A node keeps its
- * first placement for the whole Play, so a reused node anchors where it was
- * put.
- *
- * Every other interaction action, every stock row and the editor are left to
- * the engine. Records are cleared at each Play entry, and the scenes blocks
- * are read again at the Play's first scene, from the builds the Play serves:
- * one build per salt, the one whose names serve now (sh_modserve_bundle_scope,
- * names_live), so a downloaded map's own build of a mod plays its own scenes.
- * A scenes block that does not read is logged ("SCENES: <salt>: its scenes
- * entry ...") and that mod's nodes play at the player.
- *
- * Logs (backend log and console; the runtime lines once per Play each):
- *   scene-place installed: mod scene nodes play at the activating player
- *   scene-place SKIPPED -- <reason>
- *   scene-place: interaction requests without a requester are refused
- *   scene-place: a scene node plays at <player> (<node> at x y z, yaw)
- *   scene-place: <player> returned after the scene (x y z, yaw)
- *   scene-place: dropped an Activate from <who>: only a player can play a scene node
- *   scene-place: refused interaction action <n> for <owner>: it has no requester
- *   scene-place: <a reason the scene plays at the node or the player stays>
- *   scene-place: scene spawns available: a mod's scenes block can spawn at its node when its sync starts
- *   Scene <node>: plays at <player> (... scene at x y z, yaw[, turned toward the anchor]; anchor ...)
- *   Scene <node>: plays at its node (scene at x y z, yaw)
- *   Scene <node>: spawned <entityDef> at x y z, yaw with its sync
- *   Scene <node>: could not spawn <entityDef>: <reason>
- *   Scene <node>: its sync did not start; nothing was spawned
- *   Scene <node>: finished; the player stays
- *   scene-place: the HUD was shown again when the scene finished
- * (When a scene node raises On Scene Finished and a scene hid the HUD without
- * its show event firing, the HUD is shown again: sh_modhud_scene_restore.)
- * (the scenes lines for every activation, up to 48 a Play).
- */
+/* modscene_place.h -- a mod's scene node plays its scene at the player who activated it and puts the
+ * player back when the scene ends; the DoAction, USED, OnActionRequest and sync-start detours do it,
+ * and a mod's scenes block can change the anchor, the spawns and the return per node. */
 #ifndef SNAPMAP_PLUS_MODSCENE_PLACE_H
 #define SNAPMAP_PLUS_MODSCENE_PLACE_H
 
@@ -117,7 +45,7 @@ int sh_modscene_place_pose_ok(const float origin[3], const float angles[3]);
 
 /* The remembered player pose for one moved node. */
 typedef struct sh_modscene_place_record {
-    const void *node;         /* the interactable that was moved */
+    const void *node;         /* the moved interactable */
     char *player;             /* the player's entity name, whole (malloc'd), found again at return */
     float origin[3];          /* the player's feet origin at Activate */
     float angles[3];          /* pitch, yaw, roll at Activate */
@@ -132,23 +60,20 @@ typedef struct sh_modscene_place_table {
 
 void sh_modscene_place_table_clear(sh_modscene_place_table *t);
 
-/* Remember a pose for node, replacing that node's earlier pose, else in a new
- * row. Returns 1 when stored, 0 for a bad argument or when memory runs out
- * (the table is then unchanged). */
+/* Remember a pose for node, replacing that node's existing pose. Returns 1 when stored, 0 for a bad
+ * argument or when memory runs out (the table is then unchanged). */
 int sh_modscene_place_remember(sh_modscene_place_table *t, const void *node, const char *player,
                                const float origin[3], const float angles[3]);
 
-/* Take and remove node's pose. Returns 1 and fills out when it was there;
- * out->player is then the caller's to free. */
+/* Take and remove node's pose. Returns 1 and fills out when found; out->player is then the caller's
+ * to free. */
 int sh_modscene_place_take(sh_modscene_place_table *t, const void *node, sh_modscene_place_record *out);
 
 #ifndef SH_MODSCENE_PLACE_PURE
 #include "signatures.h"
 
-/* Install the detours from the resolved signature database. The empty-
- * requester guard installs on its own; the DoAction and USED detours install
- * together or not at all. Returns 1 when scenes play at the player, 0 when
- * that half is skipped (logged). */
+/* Install the detours from the resolved signatures. The empty-requester guard installs on its own;
+ * DoAction and USED install together or not at all. Returns 1 when installed, 0 when skipped (logged). */
 int sh_modscene_place_install(const sig_result *results, size_t n, const unsigned char *module_base);
 
 /* Play is starting: forget the previous Play's nodes and re-arm the once-per-Play logs. */

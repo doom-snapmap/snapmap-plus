@@ -1,15 +1,9 @@
 /* modhud_test.c -- a mod's weapon ammo displays (modhud.c).
  *
- * Offline: the hud object grammar; two mods that disagree about one weapon
- * leave only that weapon to the game; the table built from the builds the
- * open map serves (one build per salt, builds the map does not use left out,
- * a mod whose hud entry does not read skipped alone); the table read again on
- * the HUD's next question after an index change or a Play entry, with no
- * restart; and the call-site relay against an owned synthetic caller. With
- * build 13954591 executables as arguments: the call site and predicate
- * resolve uniquely at their recorded RVAs, the call decodes to the predicate,
- * its rel32 is 4-byte aligned, and the widget register and decl field are the
- * ones the handler reads. */
+ * Offline: the hud grammar, per-weapon conflicts between mods, the table built from the open map's builds and its
+ * reload on an index change or Play entry, and the call-site relay. With build 13954591 executables as arguments it
+ * also checks the call site and predicate at their recorded RVAs and the widget register and decl field the handler
+ * reads. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -135,7 +129,7 @@ static void test_builds(void)
     build("unusedmd", H4, 0, HUD_WEAPON(SHOTGUN), 0);   /* the map does not use it */
     CHECK(sh_modhud_load(fake_each, fake_serves, NULL) == 1);
     CHECK(sh_modhud_select(PISTOL, 1) == 0 && sh_modhud_select(SHOTGUN, 1) == 1);
-    /* The map now serves the place's build: its rule, not the root's. */
+    /* Once the map serves the place's build, its rule applies, not the root's. */
     g_builds[0].serves = 0;
     g_builds[1].serves = 1;
     CHECK(sh_modhud_load(fake_each, fake_serves, NULL) == 0);

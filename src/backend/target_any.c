@@ -1,8 +1,6 @@
-/* Reveal the editor-decl visibility bits 0xC0 at +0x3CD, and put back exactly
- * what the reveal changed. The same flags also affect wire coloring.
- * GetDeclsOfType returns a registry node with array@+0x20 and count@+0x28.
- * The array is engine-owned and must not be freed. Recheck these offsets when
- * porting engine builds. */
+/* Reveal the editor-decl visibility bits 0xC0 at +0x3CD, then put back exactly what the reveal changed
+ * (the flags also affect wire coloring). GetDeclsOfType returns a node with array@+0x20, count@+0x28; the
+ * array is engine-owned and never freed. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -15,9 +13,9 @@
 #define DECL_TYPE_NAME      "idDeclSnapEditorEntity"
 #define LIST_ARRAY_OFF      0x20     /* decl-manager node -> decl-pointer array */
 #define LIST_COUNT_OFF      0x28     /* decl-manager node -> decl count (uint) */
-#define DECL_FLAGS_OFF      0x3CD    /* decl -> editor-flags byte; bits 7-6 (0xC0) = the visibility pair */
-#define VIS_BITS            0xC0     /* the editor-visibility pair the toggle flips */
-#define COUNT_CAP           (1u << 20) /* Bound implausible registry counts. */
+#define DECL_FLAGS_OFF      0x3CD    /* decl -> editor-flags byte */
+#define VIS_BITS            0xC0     /* the visibility pair the toggle flips */
+#define COUNT_CAP           (1u << 20) /* bound on registry counts */
 
 typedef void *(*get_decls_fn)(const char *type_name);
 
@@ -79,8 +77,7 @@ static int target_any_reveal(uint32_t *out_count, uint32_t *out_changed)
     return 1;
 }
 
-/* Put back the visibility pair of every decl the reveal changed, and nothing
- * else: a decl that was visible before the reveal stays visible. */
+/* Put back the visibility pair of every decl the reveal changed, and nothing else. */
 static uint32_t target_any_restore(void)
 {
     uint32_t i, restored = 0;

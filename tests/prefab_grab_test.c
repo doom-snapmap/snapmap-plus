@@ -22,10 +22,8 @@ static void box_make(sh_prefab_grab_box *b, float ox, float oy, float oz, const 
     b->bmax[0] = x1; b->bmax[1] = y1; b->bmax[2] = z1;
 }
 
-/* The helper's own output for a given line: midpoint of the line-vs-OBB
- * clip, hit or not (FUN_14028a390 starts at +-1e30 and the caller ignores its
- * return). Only the in-plane slabs are replicated, which is enough to build a
- * native hit or a native miss for the tests below. */
+/* The helper's output for a line (FUN_14028a390): the midpoint of the line-vs-OBB clip, hit or not, from a
+ * start of +-1e30 with its return ignored. Only the in-plane slabs are replicated, enough for a native hit or miss. */
 static void native_frame(const float view[3], const float fwd[3], const sh_prefab_grab_box *b,
                          float frame[12], float *distance)
 {
@@ -127,7 +125,7 @@ static void test_hit_kept(void)
 
 static void test_huge_miss_corrected(void)
 {
-    /* M114's live value on the 2018 build: grabDistance -2.95e10. */
+    /* A native miss leaves a huge grabDistance such as -2.95e10. */
     sh_prefab_grab_box b;
     sh_prefab_grab_result r;
     float view[3] = { -2552.5f, 4053.8f, 238.3f }, fwd[3] = { 1, 0, 0 }, frame[12], d = -2.95e10f;

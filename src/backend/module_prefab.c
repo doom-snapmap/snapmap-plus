@@ -1,6 +1,6 @@
 /* module_prefab.c -- see module_prefab.h.
  *
- * Engine surface (build 13954591, Vulkan / OpenGL, snaphak-re R-002/R-003):
+ * Engine surface (build 13954591, Vulkan / OpenGL):
  *   SnapMapCtor / SnapMapDtor     idSnapMap in place, 0x778 bytes
  *   DeserializeFromJson           native parse (the load swap is bypassed)
  *   SnapMapValidate               the validator GetLocalSavedMapEdit runs first
@@ -363,11 +363,9 @@ static int mp_selection_is_placed(unsigned char *ed, int *count_out)
     return ok;
 }
 
-/* Select the placed modules through the native Module Mode select. One select
- * gathers the modules connected to it, so only indices not yet in the list are
- * selected (a second select of a selected module would toggle it off). When
- * the gather also took modules of the open map, the list is narrowed in place
- * to the placed ones (its capacity already holds more). */
+/* Select the placed modules through the native Module Mode select, skipping indices already in the list
+ * (a second select would toggle one off). A gather that also took modules of the open map is narrowed in
+ * place to the placed ones. */
 static int mp_select_placed(unsigned char *ed)
 {
     int i, j, n = 0;
@@ -486,8 +484,7 @@ void sh_module_prefab_tick(void *editor)
         if (mp_record_count(ed) != g_fp_records + g_added)
             mp_logf("MODPREFAB: record count %d after install, expected %d", mp_record_count(ed), g_fp_records + g_added);
         if (limits) {
-            /* The map as it was goes back in; when it cannot, the placement is
-             * committed as one undo step, so Ctrl+Z takes all of it back. */
+            /* The original map is installed again; when that fails, the placement is committed as one undo step. */
             unsigned char again = 0;
             int back = g_original && mp_install(ed, g_original, why, (int)sizeof why, &again);
             const char *text;
@@ -579,10 +576,8 @@ int sh_module_prefab_selected_count(void)
 
 /* ------------------------------------------------------------ capture (game thread) */
 
-/* The module guard's palette query (module_prefab_map.h): grid_room_native.c
- * answers it on the engine thread. ctx, when set, is the prefab's mod rows
- * (prefab_mods.h): a module one of them provides is a mod the Prefabs tab
- * lists and Place resolves, not a missing room. */
+/* The module guard's palette query (module_prefab_map.h), answered on the engine thread. A module that one of
+ * ctx's prefab mod rows provides counts as known, not as a missing room. */
 static int mp_module_known(void *ctx, const char *name)
 {
     const sh_modmanifest_list *rows = (const sh_modmanifest_list *)ctx;
@@ -739,7 +734,7 @@ static int mp_save(sh_module_prefab_call *call)
     }
     if (!sh_mp_cut(c->json, c->len, c->sel, c->nsel, &frag, &flen, &sum, err, (int)sizeof err)) {
         mp_logf("MODPREFAB: save refused: %s", err);
-        /* A selection the map no longer holds is chosen again; anything else is the map's own data. */
+        /* A selection that does not match the map is chosen again; anything else is the map's own data. */
         mp_out(call, strstr(err, "is not in this map") || strstr(err, "was chosen twice") || strstr(err, "nothing to cut") ||
                      strstr(err, "too many modules")
                      ? "Select the modules again and press Create."
@@ -884,7 +879,7 @@ static int mp_check(sh_module_prefab_call *call)
     c->checked = -1;
     /* The rows of its block. */
 
-    if (sh_prefab_mods_rows_of(call->text, call->text_len, call->meta_path, &rows) > 0) c->rows = &rows;
+    if (sh_prefab_mods_rows_of(call->text, call->text_len, call->path, &rows) > 0) c->rows = &rows;
     if (mp_capture_run(c) && c->result == 1) r = c->checked;
     sh_modmanifest_list_free(&rows);
     sh_mp_summary_free(&sum);

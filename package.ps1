@@ -1,7 +1,5 @@
-# Package the built DLLs and their hash manifest into dist/.
-# The frontend uses the system WebView2 runtime. Run build.ps1 first.
-# The bundle carries the April 2024 build's pair only (see docs/packaging.md); the 2018 build is
-# served by v0.2.1-beta.19's own release.
+# Package the built DLLs and their hash manifest into dist/; run build.ps1 first. The frontend uses the system WebView2.
+# The bundle carries the April 2024 build's pair only (docs/packaging.md); the 2018 build ships in v0.2.1-beta.19.
 # Keep this script ASCII for PowerShell 5.1.
 $ErrorActionPreference = "Stop"
 $here  = Split-Path -Parent $MyInvocation.MyCommand.Path   # the repo root

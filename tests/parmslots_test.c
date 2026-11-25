@@ -1,7 +1,6 @@
 /* parmslots_test.c -- where a render parm asking for a parm state slot goes (parmslots_rule.c): the engine's
- * ranges, the engine placing every parm it can, the product's vector parms keeping their slots whatever asks first,
- * the shared slot once the vector range is at its end, a full range of another kind. The table here is the game's
- * as measured (973 vector parms that are not the product's) with the product's 32. */
+ * ranges, the product's vector parms keeping their slots, and the shared slot once the vector range is full.
+ * The table is the game's 973 vector parms plus the product's 32. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

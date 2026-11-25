@@ -4,10 +4,7 @@
 
 #include "snapmap_plus_iface.h"
 
-/* The frontend's path relative to the folder this DLL loads from (the DOOM folder). It names the
- * supported build so the 2018 release's snapmap-plus\snapmap-plus-ui.dll, which the release bundle
- * also carries for installers without build detection, is never loaded here. package.ps1 and the
- * installer use the same path (an installer test checks them). */
+/* The installer and package place the paired frontend here. */
 #define SH_UI_DLL_DIR  L"snapmap-plus"
 #define SH_UI_DLL_PATH L"snapmap-plus\\snapmap-plus-ui-13954591.dll"
 

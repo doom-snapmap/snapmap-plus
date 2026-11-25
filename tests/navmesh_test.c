@@ -1,7 +1,5 @@
-/* Tests baked-navigation reassembly from the map's member, structural AAS
- * validation and map-scoped serving.
- * All AAS2 3.29 fixtures are synthetic; accept the valid payload and refuse
- * each malformed mutation without a crash. */
+/* Tests baked-navigation reassembly from the map's member, structural AAS validation and map-scoped serving.
+ * All AAS2 3.29 fixtures are synthetic: the valid payload is accepted and each malformed mutation refused. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -23,7 +21,7 @@ static int g_failed;
     }                                                                            \
 } while (0)
 
-/* ---- the pieces navmesh.c links against ------------------------------- */
+/* the pieces navmesh.c links against */
 
 static char g_log[64][512];
 static int  g_log_count;
@@ -74,9 +72,7 @@ int sh_config_get_bool(const char *key, int *out_value, unsigned int *out_flags)
     return 1;
 }
 
-/* ==================================================================== */
-/* a synthetic AAS2 3.29 file                                            */
-/* ==================================================================== */
+/* a synthetic AAS2 3.29 file */
 
 /* Lump order and record sizes are the file format; this mirrors them so the
  * test would notice if navmesh.c's table ever drifted. */
@@ -217,9 +213,7 @@ static int build_aas(aas_build *b, unsigned pad, node_mode mode, unsigned chain)
 
 static void free_aas(aas_build *b) { free(b->p); b->p = NULL; }
 
-/* ==================================================================== */
-/* synthetic maps                                                        */
-/* ==================================================================== */
+/* synthetic maps */
 
 #define BASE_MODULE "ind_dlc/ind_totally_blank_room_4x"
 
@@ -234,15 +228,13 @@ static const char *base_map(const char *module)
     return map;
 }
 
-/* Cut `payload` into base64 chunks of NAV_TEST_CHUNK characters and add it to
- * the "nav" part of `json`'s member as one set (map_carrier.h), after any set
- * the part already has. `fault` selects one of the delivery faults a hostile
- * or damaged map can present. Returns a process-heap text. */
+/* Adds `payload` as base64 chunks of NAV_TEST_CHUNK characters to the "nav" part of `json`'s member as one
+ * set (map_carrier.h), after any existing set. `fault` selects a delivery fault; returns process-heap text. */
 #define NAV_TEST_CHUNK 8192
 typedef enum {
     MAP_GOOD = 0,
     MAP_BAD_DIGEST,
-    MAP_MISSING_SHARD,      /* the last chunk left out: the payload no longer matches its digest */
+    MAP_MISSING_SHARD,      /* last chunk left out: digest mismatch */
     MAP_DUPLICATE_SHARD,    /* the set given twice: its chunks appear twice */
     MAP_UNREADABLE_CHUNK    /* a chunk that is not a string */
 } map_fault;
@@ -312,9 +304,7 @@ static char *make_map(const char *json, const char *module, const char *cls,
     return out;
 }
 
-/* ==================================================================== */
-/* the validator                                                         */
-/* ==================================================================== */
+/* the validator */
 
 static void test_validator(void)
 {
@@ -459,15 +449,11 @@ static void test_validator(void)
     free_aas(&b);
 }
 
-/* ==================================================================== */
-/* the header grammar and the serving table                              */
-/* ==================================================================== */
+/* the header grammar and the serving table */
 
-/* Keep source and cooked resource names as independent literals. Cooking
- * prefixes the whole extension with b (.baas_monster48); a wrong name silently
- * falls through to shipped navigation. */
-/* The load count and current set count expose whether a new load cleared
- * the previous map's navigation. */
+/* Source and cooked resource names are independent literals: cooking prefixes the whole extension with b
+ * (.baas_monster48), and a wrong name silently falls through to shipped navigation. The load and set counts
+ * show whether a load cleared the previous map's navigation. */
 static void test_report(void)
 {
     aas_build b;
@@ -536,7 +522,7 @@ static void test_resource_names(void)
                               &bytes, &len) == 1);
         if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
 
-        /* the spelling this shipped with, which the engine never asks for */
+        /* a spelling the engine never asks for */
         bytes = NULL; len = 0;
         CHECK(sh_navmesh_open("generated/maps/modules/ind_dlc/ind_totally_blank_room_4x/"
                               "ind_totally_blank_room_4x.bmonster48",
@@ -552,10 +538,8 @@ static void test_reader(void)
     char *map;
     size_t map_len = 0;
 
-    /* A module name with more than one '/': the header carries
-     * `category/module`, and the resource name is built from its last segment,
-     * so the parse must take five fields FROM THE RIGHT and leave the rest
-     * alone. */
+    /* A module name with more than one '/': the header carries `category/module` and the resource name uses
+     * its last segment, so the parse takes five fields from the right. */
     CHECK(build_aas(&b, 0, NODES_TREE, 0));
     sh_navmesh_test_reset();
     log_reset();
@@ -761,8 +745,8 @@ static void test_reader(void)
     }
 }
 
-/* A map whose prose merely contains an earlier build's variable header is
- * not perturbed: navigation is read from the member only. */
+/* A map whose prose merely contains a variable header is not perturbed: navigation is read from the member
+ * only. */
 static void test_prose(void)
 {
     static const char *padding =
@@ -885,7 +869,7 @@ static void test_carrier(void)
         {
             char bad[2048];
             _snprintf_s(bad, sizeof bad, _TRUNCATE, "%.*s%s", (int)(base_len - 1), base,
-                        ",\"snapmap-plus\":{\"format\":1,\"nav\":[{\"module\":\"" BASE_MODULE "\",\"class\":\"monster48\","
+                        ",\"snapmap-plus\":{\"format\":2,\"nav\":[{\"module\":\"" BASE_MODULE "\",\"class\":\"monster48\","
                         "\"data\":[\"QUJD\"]},{\"module\":\"" BASE_MODULE "\",\"class\":\"monster48\",\"digest\":"
                         "\"0123456789abcdef\",\"geom\":\"fedcba9876543210\",\"data\":7}]}}");
             sh_navmesh_test_reset();
@@ -894,7 +878,7 @@ static void test_carrier(void)
             CHECK(sh_navmesh_test_served_count() == 0 && sh_navmesh_test_held_count() == 0);
             CHECK(log_contains("does not read"));
             _snprintf_s(bad, sizeof bad, _TRUNCATE, "%.*s%s", (int)(base_len - 1), base,
-                        ",\"snapmap-plus\":{\"format\":1,\"nav\":{\"not\":\"an array\"}}}");
+                        ",\"snapmap-plus\":{\"format\":2,\"nav\":{\"not\":\"an array\"}}}");
             sh_navmesh_test_reset();
             sh_navmesh_build_from_map(bad, strlen(bad));
             CHECK(sh_navmesh_test_served_count() == 0 && sh_navmesh_test_held_count() == 0);

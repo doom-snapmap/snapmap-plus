@@ -1,12 +1,11 @@
-/* Bounded reads from the engine's full cvar registry. Unknown values refuse.
- * name_off is the idCVar name offset (SH_IDCVAR_NAME_FOR_LOOKUP); 0 means the
- * registry layout is not established and every lookup refuses. */
+/* Bounded reads from the engine's full cvar registry; unknown values refuse. name_off is the idCVar name offset
+ * (SH_IDCVAR_NAME_FOR_LOOKUP); 0 means the registry layout is not established and every lookup refuses. */
 #ifndef SH_ENGINE_CVAR_READ_H
 #define SH_ENGINE_CVAR_READ_H
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
-#include "cvar_unlock.h"   /* idCVarSystemLocal full-list offsets (verified unchanged on 13954591) */
+#include "cvar_unlock.h"   /* idCVarSystemLocal full-list offsets */
 
 static void *sh_engine_cvar_find(const void *system_slot, uint32_t name_off, const char *name)
 {
