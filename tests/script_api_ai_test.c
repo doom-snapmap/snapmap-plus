@@ -2294,6 +2294,14 @@ static void test_destructible(void)
     sh_ai_destruct_velocity(&p, org, axis, up, right_piece, 1574.8f, 31.42f, seq_rand, NULL, lin, ang);
     CHECK(fabsf(sqrtf(lin[0] * lin[0] + lin[1] * lin[1] + (lin[2] - 419.95f) * (lin[2] - 419.95f)) - 157.48f) < 0.1f);
     CHECK(lin[2] > 419.95f);                           /* id's negative pitch tilts the wing up */
+    /* A cone with zero spread follows the hit. A yaw at the edge of its range rotates that direction. */
+    memset(&p, 0, sizeof p);
+    p.preset = SH_AI_PRESET_CONE; p.lin_min = p.lin_max = 100; p.spin_min = p.spin_max = 2;
+    sh_ai_destruct_velocity(&p, org, axis, axis + 3, right_piece, 0, 0, seq_rand, NULL, lin, ang);
+    CHECK(dd_near3(lin, -100, 0, 0, 0.01f) && dd_near3(ang, -2, 0, 0, 0.001f));
+    p.yaw = 180; g_ri = 0; g_rv[0] = 1.0f;
+    sh_ai_destruct_velocity(&p, org, axis, axis + 3, right_piece, 0, 0, seq_rand, NULL, lin, ang);
+    CHECK(dd_near3(lin, 0, -100, 0, 0.01f));
     /* spherical, restrictBottomAngle 60: the draw 0 is straight up, the draw 1 is 30 degrees below the horizon */
     memset(&p, 0, sizeof p);
     p.preset = SH_AI_PRESET_SPHERICAL; p.lin_min = p.lin_max = 100; p.bottom = 60;
@@ -2310,6 +2318,9 @@ static void test_destructible(void)
     p.dir[2] = 1; p.speed = 2000; p.spin = 50;
     sh_ai_destruct_velocity(&p, org, axis, up, right_piece, 1574.8f, 31.42f, seq_rand, NULL, lin, ang);
     CHECK(dd_near3(lin, 0, 0, 1574.8f, 0.1f) && dd_near3(ang, 0, 0, 31.42f, 0.001f));
+    p.speed = -104.99f; p.spin = -2;
+    sh_ai_destruct_velocity(&p, org, axis, up, right_piece, 1574.8f, 31.42f, seq_rand, NULL, lin, ang);
+    CHECK(dd_near3(lin, 0, 0, -104.99f, 0.01f) && dd_near3(ang, 0, 0, -2, 0.001f));
     printf("-- destructible: the registry\n");
     memset(&s, 0, sizeof s);
     {
@@ -2349,16 +2360,21 @@ static void test_destructible(void)
         "api = 1\n"
         "print('dd ' .. tostring(destructible('breakable/tyrant/chest', { ignore_external = true, max_speed = 1574.8,\n"
         "  max_spin = 31.42, pieces = { { preset = 4, min = 157.48, max = 419.95, spin_min = 3, spin_max = 8,\n"
-        "  pitch = 20, yaw = 60, owner = true, dir = { 0, 0, 3 }, speed = 419.95, spin = 2 } } })))\n"));
+        "  pitch = 20, yaw = 60, owner = true, dir = { 0, 0, 3 }, speed = -104.99, spin = -2 } } })))\n"));
     CHECK(strstr(log_of("aaaaaaaa"), "dd true\n") != NULL);
     CHECK(strstr(g_events, "destructible\n") != NULL);
     CHECK(sh_ai_destructible_find(chain, 2, &got) == 1 && got.ignore_external && got.n == 1 &&
           got.piece[0].preset == 4 && got.piece[0].owner_frame && fabsf(got.piece[0].dir[2] - 3.0f) < 1e-6f &&
-          fabsf(got.max_spin - 31.42f) < 1e-4f);
+          fabsf(got.max_spin - 31.42f) < 1e-4f && fabsf(got.piece[0].speed + 104.99f) < 0.01f &&
+          got.piece[0].spin == -2);
     sh_script_map_end();
     sh_ai_destructible_reset();
-    CHECK(start("api = 1\nprint(select(2, destructible('breakable/tyrant/chest', { pieces = { { preset = 2 } } })))\n"));
-    CHECK(strstr(log_of("aaaaaaaa"), "cone preset, which Snapmap+ does not carry") != NULL);
+    CHECK(start("api = 1\nprint(destructible('breakable/tyrant/chest', { pieces = { { preset = 2, pitch = 35, yaw = 90 } } }))\n"));
+    CHECK(sh_ai_destructible_find(chain, 2, &got) && got.piece[0].pitch == 35 && got.piece[0].yaw == 90);
+    sh_script_map_end();
+    sh_ai_destructible_reset();
+    CHECK(start("api = 1\nprint(select(2, destructible('breakable/tyrant/chest', { pieces = { { preset = 5 } } })))\n"));
+    CHECK(strstr(log_of("aaaaaaaa"), "thru-square preset, which Snapmap+ does not carry") != NULL);
     CHECK(!sh_ai_destructible_find(chain, 2, &got));
     sh_script_map_end();
     g_destructible_ready = 0;

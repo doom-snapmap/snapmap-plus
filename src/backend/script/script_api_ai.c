@@ -3557,12 +3557,14 @@ void sh_ai_destruct_velocity(const sh_ai_destruct_piece *p, const float org[3], 
         dd_unit(d);
         drawn = 1;
         break;
-    case SH_AI_PRESET_CONE:                     /* the hit frame's second row, turned inside the two angles */
-        dd_angles(dd_between(rnd, rs, -p->pitch * 0.5f, p->pitch * 0.5f), dd_between(rnd, rs, -p->yaw * 0.5f, p->yaw * 0.5f),
-                  0.0f, m);
-        dd_vmul(e + 3, m, d);
+    case SH_AI_PRESET_CONE: {
+        float yaw = dd_between(rnd, rs, -p->yaw * 0.5f, p->yaw * 0.5f);
+        float pitch = dd_between(rnd, rs, -p->pitch * 0.5f, p->pitch * 0.5f);
+        dd_angles(pitch, yaw, 0.0f, m);
+        dd_vmul(e, m, d);
         drawn = 1;
         break;
+    }
     case SH_AI_PRESET_SPHERICAL: {              /* any direction above restrictBottomAngle below the horizon */
         float r = p->bottom < 0.0f ? 0.0f : (p->bottom > 90.0f ? 90.0f : p->bottom);
         dd_angles(rnd(rs) * ((90.0f - r) + 90.0f) - 90.0f, rnd(rs) * 360.0f, 0.0f, m);
@@ -3619,7 +3621,7 @@ static float dd_field(lua_State *L, int idx, const char *key, float lo, float hi
  * spin_min, spin_max (rad/s), pitch, yaw, bottom (degrees), random, owner,
  * dir = {x, y, z}, speed (units/s), spin (rad/s) }, ... } } in the
  * breakable's piece order. Call it when the script starts. Answers true, or
- * false and why (a preset the product does not carry: cone, thru square). */
+ * false and why when the preset cannot be applied. */
 static int l_destructible(lua_State *L)
 {
     const char *def = sh_script_check_name(L, 1, "destructible", 0, NULL);
@@ -3663,13 +3665,12 @@ static int l_destructible(lua_State *L)
         lua_getfield(L, top + 1, "dir");
         if (!lua_isnil(L, -1)) check_vec(L, lua_gettop(L), "destructible", p->dir);
         lua_pop(L, 1);
-        p->speed = dd_field(L, top + 1, "speed", 0.0f, 1e6f);
-        p->spin = dd_field(L, top + 1, "spin", 0.0f, 1e4f);
+        p->speed = dd_field(L, top + 1, "speed", -1e6f, 1e6f);
+        p->spin = dd_field(L, top + 1, "spin", -1e4f, 1e4f);
         lua_settop(L, top);
-        if (p->preset == SH_AI_PRESET_CONE || p->preset == SH_AI_PRESET_THRU_SQUARE) {
+        if (p->preset == SH_AI_PRESET_THRU_SQUARE) {
             lua_pushboolean(L, 0);
-            lua_pushfstring(L, "piece %d uses DOOM Eternal's %s preset, which Snapmap+ does not carry", i + 1,
-                            p->preset == SH_AI_PRESET_CONE ? "cone" : "thru-square");
+            lua_pushfstring(L, "piece %d uses DOOM Eternal's thru-square preset, which Snapmap+ does not carry", i + 1);
             return 2;
         }
     }
