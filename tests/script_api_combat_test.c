@@ -628,9 +628,27 @@ static char *fake_env(const char *env)
 static int g_sdk_logs;
 static void fake_log(const char *line) { (void)line; g_sdk_logs++; }
 
+static int active_areas, released_areas;
+static int fake_add_area(const char *name, sh_script_env_area *a)
+{
+    if (!strstr(name, "/hell")) return -1;
+    if (active_areas >= 2) return 0;
+    CHECK(a->bounds[0] == 1 && a->bounds[3] == 6 && a->bounds[1] == 2 && a->bounds[4] == 5);
+    a->decl = a;
+    active_areas++;
+    return 1;
+}
+static int fake_remove_area(sh_script_env_area *a)
+{
+    CHECK(a->decl == a && active_areas > 0);
+    active_areas--;
+    released_areas++;
+    return 1;
+}
+
 static void test_sdk_calls(void)
 {
-    sh_script_sdk_runtime rt = { fake_effect, fake_env, fake_log };
+    sh_script_sdk_runtime rt = { fake_effect, fake_env, fake_log, fake_add_area, fake_remove_area };
     sh_script_set_sdk_runtime(&rt);
     run("api = 1\n"
         "on.spawn('ai/brute', function(self)\n"
@@ -661,6 +679,16 @@ static void test_sdk_calls(void)
             "knows no environment \"nowhere\" of this mod; write one as environments/nowhere.decl");
     refused("api = 1\non.spawn('ai/brute', function(self) self:recolour{ primry = {1, 0, 0} } end)\n", "2",
             "knows no region \"primry\"; write primary");
+    run("api=1\non.map_start(function()\n"
+        "local lo, hi={x=6,y=2,z=0},{x=1,y=5,z=1}\n"
+        "local a=assert(environment_area('hell',lo,hi)); hi.z=2; assert(environment_area('hell',lo,hi))\n"
+        "hi.z=3; assert(environment_area('hell',lo,hi)==nil); assert(a:remove()); assert(a:remove())\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING && active_areas == 1 && released_areas == 1);
+    sh_script_map_end();
+    CHECK(active_areas == 0 && released_areas == 2);
+    refused("api=1\non.map_start(function() environment_area('hell',{x=0,y=1,z=0},{x=1,y=1,z=1}) end)\n",
+            "2", "two corners enclosing a box");
     sh_script_set_sdk_runtime(NULL);
     CHECK(g_sdk_logs == 0);
 }
