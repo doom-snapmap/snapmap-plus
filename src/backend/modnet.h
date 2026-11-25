@@ -1,4 +1,4 @@
-/* The backend's HTTP client for the mod store: units, their blobs and map claims, over one process-wide WinHTTP session.
+/* The backend's HTTP client for the mod store: units, their blobs and map claims using pooled WinHTTP sessions.
  * Every call blocks, so the engine's main thread must never call these; the caller picks the thread. */
 #ifndef SNAPMAP_PLUS_MODNET_H
 #define SNAPMAP_PLUS_MODNET_H
@@ -65,7 +65,7 @@ typedef struct modnet_result {
 typedef void (*modnet_progress_fn)(void *context, unsigned long long done, unsigned long long total);
 
 typedef struct modnet_io {
-    volatile long *cancel;        /* nonzero cancels, checked between chunks and requests; may be NULL */
+    volatile long *cancel;        /* checked during download waits and between upload chunks; may be NULL */
     modnet_progress_fn progress;  /* may be NULL */
     void *context;
 } modnet_io;
