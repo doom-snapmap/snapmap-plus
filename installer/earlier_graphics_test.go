@@ -95,3 +95,17 @@ func TestEarlierLayeredSource(t *testing.T) {
 		t.Fatal("layered source changed on second conversion", err)
 	}
 }
+
+func TestEarlierCompactLookHeader(t *testing.T) {
+	for _, test := range []struct{ in, want string }{
+		{"{look layered}", "{\ntype layered\n}"},
+		{"  { look particle\r\n  glow 2\r\n}\r\n", "  {\r\n type particle\r\n  glow 2\r\n}\r\n"},
+		{"\t{LoOk Particle // a colour\r\n}\r\n", "\t{\r\ntype Particle // a colour\r\n}\r\n"},
+		{"/*\n{look layered}\n*/\n{\nsubblock\n{look particle}\n}\n", "/*\n{look layered}\n*/\n{\nsubblock\n{look particle}\n}\n"},
+	} {
+		got, err := upgradeEarlierMaterial([]byte(test.in))
+		if err != nil || string(got) != test.want {
+			t.Errorf("%q yielded %q, %v; want %q", test.in, got, err, test.want)
+		}
+	}
+}
