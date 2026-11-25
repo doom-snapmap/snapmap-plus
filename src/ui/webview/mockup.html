@@ -2858,7 +2858,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // A Load / Place answer about mods: 3 the download is being asked for, -7 refused. Others are null.
   function pfModsLoadToast(d) {
     if (!d) return null;
-    if (d.result === 3) return {text: d.message || ('Checking online for the mods "' + d.name + '" needs'), level: 'ok'};
+    if (d.result === 3) return {text: d.message || ('Preparing mod content for "' + d.name + '"'), level: 'ok'};
     if (d.result === -7) return {text: d.message || ('"' + d.name + '" was not placed: its mods are not installed'), level: 'warn'};
     return null;
   }

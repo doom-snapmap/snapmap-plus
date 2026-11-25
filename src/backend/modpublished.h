@@ -130,7 +130,7 @@ typedef struct sh_modpub_ops {
      * (malloc'd; cause may be NULL) when it is not served. `subject` is "map" or "prefab" (NULL: "map"). Changes
      * nothing. */
     int  (*row_state)(void *c, const sh_modmanifest_row *row, const char *subject, char **cause);
-    int  (*rescan)(void *c);
+    int  (*rescan)(void *c);   /* rebuild the file index on the fetch worker, before publishing completion */
     /* Activate the rows' mods through the builds that serve them
      * (sh_modmanifest_activate). */
     int  (*activate)(void *c, const sh_modmanifest_list *rows);

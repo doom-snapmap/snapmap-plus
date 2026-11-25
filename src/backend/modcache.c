@@ -32,7 +32,10 @@ static void *g_local_ctx;
 static sh_mb_resolver g_resolver;
 static int g_resolver_set;
 static int (*g_rescan)(void);
+static sh_cache_library_fn g_library;
+static SRWLOCK g_library_lock = SRWLOCK_INIT;
 static const char *(*g_store_root)(void);
+static __declspec(thread) int t_published_probe;
 
 static void mc_log(const char *line) { backend_log(line); }
 static void mc_logf(const char *fmt, ...)
@@ -81,7 +84,12 @@ void sh_cache_set_resolver(const sh_mb_resolver *resolver)
     else { memset(&g_resolver, 0, sizeof g_resolver); g_resolver_set = 0; }
 }
 
+void sh_cache_published_probe(int on) { t_published_probe = on; }
+
 void sh_cache_set_rescan(int (*rescan)(void)) { g_rescan = rescan; }
+void sh_cache_set_library(sh_cache_library_fn fn) { g_library = fn; }
+void sh_cache_library_import_begin(void) { AcquireSRWLockShared(&g_library_lock); }
+void sh_cache_library_import_end(void) { ReleaseSRWLockShared(&g_library_lock); }
 
 int sh_cache_composition_hash(const char *salt, const char *const *units, size_t count, char out[SH_CACHE_HASH_HEX + 1])
 {
@@ -103,6 +111,8 @@ static int mc_mkdirs(const char *path)
     wchar_t *w = sh_mb_wpath(path), *p;
     int ok = 1;
     if (!w) return 0;
+    DWORD attr = GetFileAttributesW(w);
+    if (attr != INVALID_FILE_ATTRIBUTES) { free(w); return (attr & FILE_ATTRIBUTE_DIRECTORY) != 0; }
     for (p = w + 1; *p; p++) {
         if (*p != L'\\') continue;
         if (p > w && p[-1] == L':') continue;
@@ -282,17 +292,21 @@ int sh_cache_put_blob(const char *from, const char *sha, unsigned long long size
     return ok;
 }
 
-int sh_cache_import_blob(const char *sha, const void *bytes, size_t len)
+int sh_cache_import_blob(const char *sha, const void *bytes, size_t len, int *damaged)
 {
-    char *dir, *path;
+    char have[SH_MB_HASH_HEX + 1], *dir, *dest;
+    wchar_t *w;
     int ok;
+    *damaged = 0;
     if (!mc_hex64(sha)) return 0;
-    dir = mc_path("partial");
-    path = dir ? sh_textf("%s\\%s.import-%lu.part", dir, sha, GetCurrentThreadId()) : NULL;
-    ok = path && mc_mkdirs(dir) && mc_write(path, bytes, len) && sh_cache_put_blob(path, sha, len);
-    if (!ok && path) mc_delete(path);
+    sh_mb_sha256_hex(bytes, len, have);
+    if (strcmp(have, sha)) { *damaged = 1; return 0; }
+    dir = mc_path("files\\%.2s", sha);
+    dest = dir ? sh_textf("%s\\%s", dir, sha) : NULL;
+    ok = dest && mc_mkdirs(dir) && (mc_exists(dest, NULL) || mc_write(dest, bytes, len) || mc_exists(dest, NULL));
+    if (ok && (w = sh_mb_wpath(dest)) != NULL) { SetFileAttributesW(w, FILE_ATTRIBUTE_READONLY); free(w); }
+    free(dest);
     free(dir);
-    free(path);
     return ok;
 }
 
@@ -309,6 +323,14 @@ int sh_cache_put_manifest(const char *hash, const void *bytes, size_t len)
     free(dir);
     free(path);
     return ok;
+}
+
+int sh_cache_manifest_exists(const char *hash)
+{
+    char *path = mc_hex64(hash) ? mc_path("units\\%s.json", hash) : NULL;
+    int here = path && mc_exists(path, NULL);
+    free(path);
+    return here;
 }
 
 char *sh_cache_manifest(const char *hash, size_t *len)
@@ -504,7 +526,7 @@ static char *mc_source_of(const char *sha, unsigned long long size)
 
 char *sh_cache_file_source(const char *sha, unsigned long long size) { return mc_source_of(sha, size); }
 
-typedef struct mc_file { char *path; char sha[SH_MB_HASH_HEX + 1]; unsigned long long size; } mc_file;
+typedef struct mc_file { char *path, *source; char sha[SH_MB_HASH_HEX + 1]; unsigned long long size; } mc_file;
 typedef struct mc_unit {
     char hash[SH_MB_HASH_HEX + 1];
     char *bytes; size_t len;          /* the manifest, when here */
@@ -513,6 +535,7 @@ typedef struct mc_unit {
     int format;
     int state;                        /* 1 present, 0 files missing, -1 no manifest, -2 unknown format */
     int cause;                        /* SH_CACHE_ABSENT_* when not present */
+    size_t nmissing;
     unsigned long long bytes_total, bytes_missing;
 } mc_unit;
 
@@ -520,7 +543,7 @@ static void mc_unit_free(mc_unit *u)
 {
     size_t i;
     if (!u) return;
-    for (i = 0; i < u->nfiles; i++) free(u->files[i].path);
+    for (i = 0; i < u->nfiles; i++) { free(u->files[i].path); free(u->files[i].source); }
     free(u->files);
     free(u->bytes);
     free(u->root);
@@ -568,25 +591,19 @@ static void mc_unit_load(mc_unit *u, const char *hash)
     if (u->format != SH_UNIT_FORMAT) { u->state = -2; return; }
     u->state = 1;
     for (i = 0; i < u->nfiles; i++) {
-        char *src = mc_source_of(u->files[i].sha, u->files[i].size);
-        if (!src) { u->state = 0; u->bytes_missing += u->files[i].size; }
-        free(src);
+        mc_file *f = &u->files[i];
+        f->source = mc_source_of(f->sha, f->size);
+        if (!f->source) { u->state = 0; u->nmissing++; u->bytes_missing += f->size; }
     }
 }
 
 int sh_cache_unit_state(const char *hash, size_t *missing, unsigned long long *missing_bytes, unsigned long long *bytes)
 {
     mc_unit u;
-    size_t i, n = 0;
     int state;
     if (!mc_hex64(hash)) return -1;
     mc_unit_load(&u, hash);
-    for (i = 0; u.state == 0 && i < u.nfiles; i++) {
-        char *src = mc_source_of(u.files[i].sha, u.files[i].size);
-        if (!src) n++;
-        free(src);
-    }
-    if (missing) *missing = n;
+    if (missing) *missing = u.nmissing;
     if (missing_bytes) *missing_bytes = u.bytes_missing;
     if (bytes) *bytes = u.bytes_total;
     state = u.state;
@@ -1051,7 +1068,7 @@ static char *mc_compose_source(void *context, const char *path)
     for (u = 0; u < s->n; u++) {
         if (s->units[u].state != 1) continue;
         for (f = 0; f < s->units[u].nfiles; f++)
-            if (!strcmp(s->units[u].files[f].path, path)) return mc_source_of(s->units[u].files[f].sha, s->units[u].files[f].size);
+            if (!strcmp(s->units[u].files[f].path, path)) return sh_text(s->units[u].files[f].source);
     }
     return NULL;
 }
@@ -1588,7 +1605,9 @@ static void mc_side_causes(const char *chash, mc_unit *units, size_t n)
  * the composition on disk recorded, else `cause` (SH_CACHE_ABSENT_OFFLINE: nothing asked). A composition that is not
  * made again keeps its sidecar, rewritten only when a fetch brought causes. */
 static int mc_product_ok(const mc_unit *u);
-static int mc_compose(const char *chash, const int *causes, int cause, char **why, int *built)
+enum mc_compose_mode { MC_LOAD, MC_PREFAB, MC_PUBLISHED_PROBE };
+
+static int mc_compose(const char *chash, const int *causes, int cause, char **why, int *built, enum mc_compose_mode mode)
 {
     mc_row snapshot;
     mc_unit *units = NULL;
@@ -1638,12 +1657,22 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
     if (!snapshot.chash[0]) { if (why) *why = sh_text("the map's row is not known"); return 0; }
     if (snapshot.n && (!snapshot.units || !snapshot.roots)) { reason = sh_text("out of memory"); goto done; }
 
+    here = sh_cache_composed(chash, &had_complete);
+    int check_modules = snapshot.modules && strcmp(snapshot.modules, "[]");
+    if (here && had_complete && !check_modules) { ok = 1; goto record; }
+    if (here && !had_complete && mode == MC_PUBLISHED_PROBE) { ok = 1; goto done; }
+
     units = snapshot.n ? (mc_unit *)calloc(snapshot.n, sizeof *units) : NULL;
     manifests = snapshot.n ? (const char **)calloc(snapshot.n, sizeof *manifests) : NULL;
     lens = snapshot.n ? (size_t *)calloc(snapshot.n, sizeof *lens) : NULL;
     if (snapshot.n && (!units || !manifests || !lens)) { reason = sh_text("out of memory"); goto done; }
     for (i = 0; i < snapshot.n; i++) {
-        mc_unit_load(&units[i], snapshot.units[i]);
+        /* The engine first reads published map metadata on its main thread. Its launch worker prepares the full
+         * row before Play; this probe only needs the same safe palette used by a player with an empty cache. */
+        if (mode == MC_PUBLISHED_PROBE && !had_complete) {
+            strcpy_s(units[i].hash, sizeof units[i].hash, snapshot.units[i]);
+            units[i].state = -1;
+        } else mc_unit_load(&units[i], snapshot.units[i]);
         if (units[i].state == 1 && !mc_product_ok(&units[i])) units[i].state = -2;
         if (units[i].state == 1) { manifests[nm] = units[i].bytes; lens[nm] = units[i].len; nm++; continue; }
         complete = 0;
@@ -1653,13 +1682,21 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
     /* A row of no units (a local row whose folder is not here): every object the map places under its namespace
      * stands in. */
     if (!snapshot.n) complete = 0;
-    here = sh_cache_composed(chash, &had_complete);
-    mc_module_marks(units, snapshot.n, snapshot.salt, snapshot.modules);
+    if (mode != MC_PREFAB) mc_module_marks(units, snapshot.n, snapshot.salt, snapshot.modules);
+    if (here && had_complete) { complete = ok = 1; goto record; }
+    if (mode == MC_PREFAB && !complete) {
+        for (i = 0; i < snapshot.n; i++) if (units[i].state != 1) {
+            reason = units[i].state == -2 ? sh_textf("%s needs a newer Snapmap+", mc_mod_label(snapshot.name, snapshot.salt))
+                                         : sh_textf("%s is incomplete on this computer. Import the prefab's .zip export again",
+                                                    mc_mod_label(snapshot.name, snapshot.salt));
+            break;
+        }
+        goto done;
+    }
     if (!complete) {
         if (here) mc_side_causes(chash, units, snapshot.n);
         for (i = 0; i < snapshot.n; i++) if (units[i].state != 1 && !units[i].cause) units[i].cause = cause;
     }
-    if (here && had_complete) { ok = 1; complete = 1; goto record; }   /* the same units compose the same bytes */
     if (here && !complete &&
         (snapshot.n ? mc_side_same(chash, units, snapshot.n) : mc_side_same_placed(chash, &snapshot))) {   /* nothing new */
         if (causes) {
@@ -1776,6 +1813,7 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
     if (built) *built = 1;
 
 record:
+    if (mode == MC_PREFAB) goto done;
     /* What the load's notice names: the objects of the units that are not here. */
     AcquireSRWLockExclusive(&g_lock);
     {
@@ -1840,7 +1878,23 @@ done:
 
 int sh_cache_compose_now(const char *chash, int cause, char **why)
 {
-    return mc_compose(chash, NULL, cause ? cause : SH_CACHE_ABSENT_OFFLINE, why, NULL);
+    return mc_compose(chash, NULL, cause ? cause : SH_CACHE_ABSENT_OFFLINE, why, NULL, MC_LOAD);
+}
+
+int sh_cache_prepare_prefab(const sh_modmanifest_list *rows, char **why)
+{
+    int made = 0, ok = 1;
+    if (why) *why = NULL;
+    for (size_t i = 0; rows && i < rows->count && ok; i++) {
+        int built = 0;
+        ok = mc_compose(rows->rows[i].build, NULL, 0, why, &built, MC_PREFAB);
+        made |= built;
+    }
+    if ((made || ok) && g_rescan && g_rescan() < 0 && ok) {
+        if (why) *why = sh_text("the mod content could not be indexed");
+        ok = 0;
+    }
+    return ok;
 }
 
 /* A failure's absence cause. */
@@ -2168,7 +2222,7 @@ int sh_cache_prepare(const char *chash, const modnet_io *io)
     int *states = NULL, *causes = NULL;
     size_t i, nwant = 0;
     modnet_result r;
-    int code = MODNET_OK, ok;
+    int code = MODNET_OK, ok, check_modules = 0;
     char *why = NULL;
 
     memset(&snapshot, 0, sizeof snapshot);
@@ -2176,6 +2230,7 @@ int sh_cache_prepare(const char *chash, const modnet_io *io)
     {
         const mc_row *row = mc_row_find_locked(chash);
         if (row) {
+            check_modules = row->modules && strcmp(row->modules, "[]");
             snapshot.n = row->n;
             snapshot.units = row->n ? calloc(row->n, sizeof *snapshot.units) : NULL;
             for (i = 0; snapshot.units && i < row->n; i++) strcpy_s(snapshot.units[i], sizeof snapshot.units[i], row->units[i]);
@@ -2184,6 +2239,11 @@ int sh_cache_prepare(const char *chash, const modnet_io *io)
     }
     ReleaseSRWLockShared(&g_lock);
     if (!snapshot.chash[0]) return -1;
+    if (!check_modules && sh_cache_composed(chash, &ok) && ok) {
+        ok = mc_compose(chash, NULL, SH_CACHE_ABSENT_OFFLINE, &why, NULL, MC_LOAD);
+        code = ok ? MODNET_OK : -1;
+        goto done;
+    }
     causes = snapshot.n ? (int *)calloc(snapshot.n, sizeof *causes) : NULL;
     want = snapshot.n ? (const char **)calloc(snapshot.n, sizeof *want) : NULL;
     states = snapshot.n ? (int *)calloc(snapshot.n, sizeof *states) : NULL;
@@ -2236,7 +2296,7 @@ int sh_cache_prepare(const char *chash, const modnet_io *io)
         }
         free(todo);
     }
-    ok = mc_compose(chash, causes, SH_CACHE_ABSENT_UNREACHABLE, &why, NULL);
+    ok = mc_compose(chash, causes, SH_CACHE_ABSENT_UNREACHABLE, &why, NULL, MC_LOAD);
     if (!ok) { mc_logf("MODS: content: the map's row could not be composed: %s", why ? why : "?"); code = -1; }
 done:
     free(why);
@@ -2261,7 +2321,8 @@ void sh_cache_on_load(const sh_modmanifest_list *rows, char *const *placed, size
         int built = 0;
         if (!rows->rows[i].pinned) continue;
         /* Cheap when nothing changed; a stand-in composition whose units are all here now is composed in full. */
-        if (mc_compose(rows->rows[i].build, NULL, SH_CACHE_ABSENT_OFFLINE, &why, &built) && built) made++;
+        enum mc_compose_mode mode = t_published_probe && rows->rows[i].unit_count ? MC_PUBLISHED_PROBE : MC_LOAD;
+        if (mc_compose(rows->rows[i].build, NULL, SH_CACHE_ABSENT_OFFLINE, &why, &built, mode) && built) made++;
         free(why);
     }
     if (made && g_rescan) (void)g_rescan();
@@ -2434,8 +2495,19 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
     sh_modmanifest_list cur;
     memset(&st, 0, sizeof st);
     memset(&kept, 0, sizeof kept);
-    /* The references. */
+    /* Import writes a library entry and its blobs as one reference for collection. */
+    AcquireSRWLockExclusive(&g_library_lock);
     mc_kept_read(&kept, drop_played);
+    if (g_library) {
+        sh_modmanifest_list library = {0};
+        if (!g_library(&library)) kept.unreadable++;
+        for (i = 0; i < library.count; i++) {
+            const sh_modmanifest_row *r = &library.rows[i];
+            mc_set_add(&kept.comps, r->build);
+            for (size_t k = 0; k < r->unit_count; k++) mc_set_add(&kept.units, r->units[k]);
+        }
+        sh_modmanifest_list_free(&library);
+    }
     memset(&cur, 0, sizeof cur);
     if (sh_modmanifest_current(&cur)) {
         for (i = 0; i < cur.count; i++) {
@@ -2456,8 +2528,8 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
     st.maps = kept.maps;
     if (kept.unreadable) {
         /* A kept map that does not read may use any unit here: nothing is removed until it reads. */
-        mc_logf("MODS: content: the sweep removed nothing: %zu kept map(s) or map folder(s) could not be read, so what "
-                "they use is not known", kept.unreadable);
+        mc_logf("MODS: content: the sweep removed nothing because it could not read every kept map or prefab (%zu unreadable)",
+                kept.unreadable);
         st.unreadable = kept.unreadable;
         goto done;
     }
@@ -2543,6 +2615,7 @@ int sh_cache_sweep(int drop_played, const char *const *held, size_t held_count, 
             st.bytes_removed, st.served_removed, st.partials_removed,
             drop_played ? "; content of maps only played was removed" : "");
 done:
+    ReleaseSRWLockExclusive(&g_library_lock);
     if (out) *out = st;
     free(kept.units.v);
     free(kept.comps.v);

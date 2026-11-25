@@ -113,8 +113,7 @@ int   sh_prefab_mods_meta_write(const char *body, size_t len, const char *path);
 int   sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanifest_list *rows, const char *name,
                                   int *seq, char **msg);
 
-/* A held placement: 2 waiting, 1 ready (its mods are installed and in the
- * open map: place it now), 0 refused or dropped. Any thread. */
+/* A held placement: 2 preparing local files, 1 ready to join the open map, 0 refused or dropped. Any thread. */
 int   sh_prefab_mods_poll(int seq);
 
 /* Export the prefab at prefab_path (a sidecar beside the prefab refuses it) as `name` to zip_utf8. Rows come from
@@ -124,8 +123,7 @@ int   sh_prefab_mods_export(const char *prefab_path, const char *name, const cha
                             char **msg);
 
 /* Import a prefab's export (a .zip, or a .json inside an extracted export folder) into prefabs_dir: add the
- * prefab under the .json's file name, then install the carried mod folders nothing serves; a failed install
- * takes the prefab out again. The same bytes are left alone, other bytes get the next free "<name> (N)". 1
+ * prefab under the .json's file name and verify its carried content in the cache. A failed import removes the new prefab. The same bytes are left alone, other bytes get the next free "<name> (N)". 1
  * added, 0 already there, -1 refused (nothing stays); name_out receives the library name. */
 int   sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char **name_out, char **msg);
 
@@ -151,11 +149,13 @@ typedef struct sh_prefab_mods_ops {
      * manifest, declared; a salt the map uses at another version is left to it when it carries every object the
      * prefab places, else *cause (malloc'd, a clause after "was not placed: "). 1 used, -1 refused. Main thread. */
     int  (*use_pinned)(const sh_modmanifest_list *pinned, char **cause);
+    unsigned long long (*editor_context)(void);   /* changes on a map parse, or on leaving the editor */
 } sh_prefab_mods_ops;
 void  sh_prefab_mods_bind(const sh_prefab_mods_ops *ops);
 
 /* Where the console finds prefabs (tests; NULL restores %LOCALAPPDATA%\snapmap-plus\prefabs\). */
 void  sh_prefab_mods_set_root(const char *dir);
+int   sh_prefab_mods_kept(sh_modmanifest_list *rows);
 
 /* `sh_prefab`: argv[0] is the verb (NULL or "help" prints the verbs):
  *   mods "<name>"                 the prefab's mods and whether each is installed, in

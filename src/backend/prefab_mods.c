@@ -1,6 +1,7 @@
 /* prefab_mods.c -- see prefab_mods.h. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -163,7 +164,7 @@ int sh_prefab_mods_closure(const char *text, size_t len, sh_modmanifest_list *ou
     return (int)out->count;
 }
 
-int sh_prefab_mods_view_rows(const char *view, size_t len, sh_modmanifest_list *out)
+static int pm_view_rows(const char *view, size_t len, sh_modmanifest_list *out, int strict)
 {
     mpj *root;
     const mpj *arr;
@@ -189,21 +190,31 @@ int sh_prefab_mods_view_rows(const char *view, size_t len, sh_modmanifest_list *
         char err[160];
         size_t tl = 0;
         char *text;
-        if (!arr->items[i] || arr->items[i]->type != MPJ_OBJ) continue;
+        if (!arr->items[i] || arr->items[i]->type != MPJ_OBJ) {
+            if (strict) { mpj_free(root); return -1; }
+            continue;
+        }
         text = mpj_dump(arr->items[i], &tl);
         if (text && sh_modmanifest_parse_value(text, tl, &row, err, sizeof err)) {
             sh_modmanifest_row *have = pm_find(out, row.salt, row.build);
-            if (!have) (void)sh_modmanifest_list_add(out, &row);
-            else {
+            if (!have && !sh_modmanifest_list_add(out, &row) && strict) {
+                sh_modmanifest_row_free(&row); free(text); mpj_free(root); return -1;
+            }
+            if (have) {
                 size_t k;
                 for (k = 0; k < row.name_count; k++) (void)sh_modmanifest_row_add_name(have, row.names[k]);
             }
             sh_modmanifest_row_free(&row);
-        }
+        } else if (strict) { free(text); mpj_free(root); return -1; }
         free(text);
     }
     mpj_free(root);
     return (int)out->count;
+}
+
+int sh_prefab_mods_view_rows(const char *view, size_t len, sh_modmanifest_list *out)
+{
+    return pm_view_rows(view, len, out, 0);
 }
 
 static void pm_obj_remove(mpj *obj, const char *key)
@@ -309,7 +320,9 @@ static int pm_row_state(const sh_modmanifest_row *row, char **cause)
 static int pm_pinned_here(const sh_modmanifest_row *row)
 {
     size_t k;
+    int complete = 0;
     if (!row->pinned || !row->unit_count) return 0;
+    if (sh_cache_composed(row->build, &complete) && complete) return 1;
     for (k = 0; k < row->unit_count; k++) if (sh_cache_unit_state(row->units[k], NULL, NULL, NULL) != 1) return 0;
     return 1;
 }
@@ -319,6 +332,17 @@ static int pm_installed(const sh_modmanifest_row *row)
 {
     if (row->pinned) return pm_pinned_here(row);
     return pm_row_state(row, NULL) == SH_MODPUB_ROW_SERVED;
+}
+
+/* The placement worker verifies every carried file. The caller can refuse a missing manifest immediately. */
+static int pm_place_available(const sh_modmanifest_row *row, int worker)
+{
+    if (!worker || !row->pinned) return pm_installed(row);
+    int complete = 0;
+    if (sh_cache_composed(row->build, &complete) && complete) return 1;
+    for (size_t k = 0; k < row->unit_count; k++)
+        if (!sh_cache_manifest_exists(row->units[k])) return 0;
+    return row->unit_count > 0;
 }
 
 static const char *pm_state_word(int state)
@@ -737,17 +761,109 @@ static void pm_prepare(const sh_modmanifest_list *rows, const char *name)
     }
 }
 
-int sh_prefab_mods_poll(int seq) { (void)seq; return 0; }   /* nothing is held: a placement never waits */
+typedef struct pm_preparation {
+    HANDLE thread;
+    int seq;
+    unsigned long long editor;
+    sh_modmanifest_list rows;
+    char *why;
+} pm_preparation;
+
+static SRWLOCK g_prepare_lock = SRWLOCK_INIT;
+static pm_preparation *g_preparing;
+static int g_prepare_seq, g_ready_seq;
+static unsigned long long g_ready_editor;
+
+static DWORD WINAPI pm_prepare_files(void *context)
+{
+    pm_preparation *job = (pm_preparation *)context;
+    if (!sh_cache_prepare_prefab(&job->rows, &job->why)) return 0;
+    for (size_t i = 0; i < job->rows.count; i++) {
+        if (sh_modserve_row_build(&job->rows.rows[i], NULL)) continue;
+        (void)sh_modserve_row_served_for(&job->rows.rows[i], "prefab", &job->why);
+        return 0;
+    }
+    return 1;
+}
+
+static void pm_preparation_free(pm_preparation *job)
+{
+    if (job->thread) CloseHandle(job->thread);
+    sh_modmanifest_list_free(&job->rows);
+    free(job->why);
+    free(job);
+}
+
+static int pm_start_preparation(sh_modmanifest_list *rows, int *seq, char **cause)
+{
+    const sh_prefab_mods_ops *o = pm_ops();
+    pm_preparation *job = calloc(1, sizeof *job);
+    int result = -1;
+    if (!job) { pm_msg(cause, "Snapmap+ ran out of memory"); return -1; }
+    AcquireSRWLockExclusive(&g_prepare_lock);
+    if (g_preparing && WaitForSingleObject(g_preparing->thread, 0) == WAIT_OBJECT_0) {
+        pm_preparation_free(g_preparing);
+        g_preparing = NULL;
+    }
+    if (g_preparing) {
+        pm_msg(cause, "another prefab is being prepared");
+    } else {
+        job->rows = *rows;
+        memset(rows, 0, sizeof *rows);
+        job->editor = o->editor_context ? o->editor_context() : 0;
+        job->thread = CreateThread(NULL, 0, pm_prepare_files, job, 0, NULL);
+        if (job->thread) {
+            g_prepare_seq = g_prepare_seq == INT_MAX ? 1 : g_prepare_seq + 1;
+            *seq = job->seq = g_prepare_seq;
+            g_ready_seq = 0;
+            g_preparing = job;
+            job = NULL;
+            result = SH_PREFAB_MODS_HELD;
+        } else pm_msg(cause, "Snapmap+ could not start preparing its mod content");
+    }
+    ReleaseSRWLockExclusive(&g_prepare_lock);
+    if (job) pm_preparation_free(job);
+    return result;
+}
+
+static int pm_poll(int seq, char **msg)
+{
+    const sh_prefab_mods_ops *o = pm_ops();
+    pm_preparation *job;
+    DWORD code = 0;
+    int result = 0;
+    AcquireSRWLockExclusive(&g_prepare_lock);
+    job = g_preparing;
+    if (job && job->seq == seq) {
+        if (WaitForSingleObject(job->thread, 0) == WAIT_TIMEOUT) result = SH_PREFAB_MODS_HELD;
+        else {
+            if (o->editor_context && o->editor_context() != job->editor)
+                pm_msg(msg, "The map changed while the prefab was being prepared. Place it in the open map when ready.");
+            else if (GetExitCodeThread(job->thread, &code) && code == 1) {
+                g_ready_seq = job->seq;
+                g_ready_editor = job->editor;
+                result = SH_PREFAB_MODS_PLACE;
+            }
+            else pm_msg(msg, "The prefab could not be placed: %s.", job->why ? job->why : "its content could not be prepared");
+            g_preparing = NULL;
+            pm_preparation_free(job);
+        }
+    }
+    ReleaseSRWLockExclusive(&g_prepare_lock);
+    return result;
+}
+
+int sh_prefab_mods_poll(int seq) { return pm_poll(seq, NULL); }
 
 /* The refusal of a prefab whose content is not here: console line, toast, the tab's message. Nothing is fetched;
  * a prefab carries its units in its .zip export. */
-static void pm_refuse_unasked(const char *name, const sh_modmanifest_list *rows, char **msg)
+static void pm_refuse_unasked(const char *name, const sh_modmanifest_list *rows, int worker, char **msg)
 {
     const sh_prefab_mods_ops *o = pm_ops();
     pm_buf b = { 0 };
     size_t i, n = 0;
     for (i = 0; i < rows->count; i++) {
-        if (pm_installed(&rows->rows[i])) continue;
+        if (pm_place_available(&rows->rows[i], worker)) continue;
         pm_puts(&b, n ? ", " : "");
         pm_puts(&b, sh_prefab_mods_label(&rows->rows[i]));
         n++;
@@ -761,7 +877,7 @@ static void pm_refuse_unasked(const char *name, const sh_modmanifest_list *rows,
     if (o->toast && msg && *msg) o->toast(*msg);
 }
 
-static int pm_join_pinned(const sh_modmanifest_list *pinned, char **cause)
+static int pm_join_pinned(const sh_modmanifest_list *pinned, int *seq, char **cause)
 {
     sh_modmanifest_list cur, use;
     char **names = NULL;
@@ -798,13 +914,24 @@ static int pm_join_pinned(const sh_modmanifest_list *pinned, char **cause)
         }
     }
     if (r > 0 && use.count) {
-        sh_cache_on_load(&use, names, n);   /* composes each row from the cache, then the serving index again */
+        int cold = 0;
+        for (i = 0; i < use.count && !cold; i++) {
+            int complete = 0;
+            cold = !sh_cache_composed(use.rows[i].build, &complete) || !complete || !sh_modserve_row_build(&use.rows[i], NULL);
+        }
+        if (cold && seq) {
+            sh_cache_note_rows(&use, names, n);
+            r = pm_start_preparation(&use, seq, cause);
+            goto done;
+        }
+        sh_cache_on_load(&use, names, n);
         for (i = 0; i < use.count && r > 0; i++) if (sh_modmanifest_current_add_row(&use.rows[i]) < 0) r = -1;
         if (r > 0) {
             (void)sh_modui_scope_refresh("prefab");
             pm_logf("PREFABS: %u row(s) of the prefab's own content joined the map", (unsigned)use.count);
         } else pm_msg(cause, "Snapmap+ ran out of memory");
     }
+done:
     free(names);
     sh_modmanifest_list_free(&use);
     sh_modmanifest_list_free(&cur);
@@ -848,9 +975,10 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
         free(engine);
     }
     /* Every row is a local folder here, or units the prefab's import put in the content cache. */
-    for (i = 0; i < rows->count; i++) if (!pm_installed(&rows->rows[i])) missing++;
+    int worker = seq && !o->use_pinned;
+    for (i = 0; i < rows->count; i++) if (!pm_place_available(&rows->rows[i], worker)) missing++;
     if (missing) {
-        pm_refuse_unasked(name, rows, msg);
+        pm_refuse_unasked(name, rows, worker, msg);
         return SH_PREFAB_MODS_REFUSED;
     }
     {
@@ -862,8 +990,13 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
         memset(&local, 0, sizeof local);
         for (i = 0; i < rows->count; i++)
             (void)sh_modmanifest_list_add(rows->rows[i].pinned ? &pinned : &local, &rows->rows[i]);
-        int (*join)(const sh_modmanifest_list *, char **) = o->use_pinned ? o->use_pinned : pm_join_pinned;
-        r = pinned.count ? join(&pinned, &why) : 1;
+        r = !pinned.count ? 1 : o->use_pinned ? o->use_pinned(&pinned, &why) : pm_join_pinned(&pinned, seq, &why);
+        if (r == SH_PREFAB_MODS_HELD) {
+            pm_msg(msg, "Preparing mod content for %s.", name && name[0] ? name : "the prefab");
+            sh_modmanifest_list_free(&pinned);
+            sh_modmanifest_list_free(&local);
+            return r;
+        }
         if (r < 0) {
             pm_msg(msg, "Prefab %s was not placed: %s.", name && name[0] ? name : "prefab",
                    why ? why : "its mod content cannot be used in this map");
@@ -1144,13 +1277,25 @@ typedef struct pm_resolve_job {
     size_t len;
     const sh_modmanifest_list *rows;
     const char *name;
-    int result, seq;
+    int result, seq, resume;
     char *msg;               /* malloc'd, or NULL */
 } pm_resolve_job;
 
 static int pm_resolve_job_main(void *ctx)
 {
     pm_resolve_job *j = (pm_resolve_job *)ctx;
+    if (j->resume) {
+        const sh_prefab_mods_ops *o = pm_ops();
+        AcquireSRWLockExclusive(&g_prepare_lock);
+        int current = j->resume == g_ready_seq && (!o->editor_context || o->editor_context() == g_ready_editor);
+        if (j->resume == g_ready_seq) g_ready_seq = 0;
+        ReleaseSRWLockExclusive(&g_prepare_lock);
+        if (!current) {
+            j->result = SH_PREFAB_MODS_REFUSED;
+            pm_msg(&j->msg, "The map changed while the prefab was being prepared. Place it in the open map when ready.");
+            return 1;
+        }
+    }
     j->result = sh_prefab_mods_resolve_main(j->text, j->len, j->rows, j->name, &j->seq, &j->msg);
     return 1;
 }
@@ -1198,7 +1343,7 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
         sh_modmanifest_list rows;
         pm_resolve_job job;
         const char *nm = call->name && call->name[0] ? call->name : "prefab";
-        int n;
+        int n, resume = call->seq;
         pm_out(call, "");
         call->seq = 0;
         /* The block's rows. A sidecar-form prefab (or rows naming "id" and "bundle") is refused. */
@@ -1214,6 +1359,7 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
         /* No rows: the placement goes on without mods. */
         if (n <= 0) { sh_modmanifest_list_free(&rows); return SH_PREFAB_MODS_PLACE; }
         memset(&job, 0, sizeof job);
+        job.resume = resume;
         job.text = call->text;
         job.len = call->text_len;
         job.rows = &rows;
@@ -1230,8 +1376,13 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
         free(job.msg);
         return job.result;
     }
-    case SH_MODULE_PREFAB_MODS_POLL:
-        return sh_prefab_mods_poll(call->seq);
+    case SH_MODULE_PREFAB_MODS_POLL: {
+        char *msg = NULL;
+        int result = pm_poll(call->seq, &msg);
+        pm_out(call, msg);
+        free(msg);
+        return result;
+    }
     case SH_MODULE_PREFAB_META_WRITE:
         return sh_prefab_mods_meta_write(call->text, call->text_len, call->path);
     case SH_MODULE_PREFAB_EXPORT: {
@@ -1287,6 +1438,65 @@ static char *pm_root(void)
 
 /* "<name>" or "<folder>/<name>" (UTF-8): the root first, then each folder.
  * 1 with *path, *name (each malloc'd). */
+/* A prefab is kept by its file, including one in a library subfolder. Never follow a junction during collection. */
+static int pm_kept_folder(const wchar_t *dir, sh_modmanifest_list *kept)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *pattern = sh_wtextf(L"%s\\*", dir);
+    HANDLE h = pattern ? FindFirstFileW(pattern, &fd) : INVALID_HANDLE_VALUE;
+    DWORD error = h == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    int ok = pattern != NULL;
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return ok && (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND);
+    do {
+        const wchar_t *ext = wcsrchr(fd.cFileName, L'.');
+        wchar_t *path;
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { ok = 0; break; }
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && (!ext || _wcsicmp(ext, L".json"))) continue;
+        size_t n = wcslen(fd.cFileName);
+        if (n >= 10 && !_wcsicmp(fd.cFileName + n - 10, L".meta.json")) continue;
+        path = sh_wtextf(L"%s\\%s", dir, fd.cFileName);
+        if (!path) { ok = 0; break; }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ok = pm_kept_folder(path, kept);
+        else {
+            char *p = sh_mb_utf8(path);
+            size_t len = 0;
+            char *text = p ? sh_prefab_mods_read_file(p, &len) : NULL;
+            sh_prefab_block_span span;
+            int found = text ? sh_prefab_block_find(text, len, &span) : -1;
+            if (found < 0) ok = 0;
+            if (found == 1) {
+                sh_modmanifest_list rows = {0};
+                int count = pm_view_rows(text + span.value_at, span.value_len, &rows, 1);
+                ok = count >= 0 || count == SH_PREFAB_ROWS_EARLIER;
+                for (size_t i = 0; ok && i < rows.count; i++)
+                    if (rows.rows[i].pinned && !pm_find(kept, rows.rows[i].salt, rows.rows[i].build))
+                        ok = sh_modmanifest_list_add(kept, &rows.rows[i]);
+                sh_modmanifest_list_free(&rows);
+            }
+            free(text);
+            free(p);
+        }
+        free(path);
+    } while (ok && FindNextFileW(h, &fd));
+    if (ok) ok = GetLastError() == ERROR_NO_MORE_FILES;
+    FindClose(h);
+    return ok;
+}
+
+int sh_prefab_mods_kept(sh_modmanifest_list *rows)
+{
+    char *root = pm_root();
+    size_t n = root ? strlen(root) : 0;
+    while (n && (root[n - 1] == '\\' || root[n - 1] == '/')) root[--n] = 0;
+    wchar_t *w = n ? sh_mb_wpath(root) : NULL;
+    int ok = w && pm_kept_folder(w, rows);
+    free(w);
+    free(root);
+    return ok;
+}
+
 static int pm_find_prefab(const char *key, char **path, char **name)
 {
     char *root, *pattern;
@@ -1435,6 +1645,7 @@ static char *pm_default_root(void) { return NULL; }
 #include "commands.h"
 #include "grid_room_native.h"
 #include "apply_engine.h"
+#include "rawmap.h"
 #include "ui_bridge.h"
 #include "modstore.h"
 #include "modcache.h"
@@ -1484,6 +1695,11 @@ static int eng_attach(const sh_modmanifest_row *row, char **note)
 
 static int eng_activate(const sh_modmanifest_list *rows) { return sh_modmanifest_activate(rows); }
 
+static unsigned long long eng_editor_context(void)
+{
+    return ((unsigned long long)sh_rawmap_load_generation() << 1) | (sh_grid_native_editor_map() != NULL);
+}
+
 static int eng_module_known(const char *name) { return sh_grid_native_module_known(name); }
 static void eng_print(const char *line) { sh_printf("%s\n", line); }
 static void eng_toast(const char *text)
@@ -1521,6 +1737,7 @@ static void pm_bind_defaults(void)
     o.toast = eng_toast;
     o.refresh = eng_refresh;
     o.call_main = eng_call_main;
+    o.editor_context = eng_editor_context;
     g_ops = o;
 
     g_ops_bound = 1;

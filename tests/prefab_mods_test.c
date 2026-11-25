@@ -26,6 +26,7 @@
 #include "../src/backend/modauthor.h"
 #include "../src/backend/modbundle.h"
 #include "../src/backend/module_prefab_map.h"
+#include "../src/backend/saved_maps.h"
 #include "../src/backend/modnet.h"
 #include "../src/common/snapmap_plus_iface.h"
 #include "mod_test_util.h"
@@ -160,12 +161,38 @@ static int f_use_pinned(const sh_modmanifest_list *pinned, char **cause)
     return 1;
 }
 
+static unsigned long fixture_generation;
+static unsigned long long f_generation(void) { return fixture_generation; }
+static HANDLE compose_at_index, compose_continue;
+static int f_failed_index(void) { return -1; }
+static DWORD composition_thread;
+static int f_hold_rescan(void)
+{
+    composition_thread = GetCurrentThreadId();
+    SetEvent(compose_at_index);
+    return WaitForSingleObject(compose_continue, 5000) == WAIT_OBJECT_0 ? sh_modserve_index_rescan() : -1;
+}
+static int wait_for_preparation(int seq, char *msg, size_t max)
+{
+    ULONGLONG end = GetTickCount64() + 5000;
+    sh_module_prefab_call call = {0};
+    int r;
+    call.op = SH_MODULE_PREFAB_MODS_POLL;
+    call.seq = seq;
+    do {
+        r = pm_slot(&call, msg, max);
+        if (r != SH_PREFAB_MODS_HELD) return r;
+        Sleep(1);
+    } while (GetTickCount64() < end);
+    return r;
+}
+
 static const sh_prefab_mods_ops PM_OPS = {
     f_row_state, f_listed, f_attach, f_activate, f_module_known, f_print, f_toast, f_refresh, f_call_main, f_use_pinned
 };
 /* The same without the pinned rows' op. */
 static const sh_prefab_mods_ops PM_OPS_NO_PINNED = {
-    f_row_state, f_listed, f_attach, f_activate, f_module_known, f_print, f_toast, f_refresh, f_call_main, NULL
+    f_row_state, f_listed, f_attach, f_activate, f_module_known, f_print, f_toast, f_refresh, f_call_main, NULL, f_generation
 };
 
 static void reset_fakes(void)
@@ -1483,8 +1510,22 @@ static void resolving(const sh_modmanifest_row *door)
     {
         sh_modmanifest_list joined = {0};
         int activations = g_activations, refreshes = g_scope_refreshes;
+        compose_at_index = CreateEventW(NULL, TRUE, FALSE, NULL);
+        compose_continue = CreateEventW(NULL, TRUE, FALSE, NULL);
+        sh_cache_set_rescan(f_hold_rescan);
         r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
-        CHECK(r == SH_PREFAB_MODS_PLACE && g_scope_refreshes == refreshes + 1);
+        CHECK(r == SH_PREFAB_MODS_HELD && seq > 0 && strstr(msg, "Preparing mod content"));
+        CHECK(WaitForSingleObject(compose_at_index, 5000) == WAIT_OBJECT_0 && composition_thread != GetCurrentThreadId());
+        CHECK(sh_prefab_mods_poll(seq) == SH_PREFAB_MODS_HELD && g_scope_refreshes == refreshes);
+        fixture_generation++;
+        SetEvent(compose_continue);
+        CHECK(wait_for_preparation(seq, msg, sizeof msg) == 0 && strstr(msg, "map changed"));
+        CHECK(g_scope_refreshes == refreshes && !sh_modmanifest_current(&joined));
+        sh_cache_set_rescan(NULL);
+        CloseHandle(compose_at_index);
+        CloseHandle(compose_continue);
+        r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
+        CHECK(r == SH_PREFAB_MODS_PLACE && seq == 0 && g_scope_refreshes == refreshes + 1);
         CHECK(g_activations == activations);
         (void)sh_modmanifest_current(&joined);
         CHECK(joined.count == 1 && joined.rows[0].pinned && !strcmp(joined.rows[0].salt, "presentm"));
@@ -1872,6 +1913,25 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
             int seq2 = 0, calls = F.pinned_calls;
             CHECK(HO(m2, sh_prefab_mods_resolve_main(text, len, &rows, "Door", &seq2, HO_P(0))) == SH_PREFAB_MODS_PLACE &&
                   F.pinned_calls == calls + 1 && F.pinned_rows == 1 && m2[0] == 0);
+            sh_module_prefab_call resume = {0};
+            sh_prefab_mods_bind(&PM_OPS_NO_PINNED);
+            sh_cache_set_rescan(f_failed_index);
+            CHECK(HO(m2, sh_prefab_mods_resolve_main(text, len, &rows, "Door", &seq2, HO_P(0))) == SH_PREFAB_MODS_HELD);
+            CHECK(wait_for_preparation(seq2, m2, sizeof m2) == 0 && strstr(m2, "could not be indexed"));
+            sh_cache_set_rescan(sh_modserve_index_rescan);
+            CHECK(HO(m2, sh_prefab_mods_resolve_main(text, len, &rows, "Door", &seq2, HO_P(0))) == SH_PREFAB_MODS_HELD);
+            CHECK(wait_for_preparation(seq2, m2, sizeof m2) == SH_PREFAB_MODS_PLACE);
+            resume.op = SH_MODULE_PREFAB_MODS_RESOLVE;
+            resume.text = text;
+            resume.text_len = len;
+            resume.name = "Door";
+            resume.seq = seq2;
+            fixture_generation++;
+            CHECK(pm_slot(&resume, m2, sizeof m2) == SH_PREFAB_MODS_REFUSED && strstr(m2, "map changed"));
+            CHECK(HO(m2, sh_prefab_mods_resolve_main(text, len, &rows, "Door", &seq2, HO_P(0))) == SH_PREFAB_MODS_PLACE && !seq2);
+            sh_cache_set_rescan(NULL);
+            (void)sh_modmanifest_prepare_load("{}", 2, NULL);
+            sh_prefab_mods_bind(&PM_OPS);
         }
         sh_modmanifest_list_free(&rows);
     }
@@ -1879,6 +1939,37 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Door.meta.json", libB);
     CHECK(!mt_exists(path));
 
+    printf("-- collection keeps a library prefab across restarts, including nested folders\n");
+    {
+        char gc_store[MAX_PATH * 2], gc_lib[MAX_PATH * 2], nested[MAX_PATH * 2], file[MAX_PATH * 2], empty[MAX_PATH * 2];
+        sh_cache_sweep_stats sweep;
+        _snprintf_s(gc_store, sizeof gc_store, _TRUNCATE, "%s\\gc-player", tmp);
+        _snprintf_s(gc_lib, sizeof gc_lib, _TRUNCATE, "%s\\gc-library", tmp);
+        _snprintf_s(nested, sizeof nested, _TRUNCATE, "%s\\Kit", gc_lib);
+        _snprintf_s(file, sizeof file, _TRUNCATE, "%s\\Door.json", nested);
+        _snprintf_s(empty, sizeof empty, _TRUNCATE, "%s\\gc-empty", tmp);
+        mt_mkdirs_for(file);
+        CreateDirectoryA(empty, NULL);
+        use_store(gc_store);
+        sh_prefab_mods_set_root(gc_lib);
+        sh_cache_set_library(sh_prefab_mods_kept);
+        sh_saved_maps_set_root(empty);
+        sh_cache_set_map_folders(empty, empty);
+        CHECK(HO2(name, msg, sh_prefab_mods_import(zipA, nested, HO_P(0), HO_P(1))) == 1);
+        CHECK(sh_cache_sweep(0, NULL, 0, &sweep) && !sweep.unreadable && sweep.units_kept == 1);
+        CHECK(sh_cache_sweep(1, NULL, 0, &sweep) && !sweep.units_removed && sh_cache_unit_state(unit, NULL, NULL, NULL) == 1);
+        mt_write(gc_lib, "Broken.json", "{\"snapmapPlus\":{\"mods\":[{}]}}");
+        CHECK(DeleteFileA(file));
+        CHECK(sh_cache_sweep(0, NULL, 0, &sweep) && sweep.unreadable && sh_cache_unit_state(unit, NULL, NULL, NULL) == 1);
+        _snprintf_s(file, sizeof file, _TRUNCATE, "%s\\Broken.json", gc_lib);
+        CHECK(DeleteFileA(file));
+        CHECK(sh_cache_sweep(0, NULL, 0, &sweep) && !sweep.unreadable && sweep.units_removed == 1 && sweep.blobs_removed == 1);
+        sh_cache_set_library(NULL);
+        sh_prefab_mods_set_root(NULL);
+        sh_saved_maps_set_root(NULL);
+        sh_cache_set_map_folders(NULL, NULL);
+        use_store(storeB);
+    }
     printf("-- importing it again writes nothing\n");
     {
         char pj[MAX_PATH * 2];

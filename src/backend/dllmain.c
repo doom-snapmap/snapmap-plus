@@ -25,6 +25,7 @@
 #include "grid_room_editor.h"
 #include "fly_to.h"
 #include "module_prefab.h"
+#include "prefab_mods.h"
 #include "timeline_tile.h"
 #include "modserve.h"
 #include "modswf.h"
@@ -243,6 +244,7 @@ static void install_features(const sig_result *results, size_t db)
         /* The map content cache (modcache.h): compositions build as the store builds, the index admits them, and
          * every load composes its rows' units; at start the cache drops what no kept map names. */
         sh_cache_set_store_root(sh_ms_root);
+        sh_cache_set_library(sh_prefab_mods_kept);
         sh_cache_set_resolver(&boot_r);
         sh_cache_set_rescan(sh_modserve_index_rescan);
         sh_modmanifest_set_content(sh_cache_on_load);

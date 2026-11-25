@@ -138,7 +138,8 @@ static std::string   g_pick_prefab_name, g_pick_prefab_folder;   /* Export Prefa
 /* A Load/Place held while its mods are fetched (backend/prefab_mods.c): the
  * placement to poll, and the prefab to place again once they are installed. */
 static int           g_mods_wait_seq = 0;
-static std::string   g_mods_wait_name, g_mods_wait_folder;
+static std::string   g_mods_wait_name, g_mods_wait_folder, g_mods_wait_body;
+static int           g_mods_resume_seq = 0;
 /* Keep the latest sound request until the drain; an empty name stops playback.
  * The backend marshals live audio changes to the engine thread. */
 static volatile bool g_pending_sound_preview = false;
@@ -1381,7 +1382,7 @@ static void ui_apply_place_module_prefab(const std::string &body)
     g_load_message = msg;           /* the page shows it when it is the backend's sentence */
 }
 /* The mods a prefab records are resolved first (backend/prefab_mods.c) so the engine never sees a prefab whose
- * mods are missing. Returns true when placement may go on; otherwise g_load_result is 3 (held for the download,
+ * mods are missing. Returns true when placement may go on; otherwise g_load_result is 3 (preparing local content,
  * followed by ui_poll_prefab_mods), -6 (a module the player cannot get) or -7 (refused), with the text in
  * g_load_message. The rows come from the file's block. */
 static bool ui_resolve_prefab_mods(const std::string &body)
@@ -1392,6 +1393,17 @@ static bool ui_resolve_prefab_mods(const std::string &body)
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_MODS_RESOLVE;
+    if (g_mods_resume_seq) {
+        call.seq = g_mods_resume_seq;
+        g_mods_resume_seq = 0;
+        bool same = g_load_prefab_folder == g_mods_wait_folder && g_load_prefab_name == g_mods_wait_name && body == g_mods_wait_body;
+        g_mods_wait_body.clear();
+        if (!same) {
+            g_load_result = -7;
+            g_load_message = "The prefab changed while its content was being prepared. Place it again to use the new version.";
+            return false;
+        }
+    }
     call.text = body.c_str();
     call.text_len = body.size();
     call.path = path.c_str();
@@ -1400,10 +1412,11 @@ static bool ui_resolve_prefab_mods(const std::string &body)
     ui_log(("load-prefab: mods of '" + g_load_prefab_name + "' resolve=" + std::to_string(r) + " seq=" +
             std::to_string(call.seq) + " (" + msg + ")").c_str());
     if (r == 1) return true;                       /* every mod installed and in the open map */
-    if (r == 2 && call.seq > 0) {                  /* the download is asked for; Yes downloads, then it is placed */
+    if (r == 2 && call.seq > 0) {                  /* its carried content is being prepared */
         g_mods_wait_seq = call.seq;
         g_mods_wait_name = g_load_prefab_name;
         g_mods_wait_folder = g_load_prefab_folder;
+        g_mods_wait_body = body;
         g_load_result = 3;
         g_load_message = msg;
         return false;
@@ -1412,8 +1425,7 @@ static bool ui_resolve_prefab_mods(const std::string &body)
     g_load_message = !msg.empty() ? msg : "This prefab's mods could not be checked, so it was not placed. Try again.";
     return false;
 }
-/* Follow a held placement: once its mods are installed, place it again; a refusal (the game
- * showed why) is told to the page. */
+/* Resume a placement after its carried content is ready; show a preparation failure in the Prefabs tab. */
 static void ui_poll_prefab_mods()
 {
     if (!g_mods_wait_seq) return;
@@ -1421,21 +1433,26 @@ static void ui_poll_prefab_mods()
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_MODS_POLL;
     call.seq = g_mods_wait_seq;
-    int r = ui_module_prefab_call(&call);
+    std::string reason;
+    int r = ui_module_prefab_call(&call, &reason);
     if (r == 2) return;
     ui_logp("load-prefab: mods of '%s' (placement %d) finished %d", g_mods_wait_name.c_str(),
                 g_mods_wait_seq, r);
     g_mods_wait_seq = 0;
     if (r == 1) {
         /* Placed through the ordinary Load/Place, which finds every mod installed. */
+        g_mods_resume_seq = call.seq;
         g_load_prefab_name = g_mods_wait_name;
         g_load_prefab_folder = g_mods_wait_folder;
         g_pending_load_prefab = true;
         return;
     }
     std::wstring m = L"{\"kind\":\"loadPrefabResult\",\"result\":-7,\"name\":\"";
+    g_mods_wait_body.clear();
     m += sh_webview_json::escape_wide(g_mods_wait_name.c_str());
-    m += L"\",\"message\":\"\"}";
+    m += L"\",\"message\":\"";
+    m += sh_webview_json::escape_wide(reason.c_str());
+    m += L"\"}";
     ui_post_json(m.c_str());
 }
 static void ui_apply_load_prefab()
@@ -1464,7 +1481,7 @@ static void ui_apply_load_prefab()
     if (sh_webview_json::top_level_type(body) == "idSnapMap") g_load_prefab_modules = true;
     if (g_mods_wait_seq) {
         g_load_result = -7;
-        g_load_message = "Another prefab is waiting for its mods. Answer that first, then place this one.";
+        g_load_message = "Another prefab is being prepared. Place this one when it finishes.";
         return;
     }
     if (!ui_resolve_prefab_mods(body)) return;
@@ -3844,6 +3861,8 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 g_pending_delete_prefab = true;
             } else if (cmd == L"loadPrefab") {
                 std::wstring nm, fo; sh_webview_json::get_string(json, L"name", nm); sh_webview_json::get_string(json, L"folder", fo);
+                g_mods_resume_seq = 0;
+                if (!g_mods_wait_seq) g_mods_wait_body.clear();
                 g_load_prefab_name = sh_webview_json::to_utf8(nm); g_load_prefab_folder = sh_webview_json::to_utf8(fo);
                 g_pending_load_prefab = true;
             } else if (cmd == L"renamePrefab") {

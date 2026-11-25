@@ -26,6 +26,12 @@ enum {
     SH_CACHE_ABSENT_REFUSED          /* a required decl failed to parse */
 };
 
+/* Read the pinned rows still used by library prefabs. The importer and collector agree on a complete library view. */
+typedef int (*sh_cache_library_fn)(struct sh_modmanifest_list *rows);
+void sh_cache_set_library(sh_cache_library_fn fn);
+void sh_cache_library_import_begin(void);
+void sh_cache_library_import_end(void);
+
 /* The cache's folder: <data>\cache\content, resolved from the selected mods root. malloc'd. */
 char *sh_cache_root(void);
 /* Tests and tools resolve the cache and local mods from this root. NULL restores the product's root. */
@@ -36,6 +42,9 @@ void  sh_cache_set_mods_root(const char *mods_root);
 void  sh_cache_set_store_root(const char *(*fn)(void));
 void  sh_cache_set_resolver(const sh_mb_resolver *resolver);
 void  sh_cache_set_rescan(int (*rescan)(void));
+/* Scope the published metadata read on this thread; its launch worker prepares a new composition. */
+void sh_cache_published_probe(int on);
+
 /* The map manifest's content step (modmanifest.h sh_modmanifest_set_content): notes the rows, composes every
  * pinned row whose composition is not on disk (or stood in for units that are here now), and rescans when it
  * made one. */
@@ -53,12 +62,14 @@ char *sh_cache_blob_path(const char *sha);
 /* Move the file at `from` into files\ when its SHA-256 and size are `sha` and `size` (deleted otherwise). 1 held. */
 int   sh_cache_put_blob(const char *from, const char *sha, unsigned long long size);
 /* Verify and keep a file read from a map or prefab export. */
-int   sh_cache_import_blob(const char *sha, const void *bytes, size_t len);
+int   sh_cache_import_blob(const char *sha, const void *bytes, size_t len, int *damaged);
 /* Where a file with this SHA-256 and size is on this computer: its blob, else a local mod's file with those bytes (D21);
  * malloc'd, NULL when neither. An export reads a unit's files from it (SPEC 5.16). */
 char *sh_cache_file_source(const char *sha, unsigned long long size);
 /* Write a manifest whose SHA-256 is `hash`. 1 written or already there; 0 when the bytes are not the unit's. */
 int   sh_cache_put_manifest(const char *hash, const void *bytes, size_t len);
+/* A cheap presence check before scheduling a verified read. */
+int   sh_cache_manifest_exists(const char *hash);
 /* The manifest's bytes (malloc'd, checked against the hash), or NULL. */
 char *sh_cache_manifest(const char *hash, size_t *len);
 
@@ -98,6 +109,9 @@ int   sh_cache_absent_causes(const char *chash, unsigned *mask);
  * absence cause given to objects whose units are not here (SH_CACHE_ABSENT_OFFLINE for the editor's open). 1 when a
  * composition is on disk; 0 with *why (malloc'd). Main thread or worker. */
 int   sh_cache_compose_now(const char *chash, int cause, char **why);
+
+/* Build and index the noted rows from a carried prefab off the game thread. Only complete units can be placed. */
+int   sh_cache_prepare_prefab(const struct sh_modmanifest_list *rows, char **why);
 
 /* The gate's fetch (a worker thread): for the noted row `chash`, ask the store about the units that are not here,
  * download the ones it holds (each blob checked, a broken-off file resumed), then compose (with stand-ins for what
@@ -164,8 +178,8 @@ typedef struct sh_cache_sweep_stats {
  * the game's own, under %LOCALAPPDATA%\id Software\DOOM\base\doomsnapmaps). Tests set their own. */
 void  sh_cache_set_map_folders(const char *saved, const char *published);
 /* References: every unit a kept map names (local saves, cloud copies, published-map texts unless
- * `drop_played`), the open map's rows, and `held` (uploads in progress). Removes manifests no reference names,
- * then blobs no remaining manifest names, then compositions no kept map's row uses, then partial downloads no
+ * `drop_played`), the open map's rows, library prefabs, and `held` (uploads in progress). Removes manifests no reference names,
+ * then blobs no remaining manifest names, then compositions no kept map or library prefab uses, then partial downloads no
  * reference names that nothing wrote for an hour. A kept map whose text does not read, or a folder that cannot
  * be listed, may use anything, so the sweep then removes nothing. Never touches a local mod's files, never runs
  * on a timer. 1 done. */

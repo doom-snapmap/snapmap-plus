@@ -580,20 +580,22 @@ static int me_take(sh_zip_reader *zr, int kind, modexport_stats *st, char **caus
         }
         bytes = sh_zip_reader_read(zr, (long)i, (size_t)-1, &blen, cause);
         if (!bytes) return 0;
-        sh_mb_sha256_hex(bytes, blen, actual);
-        if (unit ? _strnicmp(actual, name + 6, SH_MB_HASH_HEX) : _stricmp(actual, name + 6)) {
-            free(bytes);
-            return me_cause(cause, "the export is damaged: one of its mod files is not what it says; export it again");
-        }
         if (unit) {
             char hash[SH_MB_HASH_HEX + 1];
+            sh_mb_sha256_hex(bytes, blen, actual);
+            if (strncmp(actual, name + 6, SH_MB_HASH_HEX)) {
+                free(bytes);
+                return me_cause(cause, "the export is damaged: one of its mod files is not what it says; export it again");
+            }
             memcpy(hash, name + 6, SH_MB_HASH_HEX);
             hash[SH_MB_HASH_HEX] = 0;
             if (!sh_cache_put_manifest(hash, bytes, blen)) { free(bytes); return me_cause(cause, "the map's mod content could not be saved on this computer"); }
             st->bundles_installed++;
         } else {
-            if (!sh_cache_import_blob(name + 6, bytes, blen)) {
+            int damaged = 0;
+            if (!sh_cache_import_blob(name + 6, bytes, blen, &damaged)) {
                 free(bytes);
+                if (damaged) return me_cause(cause, "the export is damaged: one of its mod files is not what it says; export it again");
                 return me_cause(cause, "the map's mod content could not be saved on this computer");
             }
             st->files++;
@@ -675,6 +677,7 @@ int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx
     memset(st, 0, sizeof *st);
     if (!prefab || !path || !path[0]) return me_cause(cause, "nothing to read");
     if (!me_open(&zr, path, ME_KIND_PREFAB, &text, &len, &idx, cause)) { st->ms = me_now_ms() - t0; return 0; }
+    sh_cache_library_import_begin();
     if (name && !(*name = sh_textn(zr.e[idx].name, strlen(zr.e[idx].name) - 5))) { me_cause(cause, "out of memory"); goto done; }
     if (rows_of) {
         int n = rows_of(ctx, text, len, &rows);
@@ -688,6 +691,7 @@ int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx
     st->map_bytes = len;
     ok = 1;
 done:
+    sh_cache_library_import_end();
     sh_zip_reader_close(&zr);
     sh_modmanifest_list_free(&rows);
     if (ok) {
