@@ -55,7 +55,7 @@ static const sh_mb_resolver g_game = { NULL, NULL, game_exists, NULL };
 
 typedef struct publish_probe {
     char folder[MAX_PATH * 2], child[MAX_PATH * 3];
-    HANDLE held, together;
+    HANDLE held, together, prepared, resume;
     volatile LONG arrivals, timed_out;
 } publish_probe;
 
@@ -66,7 +66,12 @@ void backend_log(const char *message)
     const char *prefix = "MODS: content: prepared ";
     publish_probe *p = watch_publish;
     if (!p || strncmp(message, prefix, strlen(prefix))) return;
-    if (p->together) {
+    if (p->prepared) {
+        if (InterlockedIncrement(&p->arrivals) == 1) {
+            SetEvent(p->prepared);
+            if (WaitForSingleObject(p->resume, 10000) != WAIT_OBJECT_0) InterlockedExchange(&p->timed_out, 1);
+        }
+    } else if (p->together) {
         if (InterlockedIncrement(&p->arrivals) == 2) SetEvent(p->together);
         if (WaitForSingleObject(p->together, 10000) != WAIT_OBJECT_0) InterlockedExchange(&p->timed_out, 1);
     } else {
@@ -78,6 +83,14 @@ void backend_log(const char *message)
 static DWORD WINAPI compose_thread(void *hash)
 {
     return (DWORD)sh_cache_compose_now((const char *)hash, SH_CACHE_ABSENT_OFFLINE, NULL);
+}
+
+static DWORD WINAPI metadata_thread(void *rows)
+{
+    sh_cache_published_probe(1);
+    sh_cache_on_load((const sh_modmanifest_list *)rows, NULL, 0);
+    sh_cache_published_probe(0);
+    return 0;
 }
 static int game_where(void *ctx, const char *request, char sha[SH_MB_HASH_HEX + 1], char *source, size_t cap)
 {
@@ -604,6 +617,28 @@ static void test_cache(const char *top)
         CreateDirectoryA(mods3, NULL);
         sh_cache_set_mods_root(mods3);
         download(&crate, &b, pack, 1);
+        {
+            publish_probe probe = {0};
+            sh_modmanifest_list list = {0};
+            probe.prepared = CreateEventA(NULL, TRUE, FALSE, NULL);
+            probe.resume = CreateEventA(NULL, TRUE, FALSE, NULL);
+            CHECK(sh_modmanifest_list_add(&list, &rows[0]));
+            watch_publish = &probe;
+            HANDLE worker = CreateThread(NULL, 0, metadata_thread, &list, 0, NULL);
+            CHECK(worker && WaitForSingleObject(probe.prepared, 10000) == WAIT_OBJECT_0);
+            CHECK(sh_cache_compose_now(chash, SH_CACHE_ABSENT_OFFLINE, NULL));
+            SetEvent(probe.resume);
+            if (worker) { WaitForSingleObject(worker, INFINITE); CloseHandle(worker); }
+            watch_publish = NULL;
+            CloseHandle(probe.prepared);
+            CloseHandle(probe.resume);
+            CHECK(probe.arrivals == 2 && !probe.timed_out);
+            sh_modmanifest_list_free(&list);
+            snprintf(path, sizeof path, "%s\\entities\\crate.decl", mt_composition(mods3, chash));
+            t = read_text(path);
+            CHECK(t && strstr(t, "renderModelInfo"));
+            free(t);
+        }
         (void)sh_cache_take_notice();
         load_rows(rows, 1, placed, 2);
         CHECK(sh_cache_composed(chash, &complete) && !complete);
