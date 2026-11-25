@@ -19,7 +19,8 @@
 #define SH_BT_AUTO_VIEW     3
 
 /* Growable text buffer; oom latches on the first failed growth. */
-typedef struct sh_bt_buf { char *p; size_t len, cap; int oom; } sh_bt_buf;
+#include "../common/text.h"
+typedef sh_text_buf sh_bt_buf;
 void sh_bt_buf_free(sh_bt_buf *b);
 void sh_bt_puts(sh_bt_buf *b, const char *s);
 void sh_bt_put_str(sh_bt_buf *b, const char *s);       /* JSON string, quoted and escaped */

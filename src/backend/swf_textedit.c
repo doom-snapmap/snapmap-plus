@@ -347,10 +347,3 @@ void sh_swf_textedit_install(const uint8_t *module_base)
                 ? "swf-textedit: ready (Ctrl+C copies / Ctrl+V pastes the focused SWF text field)"
                 : "swf-textedit: ready, COPY ONLY (idStr assign unresolved -- Ctrl+V disabled)");
 }
-
-void sh_swf_textedit_uninstall(void)
-{
-    if (g_orig_onkey == NULL) return;
-    if (sh_uninstall_detour((void *)g_orig_onkey)) g_orig_onkey = NULL;
-    else backend_log("swf-textedit: restore failed; original callback retained");
-}

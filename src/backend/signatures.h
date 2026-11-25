@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 /* IDA-style pattern with ?/?? wildcards. rva_vk / rva_gl are the function's
  * RVAs in the two build 13954591 executables; 0 = not on that renderer. The
@@ -59,7 +60,25 @@ size_t sig_resolve_all(const uint8_t *module_base, sig_result *results, size_t c
 sig_status sig_scan_one(const uint8_t *module_base, const sig_entry *sig, sig_result *out);
 
 /* The result named name, or NULL. */
-const sig_result *sig_lookup(const sig_result *results, size_t n, const char *name);
+static __inline const sig_result *sig_lookup(const sig_result *results, size_t n, const char *name)
+{
+    if (!results || !name) return NULL;
+    for (size_t i = 0; i < n; ++i)
+        if (results[i].name && !strcmp(results[i].name, name)) return &results[i];
+    return NULL;
+}
+
+static __inline const sig_result *sig_ok(const sig_result *results, size_t n, const char *name)
+{
+    const sig_result *r = sig_lookup(results, n, name);
+    return r && r->status == SIG_OK ? r : NULL;
+}
+
+static __inline void *sig_pointer(const sig_result *results, size_t n, const char *name)
+{
+    const sig_result *r = sig_ok(results, n, name);
+    return r ? (void *)r->addr : NULL;
+}
 
 /* The address of the SIG_OK result named name, or 0. */
 uintptr_t sig_addr_by_name(const sig_result *results, size_t n, const char *name);

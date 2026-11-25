@@ -77,22 +77,12 @@ static int ed_read_byte(const void *base, unsigned offset, unsigned char *out);
 
 static void *ed_manager(void);
 
-static const sig_result *ed_result(const sig_result *results, size_t count,
-                                   const char *name)
-{
-    size_t i;
-    if (!results || !name) return NULL;
-    for (i = 0; i < count; i++)
-        if (results[i].name && strcmp(results[i].name, name) == 0)
-            return &results[i];
-    return NULL;
-}
 
 /* The signature's address, when it resolved at its recorded RVA. */
 static void *ed_clean(const sig_result *results, size_t count, const char *name,
                       const uint8_t *module_base)
 {
-    const sig_result *r = ed_result(results, count, name);
+    const sig_result *r = sig_lookup(results, count, name);
     if (!r || r->status != SIG_OK || !r->addr) return NULL;
     if (r->addr != (uintptr_t)module_base + r->rva) return NULL;
     return (void *)r->addr;

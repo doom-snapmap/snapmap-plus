@@ -94,6 +94,30 @@ float sh_aas_get_f32(const unsigned char *rec, unsigned off)
     return f;
 }
 
+/* An obstacle visibility row uses seven-bit literals and one- or two-byte zero runs. */
+int sh_aas_read_pvs(const sh_aas *a, unsigned offset, unsigned limit, unsigned char *visible, unsigned areas)
+{
+    unsigned pos = 0;
+    const unsigned char *p = sh_aas_rec_const(a, SH_AAS_L_OBSTACLEPVS, 0);
+    if (limit > sh_aas_count(a, SH_AAS_L_OBSTACLEPVS) || (!p && areas)) return 0;
+    memset(visible, 0, areas);
+    while (pos < areas) {
+        if (offset >= limit) return 0;
+        unsigned token = p[offset++];
+        if (token & 0x80) {
+            unsigned run = token & 63;
+            if (token & 64) {
+                if (offset >= limit) return 0;
+                run |= (unsigned)p[offset++] << 6;
+            }
+            pos += run + 1;
+        } else {
+            for (unsigned bit = 0; bit < 7 && pos < areas; ++bit, ++pos) visible[pos] = (token >> bit) & 1;
+        }
+    }
+    return 1;
+}
+
 void sh_aas_put_u32(unsigned char *rec, unsigned off, uint32_t v)
 {
     unsigned char *p = rec + off;
@@ -136,37 +160,34 @@ void sh_aas_free(sh_aas *a)
     HeapFree(GetProcessHeap(), 0, a);
 }
 
-sh_aas *sh_aas_parse(const unsigned char *bytes, size_t len, char *err, size_t err_cap)
+int sh_aas_read_layout(const unsigned char *bytes, size_t len, size_t max_bytes,
+                       sh_aas_layout *layout, char *err, size_t err_cap)
 {
-    unsigned counts[SH_AAS_L__COUNT];
-    size_t   starts[SH_AAS_L__COUNT];
-    size_t   off = SH_AAS_PREAMBLE_BYTES;
-    sh_aas  *a;
-    int      i;
-
+    size_t off = SH_AAS_PREAMBLE_BYTES;
+    int i;
     if (err && err_cap) err[0] = '\0';
     if (!bytes) {
         aas_verr(err, err_cap, "no payload");
-        return NULL;
+        return 0;
     }
-    if (len > g_aas_payload_cap) {
+    if (len > max_bytes) {
         aas_verr(err, err_cap, "the payload is %zu bytes, over the %zu-byte budget",
-                 len, g_aas_payload_cap);
-        return NULL;
+                 len, max_bytes);
+        return 0;
     }
     if (len < SH_AAS_PREAMBLE_BYTES + (size_t)SH_AAS_LUMPS * 4) {
         aas_verr(err, err_cap, "the payload is %zu bytes, too small to be an AAS file", len);
-        return NULL;
+        return 0;
     }
     if (memcmp(bytes, SH_AAS_MAGIC, 4) != 0) {
         aas_verr(err, err_cap, "the payload does not start with the AAS magic");
-        return NULL;
+        return 0;
     }
     if (bytes[4] != SH_AAS_MAJOR || bytes[5] != SH_AAS_MINOR) {
         aas_verr(err, err_cap, "the AAS version is %u.%u, not %u.%u",
                  (unsigned)bytes[4], (unsigned)bytes[5],
                  (unsigned)SH_AAS_MAJOR, (unsigned)SH_AAS_MINOR);
-        return NULL;
+        return 0;
     }
 
     /* Walk all 22 count-prefixed lumps and require an exact end-of-file match. */
@@ -174,46 +195,56 @@ sh_aas *sh_aas_parse(const unsigned char *bytes, size_t len, char *err, size_t e
         uint64_t bytes_needed;
         if (len - off < 4) {
             aas_verr(err, err_cap, "lump %s: no room for its count", AAS_LUMPS[i].name);
-            return NULL;
+            return 0;
         }
-        counts[i] = sh_aas_get_u32(bytes + off, 0);
+        layout->count[i] = sh_aas_get_u32(bytes + off, 0);
         off += 4;
-        if (counts[i] > SH_AAS_MAX_RECORDS) {
+        if (layout->count[i] > SH_AAS_MAX_RECORDS) {
             aas_verr(err, err_cap, "lump %s: a count of %u is beyond any real file",
-                     AAS_LUMPS[i].name, counts[i]);
-            return NULL;
+                     AAS_LUMPS[i].name, layout->count[i]);
+            return 0;
         }
-        bytes_needed = (uint64_t)counts[i] * AAS_LUMPS[i].record;
+        bytes_needed = (uint64_t)layout->count[i] * AAS_LUMPS[i].record;
         if (bytes_needed > (uint64_t)(len - off)) {
             aas_verr(err, err_cap, "lump %s: %u records overrun the payload",
-                     AAS_LUMPS[i].name, counts[i]);
-            return NULL;
+                     AAS_LUMPS[i].name, layout->count[i]);
+            return 0;
         }
-        starts[i] = off;
+        layout->off[i] = off;
         off += (size_t)bytes_needed;
     }
     if (off != len) {
         aas_verr(err, err_cap, "%zu trailing bytes after the last lump", len - off);
-        return NULL;
+        return 0;
     }
 
     /* Enforce the validator's file-level count relationships before allocating. */
-    if (counts[SH_AAS_L_AREAS] > SH_AAS_MAX_AREAS) {
+    if (layout->count[SH_AAS_L_AREAS] > SH_AAS_MAX_AREAS) {
         aas_verr(err, err_cap, "%u areas, over the %u a u16 index can reach",
-                 counts[SH_AAS_L_AREAS], (unsigned)SH_AAS_MAX_AREAS);
-        return NULL;
+                 layout->count[SH_AAS_L_AREAS], (unsigned)SH_AAS_MAX_AREAS);
+        return 0;
     }
-    if (counts[SH_AAS_L_CLUSTERS] > 0xFFFFu) {
+    if (layout->count[SH_AAS_L_CLUSTERS] > 0xFFFFu) {
         aas_verr(err, err_cap, "%u clusters, over the %u a u16 index can reach",
-                 counts[SH_AAS_L_CLUSTERS], 0xFFFFu);
-        return NULL;
+                 layout->count[SH_AAS_L_CLUSTERS], 0xFFFFu);
+        return 0;
     }
-    if (counts[SH_AAS_L_AREABOUNDS] != counts[SH_AAS_L_AREAS]) {
+    if (layout->count[SH_AAS_L_AREABOUNDS] != layout->count[SH_AAS_L_AREAS]) {
         aas_verr(err, err_cap, "areaBounds holds %u records for %u areas",
-                 counts[SH_AAS_L_AREABOUNDS], counts[SH_AAS_L_AREAS]);
-        return NULL;
+                 layout->count[SH_AAS_L_AREABOUNDS], layout->count[SH_AAS_L_AREAS]);
+        return 0;
     }
 
+    layout->p = bytes;
+    return 1;
+}
+
+sh_aas *sh_aas_parse(const unsigned char *bytes, size_t len, char *err, size_t err_cap)
+{
+    sh_aas_layout layout;
+    sh_aas *a;
+    int i;
+    if (!sh_aas_read_layout(bytes, len, g_aas_payload_cap, &layout, err, err_cap)) return NULL;
     a = (sh_aas *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *a);
     if (!a) {
         aas_verr(err, err_cap, "out of memory parsing the AAS payload");
@@ -224,9 +255,9 @@ sh_aas *sh_aas_parse(const unsigned char *bytes, size_t len, char *err, size_t e
 
     /* Start at the parsed count; later appends grow capacity geometrically. */
     for (i = 0; i < SH_AAS_L__COUNT; i++) {
-        size_t n = (size_t)counts[i] * AAS_LUMPS[i].record;
-        a->lump[i].count = counts[i];
-        a->lump[i].cap = counts[i];
+        size_t n = (size_t)layout.count[i] * AAS_LUMPS[i].record;
+        a->lump[i].count = layout.count[i];
+        a->lump[i].cap = layout.count[i];
         if (n == 0) continue;
         a->lump[i].bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, n);
         if (!a->lump[i].bytes) {
@@ -234,7 +265,7 @@ sh_aas *sh_aas_parse(const unsigned char *bytes, size_t len, char *err, size_t e
             sh_aas_free(a);
             return NULL;
         }
-        memcpy(a->lump[i].bytes, bytes + starts[i], n);
+        memcpy(a->lump[i].bytes, bytes + layout.off[i], n);
     }
     return a;
 }

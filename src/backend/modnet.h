@@ -11,8 +11,7 @@
 #define MODNET_HASH_HEX       64
 #define MODNET_DEFAULT_STORE  "https://api.snapmapplus.com"
 #define MODNET_ARCHIVE_TYPE   "application/zip"
-/* A claim reference (the published item a claim names) has no length of the
- * product's or the store's: any text without control characters. */
+/* The HTTP ref is text without control characters. The local claim record has its own size limit. */
 #define MODNET_REF_RULE       "the ref must be text without control characters"
 
 /* Result codes. 0 is success; every failure is negative. */

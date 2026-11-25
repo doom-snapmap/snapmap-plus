@@ -7,13 +7,6 @@
 #include "commands.h"
 #include "backend_log.h"
 
-/* Guarded byte read shared by the decoders and entity handlers. */
-int sh_safe_read(const uint8_t *src, uint8_t *dst, size_t n)
-{
-    __try { for (size_t i = 0; i < n; i++) dst[i] = src[i]; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
-
 /* Decodes the first RIP-relative MOV/LEA to RAX/RCX within the accessor window and returns the pointer slot, not
  * the object it contains. */
 const uint8_t *sh_decode_rip_slot(const uint8_t *accessor_fn)

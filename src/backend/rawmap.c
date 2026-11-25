@@ -310,7 +310,7 @@ static int old_shape_refused(const char *json, size_t len)
         return 1;
     }
     if (shape == SH_MAP_OLD_NONE) return 0;
-    backend_log(shape == SH_MAP_OLD_ROWS
+    backend_log(shape == SH_MAP_OLD_FORMAT ? "CARRIER: map refused: its Snapmap+ member uses format 1" : shape == SH_MAP_OLD_ROWS
                     ? "CARRIER: map refused: its mod rows name mods the way earlier builds did; nothing was read"
                     : "CARRIER: map refused: it carries the variables earlier builds wrote; nothing was read");
     sh_modmanifest_load_refuse(SH_MAP_OLD_REFUSAL);
@@ -1586,8 +1586,8 @@ static unsigned long long write_file_atomic(const char *data, size_t len, const 
 static char *pretty_copy(const char *data, size_t len, size_t *out_len);
 
 /* Save Rawmap serializes the LIVE map through the engine (not the newest save on disk), so unsaved edits
- * and never-saved maps export correctly. The call is SnapMapToJson (0x59D2F0), NOT SerializeToJson
- * (0x5F2390), whose first argument is a temporary snapshot SnapMapToJson builds and destroys around it.
+ * and never-saved maps export correctly. The call is EditorMapToJson, NOT SerializeToJson
+ *, whose first argument is a temporary snapshot EditorMapToJson builds and destroys around it.
  * The output idStr must be a real one: the engine's own ctor and dtor, decoded from the two CALLs inside
  * the uniquely signable SnapMapAddBranchTag. sizeof(idStr) is 0x30, from that function's tag-list stride. */
 
@@ -1690,7 +1690,7 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char **msg, un
      * fault also disables this path for the session, so it happens once. */
     __try {
         g_idstr_ctor(blk, "");
-        /* SnapMapToJson calls the hooked serializer; suppress its save side effects so the export embeds once. */
+        /* EditorMapToJson calls the hooked serializer; suppress its save side effects so the export embeds once. */
         g_snapshot_depth++;
         __try { rc = g_map_to_json(map, blk, 1); }
         __finally { g_snapshot_depth--; }

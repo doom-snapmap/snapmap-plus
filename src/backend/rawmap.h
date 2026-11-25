@@ -55,7 +55,7 @@ void sh_rawmap_set_save_observer(sh_rawmap_save_observer observer);
 /* Resolve native idStr assignment for navigation embedding; without it save-output replacement is unavailable. */
 void sh_rawmap_embed_install(const void *module_base);
 
-/* Serialize the LIVE map, so unsaved edits export. `map_to_json` is the resolved SnapMapToJson, NOT
+/* Serialize the LIVE map, so unsaved edits export. `map_to_json` is the resolved EditorMapToJson, NOT
  * SerializeToJson; `add_branch_tag_fn` only derives the engine's idStr ctor/dtor (too many twins to sign). */
 int sh_rawmap_set_live_serialize(void *map_to_json, void *add_branch_tag_fn);
 

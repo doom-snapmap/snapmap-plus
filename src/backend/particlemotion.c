@@ -69,14 +69,6 @@ static void pm_log(const char *fmt, ...)
     backend_log(line);
 }
 
-static void *clean(const sig_result *r, size_t n, const char *name)
-{
-    size_t i;
-    for (i = 0; i < n; ++i)
-        if (r[i].name && !strcmp(r[i].name, name) && r[i].status == SIG_OK) return (void *)r[i].addr;
-    return NULL;
-}
-
 /* The game's origin for this particle at another age. */
 static void origin_at(void **context, const uint32_t *born, float age, float life, float out[3])
 {
@@ -401,9 +393,9 @@ int sh_particlemotion_install(const sig_result *results, size_t count, const uin
             return 0;
         }
     }
-    g_origin = (origin_fn)clean(own, 3, "ParticleOrigin");
+    g_origin = (origin_fn)sig_pointer(own, 3, "ParticleOrigin");
     /* The context detour supplies the fx scale of a model-axes stage; without it such a stage draws at scale 1. */
-    tramp = hook_prepare(clean(own, 3, "ParticleContext"), (void *)context_detour, CONTEXT_STOLEN);
+    tramp = hook_prepare(sig_pointer(own, 3, "ParticleContext"), (void *)context_detour, CONTEXT_STOLEN);
     if (tramp && hook_commit(tramp) == B2_PATCH_OK) {
         g_context = (context_fn)tramp;
     } else {
@@ -411,7 +403,7 @@ int sh_particlemotion_install(const sig_result *results, size_t count, const uin
         pm_log("PARTICLES: the stage context builder could not be detoured (%s); a stage in its model's axes is "
                "drawn at scale 1", hook_last_failure());
     }
-    tramp = hook_prepare(clean(own, 3, "ParticleWriteVerts"), (void *)write_detour, WRITE_STOLEN);
+    tramp = hook_prepare(sig_pointer(own, 3, "ParticleWriteVerts"), (void *)write_detour, WRITE_STOLEN);
     if (!tramp) {
         pm_log("PARTICLES: the particle vertex writer could not be detoured (%s); a stage's simulated motion is "
                "not drawn", hook_last_failure());

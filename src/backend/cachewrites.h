@@ -22,7 +22,4 @@ extern const sig_entry SH_CACHEWRITES_SIGNATURES[];   /* NULL-terminated */
 /* Detours the atomic write (both renderers). Returns 1 when cache writes go to the save path. */
 int sh_cachewrites_install(const uint8_t *module_base);
 
-/* Returns the cache writes redirected since the start. */
-long sh_cachewrites_redirected(void);
-
 #endif /* SNAPMAP_PLUS_CACHEWRITES_H */

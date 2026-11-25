@@ -1,5 +1,6 @@
 /* Reports live signature resolution at startup, with expected and live bytes of each unresolved signature. The
  * diagnostic build (SH_DIAG) also tests the detour engine on scratch code; a release build allocates no RWX memory. */
+#include "safe_read.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -50,16 +51,6 @@ static const char *sig_status_str(sig_status s)
 }
 
 /* Distinguish an unreadable page from differing bytes in failure diagnostics. */
-static int safe_read(const uint8_t *src, uint8_t *dst, int n)
-{
-    __try {
-        for (int i = 0; i < n; i++) dst[i] = src[i];
-        return 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
 /* Append up to `n` bytes of `buf` as hex into `out` (out must hold 3*n+1). */
 static void hexdump(const uint8_t *buf, int n, char *out, size_t outcap)
 {
@@ -96,7 +87,7 @@ static void log_sig_failure_diag(const uint8_t *doom_base, const sig_entry *e, s
 
     uint8_t got[DIAG_BYTES];
     uint32_t known_rva = sh_host_image_rva(doom_base, e->rva_vk, e->rva_gl);
-    int readable = known_rva && safe_read(doom_base + known_rva, got, en > 0 ? en : DIAG_BYTES);
+    int readable = known_rva && sh_safe_read(doom_base + known_rva, got, en > 0 ? en : DIAG_BYTES);
     if (readable) hexdump(got, en > 0 ? en : DIAG_BYTES, got_hex, sizeof got_hex);
 
     _snprintf_s(line, sizeof line, _TRUNCATE,

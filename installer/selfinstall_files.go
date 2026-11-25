@@ -8,7 +8,7 @@ import (
 )
 
 // The executables this installer places in the data folder (snapmap-plus.exe, and those a previous
-// install placed that this release does not ship, in retiredExecutables) are recorded in install.json
+// install placed that this release does not ship, in the installer cleanup table) are recorded in install.json
 // by name with their SHA-256, so uninstall never deletes, and an update never overwrites, a player's file.
 
 // executableRecord maps an executable's file name to the SHA-256 of the bytes this installer placed.
@@ -18,17 +18,13 @@ func executableName(name string) bool {
 	return name != "" && filepath.Base(name) == name && !strings.ContainsAny(name, `:/\`) && strings.EqualFold(filepath.Ext(name), ".exe")
 }
 
-// loadExecutableRecord reads dir's recorded executables, including any listed in a leftover
-// installer-files.json.
+// loadExecutableRecord reads executable ownership recorded in install.json.
 func loadExecutableRecord(dir string) (executableRecord, error) {
 	rec, err := loadStateAt(dir)
 	if err != nil {
 		return nil, err
 	}
 	out := executableRecord{}
-	for name, sum := range readRetiredExecutables(dir) {
-		out[name] = sum
-	}
 	for name, e := range rec.Executables {
 		out[name] = e.SHA256
 	}
@@ -38,7 +34,7 @@ func loadExecutableRecord(dir string) (executableRecord, error) {
 // saveExecutableRecord replaces dir's recorded executables with m, keeping each recorded version
 // whose bytes are unchanged.
 func saveExecutableRecord(dir string, m executableRecord) error {
-	err := updateStateAt(dir, func(r *installRecord) {
+	return updateStateAt(dir, func(r *installRecord) {
 		next := map[string]exeEntry{}
 		for name, sum := range m {
 			e := exeEntry{SHA256: sum}
@@ -52,10 +48,6 @@ func saveExecutableRecord(dir string, m executableRecord) error {
 		}
 		r.Executables = next
 	})
-	if err == nil {
-		os.Remove(filepath.Join(dir, retiredExecutableRecord)) // its entries are in install.json
-	}
-	return err
 }
 
 func ownsExecutable(path, digest string) bool {
@@ -86,7 +78,7 @@ func installSelfCopy(src, dst string) error {
 		if err := copyMissingFile(src, dst); err != nil {
 			return err
 		}
-	} else if ownsExecutable(dst, rec[name]) {
+	} else if ownsExecutable(dst, rec[name]) || ownsExecutable(dst, earlierExeDigests(dir)[name]) {
 		if err := replaceExe(dst, src); err != nil {
 			return err
 		}
@@ -123,7 +115,6 @@ func cleanupOwnedExecutables(dir, running string) {
 			delete(rec, name)
 			continue
 		}
-		retireUpdateLeftovers(dir, path)
 		if os.Remove(path) == nil {
 			delete(rec, name)
 		}

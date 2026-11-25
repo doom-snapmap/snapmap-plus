@@ -12,6 +12,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "modserve.h"
+#include "map_cvars.h"
 #include "modmanifest.h"
 #include "modbundle.h"
 #include "modsalt.h"
@@ -221,7 +222,6 @@ static int ms_write_served(const char *path, const unsigned char *bytes, size_t 
 static void ms_script_node_row(ms_index *x, ms_bundle *b);
 static void ms_req_index(ms_index *x, const ms_index *old);
 static int ms_req_conflicts(ms_index *x);
-static int ms_req_same(const char *a, const char *b);
 static int ms_standin_supplement(const ms_index *x, int b);
 static int ms_row_name_resolves_here(const ms_index *x, const char *lower);
 static int ms_salt_in(const ms_index *x, const char *salt, const char *hash, const char *place);
@@ -7163,7 +7163,8 @@ typedef struct ms_held {
     char *original;                       /* what this layer displaced, whole (owned only; malloc'd) */
     char *owner;                          /* the name of the earliest install asking it (malloc'd) */
     int needed;                           /* an accepted bundle asks it (this pass) */
-    int owned;                            /* this layer changed it and restores `original` */
+    int owned;                            /* this layer changed the cvar at least once */
+    int tracked;                          /* also holds a value already set by a script */
     int state;                            /* 1 live, 0 not applied yet, -1 not live */
     char *why;                            /* not live: the cause (malloc'd), or NULL */
 } ms_held;
@@ -7171,6 +7172,7 @@ typedef struct ms_held {
 /* Replace *dst with a copy of `text` (NULL clears it). */
 static void ms_req_set(char **dst, const char *text)
 {
+    if (*dst == text || (*dst && text && !strcmp(*dst, text))) return;
     char *copy = text ? _strdup(text) : NULL;
     if (text && !copy) return;
     free(*dst);
@@ -7266,7 +7268,7 @@ static int ms_req_clash(const ms_bundle *b, const ms_bundle *w, int *bk, int *wm
     for (k = 0; k < b->req_ncvars; ++k)
         for (m = 0; m < w->req_ncvars; ++m)
             if (!_stricmp(w->req_cvars[m].name, b->req_cvars[k].name) &&
-                !ms_req_same(w->req_cvars[m].value, b->req_cvars[k].value)) {
+                !sh_map_cvar_same(w->req_cvars[m].value, b->req_cvars[k].value)) {
                 *bk = k;
                 *wm = m;
                 return 1;
@@ -7332,18 +7334,6 @@ static int ms_req_conflicts(ms_index *x)
     return changed;
 }
 
-/* Two values the engine would hold alike: the same text, or the same number. */
-static int ms_req_same(const char *a, const char *b)
-{
-    char *ea, *eb;
-    double x, y;
-    if (!strcmp(a, b)) return 1;
-    if (!*a || !*b) return 0;
-    x = strtod(a, &ea);
-    y = strtod(b, &eb);
-    return !*ea && !*eb && x == y;
-}
-
 static ms_held *ms_held_find(const char *name)
 {
     int i;
@@ -7401,7 +7391,7 @@ static void ms_req_mark_bundle(ms_index *x, ms_bundle *b)
     }
     for (k = 0; k < b->req_ncvars; ++k) {
         const ms_held *h = ms_held_find(b->req_cvars[k].name);
-        if (h && h->state == 1 && ms_req_same(h->want, b->req_cvars[k].value)) continue;
+        if (h && h->state == 1 && sh_map_cvar_same(h->want, b->req_cvars[k].value)) continue;
         if (names.n) ms_text_put(&names, ", ", 2);
         ms_text_put(&names, b->req_cvars[k].name, strlen(b->req_cvars[k].name));
         ms_text_put(&names, "=", 1);
@@ -7529,7 +7519,7 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
     unsigned char *changed = NULL, *queued = NULL, *restoring = NULL, *refused = NULL;
     char **target = NULL;
     char *names = NULL;
-    int i, k, result;
+    int i, k, result, slots = 0;
     memset(&r, 0, sizeof r);
     if (!phase) phase = "plan";
     AcquireSRWLockExclusive(&g_req_lock);
@@ -7605,6 +7595,7 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
         r.not_live = r.needed;
         goto finish;
     }
+    slots = g_nheld;
     changed = (unsigned char *)calloc((size_t)g_nheld + 1, 1);
     queued = (unsigned char *)calloc((size_t)g_nheld + 1, 1);
     restoring = (unsigned char *)calloc((size_t)g_nheld + 1, 1);
@@ -7621,24 +7612,29 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
         ms_held *h = &g_held[i];
         char *now = NULL;
         int set;
-        if (!h->needed && !h->owned) continue;
+        if (!h->needed && !h->tracked) continue;
         if (ops->read(ops->context, h->name, &now) != 1) {
             refused[i] = 1;
             if (h->needed) { h->state = -1; ms_req_set(&h->why, "the engine has no such cvar"); }
-            else h->owned = 0;   /* gone: nothing to restore */
+            else { sh_map_cvar_release(SH_CVAR_REQUIREMENT, h->name); h->tracked = h->owned = 0; }
             free(now);
             continue;
         }
         if (h->needed) {
             ms_req_set(&target[i], h->want);
-            if (ms_req_same(now, h->want)) { free(now); continue; }
+            if (sh_map_cvar_same(now, h->want)) {
+                h->tracked = sh_map_cvar_hold(SH_CVAR_REQUIREMENT, h->name, now, now, NULL, NULL) == 1;
+                free(now); continue;
+            }
         } else {
             /* Changed by someone else since: theirs. */
             restoring[i] = 1;
-            ms_req_set(&target[i], ms_req_same(now, h->want) && h->original ? h->original : now);
-            if (target[i] && ms_req_same(now, target[i])) { free(now); continue; }
+            ms_req_set(&target[i], sh_map_cvar_restore_to(SH_CVAR_REQUIREMENT, h->name, now));
+            if (target[i] && sh_map_cvar_same(now, target[i])) { free(now); continue; }
         }
-        set = target[i] ? ops->set(ops->context, h->name, target[i]) : 0;
+        if (!target[i]) set = 0;
+        else if (h->needed) set = sh_map_cvar_hold(SH_CVAR_REQUIREMENT, h->name, now, target[i], ops->set, ops->context);
+        else set = ops->set(ops->context, h->name, target[i]);
         if (set != SH_MODSERVE_GATE_SET && set != SH_MODSERVE_GATE_QUEUED) {
             refused[i] = 1;
             if (h->needed) { h->state = -1; ms_req_set(&h->why, target[i] ? ms_refusal(set) : "out of memory"); }
@@ -7650,6 +7646,7 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
         changed[i] = 1;
         r.changed++;
         if (set == SH_MODSERVE_GATE_QUEUED) { queued[i] = 1; r.queued++; }
+        if (h->needed) h->tracked = 1;
         if (h->needed && !h->owned) { free(h->original); h->original = now; now = NULL; h->owned = 1; }
         free(now);
     }
@@ -7677,18 +7674,19 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
             continue;
         }
         if (h->needed) {
-            if (ms_req_same(now, h->want)) { h->state = 1; ms_req_set(&h->why, NULL); }
+            if (sh_map_cvar_same(now, h->want)) { h->state = 1; ms_req_set(&h->why, NULL); }
             else {
                 char *why = sh_textf("the engine kept \"%s\"", now);
                 h->state = -1;
                 ms_req_set(&h->why, why ? why : "the engine kept another value");
                 free(why);
             }
-        } else if (target[i] && ms_req_same(now, target[i])) {
+        } else if (target[i] && sh_map_cvar_same(now, target[i])) {
             if (changed[i]) ms_log("%s: requirement released: %s restored to %s (no active bundle needs it)", phase, h->name,
                                    target[i]);
-            r.restored++;
-            h->owned = 0;
+            if (h->owned) r.restored++;
+            sh_map_cvar_release(SH_CVAR_REQUIREMENT, h->name);
+            h->tracked = h->owned = 0;
         }
         free(now);
     }
@@ -7713,7 +7711,7 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
 finish:
     /* Entries neither asked nor holding a displaced value are done. */
     for (i = g_nheld - 1; i >= 0; --i)
-        if (!g_held[i].needed && !g_held[i].owned) {
+        if (!g_held[i].needed && !g_held[i].tracked) {
             ms_held_free(&g_held[i]);
             memmove(&g_held[i], &g_held[i + 1], sizeof *g_held * (size_t)(g_nheld - i - 1));
             g_nheld--;
@@ -7757,11 +7755,12 @@ finish:
     for (i = 0; x && i < x->nbundles; ++i)
         if (x->bundles[i].admitted && ms_req_needs(&x->bundles[i])) ms_req_mark_bundle(x, &x->bundles[i]);
     ReleaseSRWLockExclusive(&g_req_lock);
+    sh_map_cvars_flush();
     free(changed);
     free(queued);
     free(restoring);
     free(refused);
-    for (i = 0; target && i < g_nheld + 1; ++i) free(target[i]);
+    for (i = 0; target && i < slots; ++i) free(target[i]);
     free(target);
     if (out) *out = r;
     result = !r.needed ? 0 : r.not_live ? -1 : 1;
@@ -7854,7 +7853,7 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context)
             if (b->req_lost_to) state = "refused", why = sh_textf(" (%s)", lost ? lost : "a cvar lost a conflict");
             else if (off) {
                 state = "not active for this map";
-                if (h && h->needed && h->state == 1 && ms_req_same(h->want, b->req_cvars[k].value))
+                if (h && h->needed && h->state == 1 && sh_map_cvar_same(h->want, b->req_cvars[k].value))
                     why = sh_textf(" (%s; the cvar has this value because %s asks it)", scope_why, h->owner ? h->owner : "");
                 else if (h && h->owned && !h->needed)
                     why = sh_textf(" (%s; restored to \"%s\" at the next editor pass or map load)", scope_why,
@@ -7862,7 +7861,7 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context)
                 else if (stopped)
                     why = sh_textf(" (%s; restored: the cvar is back at the value it displaced)", scope_why);
                 else why = sh_textf(" (%s)", scope_why);
-            } else if (!h || !h->needed || !ms_req_same(h->want, b->req_cvars[k].value) || h->state == 0)
+            } else if (!h || !h->needed || !sh_map_cvar_same(h->want, b->req_cvars[k].value) || h->state == 0)
                 state = "not applied yet", why = _strdup(" (the next editor pass or map load applies it)");
             else if (h->state == 1) state = "live", why = _strdup("");
             else state = "NOT live", why = sh_textf(" (%s; its steps are blocked)", h->why ? h->why : "");
@@ -7914,7 +7913,10 @@ void sh_modserve_test_reset_gates(void)
     int i;
     AcquireSRWLockExclusive(&g_req_lock);
     for (i = g_nactive - 1; i >= 0; --i) ms_active_drop(i);
-    for (i = 0; i < g_nheld; ++i) { free(g_held[i].name); free(g_held[i].want); }
+    for (i = 0; i < g_nheld; ++i) {
+        sh_map_cvar_release(SH_CVAR_REQUIREMENT, g_held[i].name);
+        ms_held_free(&g_held[i]);
+    }
     g_nheld = 0;
     g_nstopped = 0;
     ReleaseSRWLockExclusive(&g_req_lock);

@@ -869,7 +869,7 @@ static void test_carrier(void)
         {
             char bad[2048];
             _snprintf_s(bad, sizeof bad, _TRUNCATE, "%.*s%s", (int)(base_len - 1), base,
-                        ",\"snapmap-plus\":{\"format\":1,\"nav\":[{\"module\":\"" BASE_MODULE "\",\"class\":\"monster48\","
+                        ",\"snapmap-plus\":{\"format\":2,\"nav\":[{\"module\":\"" BASE_MODULE "\",\"class\":\"monster48\","
                         "\"data\":[\"QUJD\"]},{\"module\":\"" BASE_MODULE "\",\"class\":\"monster48\",\"digest\":"
                         "\"0123456789abcdef\",\"geom\":\"fedcba9876543210\",\"data\":7}]}}");
             sh_navmesh_test_reset();
@@ -878,7 +878,7 @@ static void test_carrier(void)
             CHECK(sh_navmesh_test_served_count() == 0 && sh_navmesh_test_held_count() == 0);
             CHECK(log_contains("does not read"));
             _snprintf_s(bad, sizeof bad, _TRUNCATE, "%.*s%s", (int)(base_len - 1), base,
-                        ",\"snapmap-plus\":{\"format\":1,\"nav\":{\"not\":\"an array\"}}}");
+                        ",\"snapmap-plus\":{\"format\":2,\"nav\":{\"not\":\"an array\"}}}");
             sh_navmesh_test_reset();
             sh_navmesh_build_from_map(bad, strlen(bad));
             CHECK(sh_navmesh_test_served_count() == 0 && sh_navmesh_test_held_count() == 0);

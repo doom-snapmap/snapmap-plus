@@ -54,11 +54,8 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 	if got := readF(t, filepath.Join(doom, "XINPUT1_4.dll")); got != "backend" {
 		t.Errorf("deployed XINPUT1_4.dll = %q, want %q", got, "backend")
 	}
-	if got := readF(t, filepath.Join(doom, "snapmap-plus", "logs", "old_backend.log")); got != "old log" {
-		t.Errorf("legacy log migrated = %q, want %q", got, "old log")
-	}
-	if exists(filepath.Join(doom, "snaphak_logs")) {
-		t.Error("legacy snaphak_logs dir should be gone after migration")
+	if exists(filepath.Join(doom, "snapmap-plus", "logs", "old_backend.log")) || exists(filepath.Join(doom, "snaphak_logs")) {
+		t.Error("obsolete log tree was retained")
 	}
 
 	// simulate runtime logs written since install that uninstall must clean
@@ -81,35 +78,6 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 }
 
 // Exercise log migration directly, without cmdInstall's running-game check.
-func TestMigrateLegacyLogs(t *testing.T) {
-	tmp := t.TempDir()
-	doom := filepath.Join(tmp, "DOOM")
-	writeF(t, filepath.Join(doom, "snaphak_logs", "a.log"), "A")
-	writeF(t, filepath.Join(doom, "snaphak_logs", "b.log"), "B")
-	// a name collision: the new location already has b.log -> keep the new one, leave the old copy behind
-	writeF(t, filepath.Join(doom, "snapmap-plus", "logs", "b.log"), "NEW")
-	migrateLegacyLogs(doom)
-	if got := readF(t, filepath.Join(doom, "snapmap-plus", "logs", "a.log")); got != "A" {
-		t.Errorf("migrated a.log = %q, want %q", got, "A")
-	}
-	if got := readF(t, filepath.Join(doom, "snapmap-plus", "logs", "b.log")); got != "NEW" {
-		t.Errorf("colliding b.log = %q, want the pre-existing %q kept", got, "NEW")
-	}
-	if !exists(filepath.Join(doom, "snaphak_logs", "b.log")) {
-		t.Error("colliding old b.log should stay behind (old dir kept, since non-empty)")
-	}
-	// no collisions: a fresh legacy dir migrates fully and the emptied dir is removed
-	doom2 := filepath.Join(tmp, "DOOM2")
-	writeF(t, filepath.Join(doom2, "snaphak_logs", "only.log"), "x")
-	migrateLegacyLogs(doom2)
-	if exists(filepath.Join(doom2, "snaphak_logs")) {
-		t.Error("emptied legacy dir should be removed after a full migration")
-	}
-	if got := readF(t, filepath.Join(doom2, "snapmap-plus", "logs", "only.log")); got != "x" {
-		t.Errorf("migrated only.log = %q, want %q", got, "x")
-	}
-}
-
 // An update must retain the original backup decision. With no pre-existing DLL,
 // uninstall should remove the mod without restoring an earlier mod version.
 func TestUpdateDoesNotBackUpOwnDLL(t *testing.T) {

@@ -11,9 +11,6 @@ char *sh_saved_maps_root(void);
 /* Read the slots under `path` instead (tests, tools); NULL restores the game's folder. */
 void  sh_saved_maps_set_root(const char *path);
 
-/* The map JSON of a map.decl (malloc'd, NUL-terminated, its length in *len), or NULL when the file is absent or
- * does not decode. */
-char *sh_saved_map_text(const char *path, size_t *len);
 
 /* One slot: its local id (the folder's suffix), the cloud-saved item id its game.details names ("" for none), and
  * the map's JSON. */

@@ -149,8 +149,6 @@ int sh_fly_to_request(int id, sh_iface *iface)
     return 1;
 }
 
-int sh_fly_to_active(void) { return InterlockedCompareExchange(&g_phase, 0, 0) != FLY_IDLE; }
-
 void sh_fly_to_tick(void *editor)
 {
     unsigned char *ed = (unsigned char *)editor;

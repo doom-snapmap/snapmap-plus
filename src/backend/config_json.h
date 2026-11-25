@@ -41,9 +41,6 @@ typedef struct sh_json_field_span {
 } sh_json_field_span;
 typedef int (*sh_json_object_visitor)(void *context, const sh_json_field_span *fields,
                                       size_t count, unsigned depth);
-int sh_json_visit_objects(const char *json, size_t length, unsigned max_depth,
-                          sh_json_object_visitor visitor, void *context);
-
 /* The field filter sees each decoded key before its value is scanned: positive visits, zero suppresses
  * callbacks in that value (still validated), negative aborts. depth is the containing object's. */
 typedef int (*sh_json_field_filter)(void *context, const char *key,

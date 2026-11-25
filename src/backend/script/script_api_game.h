@@ -44,11 +44,11 @@ typedef struct sh_script_game_ops {
     void *(*decl)(const char *type, const char *name);
     /* The class that describes decls of that type, NULL when the game describes none. */
     const char *(*decl_class)(const char *type);
-    /* A cvar's default as text (malloc'd), or NULL when the game has no such cvar. */
-    char *(*cvar_default)(const char *name);
-    /* Keep the outstanding cvar restores where the next start finds them (`json`, sh_script_game_cvar_journal_text),
+    /* The game persists this cvar in either of its configuration files. */
+    int (*cvar_archived)(const char *name);
+    /* Keep the outstanding cvar restores where the next start finds them,
      * or forget them (NULL: none outstanding). */
-    void (*cvar_journal)(const char *json);
+    int (*cvar_journal)(const char *json);
 } sh_script_game_ops;
 
 /* The engine's operations, or a test's (NULL turns the calls off). */
@@ -57,10 +57,7 @@ void sh_script_api_game_set(const sh_script_game_ops *ops);
 /* Register the calls (once). */
 void sh_script_api_game_register(void);
 
-/* The journal of the cvar restores a running map still owes (NULL when none), and the start's recovery from it: a
- * cvar that still holds the script's value, when that is not its default, gets back the value the script displaced.
- * Returns how many were put back. */
-char *sh_script_game_cvar_journal_text(void);
+/* Restore archived cvars that still hold the value a map set before quitting. */
 int sh_script_game_cvar_recover(const char *journal);
 
 #ifndef SH_SCRIPT_PURE

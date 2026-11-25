@@ -1,6 +1,7 @@
 /* Signature resolution (signatures.h): a signature resolves at its recorded RVA for the host's renderer, and
  * only when the whole pattern holds. sig_scan_one is the masked whole-image scan that derives and audits those
  * RVAs. */
+#include "safe_read.h"
 #include "signatures.h"
 #include "host_image.h"
 #include <string.h>
@@ -121,16 +122,6 @@ static int collect_exec_sections(const uint8_t *module_base, exec_section *out, 
 }
 
 /* SEH-guarded copy of up to n bytes from src into dst; returns 1 if all read, 0 on access violation. */
-static int sig_safe_read(const uint8_t *src, uint8_t *dst, size_t n)
-{
-    __try {
-        for (size_t i = 0; i < n; i++) dst[i] = src[i];
-        return 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
 static void reset(const sig_entry *sig, sig_result *out)
 {
     out->name = sig->name;
@@ -216,7 +207,7 @@ sig_status sig_resolve_one(const uint8_t *module_base, const sig_entry *sig, sig
     for (s = 0; s < nsec; s++)
         if (rva >= secs[s].vaddr && rva - secs[s].vaddr <= secs[s].vsize &&
             n <= secs[s].vsize - (rva - secs[s].vaddr)) break;
-    if (s == nsec || !sig_safe_read(module_base + rva, live, n)) return out->status;
+    if (s == nsec || !sh_safe_read(module_base + rva, live, n)) return out->status;
     out->rva = rva;
     for (i = 0; i < n; i++)
         if (mask[i] && live[i] != pat[i]) { out->status = SIG_CHANGED; return out->status; }
@@ -240,17 +231,9 @@ size_t sig_resolve_all(const uint8_t *module_base, sig_result *results, size_t c
     return ok;
 }
 
-const sig_result *sig_lookup(const sig_result *results, size_t n, const char *name)
-{
-    for (size_t i = 0; i < n; i++)
-        if (results[i].name && strcmp(results[i].name, name) == 0) return &results[i];
-    return NULL;
-}
-
 uintptr_t sig_addr_by_name(const sig_result *results, size_t n, const char *name)
 {
-    const sig_result *r = sig_lookup(results, n, name);
-    return r && r->status == SIG_OK ? r->addr : 0;
+    return (uintptr_t)sig_pointer(results, n, name);
 }
 
 const char *sig_status_reason(sig_status status)
@@ -294,8 +277,6 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 48 83 EC 20 48 8B 51 48 48 8B D9 48 81 C2 28 36 02 00 0F B6 02 88 01 0F B6 42 01 88 41 01 0F B6 42 02 88 41 02 0F B6 42 03 88 41 03 0F B6 42 04", 0x118EAA0u, 0x118DC30u },
     { "RenderSettingsDirtyCall",
       "E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? C7 44 24 30 16 00 00 00 45 33 C0 48 8D 54 24 30 48 8B CB E8 ?? ?? ?? ?? C6 47 08 01 48 8D 15 ?? ?? ?? ??", 0x118F716u, 0x118E896u },
-    { "RenderAddFloat",
-      "48 8B C4 57 41 56 41 57 48 81 EC 80 00 00 00 48 C7 40 A8 FE FF FF FF 48 89 58 10 48 89 68 18 48 89 70 20 4D 8B F1 4D 8B F8 48 8B EA 48 8B F1 B9 38 01 00 00 E8 ?? ?? ?? ?? 48 8B F8 48 89 84 24 A0 00 00 00 48 85 C0 74 ?? 8B 9E E0 01 00 00 8D 53 01 89 96 E0 01 00 00 48 8B CE E8 ?? ?? ?? ?? 4C 8B C0 44 8B CB", 0x127DBE0u, 0x127D190u },
     { "RenderAddTitle",
       "48 8B C4 57 41 56 41 57 48 81 EC 90 00 00 00 48 C7 40 98 FE FF FF FF 48 89 58 10 48 89 68 18 48 89 70 20 48 8B DA 48 8B E9 B9 20 00 00 00 E8 ?? ?? ?? ??", 0x12807B0u, 0x127FD60u },
     { "RenderClipRead",
@@ -426,15 +407,6 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                             * pointer slot and dereference lazily; it may be NULL at startup. */
       "48 8B 05 ?? ?? ?? ?? 48 83 B8 A0 54 0A 00 00 0F 94 C0",
       0xD4A710u, 0xD49DC0u },
-    /* bool SnapMapToJson(void *map, idStr *out, unsigned char compact): the editor's map-save serializer. Call
-     * it, not SerializeToJson, whose first argument is a ~0x770-byte stack snapshot of the map. One
-     * RIP-relative wildcard (the stack-cookie load); the trailing E8 anchors the temp-object construction. */
-    { "SnapMapToJson",
-      "40 53 56 57 48 81 EC B0 07 00 00 48 C7 44 24 20 FE FF FF FF "
-      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 A0 07 00 00 "
-      "41 0F B6 F0 48 8B FA 48 8B D9 48 8D 4C 24 30 E8",
-      0x11F8EB0u, 0x11F80D0u },
-
     /* idSnapMap::AddTag("map:branch"): add-if-absent on the map's tag list. Save becomes Save As when the map
      * carries "map:new" or "map:branch", so tagging a substituted map opens a rawmap as a new map; save-as
      * removes the tag before writing and restores it on failure. The prologue has a byte-identical twin at

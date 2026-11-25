@@ -232,12 +232,6 @@ size_t sh_boot_pacing_match(const uint8_t *base, sig_result *results, size_t cap
     return ok;
 }
 
-static const sig_result *binding(const sig_result *r, size_t n, const char *name)
-{
-    size_t i;
-    for (i = 0; i < n; i++) if (r[i].name && !strcmp(r[i].name, name) && r[i].status == SIG_OK) return r + i;
-    return NULL;
-}
 
 /* Allocates one page within rel32 reach of every site in sites[]. */
 static unsigned char *near_page(const uintptr_t *sites, size_t n)
@@ -285,9 +279,9 @@ static int repoint(uintptr_t at, uintptr_t next, uintptr_t dest, sh_patch_handle
 
 unsigned sh_boot_pacing_install(const sig_result *results, size_t count, unsigned mask, unsigned long age_ms)
 {
-    const sig_result *lock_r = binding(results, count, "BootVideoLock"),
-        *sleep_r = binding(results, count, "BootVideoSleep"),
-        *poll_r = binding(results, count, "BootReadPoll");
+    const sig_result *lock_r = sig_ok(results, count, "BootVideoLock"),
+        *sleep_r = sig_ok(results, count, "BootVideoSleep"),
+        *poll_r = sig_ok(results, count, "BootReadPoll");
     uintptr_t lock = 0, video_sleep = 0, poll_sleep = 0;
     uintptr_t sites[2];
     size_t nsites = 0;

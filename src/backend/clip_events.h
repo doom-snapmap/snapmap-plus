@@ -36,8 +36,6 @@ int sh_ce_clip_of_mod(const char *clip, const char *salt);
 int sh_ce_def_of_mod(const char *md6def, const char *salt);
 /* 1 when the decl `name` is under mods/ (any case, either slash): a mod's decl, never a stock one. */
 int sh_ce_decl_under_mods(const char *name);
-/* Name equality as the engine's resource names compare: any case, '\' as '/'. */
-int sh_ce_name_eq(const char *a, const char *b);
 
 typedef struct sh_ce_md6 {
     char  *base;       /* init { inherit "<base>" }, malloc'd; NULL when it has none */

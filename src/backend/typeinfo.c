@@ -27,12 +27,12 @@ typedef void *(*declmgr_getter_fn)(void);
 #define VSLOT_REFLECT_ACCESSOR  0x80
 
 /* Three-argument type lookup returns a record, despite a void decompiler label.
- * Caller 0x9C79D0 consumes the result; NULL means the type was not found. */
+ * A missing type returns NULL. */
 typedef void *(*find_typeinfo_fn)(void *reflect, const char *name, void *scope);
 
 typedef void *(*find_enum_fn)(void *reflect, const char *name);
 
-/* Reflection field layout: array@record+0x20, stride 0x48 and name@field+0x10 match engine caller 0x9C79D0;
+/* Reflection field layout: array@record+0x20, stride 0x48 and name@field+0x10 are used by type lookup;
  * the other offsets are unchecked. */
 #define REC_FIELDS_OFF      0x20    /* type record -> field array */
 #define REC_SUPER_OFF       0x08    /* superclass name */
@@ -44,7 +44,7 @@ typedef void *(*find_enum_fn)(void *reflect, const char *name);
 #define FIELD_VAROPS_OFF    0x08    /* pointer/array qualifier */
 #define FIELD_COMMENT_OFF   0x28    /* field comment */
 
-/* Enum array/stride/member offsets follow engine caller 0x440230; the name offset is unchecked. */
+/* Enum array/stride/member offsets follow enum lookup; the name offset is unchecked. */
 #define ENUM_NAME_OFF       0x00    /* enum name */
 #define ENUM_MEMBERS_OFF    0x10    /* member array */
 #define ENUM_MEMBER_STRIDE  0x10    /* enum-member stride */
@@ -58,7 +58,6 @@ typedef void *(*find_enum_fn)(void *reflect, const char *name);
 
 
 typedef void *(*decl_find_fn)(void *ctx, const char *name);
-typedef int   (*dim_fn)(void *material);
 
 static const uint8_t   *g_doom_base    = NULL;
 static find_typeinfo_fn g_find_type    = NULL;
@@ -69,11 +68,8 @@ static volatile LONG    g_installed    = 0;
 static declmgr_getter_fn g_declmgr_getter   = NULL;   /* "declmgr_accessor": a code address */
 static const uint8_t    *g_validator_mgr    = NULL;   /* "validator_manager": a slot, deref lazily */
 static void             *g_resource_mgr_ctx = NULL;   /* "resource_manager_ctx": the object */
-static void             *g_material_mgr_ctx = NULL;   /* "material_manager_ctx": the object */
 static const uint8_t    *g_type_container   = NULL;   /* "type_container": the reflection container */
 static decl_find_fn      g_decl_find        = NULL;   /* sig "DeclPureFind" */
-static dim_fn            g_material_width   = NULL;   /* sig "MaterialWidth" */
-static dim_fn            g_material_height  = NULL;   /* sig "MaterialHeight" */
 
 /* Shared guarded accessor for reflection, apply, and event-manager consumers. */
 void *sh_typeinfo_get_declmgr(void)
@@ -338,42 +334,6 @@ size_t sh_typeinfo_inherit_text(const char *inheritName, char *buf, size_t cap)
         buf[len] = '\0';
         return len;
     } __except (EXCEPTION_EXECUTE_HANDLER) { buf[0] = '\0'; return 0; }
-}
-
-/* Look a material up through the read-only declaration lookup with the material-manager context. Names are
- * available before rendering, which does not mean GPU images are resident; dimension getters are best effort. */
-/* Pinned Vulkan audit references; all three addresses resolve by signature. */
-#define MATERIAL_MGR_CTX_RVA    SH_RVA(0x66C4A60u, 0x4FCA020u)  /* material type-manager context from the material setter */
-#define MATERIAL_WIDTH_FN_RVA   SH_RVA(0x16C90A0u, 0x16C9D80u)   /* verified idMaterial width getter                       */
-#define MATERIAL_HEIGHT_FN_RVA  SH_RVA(0x16C8EA0u, 0x16C9B80u)   /* verified idMaterial height getter                      */
-
-int sh_typeinfo_find_material(const char *name, char *buf, size_t cap)
-{
-    if (buf && cap) buf[0] = '\0';
-    if (!name || !name[0] || !buf || cap < 2) return 0;
-    if (!g_material_mgr_ctx || !g_decl_find) return 0;
-    __try {
-        void *material = g_decl_find(g_material_mgr_ctx, name);
-        if (!material) return 0;
-
-        /* A missing dimension getter does not invalidate the material lookup. */
-        int w = -1, h = -1;
-        if (g_material_width && g_material_height) {
-            __try {
-                w = g_material_width(material);
-                h = g_material_height(material);
-            } __except (EXCEPTION_EXECUTE_HANDLER) { w = -1; h = -1; }
-        }
-
-        if (w > 0 && h > 0)
-            _snprintf_s(buf, cap, _TRUNCATE, "found (%dx%d)", w, h);
-        else
-            _snprintf_s(buf, cap, _TRUNCATE, "found");
-        return 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        if (cap) buf[0] = '\0';
-        return 0;
-    }
 }
 
 /* Reflection types form a NULL-name-terminated array at container+0x20, stride 0x38, name@+0, superclass@+8
@@ -963,26 +923,22 @@ int sh_typeinfo_install(const sig_result *results, size_t n, const uint8_t *modu
 
 
     g_decl_find       = (decl_find_fn)sig_addr_by_name(results, n, "DeclPureFind");
-    g_material_width  = (dim_fn)sig_addr_by_name(results, n, "MaterialWidth");
-    g_material_height = (dim_fn)sig_addr_by_name(results, n, "MaterialHeight");
 
     /* Resolve code/data anchors once; each consumer handles missing dependencies. */
     g_declmgr_getter   = (declmgr_getter_fn)glb_resolve(module_base, "declmgr_accessor", NULL);
     g_validator_mgr    = (const uint8_t *)glb_resolve(module_base, "validator_manager", NULL);
     g_resource_mgr_ctx = (void *)glb_resolve(module_base, "resource_manager_ctx", NULL);
-    g_material_mgr_ctx = (void *)glb_resolve(module_base, "material_manager_ctx", NULL);
     g_type_container   = (const uint8_t *)glb_resolve(module_base, "type_container", NULL);
 
     /* Log relative addresses for comparison across reports; 0 means unresolved. */
     char line[240];
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "B2: typeinfo install -- find_type=0x%x find_enum=0x%x declmgr_acc=0x%x decl_find=0x%x "
-        "res_ctx=0x%x mat_ctx=0x%x validator=0x%x type_container=0x%x mat_dims=%s",
+        "res_ctx=0x%x validator=0x%x type_container=0x%x",
         ti_rva((uintptr_t)g_find_type), ti_rva((uintptr_t)g_find_enum),
         ti_rva((uintptr_t)g_declmgr_getter), ti_rva((uintptr_t)g_decl_find),
-        ti_rva((uintptr_t)g_resource_mgr_ctx), ti_rva((uintptr_t)g_material_mgr_ctx),
-        ti_rva((uintptr_t)g_validator_mgr), ti_rva((uintptr_t)g_type_container),
-        (g_material_width && g_material_height) ? "yes" : "no");
+        ti_rva((uintptr_t)g_resource_mgr_ctx),
+        ti_rva((uintptr_t)g_validator_mgr), ti_rva((uintptr_t)g_type_container));
     backend_log(line);
     return 1;
 }

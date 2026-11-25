@@ -37,11 +37,6 @@ void backend_log(const char *message);
 static sh_patch_handle g_patch[SH_PLACE_GATE_COUNT];
 static int g_live;
 
-static const sig_result *binding(const sig_result *r,size_t n,const char *name)
-{
-    size_t i;for(i=0;i<n;i++)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)return r+i;
-    return NULL;
-}
 static int site_matches(uintptr_t site,int gate)
 {
     __try {return sh_place_gate_branch((const unsigned char*)site,gate);}
@@ -53,7 +48,7 @@ int sh_place_anywhere_install(const sig_result *results,size_t count)
     uintptr_t at[SH_PLACE_GATE_COUNT];const char *why=NULL;char line[320];int i;
     if(g_live)return 1;
     for(i=0;i<SH_PLACE_GATE_COUNT&&!why;i++) {
-        const sig_result *r=binding(results,count,k_gate[i].name);int branch;
+        const sig_result *r=sig_ok(results,count,k_gate[i].name);int branch;
         if(!r){why=i?"the ghost colour test was not found":"the Place test was not found";break;}
         if((branch=site_matches(r->addr,i))<0){why=i?"the ghost colour test has unexpected bytes":"the Place test has unexpected bytes";break;}
         at[i]=r->addr+(uintptr_t)branch;

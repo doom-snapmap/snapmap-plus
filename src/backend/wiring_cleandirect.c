@@ -31,19 +31,11 @@ static volatile LONG  g_installed      = 0;
 static creator_fn     g_orig_base      = NULL;
 static creator_fn     g_orig_outnode   = NULL;
 
-/* Notify the frontend of connect edits even when entity count is unchanged,
- * so module-name labels can refresh through interface slot +0x288. */
-static volatile LONG  g_connect_generation = 0;
-
 /* Creators run every hover frame. Debounce each bare source/target pair;
  * backend reference insertion also deduplicates repeated IDs. Editor thread only. */
 static int            g_last_write_source = -1;
 static int            g_last_write_target = -1;
 
-int sh_wiring_cleandirect_generation(void)
-{
-    return (int)g_connect_generation;
-}
 
 /* Resolve the hovered target's decl-flags byte pointer from (world, idx). Returns the byte* or NULL. */
 static uint8_t *wcd_target_flags(void *world, int idx)
@@ -92,7 +84,6 @@ static void wcd_run(creator_fn stock, void *tool, void *world, int idx)
             g_last_write_source = source;
             g_last_write_target = idx;
             ae_schedule_target_write(source, idx);        /* Queue serialization and apply on the engine command drain. */
-            InterlockedIncrement(&g_connect_generation);
         }
         return;
     }
@@ -101,7 +92,6 @@ static void wcd_run(creator_fn stock, void *tool, void *world, int idx)
     g_last_write_source = -1;
     g_last_write_target = -1;
     stock(tool, world, idx);
-    if (idx >= 0) InterlockedIncrement(&g_connect_generation);
 }
 
 static void connect_creator_base_detour(void *tool, void *world, int idx)

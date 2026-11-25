@@ -360,7 +360,8 @@ static void old_shape_rows(void)
     unsigned rejected = 0;
     char refusal[200];
     printf("-- rows in an earlier shape: not read; a refused load holds its sentence\n");
-    CHECK(sh_modmanifest_read(OLD, sizeof OLD - 1, &rows, &rejected) == 0 && rows.count == 0 && rejected == 1);
+    CHECK(sh_map_old_shape(OLD, sizeof OLD - 1) == SH_MAP_OLD_FORMAT);
+    CHECK(sh_modmanifest_read(OLD, sizeof OLD - 1, &rows, &rejected) == 0 && rows.count == 0 && rejected == 0);
     sh_modmanifest_list_free(&rows);
     sh_modmanifest_reset();
     sh_modmanifest_load_refuse(SH_MAP_OLD_REFUSAL);

@@ -2,6 +2,7 @@
  * folder: admission and failure isolation, shadow conflicts, builds of one salt, compositions, lookups, provider
  * precedence, the registration plan and its runs through fake engine operations, bundle closure and rescan. */
 #define WIN32_LEAN_AND_MEAN
+#include "map_cvars.h"
 #include "heap_out.h"
 #include <windows.h>
 #include <stdint.h>
@@ -990,6 +991,15 @@ static void build_requirements_fixture(const char *root)
     g_bundle_extra = NULL;
 }
 
+static char gate_journal[4096];
+static int gate_writes;
+static int record_gate_journal(const char *json)
+{
+    ++gate_writes;
+    strcpy_s(gate_journal, sizeof gate_journal, json ? json : "");
+    return 1;
+}
+
 static void test_requirements(void)
 {
     char top[MAX_PATH], req_root[MAX_PATH], plain_root[MAX_PATH];
@@ -1088,7 +1098,12 @@ static void test_requirements(void)
     /* Gates are released when no admitted bundle needs them any more, to the
      * value they displaced; after that nothing is touched again. */
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    sh_map_cvars_writer(record_gate_journal);
+    gate_writes = 0;
     CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 1 && sh_modserve_test_gates_owned() == 2);
+    CHECK(gate_writes == 1 && strstr(gate_journal, "\"name\":\"g_useResourceBlackList\",\"was\":\"1\",\"set\":\"0\"")
+          && strstr(gate_journal, "\"name\":\"g_useImageBlackList\",\"was\":\"1\",\"set\":\"0\""));
+    CHECK(sh_modserve_requirements_check(&g_gates, "play", &r) == 1 && gate_writes == 1);
     CHECK(sh_modserve_index_build(plain_root) == 1);
     log_clear();
     CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 0);
@@ -1096,6 +1111,9 @@ static void test_requirements(void)
     CHECK(log_has("requirement released: g_useResourceBlackList restored to 1"));
     g_gate_reads = g_gate_sets = 0;
     CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 0 && g_gate_reads == 0 && g_gate_sets == 0);
+
+    CHECK(gate_writes == 2 && !gate_journal[0]);
+    sh_map_cvars_writer(NULL);
 
     /* The empty case: no bundle needs a requirement, so the cvars are never
      * read or set, by the apply or by a gated plan run. */

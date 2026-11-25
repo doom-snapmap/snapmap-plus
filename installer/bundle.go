@@ -436,7 +436,7 @@ func tokenPath() (string, error) {
 	return filepath.Join(dir, "token"), nil
 }
 
-// resolveToken: --token flag > SNAPMAP_PLUS_TOKEN env > the saved token file (current location, then the open-snaphak one).
+// resolveToken: --token flag > SNAPMAP_PLUS_TOKEN env > the saved token file.
 func resolveToken(f flags) string {
 	if f.token != "" {
 		return f.token
@@ -446,12 +446,6 @@ func resolveToken(f flags) string {
 	}
 	if p, err := tokenPath(); err == nil {
 		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	// The token may also sit under %LOCALAPPDATA%\open-snaphak\.
-	if op := oldTokenPath(); op != "" {
-		if b, err := os.ReadFile(op); err == nil {
 			return strings.TrimSpace(string(b))
 		}
 	}

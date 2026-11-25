@@ -83,28 +83,7 @@ static void dt_remove_kid(sh_dt_node *parent, int i)
     parent->nkids--;
 }
 
-typedef struct dt_buf { char *p; size_t n, cap; int oom; } dt_buf;
-
-static void dt_put(dt_buf *b, const char *s, size_t n)
-{
-    if (b->oom || !n) return;
-    if (b->n + n + 1 > b->cap) {
-        size_t cap = b->cap ? b->cap * 2 : 1024;
-        char *g;
-        while (cap < b->n + n + 1) cap *= 2;
-        g = (char *)realloc(b->p, cap);
-        if (!g) { b->oom = 1; return; }
-        b->p = g;
-        b->cap = cap;
-    }
-    memcpy(b->p + b->n, s, n);
-    b->n += n;
-    b->p[b->n] = 0;
-}
-
-static void dt_puts(dt_buf *b, const char *s) { dt_put(b, s, strlen(s)); }
-
-static char *dt_done(dt_buf *b, size_t *len)
+static char *dt_done(sh_text_buf *b, size_t *len)
 {
     if (b->oom) { free(b->p); b->p = NULL; return NULL; }
     if (!b->p) { b->p = (char *)malloc(1); if (!b->p) return NULL; b->p[0] = 0; }
@@ -390,38 +369,38 @@ sh_dt *sh_dt_parse(const char *text, size_t len, char *cause, size_t cap)
     return t;
 }
 
-static void dt_indent(dt_buf *b, int depth) { int i; for (i = 0; i < depth; ++i) dt_put(b, "\t", 1); }
+static void dt_indent(sh_text_buf *b, int depth) { int i; for (i = 0; i < depth; ++i) sh_text_append(b, "\t", 1); }
 
-static void dt_write_members(dt_buf *b, const sh_dt_node *n, int depth, int canon, const char *eol);
+static void dt_write_members(sh_text_buf *b, const sh_dt_node *n, int depth, int canon, const char *eol);
 
 /* One statement; `item` >= 0 writes the key as item[item]. */
-static void dt_write_stmt(dt_buf *b, const sh_dt_node *k, int depth, int canon, const char *eol, long item)
+static void dt_write_stmt(sh_text_buf *b, const sh_dt_node *k, int depth, int canon, const char *eol, long item)
 {
     char tmp[48];
     if (item >= 0) {
         _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "item[%ld]", item);
-        dt_puts(b, tmp);
-    } else dt_put(b, k->key, k->key_n);
-    if (k->name) { dt_put(b, " ", 1); dt_put(b, k->name, k->name_n); }
+        sh_text_append_str(b, tmp);
+    } else sh_text_append(b, k->key, k->key_n);
+    if (k->name) { sh_text_append(b, " ", 1); sh_text_append(b, k->name, k->name_n); }
     if (k->block) {
-        dt_puts(b, k->eq ? " = {" : " {");
-        dt_puts(b, eol);
+        sh_text_append_str(b, k->eq ? " = {" : " {");
+        sh_text_append_str(b, eol);
         dt_write_members(b, k, depth + 1, canon, eol);
         dt_indent(b, depth);
-        dt_put(b, "}", 1);
-        if (k->semi && !canon) dt_put(b, ";", 1);
+        sh_text_append(b, "}", 1);
+        if (k->semi && !canon) sh_text_append(b, ";", 1);
     } else if (k->eq) {
-        dt_put(b, " = ", 3);
-        dt_put(b, k->val, k->val_n);
-        if (k->semi || canon) dt_put(b, ";", 1);
+        sh_text_append(b, " = ", 3);
+        sh_text_append(b, k->val, k->val_n);
+        if (k->semi || canon) sh_text_append(b, ";", 1);
     } else if (k->val_n) {
-        dt_put(b, " ", 1);
-        dt_put(b, k->val, k->val_n);
-        if (k->semi && !canon) dt_put(b, ";", 1);
-    } else if (k->semi && !canon) dt_put(b, ";", 1);
+        sh_text_append(b, " ", 1);
+        sh_text_append(b, k->val, k->val_n);
+        if (k->semi && !canon) sh_text_append(b, ";", 1);
+    } else if (k->semi && !canon) sh_text_append(b, ";", 1);
 }
 
-static void dt_write_members(dt_buf *b, const sh_dt_node *n, int depth, int canon, const char *eol)
+static void dt_write_members(sh_text_buf *b, const sh_dt_node *n, int depth, int canon, const char *eol)
 {
     int i;
     long item = 0;
@@ -433,34 +412,34 @@ static void dt_write_members(dt_buf *b, const sh_dt_node *n, int depth, int cano
         dt_indent(b, depth);
         _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%.*s = %ld%s", num ? (int)num->key_n : 3, num ? num->key : "num",
                     count + n->num_delta, (canon || !num || num->semi) ? ";" : "");
-        dt_puts(b, tmp);
-        dt_puts(b, eol);
+        sh_text_append_str(b, tmp);
+        sh_text_append_str(b, eol);
     }
     for (i = 0; i < n->nkids; ++i) {
         const sh_dt_node *k = n->kids[i];
         if (n->list && dt_key_is(k, "num") && !k->block) continue;
         dt_indent(b, depth);
         dt_write_stmt(b, k, depth, canon, eol, n->list ? item++ : -1);
-        dt_puts(b, eol);
+        sh_text_append_str(b, eol);
     }
 }
 
 char *sh_dt_text(const sh_dt *t, size_t *len)
 {
-    dt_buf b = { NULL, 0, 0, 0 };
+    sh_text_buf b = { NULL, 0, 0, 0 };
     if (!t || !t->root) return NULL;
-    dt_put(&b, "{", 1);
-    dt_puts(&b, t->eol);
+    sh_text_append(&b, "{", 1);
+    sh_text_append_str(&b, t->eol);
     dt_write_members(&b, t->root, 1, 0, t->eol);
-    dt_put(&b, "}", 1);
-    dt_puts(&b, t->eol);
+    sh_text_append(&b, "}", 1);
+    sh_text_append_str(&b, t->eol);
     return dt_done(&b, len);
 }
 
 /* A statement's text at depth 0, without the final line end (malloc'd). */
 static char *dt_stmt_text(const sh_dt_node *k, int canon, const char *eol)
 {
-    dt_buf b = { NULL, 0, 0, 0 };
+    sh_text_buf b = { NULL, 0, 0, 0 };
     dt_write_stmt(&b, k, 0, canon, eol, -1);
     return dt_done(&b, NULL);
 }
@@ -468,20 +447,20 @@ static char *dt_stmt_text(const sh_dt_node *k, int canon, const char *eol)
 /* A value's text: a scalar's token, or a block's braces and members. */
 static char *dt_value_text(const sh_dt_node *k, const char *eol)
 {
-    dt_buf b = { NULL, 0, 0, 0 };
-    if (!k->block) dt_put(&b, k->val, k->val_n);
+    sh_text_buf b = { NULL, 0, 0, 0 };
+    if (!k->block) sh_text_append(&b, k->val, k->val_n);
     else {
-        dt_put(&b, "{", 1);
-        dt_puts(&b, eol);
+        sh_text_append(&b, "{", 1);
+        sh_text_append_str(&b, eol);
         dt_write_members(&b, k, 1, 0, eol);
-        dt_put(&b, "}", 1);
+        sh_text_append(&b, "}", 1);
     }
     return dt_done(&b, NULL);
 }
 
 /* A value with its runs of blanks and line breaks outside strings as one
  * space: two spellings of `0 0 1 1` compare equal. */
-static void dt_put_flat(dt_buf *b, const char *v, size_t n)
+static void dt_put_flat(sh_text_buf *b, const char *v, size_t n)
 {
     size_t i;
     int in_str = 0, gap = 0;
@@ -489,14 +468,14 @@ static void dt_put_flat(dt_buf *b, const char *v, size_t n)
         char c = v[i];
         if (c == '"') in_str = !in_str;
         if (!in_str && (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f')) { gap = 1; continue; }
-        if (gap) { dt_put(b, " ", 1); gap = 0; }
-        dt_put(b, &c, 1);
+        if (gap) { sh_text_append(b, " ", 1); gap = 0; }
+        sh_text_append(b, &c, 1);
     }
 }
 
 static int dt_val_eq(const char *a, size_t an, const char *b, size_t bn)
 {
-    dt_buf x = { NULL, 0, 0, 0 }, y = { NULL, 0, 0, 0 };
+    sh_text_buf x = { NULL, 0, 0, 0 }, y = { NULL, 0, 0, 0 };
     int eq;
     if (an == bn && !memcmp(a, b, an)) return 1;
     dt_put_flat(&x, a, an);
@@ -512,26 +491,26 @@ static int dt_str_cmp(const void *a, const void *b) { return strcmp(*(const char
 /* Order-free text: fields and entries sorted, list items in order, keys
  * lower case, ';' and the list's renumbering normalised. `with_key` 0
  * writes the value only (a list item). */
-static void dt_sorted(dt_buf *b, const sh_dt_node *n, int with_key)
+static void dt_sorted(sh_text_buf *b, const sh_dt_node *n, int with_key)
 {
     size_t i;
     if (with_key) {
-        for (i = 0; i < n->key_n; ++i) { char c = (char)dt_lower((unsigned char)n->key[i]); dt_put(b, &c, 1); }
-        if (n->name) { dt_put(b, " ", 1); dt_put(b, n->name, n->name_n); }
-        dt_put(b, n->eq ? "=" : " ", 1);
+        for (i = 0; i < n->key_n; ++i) { char c = (char)dt_lower((unsigned char)n->key[i]); sh_text_append(b, &c, 1); }
+        if (n->name) { sh_text_append(b, " ", 1); sh_text_append(b, n->name, n->name_n); }
+        sh_text_append(b, n->eq ? "=" : " ", 1);
     }
     if (!n->block) { dt_put_flat(b, n->val, n->val_n); return; }
-    dt_put(b, "{", 1);
+    sh_text_append(b, "{", 1);
     if (n->list) {
         char tmp[48];
         long count = 0;
         int k;
         for (k = 0; k < n->nkids; ++k) if (!(dt_key_is(n->kids[k], "num") && !n->kids[k]->block)) count++;
         _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "#%ld", count + n->num_delta);
-        dt_puts(b, tmp);
+        sh_text_append_str(b, tmp);
         for (k = 0; k < n->nkids; ++k) {
             if (dt_key_is(n->kids[k], "num") && !n->kids[k]->block) continue;
-            dt_put(b, "\x1e", 1);
+            sh_text_append(b, "\x1e", 1);
             dt_sorted(b, n->kids[k], 0);
         }
     } else if (n->nkids) {
@@ -539,21 +518,21 @@ static void dt_sorted(dt_buf *b, const sh_dt_node *n, int with_key)
         int k, np = 0;
         if (!parts) { b->oom = 1; return; }
         for (k = 0; k < n->nkids; ++k) {
-            dt_buf one = { NULL, 0, 0, 0 };
+            sh_text_buf one = { NULL, 0, 0, 0 };
             dt_sorted(&one, n->kids[k], 1);
             if (one.oom) { free(one.p); b->oom = 1; continue; }
             parts[np++] = dt_done(&one, NULL);
         }
         qsort(parts, (size_t)np, sizeof *parts, dt_str_cmp);
-        for (k = 0; k < np; ++k) { dt_put(b, "\x1f", 1); dt_puts(b, parts[k] ? parts[k] : ""); free(parts[k]); }
+        for (k = 0; k < np; ++k) { sh_text_append(b, "\x1f", 1); sh_text_append_str(b, parts[k] ? parts[k] : ""); free(parts[k]); }
         free(parts);
     }
-    dt_put(b, "}", 1);
+    sh_text_append(b, "}", 1);
 }
 
 static char *dt_sorted_text(const sh_dt_node *n, int with_key)
 {
-    dt_buf b = { NULL, 0, 0, 0 };
+    sh_text_buf b = { NULL, 0, 0, 0 };
     dt_sorted(&b, n, with_key);
     return dt_done(&b, NULL);
 }
@@ -593,9 +572,9 @@ int sh_dt_texts_equal(const char *a, size_t alen, const char *b, size_t blen)
 /* The canonical head of a member: its key, plus ` <name>` for a named block. */
 static char *dt_head(const sh_dt_node *n)
 {
-    dt_buf b = { NULL, 0, 0, 0 };
-    dt_put(&b, n->key, n->key_n);
-    if (n->name) { dt_put(&b, " ", 1); dt_put(&b, n->name, n->name_n); }
+    sh_text_buf b = { NULL, 0, 0, 0 };
+    sh_text_append(&b, n->key, n->key_n);
+    if (n->name) { sh_text_append(&b, " ", 1); sh_text_append(&b, n->name, n->name_n); }
     return dt_done(&b, NULL);
 }
 
@@ -633,25 +612,25 @@ static int dt_name_field(const sh_dt_node *n, const char **p, size_t *len)
 
 static int dt_word_eq(const sh_dt_node *a, const sh_dt_node *b) { return dt_ieq(a->key, a->key_n, b->key, b->key_n); }
 
-static void dt_jstr(dt_buf *b, const char *s, size_t n)
+static void dt_jstr(sh_text_buf *b, const char *s, size_t n)
 {
     size_t i;
-    dt_put(b, "\"", 1);
+    sh_text_append(b, "\"", 1);
     for (i = 0; i < n; ++i) {
         unsigned char c = (unsigned char)s[i];
         char esc[8];
-        if (c == '"') dt_put(b, "\\\"", 2);
-        else if (c == '\\') dt_put(b, "\\\\", 2);
-        else if (c == '\n') dt_put(b, "\\n", 2);
-        else if (c == '\r') dt_put(b, "\\r", 2);
-        else if (c == '\t') dt_put(b, "\\t", 2);
-        else if (c < 0x20) { _snprintf_s(esc, sizeof esc, _TRUNCATE, "\\u%04x", c); dt_puts(b, esc); }
-        else dt_put(b, (const char *)&s[i], 1);
+        if (c == '"') sh_text_append(b, "\\\"", 2);
+        else if (c == '\\') sh_text_append(b, "\\\\", 2);
+        else if (c == '\n') sh_text_append(b, "\\n", 2);
+        else if (c == '\r') sh_text_append(b, "\\r", 2);
+        else if (c == '\t') sh_text_append(b, "\\t", 2);
+        else if (c < 0x20) { _snprintf_s(esc, sizeof esc, _TRUNCATE, "\\u%04x", c); sh_text_append_str(b, esc); }
+        else sh_text_append(b, (const char *)&s[i], 1);
     }
-    dt_put(b, "\"", 1);
+    sh_text_append(b, "\"", 1);
 }
 
-static void dt_jcstr(dt_buf *b, const char *s) { dt_jstr(b, s, strlen(s)); }
+static void dt_jcstr(sh_text_buf *b, const char *s) { dt_jstr(b, s, strlen(s)); }
 
 enum { DJ_NULL, DJ_STR, DJ_NUM, DJ_ARR, DJ_OBJ, DJ_LIT };
 typedef struct dj {
@@ -694,31 +673,31 @@ static int dj_hex(const char *p, unsigned *out)
 
 static char *dj_string(dj_ps *ps, size_t *len)
 {
-    dt_buf b = { NULL, 0, 0, 0 };
+    sh_text_buf b = { NULL, 0, 0, 0 };
     if (ps->p >= ps->e || *ps->p != '"') return NULL;
     ps->p++;
     while (ps->p < ps->e && *ps->p != '"') {
         char c = *ps->p++;
-        if (c != '\\') { dt_put(&b, &c, 1); continue; }
+        if (c != '\\') { sh_text_append(&b, &c, 1); continue; }
         if (ps->p >= ps->e) { free(b.p); return NULL; }
         c = *ps->p++;
         switch (c) {
-        case 'n': dt_put(&b, "\n", 1); break;
-        case 'r': dt_put(&b, "\r", 1); break;
-        case 't': dt_put(&b, "\t", 1); break;
-        case 'b': dt_put(&b, "\b", 1); break;
-        case 'f': dt_put(&b, "\f", 1); break;
+        case 'n': sh_text_append(&b, "\n", 1); break;
+        case 'r': sh_text_append(&b, "\r", 1); break;
+        case 't': sh_text_append(&b, "\t", 1); break;
+        case 'b': sh_text_append(&b, "\b", 1); break;
+        case 'f': sh_text_append(&b, "\f", 1); break;
         case 'u': {
             unsigned u;
             char out[4];
             if (ps->e - ps->p < 4 || !dj_hex(ps->p, &u)) { free(b.p); return NULL; }
             ps->p += 4;
-            if (u < 0x80) { out[0] = (char)u; dt_put(&b, out, 1); }
-            else if (u < 0x800) { out[0] = (char)(0xC0 | (u >> 6)); out[1] = (char)(0x80 | (u & 0x3F)); dt_put(&b, out, 2); }
-            else { out[0] = (char)(0xE0 | (u >> 12)); out[1] = (char)(0x80 | ((u >> 6) & 0x3F)); out[2] = (char)(0x80 | (u & 0x3F)); dt_put(&b, out, 3); }
+            if (u < 0x80) { out[0] = (char)u; sh_text_append(&b, out, 1); }
+            else if (u < 0x800) { out[0] = (char)(0xC0 | (u >> 6)); out[1] = (char)(0x80 | (u & 0x3F)); sh_text_append(&b, out, 2); }
+            else { out[0] = (char)(0xE0 | (u >> 12)); out[1] = (char)(0x80 | ((u >> 6) & 0x3F)); out[2] = (char)(0x80 | (u & 0x3F)); sh_text_append(&b, out, 3); }
             break;
         }
-        default: dt_put(&b, &c, 1); break;
+        default: sh_text_append(&b, &c, 1); break;
         }
     }
     if (ps->p >= ps->e) { free(b.p); return NULL; }
@@ -831,7 +810,7 @@ static int dj_int(const dj *o, const char *key)
 }
 
 typedef struct dt_diff {
-    dt_buf out;                        /* the ops array's members */
+    sh_text_buf out;                        /* the ops array's members */
     int first;
     sh_dt_counts counts;
     const char *eol;
@@ -843,26 +822,26 @@ typedef struct dt_diff {
 static void dt_op_begin(dt_diff *d, const char *op, const char *last_seg)
 {
     int i;
-    if (!d->first) dt_put(&d->out, ",", 1);
+    if (!d->first) sh_text_append(&d->out, ",", 1);
     d->first = 0;
-    dt_puts(&d->out, "{\"op\":");
+    sh_text_append_str(&d->out, "{\"op\":");
     dt_jcstr(&d->out, op);
-    dt_puts(&d->out, ",\"path\":[");
-    for (i = 0; i < d->nseg; ++i) { if (i) dt_put(&d->out, ",", 1); dt_jcstr(&d->out, d->segs[i]); }
-    if (last_seg) { if (d->nseg) dt_put(&d->out, ",", 1); dt_jcstr(&d->out, last_seg); }
-    dt_put(&d->out, "]", 1);
+    sh_text_append_str(&d->out, ",\"path\":[");
+    for (i = 0; i < d->nseg; ++i) { if (i) sh_text_append(&d->out, ",", 1); dt_jcstr(&d->out, d->segs[i]); }
+    if (last_seg) { if (d->nseg) sh_text_append(&d->out, ",", 1); dt_jcstr(&d->out, last_seg); }
+    sh_text_append(&d->out, "]", 1);
 }
 
 static void dt_op_member(dt_diff *d, const char *member, const char *text)
 {
-    dt_put(&d->out, ",", 1);
+    sh_text_append(&d->out, ",", 1);
     dt_jcstr(&d->out, member);
-    dt_put(&d->out, ":", 1);
+    sh_text_append(&d->out, ":", 1);
     dt_jcstr(&d->out, text ? text : "");
     if (!text) d->failed = 1;
 }
 
-static void dt_op_end(dt_diff *d) { dt_put(&d->out, "}", 1); }
+static void dt_op_end(dt_diff *d) { sh_text_append(&d->out, "}", 1); }
 
 static void dt_op_stmt(dt_diff *d, const char *op, const sh_dt_node *n, const char *last_seg)
 {
@@ -1132,7 +1111,7 @@ char *sh_dt_diff(const char *request, const char *stock, size_t stock_len, const
 {
     sh_dt *s, *c;
     dt_diff d;
-    dt_buf o = { NULL, 0, 0, 0 };
+    sh_text_buf o = { NULL, 0, 0, 0 };
     char why[300], tmp[160];
     if (counts) memset(counts, 0, sizeof *counts);
     if (cause && cap) cause[0] = 0;
@@ -1147,16 +1126,16 @@ char *sh_dt_diff(const char *request, const char *stock, size_t stock_len, const
     sh_dt_free(s);
     sh_dt_free(c);
     if (d.failed || d.out.oom) { free(d.out.p); dt_cause(cause, cap, "out of memory"); return NULL; }
-    dt_puts(&o, "{\"file\":");
+    sh_text_append_str(&o, "{\"file\":");
     dt_jcstr(&o, request ? request : "");
     _snprintf_s(tmp, sizeof tmp, _TRUNCATE, ",\"stock\":\"%016llx\"", dt_fnv(stock, stock_len));
-    dt_puts(&o, tmp);
+    sh_text_append_str(&o, tmp);
     _snprintf_s(tmp, sizeof tmp, _TRUNCATE, ",\"counts\":{\"set\":%d,\"remove\":%d,\"list\":%d,\"keyed\":%d,\"bag\":%d,\"drop\":%d}",
                 d.counts.set, d.counts.remove, d.counts.list, d.counts.keyed, d.counts.bag, d.counts.drop);
-    dt_puts(&o, tmp);
-    dt_puts(&o, ",\"ops\":[");
-    if (d.out.p) dt_put(&o, d.out.p, d.out.n);
-    dt_puts(&o, "]}");
+    sh_text_append_str(&o, tmp);
+    sh_text_append_str(&o, ",\"ops\":[");
+    if (d.out.p) sh_text_append(&o, d.out.p, d.out.n);
+    sh_text_append_str(&o, "]}");
     free(d.out.p);
     if (counts) *counts = d.counts;
     if (o.oom) { free(o.p); dt_cause(cause, cap, "out of memory"); return NULL; }
@@ -1256,25 +1235,25 @@ char *sh_dt_game_name(const char *request)
 }
 
 /* One slot segment: the key, or `word:name` for a named block. */
-static void dt_slot_seg(dt_buf *b, const char *seg)
+static void dt_slot_seg(sh_text_buf *b, const char *seg)
 {
     const char *sp = strchr(seg, ' ');
-    if (!sp) { dt_puts(b, seg); return; }
-    dt_put(b, seg, (size_t)(sp - seg));
-    dt_put(b, ":", 1);
+    if (!sp) { sh_text_append_str(b, seg); return; }
+    sh_text_append(b, seg, (size_t)(sp - seg));
+    sh_text_append(b, ":", 1);
     sp++;
-    if (*sp == '"') { size_t n = strlen(sp); dt_put(b, sp + 1, n >= 2 ? n - 2 : 0); }
-    else dt_puts(b, sp);
+    if (*sp == '"') { size_t n = strlen(sp); sh_text_append(b, sp + 1, n >= 2 ? n - 2 : 0); }
+    else sh_text_append_str(b, sp);
 }
 
 static void dt_op_slot(dt_op *op, const char *game)
 {
-    dt_buf b = { NULL, 0, 0, 0 };
+    sh_text_buf b = { NULL, 0, 0, 0 };
     int i;
     char *s;
-    dt_puts(&b, game);
-    for (i = 0; i < op->npath; ++i) { dt_put(&b, "/", 1); dt_slot_seg(&b, op->path[i]); }
-    if (op->kind == OP_KEYED || op->kind == OP_UNKEY) { dt_put(&b, "/", 1); dt_puts(&b, op->name ? op->name : ""); }
+    sh_text_append_str(&b, game);
+    for (i = 0; i < op->npath; ++i) { sh_text_append(&b, "/", 1); dt_slot_seg(&b, op->path[i]); }
+    if (op->kind == OP_KEYED || op->kind == OP_UNKEY) { sh_text_append(&b, "/", 1); sh_text_append_str(&b, op->name ? op->name : ""); }
     s = dt_done(&b, NULL);
     free(op->slot);
     op->slot = s ? s : sh_text("");
@@ -1290,12 +1269,12 @@ static unsigned long long dt_op_digest(const dt_op *op)
     t = sh_dt_parse("{}", 2, NULL, 0);
     h = dt_fnv(op->entry, strlen(op->entry));
     if (t) {
-        dt_buf w = { NULL, 0, 0, 0 };
+        sh_text_buf w = { NULL, 0, 0, 0 };
         sh_dt_node *root;
         char *in;
-        dt_puts(&w, "{\n");
-        dt_puts(&w, op->entry);
-        dt_puts(&w, "\n}");
+        sh_text_append_str(&w, "{\n");
+        sh_text_append_str(&w, op->entry);
+        sh_text_append_str(&w, "\n}");
         in = w.p ? dt_copy(t, w.p, w.n) : NULL;
         root = in ? dt_parse_into(t, in, w.n, NULL, 0) : NULL;
         if (root && root->nkids == 1 && (txt = dt_sorted_text(root->kids[0], 1)) != NULL) { h = dt_fnv(txt, strlen(txt)); free(txt); }
@@ -1452,10 +1431,10 @@ static sh_dt_node *dt_nav(sh_dt_node *n, const char *const *path, int npath, con
 /* The op's path, "/"-joined (malloc'd), or NULL. */
 static char *dt_path_text(const dt_op *op, int npath)
 {
-    dt_buf b = { NULL, 0, 0, 0 };
+    sh_text_buf b = { NULL, 0, 0, 0 };
     int i;
     if (!npath) return sh_text("(the decl)");
-    for (i = 0; i < npath; ++i) { if (i) dt_put(&b, "/", 1); dt_puts(&b, op->path[i]); }
+    for (i = 0; i < npath; ++i) { if (i) sh_text_append(&b, "/", 1); sh_text_append_str(&b, op->path[i]); }
     return dt_done(&b, NULL);
 }
 
@@ -1599,7 +1578,7 @@ static int dt_type_values(const char *entry, size_t *at, size_t *n)
 }
 
 /* `words` gains each word of value[0..n) it does not hold yet (any case). */
-static void dt_union_words(dt_buf *words, const char *value, size_t n)
+static void dt_union_words(sh_text_buf *words, const char *value, size_t n)
 {
     size_t i = 0;
     while (i < n) {
@@ -1620,8 +1599,8 @@ static void dt_union_words(dt_buf *words, const char *value, size_t n)
             }
         }
         if (held) continue;
-        if (words->n) dt_put(words, " ", 1);
-        dt_put(words, value + s, m);
+        if (words->n) sh_text_append(words, " ", 1);
+        sh_text_append(words, value + s, m);
     }
 }
 
@@ -1631,8 +1610,8 @@ static void dt_union_words(dt_buf *words, const char *value, size_t n)
 static int dt_union_types(dt_src_ops *so, const sh_dt_source *src, const int *who, int nwho, const dt_op *op,
                           sh_dt_report *report)
 {
-    dt_buf names = { NULL, 0, 0, 0 }, out = { NULL, 0, 0, 0 };
-    dt_buf words[DT_TYPES_MAX];
+    sh_text_buf names = { NULL, 0, 0, 0 }, out = { NULL, 0, 0, 0 };
+    sh_text_buf words[DT_TYPES_MAX];
     size_t at0[DT_TYPES_MAX], n0[DT_TYPES_MAX], at[DT_TYPES_MAX], nn[DT_TYPES_MAX];
     dt_op *first = NULL;
     int w, k, c0 = 0, i, ok = 1;
@@ -1667,11 +1646,11 @@ static int dt_union_types(dt_src_ops *so, const sh_dt_source *src, const int *wh
     if (ok && first) {
         size_t p = 0;
         for (i = 0; i < c0; ++i) {
-            dt_put(&out, first->entry + p, at0[i] - p);
-            if (words[i].p) dt_puts(&out, words[i].p);
+            sh_text_append(&out, first->entry + p, at0[i] - p);
+            if (words[i].p) sh_text_append_str(&out, words[i].p);
             p = at0[i] + n0[i];
         }
-        dt_puts(&out, first->entry + p);
+        sh_text_append_str(&out, first->entry + p);
     }
     for (i = 0; i < DT_TYPES_MAX; ++i) free(words[i].p);
     entry = ok && first && out.p && !out.oom ? out.p : NULL;
@@ -1682,8 +1661,8 @@ static int dt_union_types(dt_src_ops *so, const sh_dt_source *src, const int *wh
             if (o != first && !_stricmp(o->slot, op->slot)) { o->skip = 1; o->unioned = 1; }
         }
     for (w = 0; w < nwho; ++w) {
-        if (w) dt_puts(&names, ", ");
-        dt_puts(&names, src[who[w]].who ? src[who[w]].who : "?");
+        if (w) sh_text_append_str(&names, ", ");
+        sh_text_append_str(&names, src[who[w]].who ? src[who[w]].who : "?");
     }
     free(first->own_entry);
     first->own_entry = entry;
@@ -1735,7 +1714,7 @@ sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, con
             int who[64], nwho = 0, differ = 0, serving, by_choice = 0, s2, k2, w;
             unsigned long long first_digest = op->digest;
             const sh_dt_choice *ch;
-            dt_buf list = { NULL, 0, 0, 0 };
+            sh_text_buf list = { NULL, 0, 0, 0 };
             const char *names;
             if (op->skip || !(op->kind == OP_SET || op->kind == OP_REMOVE || op->kind == OP_KEYED || op->kind == OP_UNKEY)) continue;
             /* Only the first claim of a slot is handled here; later claims ride with it. */
@@ -1779,8 +1758,8 @@ sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, con
                     }
             }
             for (w = 0; w < nwho; ++w) {
-                if (w) dt_puts(&list, ", ");
-                dt_puts(&list, src[who[w]].who ? src[who[w]].who : "?");
+                if (w) sh_text_append_str(&list, ", ");
+                sh_text_append_str(&list, src[who[w]].who ? src[who[w]].who : "?");
             }
             names = list.p && !list.oom ? list.p : "";
             report->clashes++;
@@ -1874,23 +1853,23 @@ static void dt_counts_of(const dj *e, sh_dt_counts *c)
 }
 
 /* A read JSON value written back. */
-static void dt_jvalue(dt_buf *b, const dj *v)
+static void dt_jvalue(sh_text_buf *b, const dj *v)
 {
     int i;
-    if (!v) { dt_puts(b, "null"); return; }
+    if (!v) { sh_text_append_str(b, "null"); return; }
     switch (v->t) {
     case DJ_STR: dt_jstr(b, v->s ? v->s : "", v->s ? v->n : 0); break;
-    case DJ_NUM: case DJ_LIT: if (v->s) dt_put(b, v->s, v->n); else dt_puts(b, "null"); break;
+    case DJ_NUM: case DJ_LIT: if (v->s) sh_text_append(b, v->s, v->n); else sh_text_append_str(b, "null"); break;
     case DJ_ARR: case DJ_OBJ:
-        dt_put(b, v->t == DJ_ARR ? "[" : "{", 1);
+        sh_text_append(b, v->t == DJ_ARR ? "[" : "{", 1);
         for (i = 0; i < v->count; ++i) {
-            if (i) dt_put(b, ",", 1);
-            if (v->t == DJ_OBJ) { dt_jcstr(b, v->keys[i]); dt_put(b, ":", 1); }
+            if (i) sh_text_append(b, ",", 1);
+            if (v->t == DJ_OBJ) { dt_jcstr(b, v->keys[i]); sh_text_append(b, ":", 1); }
             dt_jvalue(b, v->items[i]);
         }
-        dt_put(b, v->t == DJ_ARR ? "]" : "}", 1);
+        sh_text_append(b, v->t == DJ_ARR ? "]" : "}", 1);
         break;
-    default: dt_puts(b, "null"); break;
+    default: sh_text_append_str(b, "null"); break;
     }
 }
 
@@ -1899,25 +1878,25 @@ char *sh_dt_edits_keep(const char *element, size_t len, int (*keep)(void *contex
 {
     dj *e = dj_parse(element, len);
     const dj *ops = e ? dj_get(e, "ops") : NULL;
-    dt_buf o = { NULL, 0, 0, 0 };
+    sh_text_buf o = { NULL, 0, 0, 0 };
     sh_dt_counts c;
     char tmp[160];
     int i, k, first = 1, gone = 0;
     if (dropped) *dropped = 0;
     memset(&c, 0, sizeof c);
     if (!e || e->t != DJ_OBJ || !ops || ops->t != DJ_ARR) { dj_free(e); return NULL; }
-    dt_puts(&o, "{");
+    sh_text_append_str(&o, "{");
     for (i = 0; i < e->count; ++i) {
-        if (i) dt_puts(&o, ",");
+        if (i) sh_text_append_str(&o, ",");
         dt_jcstr(&o, e->keys[i]);
-        dt_puts(&o, ":");
-        if (!strcmp(e->keys[i], "counts")) { dt_puts(&o, "\001"); continue; }   /* written once the ops are known */
+        sh_text_append_str(&o, ":");
+        if (!strcmp(e->keys[i], "counts")) { sh_text_append_str(&o, "\001"); continue; }   /* written once the ops are known */
         if (strcmp(e->keys[i], "ops")) { dt_jvalue(&o, e->items[i]); continue; }
-        dt_puts(&o, "[");
+        sh_text_append_str(&o, "[");
         for (k = 0; k < ops->count; ++k) {
             const char *entry = dj_str(ops->items[k], "entry");
             if (entry && keep && !keep(context, entry)) { gone++; continue; }
-            if (!first) dt_puts(&o, ",");
+            if (!first) sh_text_append_str(&o, ",");
             first = 0;
             dt_jvalue(&o, ops->items[k]);
             switch (dt_op_kind(dj_str(ops->items[k], "op"))) {
@@ -1930,24 +1909,24 @@ char *sh_dt_edits_keep(const char *element, size_t len, int (*keep)(void *contex
             default: c.drop++; break;
             }
         }
-        dt_puts(&o, "]");
+        sh_text_append_str(&o, "]");
     }
-    dt_puts(&o, "}");
+    sh_text_append_str(&o, "}");
     dj_free(e);
     if (o.oom || !o.p) { free(o.p); return NULL; }
     {
         /* the counts in place of their mark */
         char *out, *mark;
-        dt_buf w = { NULL, 0, 0, 0 };
-        dt_put(&o, "", 1);
+        sh_text_buf w = { NULL, 0, 0, 0 };
+        sh_text_append(&o, "", 1);
         mark = strchr(o.p, '\001');
         _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "{\"set\":%d,\"remove\":%d,\"list\":%d,\"keyed\":%d,\"bag\":%d,\"drop\":%d}",
                     c.set, c.remove, c.list, c.keyed, c.bag, c.drop);
         if (mark) {
-            dt_put(&w, o.p, (size_t)(mark - o.p));
-            dt_puts(&w, tmp);
-            dt_puts(&w, mark + 1);
-        } else dt_puts(&w, o.p);
+            sh_text_append(&w, o.p, (size_t)(mark - o.p));
+            sh_text_append_str(&w, tmp);
+            sh_text_append_str(&w, mark + 1);
+        } else sh_text_append_str(&w, o.p);
         free(o.p);
         if (w.oom) { free(w.p); return NULL; }
         out = dt_done(&w, NULL);

@@ -76,7 +76,7 @@ static const char *at_name_at(const void *object, size_t offset)
 static int at_still(const void *model, const char *name)
 {
     int same = 0;
-    __try { same = sh_ce_name_eq(*(const char *const *)((const uint8_t *)model + MODEL_NAME), name); }
+    __try { same = sh_path_eq(*(const char *const *)((const uint8_t *)model + MODEL_NAME), name); }
     __except (av_only(GetExceptionCode())) { same = 0; }
     return same;
 }
@@ -308,7 +308,7 @@ void sh_attach_tags_command(sh_ce_line_fn line, void *context)
         void *obj = NULL;
         unsigned st = 0, level = 0;
         int held;
-        for (k = 0; k < i && !sh_ce_name_eq(reg->rows[k].carrier, w->carrier); k++) {}
+        for (k = 0; k < i && !sh_path_eq(reg->rows[k].carrier, w->carrier); k++) {}
         if (k < i) continue;   /* each carrier once, with its props */
         held = sh_modserve_engine_decl_held(CARRIER_TYPE, w->carrier, &obj, &st, &level);
         text = sh_textf("  %s: \"%s\" over \"%s\": %s", w->label, w->carrier, w->base,
@@ -321,7 +321,7 @@ void sh_attach_tags_command(sh_ce_line_fn line, void *context)
         free(text);
         for (k = i; k < reg->n; k++) {
             const sh_at_row *c = &reg->rows[k];
-            if (!sh_ce_name_eq(c->carrier, w->carrier)) continue;
+            if (!sh_path_eq(c->carrier, w->carrier)) continue;
             text = c->answered ? sh_textf("    \"%s\": answered %ld lookup(s)", c->prop, (long)c->answered)
                                : sh_textf("    \"%s\"", c->prop);
             if (text) line(context, text);

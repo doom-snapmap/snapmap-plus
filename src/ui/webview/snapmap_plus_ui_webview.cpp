@@ -1,6 +1,5 @@
 #include "webview_json.h"
-/* WebView2 frontend host. sh_ui_init (ordinal 10) receives loop state in arg[0] and the backend interface in
- * arg[3]; one STA thread serves the page, drains UI requests at about 30 Hz and polls change-gated editor state. */
+/* One STA thread serves the WebView2 page and polls the editor through the backend interface. */
 #include <windows.h>
 #include <lmcons.h>
 #include <dwmapi.h>
@@ -45,9 +44,6 @@
 
 using namespace Microsoft::WRL;
 
-struct ShLoopState { CRITICAL_SECTION mtx; uint64_t flags; };
-
-static ShLoopState *g_loop  = nullptr;
 static sh_iface    *g_iface = nullptr;
 
 static HWND                     g_hwnd         = nullptr;
@@ -73,7 +69,6 @@ static bool                     g_pair_mismatch = false;
 
 static bool          g_sync_on       = false;   /* "Synchronize with editor" checkbox */
 static int           g_displayed_eid = -1;      /* entity the state panel is showing */
-static int           g_last_editor_sel = -1;    /* reverse-apply guard */
 static uint64_t      g_last_list_sig  = 0;
 static uint64_t      g_last_state_sig = 0;
 static uint64_t      g_last_sel_sig   = 0;       /* forward-sync: last editor-selection signature */
@@ -238,7 +233,6 @@ static std::vector<UiEnt> g_ents;
 /* Rebuild the Timeline and Encounter Manager list when the entity signature changes. */
 struct UiTl { int eid; std::string id, name; };
 static std::vector<UiTl> g_tls;
-static int    g_tl_count = 0;
 
 /* Text a slot handed over (snapmap_plus_iface.h): copied whole, then released
  * through free_text. */
@@ -514,10 +508,8 @@ static int ui_editor_ready()
 {
     int r = 0;
     __try {
-        if (g_iface && g_iface->vtbl) {
-            if (g_iface->vtbl->editor_ready_poll) r = g_iface->vtbl->editor_ready_poll(g_iface) ? 1 : 0;
-            else if (g_iface->vtbl->entity_count)  r = g_iface->vtbl->entity_count(g_iface) > 0 ? 1 : 0;
-        }
+        if (SH_IFACE_HAS_SLOT(g_iface, editor_ready_poll))
+            r = g_iface->vtbl->editor_ready_poll(g_iface) ? 1 : 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) { r = 0; }
     return r;
 }
@@ -602,7 +594,6 @@ static int ui_collect_timed(int *out_ready, const char *reason,
 static void ui_rescan_timelines(int n)
 {
     g_tls.clear();
-    g_tl_count = 0;
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->get_classname_copy) return;
     for (int i = 0; i < n; i++) {
         if (g_ents[i].hidden) continue;   /* dev-layer hidden -> excluded from both lists, as the editor hides it */
@@ -615,7 +606,6 @@ static void ui_rescan_timelines(int n)
             g_tls.push_back(t);
         }
     }
-    g_tl_count = (int)g_tls.size();
 }
 static void ui_rescan_timelines_timed(int n, const char *reason)
 {
@@ -623,7 +613,7 @@ static void ui_rescan_timelines_timed(int n, const char *reason)
     ui_rescan_timelines(n);
     unsigned long long finished = ui_perf_now_us();
     ui_logp("perf timeline-rescan: reason=%s entities=%d timelines=%d duration_us=%llu",
-                reason ? reason : "unknown", n, g_tl_count,
+                reason ? reason : "unknown", n, (int)g_tls.size(),
                 finished >= started ? finished - started : 0);
 }
 /* The state panel's four texts, whole. */
@@ -697,22 +687,12 @@ static void ui_apply_save()
         int id = g_save_eid;
         if (id < 0) { g_save_result = -2; return; }
         if (g_iface->vtbl->is_valid_id && !g_iface->vtbl->is_valid_id(g_iface, id)) { g_save_result = -2; return; }
-        int r = -1;
-        if (g_iface->vtbl->apply_class_inherit) r = g_iface->vtbl->apply_class_inherit(g_iface, id, g_save_class.c_str(), g_save_inherit.c_str());
-        if (r == -1) {
-            if (g_iface->vtbl->set_classname) g_iface->vtbl->set_classname(g_iface, id, g_save_class.c_str());
-            if (g_iface->vtbl->set_inherit)   g_iface->vtbl->set_inherit(g_iface, id, g_save_inherit.c_str());
-        }
-        /* Apply the display name only after the class/inherit pair is accepted. */
-        if (r == 1 || r == -1) {
+        auto apply_pair = g_iface->vtbl->apply_class_inherit;
+        if (!apply_pair) return;
+        int r = apply_pair(g_iface, id, g_save_class.c_str(), g_save_inherit.c_str());
+        if (r == 1) {
             if (g_iface->vtbl->rebuild_set_declsource) g_iface->vtbl->rebuild_set_declsource(g_iface, id, g_save_decl.c_str());
-            int r2 = -1;
-            if (g_iface->vtbl->apply_class_inherit) r2 = g_iface->vtbl->apply_class_inherit(g_iface, id, g_save_class.c_str(), g_save_inherit.c_str());
-            if (r2 == -1) {
-                if (g_iface->vtbl->set_classname) g_iface->vtbl->set_classname(g_iface, id, g_save_class.c_str());
-                if (g_iface->vtbl->set_inherit)   g_iface->vtbl->set_inherit(g_iface, id, g_save_inherit.c_str());
-            }
-            if (r2 != 1 && r2 != -1) { g_save_result = -2; return; }
+            if (apply_pair(g_iface, id, g_save_class.c_str(), g_save_inherit.c_str()) != 1) return;
             if (g_iface->vtbl->set_entity_0x170) g_iface->vtbl->set_entity_0x170(g_iface, id, g_save_dname.c_str());
             g_save_result = 1;
         } else g_save_result = r == 0 ? 0 : -2;
@@ -946,7 +926,16 @@ static int ui_prefab_grab_status(sh_prefab_grab_info *info)
  * that line misses the hovered entity, and a file whose frame missed is refused without that guard.
  * Results: 1 saved, 0 empty, 2 nothing hovered, 3 no usable grab frame, 4 hovered entity not selected,
  * 5 copy check refused, 6 file not written whole, 7 game did not run the request, -1 name or path refused. */
-static bool ui_prefab_meta_path(const std::string &folder, const std::string &name, std::string &out);   /* fwd */
+static std::string ui_prefab_view(const char *path, const std::string *text, int *source = nullptr, std::string *fileType = nullptr);
+static bool ui_prefab_can_move(const std::string &path, const wchar_t **reason)
+{
+    int source = 0;
+    ui_prefab_view(path.c_str(), nullptr, &source);
+    if (source == 0 || source == 1) return true;
+    *reason = source == 2 ? L"This prefab was saved by an earlier Snapmap+. Run the Snapmap+ installer to update it."
+                          : L"The prefab could not be checked.";
+    return false;
+}
 static int ui_module_prefab_call(sh_module_prefab_call *call, std::string *out = nullptr);   /* fwd */
 struct UiCreateMain {
     char *json;   /* the slot's owned text */
@@ -1089,13 +1078,6 @@ static bool ui_prefab_file_path(const std::string &folder, const std::string &na
     out = ui_take(g_iface->vtbl->resolve_prefab_path(g_iface, prefix.c_str(), fname.c_str()));
     return !out.empty();
 }
-/* A prefab's description, tags, summary and mods live in its snapmapPlus block (backend/prefab_block.h);
- * <name>.meta.json is a read-only fallback that is never written and follows its prefab on move, rename and delete. */
-static bool ui_prefab_meta_path(const std::string &folder, const std::string &name, std::string &out)
-{
-    return ui_prefab_file_path(folder, name + ".meta", out);
-}
-static bool ui_read_small_file(const char *path, std::string &body);   /* fwd */
 /* Save the selected Blueprint modules, with every entity inside them, as a module
  * prefab at the prefab root. The backend writes the file, its summary and mods in its block.
  * Results: 1 saved, 0 the name exists, -1 failed, -2 not in Blueprint, -3 no module selected. */
@@ -1234,13 +1216,9 @@ static int ui_delete_one_prefab(const std::string &folder, const std::string &na
     if (name.empty()) return -1;
     std::string path;
     if (!ui_prefab_file_path(folder, name, path)) return -1;
+    if (!ui_prefab_can_move(path, reason)) return 0;
     int result = ui_recycle_file(path.c_str());
     if (result != 1) *reason = ui_fs_reason();
-    if (result == 1) {   /* the sidecar goes with its prefab; absent is fine */
-        std::string mp;
-        if (ui_prefab_meta_path(folder, name, mp) && ui_exists(mp.c_str()))
-            ui_recycle_file(mp.c_str());
-    }
     return result;
 }
 static void ui_apply_delete_prefab()
@@ -1266,14 +1244,9 @@ static void ui_apply_rename_prefab()
     std::string oldp, newp;
     if (!ui_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_old, oldp)) return;
     if (!ui_prefab_file_path(g_rename_prefab_folder, g_rename_prefab_new, newp)) return;
+    if (!ui_prefab_can_move(oldp, &g_rename_reason)) { g_rename_result = 0; return; }
     g_rename_result = ui_move(oldp.c_str(), newp.c_str()) ? 1 : 0;
     g_rename_reason = g_rename_result == 1 ? L"" : ui_fs_reason();
-    if (g_rename_result == 1) {   /* the sidecar follows the rename; absent is fine */
-        std::string oldm, newm;
-        if (ui_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_old, oldm) &&
-            ui_prefab_meta_path(g_rename_prefab_folder, g_rename_prefab_new, newm))
-            ui_move(oldm.c_str(), newm.c_str());
-    }
 }
 /* Load/Place reads prefab JSON and queues kind=2 for staging and native paste.
  * Placement depends on backend editor gates; queue acceptance alone is not placement. */
@@ -1303,8 +1276,6 @@ static int ui_apply_sync_seh(const sh_apply_item *it, int count, const char *op)
             int result = g_iface->vtbl->apply_sync(g_iface, it, count, op);
             return result == SH_APPLY_IN_PROGRESS ? result : result == count ? 1 : 0;
         }
-        if (g_iface->vtbl->apply_edit)
-            return g_iface->vtbl->apply_edit(g_iface, it, count, op) ? SH_APPLY_IN_PROGRESS : 0;
         return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
@@ -1412,18 +1383,18 @@ static void ui_apply_place_module_prefab(const std::string &body)
 /* The mods a prefab records are resolved first (backend/prefab_mods.c) so the engine never sees a prefab whose
  * mods are missing. Returns true when placement may go on; otherwise g_load_result is 3 (held for the download,
  * followed by ui_poll_prefab_mods), -6 (a module the player cannot get) or -7 (refused), with the text in
- * g_load_message. The rows come from the file's block, else its sidecar. */
+ * g_load_message. The rows come from the file's block. */
 static bool ui_resolve_prefab_mods(const std::string &body)
 {
-    std::string meta, msg;
+    std::string path, msg;
     if (!SH_IFACE_HAS_SLOT(g_iface, module_prefab)) return true;   /* a backend that records no mods */
-    if (!ui_prefab_meta_path(g_load_prefab_folder, g_load_prefab_name, meta)) meta.clear();
+    if (!ui_prefab_file_path(g_load_prefab_folder, g_load_prefab_name, path)) path.clear();
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_MODS_RESOLVE;
     call.text = body.c_str();
     call.text_len = body.size();
-    call.meta_path = meta.c_str();
+    call.path = path.c_str();
     call.name = g_load_prefab_name.c_str();
     int r = ui_module_prefab_call(&call, &msg);
     ui_log(("load-prefab: mods of '" + g_load_prefab_name + "' resolve=" + std::to_string(r) + " seq=" +
@@ -1556,13 +1527,12 @@ static void ui_poll_place_outcome()
     ui_post_json(m.c_str());
     ui_log(("load-prefab: '" + g_place_wait_name + "' " + placed + (decided && !reason.empty() ? ": " + reason : "")).c_str());
 }
-/* Commit the page's refreshed, patched entity JSON with kind=0, preferring the synchronous applied
- * result (ui_apply_sync_seh falls back to apply_edit when the slot is missing). */
+/* Commit the page's patched timeline through synchronous apply. */
 static void ui_apply_save_timeline()
 {
     g_save_timeline_result = 0;
     if (g_save_timeline_eid < 0 || g_save_timeline_json.empty()) return;
-    if (!g_iface || !g_iface->vtbl || (!g_iface->vtbl->apply_sync && !g_iface->vtbl->apply_edit)) {
+    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->apply_sync) {
         ui_log("save-timeline: ABORT (iface/slot missing)"); return;
     }
     sh_apply_item it; it.kind = 0; it.id = g_save_timeline_eid; it.text = g_save_timeline_json.c_str();
@@ -1579,13 +1549,9 @@ static int ui_move_one_prefab(const std::string &from, const std::string &name, 
     std::string oldp, newp;
     if (!ui_prefab_file_path(from, name, oldp)) return -1;
     if (!ui_prefab_file_path(to, name, newp)) return -1;
+    if (!ui_prefab_can_move(oldp, reason)) return 0;
     int result = ui_move(oldp.c_str(), newp.c_str()) ? 1 : 0;
     if (result != 1) *reason = ui_fs_reason();
-    if (result == 1) {   /* the sidecar follows the move; absent is fine */
-        std::string oldm, newm;
-        if (ui_prefab_meta_path(from, name, oldm) && ui_prefab_meta_path(to, name, newm))
-            ui_move(oldm.c_str(), newm.c_str());
-    }
     return result;
 }
 static void ui_apply_move_prefab()
@@ -1638,13 +1604,13 @@ static void ui_apply_delete_folder()
     if (!ui_prefab_dir("", rootDir)) return;
     std::vector<std::string> items;
     ui_list_json_dir(dir, items);
-    for (size_t i = 0; i < items.size(); i++) {
-        std::string src = dir + items[i] + ".json";
-        std::string dst = rootDir + items[i] + ".json";
-        if (!ui_move(src.c_str(), dst.c_str())) continue;
-        std::string oldm, newm;   /* the sidecar follows its prefab; absent is fine */
-        if (ui_prefab_meta_path(g_delete_folder_name, items[i], oldm) && ui_prefab_meta_path("", items[i], newm))
-            ui_move(oldm.c_str(), newm.c_str());
+    for (const auto &item : items) {
+        const wchar_t *reason;
+        if (!ui_prefab_can_move(dir + item + ".json", &reason)) { g_delete_folder_result = 2; return; }
+        if (ui_exists((rootDir + item + ".json").c_str())) { g_delete_folder_result = 0; return; }
+    }
+    for (const auto &item : items) {
+        if (!ui_move((dir + item + ".json").c_str(), (rootDir + item + ".json").c_str())) return;
     }
     ui_strip_trailing_sep(dir);
     g_delete_folder_result = RemoveDirectoryW(ui_wpath(dir.c_str()).c_str()) ? 1 : 0;
@@ -1676,7 +1642,7 @@ static void ui_emit_list(int n, int ready, const char *reason)
     if (!g_webview) return;
     unsigned long long started = ui_perf_now_us();
     unsigned long seq = ++g_list_seq;
-    std::wstring json; json.reserve((size_t)(n + g_tl_count) * 96 + 96);
+    std::wstring json; json.reserve(((size_t)n + g_tls.size()) * 96 + 96);
     json += L"{\"kind\":\"list\",\"seq\":"; json += std::to_wstring(seq);
     json += L",\"version\":\""; json += sh_webview_json::escape_wide(g_version.c_str());
     /* the renderer rides the list message beside the version for the page's feedback payload */
@@ -1701,7 +1667,7 @@ static void ui_emit_list(int n, int ready, const char *reason)
         json += L"}";
     }
     json += L"],\"timelines\":[";
-    for (int i = 0; i < g_tl_count; i++) {
+    for (size_t i = 0; i < g_tls.size(); i++) {
         if (i) json += L",";
         json += L"{\"eid\":"; json += std::to_wstring(g_tls[i].eid);
         json += L",\"id\":\""; json += sh_webview_json::escape_wide(g_tls[i].id.c_str());
@@ -1713,7 +1679,7 @@ static void ui_emit_list(int n, int ready, const char *reason)
     HRESULT hr = g_webview->PostWebMessageAsJson(json.c_str());
     unsigned long long posted = ui_perf_now_us();
     ui_logp("perf list-emit: seq=%lu reason=%s entities=%d timelines=%d json_chars=%llu build_us=%llu post_us=%llu hr=0x%08lx",
-                seq, reason ? reason : "unknown", n, g_tl_count,
+                seq, reason ? reason : "unknown", n, (int)g_tls.size(),
                 (unsigned long long)json.size(), built >= started ? built - started : 0,
                 posted >= built ? posted - built : 0, (unsigned long)hr);
 }
@@ -2072,17 +2038,15 @@ static void ui_finish_prefab_pick(int kind, bool picked, const std::string &zip8
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.zip_path = zip8.c_str();
-    std::string path, meta;
+    std::string path;
     int r;
     if (kind == 2) {
-        if (!ui_prefab_file_path(g_pick_prefab_folder, g_pick_prefab_name, path) ||
-            !ui_prefab_meta_path(g_pick_prefab_folder, g_pick_prefab_name, meta)) {
+        if (!ui_prefab_file_path(g_pick_prefab_folder, g_pick_prefab_name, path)) {
             ui_post_json(L"{\"kind\":\"prefabFileResult\",\"op\":\"export\",\"ok\":false,\"message\":\"That prefab cannot be found.\"}");
             return;
         }
         call.op = SH_MODULE_PREFAB_EXPORT;
         call.path = path.c_str();
-        call.meta_path = meta.c_str();
         call.name = g_pick_prefab_name.c_str();
         r = ui_module_prefab_call(&call, &out);
     } else {
@@ -2423,23 +2387,6 @@ static int ui_count_prefab_entities(const std::string &body)
     }
     return entityCount;
 }
-/* Read a whole auxiliary file; return false for a missing, empty or unreadable one. */
-static bool ui_read_small_file(const char *path, std::string &body)
-{
-    FILE *fp = ui_open(path, L"rb");
-    if (!fp) return false;
-    _fseeki64(fp, 0, SEEK_END); long long sz = _ftelli64(fp); _fseeki64(fp, 0, SEEK_SET);
-    bool ok = false;
-    if (sz > 0) {
-        body.resize((size_t)sz);
-        size_t got = fread(&body[0], 1, (size_t)sz, fp);
-        body.resize(got);
-        ok = got == (size_t)sz;
-    }
-    fclose(fp);
-    if (!ok) body.clear();
-    return ok;
-}
 /* A view's top-level "kind" string, or "" (object prefabs have none). */
 static std::string ui_meta_kind_of(const std::string &body)
 {
@@ -2463,23 +2410,6 @@ static int ui_meta_int(const std::string &body, const char *key)
     size_t c = body.find(':', at + k.size());
     if (c == std::string::npos) return -1;
     return atoi(body.c_str() + c + 1);
-}
-/* The top-level "~type" of a prefab file from its last 256 KB, the block left out
- * (prefab_host.h); "" when that tail names none. */
-static std::string ui_file_top_type(const char *path)
-{
-    FILE *fp = ui_open(path, L"rb");
-    if (!fp) return std::string();
-    fseek(fp, 0, SEEK_END); long sz = ftell(fp);
-    long take = sz < 256 * 1024 ? sz : 256 * 1024;
-    std::string tail;
-    if (take > 0) {
-        tail.resize((size_t)take);
-        fseek(fp, sz - take, SEEK_SET);
-        tail.resize(fread(&tail[0], 1, (size_t)take, fp));
-    }
-    fclose(fp);
-    return sh_prefab_host::top_type_of_tail(tail.data(), tail.size());
 }
 /* The prefab file's size and write time, the content signature the page's
  * Limits cache keys on. */
@@ -2511,9 +2441,9 @@ static bool ui_read_prefab_scene(const char *path, std::string &body)
     return ok;
 }
 /* A prefab's details as the view the page reads (SH_MODULE_PREFAB_META_READ), from the file's snapmapPlus
- * block, else its sidecar. `text` is the whole file when already read; otherwise the file is read from the end
+ * block. `text` is the whole file when already read; otherwise the file is read from the end
  * in doubling windows until the block is in it. Empty when there are none or the backend cannot answer. */
-static std::string ui_prefab_view(const char *path, const char *meta_path, const std::string *text)
+static std::string ui_prefab_view(const char *path, const std::string *text, int *source, std::string *fileType)
 {
     std::string tail, out;
     bool is_tail = false;
@@ -2537,20 +2467,22 @@ static std::string ui_prefab_view(const char *path, const char *meta_path, const
         }
         text = &tail;
     }
+    if (fileType) *fileType = sh_prefab_host::top_type_of_tail(text->data(), text->size());
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_META_READ;
     call.text = text->c_str();
     call.text_len = text->size();
     call.tail = is_tail ? 1 : 0;
-    call.meta_path = meta_path;
+    call.path = path;
     int r = ui_module_prefab_call(&call, &out);
+    if (source) *source = r;
     return r <= 0 ? std::string() : out;
 }
 /* The backend's module check for a module prefab's text (SH_MODULE_PREFAB_CHECK):
  * its JSON, or empty when this backend or editor cannot answer. The text is the
  * whole file; the backend leaves its block out and reads its mod rows from it. */
-static std::string ui_module_prefab_check(const std::string &scene, const char *meta_path)
+static std::string ui_module_prefab_check(const std::string &scene, const char *path)
 {
     std::string out;
     sh_module_prefab_call call;
@@ -2559,7 +2491,7 @@ static std::string ui_module_prefab_check(const std::string &scene, const char *
     call.op = SH_MODULE_PREFAB_CHECK;
     call.text = scene.c_str();
     call.text_len = scene.size();
-    call.meta_path = meta_path;   /* a module one of its mods provides is listed under Mods instead */
+    call.path = path;   /* a module one of its mods provides is listed under Mods instead */
     int r = ui_module_prefab_call(&call, &out);
     return r < 0 ? std::string() : out;
 }
@@ -2584,22 +2516,22 @@ static void ui_send_prefab_detail(const std::string &name, const std::string &fo
     bool ok = false, modules = false;
     std::string metaBody, sceneBody, fileBody;
     std::wstring sig;
-    std::string pathText, mpText;
+    std::string pathText;
     if (!name.empty() && ui_prefab_file_path(folder, name, pathText) && ui_exists(pathText.c_str())) {
-        if (!ui_prefab_meta_path(folder, name, mpText)) mpText.clear();
-        const char *path = pathText.c_str(), *mp = mpText.c_str();
+        const char *path = pathText.c_str();
         /* The scene is sent only for the selected prefab, without the product's block. */
         bool whole = ui_read_prefab_scene(path, fileBody);
         /* The view ships as an escaped string the page parses under try/catch, never spliced raw, so a damaged
-         * sidecar cannot invalidate the message (PostWebMessageAsJson drops a malformed payload). */
-        metaBody = ui_prefab_view(path, mp, whole ? &fileBody : nullptr);
+         * view cannot invalidate the message (PostWebMessageAsJson drops a malformed payload). */
+        std::string fileType;
+        metaBody = ui_prefab_view(path, whole ? &fileBody : nullptr, nullptr, whole ? nullptr : &fileType);
         if (whole) {
             sceneBody = fileBody;
             sceneBody.resize(sh_prefab_block_strip(&sceneBody[0], sceneBody.size()));
         }
         /* The file's ~type decides the kind, with or without a block (prefab_host.h). */
         std::string kind = sh_prefab_host::kind_of_type(whole ? sh_webview_json::top_level_type(sceneBody)
-                                                              : ui_file_top_type(path));
+                                                              : fileType);
         modules = kind.empty() ? ui_meta_kind_of(metaBody) == "modules" : kind == "modules";
         sig = ui_prefab_signature(path);
         ok = whole || modules;
@@ -2619,7 +2551,7 @@ static void ui_send_prefab_detail(const std::string &name, const std::string &fo
     json += L"\",\"count\":"; json += std::to_wstring(entityCount);
     if (modules) {
         /* an escaped string, parsed by the page under try/catch like the view */
-        json += L",\"moduleCheck\":\""; json += sh_webview_json::escape_wide(ui_module_prefab_check(fileBody, mpText.c_str()).c_str());
+        json += L",\"moduleCheck\":\""; json += sh_webview_json::escape_wide(ui_module_prefab_check(fileBody, pathText.c_str()).c_str());
         json += L"\"";
     }
     json += L",\"modsStatus\":\""; json += sh_webview_json::escape_wide(ui_prefab_mods_status(metaBody).c_str());
@@ -2736,9 +2668,9 @@ static void ui_budget_poll()
     if (!g_budget_wanted) return;
     sh_budget_call call;
     memset(&call, 0, sizeof call);
-    call.op = SH_BUDGET_TABLE;
-    if (ui_budget_call(&call) == 0 && !call.generation) return;
-    if (call.generation && call.generation != g_budget_sent_gen) ui_send_budget_table();
+    call.op = SH_BUDGET_GENERATION;
+    if (ui_budget_call(&call) && call.generation && call.generation != g_budget_sent_gen)
+        ui_send_budget_table();
 }
 
 /* The Mods tab (mods_tab.js; backend/modui.c behind the `mods` slot). Each job runs on a short-lived worker
@@ -3379,8 +3311,7 @@ static bool ui_view_tags(const std::string &body, std::vector<std::string> &tags
     return true;
 }
 
-/* Enumerate root prefabs and one level of folders. Each prefab's view (its block, else its sidecar) gives the
- * list its tags, kinds and mods, so filtering needs no per-prefab page reads; the list never sends a scene. */
+/* Send the tags, kind and mods from one read per prefab. Scenes are loaded when selected. */
 static void ui_send_prefabs()
 {
     if (!g_webview) return;
@@ -3410,15 +3341,15 @@ static void ui_send_prefabs()
             folders.push_back(std::make_pair(subdirs[i], items));
         }
     }
-    /* One view per prefab, keyed like the page keys them. */
-    std::vector<std::pair<std::string, std::string>> views;
+    struct PrefabRow { std::string key, view; bool modules; };
+    std::vector<PrefabRow> views;
     auto readView = [&](const std::string &folder, const std::string &name) {
-        std::string path, mp;
+        std::string path, fileType;
         if (!ui_prefab_file_path(folder, name, path)) return;
-        if (!ui_prefab_meta_path(folder, name, mp)) mp.clear();
-        std::string view = ui_prefab_view(path.c_str(), mp.c_str(), nullptr);
-        if (view.empty()) return;
-        views.push_back(std::make_pair(folder.empty() ? name : (folder + "/" + name), view));
+        std::string view = ui_prefab_view(path.c_str(), nullptr, nullptr, &fileType);
+        std::string kind = sh_prefab_host::kind_of_type(fileType);
+        bool modules = kind.empty() ? ui_meta_kind_of(view) == "modules" : kind == "modules";
+        if (!view.empty() || modules) views.push_back({folder.empty() ? name : folder + "/" + name, std::move(view), modules});
     };
     for (size_t i = 0; i < rootNames.size(); i++) readView("", rootNames[i]);
     for (size_t i = 0; i < folders.size(); i++)
@@ -3444,9 +3375,9 @@ static void ui_send_prefabs()
     bool firstMeta = true;
     for (size_t v = 0; v < views.size(); v++) {
         std::vector<std::string> tags;
-        if (!ui_view_tags(views[v].second, tags) || tags.empty()) continue;
+        if (!ui_view_tags(views[v].view, tags) || tags.empty()) continue;
         if (!firstMeta) json += L","; firstMeta = false;
-        json += L"\""; json += sh_webview_json::escape_wide(views[v].first.c_str()); json += L"\":[";
+        json += L"\""; json += sh_webview_json::escape_wide(views[v].key.c_str()); json += L"\":[";
         for (size_t t = 0; t < tags.size(); t++) {
             if (t) json += L",";
             json += L"\""; json += sh_webview_json::escape_wide(tags[t].c_str()); json += L"\"";
@@ -3457,29 +3388,20 @@ static void ui_send_prefabs()
      * block; a tail that names no type falls back to the view's "kind". */
     json += L"},\"kinds\":{";
     bool firstKind = true;
-    auto kindOf = [&](const std::string &folder, const std::string &name) {
-        std::string path;
-        if (!ui_prefab_file_path(folder, name, path)) return;
-        std::string key = folder.empty() ? name : (folder + "/" + name);
-        std::string kind = sh_prefab_host::kind_of_type(ui_file_top_type(path.c_str()));
-        if (kind.empty())
-            for (size_t v = 0; v < views.size(); v++)
-                if (views[v].first == key && ui_meta_kind_of(views[v].second) == "modules") kind = "modules";
-        if (kind != "modules") return;
-        if (!firstKind) json += L","; firstKind = false;
-        json += L"\""; json += sh_webview_json::escape_wide(key.c_str()); json += L"\":\"modules\"";
-    };
-    for (size_t i = 0; i < rootNames.size(); i++) kindOf("", rootNames[i]);
-    for (size_t i = 0; i < folders.size(); i++)
-        for (size_t j = 0; j < folders[i].second.size(); j++) kindOf(folders[i].first, folders[i].second[j]);
+    for (const auto &v : views) {
+        if (!v.modules) continue;
+        if (!firstKind) json += L",";
+        firstKind = false;
+        json += L"\""; json += sh_webview_json::escape_wide(v.key.c_str()); json += L"\":\"modules\"";
+    }
     /* mods: the mods each view records, keyed like meta, as escaped status JSON the page parses. */
     json += L"},\"mods\":{";
     bool firstMods = true;
     for (size_t v = 0; v < views.size(); v++) {
-        std::string status = ui_prefab_mods_status(views[v].second);
+        std::string status = ui_prefab_mods_status(views[v].view);
         if (status.empty()) continue;
         if (!firstMods) json += L","; firstMods = false;
-        json += L"\""; json += sh_webview_json::escape_wide(views[v].first.c_str()); json += L"\":\"";
+        json += L"\""; json += sh_webview_json::escape_wide(views[v].key.c_str()); json += L"\":\"";
         json += sh_webview_json::escape_wide(status.c_str()); json += L"\"";
     }
     json += L"}}";
@@ -3493,16 +3415,14 @@ static void ui_send_prefabs()
 static void ui_apply_save_prefab_meta(const std::string &name, const std::string &folder, const std::string &body)
 {
     int result = -1;
-    std::string path, mp;
+    std::string path;
     if (!name.empty() && ui_prefab_file_path(folder, name, path)) {
-        if (!ui_prefab_meta_path(folder, name, mp)) mp.clear();
         sh_module_prefab_call call;
         memset(&call, 0, sizeof call);
         call.op = SH_MODULE_PREFAB_META_WRITE;
         call.text = body.c_str();
         call.text_len = body.size();
         call.path = path.c_str();
-        call.meta_path = mp.c_str();
         int w = ui_module_prefab_call(&call);
         result = w == 1 ? 1 : -1;   /* 0: this backend cannot write details */
     }
@@ -3592,7 +3512,6 @@ static const char *kCrashGlob = "snapmap-plus\\crash\\pending-*.json";
 #define CRASH_RECORDS_KEEP     8                          /* newest records kept; the rest are pruned */
 
 static bool        g_report_is_crash = false;   /* the in-flight relay POST came from the crash dialog */
-static bool        g_page_loaded     = false;   /* NavigationCompleted fired -- the page can receive */
 static std::string g_crash_last_sent;           /* terminal pending-*.json already raised as the dialog */
 static sh_crash_pending::inventory g_crash_last_seen;
 
@@ -3958,11 +3877,9 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 /* The Timelines tree's folder moves and renames: eids[i] takes names[i]. */
                 std::vector<int> eids; std::vector<std::wstring> names;
                 sh_webview_json::get_int_array(json, L"eids", eids); sh_webview_json::get_string_array(json, L"names", names);
-                EnterCriticalSection(&g_loop->mtx);
                 g_set_names_eids.clear(); g_set_names_names.clear();
                 for (size_t i = 0; i < eids.size() && i < names.size(); i++) { g_set_names_eids.push_back(eids[i]); g_set_names_names.push_back(sh_webview_json::to_utf8(names[i])); }
                 g_pending_set_names = !g_set_names_eids.empty();
-                LeaveCriticalSection(&g_loop->mtx);
             } else if (cmd == L"deletePrefabs") {
                 std::vector<std::wstring> names, folders;
                 sh_webview_json::get_string_array(json, L"names", names); sh_webview_json::get_string_array(json, L"folders", folders);
@@ -3984,7 +3901,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     g_save_timeline_eid = eid; g_save_timeline_json = sh_webview_json::to_utf8(j); g_pending_save_timeline = true;
                 }
             } else if (cmd == L"setSync") {
-                int on = 0; sh_webview_json::get_int(json, L"on", &on); g_sync_on = (on != 0); g_last_editor_sel = -1; g_last_sel_sig = 0;
+                int on = 0; sh_webview_json::get_int(json, L"on", &on); g_sync_on = (on != 0); g_last_sel_sig = 0;
             } else if (cmd == L"delete") {
                 sh_webview_json::get_int_array(json, L"eids", g_delete_eids);
                 if (!g_delete_eids.empty()) g_pending_delete = true;
@@ -4279,7 +4196,6 @@ static HRESULT on_nav_completed(ICoreWebView2 *,
     g_cam_lock = false;
     g_cam_write_once = false;
     g_cam_read_published = false;
-    g_page_loaded = true;
     g_webview_ready = true;
     if (g_pair_mismatch) {
         ui_post_json(L"{\"kind\":\"installMismatch\"}");
@@ -4360,15 +4276,7 @@ static void ui_start_webview()
         if (known) CoTaskMemFree(known);
     }
     bool have_local = !local.empty();
-    if (have_local) {
-        /* %LOCALAPPDATA%\snapmap-plus\cache\webview2; an existing snapmap-plus\webview2 folder is renamed
-         * into cache\ (webview_profile.h). */
-        int how = sh_webview_profile::created; DWORD error = 0;
-        udf = sh_webview_profile::choose(local, &how, &error);
-        if (how == sh_webview_profile::moved) ui_log("webview2 profile moved into cache\\webview2");
-        else if (how == sh_webview_profile::kept_old)
-            ui_logf("webview2 profile could not be moved into cache\\ (error %lu); using the old folder this time", (unsigned long)error);
-    }
+    if (have_local) udf = sh_webview_profile::path(local);
     ComPtr<ICoreWebView2EnvironmentOptions> options;
 #ifdef SH_DIAG
     int devtools_port = have_local ? ui_devtools_port(local.c_str()) : 0;
@@ -4390,12 +4298,13 @@ static void ui_start_webview()
 static void ui_think_loop()
 {
     bool was_visible = false;
+    sh_crash_pending::scan_clock crash_clock;
     unsigned frame = 0;
     for (;;) {
         frame++;
         if (g_pair_mismatch) {
-            /* Shown with the editor like the working window, holding only the notice. */
-            bool ready = g_webview_ready && ui_editor_ready() != 0;
+            /* Show the reinstall notice without calling through the mismatched table. */
+            bool ready = g_webview_ready;
             if (ready != was_visible) { ShowWindow(g_hwnd, ready ? SW_SHOW : SW_HIDE); was_visible = ready; }
             MSG msg;
             while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
@@ -4410,8 +4319,6 @@ static void ui_think_loop()
         bool did_create_folder = false, did_rename_folder = false, did_delete_folder = false, did_move_prefab = false;
         bool did_move_prefabs = false, did_delete_prefabs = false;
         bool did_open_timeline = false, did_resolve_entity = false, did_save_timeline = false;
-        EnterCriticalSection(&g_loop->mtx);
-        if (g_iface && g_iface->vtbl && g_iface->vtbl->drain_work_queue) g_iface->vtbl->drain_work_queue(g_iface);
         {
             UiMainEdits edits = { g_pending_save, g_pending_delete, g_pending_select, g_pending_deselect,
                                    g_cam_lock || g_cam_write_once, g_pending_set_names };
@@ -4428,13 +4335,11 @@ static void ui_think_loop()
         if (g_pending_set_names) { g_pending_set_names = false; did_set_names = true; }
         if (g_pending_delete) { g_delete_eids.clear(); g_pending_delete = false; did_delete = true; }
         if (g_pending_select) {
-            /* keep forward-sync (editor->list) quiet about the selection WE just pushed (avoid a ping-pong). */
-            g_last_editor_sel = (g_select_eids.size() == 1) ? g_select_eids[0] : -1;
             if (g_select_eids.size() == 1) g_displayed_eid = g_select_eids[0];
             g_select_eids.clear(); g_pending_select = false;
         }
         if (g_pending_deselect) {
-            g_last_editor_sel = -1; g_last_sel_sig = 0;
+            g_last_sel_sig = 0;
             g_pending_deselect = false;
         }
         if (g_select_refused) { select_refused_reason = g_select_refused; g_select_refused = 0; did_select_refused = true; }
@@ -4464,7 +4369,6 @@ static void ui_think_loop()
         if (g_pending_open_timeline) { g_tl_json_len = ui_serialize_entity_raw(g_open_timeline_eid); g_pending_open_timeline = false; did_open_timeline = true; }
         if (g_pending_resolve_entity) { g_resolve_json_len = ui_serialize_entity_resolve(g_resolve_entity_eid); g_pending_resolve_entity = false; did_resolve_entity = true; }
         if (g_pending_save_timeline) { ui_apply_save_timeline(); g_pending_save_timeline = false; did_save_timeline = true; }
-        LeaveCriticalSection(&g_loop->mtx);
         /* The prefabs folder watcher: the Prefabs list follows the disk. */
         ui_watch_tick();
         ui_mods_progress_tick();
@@ -4624,7 +4528,8 @@ static void ui_think_loop()
 
         /* Reclassify changes anywhere in the retained inventory so a same-second arrival cannot hide a crash
          * prompt; nonterminal records show notices only after startup. */
-        if (g_page_loaded && (frame == 1 || frame % 60 == 0)) {
+        auto crash_scan_due = crash_clock.tick(g_webview_ready, frame);
+        if (crash_scan_due != sh_crash_pending::scan::skip) {
             std::vector<std::string> names;
             int cnt = crash_scan(names);
             if (cnt == 0) {
@@ -4632,7 +4537,7 @@ static void ui_think_loop()
                 g_crash_last_seen.clear();
                 g_crash_last_sent.clear();
             } else if (g_crash_last_seen.changed(names)) {
-                bool startup = (frame == 1);
+                bool startup = crash_scan_due == sh_crash_pending::scan::startup;
                 int terminal = 0, survived = 0;
                 std::string termName, termRec;
                 for (size_t i = 0; i < names.size(); i++) {
@@ -4760,16 +4665,11 @@ static void ui_think_loop()
 extern "C" __declspec(dllexport) DWORD WINAPI sh_ui_init(LPVOID param_1)
 {
     sh_ui_argblock *args = reinterpret_cast<sh_ui_argblock *>(param_1);
-    g_loop = new ShLoopState();
-    InitializeCriticalSection(&g_loop->mtx); g_loop->flags = 0;
-    if (args && args->out_slot) *reinterpret_cast<void **>(args->out_slot) = g_loop;
     g_iface = args ? args->iface : nullptr;
-    /* The window and the backend are built together: their interface tables must be the
-     * same size, or every slot past the shorter one is unknown, and a backend that names its
-     * release must name this window's. A mismatched pair runs the window only to say so. */
+    /* Only matching releases with a matching table size may edit the game. */
     std::string backend_version = args ? sh_game_identity::backend_version(args->argc, args->argv) : std::string();
     g_pair_mismatch = g_iface && (sh_iface_vtbl_bytes(g_iface) != sizeof(sh_iface_vtbl) ||
-                                  (!backend_version.empty() && backend_version != g_version));
+                                  backend_version != g_version);
     g_game = args ? sh_game_identity::from_argv(args->argc, args->argv) : std::string();
 
     ui_log("=== sh_ui_init: the Snapmap+ window is starting ===");

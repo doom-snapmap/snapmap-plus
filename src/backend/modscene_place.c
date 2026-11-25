@@ -757,13 +757,6 @@ static unsigned char sp_on_action_request(void *component, void *owner, const in
     return g_orig_request(component, owner, action, requester);
 }
 
-static const sig_result *sp_sig(const sig_result *results, size_t n, const char *name)
-{
-    size_t i;
-    for (i = 0; i < n; i++)
-        if (results[i].name && !strcmp(results[i].name, name)) return &results[i];
-    return NULL;
-}
 
 /* Prepare and commit one detour, publishing its trampoline first. */
 static void *sp_detour(const sig_result *r, void *detour, size_t stolen, void **orig)
@@ -780,18 +773,13 @@ static void *sp_detour(const sig_result *r, void *detour, size_t stolen, void **
 
 static void sp_guard_install(const sig_result *results, size_t n)
 {
-    if (sp_detour(sp_sig(results, n, "InteractionOnActionRequest"), (void *)sp_on_action_request,
+    if (sp_detour(sig_lookup(results, n, "InteractionOnActionRequest"), (void *)sp_on_action_request,
                   SP_REQUEST_STOLEN, (void **)&g_orig_request))
         backend_log("scene-place: interaction requests without a requester are refused");
     else
         backend_log("scene-place: the empty-requester guard is not available on this build");
 }
 
-static const sig_result *sp_clean(const sig_result *results, size_t n, const char *name)
-{
-    const sig_result *r = sp_sig(results, n, name);
-    return (r && r->status == SIG_OK) ? r : NULL;
-}
 
 /* The scene spawns: the engine's create and finish calls (private signatures)
  * and the decl registry the shared results name. Without them a scenes
@@ -799,8 +787,8 @@ static const sig_result *sp_clean(const sig_result *results, size_t n, const cha
 static void sp_spawns_install(const sig_result *results, size_t n)
 {
     sig_result own[3];
-    const sig_result *anchor = sp_clean(results, n, "DeclRegistryAnchor"), *reg = sp_clean(results, n, "DeclRegisterFile");
-    const sig_result *type = sp_clean(results, n, "DeclTypeByName"), *find = sp_clean(results, n, "DeclFind");
+    const sig_result *anchor = sig_ok(results, n, "DeclRegistryAnchor"), *reg = sig_ok(results, n, "DeclRegisterFile");
+    const sig_result *type = sig_ok(results, n, "DeclTypeByName"), *find = sig_ok(results, n, "DeclFind");
     int i;
     for (i = 0; i < 3; i++)
         if (!g_base || sig_resolve_one(g_base, &SH_MODSCENE_SPAWN_SIGNATURES[i], &own[i]) != SIG_OK) {
@@ -837,13 +825,13 @@ int sh_modscene_place_install(const sig_result *results, size_t n, const unsigne
         backend_log("scene-place SKIPPED -- scene nodes play at the node on this executable");
         return 0;
     }
-    used = sp_detour(sp_sig(results, n, "InteractableUsedOutput"), (void *)sp_used, SP_USED_STOLEN,
+    used = sp_detour(sig_lookup(results, n, "InteractableUsedOutput"), (void *)sp_used, SP_USED_STOLEN,
                      (void **)&g_orig_used);
     if (!used) {
         backend_log("scene-place SKIPPED -- the interactable USED output could not be detoured");
         return 0;
     }
-    if (!sp_detour(sp_sig(results, n, "SceneInteractionDoAction"), (void *)sp_doaction, SP_DOACTION_STOLEN,
+    if (!sp_detour(sig_lookup(results, n, "SceneInteractionDoAction"), (void *)sp_doaction, SP_DOACTION_STOLEN,
                    (void **)&g_orig_doaction)) {
         /* Without the DoAction half nothing is ever recorded; take the USED half back out. */
         if (sh_uninstall_detour(used)) g_orig_used = NULL;

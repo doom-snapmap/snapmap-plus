@@ -266,17 +266,12 @@ static void grid_populate(void *panel,int instance,void *map,void *settings,void
     }
 }
 
-static const sig_result *clean(const sig_result *results,size_t count,const char *name)
-{
-    size_t i;for(i=0;i<count;++i)if(results[i].name&&!strcmp(results[i].name,name)&&
-        results[i].status==SIG_OK)return &results[i];return NULL;
-}
 
 int sh_native_property_hook_install(const sig_result *results,size_t count)
 {
     const sig_result *change;
     if(g_change)return hook_is_installed((void*)g_change);
-    change=clean(results,count,"GridPropertyChanged");
+    change=sig_ok(results,count,"GridPropertyChanged");
     if(!change)return 0;
     /* Change's entry has a null branch, so its non-null body is hooked at +9 and 17 position-independent bytes are
      * stolen; the branch and its destination are untouched. */
@@ -299,18 +294,18 @@ int sh_grid_editor_install(const sig_result *results,size_t count,
        hook_is_installed((void*)g_blueprint_update)&&hook_is_installed((void*)g_blueprint_help))return 1;
     if(g_populate||g_add_vec||g_blueprint_update||g_blueprint_help)return 0;
     if(!sh_native_property_hook_install(results,count))return 0;
-    populate=clean(results,count,"GridModuleProperties");
-    add=clean(results,count,"GridAddVec3");set=clean(results,count,"GridSetVec3");hash=clean(results,count,"StridsHash");
-    update=clean(results,count,"GridBlueprintUpdate");help=clean(results,count,"GridBlueprintHelp");
-    pressed=clean(results,count,"GridInputPressed");blocked=clean(results,count,"GridPropertiesBlocked");
-    state=clean(results,count,"GridSetEditorState");action_help=clean(results,count,"GridAddActionHelp");
+    populate=sig_ok(results,count,"GridModuleProperties");
+    add=sig_ok(results,count,"GridAddVec3");set=sig_ok(results,count,"GridSetVec3");hash=sig_ok(results,count,"StridsHash");
+    update=sig_ok(results,count,"GridBlueprintUpdate");help=sig_ok(results,count,"GridBlueprintHelp");
+    pressed=sig_ok(results,count,"GridInputPressed");blocked=sig_ok(results,count,"GridPropertiesBlocked");
+    state=sig_ok(results,count,"GridSetEditorState");action_help=sig_ok(results,count,"GridAddActionHelp");
     if(!populate||!add||!set||!hash||!update||!help||!pressed||!blocked||!state||!action_help)return 0;
     g_read=read;g_apply=apply;g_set_vec=(set_vec_fn)set->addr;g_hash=(hash_fn)hash->addr;
     g_pressed=(pressed_fn)pressed->addr;g_blocked=(blocked_fn)blocked->addr;
     g_set_state=(set_state_fn)state->addr;g_action_help=(action_help_fn)action_help->addr;
-    {const sig_result *dirty=clean(results,count,"GridPropertyDirtyRefresh"),*menu=clean(results,count,"GridMenuOf"),
-        *screen=clean(results,count,"MenuScreenByIndex"),*redraw=clean(results,count,"ContextListRedraw"),
-        *resolve=clean(results,count,"SwfWidgetResolve");
+    {const sig_result *dirty=sig_ok(results,count,"GridPropertyDirtyRefresh"),*menu=sig_ok(results,count,"GridMenuOf"),
+        *screen=sig_ok(results,count,"MenuScreenByIndex"),*redraw=sig_ok(results,count,"ContextListRedraw"),
+        *resolve=sig_ok(results,count,"SwfWidgetResolve");
      if(dirty&&menu&&screen&&redraw&&resolve){
         g_dirty_refresh=(dirty_refresh_fn)dirty->addr;g_menu_of=(menu_of_fn)menu->addr;
         g_screen_by_index=(screen_by_index_fn)screen->addr;g_widget_resolve=(widget_resolve_fn)resolve->addr;

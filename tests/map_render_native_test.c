@@ -56,7 +56,7 @@ static void parse_map(const char *value,int broken)
         "{\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
         "{\"info\":{\"name\":\"author\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"x\",\"~type\":\"snapVarString_t\"}"
         "],\"~type\":\"idSnapVariables\"}%s%s%s}",
-        value?(broken?",\"snapmap-plus\":{\"format\":1,\"settings\":[\"":",\"snapmap-plus\":{\"format\":1,\"settings\":{\"render\":\""):"",
+        value?(broken?",\"snapmap-plus\":{\"format\":2,\"settings\":[\"":",\"snapmap-plus\":{\"format\":2,\"settings\":{\"render\":\""):"",
         value?value:"",value?(broken?"\"]}":"\"}}"):"");
     out=sh_map_settings_prepare_load(json,strlen(json),&n);
     assert(!out);
@@ -70,7 +70,7 @@ static int synthetic_main(void)
     float values[36];sh_map_render settings;int game=1,i;
     sh_map_render_default(&settings);
     /* Before install nothing is written to r_zfar, but selection works. */
-    parse_map("1;60000;100;1500;6500;0.35;0.4;0.45",0);
+    parse_map("4;0",0);
     sh_map_render_loaded(saved);assert(g_ready&&g_runtime.unlocked&&zfar_sets==0&&far_floor==SH_RENDER_MAX_DISTANCE);
     {
         sh_map_render retained;
@@ -90,7 +90,7 @@ static int synthetic_main(void)
         *(const char**)(resources[i]+8)=names[i];
         *(unsigned short*)(ops+i*8)=15360;*(unsigned short*)(ops+i*8+2)=(unsigned short)i;
     }
-    /* A version-1 map with a distance reads as on: maximum, fog stretched by
+    /* An unlocked map uses the maximum, fog stretched by
      * 200000 / 60000 (snapmap/base's own distance). */
     fresh_native(values,60000);
     assert(render_clip(block,NULL,0)==SH_RENDER_MAX_DISTANCE);unlocked_block(values,60000);
@@ -117,7 +117,7 @@ static int synthetic_main(void)
     parse_map("4;8192",0);
     sh_map_render_loaded(saved);values[4]=15000;assert(render_clip(block,NULL,0)==15000);values[4]=46;
     unchanged(values);assert(zfar_sets==0&&zfar_value()==8192);
-    /* Every distance other than 8192 reads as on, 0 and 200000 too. */
+    /* The current unlock selects the maximum distance. */
     parse_map("4;0",0);
     unlocked_logs=0;sh_map_render_loaded(saved);assert(unlocked_logs==1&&zfar_sets==1);
     fresh_native(values,15000);assert(render_clip(block,NULL,0)==SH_RENDER_MAX_DISTANCE);unlocked_block(values,15000);
@@ -126,9 +126,8 @@ static int synthetic_main(void)
     fresh_native(values,256000);assert(render_clip(block,NULL,0)==SH_RENDER_MAX_DISTANCE);unlocked_block(values,256000);
     for(i=0;i<36;i++)if(i/4!=1)assert(values[i]==(float)(i+42));
     parse_map("4;60000",0);sh_map_render_loaded(saved);
-    fresh_block(values);values[4]=100000;assert(render_clip(block,NULL,0)==SH_RENDER_MAX_DISTANCE);
-    parse_map("4;200000",0);sh_map_render_loaded(saved);
-    fresh_block(values);assert(render_clip(block,NULL,0)==SH_RENDER_MAX_DISTANCE);unlocked_block(values,46);
+    fresh_block(values);values[4]=100000;assert(render_clip(block,NULL,0)==100000);
+    parse_map("4;0",0);sh_map_render_loaded(saved);
     /* The returned distance is authoritative even without a literal slot. */
     *(unsigned short*)(ops+8)=15361;fresh_block(values);
     assert(render_clip(block,NULL,0)==SH_RENDER_MAX_DISTANCE&&values[4]==46);

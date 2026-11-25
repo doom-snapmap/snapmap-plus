@@ -97,7 +97,6 @@ typedef int          (*sh_enum_inherits_fn)(struct sh_iface *self, char **out, i
 /* Hide non-base-layer entities only when the dev-layer cvar is confirmed disabled; an unknown cvar or entity state
  * leaves them visible. This list filter omits the native picker's extra mask. */
 typedef int          (*sh_id_dev_layer_hidden_fn)(struct sh_iface *self, int id);                /* +0x280 (ext 3) */
-typedef int          (*sh_wire_edit_generation_fn)(struct sh_iface *self);                       /* +0x288 (ext 4) */
 
 #define SH_APPLY_IN_PROGRESS (-2)
 struct sh_apply_item;
@@ -106,9 +105,6 @@ struct sh_apply_item;
  * refuse execution; marshaling owns a complete text copy. */
 typedef int          (*sh_apply_sync_fn)(struct sh_iface *self, const struct sh_apply_item *items,
                                          int count, const char *op_label);                        /* +0x290 (ext 5) */
-
-/* Unused: timelines are placed on snapmaps/unknown directly, so the slot returns 1 without normalizing. */
-typedef int          (*sh_normalize_timeline_inherit_fn)(struct sh_iface *self, int id);          /* +0x298 (ext 6) */
 
 /* Push IDs with deduplication onto the backend stack shared with console commands. */
 typedef void          (*sh_push_to_stack_fn)(struct sh_iface *self, int index, const int *ids, int count); /* +0x2A0 (ext 7) */
@@ -119,7 +115,6 @@ typedef int           (*sh_clear_stack_fn)(struct sh_iface *self, int index);   
  * a native editor action such as Delete Selection finishes its commit. Check before changing selection; the
  * add/clear/remove callbacks apply the same guard. */
 typedef int           (*sh_manipulation_in_progress_fn)(struct sh_iface *self);                     /* +0x2C0 (ext 11) */
-
 
 /* +0x2D0 (ext 13) Consume the latest asset preview as a `data:image/png;base64,...` URI, owned;
  * NULL when nothing is published. */
@@ -132,12 +127,6 @@ typedef char         *(*sh_get_preview_fn)(struct sh_iface *self);
 /* Request asynchronous preview work (poll get_preview); null/empty cancels staged work and unconsumed output. The
  * route prefix selects an Image and plain names a Material-first lookup; returns whether it was accepted. */
 typedef int           (*sh_request_preview_fn)(struct sh_iface *self, const char *name);
-
-/* +0x2C8: cached material lookup; a short result, owned, on a hit, else NULL. */
-typedef char         *(*sh_find_material_fn)(struct sh_iface *self, const char *name);
-
-/* Every material name, one per line, owned; NULL when the catalog is unavailable. */
-typedef char         *(*sh_list_materials_fn)(struct sh_iface *self);
 
 /* Asset kind IDs cross the ABI: append only, never renumber. Material and
  * Image retain the container catalog IDs 0 and 1. */
@@ -176,7 +165,7 @@ typedef char         *(*sh_list_materials_fn)(struct sh_iface *self);
 #define SH_ASSET_COUNT       19
 
 /* Every name of an asset kind, one per line, owned; NULL when the catalog is
- * unavailable. list_materials is kind 0. */
+ * unavailable. */
 typedef char         *(*sh_list_assets_fn)(struct sh_iface *self, int kind);
 /* A material's .vmtr atlas rect -> out_xywh = {x,y,w,h} in atlas pixels; 1 if virtual-textured,
  * 0 if it has no rect. Divide by 245760 for the `virtualmapping` renderParm value form. */
@@ -188,10 +177,9 @@ typedef int           (*sh_sound_preview_fn)(struct sh_iface *self, const char *
  * off stops playback; session scope avoids cvar changes on every click. */
 typedef void          (*sh_sound_session_fn)(struct sh_iface *self, int on);
 
-/* Resolve prefab model/defaults through live or installed decl data (model owned, or NULL). Mesh requests are
+/* Mesh requests are
  * asynchronous and generation-keyed and empty cancels stale work; get consumes one binary completion into *out
  * (owned) and returns its byte count, 0 when none is ready. */
-typedef char *(*sh_resolve_prefab_model_fn)(struct sh_iface *self, const char *inherit_name);
 typedef int (*sh_request_prefab_mesh_fn)(struct sh_iface *self, unsigned long generation,
                                          const char *model_name);
 typedef int (*sh_get_prefab_mesh_fn)(struct sh_iface *self, void **out);
@@ -264,7 +252,7 @@ typedef struct sh_prefab_grab_info {
 typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_info *out); /* +0x358 (ext 30) */
 /* Module prefabs: Blueprint modules saved with their entities and placed in another map's Blueprint mode
  * (backend/module_prefab.c, prefab_mods.c). Details and the mods a prefab needs live in the prefab file's "snapmapPlus"
- * block (backend/prefab_block.h), with a read-only fallback to a <name>.meta.json sidecar at meta_path, and cross as a
+ * block (backend/prefab_block.h), with earlier prefabs refused, and cross as a
  * flat view {"desc","tags",...summary...,"mods"}. SAVE, CHECK, MODS_RESOLVE, EXPORT and IMPORT marshal to the game
  * thread and wait, so never call them from it; the other ops run on any thread. */
 /* Fills blueprint (Blueprint state 1) and entity_mode (Object Mode, state 2); 1, or 0 when no editor is open. */
@@ -280,7 +268,7 @@ typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_in
 #define SH_MODULE_PREFAB_STATUS 4
 /* The PLACE module check for text without placing; out is {"checked":true,"count":N,"missing":[...],"status":"..."}
  * or {"checked":false}. Returns the missing count, -1 when it could not check; a module provided by a row of text's
- * snapmapPlus block (else of the sidecar at meta_path) is not missing. */
+ * snapmapPlus block is not missing. */
 #define SH_MODULE_PREFAB_CHECK  5
 /* text: the prefab the engine just serialized; path: its file. Writes a fresh block of mod rows (the map manifest's
  * save-time closure over the prefab) into the file; out is the view. Returns the row count, -1 failed (file unchanged). */
@@ -288,7 +276,7 @@ typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_in
 /* text: a view; out is {"count":N,"missing":M,"mods":[{"id","salt","build","size","installed","state","cause"}...]}
  * ("id" is the name the mod was recorded with). Returns M, -1 unreadable. */
 #define SH_MODULE_PREFAB_MODS_STATUS  7
-/* text: the prefab file; meta_path: its sidecar; name: its name. Returns 1 place now (every mod installed and in the
+/* text: the prefab file; name: its name. Returns 1 place now (every mod installed and in the
  * open map), 2 held for a download (poll MODS_POLL with seq), -6 a module the player cannot get (DLC), -7 refused,
  * 0 no answer; out is the message for -6, -7 and 2. The caller strips the block before the engine sees the text. */
 #define SH_MODULE_PREFAB_MODS_RESOLVE 8
@@ -297,19 +285,19 @@ typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_in
 /* text: a view from the page ("" clears), of which only desc and tags are taken; rewrites path's block in place
  * (starting from the sidecar when the file has none; the sidecar is unchanged). 1 written, -1 failed. */
 #define SH_MODULE_PREFAB_META_WRITE   10
-/* path: the prefab file; meta_path: its sidecar; name (UTF-8); zip_path. Writes the prefab with its mods as one ZIP
+/* path: the prefab file; name (UTF-8); zip_path. Writes the prefab with its mods as one ZIP
  * (modexport.h); out is the message. 1 written, -1 refused. */
 #define SH_MODULE_PREFAB_EXPORT       11
 /* zip_path: a .zip, or a .json inside an extracted export folder; path: the prefabs folder. Installs the mods and adds
  * the prefab; out is {"ok","added","name","message"}. 1 added, 0 already in the library (nothing written), -1 refused. */
 #define SH_MODULE_PREFAB_IMPORT       12
-/* text: the prefab file, or its end when tail is 1; meta_path: its sidecar. out is the view (empty without details).
- * Returns the source: 1 the block, 2 the sidecar, 0 neither. */
+/* text: the prefab file, or its end when tail is 1. out is the view (empty without details).
+ * Returns the source: 1 the block, 2 an earlier shape, 0 neither. */
 #define SH_MODULE_PREFAB_META_READ    13
 typedef struct sh_module_prefab_call {
     int         op;
     const char *path;        /* SAVE, MODS_RECORD, META_WRITE, EXPORT: prefab file; IMPORT: prefabs folder */
-    const char *meta_path;   /* CHECK, MODS_RESOLVE, META_*, EXPORT: the read-only sidecar fallback */
+    const void *reserved_path;
     const char *text;        /* PLACE, CHECK, MODS_RECORD, MODS_RESOLVE, META_READ: prefab file text;
                                 MODS_STATUS, META_WRITE: a view */
     size_t      text_len;
@@ -324,20 +312,6 @@ typedef struct sh_module_prefab_call {
     int         map_open;    /* STATE out: the editor holds a map object (0 at the hub or after the editor left it) */
 } sh_module_prefab_call;
 typedef int (*sh_module_prefab_fn)(struct sh_iface *self, sh_module_prefab_call *call); /* +0x360 (ext 31) */
-/* Timeline tile: the product palette row on snapmaps/unknown whose prototype record carries class idTarget_Timeline
- * (backend/timeline_tile.c). STATUS (any thread) fills the fields from the last editor frame and returns 1, or 0 when
- * no editor is open; row indexes are -1 when the row is not in the palette. */
-#define SH_TIMELINE_TILE_STATUS 1
-typedef struct sh_timeline_tile_call {
-    int  op;
-    int  tile_row;          /* palette index of the Timeline tile */
-    int  unknown_row;       /* palette index of the Unknown tile */
-    int  last_rebinds;      /* entities rebound by the most recent pass */
-    int  total_rebinds;     /* entities rebound since the backend loaded */
-    int  registered;        /* 1 once the tile decl is registered */
-    char *record_class;     /* out, owned: class of the tile's prototype record, or NULL */
-} sh_timeline_tile_call;
-typedef int (*sh_timeline_tile_fn)(struct sh_iface *self, sh_timeline_tile_call *call); /* +0x368 (ext 32) */
 /* Editor budget table for the Prefabs tab's Limits section (backend/budget_table.c); out is UTF-8 JSON, owned. TABLE
  * (any thread) copies the table built on the game thread after the last palette build (limits, usage, reached, layers,
  * sedefs per palette row, inherits inherit -> row, modules, aliases leaf name -> module) and returns 1, or 0 when none
@@ -345,6 +319,7 @@ typedef int (*sh_timeline_tile_fn)(struct sh_iface *self, sh_timeline_tile_call 
  * or 0 before the first frame; both set generation, which changes whenever the table is rebuilt. */
 #define SH_BUDGET_TABLE 1
 #define SH_BUDGET_USAGE 2
+#define SH_BUDGET_GENERATION 3  /* Returns the generation without copying the table. */
 typedef struct sh_budget_call {
     int          op;
     char        *out;          /* out, owned (NULL in) */
@@ -508,14 +483,6 @@ typedef int          (*sh_schedule_apply_fn)(struct sh_iface *self, const sh_app
 /* Serialize the pending prefab as JSON, owned; NULL on failure. */
 typedef char        *(*sh_read_prefab_fn)(struct sh_iface *self);                              /* +0xb8 */
 
-/* Work record executed on the drain caller's thread, normally the UI worker. */
-typedef struct sh_work_item {
-    sh_cmd_handler  handler;
-    void           *ctx;
-    int             argc;
-    char          **argv;       /* heap-owned copy of the parsed argv; freed after the handler runs */
-} sh_work_item;
-
 /* Fixed vtable: 77 original cells (+0x00..+0x260) followed by append-only extensions; existing cells never move.
  * Typed callbacks are bound by the backend and void-pointer cells reserve unused offsets; the parenthesized RVAs are
  * the original interface's function addresses. */
@@ -582,10 +549,10 @@ typedef struct sh_iface_vtbl {
     /* +0x188 (0x7A00) */
     void (*register_cmd)(sh_iface *self, const char *name, sh_cmd_handler handler, void *ctx);
     /* +0x190 (0x7BA0) */
-    void (*unregister_cmd)(sh_iface *self, const char *name);
+    void *reserved_190;
     sh_hovered_id_fn hovered_id;    /* +0x198 (0x7D30) */
     /* +0x1A0 (0x7D50) detach under lock, then execute on caller thread */
-    void (*drain_work_queue)(sh_iface *self);
+    void *reserved_drain;
     void *input_state_b;            /* +0x1a8 (0x7e30) */
     void *input_state_a;            /* +0x1b0 (0x7e50) */
     sh_toast_fn toast;              /* +0x1B8 (0x7E70) */
@@ -617,23 +584,23 @@ typedef struct sh_iface_vtbl {
     sh_enum_valid_classes_fn  enum_valid_classes;    /* +0x270 (ext 1) class-dropdown enumerator */
     sh_enum_inherits_fn       enum_inherits;         /* +0x278 (ext 2) inherit-dropdown enumerator */
     sh_id_dev_layer_hidden_fn id_dev_layer_hidden;   /* +0x280 (ext 3) dev-layer entity-hidden query */
-    sh_wire_edit_generation_fn wire_edit_generation; /* +0x288 (ext 4) wire-edit generation */
+    void *reserved_288;
     sh_apply_sync_fn           apply_sync;           /* +0x290 (ext 5) synchronous apply */
-    sh_normalize_timeline_inherit_fn normalize_timeline_inherit; /* +0x298 (ext 6) unused, returns 1 */
+    void *reserved_298;
     sh_push_to_stack_fn        push_to_stack;        /* +0x2A0 (ext 7) stack push */
     sh_clear_stack_fn          clear_stack;          /* +0x2A8 (ext 8) stack clear */
     sh_config_get_json_fn      config_get_json;      /* +0x2B0 (ext 9) registered setting -> JSON */
     sh_config_set_json_fn      config_set_json;      /* +0x2B8 (ext 10) validate + persist JSON */
     sh_manipulation_in_progress_fn manipulation_in_progress; /* +0x2C0 (ext 11) selection-mutation guard */
-    sh_find_material_fn        find_material;        /* +0x2C8 (ext 12) cached material lookup */
+    void *reserved_2c8;
     sh_get_preview_fn          get_preview;          /* +0x2D0 (ext 13) consume preview URI */
     sh_request_preview_fn      request_preview;      /* +0x2D8 (ext 14) request preview */
-    sh_list_materials_fn       list_materials;       /* +0x2E0 (ext 15) material catalog */
+    void *reserved_2e0;
     sh_list_assets_fn          list_assets;          /* +0x2E8 (ext 16) asset catalog */
     sh_material_rect_fn        material_rect;        /* +0x2F0 (ext 17) material atlas rectangle */
     sh_sound_preview_fn        sound_preview;        /* +0x2F8 (ext 18) sound audition */
     sh_sound_session_fn        sound_session;        /* +0x300 (ext 19) sound-preview session */
-    sh_resolve_prefab_model_fn resolve_prefab_model; /* +0x308 (ext 20) entityDef inherit -> model */
+    void *reserved_308;
     sh_request_prefab_mesh_fn  request_prefab_mesh;  /* +0x310 (ext 21) async installed geometry */
     sh_get_prefab_mesh_fn      get_prefab_mesh;      /* +0x318 (ext 22) consume geometry blob */
     sh_resolve_prefab_defaults_fn resolve_prefab_defaults; /* +0x320 (ext 23) model + scale defaults */
@@ -645,7 +612,7 @@ typedef struct sh_iface_vtbl {
     sh_delete_entities_fn      delete_entities;      /* +0x350 (ext 29) native batch delete */
     sh_prefab_grab_status_fn   prefab_grab_status;   /* +0x358 (ext 30) Create grab-frame guard result */
     sh_module_prefab_fn        module_prefab;        /* +0x360 (ext 31) Blueprint module prefabs */
-    sh_timeline_tile_fn        timeline_tile;        /* +0x368 (ext 32) Timeline palette tile */
+    void *reserved_368;
     sh_budget_fn               budget;               /* +0x370 (ext 33) editor budget table */
     sh_mods_fn                 mods;                 /* +0x378 (ext 34) Mods tab */
     sh_prefab_watch_fn         prefab_watch;         /* +0x380 (ext 35) Prefabs tab editor watch */
@@ -658,15 +625,15 @@ typedef struct sh_iface_vtbl {
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_set_json) == 0x2B8);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, manipulation_in_progress) == 0x2C0);
-SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, find_material) == 0x2C8);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, reserved_2c8) == 0x2C8);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, get_preview) == 0x2D0);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, request_preview) == 0x2D8);
-SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, list_materials) == 0x2E0);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, reserved_2e0) == 0x2E0);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, list_assets) == 0x2E8);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, material_rect) == 0x2F0);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, sound_preview) == 0x2F8);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, sound_session) == 0x300);
-SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, resolve_prefab_model) == 0x308);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, reserved_308) == 0x308);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, request_prefab_mesh) == 0x310);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, get_prefab_mesh) == 0x318);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, resolve_prefab_defaults) == 0x320);
@@ -678,7 +645,7 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, run_on_main) == 0x348);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, delete_entities) == 0x350);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_grab_status) == 0x358);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, module_prefab) == 0x360);
-SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, timeline_tile) == 0x368);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, reserved_368) == 0x368);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, budget) == 0x370);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, mods) == 0x378);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_watch) == 0x380);
@@ -704,34 +671,27 @@ typedef struct sh_iface_sub {
     void          *map_root;        /* sub+0x08 */
     uint64_t       map_size;        /* sub+0x10 */
     uint8_t        _mtx2[0x48];     /* sub+0x18: reserved mutex bytes. */
-    /* Queue vector; drain detaches it before executing handlers. */
-    sh_work_item  *wq_begin;        /* sub+0x60 */
-    sh_work_item  *wq_end;          /* sub+0x68 */
-    sh_work_item  *wq_cap;          /* sub+0x70 */
-
+    void *reserved_queue[3];
 } sh_iface_sub;
 
 struct sh_iface {
     const sh_iface_vtbl *vtbl;      /* +0x00 */
     uint8_t              mtx[0x50]; /* +0x08..+0x57: reserved. */
-    sh_iface_sub        *sub;       /* +0x58  -> the cmd-map + work-queue sub-object */
+    sh_iface_sub        *sub;       /* +0x58 command registry */
 };
 
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
 SH_STATIC_ASSERT(sizeof(sh_iface) == 0x60);
 
-/* sh_iface_create stores a marker and sizeof(sh_iface_vtbl) in the first reserved cell (+0x08). A backend that leaves
- * that cell zero exposes only SH_IFACE_LEGACY_VTBL_BYTES (0x350) vtable bytes, so a frontend tests slots at or past
- * +0x350 with SH_IFACE_HAS_SLOT. */
-#define SH_IFACE_VTBL_MARK         0x53485654u   /* "SHVT" */
-#define SH_IFACE_LEGACY_VTBL_BYTES 0x350u
+/* The backend records its vtable size in the first reserved cell. */
+#define SH_IFACE_VTBL_MARK 0x53485654u  /* "SHVT" */
 
 static __inline uint32_t sh_iface_vtbl_bytes(const struct sh_iface *self)
 {
     const uint32_t *cell;
     if (!self) return 0;
     cell = (const uint32_t *)(const void *)self->mtx;
-    return cell[0] == SH_IFACE_VTBL_MARK ? cell[1] : SH_IFACE_LEGACY_VTBL_BYTES;
+    return cell[0] == SH_IFACE_VTBL_MARK ? cell[1] : 0;
 }
 
 #define SH_IFACE_HAS_SLOT(self, member)                                          \
@@ -748,9 +708,7 @@ typedef struct sh_ui_argblock {
     sh_iface *iface;                /* [3] the shared interface object (backend-owned) */
 } sh_ui_argblock;
 
-/* Allocate the backend-owned object and private registry/queue state.
- * Bind registry/drain callbacks and free_text immediately; return null on
- * allocation failure. */
+/* Allocate the backend interface and its command registry. */
 sh_iface *sh_iface_create(void);
 
 /* The backend's side of owned text: a process-heap copy of s (n bytes, or a formatted string) with its NUL, released
@@ -762,18 +720,7 @@ char *sh_iface_textf(const char *fmt, ...);
 int   sh_iface_text_set(char **slot, const char *s);
 void  sh_iface_text_free(void *text);
 
-/* Set the optional callback run before each UI queue drain. Null clears it;
- * registration avoids an engine link dependency in the common module. */
-void sh_iface_set_tick_hook(void (*fn)(void));
-
-/* Locked command lookup: fill handler/context and return 1 on a hit, else 0. */
 int sh_iface_lookup_cmd(sh_iface *self, const char *name, sh_cmd_handler *handler, void **ctx);
-
-/* Deep-copy argv into the queue for execution by the drain caller, normally
- * the UI worker. Return 1 on success. Console dispatch instead calls inline
- * on the engine main thread; this queue is not a main-thread transport. */
-int sh_iface_enqueue_work(sh_iface *self, sh_cmd_handler handler, void *ctx,
-                          int argc, const char **argv);
 
 /* Bind engine-independent configuration before starting the frontend. */
 typedef struct sh_iface_config_slots {
@@ -825,11 +772,7 @@ typedef struct sh_iface_engine_slots {
 
     sh_id_dev_layer_hidden_fn    id_dev_layer_hidden;   /* +0x280 (ext 3) */
 
-    sh_wire_edit_generation_fn   wire_edit_generation;  /* +0x288 (ext 4) */
-
     sh_apply_sync_fn             apply_sync;            /* +0x290 (ext 5) */
-
-    sh_normalize_timeline_inherit_fn normalize_timeline_inherit; /* +0x298 (ext 6) */
 
     sh_push_to_stack_fn          push_to_stack;         /* +0x2A0 (ext 7) */
 
@@ -837,15 +780,12 @@ typedef struct sh_iface_engine_slots {
 
     sh_manipulation_in_progress_fn manipulation_in_progress; /* +0x2C0 (ext 11) */
 
-    sh_find_material_fn        find_material;               /* +0x2C8 (ext 12) */
     sh_get_preview_fn          get_preview;                 /* +0x2D0 (ext 13) */
     sh_request_preview_fn      request_preview;             /* +0x2D8 (ext 14) */
-    sh_list_materials_fn       list_materials;              /* +0x2E0 (ext 15) */
     sh_list_assets_fn          list_assets;                 /* +0x2E8 (ext 16) */
     sh_material_rect_fn        material_rect;               /* +0x2F0 (ext 17) */
     sh_sound_preview_fn        sound_preview;               /* +0x2F8 (ext 18) */
     sh_sound_session_fn        sound_session;               /* +0x300 (ext 19) */
-    sh_resolve_prefab_model_fn resolve_prefab_model;        /* +0x308 (ext 20) */
     sh_request_prefab_mesh_fn  request_prefab_mesh;         /* +0x310 (ext 21) */
     sh_get_prefab_mesh_fn      get_prefab_mesh;             /* +0x318 (ext 22) */
     sh_resolve_prefab_defaults_fn resolve_prefab_defaults;  /* +0x320 (ext 23) */
@@ -858,7 +798,6 @@ typedef struct sh_iface_engine_slots {
     sh_delete_entities_fn      delete_entities;             /* +0x350 (ext 29) */
     sh_prefab_grab_status_fn   prefab_grab_status;          /* +0x358 (ext 30) */
     sh_module_prefab_fn        module_prefab;               /* +0x360 (ext 31) */
-    sh_timeline_tile_fn        timeline_tile;               /* +0x368 (ext 32) */
     sh_budget_fn               budget;                      /* +0x370 (ext 33) */
     sh_mods_fn                 mods;                        /* +0x378 (ext 34) */
     sh_prefab_watch_fn         prefab_watch;                /* +0x380 (ext 35) */

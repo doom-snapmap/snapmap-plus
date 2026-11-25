@@ -1,6 +1,7 @@
 /* Reads, validates and serves map-scoped baked navigation payloads. SEH stays inside the table lock so error
  * handling still releases it, and header paths and payload sizes are bounded before native parsing. */
 #define WIN32_LEAN_AND_MEAN
+#include "../common/text.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -168,28 +169,6 @@ static int nav_copy_hex(const char *p, size_t n, char *out, size_t want)
     return 1;
 }
 
-static uint32_t nav_be32(const unsigned char *p)
-{
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-}
-
-static uint16_t nav_be16(const unsigned char *p)
-{
-    return (uint16_t)(((uint32_t)p[0] << 8) | (uint32_t)p[1]);
-}
-
-static int32_t nav_be32s(const unsigned char *p) { return (int32_t)nav_be32(p); }
-
-typedef char sh_aas_lumps_agree[(SH_AAS_LUMPS == SH_AAS_L__COUNT) ? 1 : -1];
-
-typedef struct nav_aas {
-    const unsigned char *p;
-    size_t   len;
-    size_t   off[SH_AAS_LUMPS];
-    uint32_t count[SH_AAS_LUMPS];
-} nav_aas;
-
 static void nav_verr(char *err, size_t cap, const char *fmt, ...)
 {
     va_list ap;
@@ -203,7 +182,7 @@ static void nav_verr(char *err, size_t cap, const char *fmt, ...)
 
 /* Requires every BSP node to be reachable once from a root within the native depth limit, rejecting cycles,
  * multiple parents and unreachable nodes. */
-static int nav_walk_bsp(const nav_aas *a, char *err, size_t err_cap)
+static int nav_walk_bsp(const sh_aas_layout *a, char *err, size_t err_cap)
 {
     enum { ST_REF = 1, ST_REFMANY = 2, ST_SEEN = 4 };
     uint32_t num_nodes = a->count[SH_AAS_L_NODES];
@@ -227,14 +206,14 @@ static int nav_walk_bsp(const nav_aas *a, char *err, size_t err_cap)
     /* Pass 1: every plane index and child is in range, and no node has two parents. */
     for (n = 0; n < num_nodes; n++) {
         const unsigned char *rec = NAV_REC(a, SH_AAS_L_NODES, n);
-        uint32_t plane = nav_be32(rec);
+        uint32_t plane = sh_aas_get_u32(rec, 0);
         int k;
         if (plane >= num_planes) {
             nav_verr(err, err_cap, "node %u references plane %u of %u", n, plane, num_planes);
             goto done;
         }
         for (k = 0; k < 2; k++) {
-            int32_t child = nav_be32s(rec + 8 + 4 * k);
+            int32_t child = sh_aas_get_i32(rec, 8 + 4 * k);
             if (child > 0) {
                 if ((uint32_t)child >= num_nodes) {
                     nav_verr(err, err_cap, "node %u child %d is out of range (%u nodes)",
@@ -287,7 +266,7 @@ static int nav_walk_bsp(const nav_aas *a, char *err, size_t err_cap)
             }
             rec = NAV_REC(a, SH_AAS_L_NODES, node);
             for (k = 0; k < 2; k++) {
-                int32_t child = nav_be32s(rec + 8 + 4 * k);
+                int32_t child = sh_aas_get_i32(rec, 8 + 4 * k);
                 if (child <= 0) continue;
                 if (sp >= sizeof stack / sizeof stack[0]) {
                     nav_verr(err, err_cap, "the BSP walk exceeded its bounded stack");
@@ -313,7 +292,7 @@ done:
 
 /* Validates per-area from/to chains against repeated reachabilities and unbounded walks; unlisted records are
  * checked separately because the engine rebuilds these lists. */
-static int nav_walk_reach_chains(const nav_aas *a, char *err, size_t err_cap)
+static int nav_walk_reach_chains(const sh_aas_layout *a, char *err, size_t err_cap)
 {
     uint32_t num_reach = a->count[SH_AAS_L_REACHABILITIES];
     uint32_t num_areas = a->count[SH_AAS_L_AREAS];
@@ -338,7 +317,7 @@ static int nav_walk_reach_chains(const nav_aas *a, char *err, size_t err_cap)
     }
     /* Load rebuilds these lists from the records, so an omitted list head must not hide an overflow. */
     for (area = 0; area < num_reach; area++) {
-        unsigned from = nav_be16(NAV_REC(a, SH_AAS_L_REACHABILITIES, area) + 6);
+        unsigned from = sh_aas_get_u16(NAV_REC(a, SH_AAS_L_REACHABILITIES, area), 6);
         if (++degrees[from] > SH_AAS_MAX_AREA_REACHABILITIES) {
             nav_verr(err, err_cap, "area %u has more than %u outgoing reachabilities",
                      from, SH_AAS_MAX_AREA_REACHABILITIES);
@@ -354,7 +333,7 @@ static int nav_walk_reach_chains(const nav_aas *a, char *err, size_t err_cap)
         size_t link_off = (list == 0) ? 0x20 : 0x24;
         for (area = 0; area < num_areas; area++) {
             unsigned degree = 0;
-            int32_t at = nav_be32s(NAV_REC(a, SH_AAS_L_AREAS, area) + head_off);
+            int32_t at = sh_aas_get_i32(NAV_REC(a, SH_AAS_L_AREAS, area), head_off);
             while (at != -1) {
                 uint32_t idx;
                 if (list == 0 && ++degree > SH_AAS_MAX_AREA_REACHABILITIES) {
@@ -377,7 +356,7 @@ static int nav_walk_reach_chains(const nav_aas *a, char *err, size_t err_cap)
                     goto done;
                 }
                 bits[idx >> 3] |= (unsigned char)(1u << (idx & 7));
-                at = nav_be32s(NAV_REC(a, SH_AAS_L_REACHABILITIES, idx) + link_off);
+                at = sh_aas_get_i32(NAV_REC(a, SH_AAS_L_REACHABILITIES, idx), link_off);
             }
         }
     }
@@ -390,89 +369,19 @@ done:
 
 int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_t err_cap)
 {
-    nav_aas a;
-    size_t off = SH_AAS_PREAMBLE_BYTES;
+    sh_aas_layout a;
     uint32_t i, n;
-
-    if (err && err_cap) err[0] = '\0';
-    if (!p) { nav_verr(err, err_cap, "no payload"); return 0; }
-    if (len > SH_AAS_MAX_BAKE_PAYLOAD) {
-        nav_verr(err, err_cap, "the payload is %zu bytes, over the %u-byte budget",
-                 len, (unsigned)SH_AAS_MAX_BAKE_PAYLOAD);
-        return 0;
-    }
-    if (len < SH_AAS_PREAMBLE_BYTES + (size_t)SH_AAS_LUMPS * 4) {
-        nav_verr(err, err_cap, "the payload is %zu bytes, too small to be an AAS file", len);
-        return 0;
-    }
-    if (memcmp(p, SH_AAS_MAGIC, 4) != 0) {
-        nav_verr(err, err_cap, "the payload does not start with the AAS magic");
-        return 0;
-    }
-    if (p[4] != SH_AAS_MAJOR || p[5] != SH_AAS_MINOR) {
-        nav_verr(err, err_cap, "the AAS version is %u.%u, not %u.%u",
-                 (unsigned)p[4], (unsigned)p[5],
-                 (unsigned)SH_AAS_MAJOR, (unsigned)SH_AAS_MINOR);
-        return 0;
-    }
-
-    a.p = p;
-    a.len = len;
-
-    /* 22 bounded count-prefixed lumps must end exactly at EOF. */
-    for (i = 0; i < SH_AAS_LUMPS; i++) {
-        uint64_t bytes;
-        if (len - off < 4) {
-            nav_verr(err, err_cap, "lump %s: no room for its count", SH_AAS_LUMP_DEFS[i].name);
-            return 0;
-        }
-        a.count[i] = nav_be32(p + off);
-        off += 4;
-        if (a.count[i] > SH_AAS_MAX_RECORDS) {
-            nav_verr(err, err_cap, "lump %s: a count of %u is beyond any real file",
-                     SH_AAS_LUMP_DEFS[i].name, a.count[i]);
-            return 0;
-        }
-        bytes = (uint64_t)a.count[i] * SH_AAS_LUMP_DEFS[i].record;
-        if (bytes > (uint64_t)(len - off)) {
-            nav_verr(err, err_cap, "lump %s: %u records overrun the payload",
-                     SH_AAS_LUMP_DEFS[i].name, a.count[i]);
-            return 0;
-        }
-        a.off[i] = off;
-        off += (size_t)bytes;
-    }
-    if (off != len) {
-        nav_verr(err, err_cap, "%zu trailing bytes after the last lump", len - off);
-        return 0;
-    }
-
-    if (a.count[SH_AAS_L_AREAS] > SH_AAS_MAX_AREAS) {
-        nav_verr(err, err_cap, "%u areas, over the %u a u16 index can reach",
-                 a.count[SH_AAS_L_AREAS], (unsigned)SH_AAS_MAX_AREAS);
-        return 0;
-    }
-    if (a.count[SH_AAS_L_CLUSTERS] > 0xFFFFu) {
-        nav_verr(err, err_cap, "%u clusters, over the %u a u16 index can reach",
-                 a.count[SH_AAS_L_CLUSTERS], 0xFFFFu);
-        return 0;
-    }
+    if (!sh_aas_read_layout(p, len, SH_AAS_MAX_BAKE_PAYLOAD, &a, err, err_cap)) return 0;
     /* An area's first traversal point is a u16, so the table indexes at most 65536 points. */
     if (a.count[SH_AAS_L_TRAVERSALPOINTS] > SH_AAS_MAX_TRAVERSAL_POINTS) {
         nav_verr(err, err_cap, "%u traversal points, over the %u a u16 index can reach",
                  a.count[SH_AAS_L_TRAVERSALPOINTS], (unsigned)SH_AAS_MAX_TRAVERSAL_POINTS);
         return 0;
     }
-    if (a.count[SH_AAS_L_AREABOUNDS] != a.count[SH_AAS_L_AREAS]) {
-        nav_verr(err, err_cap, "areaBounds holds %u records for %u areas",
-                 a.count[SH_AAS_L_AREABOUNDS], a.count[SH_AAS_L_AREAS]);
-        return 0;
-    }
-
     /* Edge to vertex. */
     for (n = 0; n < a.count[SH_AAS_L_EDGES]; n++) {
         const unsigned char *rec = NAV_REC(&a, SH_AAS_L_EDGES, n);
-        uint32_t v0 = nav_be32(rec), v1 = nav_be32(rec + 4);
+        uint32_t v0 = sh_aas_get_u32(rec, 0), v1 = sh_aas_get_u32(rec, 4);
         if (v0 >= a.count[SH_AAS_L_VERTICES] || v1 >= a.count[SH_AAS_L_VERTICES]) {
             nav_verr(err, err_cap, "edge %u references a vertex outside the %u present",
                      n, a.count[SH_AAS_L_VERTICES]);
@@ -482,7 +391,7 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
 
     /* edgeIndex to edges; the sign carries the traversal direction, so the magnitude must be in range. */
     for (n = 0; n < a.count[SH_AAS_L_EDGEINDEX]; n++) {
-        int32_t v = nav_be32s(NAV_REC(&a, SH_AAS_L_EDGEINDEX, n));
+        int32_t v = sh_aas_get_i32(NAV_REC(&a, SH_AAS_L_EDGEINDEX, n), 0);
         int64_t mag = (v < 0) ? -(int64_t)v : (int64_t)v;
         if (mag >= (int64_t)a.count[SH_AAS_L_EDGES]) {
             nav_verr(err, err_cap, "edgeIndex %u references edge %d of %u",
@@ -493,7 +402,7 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
 
     /* areaCoverIndex to cover. */
     for (n = 0; n < a.count[SH_AAS_L_AREACOVERINDEX]; n++) {
-        uint32_t v = nav_be32(NAV_REC(&a, SH_AAS_L_AREACOVERINDEX, n));
+        uint32_t v = sh_aas_get_u32(NAV_REC(&a, SH_AAS_L_AREACOVERINDEX, n), 0);
         if (v >= a.count[SH_AAS_L_COVER]) {
             nav_verr(err, err_cap, "areaCoverIndex %u references cover %u of %u",
                      n, v, a.count[SH_AAS_L_COVER]);
@@ -504,14 +413,14 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
     /* Areas: the spans they own and the cluster they belong to. */
     for (n = 0; n < a.count[SH_AAS_L_AREAS]; n++) {
         const unsigned char *rec = NAV_REC(&a, SH_AAS_L_AREAS, n);
-        uint32_t num_edges   = nav_be16(rec + 0x06);
-        uint32_t first_edge  = nav_be32(rec + 0x08);
-        uint32_t cluster     = nav_be16(rec + 0x0C);
-        uint32_t first_pvs   = nav_be32(rec + 0x10);
-        uint32_t first_cover = nav_be16(rec + 0x20);
-        uint32_t num_cover   = nav_be16(rec + 0x22);
-        uint32_t first_trav  = nav_be16(rec + 0x24);
-        uint32_t num_trav    = nav_be16(rec + 0x26);
+        uint32_t num_edges   = sh_aas_get_u16(rec, 0x06);
+        uint32_t first_edge  = sh_aas_get_u32(rec, 0x08);
+        uint32_t cluster     = sh_aas_get_u16(rec, 0x0C);
+        uint32_t first_pvs   = sh_aas_get_u32(rec, 0x10);
+        uint32_t first_cover = sh_aas_get_u16(rec, 0x20);
+        uint32_t num_cover   = sh_aas_get_u16(rec, 0x22);
+        uint32_t first_trav  = sh_aas_get_u16(rec, 0x24);
+        uint32_t num_trav    = sh_aas_get_u16(rec, 0x26);
         if (first_trav + num_trav > a.count[SH_AAS_L_TRAVERSALPOINTS]) {
             nav_verr(err, err_cap, "area %u claims traversal points %u..%u of %u",
                      n, first_trav, first_trav + num_trav, a.count[SH_AAS_L_TRAVERSALPOINTS]);
@@ -542,7 +451,7 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
     /* Reachabilities: the areas they join. */
     for (n = 0; n < a.count[SH_AAS_L_REACHABILITIES]; n++) {
         const unsigned char *rec = NAV_REC(&a, SH_AAS_L_REACHABILITIES, n);
-        uint32_t from = nav_be16(rec + 0x06), to = nav_be16(rec + 0x08);
+        uint32_t from = sh_aas_get_u16(rec, 0x06), to = sh_aas_get_u16(rec, 0x08);
         if (from >= a.count[SH_AAS_L_AREAS] || to >= a.count[SH_AAS_L_AREAS]) {
             nav_verr(err, err_cap, "reachability %u joins areas %u and %u of %u",
                      n, from, to, a.count[SH_AAS_L_AREAS]);
@@ -1096,20 +1005,6 @@ char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len, int *f
 }
 
 /* Path-tolerant compare: case-insensitive, with '/' equal to '\\'. */
-static int nav_name_eq(const char *a, const char *b)
-{
-    if (!a || !b) return 0;
-    for (;; a++, b++) {
-        char ca = *a, cb = *b;
-        if (ca == '\\') ca = '/';
-        if (cb == '\\') cb = '/';
-        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
-        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
-        if (ca != cb) return 0;
-        if (ca == '\0') return 1;
-    }
-}
-
 /* Guarded, with the shared lock already held. */
 static int nav_open_locked(const char *name, unsigned char **out_bytes, size_t *out_len,
                            const char **which)
@@ -1122,8 +1017,8 @@ static int nav_open_locked(const char *name, unsigned char **out_bytes, size_t *
             nav_set *s = &g_sets[i];
             unsigned char *copy;
             if (!s->served || !s->payload) continue;
-            if (nav_name_eq(name, s->res_name)) *which = "module";
-            else if (nav_name_eq(name, s->cook_name)) *which = "cooked";
+            if (sh_path_eq(name, s->res_name)) *which = "module";
+            else if (sh_path_eq(name, s->cook_name)) *which = "cooked";
             else continue;
             /* A copy is returned because a map load can rebuild the table while the engine owns the stream. */
             copy = (unsigned char *)HeapAlloc(GetProcessHeap(), 0,

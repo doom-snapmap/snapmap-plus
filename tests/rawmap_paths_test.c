@@ -388,7 +388,7 @@ static void looks_like_rawmap_tells_them_apart(void)
         size_t n = 0;
         n += (size_t)sprintf_s(big + n, sizeof big - n,
                                "{\"entities\":[],\"version\":111,\"~type\":\"idSnapMap\",\"~version\":111,"
-                               "\"snapmap-plus\":{\"format\":1,\"nav\":[{\"module\":\"m\",\"class\":\"c\",\"data\":[\"");
+                               "\"snapmap-plus\":{\"format\":2,\"nav\":[{\"module\":\"m\",\"class\":\"c\",\"data\":[\"");
         memset(big + n, 'A', 12000);
         n += 12000;
         n += (size_t)sprintf_s(big + n, sizeof big - n, "\"]}]}}");
@@ -400,7 +400,7 @@ static void looks_like_rawmap_tells_them_apart(void)
         n = 0;
         n += (size_t)sprintf_s(big + n, sizeof big - n,
                                "{\"entities\":[],\"~type\":\"idSnapEntityPrefab\",\"~version\":111,"
-                               "\"snapmap-plus\":{\"format\":1,\"nav\":[{\"module\":\"m\",\"class\":\"c\",\"data\":[\"");
+                               "\"snapmap-plus\":{\"format\":2,\"nav\":[{\"module\":\"m\",\"class\":\"c\",\"data\":[\"");
         memset(big + n, 'A', 12000);
         n += 12000;
         n += (size_t)sprintf_s(big + n, sizeof big - n, "\"]}]}}");
@@ -1550,7 +1550,7 @@ static void check_image(const char *path)
     {
         uint32_t size = ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage;
         const unsigned char *is_branch = (const unsigned char *)find_is_branch_map(base);
-        const uint8_t *to_json = image_site(base, results, n, "SnapMapToJson", identity->vulkan);
+        const uint8_t *to_json = image_site(base, results, n, "EditorMapToJson", identity->vulkan);
         const uint8_t *tag = image_site(base, results, n, "SnapMapAddBranchTag", identity->vulkan);
         const uint8_t *ctor = image_site(base, results, n, "IdStrCtor", identity->vulkan);
         const uint8_t *dtor = image_site(base, results, n, "IdStrDtor", identity->vulkan);

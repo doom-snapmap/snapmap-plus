@@ -2863,11 +2863,6 @@ void sh_nav_bake_test_reset(void)
     InterlockedExchange(&g_faulted, 0);
 }
 
-int sh_nav_bake_test_bake_count(void)
-{
-    return (int)InterlockedCompareExchange(&g_bakes, 0, 0);
-}
-
 void sh_nav_bake_test_copy_map(sh_nav_map *out)
 {
     AcquireSRWLockShared(&g_bake_lock);
@@ -2930,13 +2925,7 @@ static char   g_test_reason[BAKE_REASON_CAP];
 static size_t g_test_length;
 static char   g_test_faces[BAKE_FACES_CAP];
 static bake_class g_test_class;
-/* The last test bake's class block, as sh_navmesh prints it. */
-void sh_nav_bake_test_print_last(void (*out)(const char *fmt, ...), const char *cls)
-{
-    bake_print_class(out, cls, &g_test_class, g_test_class.state);
-}
 const char *sh_nav_bake_test_last_reason(void) { return g_test_reason; }
-const char *sh_nav_bake_test_last_faces(void) { return g_test_faces; }
 size_t sh_nav_bake_test_last_length(void) { return g_test_length; }
 
 int sh_nav_bake_test_run(const char *name, const sh_aug_platform *plats, int n,

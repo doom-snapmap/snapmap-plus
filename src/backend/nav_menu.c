@@ -537,14 +537,6 @@ static void menu_end(void *state,void *object)
     }
 }
 
-static const sig_result *find(const sig_result *results,size_t count,const char *name)
-{
-    size_t i;
-    for (i=0;i<count;i++)
-        if (results[i].name && !strcmp(results[i].name,name) && results[i].status==SIG_OK)
-            return &results[i];
-    return NULL;
-}
 
 /* The row-bound compares the install widens (the eighth row), with the instruction each sits in. */
 struct nav_limit { const sig_result *anchor;size_t offset;unsigned char bytes[3]; };
@@ -574,7 +566,7 @@ int sh_nav_menu_install(const sig_result *results,size_t count)
     void *hooks[4]={0};
     int i;
     if (g_bind || g_action || g_think || g_end) return g_enabled;
-#define RESOLVE(dst,type,name) do { r=find(results,count,name);if(!r)goto fail;dst=(type)r->addr; } while(0)
+#define RESOLVE(dst,type,name) do { r=sig_ok(results,count,name);if(!r)goto fail;dst=(type)r->addr; } while(0)
     RESOLVE(g_string,string_fn,"IdStrCtor");
     RESOLVE(g_destroy,destroy_fn,"IdStrDtor");
     RESOLVE(g_busy,message_fn,"EditorBusyShow");
@@ -592,10 +584,10 @@ int sh_nav_menu_install(const sig_result *results,size_t count)
     RESOLVE(g_label,label_fn,"SwfFrameLabel");
     RESOLVE(g_play,play_fn,"SwfPlayFrame");
 #undef RESOLVE
-    bind=find(results,count,"StartMenuBind");action=find(results,count,"StartMenuAction");
-    think=find(results,count,"StartMenuThink");end=find(results,count,"StartMenuEnd");
-    init=find(results,count,"StartMenuInit");row=find(results,count,"StartMenuRow");
-    select=find(results,count,"StartMenuSelect");
+    bind=sig_ok(results,count,"StartMenuBind");action=sig_ok(results,count,"StartMenuAction");
+    think=sig_ok(results,count,"StartMenuThink");end=sig_ok(results,count,"StartMenuEnd");
+    init=sig_ok(results,count,"StartMenuInit");row=sig_ok(results,count,"StartMenuRow");
+    select=sig_ok(results,count,"StartMenuSelect");
     if (!bind||!action||!think||!end||!init||!row||!select) goto fail;
     /* Independently verified instruction offsets and bounds on both renderers.
      * Check every site before making any change; no raw image-RVA fallback. */

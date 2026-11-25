@@ -66,10 +66,6 @@ typedef struct sh_ti_pack { char *text; size_t len, cap; int failed; } sh_ti_pac
 int sh_ti_pack_put(sh_ti_pack *p, const char *name);
 int sh_ti_pack_finish(sh_ti_pack *p, int names, char **out, int *out_count);
 
-/* Look up a material without loading/creating it; shipped names can resolve
- * before first rendering. Return 1 on a hit and format found/dimension details
- * into buf. Optional dimension/probe failures do not invalidate the hit. */
-int sh_typeinfo_find_material(const char *name, char *buf, size_t cap);
 
 /* The game's reflected classes and enums by name, for script/script_reflect.h. Strings are the engine's own
  * and stay valid for the session; every call answers 0 when the type system or the name is unavailable. */

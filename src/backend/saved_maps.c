@@ -110,13 +110,6 @@ static char *sm_map_text(const char *path, size_t *len, int *absent)
     return out;
 }
 
-char *sh_saved_map_text(const char *path, size_t *len)
-{
-    size_t n = 0;
-    char *t = sm_map_text(path, &n, NULL);
-    if (len) *len = n;
-    return t;
-}
 
 /* The itemId= line of a game.details text, malloc'd ("" for none). */
 static char *sm_item_id(const char *details)

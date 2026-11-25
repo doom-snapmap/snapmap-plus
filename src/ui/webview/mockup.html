@@ -2594,6 +2594,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                                                           : fsFailText(d, '"' + d.oldName + '"'), 'err');
     } else if (d.kind === 'deleteFolderResult') {
       if (d.result === 1) toast('Folder deleted', 'ok');
+      else if (d.result === 2) toast('Run the Snapmap+ installer to check the prefabs in this folder, then try again.', 'err');
       else if (d.result === 0) toast('The folder "' + d.name + '" was not deleted: a prefab in it has the same name as one in the root list. Rename one of them and try again.', 'err');
       else toast('The folder "' + d.name + '" could not be deleted. Try again; if it keeps failing, use Send feedback.', 'err');
     } else if (d.kind === 'movePrefabResult') {

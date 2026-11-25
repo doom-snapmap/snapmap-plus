@@ -92,11 +92,6 @@ static uint8_t write_detour(const char *rel, int path_type, const void *buf, siz
     return g_write(path, path_type, buf, len);
 }
 
-long sh_cachewrites_redirected(void)
-{
-    return InterlockedCompareExchange(&g_redirected, 0, 0);
-}
-
 int sh_cachewrites_install(const uint8_t *module_base)
 {
     sig_result own;

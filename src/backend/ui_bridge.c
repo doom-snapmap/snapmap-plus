@@ -15,7 +15,6 @@ static sh_iface *g_iface = NULL;
 
 /* Startup arguments must outlive the frontend thread. */
 static sh_ui_argblock g_argblock;
-static void          *g_ui_out_slot = NULL;   /* receives the frontend's loop-state obj address */
 
 /* Synthetic argv for the frontend startup ABI: "--version=" (the release, or "dev") and "--game="
  * (the game identity every report uses). */
@@ -61,7 +60,6 @@ int sh_ui_bridge_install(void)
     sh_register_snapstack_commands_backend(g_iface);
     backend_log("ui: SnapStack commands registered");
 
-    g_argblock.out_slot = &g_ui_out_slot;
     {
         char game[SH_GAME_IDENTITY_MAX];
         g_argv_game[0] = '\0';

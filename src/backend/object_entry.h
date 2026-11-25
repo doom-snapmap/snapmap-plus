@@ -24,7 +24,6 @@ int sh_object_entry_disp(uintptr_t site,uintptr_t dest,int32_t *disp);
 /* The install's byte checks (load decoded, constant 18364); NULL when they hold, else the reason. */
 const char *sh_object_entry_check(const unsigned char *site,uintptr_t *constant);
 int sh_object_entry_install(const sig_result *results,size_t count);
-int sh_object_entry_live(void);
 /* The segment length the entry trace reads (18364 when not live). */
 float sh_object_entry_drop(void);
 #endif

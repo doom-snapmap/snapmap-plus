@@ -118,8 +118,8 @@ func TestContractFromSnapHak(t *testing.T) {
 	wantDoom(t, "SnapHak install", r.doom, "XINPUT1_4.dll", currentUIDll, "bink2w64.dll", "superscriptx64.dll", "dinput8.dll.doomforge.rollback")
 	wantData(t, "SnapHak install", r.data)
 	for _, rel := range []string{`prefabs\arena.json`, `strings\en.json`, "rawmap.json"} {
-		if !exists(filepath.Join(r.data, rel)) {
-			t.Errorf("%s did not come across", rel)
+		if !exists(filepath.Join(profile, "snaphak", rel)) || exists(filepath.Join(r.data, rel)) {
+			t.Errorf("%s was moved from the original profile", rel)
 		}
 	}
 	if err := cmdUninstall(flags{yes: true}); err != nil {
@@ -127,7 +127,7 @@ func TestContractFromSnapHak(t *testing.T) {
 	}
 	wantDoom(t, "uninstall", r.doom, "bink2w64.dll", "superscriptx64.dll", "dinput8.dll.doomforge.rollback")
 	wantData(t, "uninstall", r.data)
-	if exists(statePath(r.data)) || !exists(filepath.Join(r.data, "prefabs", "arena.json")) {
+	if exists(statePath(r.data)) || !exists(filepath.Join(profile, "snaphak", "prefabs", "arena.json")) {
 		t.Error("uninstall kept install.json or removed the player's prefabs")
 	}
 }
@@ -217,8 +217,8 @@ func TestContractFromBeta20Layout(t *testing.T) {
 		}
 	})
 	for _, want := range []string{"with both DOOM builds' files, backups in the DOOM folder and retired installer records", "Tidying the data folder",
-		"installer-files.json (folded into install.json)", "snapmap-plus.exe.old", "Other programs' files Snapmap+ had replaced",
-		"Other programs' files (left in place):", "dinput8.dll.doomforge.rollback", `override-backups\ (an empty folder of an earlier release)`} {
+		"installer-files.json (retired installer record)", "snapmap-plus.exe.old", "Other programs' files Snapmap+ had replaced",
+		"Other programs' files (left in place):", "dinput8.dll.doomforge.rollback", `override-backups (empty folder)`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}

@@ -27,11 +27,6 @@ typedef unsigned char (*cvar_set_fn)(void *,const char *,unsigned char);
 static cvar_set_fn g_set;
 static void *g_zfar;
 
-static const sig_result *binding(const sig_result *r,size_t n,const char *name)
-{
-    size_t i;for(i=0;i<n;i++)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)return r+i;
-    return NULL;
-}
 
 /* The setting belongs to the open map and is held by map_settings.c: each map parse reads it from the "render" key
  * of the settings part and each save writes it back. The map argument only names the map the caller means. */
@@ -210,8 +205,8 @@ int sh_map_render_install(const sig_result *results,size_t count,const uint8_t *
     const sig_result *read,*decl,*set;unsigned char before[5],after[5];int32_t relative;
     intptr_t distance;void **slot;unsigned char *system;void **vars;int i,n;
     if(g_patch.live)return g_relay!=NULL;
-    read=binding(results,count,"RenderClipRead");decl=binding(results,count,"RenderParmFromOp");
-    set=binding(results,count,"CvarSetString");
+    read=sig_ok(results,count,"RenderClipRead");decl=sig_ok(results,count,"RenderParmFromOp");
+    set=sig_ok(results,count,"CvarSetString");
     if(!read||!decl)return 0;
     __try {
         slot=(void**)glb_resolve(base,"cvar_system_slot",NULL);if(!slot||!*slot)return 0;

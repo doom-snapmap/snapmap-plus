@@ -173,7 +173,7 @@ static void install_features(const sig_result *results, size_t db)
         }
         /* Save Rawmap serializes the open map, not the newest save on disk. The tag
          * function also derives the engine's idStr ctor/dtor. */
-        sh_rawmap_set_live_serialize(sig_fn(results, db, "SnapMapToJson", NULL),
+        sh_rawmap_set_live_serialize(sig_fn(results, db, "EditorMapToJson", NULL),
                                      sig_fn(results, db, "SnapMapAddBranchTag", NULL));
     }
 

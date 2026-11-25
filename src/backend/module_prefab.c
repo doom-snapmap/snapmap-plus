@@ -879,7 +879,7 @@ static int mp_check(sh_module_prefab_call *call)
     c->checked = -1;
     /* The rows of its block. */
 
-    if (sh_prefab_mods_rows_of(call->text, call->text_len, call->meta_path, &rows) > 0) c->rows = &rows;
+    if (sh_prefab_mods_rows_of(call->text, call->text_len, call->path, &rows) > 0) c->rows = &rows;
     if (mp_capture_run(c) && c->result == 1) r = c->checked;
     sh_modmanifest_list_free(&rows);
     sh_mp_summary_free(&sum);

@@ -70,9 +70,6 @@ func TestLegacyMigrationOnInstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	if len(rec.LegacyRemoved) == 0 {
-		t.Error("record should note the original-SnapHak files that were removed")
-	}
 	if len(rec.Backups) != 0 {
 		t.Errorf("no genuine file was overwritten -- Backups should be empty, got %v", rec.Backups)
 	}

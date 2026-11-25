@@ -2266,10 +2266,12 @@ static void mc_kept_text(mc_kept *k, const char *text, size_t len)
     sh_modmanifest_list rows;
     memset(&rows, 0, sizeof rows);
     {
-        int part = sh_carrier_part(text, len, "mods", NULL, NULL);
-        /* a member that does not read leaves what the map uses unknown, as a row that does not parse does. */
-        if (part < 0) k->unreadable++;
-        if (part == 1) sh_modmanifest_read(text, len, &rows, &rejected);
+        sh_carrier_view member;
+        if (!sh_carrier_view_read(text, len, &member)) { k->unreadable++; return; }
+        if (member.format == 1) return;   /* Earlier maps held only whole bundles. */
+        if (member.state == SH_CARRIER_MALFORMED) k->unreadable++;
+        if (member.state == SH_CARRIER_PRESENT && member.mods.present)
+            sh_modmanifest_read(text, len, &rows, &rejected);
     }
     /* A row of an earlier shape names no unit and is not counted; only a row that does not parse leaves what the map
      * uses unknown. */

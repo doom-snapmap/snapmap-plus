@@ -64,7 +64,7 @@ func installLegacyRelease(f flags, doom string) error {
 	// installer's state is carried across its run and the DOOM folder is tidied before and after it.
 	dir := appDataDir()
 	saved, _ := loadStateAt(dir)
-	tidyRetiredFolders()
+	removeLeftovers(doom, dir, "")
 	reportStartupTidy()
 	tidy2018(doom, "Cleaning the DOOM folder")
 	ui.Section("Installing files")
@@ -91,8 +91,7 @@ func installLegacyRelease(f flags, doom string) error {
 		})
 	}
 	ui.Blank()
-	startupTidy = append(startupTidy, retireBookkeeping(dir, "")...)
-	tidyRetiredFolders()
+	removeLeftovers(doom, dir, "")
 	reportStartupTidy()
 	tidy2018(doom, "Cleaning up after the "+legacyReleaseTag+" installer")
 	if runErr != nil {

@@ -18,7 +18,4 @@ int sh_fly_to_request(int id, struct sh_iface *iface);
 /* Called by the EditorFrame detour after the engine's frame, on the game thread. */
 void sh_fly_to_tick(void *editor);
 
-/* 1 while a request is being serviced (switch, place or settle). */
-int sh_fly_to_active(void);
-
 #endif

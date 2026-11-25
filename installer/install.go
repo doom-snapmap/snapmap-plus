@@ -74,7 +74,7 @@ func cmdInstall(f flags) error {
 	if len(legacy) > 0 {
 		ui.Warn("Found the original SnapHak in this DOOM folder. Snapmap+ replaces it, so its\n"+
 			"files (%d) will be removed. Your maps and prefabs under\n"+
-			"%%USERPROFILE%%\\snaphak are yours and are kept (they carry over).", len(legacy))
+			"%%USERPROFILE%%\\snaphak stay in that folder.", len(legacy))
 		confirmMsg = fmt.Sprintf("About to remove the original SnapHak and install Snapmap+ %s for the %s DOOM build into\n  %s\nContinue?",
 			b.version, build.label, doom)
 	}
@@ -85,11 +85,7 @@ func cmdInstall(f flags) error {
 			return nil
 		}
 	}
-	tidyRetiredFolders()
-	reportStartupTidy()
-	ui.LazySection("Migrating player data")
-	// Move player content from the locations a previous install used into the data folder.
-	migrateUserData()
+	ensureUserDataTree()
 
 	rec := &installRecord{}
 	if prior != nil {
@@ -97,15 +93,16 @@ func cmdInstall(f flags) error {
 			rec.Files = append(rec.Files, prior.Files...) // files in another DOOM folder are not here
 		}
 		rec.Backups = append(rec.Backups, prior.Backups...)
-		rec.LegacyRemoved = append(rec.LegacyRemoved, prior.LegacyRemoved...)
 	}
 	if len(legacy) > 0 {
 		ui.Section("Removing the original SnapHak")
 		rec.Backups = dropLegacyBackups(doom, rec.Backups)
-		rec.LegacyRemoved = append(rec.LegacyRemoved, removeLegacy(doom, legacy)...)
+		removeLegacy(doom, legacy)
 	}
 	ui.LazySection("Cleaning the DOOM folder")
 	printDoomTidy(cleanDoomFolder(doom, pair, own, rec), appDataDir())
+	removeLeftovers(doom, appDataDir(), "")
+	reportStartupTidy()
 
 	ui.Section("Installing files")
 	ui.Field("Version", b.version)
@@ -152,7 +149,6 @@ func cmdInstall(f flags) error {
 	if err := saveInstall(b.version, doom, build.build, rec); err != nil {
 		return fmt.Errorf("installed the files, but couldn't write the install record (%v) -- run: snapmap-plus update", err)
 	}
-	migrateLegacyLogs(doom) // best-effort: move logs from snaphak_logs\ and snaphak\logs\ into snapmap-plus\logs\
 	ui.Blank()
 	ui.OK("Snapmap+ %s installed.", b.version)
 	ensureWebView2Runtime(f) // the HTML UI renders in the WebView2 runtime -- ensure it's present (never fails the install)
@@ -174,7 +170,6 @@ func saveInstall(ver, doom, build string, rec *installRecord) error {
 		r.InstalledAt = time.Now().UTC().Format(time.RFC3339)
 		r.Files = rec.Files
 		r.Backups = rec.Backups
-		r.LegacyRemoved = rec.LegacyRemoved
 		if r.Files == nil {
 			r.Files = []string{}
 		}
@@ -261,66 +256,6 @@ func upperFirst(s string) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
-// tidyRetiredFolders removes the package folders a previous install placed that this release does not
-// ship, while they are empty; reportStartupTidy prints what it did. One that holds files stays.
-func tidyRetiredFolders() {
-	dir := appDataDir()
-	if dir == "" {
-		return
-	}
-	for _, name := range []string{"override-backups", "package-cache", "package-staging"} { // package folders this release does not ship
-		p := filepath.Join(dir, name)
-		if st, err := os.Lstat(p); err != nil || !st.IsDir() {
-			continue
-		}
-		if entries, err := os.ReadDir(p); err == nil && len(entries) == 0 && os.Remove(p) == nil {
-			startupTidy = append(startupTidy, name+"\\ (an empty folder of an earlier release)")
-		} else {
-			startupKept = append(startupKept, name+"\\ (it holds files of an earlier release; Snapmap+ no longer reads it)")
-		}
-	}
-}
-
-// migrateLegacyLogs moves runtime logs from snaphak_logs\ and snaphak\logs\ into snapmap-plus\logs\.
-// Locked files and name collisions stay where they are; failure is nonfatal.
-func migrateLegacyLogs(doom string) {
-	newDir := filepath.Join(doom, "snapmap-plus", "logs")
-	foldLogsForward(filepath.Join(doom, "snaphak_logs"), newDir)
-	foldLogsForward(filepath.Join(doom, "snaphak", "logs"), newDir)
-	removeIfEmpty(filepath.Join(doom, "snaphak")) // the snaphak overlay dir, once empty
-}
-
-// foldLogsForward moves every file in old into newDir (keeping any that already exist there), then removes old
-// if it ends up empty. Best-effort.
-func foldLogsForward(old, newDir string) {
-	entries, err := os.ReadDir(old)
-	if err != nil {
-		return // nothing to migrate
-	}
-	if err := os.MkdirAll(newDir, 0o755); err != nil {
-		return
-	}
-	moved := false
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		dst := filepath.Join(newDir, e.Name())
-		if _, err := os.Stat(dst); err == nil {
-			continue // already exists at the new location -- keep it, leave the old copy
-		}
-		if os.Rename(filepath.Join(old, e.Name()), dst) == nil {
-			moved = true
-		}
-	}
-	if rest, err := os.ReadDir(old); err == nil && len(rest) == 0 {
-		os.Remove(old)
-		if moved {
-			ui.OK("moved runtime logs into snapmap-plus\\logs\\")
-		}
-	}
-}
-
 func cmdUpdate(f flags) error {
 	rec, err := loadRecord()
 	ui.Section("Updating")
@@ -377,7 +312,7 @@ func cmdUninstall(f flags) error {
 			return nil
 		}
 	}
-	tidyRetiredFolders()
+	removeLeftovers(doom, appDataDir(), "")
 	reportStartupTidy()
 	ui.Section("Removing Snapmap+ from the DOOM folder")
 

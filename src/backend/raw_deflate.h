@@ -18,17 +18,5 @@ int sh_inflate_raw_exact(const unsigned char *src, size_t src_len,
 size_t sh_inflate_raw_upto(const unsigned char *src, size_t src_len,
                            unsigned char *dst, size_t dst_cap);
 
-#ifdef SH_RAW_DEFLATE_TESTING
-enum {
-    SH_INFLATE_HUFF_CODE_LENGTH = 0,
-    SH_INFLATE_HUFF_LITERAL_LENGTH,
-    SH_INFLATE_HUFF_DISTANCE,
-    SH_INFLATE_HUFF_FIXED_DISTANCE
-};
-
-/* Test-only entry to the decoder's canonical code-space checks. */
-int sh_inflate_test_huff_build(const unsigned char *lens, size_t count,
-                               int kind);
-#endif
 
 #endif /* BACKEND_RAW_DEFLATE_H */

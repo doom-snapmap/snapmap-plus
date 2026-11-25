@@ -330,14 +330,6 @@ static int slot_manipulation_in_progress(sh_iface *self)
     return manipulation_in_progress();
 }
 
-/* Cached material lookup only; do not invoke the fatal-on-miss loader. The
- * result is a fixed short phrase with two numbers. */
-static char *slot_find_material(sh_iface *self, const char *name)
-{
-    char info[64];
-    (void)self;
-    return sh_typeinfo_find_material(name, info, sizeof info) ? sh_iface_text(info) : NULL;
-}
 
 /* Consume the published preview, owned. */
 static char *slot_get_preview(sh_iface *self)
@@ -364,12 +356,6 @@ static int slot_request_preview(sh_iface *self, const char *name)
     return 1;
 }
 
-/* The installed material index, whole, without touching engine state. */
-static char *slot_list_materials(sh_iface *self)
-{
-    (void)self;
-    return sh_imgpreview_list(SH_ASSET_MATERIAL);
-}
 
 /* The selected asset catalog, whole; invalid kinds return NULL. */
 static char *slot_list_assets(sh_iface *self, int kind)
@@ -477,16 +463,6 @@ static int prefab_model_rule(const char *inherit_name, char *out_model, int out_
  * refuse (no model) a name that does not fit; they never cut one. */
 #define IE_MODEL_NAME_CAP 1024
 
-/* Resolve prefab models from decl/installed data; mesh extraction is asynchronous. */
-static char *slot_resolve_prefab_model(sh_iface *self, const char *inherit_name)
-{
-    char model[IE_MODEL_NAME_CAP];
-    float size[3];
-    int have_size;
-    (void)self;
-    return (prefab_model_rule(inherit_name, model, (int)sizeof model, size, &have_size) & SH_PREFAB_DEFAULT_MODEL)
-           ? sh_iface_text(model) : NULL;
-}
 
 static int slot_request_prefab_mesh(sh_iface *self, unsigned long generation, const char *model_name)
 {
@@ -1190,7 +1166,6 @@ static int slot_id_dev_layer_hidden(sh_iface *self, int id)
 
 /* A wire edit can change labels without changing entity count. The UI uses
  * this generation counter to trigger another entity-list read. */
-static int slot_wire_edit_generation(sh_iface *self) { (void)self; return sh_wiring_cleandirect_generation(); }
 
 /* Push to the backend-owned stack shared with console commands. */
 static void slot_push_to_stack(sh_iface *self, int index, const int *ids, int count)
@@ -1486,7 +1461,6 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.delete_entities        = slot_delete_entities;      /* +0x350 ext 29 */
     slots.prefab_grab_status     = slot_prefab_grab_status;   /* +0x358 ext 30 */
     slots.module_prefab          = sh_module_prefab_slot;     /* +0x360 ext 31 */
-    slots.timeline_tile          = sh_timeline_tile_slot;     /* +0x368 ext 32 */
     slots.budget                 = sh_budget_table_slot;      /* +0x370 ext 33 */
     slots.prefab_watch           = slot_prefab_watch;         /* +0x380 ext 35 */
     {
@@ -1526,11 +1500,9 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
 
     slots.id_dev_layer_hidden    = slot_id_dev_layer_hidden;  /* +0x280 ext 3 */
 
-    slots.wire_edit_generation   = slot_wire_edit_generation; /* +0x288 ext 4 */
     /* Apply installation runs first; collect its checked callbacks into this binding. */
     sh_apply_engine_get_slots(&slots.serialize_entity, &slots.apply_edit, &slots.read_prefab,
-                              &slots.apply_sync,        /* +0x290 synchronous apply, marshaled when available. */
-                              &slots.normalize_timeline_inherit); /* +0x298 returns 1 */
+                              &slots.apply_sync);
 
     sh_apply_engine_get_serialize_selection(&slots.serialize_selection);
     sh_apply_engine_get_run_on_main(&slots.run_on_main);         /* +0x348 ext 28 */
@@ -1541,10 +1513,8 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
 
     slots.manipulation_in_progress = slot_manipulation_in_progress;  /* +0x2C0 ext 11 */
 
-    slots.find_material           = slot_find_material;              /* +0x2C8 ext 12 */
     slots.get_preview             = slot_get_preview;                /* +0x2D0 ext 13 */
     slots.request_preview         = slot_request_preview;            /* +0x2D8 ext 14 */
-    slots.list_materials          = slot_list_materials;             /* +0x2E0 ext 15 */
     slots.list_assets             = slot_list_assets;                /* +0x2E8 ext 16 */
     slots.material_rect           = slot_material_rect;              /* +0x2F0 ext 17 */
     slots.sound_preview           = slot_sound_preview;              /* +0x2F8 ext 18 */
@@ -1552,7 +1522,6 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.features_off            = sh_feature_health_slot;          /* +0x388 ext 36 */
     slots.preview_failure         = slot_preview_failure;            /* +0x390 ext 37 */
     slots.sound_refusal           = slot_sound_refusal;              /* +0x398 ext 38 */
-    slots.resolve_prefab_model    = slot_resolve_prefab_model;       /* +0x308 ext 20 */
     slots.request_prefab_mesh     = slot_request_prefab_mesh;        /* +0x310 ext 21 */
     slots.get_prefab_mesh         = slot_get_prefab_mesh;            /* +0x318 ext 22 */
     slots.resolve_prefab_defaults = slot_resolve_prefab_defaults;    /* +0x320 ext 23 */

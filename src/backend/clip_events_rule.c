@@ -5,33 +5,21 @@
 #include <stdarg.h>
 #include "clip_events.h"
 #include "mp_json.h"
+#include "md6_tokens.h"
 #include "../common/text.h"
-
-static char ce_fold(char c)
-{
-    if (c == '\\') return '/';
-    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
-}
 
 static int ce_prefix(const char *s, const char *prefix, size_t n)
 {
     size_t i;
     if (!s) return 0;
-    for (i = 0; i < n; i++) if (!s[i] || ce_fold(s[i]) != ce_fold(prefix[i])) return 0;
+    for (i = 0; i < n; i++) if (!s[i] || sh_path_fold(s[i]) != sh_path_fold(prefix[i])) return 0;
     return 1;
-}
-
-int sh_ce_name_eq(const char *a, const char *b)
-{
-    if (!a || !b) return 0;
-    for (; *a && *b; ++a, ++b) if (ce_fold(*a) != ce_fold(*b)) return 0;
-    return !*a && !*b;
 }
 
 static int ce_name_cmp(const char *a, const char *b)
 {
     for (; *a && *b; ++a, ++b) {
-        char x = ce_fold(*a), y = ce_fold(*b);
+        char x = sh_path_fold(*a), y = sh_path_fold(*b);
         if (x != y) return (unsigned char)x < (unsigned char)y ? -1 : 1;
     }
     return *a ? 1 : *b ? -1 : 0;
@@ -67,57 +55,6 @@ int sh_ce_decl_under_mods(const char *name)
     return ce_prefix(name, SH_CE_DECL_ROOT, SH_CE_DECL_ROOT_LEN);
 }
 
-enum { T_END, T_WORD, T_STR, T_LB, T_RB, T_OTHER };
-typedef struct ce_tok { int k; const char *p; size_t n; } ce_tok;
-
-static ce_tok ce_next(const char *t, size_t len, size_t *pos)
-{
-    ce_tok k = { T_END, NULL, 0 };
-    size_t i = *pos;
-    for (;;) {
-        while (i < len && (t[i] == ' ' || t[i] == '\t' || t[i] == '\r' || t[i] == '\n')) i++;
-        if (i + 1 < len && t[i] == '/' && t[i + 1] == '/') { while (i < len && t[i] != '\n') i++; continue; }
-        if (i + 1 < len && t[i] == '/' && t[i + 1] == '*') {
-            i += 2;
-            while (i + 1 < len && !(t[i] == '*' && t[i + 1] == '/')) i++;
-            i = i + 2 <= len ? i + 2 : len;
-            continue;
-        }
-        break;
-    }
-    if (i >= len) { *pos = len; return k; }
-    if (t[i] == '"') {
-        size_t s = ++i;
-        while (i < len && t[i] != '"' && t[i] != '\n') i++;
-        k.k = T_STR; k.p = t + s; k.n = i - s;
-        if (i < len && t[i] == '"') i++;
-    } else if (t[i] == '{') { k.k = T_LB; i++; }
-    else if (t[i] == '}') { k.k = T_RB; i++; }
-    else if ((t[i] >= 'a' && t[i] <= 'z') || (t[i] >= 'A' && t[i] <= 'Z') || t[i] == '_') {
-        size_t s = i;
-        while (i < len && ((t[i] >= 'a' && t[i] <= 'z') || (t[i] >= 'A' && t[i] <= 'Z') ||
-                           (t[i] >= '0' && t[i] <= '9') || t[i] == '_')) i++;
-        k.k = T_WORD; k.p = t + s; k.n = i - s;
-    } else { k.k = T_OTHER; i++; }
-    *pos = i;
-    return k;
-}
-
-static int ce_word(const ce_tok *t, const char *w)
-{
-    size_t n = strlen(w), i;
-    if (t->k != T_WORD || t->n != n) return 0;
-    for (i = 0; i < n; i++) if (ce_fold(t->p[i]) != w[i]) return 0;
-    return 1;
-}
-
-static char *ce_ndup(const char *p, size_t n)
-{
-    char *s = (char *)malloc(n + 1);
-    if (s) { memcpy(s, p, n); s[n] = 0; }
-    return s;
-}
-
 void sh_ce_md6_free(sh_ce_md6 *m)
 {
     int i;
@@ -132,7 +69,7 @@ int sh_ce_md6_read(const char *text, size_t len, sh_ce_md6 *out)
 {
     size_t pos = 0;
     int depth = 0, in_init = 0, in_events = 0, cap = 0;
-    ce_tok prev = { T_END, NULL, 0 }, prev2 = { T_END, NULL, 0 };
+    md6_token prev = { MD6_END, NULL, 0 }, prev2 = { MD6_END, NULL, 0 };
     /* The anim block being read: its name, and a flag for an event row seen. */
     const char *clip = NULL;
     size_t clip_n = 0;
@@ -140,17 +77,17 @@ int sh_ce_md6_read(const char *text, size_t len, sh_ce_md6 *out)
     memset(out, 0, sizeof *out);
     if (!text) return 1;
     for (;;) {
-        ce_tok t = ce_next(text, len, &pos);
-        if (t.k == T_END) break;
-        if (t.k == T_LB) {
+        md6_token t = md6_next(text, len, &pos);
+        if (t.k == MD6_END) break;
+        if (t.k == MD6_LB) {
             depth++;
             /* `init {` and `events {` directly inside the decl's own braces. */
-            if (depth == 2 && ce_word(&prev, "init")) in_init = 1;
-            if (depth == 2 && ce_word(&prev, "events")) in_events = 1;
-            if (depth == 3 && in_events && prev.k == T_STR && ce_word(&prev2, "anim")) {
+            if (depth == 2 && md6_word(&prev, "init")) in_init = 1;
+            if (depth == 2 && md6_word(&prev, "events")) in_events = 1;
+            if (depth == 3 && in_events && prev.k == MD6_STR && md6_word(&prev2, "anim")) {
                 clip = prev.p; clip_n = prev.n; clip_depth = 3; clip_rows = 0;
             }
-        } else if (t.k == T_RB) {
+        } else if (t.k == MD6_RB) {
             if (depth == clip_depth) {
                 if (clip_rows && clip_n) {
                     if (out->nclips == cap) {
@@ -160,7 +97,7 @@ int sh_ce_md6_read(const char *text, size_t len, sh_ce_md6 *out)
                         out->clips = g;
                         cap = c;
                     }
-                    if (!(out->clips[out->nclips] = ce_ndup(clip, clip_n))) { sh_ce_md6_free(out); return 0; }
+                    if (!(out->clips[out->nclips] = sh_textn(clip, clip_n))) { sh_ce_md6_free(out); return 0; }
                     out->nclips++;
                 } else out->empty++;
                 clip_depth = -1;
@@ -168,47 +105,15 @@ int sh_ce_md6_read(const char *text, size_t len, sh_ce_md6 *out)
             }
             if (depth == 2) in_init = in_events = 0;
             if (depth > 0) depth--;
-        } else if (t.k == T_STR && in_init && depth == 2 && ce_word(&prev, "inherit") && !out->base) {
-            if (t.n && !(out->base = ce_ndup(t.p, t.n))) { sh_ce_md6_free(out); return 0; }
-        } else if (t.k == T_WORD && clip_depth == 3 && depth == 3 && ce_word(&t, "event")) {
+        } else if (t.k == MD6_STR && in_init && depth == 2 && md6_word(&prev, "inherit") && !out->base) {
+            if (t.n && !(out->base = sh_textn(t.p, t.n))) { sh_ce_md6_free(out); return 0; }
+        } else if (t.k == MD6_WORD && clip_depth == 3 && depth == 3 && md6_word(&t, "event")) {
             clip_rows++;
         }
         prev2 = prev;
         prev = t;
     }
     return 1;
-}
-
-typedef struct ce_buf { char *p; size_t n, cap; int oom; } ce_buf;
-
-static void ce_put(ce_buf *b, const char *s, size_t n)
-{
-    if (b->oom) return;
-    if (b->n + n + 1 > b->cap) {
-        size_t c = b->cap ? b->cap * 2 : 256;
-        char *g;
-        while (c < b->n + n + 1) c *= 2;
-        g = (char *)realloc(b->p, c);
-        if (!g) { b->oom = 1; return; }
-        b->p = g;
-        b->cap = c;
-    }
-    memcpy(b->p + b->n, s, n);
-    b->n += n;
-    b->p[b->n] = 0;
-}
-
-static void ce_puts(ce_buf *b, const char *s) { ce_put(b, s, strlen(s)); }
-
-/* Writes a JSON string, escaping quote and backslash. */
-static void ce_put_str(ce_buf *b, const char *s)
-{
-    ce_put(b, "\"", 1);
-    for (; *s; s++) {
-        if (*s == '"' || *s == '\\') ce_put(b, "\\", 1);
-        if ((unsigned char)*s >= 0x20) ce_put(b, s, 1);
-    }
-    ce_put(b, "\"", 1);
 }
 
 static void ce_say(sh_ce_line_fn fn, void *ctx, int *oom, const char *fmt, ...)
@@ -228,7 +133,7 @@ typedef struct ce_given { const char *clip; int entry; } ce_given;
 char *sh_ce_build_registry(const char *salt, const char *const *names, int n, sh_ce_text_fn text, void *text_ctx,
                            sh_ce_line_fn warn, void *warn_ctx, int *oom)
 {
-    ce_buf out = { 0 };
+    sh_text_buf out = { 0 };
     ce_given *given = NULL;
     sh_ce_md6 *read = NULL;
     int ngiven = 0, cgiven = 0, i, k, rows = 0, dummy = 0;
@@ -237,14 +142,14 @@ char *sh_ce_build_registry(const char *salt, const char *const *names, int n, sh
     if (!salt || !names || n <= 0) return NULL;
     read = (sh_ce_md6 *)calloc((size_t)n, sizeof *read);
     if (!read) { *oom = 1; return NULL; }
-    ce_put(&out, "[", 1);
+    sh_text_append(&out, "[", 1);
     for (i = 0; i < n; i++) {
         const char *name = names[i];
         char *body = NULL;
         size_t blen = 0;
         int found, dup = 0, first = 1, kept = 0;
         if (!name || !name[0]) continue;
-        for (k = 0; k < i && !dup; k++) dup = names[k] && sh_ce_name_eq(names[k], name);
+        for (k = 0; k < i && !dup; k++) dup = names[k] && sh_path_eq(names[k], name);
         if (dup) {
             ce_say(warn, warn_ctx, oom, "mod.json animation_events lists \"%s\" twice; the second entry is ignored. List "
                    "each md6Def once.", name);
@@ -282,7 +187,7 @@ char *sh_ce_build_registry(const char *salt, const char *const *names, int n, sh
                        "under md6/mods/<folder name>/.", name, clip);
                 continue;
             }
-            for (g = 0; g < ngiven && other < 0; g++) if (sh_ce_name_eq(given[g].clip, clip)) other = given[g].entry;
+            for (g = 0; g < ngiven && other < 0; g++) if (sh_path_eq(given[g].clip, clip)) other = given[g].entry;
             if (other >= 0) {
                 if (other != i)
                     ce_say(warn, warn_ctx, oom, "mod.json animation_events: \"%s\" gets rows from \"%s\" and from \"%s\"; only "
@@ -300,20 +205,20 @@ char *sh_ce_build_registry(const char *salt, const char *const *names, int n, sh
             given[ngiven].entry = i;
             ngiven++;
             if (first) {
-                ce_puts(&out, rows ? ",{\"md6Def\":" : "{\"md6Def\":");
-                ce_put_str(&out, name);
-                ce_puts(&out, ",\"base\":");
-                ce_put_str(&out, read[i].base);
-                ce_puts(&out, ",\"clips\":[");
+                sh_text_append_str(&out, rows ? ",{\"md6Def\":" : "{\"md6Def\":");
+                md6_put_name(&out, name);
+                sh_text_append_str(&out, ",\"base\":");
+                md6_put_name(&out, read[i].base);
+                sh_text_append_str(&out, ",\"clips\":[");
                 first = 0;
-            } else ce_put(&out, ",", 1);
-            ce_put_str(&out, clip);
+            } else sh_text_append(&out, ",", 1);
+            md6_put_name(&out, clip);
             kept++;
         }
-        if (kept) { ce_puts(&out, "]}"); rows++; }
+        if (kept) { sh_text_append_str(&out, "]}"); rows++; }
         if (*oom) break;
     }
-    ce_put(&out, "]", 1);
+    sh_text_append(&out, "]", 1);
     for (i = 0; i < n; i++) sh_ce_md6_free(&read[i]);
     free(read);
     free(given);
@@ -321,8 +226,6 @@ char *sh_ce_build_registry(const char *salt, const char *const *names, int n, sh
     if (*oom || !rows) { free(out.p); return NULL; }
     return out.p;
 }
-
-static char *ce_dup(const char *s) { return s ? ce_ndup(s, strlen(s)) : NULL; }
 
 /* Returns a JSON string's text when it has no escapes, NULL for anything else. */
 static const char *ce_plain(const mpj *v)
@@ -373,7 +276,7 @@ int sh_ce_registry_add(sh_ce_registry *r, const char *salt, const char *label, c
                        "so they are not used.", who, carrier);
                 continue;
             }
-            for (j = 0; j < r->n && !dup; j++) dup = sh_ce_name_eq(r->rows[j].clip, clip);
+            for (j = 0; j < r->n && !dup; j++) dup = sh_path_eq(r->rows[j].clip, clip);
             if (dup) continue;
             if (r->n == r->cap) {
                 int c = r->cap ? r->cap * 2 : 16;
@@ -384,11 +287,11 @@ int sh_ce_registry_add(sh_ce_registry *r, const char *salt, const char *label, c
             }
             w = &r->rows[r->n];
             memset(w, 0, sizeof *w);
-            w->clip = ce_dup(clip);
-            w->carrier = ce_dup(carrier);
-            w->base = ce_dup(base);
-            w->salt = ce_dup(salt);
-            w->label = ce_dup(who);
+            w->clip = sh_text(clip);
+            w->carrier = sh_text(carrier);
+            w->base = sh_text(base);
+            w->salt = sh_text(salt);
+            w->label = sh_text(who);
             if (!w->clip || !w->carrier || !w->base || !w->salt || !w->label) { ce_row_free(w); failed = 1; break; }
             r->n++;
             added++;

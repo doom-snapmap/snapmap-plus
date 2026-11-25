@@ -99,7 +99,7 @@ const uint8_t *sh_resolve_gamemgr_slot(const sig_result *results, size_t n, cons
         if (sh_safe_read(slot, (uint8_t *)&probe, sizeof probe)) {
             char line[128];
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B2: gameMgr slot pinned-build fallback=base+0x56ffb90=%p (current=%p, lazy-deref)",
+                "B2: gameMgr slot pinned-build fallback=%p (current=%p, lazy-deref)",
                 (void *)slot, probe);
             backend_log(line);
             return slot;

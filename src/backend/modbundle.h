@@ -48,7 +48,7 @@ typedef struct sh_mb_file {
     char *stock_source;    /* the installed resource path a stock pointer names */
     int deferred;          /* builder: 1 type not allowed, 2 over 64 MiB, refused unless it is a pointer */
     int absent;            /* a stock pointer with no file in the folder (a closure pointer, or a received build's) */
-    int cls;               /* SH_MB_CLASS_*: what the file is to the game (sh_mb_classify) */
+    int cls;               /* SH_MB_CLASS_*: what the file is to the game */
     char *edit;            /* builder: a decl at a game name, its derived edits element (JSON), or NULL */
     int edited;            /* an edited copy: a REPLACE file the bundle's edits name (built or loaded); never served */
     int closure;           /* builder: campaign-only content a served decl needs, derived by this build ("closure": true) */
@@ -56,7 +56,7 @@ typedef struct sh_mb_file {
     size_t event_count;
 } sh_mb_file;
 
-/* Per-file classification, decided from the file's path and bytes (sh_mb_classify). */
+/* Per-file classification, decided from the file's path and bytes. */
 #define SH_MB_CLASS_NONE    0
 #define SH_MB_CLASS_ADD     1   /* under the mod's namespace, bytes the game does not hold */
 #define SH_MB_CLASS_BORROW  2   /* under the namespace, a stock pointer (the game's own bytes) */
@@ -330,6 +330,7 @@ char  *sh_mb_salt_strings(const char *text, size_t n, const char *from, const ch
 /* Rewrites every "#str_<from>" reference (any case, ending at a name boundary) in a text to "#str_<to>": the
  * count, and with `out` the rewritten text (malloc'd, NULL when the count is 0); (size_t)-1 when out of memory. */
 size_t sh_mb_restr_text(const char *text, size_t n, const sh_mb_strkey *keys, size_t count, char **out, size_t *out_len);
+
 void   sh_mb_strkeys_free(sh_mb_strkey *keys, size_t count);
 
 /* The classes counts as one line ("2 adds, 0 borrows, 1 edits, 0 replaces, 0 editor, 0 surfaces"). */

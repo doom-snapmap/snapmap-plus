@@ -10,7 +10,5 @@
  * works. Failures are logged. */
 void sh_swf_textedit_install(const uint8_t *module_base);
 
-/* Remove the detour if installed. */
-void sh_swf_textedit_uninstall(void);
 
 #endif /* BACKEND_SWF_TEXTEDIT_H */

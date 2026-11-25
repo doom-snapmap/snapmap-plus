@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "signatures.h"
+#include "safe_read.h"
 
 /* Native callback argument layout: argc@0 and argv[N]@+8+8*N. */
 typedef struct idCmdArgs {
@@ -25,7 +26,6 @@ void sh_printf(const char *fmt, ...);
 /* Decodes the first RIP-relative MOV/LEA to RAX/RCX in the accessor window and returns the slot address, not its
  * object. sh_safe_read is the guarded byte read. */
 #define B2_RIP_SCAN_WINDOW 0x40
-int            sh_safe_read(const uint8_t *src, uint8_t *dst, size_t n);
 const uint8_t *sh_decode_rip_slot(const uint8_t *accessor_fn);
 
 /* The bind-time decoders (commands_decode.c). */

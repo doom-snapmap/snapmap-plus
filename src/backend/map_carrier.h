@@ -11,7 +11,7 @@
 
 #define SH_CARRIER_KEY      "snapmap-plus"
 #define SH_CARRIER_KEY_LEN  12
-#define SH_CARRIER_FORMAT   1
+#define SH_CARRIER_FORMAT   "2"
 
 enum {
     SH_CARRIER_ABSENT    = 0,
@@ -26,6 +26,7 @@ typedef struct sh_carrier_span {
 
 typedef struct sh_carrier_view {
     int    state;              /* SH_CARRIER_ABSENT, _PRESENT or _MALFORMED */
+    int format;                /* A single numeric format, or zero when unknown. */
     unsigned members;          /* root members with the carrier's key */
     size_t cut_from, cut_to;   /* the first such member with its separator */
     size_t value_from, value_to;
@@ -34,7 +35,7 @@ typedef struct sh_carrier_view {
 } sh_carrier_view;
 
 /* Reads the root of `json`: 1 when it is one JSON object (view filled, ABSENT when it has no member), 0 when
- * not. Two members with the key, a format other than 1 or 2, or a part of the wrong type are MALFORMED. */
+ * not. Two members with the key, a format other than 2, or a part of the wrong type are MALFORMED. */
 int sh_carrier_view_read(const char *json, size_t len, sh_carrier_view *view);
 
 /* The part's value span, from a fresh read: 1 present, 0 absent, -1 when the member is malformed. */
@@ -68,9 +69,9 @@ void sh_carrier_describe(const sh_carrier_view *view, char *out, size_t cap);
 
 /* Detects maps that carry Snapmap+ data in an unsupported shape: string variables in the author's table
  * (smpkg., smpbind., smpref., smpmod1., smpprod1., smp.render.v1, smp.bounds.v1, smnav1. names), or member rows
- * naming a mod by "id"/"bundle" or (format 1) "<salt>@<build>". Answers SH_MAP_OLD_VARIABLES, _ROWS or _NONE;
+ * naming a mod by "id"/"bundle" or (format 1) "<salt>@<build>". The format-1 member itself also identifies an earlier map;
  * such a map is refused with SH_MAP_OLD_REFUSAL and its text is not changed. */
-enum { SH_MAP_OLD_NONE = 0, SH_MAP_OLD_VARIABLES = 1, SH_MAP_OLD_ROWS = 2 };
+enum { SH_MAP_OLD_NONE = 0, SH_MAP_OLD_VARIABLES = 1, SH_MAP_OLD_ROWS = 2, SH_MAP_OLD_FORMAT = 3 };
 int sh_map_old_shape(const char *json, size_t len);
 #define SH_MAP_OLD_REFUSAL "This map was saved by an earlier Snapmap+; run the Snapmap+ installer to update it."
 

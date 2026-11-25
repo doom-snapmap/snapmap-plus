@@ -64,6 +64,17 @@ static const sh_aas_lump_def SH_AAS_LUMP_DEFS[SH_AAS_L__COUNT] = {
 
 typedef struct sh_aas sh_aas;
 
+typedef struct sh_aas_layout {
+    const unsigned char *p;
+    size_t off[SH_AAS_L__COUNT];
+    unsigned count[SH_AAS_L__COUNT];
+} sh_aas_layout;
+
+int sh_aas_read_layout(const unsigned char *bytes, size_t len, size_t max_bytes,
+                       sh_aas_layout *layout, char *err, size_t err_cap);
+int sh_aas_read_pvs(const sh_aas *a, unsigned offset, unsigned limit, unsigned char *visible, unsigned areas);
+
+
 /* Parses the header, lump bounds and count relationships. Returns NULL and fills err on failure; cross-lump
  * indices and BSP integrity need sh_navmesh_validate_aas after editing. */
 sh_aas *sh_aas_parse(const unsigned char *bytes, size_t len, char *err, size_t err_cap);

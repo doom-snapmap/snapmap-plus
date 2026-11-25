@@ -480,12 +480,6 @@ int sh_native_json_validate(const char *json, size_t length, unsigned max_depth,
     return validate(json, length, max_depth, out_kind, error, 1);
 }
 
-int sh_json_visit_objects(const char *json, size_t length, unsigned max_depth,
-                          sh_json_object_visitor visitor, void *context)
-{
-    return sh_json_visit_objects_filtered(json, length, max_depth, visitor, NULL, context);
-}
-
 static int visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
                                   sh_json_object_visitor visitor,
                                   sh_json_field_filter filter, void *context, int native_strings)

@@ -149,7 +149,7 @@ static int cr_root_visit(void *ctx, const char *s, const cr_member *m)
     return 1;
 }
 
-typedef struct cr_inner_ctx { sh_carrier_view *v; int format_ok; int bad; } cr_inner_ctx;
+typedef struct cr_inner_ctx { sh_carrier_view *v; int format_seen; int bad; } cr_inner_ctx;
 
 static int cr_inner_visit(void *ctx, const char *s, const cr_member *m)
 {
@@ -157,7 +157,9 @@ static int cr_inner_visit(void *ctx, const char *s, const cr_member *m)
     sh_carrier_view *v = c->v;
     char first = s[m->value_from];
     if (cr_key_is(s, m, "format")) {
-        c->format_ok = (m->value_to - m->value_from == 1 && (first == '1' || first == '2'));   /* format 1 or 2 */
+        if (c->format_seen++) { c->bad = 1; return 0; }
+        if (m->value_to - m->value_from == 1 && first >= '0' && first <= '9')
+            v->format = first - '0';
         return 1;
     }
     if (cr_key_is(s, m, "mods")) {
@@ -208,10 +210,11 @@ int sh_carrier_view_read(const char *json, size_t len, sh_carrier_view *view)
         ic.v = &v;
         if (!cr_object(json, v.value_to, v.value_from, cr_inner_visit, &ic) || ic.bad) {
             v.state = SH_CARRIER_MALFORMED;
+            v.format = 0;
             strcpy_s(v.why, sizeof v.why, "a part has the wrong type or appears twice");
-        } else if (!ic.format_ok) {
+        } else if (v.format != SH_CARRIER_FORMAT[0] - '0') {
             v.state = SH_CARRIER_MALFORMED;
-            strcpy_s(v.why, sizeof v.why, "its format is not 1 or 2");
+            strcpy_s(v.why, sizeof v.why, "its format is not " SH_CARRIER_FORMAT);
         }
     }
     if (v.state == SH_CARRIER_MALFORMED) {
@@ -355,7 +358,7 @@ char *sh_carrier_put(const char *json, size_t len, const char *part, const char 
 #define CR_LIT(s) CR_EMIT((s), sizeof(s) - 1)
     CR_EMIT(src, before);
     if (!empty_root) CR_LIT(",");
-    CR_LIT("\"" SH_CARRIER_KEY "\":{\"format\":2");
+    CR_LIT("\"" SH_CARRIER_KEY "\":{\"format\":" SH_CARRIER_FORMAT);
     for (i = 0; i < CR_PARTS; i++) {
         if (!pv[i]) continue;
         CR_LIT(",\"");
@@ -462,7 +465,8 @@ static int cr_is_name_value(const char *json, const char *quote)
 
 int sh_map_old_shape(const char *json, size_t len)
 {
-    size_t f, from = 0, to = 0;
+    size_t f;
+    sh_carrier_view v;
     if (!json || !len) return SH_MAP_OLD_NONE;
     for (f = 0; f < sizeof cr_old_families / sizeof cr_old_families[0]; f++) {
         size_t m = strlen(cr_old_families[f]), at = 0;
@@ -480,9 +484,10 @@ int sh_map_old_shape(const char *json, size_t len)
             }
         }
     }
-    /* Rows of the member's "mods" part that name an "id" or a "bundle", or a mod as "<salt>@<build>" (format 1). */
-    if (sh_carrier_part(json, len, "mods", &from, &to) == 1) {
-        const char *cursor = json + from, *end = json + to, *elem;
+    if (!sh_carrier_view_read(json, len, &v)) return SH_MAP_OLD_NONE;
+    if (v.format == 1) return SH_MAP_OLD_FORMAT;
+    if (v.state == SH_CARRIER_PRESENT && v.mods.present) {
+        const char *cursor = json + v.mods.from, *end = json + v.mods.to, *elem;
         size_t elem_len;
         while (sh_carrier_array_next(&cursor, end, &elem, &elem_len) == 1) {
             if (*elem != '{') continue;

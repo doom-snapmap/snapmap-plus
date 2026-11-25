@@ -36,14 +36,6 @@ static void ps_log(const char *fmt, ...)
     backend_log(line);
 }
 
-static void *clean(const sig_result *r, size_t n, const char *name)
-{
-    size_t i;
-    for (i = 0; i < n; ++i)
-        if (r[i].name && !strcmp(r[i].name, name) && r[i].status == SIG_OK) return (void *)r[i].addr;
-    return NULL;
-}
-
 /* A slot's holder, read from the engine's table. An unreadable holder counts as held and unnamed. */
 static int ps_read(void *context, int slot, const char **name, int *kind)
 {
@@ -98,19 +90,13 @@ static int alloc_detour(void *state, void *decl)
     return slot;
 }
 
-long sh_parmslots_shared(int *spill_slot)
-{
-    if (spill_slot) *spill_slot = (int)InterlockedCompareExchange(&g_spill, -1, -1);
-    return InterlockedCompareExchange(&g_shared, 0, 0);
-}
-
 int sh_parmslots_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     void *target, *tramp;
     unsigned i;
     (void)module_base;
     if (g_alloc) return 1;
-    target = clean(results, count, "ParmStateAlloc");
+    target = sig_pointer(results, count, "ParmStateAlloc");
     if (!target) {
         ps_log("PARMS: AllocParmState did not resolve on this executable; a full parm range stays the engine's error");
         return 0;

@@ -173,11 +173,6 @@ static float g_far_floor;
 static volatile LONG g_blueprint_now;
 static volatile LONG64 g_blueprint_at;
 
-static const sig_result *binding(const sig_result *r,size_t n,const char *name)
-{
-    size_t i;for(i=0;i<n;i++)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)return r+i;
-    return NULL;
-}
 static zoom_page *near_page(uintptr_t low,uintptr_t high)
 {
     SYSTEM_INFO info;uintptr_t step,center,delta;
@@ -242,7 +237,6 @@ static void refresh_ground(void)
         if(!InterlockedExchange(&g_faulted,1))backend_log("ZOOM: Blueprint ground plane refresh disabled after an engine exception");
     }
 }
-void sh_editor_zoom_set_scale(float scale){g_scale=sh_editor_zoom_clamp_scale(scale);publish();}
 void sh_editor_zoom_set_far_floor(float floor_value)
 {
     if(!isfinite(floor_value)||floor_value<0)floor_value=0;
@@ -381,11 +375,11 @@ int sh_editor_zoom_install(const sig_result *results,size_t count,const uint8_t 
     void *slot,*camera_cvar,*bounds_cvar,*threshold_cvar,*zfar_cvar,*fog_cvar,*pick_cvar;
     uintptr_t low,high,half;int i;
     if(g_installed)return 1;
-    dolly=binding(results,count,"OrbitDollyClamp");pan=binding(results,count,"OrbitPanClamp");
-    sky=binding(results,count,"BlueprintZoomClamp");clock=binding(results,count,"EditorClockMs");
-    far_sites[0]=binding(results,count,"BlueprintFarClipA");far_sites[1]=binding(results,count,"BlueprintFarClipB");
-    fog_site=binding(results,count,"EditorFogVolume");update=binding(results,count,"RenderEntityUpdate");
-    pick_sites[0]=binding(results,count,"ModulePickHover");pick_sites[1]=binding(results,count,"ModulePickFocus");
+    dolly=sig_ok(results,count,"OrbitDollyClamp");pan=sig_ok(results,count,"OrbitPanClamp");
+    sky=sig_ok(results,count,"BlueprintZoomClamp");clock=sig_ok(results,count,"EditorClockMs");
+    far_sites[0]=sig_ok(results,count,"BlueprintFarClipA");far_sites[1]=sig_ok(results,count,"BlueprintFarClipB");
+    fog_site=sig_ok(results,count,"EditorFogVolume");update=sig_ok(results,count,"RenderEntityUpdate");
+    pick_sites[0]=sig_ok(results,count,"ModulePickHover");pick_sites[1]=sig_ok(results,count,"ModulePickFocus");
     if(!dolly||!pan||!sky||!clock||!base)goto unavailable;
     slot=(void*)glb_resolve(base,"cvar_system_slot",NULL);
     camera_cvar=sh_engine_cvar_find(slot,SH_IDCVAR_NAME_FOR_LOOKUP,"snapEdit_cameraDistanceLimit");

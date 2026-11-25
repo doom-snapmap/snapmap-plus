@@ -68,13 +68,13 @@ char *sh_prefab_mods_block_compose(const char *view, size_t len, const sh_modman
 char *sh_prefab_mods_block_view(const char *block, size_t len, size_t *out_len);
 
 /* A prefab's details as a view: its block when the text has one (tail: the text is the end of a larger file),
- * else NULL; *source receives an SH_PREFAB_META_* value (EARLIER when a sidecar exists at meta_path, may be NULL). */
-char *sh_prefab_mods_view_of(const char *text, size_t len, int tail, const char *meta_path, int *source,
+ * else NULL; *source receives an SH_PREFAB_META_* value (EARLIER when a sidecar exists beside the prefab, may be NULL). */
+char *sh_prefab_mods_view_of(const char *text, size_t len, int tail, const char *path, int *source,
                              size_t *out_len);
 
 /* The rows a prefab names: its block's. Returns the count, -1 unreadable, SH_PREFAB_ROWS_EARLIER for the
  * sidecar form. */
-int   sh_prefab_mods_rows_of(const char *text, size_t len, const char *meta_path, sh_modmanifest_list *out);
+int   sh_prefab_mods_rows_of(const char *text, size_t len, const char *path, sh_modmanifest_list *out);
 
 /* The prefab text with the block composed from `view` and `rows` (NULL keeps
  * the view's). malloc'd; NULL when the text is not a JSON object. */
@@ -103,9 +103,9 @@ char *sh_prefab_mods_module_file(const char *prefab, size_t len, const char *sum
                                  int *count);
 
 /* The Prefabs tab's description and tag edit: `body` is a view ("" clears both), only "desc" and "tags" are
- * taken; the block at `path` is rewritten in place (written fresh when none). A sidecar-form prefab (meta_path,
+ * taken; the block at `path` is rewritten in place (written fresh when none). A sidecar-form prefab (
  * no block) is not written. 1 written, -1 failed. */
-int   sh_prefab_mods_meta_write(const char *body, size_t len, const char *path, const char *meta_path);
+int   sh_prefab_mods_meta_write(const char *body, size_t len, const char *path);
 
 /* Bring a prefab's mods into the open map before it is placed (main thread). `text` is the prefab file, for a
  * module prefab's module check. Returns an SH_PREFAB_MODS_* answer; msg receives what the Prefabs tab shows
@@ -117,10 +117,10 @@ int   sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmani
  * open map: place it now), 0 refused or dropped. Any thread. */
 int   sh_prefab_mods_poll(int seq);
 
-/* Export the prefab at prefab_path (a sidecar at meta_path refuses it) as `name` to zip_utf8. Rows come from
+/* Export the prefab at prefab_path (a sidecar beside the prefab refuses it) as `name` to zip_utf8. Rows come from
  * its block, else from the closure; a prefab with no block or with rows moved to the current builds is
  * carried with a block written for them (the file on disk is unchanged). 1 written, -1 refused; msg says why. */
-int   sh_prefab_mods_export(const char *prefab_path, const char *meta_path, const char *name, const char *zip_utf8,
+int   sh_prefab_mods_export(const char *prefab_path, const char *name, const char *zip_utf8,
                             char **msg);
 
 /* Import a prefab's export (a .zip, or a .json inside an extracted export folder) into prefabs_dir: add the

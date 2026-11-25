@@ -101,6 +101,18 @@ static int stock_exists(void *ctx, const char *request)
     if (g_verbose) printf("    stock miss: %s\n", request);
     return 0;
 }
+static int example_stock(void *ctx, const char *request)
+{
+    if (g_doom_registered) return stock_exists(ctx,request);
+    static const char *const stock[] = {
+        "generated/decls/material/textures/guis/snapmaps/entity_icons/prop/crate01.decl",
+        "generated/decls/particle/env/sparks/sparks_med_01.decl",
+        "cooked/model/models/snapmaps/props/new/crate01.bmodel"
+    };
+    for (size_t i=0; i<sizeof stock/sizeof stock[0]; ++i)
+        if (!strcmp(request,stock[i])) return 1;
+    return stock_exists(ctx,request);
+}
 static sh_mb_resolver g_resolver = { NULL, NULL, stock_exists, NULL };
 
 static const char *fixture_path(const char *name, char *out, size_t cap)
@@ -815,6 +827,22 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "doom=", 5)) strcpy_s(g_doom, sizeof g_doom, argv[i] + 5);
         else if (!strncmp(argv[i], "tyrant=", 7)) strcpy_s(g_tyrant, sizeof g_tyrant, argv[i] + 7);
         else if (!strcmp(argv[i], "verbose")) g_verbose = 1;
+    }
+    if (argc >= 3 && !strcmp(argv[1], "--author-example")) {
+        sh_mb_bundle b;
+        if (g_doom[0]) {
+            sh_modstock_set_install(g_doom);
+            sh_modstock_register();
+            g_doom_registered = 1;
+        }
+        sh_mb_set_script_check(sh_script_compile_check);
+        sh_mb_set_sdk_compiler(sh_sdk_compile);
+        sh_mb_set_look_compiler(sh_look_compile_notes);
+        sh_mb_resolver r = { NULL, NULL, example_stock, NULL };
+        int ok = sh_mb_build(argv[2], "spark123", &r, &b);
+        if (!ok) fprintf(stderr, "author example: %s\n", sh_mb_first_cause(&b));
+        sh_mb_free(&b);
+        return ok ? 0 : 1;
     }
     if (!g_fixtures[0] || !g_fixtures_prog[0]) { fprintf(stderr, "usage: fixtures=<dir> fixtures_prog=<dir>\n"); return 2; }
     if (!mt_temp_dir("modlookmod", tmp, sizeof tmp)) { fprintf(stderr, "no temp dir\n"); return 2; }

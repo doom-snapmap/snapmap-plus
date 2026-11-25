@@ -1,6 +1,7 @@
 /* Injects bundle and baked #str_ mappings, then sorts the live dictionary by hash; install injects, the sort
  * hook is a fallback. Native 32-byte record: +0x00 lowercased FNV-1a hash, +0x08 interned key handle,
  * +0x10 interned value handle, value lengths at +0x18/+0x1c; the engine owns the string pool and list. */
+#include "safe_read.h"
 #include <windows.h>
 #include <stdint.h>
 #include <limits.h>
@@ -16,14 +17,14 @@
 #include "strkeys.h"    /* string edits: keys the game or the product defines */
 #include "process_heap_scope.h"   /* a runtime pass grows the table in the process heap */
 
-/* StridsSortBody prologue steal window (disasm of 0x1a2b490): mov [rsp+0x18],rbx; push rbp/rsi/rdi;
+/* StridsSortBody prologue steal window: mov [rsp+0x18],rbx; push rbp/rsi/rdi;
  * lea rbp,[rsp-0x7f0] = 16 bytes of whole, rsp-only, position-independent instructions (no RIP-rel, no rel jmp). */
 #define SORT_STOLEN 16
 
 /* Native sort ABI: void sort(ctx, arr, uint32 count, uint32 radix). */
 typedef void (*sort_fn_t)(void *ctx, void *arr, uint32_t count, uint32_t radix);
 
-/* The native wrapper (Vulkan RVA 0x1a2b480) sets radix=0x20 before the body, which sorts the 32-bit hash
+/* The native wrapper sets radix=0x20 before the body, which sorts the 32-bit hash
  * eight bits at a time. */
 #define SORT_RADIX 0x20
 
@@ -50,16 +51,10 @@ static int g_table_changed;                     /* the last pass wrote to the li
  * matching LEA references the error string. */
 #define LEA_SCAN_WINDOW 0x40
 
-static int safe_read_n(const uint8_t *src, uint8_t *dst, size_t n)
-{
-    __try { for (size_t i = 0; i < n; i++) dst[i] = src[i]; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
-
 static void *decode_table_global(const uint8_t *table_lea_fn)
 {
     uint8_t b[LEA_SCAN_WINDOW];
-    if (!safe_read_n(table_lea_fn, b, sizeof b)) return NULL;
+    if (!sh_safe_read(table_lea_fn, b, sizeof b)) return NULL;
     for (int i = 0; i + 7 <= LEA_SCAN_WINDOW; i++) {
         if (b[i] == 0x48 && b[i + 1] == 0x8D && b[i + 2] == 0x0D) {     /* LEA RCX,[rip+disp32] */
             int32_t disp;

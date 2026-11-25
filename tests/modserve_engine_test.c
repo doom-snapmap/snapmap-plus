@@ -29,6 +29,7 @@ static int log_has(const char *needle) { return strstr(g_log, needle) != NULL; }
 
 /* ------------------------------------------------------------------ link stand-ins */
 
+void sh_script_game_cvar_recover_poll(void) {}
 static int g_smodel_begins, g_smodel_reloads;
 void sh_static_model_reload_begin(void) { g_smodel_begins++; }
 int sh_static_model_reloaded(const void *backing) { (void)backing; g_smodel_reloads++; return 1; }

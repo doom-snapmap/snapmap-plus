@@ -170,11 +170,6 @@ static unsigned char grid_build_collision(void *collision,void *map,int instance
     return result;
 }
 
-static void *clean(const sig_result *r,size_t n,const char *name)
-{
-    size_t i;for(i=0;i<n;++i)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)
-        return (void*)r[i].addr;return NULL;
-}
 static unsigned char *read_asset(void *context,const char *name,size_t *length)
 {(void)context;return sh_overrides_read_engine_resource(name,length);}
 static void release_asset(void *context,void *bytes)
@@ -1357,33 +1352,33 @@ int sh_grid_native_decode_reapply(const void *reapply,const void *entity_tree,co
 }
 int sh_grid_native_install(const sig_result *r,size_t n,const uint8_t *base)
 {
-    void *find=clean(r,n,"GridFindModule"),*has=clean(r,n,"GridHasModule");
-    void *collision=clean(r,n,"GridBuildModuleCollision");
-    void *containing=clean(r,n,"GridContainingModule");
+    void *find=sig_pointer(r,n,"GridFindModule"),*has=sig_pointer(r,n,"GridHasModule");
+    void *collision=sig_pointer(r,n,"GridBuildModuleCollision");
+    void *containing=sig_pointer(r,n,"GridContainingModule");
     if(g_find)return hook_is_installed((void*)g_find)&&hook_is_installed(g_has_hook)&&
         hook_is_installed((void*)g_containing_module);
-    g_module_ray=(module_ray_fn)clean(r,n,"GridModuleRay");
-    g_refresh_surfaces=(refresh_surfaces_fn)clean(r,n,"GridRefreshPlacementSurfaces");
-    g_load=(load_module_fn)clean(r,n,"GridLoadModule");g_ctor=(str_ctor_fn)clean(r,n,"IdStrCtor");
-    g_dtor=(str_dtor_fn)clean(r,n,"IdStrDtor");g_anchor=clean(r,n,"DeclRegistryAnchor");
-    g_type=(type_fn)clean(r,n,"DeclTypeByName");g_register=(register_fn)clean(r,n,"DeclRegisterFile");
-    g_source=(source_fn)clean(r,n,"DeclSourceFind");g_decl=(find_decl_fn)clean(r,n,"DeclFind");
-    g_generic_load=(generic_load_fn)clean(r,n,"ResourceGenericLoad");
-    g_replace=(replace_instance_fn)clean(r,n,"GridReplaceInstance");
-    g_reconnect=(reconnect_fn)clean(r,n,"GridReconnectPortals");
+    g_module_ray=(module_ray_fn)sig_pointer(r,n,"GridModuleRay");
+    g_refresh_surfaces=(refresh_surfaces_fn)sig_pointer(r,n,"GridRefreshPlacementSurfaces");
+    g_load=(load_module_fn)sig_pointer(r,n,"GridLoadModule");g_ctor=(str_ctor_fn)sig_pointer(r,n,"IdStrCtor");
+    g_dtor=(str_dtor_fn)sig_pointer(r,n,"IdStrDtor");g_anchor=sig_pointer(r,n,"DeclRegistryAnchor");
+    g_type=(type_fn)sig_pointer(r,n,"DeclTypeByName");g_register=(register_fn)sig_pointer(r,n,"DeclRegisterFile");
+    g_source=(source_fn)sig_pointer(r,n,"DeclSourceFind");g_decl=(find_decl_fn)sig_pointer(r,n,"DeclFind");
+    g_generic_load=(generic_load_fn)sig_pointer(r,n,"ResourceGenericLoad");
+    g_replace=(replace_instance_fn)sig_pointer(r,n,"GridReplaceInstance");
+    g_reconnect=(reconnect_fn)sig_pointer(r,n,"GridReconnectPortals");
     if(g_reconnect){const float *bounds=sh_grid_native_decode_environment_bounds(g_reconnect);
         if(bounds)g_environment_bounds=bounds;}
-    g_edit_entity=(edit_entity_fn)clean(r,n,"GridEditEntity");
-    g_set_transform=(set_transform_fn)clean(r,n,"GridSetEntityTransform");
-    g_portal_bounds=(portal_bounds_fn)clean(r,n,"GridPortalBounds");
-    g_world_bounds=(world_bounds_fn)clean(r,n,"GridWorldBounds");
-    g_entity_tree=(entity_tree_fn)clean(r,n,"GridEntityTree");
-    g_apply_tree=(entity_tree_apply_fn)clean(r,n,"GridApplyEntityTree");
-    g_read_properties=(entity_tree_apply_fn)clean(r,n,"GridReadEntityProperties");
-    g_tree_vec=(tree_vec_fn)clean(r,n,"GridTreeSetVec3");
-    g_tree_float=(tree_float_fn)clean(r,n,"GridTreeSetFloat");
+    g_edit_entity=(edit_entity_fn)sig_pointer(r,n,"GridEditEntity");
+    g_set_transform=(set_transform_fn)sig_pointer(r,n,"GridSetEntityTransform");
+    g_portal_bounds=(portal_bounds_fn)sig_pointer(r,n,"GridPortalBounds");
+    g_world_bounds=(world_bounds_fn)sig_pointer(r,n,"GridWorldBounds");
+    g_entity_tree=(entity_tree_fn)sig_pointer(r,n,"GridEntityTree");
+    g_apply_tree=(entity_tree_apply_fn)sig_pointer(r,n,"GridApplyEntityTree");
+    g_read_properties=(entity_tree_apply_fn)sig_pointer(r,n,"GridReadEntityProperties");
+    g_tree_vec=(tree_vec_fn)sig_pointer(r,n,"GridTreeSetVec3");
+    g_tree_float=(tree_float_fn)sig_pointer(r,n,"GridTreeSetFloat");
     {void *destroy=NULL,*release=NULL;
-        if(sh_grid_native_decode_reapply(clean(r,n,"GridReapplyEntityTree"),(const void*)g_entity_tree,
+        if(sh_grid_native_decode_reapply(sig_pointer(r,n,"GridReapplyEntityTree"),(const void*)g_entity_tree,
                                          (const void*)g_apply_tree,&destroy,&release)){
             g_tree_destroy=(tree_destroy_fn)destroy;g_tree_free=(tree_free_fn)release;}
     }

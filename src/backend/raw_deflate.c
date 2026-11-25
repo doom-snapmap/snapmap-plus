@@ -296,14 +296,3 @@ int sh_inflate_raw_exact(const unsigned char *src, size_t src_len, unsigned char
     inflate_body(src, src_len, dst, dst_len, 1, &valid);
     return valid;
 }
-
-#ifdef SH_RAW_DEFLATE_TESTING
-int sh_inflate_test_huff_build(const unsigned char *lens, size_t count,
-                               int kind)
-{
-    huff_t h;
-    if (count > 288u || kind < HUFF_CODE_LENGTH || kind > HUFF_FIXED_DISTANCE)
-        return 0;
-    return huff_build(&h, lens, (unsigned)count, (huff_kind)kind);
-}
-#endif

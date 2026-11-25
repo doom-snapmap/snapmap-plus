@@ -1206,14 +1206,6 @@ static int e_difficulty(int *level)
     return 1;
 }
 
-static void *clean(const sig_result *r, size_t n, const char *name)
-{
-    size_t i;
-    for (i = 0; r && i < n; ++i)
-        if (r[i].name && !strcmp(r[i].name, name) && r[i].status == SIG_OK) return (void *)r[i].addr;
-    return NULL;
-}
-
 int sh_script_api_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     static const sh_script_engine engine = {
@@ -1263,10 +1255,10 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
                 "tag name find joints only.");
     g_lookup = (void *)lookup.addr;
     /* spawning: the idTarget_Spawn create and finish calls and the decl registry */
-    g_decl_anchor = (const uint8_t *)clean(results, count, "DeclRegistryAnchor");
-    g_decl_register = clean(results, count, "DeclRegisterFile");
-    g_decl_type = (type_fn)clean(results, count, "DeclTypeByName");
-    g_decl_find = (find_decl_fn)clean(results, count, "DeclFind");
+    g_decl_anchor = (const uint8_t *)sig_pointer(results, count, "DeclRegistryAnchor");
+    g_decl_register = sig_pointer(results, count, "DeclRegisterFile");
+    g_decl_type = (type_fn)sig_pointer(results, count, "DeclTypeByName");
+    g_decl_find = (find_decl_fn)sig_pointer(results, count, "DeclFind");
     for (i = 0; SH_MODSCENE_SPAWN_SIGNATURES[i].name; i++) {
         const sig_entry *s = &SH_MODSCENE_SPAWN_SIGNATURES[i];
         sig_result r;

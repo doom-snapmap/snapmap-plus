@@ -37,11 +37,6 @@ static drop_page *g_page;
 static sh_patch_handle g_patch;
 static int g_live;
 
-static const sig_result *binding(const sig_result *r,size_t n,const char *name)
-{
-    size_t i;for(i=0;i<n;i++)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)return r+i;
-    return NULL;
-}
 static int read_float(uintptr_t at,float *out)
 {
     __try {*out=*(const volatile float*)at;return 1;}
@@ -60,7 +55,7 @@ int sh_object_entry_install(const sig_result *results,size_t count)
     const sig_result *site;uintptr_t constant=0;int32_t old_disp,new_disp;
     const char *why;char line[320];
     if(g_live)return 1;
-    site=binding(results,count,"ObjectEntryDrop");
+    site=sig_ok(results,count,"ObjectEntryDrop");
     if(!site){why="the entry drop load was not found";goto unavailable;}
     if((why=sh_object_entry_check((const unsigned char*)site->addr,&constant)))goto unavailable;
     /* The load's disp32 is relative to the instruction's end, site + 9. */
@@ -83,6 +78,5 @@ unavailable:
     backend_log(line);
     return 0;
 }
-int sh_object_entry_live(void){return g_live;}
 float sh_object_entry_drop(void){return g_live&&g_page?g_page->drop:SH_OBJECT_ENTRY_NATIVE_DROP;}
 #endif

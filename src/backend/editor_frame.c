@@ -484,11 +484,6 @@ int sh_editor_frame_carrier_install(void *read_text_fn, int status_ok, void *ass
     return 1;
 }
 
-void *sh_editor_frame_target(void)
-{
-    return g_frame_entry;
-}
-
 /* Set *msg (malloc'd, freeing the prior value) to `text` when msg is given. */
 static void ef_msg(char **msg, const char *text)
 {

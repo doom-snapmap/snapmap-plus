@@ -148,14 +148,6 @@ static int stack_push(int index, const int *ids, int n)
     ss_unlock();
     return pushed;
 }
-static void stack_clear(int index)
-{
-    ss_ids *s = stack_get(index);
-    if (!s) return;
-    ss_lock();
-    ss_ids_clear(s);
-    ss_unlock();
-}
 static int stack_move_out(int index, int **out)
 {
     ss_ids *s = stack_get(index);

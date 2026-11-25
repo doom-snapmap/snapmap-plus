@@ -73,7 +73,6 @@ int  sh_editor_zoom_check_far(uintptr_t a, uintptr_t *zfar_at);
 int  sh_editor_zoom_check_pick(uintptr_t a, uintptr_t *value_at);
 int  sh_editor_zoom_check_fog(uintptr_t a, uintptr_t *fog_at);
 int  sh_editor_zoom_install(const sig_result *results, size_t count, const uint8_t *base);
-void sh_editor_zoom_set_scale(float scale);
 /* The active module bound changed (map bounds). */
 void sh_editor_zoom_update(float module_bounds);
 /* Any thread. The lowest Blueprint far plane the open map asks for: SH_ZOOM_FAR_MAX while it unlocks its view

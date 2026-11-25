@@ -189,17 +189,15 @@ static void confirm_exact(void *edit,float step)
     __try {g_confirm(edit,step);}
     __finally {g_exact=previous;}
 }
-static void *clean(const sig_result *r,size_t n,const char *name)
-{size_t i;for(i=0;i<n;++i)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)return (void*)r[i].addr;return NULL;}
 int sh_grid_snap_install(const sig_result *r,size_t n,const uint8_t *base)
 {
-    void *snap=clean(r,n,"GridPortalSnap"),*align=clean(r,n,"GridPortalAlign"),*quantize=clean(r,n,"GridQuantizeOrigin");
-    void *confirm=clean(r,n,"GridConfirmOrigins");
+    void *snap=sig_pointer(r,n,"GridPortalSnap"),*align=sig_pointer(r,n,"GridPortalAlign"),*quantize=sig_pointer(r,n,"GridQuantizeOrigin");
+    void *confirm=sig_pointer(r,n,"GridConfirmOrigins");
     if(g_snap||g_align||g_quantize||g_confirm)return g_snap&&g_align&&g_quantize&&g_confirm&&
         hook_is_installed((void*)g_snap)&&hook_is_installed((void*)g_align)&&
         hook_is_installed((void*)g_quantize)&&hook_is_installed((void*)g_confirm);
-    g_bounds=(bounds_fn)clean(r,n,"GridPortalBounds");g_direction=(direction_fn)clean(r,n,"GridPortalDirection");
-    g_replace=(replace_fn)clean(r,n,"GridReplaceInstance");g_reconnect=(reconnect_fn)clean(r,n,"GridReconnectPortals");
+    g_bounds=(bounds_fn)sig_pointer(r,n,"GridPortalBounds");g_direction=(direction_fn)sig_pointer(r,n,"GridPortalDirection");
+    g_replace=(replace_fn)sig_pointer(r,n,"GridReplaceInstance");g_reconnect=(reconnect_fn)sig_pointer(r,n,"GridReconnectPortals");
     g_editor=(unsigned char*)glb_resolve(base,"editor_singleton",NULL);
     if(!snap||!align||!quantize||!confirm||!g_bounds||!g_direction||!g_replace||!g_reconnect||!g_editor)return 0;
     /* Each stolen prefix is 15 whole, register/stack-only bytes in both images. */

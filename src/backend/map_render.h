@@ -34,17 +34,11 @@ float sh_map_render_fog_stretch(float native_distance);
 float sh_map_render_fog_distance(float value, float r);
 float sh_map_render_fog_strength(float value, float r);
 int sh_map_render_valid(const sh_map_render *settings);
-/* Every stored version reads as on or off: versions 1 and 3 (distance and six fog values), 2 (an enable
- * flag, then the same) and 4 (distance only). Any valid distance other than the native 8192 (0 included)
- * reads as on; 8192 and a disabled version 2 read as off. */
+/* An unlocked map stores SH_RENDER_UNLOCKED_TEXT. */
 int sh_map_render_decode(const char *text, sh_map_render *settings);
 /* On encodes as SH_RENDER_UNLOCKED_TEXT. Off has no text: it is stored as the
  * variable's absence, so encoding it fails. */
 int sh_map_render_encode(const sh_map_render *settings, char *out, size_t cap);
-/* Whether a string variable named name is one of Snapmap+'s own map settings
- * ("smp." prefix). No logic node binds to them. */
-int sh_map_render_own_variable(const char *name, int length);
-
 int sh_map_render_install(const sig_result *results, size_t count, const uint8_t *base);
 /* The RenderClipRead site is an E8 rel32 call: its five bytes in `bytes`, its callee in *callee; 0 when it is not
  * that call. sh_map_render_install runs this same decode. */

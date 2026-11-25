@@ -1619,15 +1619,6 @@ void sh_modvt_console_sync(void)
     sh_modvt_print_status();
 }
 
-/* ------------------------------------------------------------------ install */
-
-static const sig_result *mv_clean(const sig_result *r, size_t n, const char *name)
-{
-    size_t i;
-    for (i = 0; i < n; ++i)
-        if (r[i].name && !strcmp(r[i].name, name)) return r[i].status == SIG_OK ? &r[i] : NULL;
-    return NULL;
-}
 
 int sh_modvt_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
@@ -1647,7 +1638,7 @@ int sh_modvt_install(const sig_result *results, size_t count, const uint8_t *mod
     g_vulkan = id ? id->vulkan : -1;
     g_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
     for (i = 0; i < 8; ++i)
-        if ((s[i] = mv_clean(results, count, names[i])) == NULL) {
+        if ((s[i] = sig_ok(results, count, names[i])) == NULL) {
             mv_log("boards unavailable: %s is not a clean signature match", names[i]);
             return 0;
         }

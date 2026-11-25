@@ -2756,13 +2756,6 @@ static void ae_nav_refresh_poll(void)
     ae_nav_refresh_queue();
 }
 
-/* Always succeeds: palette timelines are placed on snapmaps/unknown directly (timeline_tile.c), so there is
- * nothing to normalize. */
-static int slot_normalize_timeline_inherit(sh_iface *self, int id)
-{
-    (void)self; (void)id;
-    return 1;
-}
 
 /* Deep-copy a batch and request execution through the engine command buffer. */
 static int slot_schedule_apply(sh_iface *self, const sh_apply_item *items, int count, const char *op_label)
@@ -2976,14 +2969,12 @@ static int slot_apply_sync(sh_iface *self, const sh_apply_item *items, int count
 void sh_apply_engine_get_slots(sh_serialize_entity_fn *serialize_entity,
                                sh_schedule_apply_fn   *apply_edit,
                                sh_read_prefab_fn      *read_prefab,
-                               sh_apply_sync_fn       *apply_sync,
-                               sh_normalize_timeline_inherit_fn *normalize_timeline_inherit)
+                               sh_apply_sync_fn       *apply_sync)
 {
     if (serialize_entity) *serialize_entity = slot_serialize_entity;
     if (apply_edit)       *apply_edit       = slot_schedule_apply;
     if (read_prefab)      *read_prefab      = slot_read_prefab;
     if (apply_sync)       *apply_sync       = slot_apply_sync;
-    if (normalize_timeline_inherit) *normalize_timeline_inherit = slot_normalize_timeline_inherit;
 }
 
 

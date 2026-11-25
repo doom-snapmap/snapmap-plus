@@ -172,7 +172,6 @@ void sh_nav_bake_set_live_editor(sh_navr_entity_valid valid,
 int sh_nav_bake_test_parse_name(const char *name, char *module, size_t module_cap,
                                 char *cls, size_t cls_cap);
 void sh_nav_bake_test_reset(void);
-int  sh_nav_bake_test_bake_count(void);
 void sh_nav_bake_test_copy_map(sh_nav_map *out);
 /* Deliver a synthetic completed worker result through the production publisher. */
 void sh_nav_bake_test_preview_complete(unsigned long revision, const char *bytes);
@@ -192,10 +191,6 @@ const char *sh_nav_bake_test_last_reason(void);
 void sh_nav_bake_test_print_faces(void (*out)(const char *fmt, ...), const unsigned *volumes,
                                   const unsigned char (*dir)[4], const unsigned char (*code)[4],
                                   int rows, int demons, int climbed, int total);
-/* The last test bake's class block, as sh_navmesh prints it under `cls`. */
-void sh_nav_bake_test_print_last(void (*out)(const char *fmt, ...), const char *cls);
-/* The last test bake's floor climbs per box face, as sh_navmesh prints them. */
-const char *sh_nav_bake_test_last_faces(void);
 size_t      sh_nav_bake_test_last_length(void);
 /* Lower the bake cache budget (0 restores it); returns the previous one. */
 size_t sh_nav_bake_test_set_cache_budget(size_t bytes);

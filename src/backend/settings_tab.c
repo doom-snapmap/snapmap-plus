@@ -6,19 +6,6 @@
  * row: native Populate adds one title (RenderAddTitle VK 0x12807b0, GL 0x127fd60) before the rows, so the tab adds one. */
 #include "settings_tab.h"
 #include <string.h>
-#include <math.h>
-
-float sh_settings_tab_unwrap(float previous,float value,float min,float max,float small_step,float large_step)
-{
-    float step=fmaxf(fabsf(small_step),fabsf(large_step));
-    if(!isfinite(previous)||!isfinite(value)||!isfinite(min)||!isfinite(max)||!(max>min))return value;
-    /* A real step moves at most one large step; a wrap jumps across the
-     * range from one end to the other. Ranges too small to tell are left. */
-    if(!(step>0)||max-min<=2*step||fabsf(value-previous)<=step)return value;
-    if(previous<=min+step&&value>=max-step&&value>previous)return min;
-    if(previous>=max-step&&value<=min+step&&value<previous)return max;
-    return value;
-}
 
 int sh_settings_tab_wrap(int category,int delta,int count)
 {
@@ -63,13 +50,10 @@ typedef void (*state_fn)(void *,void *);
 typedef void (*populate_fn)(void *,int);
 typedef void (*controller_fn)(void *);
 typedef unsigned char (*dirty_fn)(void *);
-typedef void *(*float_fn)(void *,const char *,const uint32_t *,const uint32_t *,
-    unsigned char,float,float,float,float,float,unsigned char);
 typedef void (*title_fn)(void *,const char *);
 typedef void (*toggle_fn)(void *,unsigned,const char *,const uint32_t *,const uint32_t *,
     unsigned char,unsigned char,const char *,const char *);
 typedef void (*toggle_set_fn)(void *,unsigned char);
-typedef void (*float_set_fn)(void *,float);
 typedef uint32_t (*hash_fn)(const char *);
 typedef void (*clear_fn)(void *);
 typedef void (*category_fn)(void *,void *,void *,int);
@@ -86,7 +70,6 @@ static state_fn g_enter,g_exit;
 static populate_fn g_populate;
 static controller_fn g_apply,g_reset;
 static dirty_fn g_dirty;
-static float_fn g_add;
 static title_fn g_title;
 static toggle_fn g_toggle;
 static hash_fn g_hash;
@@ -112,18 +95,14 @@ typedef struct group_slot {sh_settings_group desc;int active;} group_slot;
 static group_slot g_groups[SH_SETTINGS_TAB_MAX_GROUPS];
 static int g_group_count;
 
-enum {ROW_FLOAT,ROW_BOOL};
 typedef struct row_slot {
-    int kind;
-    sh_settings_float desc;float *draft;float *base;
-    int *bool_draft,*bool_base;
-    void (*adjust)(void *,float *,float);int group;void *widget;
+    int *draft, *base;
+    int group;
+    void *widget;
 } row_slot;
 static row_slot g_rows[SH_SETTINGS_TAB_MAX_ROWS];
 static int g_row_count;
 struct sh_settings_rows {void *panel;int group;};
-
-sh_settings_tab_mode sh_settings_tab_current_mode(void){return g_mode;}
 
 int sh_settings_tab_register_group(const sh_settings_group *group)
 {
@@ -131,13 +110,6 @@ int sh_settings_tab_register_group(const sh_settings_group *group)
     g_groups[g_group_count].desc=*group;g_groups[g_group_count].active=0;g_group_count++;
     return 1;
 }
-int sh_settings_tab_register(const char *title,sh_settings_populate_fn populate)
-{
-    sh_settings_group group;memset(&group,0,sizeof group);
-    group.title=title;group.populate=populate;
-    return sh_settings_tab_register_group(&group);
-}
-
 static int active(void)
 {
     unsigned char *e=(unsigned char*)g_editor;
@@ -153,64 +125,33 @@ static void fault(const char *where)
 }
 static int row_changed(const row_slot *r)
 {
-    return r->kind==ROW_BOOL?(*r->bool_draft!=0)!=(*r->bool_base!=0):*r->draft!=*r->base;
+    return (*r->draft != 0) != (*r->base != 0);
 }
-static void row_keep(row_slot *r){if(r->kind==ROW_BOOL)*r->bool_base=*r->bool_draft;else *r->base=*r->draft;}
-static void row_revert(row_slot *r){if(r->kind==ROW_BOOL)*r->bool_draft=*r->bool_base;else *r->draft=*r->base;}
+static void row_keep(row_slot *r){*r->base=*r->draft;}
+static void row_revert(row_slot *r){*r->draft=*r->base;}
 static void refresh_values(void)
 {
     int i;
     for(i=0;i<g_row_count;i++)if(g_rows[i].widget) {
         unsigned char *v=(unsigned char*)g_rows[i].widget;
-        if(g_rows[i].kind==ROW_BOOL) {
-            unsigned char on=(unsigned char)(*g_rows[i].bool_draft!=0);
-            /* vtable +0x28: set the value and redraw the true/false text. */
-            if(v[0xd0]!=on)(*(toggle_set_fn*)(*(uintptr_t*)v+0x28))(v,on);
-        } else if(*(float*)(v+0x120)!=*g_rows[i].draft) {
-            /* vtable +0xb8 (VK 0x12a7860): store +0x120 and reformat the
-             * row text; a bare +0x120 write leaves the row text stale. */
-            (*(float_set_fn*)(*(uintptr_t*)v+0xb8))(v,*g_rows[i].draft);
-        }
+        unsigned char on=(unsigned char)(*g_rows[i].draft!=0);
+        if(v[0xd0]!=on)(*(toggle_set_fn*)(*(uintptr_t*)v+0x28))(v,on);
         v[0xc8]=(unsigned char)row_changed(&g_rows[i]);
     }
-}
-
-int sh_settings_tab_add_float(sh_settings_rows *rows,const sh_settings_float *row,float *draft,
-                              float *base,void (*adjust)(void *,float *,float))
-{
-    uint32_t label,help;unsigned char *v;int i;
-    if(!rows||!row||!draft||!base||!g_add)return 0;
-    for(i=0;i<g_row_count;i++)if(g_rows[i].kind==ROW_FLOAT&&g_rows[i].draft==draft)break;
-    if(i==g_row_count) {
-        if(g_row_count>=SH_SETTINGS_TAB_MAX_ROWS)return 0;
-        g_row_count++;
-    }
-    memset(&g_rows[i],0,sizeof g_rows[i]);
-    g_rows[i].kind=ROW_FLOAT;g_rows[i].desc=*row;g_rows[i].draft=draft;g_rows[i].base=base;
-    g_rows[i].adjust=adjust;g_rows[i].group=rows->group;g_rows[i].widget=NULL;
-    label=g_hash(row->label);help=g_hash(row->help);
-    /* Last argument: 0 makes the native step stop at min / max; 1 (row->wrap) wraps and the row's adjust filters it. */
-    v=(unsigned char*)g_add(rows->panel,row->name,&label,&help,1,*base,
-        row->min,row->max,row->small_step,row->large_step,row->wrap?1:0);
-    if(!v)return 0;
-    *(unsigned*)(v+0x40)=ROW_ID_BASE+(unsigned)i;g_rows[i].widget=v;
-    return 1;
 }
 
 int sh_settings_tab_add_bool(sh_settings_rows *rows,const sh_settings_bool *row,int *draft,int *base)
 {
     uint32_t label,help;unsigned char *panel,*v;int i,before,after;unsigned id;
     if(!rows||!row||!draft||!base||!g_toggle||!g_hash)return 0;
-    for(i=0;i<g_row_count;i++)if(g_rows[i].kind==ROW_BOOL&&g_rows[i].bool_draft==draft)break;
+    for(i=0;i<g_row_count;i++)if(g_rows[i].draft==draft)break;
     if(i==g_row_count) {
         if(g_row_count>=SH_SETTINGS_TAB_MAX_ROWS)return 0;
         g_row_count++;
     }
     memset(&g_rows[i],0,sizeof g_rows[i]);
-    g_rows[i].kind=ROW_BOOL;g_rows[i].bool_draft=draft;g_rows[i].bool_base=base;
+    g_rows[i].draft=draft;g_rows[i].base=base;
     g_rows[i].group=rows->group;
-    g_rows[i].desc.name=row->name;g_rows[i].desc.label=row->label;g_rows[i].desc.help=row->help;
-    g_rows[i].desc.min=0;g_rows[i].desc.max=1;
     label=g_hash(row->label);help=g_hash(row->help);
     panel=(unsigned char*)rows->panel;id=ROW_ID_BASE+(unsigned)i;
     before=*(int*)(panel+0x200);
@@ -326,17 +267,7 @@ static int changed(void *panel,void *widget,int action)
         handled=1;id-=ROW_ID_BASE;
         if(active()&&panel==g_panel&&(int)id<g_row_count&&widget==g_rows[id].widget) {
             row_slot *r=&g_rows[id];
-            if(r->kind==ROW_BOOL) {
-                /* The toggle flipped its own +0xd0 before this dispatch. */
-                *r->bool_draft=((unsigned char*)widget)[0xd0]!=0;
-            } else {
-                /* The value is inside [min, max]. A row created without the
-                 * native wrap clamps; one created with it may have jumped to
-                 * the other limit, which its adjust filters. */
-                float value=*(float*)((unsigned char*)widget+0x120);
-                if(r->adjust)r->adjust(g_groups[r->group].desc.user,r->draft,value);
-                else if(isfinite(value))*r->draft=fminf(r->desc.max,fmaxf(r->desc.min,value));
-            }
+            *r->draft=((unsigned char*)widget)[0xd0]!=0;
             refresh_values();
         }
     } __except(EXCEPTION_EXECUTE_HANDLER){fault("change");}
@@ -399,11 +330,6 @@ static void category_select(void *state,void *editor,void *manager,int index)
     g_repopulate(manager,index);
 }
 
-static const sig_result *binding(const sig_result *r,size_t n,const char *name)
-{
-    size_t i;for(i=0;i<n;i++)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)return r+i;
-    return NULL;
-}
 static void *near_relay(uintptr_t call,void *handler)
 {
     SYSTEM_INFO info;uintptr_t step,center,delta;
@@ -427,7 +353,7 @@ static void *near_relay(uintptr_t call,void *handler)
 /* Redirect Populate's clear call through a relay; verify it targets the clear. */
 static int install_injection(const sig_result *results,size_t count)
 {
-    const sig_result *site=binding(results,count,"SettingsPanelClearCall"),*clear=binding(results,count,"SettingsPanelClear");
+    const sig_result *site=sig_ok(results,count,"SettingsPanelClearCall"),*clear=sig_ok(results,count,"SettingsPanelClear");
     unsigned char before[5],after[5];int32_t rel;intptr_t distance;
     if(!site||!clear)return 0;
     if(!sh_settings_tab_check_clear(site->addr,clear->addr))return 0;
@@ -450,7 +376,7 @@ static int install_category(const sig_result *results,size_t count)
         "EditorUiEvent","SwfNestedValue","SwfSpriteInstance","SwfValueDestroy","SwfFrameLabel",
         "SwfPlayFrame","SwfSpriteSetVisible"};
     const sig_result *r[10];unsigned i;
-    for(i=0;i<10;i++){r[i]=binding(results,count,names[i]);if(!r[i])return 0;}
+    for(i=0;i<10;i++){r[i]=sig_ok(results,count,names[i]);if(!r[i])return 0;}
     g_repopulate=(repopulate_fn)r[2]->addr;g_ui_event=(ui_event_fn)r[3]->addr;
     g_lookup=(lookup_fn)r[4]->addr;g_sprite=(sprite_fn)r[5]->addr;g_destroy=(destroy_fn)r[6]->addr;
     g_label=(label_fn)r[7]->addr;g_play=(play_fn)r[8]->addr;g_visible=(visible_fn)r[9]->addr;
@@ -469,16 +395,16 @@ fail:
 int sh_settings_tab_install(const sig_result *results,size_t count)
 {
     static const char *names[]={"RenderSettingsEnter","RenderSettingsExit","RenderSettingsPopulate",
-        "RenderSettingsApply","RenderSettingsReset","RenderSettingsDirtyCall","RenderAddFloat","RenderAddTitle","StridsHash"};
-    const sig_result *r[9];void **originals[]={(void**)&g_enter,(void**)&g_exit,(void**)&g_populate,
+        "RenderSettingsApply","RenderSettingsReset","RenderSettingsDirtyCall","RenderAddTitle","StridsHash"};
+    const sig_result *r[8];void **originals[]={(void**)&g_enter,(void**)&g_exit,(void**)&g_populate,
         (void**)&g_apply,(void**)&g_reset,(void**)&g_dirty};
     void *handlers[]={(void*)enter,(void*)leave,(void*)populate,(void*)apply,(void*)reset,(void*)dirty};
     const size_t stolen[]={15,16,20,16,20,16};unsigned i;uintptr_t address;
     if(g_mode!=SH_SETTINGS_TAB_OFF)return 1;
     for(i=0;i<6;i++)if(*originals[i])return 0;
-    for(i=0;i<9;i++){r[i]=binding(results,count,names[i]);if(!r[i])goto unavailable;}
-    g_add=(float_fn)r[6]->addr;g_title=(title_fn)r[7]->addr;g_hash=(hash_fn)r[8]->addr;
-    {const sig_result *toggle=binding(results,count,"RenderAddToggle");g_toggle=toggle?(toggle_fn)toggle->addr:NULL;}
+    for(i=0;i<8;i++){r[i]=sig_ok(results,count,names[i]);if(!r[i])goto unavailable;}
+    g_title=(title_fn)r[6]->addr;g_hash=(hash_fn)r[7]->addr;
+    {const sig_result *toggle=sig_ok(results,count,"RenderAddToggle");g_toggle=toggle?(toggle_fn)toggle->addr:NULL;}
     if(!g_toggle)backend_log("SETTINGS: toggle rows unavailable on this build");
     for(i=0;i<6;i++) {
         address=r[i]->addr;

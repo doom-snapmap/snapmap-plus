@@ -223,5 +223,9 @@ check(host.includes('cmd == L"budgetTable"') && host.includes('cmd == L"budgetUs
       'host routes budget requests and re-sends the table after a rebuild');
 check(host.includes('\\"sig\\":\\""'), 'prefabDetail carries a content signature');
 
+const budgetPoll = host.match(/static void ui_budget_poll\(\)\s*\{([\s\S]*?)\n\}/)[1];
+check(budgetPoll.includes('SH_BUDGET_GENERATION') && !budgetPoll.includes('SH_BUDGET_TABLE'),
+      'polling an unchanged table does not allocate a copy');
+
 if (failures) { console.error(failures + ' prefab budget check(s) failed'); process.exit(1); }
 console.log('prefab_budget_test: OK');

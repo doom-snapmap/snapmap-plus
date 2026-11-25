@@ -720,22 +720,9 @@ static int aug_rebuild_pvs(aug_ctx *c)
         if(!found)goto done;
     }
     for(i=0;i<old;i++) {
-        unsigned pos=0,at=offset[i],used=0;
-        memset(visible,0,n);
-        while(pos<old) {
-            unsigned token,run,k;
-            const unsigned char *p;
-            if(at>=bytes)goto done;
-            p=sh_aas_rec_const(c->a,SH_AAS_L_OBSTACLEPVS,at++);token=*p;
-            if(token&0x80) {
-                run=token&0x3f;
-                if(token&0x40) {
-                    if(at>=bytes)goto done;
-                    run|=(unsigned)*sh_aas_rec_const(c->a,SH_AAS_L_OBSTACLEPVS,at++)<<6;
-                }
-                pos+=run+1;
-            } else for(k=0;k<7&&pos<old;k++,pos++)visible[pos]=(token>>k)&1;
-        }
+        unsigned pos=0,used=0;
+        if(!sh_aas_read_pvs(c->a,offset[i],bytes,visible,old))goto done;
+        memset(visible+old,0,n-old);
         if(i)visible[i]=1;
         /* A construction can cross the module's visibility boundary, so its new route neighbours are included
          * in both directions as well as the carrier row. */

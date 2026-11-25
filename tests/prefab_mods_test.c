@@ -473,23 +473,23 @@ static void recording(const char *lib, const sh_modmanifest_row *door)
     printf("-- description and tag edits rewrite the block in place and keep the rows; no sidecar\n");
     {
         static const char BODY[] = "{\"desc\":\"Blast door\",\"tags\":[\"door\",\"x\"],\"kind\":\"ignored\",\"mods\":[]}";
-        CHECK(sh_prefab_mods_meta_write(BODY, sizeof BODY - 1, prefab, meta) == 1);
+        CHECK(sh_prefab_mods_meta_write(BODY, sizeof BODY - 1, prefab) == 1);
     }
     text = slurp(prefab, &len);
     blk = block_of(text, len);
     CHECK(strstr(blk, "\"description\":\"Blast door\",\"tags\":[\"door\",\"x\"]") && strstr(blk, LOCAL_ROW) && !strstr(blk, "ignored"));
     CHECK(engine_bytes_are(prefab, OBJECT_PREFAB) && !mt_exists(meta));
-    view = sh_prefab_mods_view_of(text, len, 0, meta, &source, NULL);
+    view = sh_prefab_mods_view_of(text, len, 0, prefab, &source, NULL);
     CHECK(view && source == SH_PREFAB_META_BLOCK && strstr(view, "\"desc\":\"Blast door\"") && strstr(view, "\"mods\":["));
     free(view);
     free(text);
     /* Clearing both fields keeps the block and its rows. */
-    CHECK(sh_prefab_mods_meta_write("", 0, prefab, meta) == 1);
+    CHECK(sh_prefab_mods_meta_write("", 0, prefab) == 1);
     text = slurp(prefab, &len);
     blk = block_of(text, len);
     CHECK(strstr(blk, "\"description\":\"\",\"tags\":[]") && strstr(blk, LOCAL_ROW) && !mt_exists(meta));
     free(text);
-    CHECK(sh_prefab_mods_meta_write("{\"desc\":\"An airlock\",\"tags\":[\"door\"]}", 37, prefab, meta) == 1);
+    CHECK(sh_prefab_mods_meta_write("{\"desc\":\"An airlock\",\"tags\":[\"door\"]}", 37, prefab) == 1);
 
     /* A prefab that needs no mods still gets its block, naming none. */
     {
@@ -546,13 +546,13 @@ static void recording(const char *lib, const sh_modmanifest_row *door)
         _snprintf_s(side, sizeof side, _TRUNCATE, SIDE, door->build);
         CHECK(put_file(p3, OBJECT_PREFAB) && put_file(m3, side));
         text = slurp(p3, &len);
-        view = sh_prefab_mods_view_of(text, len, 0, m3, &source, NULL);
+        view = sh_prefab_mods_view_of(text, len, 0, p3, &source, NULL);
         CHECK(!view && source == SH_PREFAB_META_EARLIER);
-        CHECK(sh_prefab_mods_rows_of(text, len, m3, &rows) == SH_PREFAB_ROWS_EARLIER && rows.count == 0);
+        CHECK(sh_prefab_mods_rows_of(text, len, p3, &rows) == SH_PREFAB_ROWS_EARLIER && rows.count == 0);
         view = sh_prefab_mods_view_of(text, len, 0, NULL, &source, NULL);
         CHECK(!view && source == SH_PREFAB_META_NONE);
         free(text);
-        CHECK(sh_prefab_mods_meta_write("{\"desc\":\"New hall\",\"tags\":[\"old\"]}", 34, p3, m3) == -1);
+        CHECK(sh_prefab_mods_meta_write("{\"desc\":\"New hall\",\"tags\":[\"old\"]}", 34, p3) == -1);
         text = slurp(p3, &len);
         CHECK(text && !strcmp(text, OBJECT_PREFAB));   /* nothing written */
         free(text);
@@ -1528,13 +1528,13 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
     call.op = SH_MODULE_PREFAB_MODS_RESOLVE;
     call.text = OBJECT_PREFAB;   /* no block, no sidecar */
     call.text_len = sizeof OBJECT_PREFAB - 1;
-    call.meta_path = none;
+    call.path = NULL;
     call.name = "Nothing";
     CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_PLACE && F.main_calls == 0);
     text = slurp(path, &len);   /* Door.json carries its block */
     call.text = text;
     call.text_len = len;
-    call.meta_path = meta;
+    call.path = path;
     call.name = "Door";
     /* The recorded row places the door: it reaches the map through the placed door, not as a map-level row. */
     CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_PLACE && F.main_calls == 1 && F.attaches == 0 &&
@@ -1542,10 +1542,10 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
     {
         /* A prefab an earlier version saved: refused with its sentence. */
         char old[MAX_PATH * 2];
-        _snprintf_s(old, sizeof old, _TRUNCATE, "%s\\Old hall.meta.json", lib);
+        _snprintf_s(old, sizeof old, _TRUNCATE, "%s\\Old hall.json", lib);
         call.text = OBJECT_PREFAB;
         call.text_len = sizeof OBJECT_PREFAB - 1;
-        call.meta_path = old;
+        call.path = old;
         call.name = "Old hall";
         CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_REFUSED && !strcmp(out, SH_PREFAB_EARLIER_TEXT) &&
               !strcmp(F.last_print, "Prefab Old hall was not placed: it was saved by an earlier Snapmap+; run the "
@@ -1557,7 +1557,7 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
     call.op = SH_MODULE_PREFAB_META_READ;
     call.text = text;
     call.text_len = len;
-    call.meta_path = meta;
+    call.path = path;
     CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_META_BLOCK && strstr(out, "\"desc\":\"An airlock\"") && strstr(out, LOCAL_ROW));
     call.text = text + 40;
     call.text_len = len - 40;
@@ -1566,10 +1566,10 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
     call.text = OBJECT_PREFAB;
     call.text_len = sizeof OBJECT_PREFAB - 1;
     call.tail = 0;
-    call.meta_path = none;
+    call.path = NULL;
     CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_META_NONE && out[0] == 0);
-    _snprintf_s(meta, sizeof meta, _TRUNCATE, "%s\\Old hall.meta.json", lib);
-    call.meta_path = meta;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Old hall.json", lib);
+    call.path = path;
     CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_META_EARLIER && out[0] == 0);
     free(text);
 
@@ -1589,7 +1589,6 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
         call.text = "{\"desc\":\"s\",\"tags\":[]}";
         call.text_len = strlen(call.text);
         call.path = p2;
-        call.meta_path = none;
         CHECK(pm_slot(&call, out, sizeof out) == 1 && !mt_exists(none));
         text = slurp(p2, &len);
         CHECK(strstr(block_of(text, len), "\"description\":\"s\"") && strstr(block_of(text, len), LOCAL_ROW));
@@ -1680,7 +1679,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     _snprintf_s(prefab, sizeof prefab, _TRUNCATE, "%s\\Door.json", libA);
     _snprintf_s(meta, sizeof meta, _TRUNCATE, "%s\\Door.meta.json", libA);
     disk = slurp(prefab, &dl);
-    CHECK(HO(msg, sh_prefab_mods_export(prefab, meta, "Door", zipA, HO_P(0))) == 1);
+    CHECK(HO(msg, sh_prefab_mods_export(prefab, "Door", zipA, HO_P(0))) == 1);
     CHECK(strstr(msg, "Exported prefab Door with 1 mod to ") != NULL);
     z = slurp(zipA, &zl);
     CHECK(zip_count(zipA, "") == 3 && zip_count(zipA, "units/") == 1 && zip_count(zipA, "files/") == 1 &&
@@ -1736,14 +1735,14 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     free(z);
     free(disk);
     printf("-- two exports of the same prefab are byte-identical\n");
-    CHECK(HO(msg, sh_prefab_mods_export(prefab, meta, "Door", zipA2, HO_P(0))) == 1);
+    CHECK(HO(msg, sh_prefab_mods_export(prefab, "Door", zipA2, HO_P(0))) == 1);
     {
         size_t al = 0, bl = 0;
         char *a = slurp(zipA, &al), *b = slurp(zipA2, &bl);
         CHECK(a && b && al == bl && !memcmp(a, b, al));
         free(a); free(b);
     }
-    CHECK(HO(msg, sh_prefab_mods_export(prefab, meta, "Door", "C:\\x\\Door.json", HO_P(0))) == -1 &&
+    CHECK(HO(msg, sh_prefab_mods_export(prefab, "Door", "C:\\x\\Door.json", HO_P(0))) == -1 &&
           strstr(msg, "must end in .zip"));
     /* A map's importer refuses it. */
     CHECK(HOT(char *, cause, modexport_read(zipA, &len, &st, HO_P(0))) == NULL && strstr(cause, "prefab's export, not a map's"));
@@ -1755,7 +1754,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         _snprintf_s(z0, sizeof z0, _TRUNCATE, "%s\\Crate.zip", tmp);
         CHECK(put_file(p0, STOCK_PREFAB));
         CHECK(sh_prefab_mods_record(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, p0, NULL) == 0);
-        CHECK(HO(msg, sh_prefab_mods_export(p0, NULL, "Crate", z0, HO_P(0))) == 1 && strstr(msg, "it uses no mods"));
+        CHECK(HO(msg, sh_prefab_mods_export(p0, "Crate", z0, HO_P(0))) == 1 && strstr(msg, "it uses no mods"));
         z = slurp(z0, &zl);
         disk = slurp(p0, &len);
         e = zip_entry(z, zl, "Crate.json", &el);
@@ -2086,7 +2085,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
             /* and its export is refused with the mod's name: nothing here to carry */
             _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\nothing here.zip", tmp);
             CHECK(HO(msg, sh_prefab_mods_export(libB[0] ? (_snprintf_s(content, sizeof content, _TRUNCATE, "%s\\Door (2).json", libB), content) : NULL,
-                                                NULL, "Door (2)", path, HO_P(0))) == -1);
+                                                "Door (2)", path, HO_P(0))) == -1);
             CHECK(strstr(msg, "Prefab Door (2) was not exported: the content of test.door that this ") == msg &&
                   strstr(msg, " is not on this computer. Import the prefab's .zip export again") && !mt_exists(path));
             use_store(storeB);
@@ -2149,7 +2148,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         with = sh_prefab_mods_embed(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, side, strlen(side), NULL, &wl);
         CHECK(with && sh_prefab_mods_write_file(p3, with, wl));
         free(with);
-        CHECK(HO(msg, sh_prefab_mods_export(p3, NULL, "Ghost", z3, HO_P(0))) == -1 &&
+        CHECK(HO(msg, sh_prefab_mods_export(p3, "Ghost", z3, HO_P(0))) == -1 &&
               !strcmp(msg, "Prefab Ghost was not exported: this prefab uses ghost.mod, which is not on this computer. Install "
                            "it in the Mods tab, or remove its objects from the prefab.") &&
               !strstr(msg, "ghostmod@") && !mt_exists(z3));
@@ -2162,7 +2161,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         _snprintf_s(m4, sizeof m4, _TRUNCATE, "%s\\Old door.meta.json", libA);
         _snprintf_s(z4, sizeof z4, _TRUNCATE, "%s\\old.zip", tmp);
         CHECK(put_file(p4, OBJECT_PREFAB) && !mt_exists(m4));
-        CHECK(HO(msg, sh_prefab_mods_export(p4, m4, "Old door", z4, HO_P(0))) == 1 && strstr(msg, "with 1 mod"));
+        CHECK(HO(msg, sh_prefab_mods_export(p4, "Old door", z4, HO_P(0))) == 1 && strstr(msg, "with 1 mod"));
         z = slurp(z4, &zl);
         e = zip_entry(z, zl, "Old door.json", &el);
         CHECK(e && strstr(block_of(e, el), "\"objects\"") && !strstr(block_of(e, el), door->build) && !strstr(block_of(e, el), "\"local\""));
@@ -2173,7 +2172,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         free(text);
         /* With an earlier version's sidecar and no block: refused. */
         CHECK(put_file(m4, "{\"desc\":\"From the sidecar\",\"tags\":[\"old\"]}"));
-        CHECK(HO(msg, sh_prefab_mods_export(p4, m4, "Old door", z4, HO_P(0))) == -1 &&
+        CHECK(HO(msg, sh_prefab_mods_export(p4, "Old door", z4, HO_P(0))) == -1 &&
               !strcmp(msg, "Prefab Old door was not exported: it was saved by an earlier Snapmap+; run the Snapmap+ "
                            "installer to update it."));
 

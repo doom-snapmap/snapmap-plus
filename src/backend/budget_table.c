@@ -1,4 +1,5 @@
 /* budget_table.c -- see budget_table.h. */
+#include "../common/text.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -8,45 +9,22 @@ void sh_bt_buf_free(sh_bt_buf *b)
 {
     if (!b) return;
     free(b->p);
-    b->p = NULL; b->len = b->cap = 0; b->oom = 0;
+    b->p = NULL; b->n = b->cap = 0; b->oom = 0;
 }
 
-static int bt_reserve(sh_bt_buf *b, size_t extra)
-{
-    size_t need, cap;
-    char *p;
-    if (b->oom) return 0;
-    need = b->len + extra + 1;
-    if (need <= b->cap) return 1;
-    cap = b->cap ? b->cap : 256;
-    while (cap < need) cap *= 2;
-    p = (char *)realloc(b->p, cap);
-    if (!p) { b->oom = 1; return 0; }
-    b->p = p; b->cap = cap;
-    return 1;
-}
-
-static void bt_putn(sh_bt_buf *b, const char *s, size_t n)
-{
-    if (!bt_reserve(b, n)) return;
-    memcpy(b->p + b->len, s, n);
-    b->len += n;
-    b->p[b->len] = 0;
-}
-
-void sh_bt_puts(sh_bt_buf *b, const char *s) { if (s) bt_putn(b, s, strlen(s)); }
+void sh_bt_puts(sh_bt_buf *b, const char *s) { if (s) sh_text_append(b, s, strlen(s)); }
 
 void sh_bt_put_str(sh_bt_buf *b, const char *s)
 {
     static const char hex[] = "0123456789abcdef";
-    bt_putn(b, "\"", 1);
+    sh_text_append(b, "\"", 1);
     for (; s && *s; ++s) {
         unsigned char c = (unsigned char)*s;
-        if (c == '"' || c == '\\') { char e[2] = { '\\', (char)c }; bt_putn(b, e, 2); }
-        else if (c < 0x20) { char e[6] = { '\\', 'u', '0', '0', hex[c >> 4], hex[c & 15] }; bt_putn(b, e, 6); }
-        else bt_putn(b, (const char *)&c, 1);
+        if (c == '"' || c == '\\') { char e[2] = { '\\', (char)c }; sh_text_append(b, e, 2); }
+        else if (c < 0x20) { char e[6] = { '\\', 'u', '0', '0', hex[c >> 4], hex[c & 15] }; sh_text_append(b, e, 6); }
+        else sh_text_append(b, (const char *)&c, 1);
     }
-    bt_putn(b, "\"", 1);
+    sh_text_append(b, "\"", 1);
 }
 
 void sh_bt_put_int(sh_bt_buf *b, long long v)
@@ -59,12 +37,12 @@ void sh_bt_put_int(sh_bt_buf *b, long long v)
 void sh_bt_put_block(sh_bt_buf *b, const int block[SH_BT_FIELDS])
 {
     int i;
-    bt_putn(b, "[", 1);
+    sh_text_append(b, "[", 1);
     for (i = 0; i < SH_BT_FIELDS; ++i) {
-        if (i) bt_putn(b, ",", 1);
+        if (i) sh_text_append(b, ",", 1);
         sh_bt_put_int(b, block[i]);
     }
-    bt_putn(b, "]", 1);
+    sh_text_append(b, "]", 1);
 }
 
 void sh_bt_base(int block[SH_BT_FIELDS])
@@ -300,9 +278,9 @@ int sh_bt_usage_json(char *out, int cap, const int limits[SH_BT_FIELDS], const i
     sh_bt_put_int(&b, generation);
     sh_bt_puts(&b, "}");
     if (b.oom || !b.p) { sh_bt_buf_free(&b); return -1; }
-    n = (int)b.len;
+    n = (int)b.n;
     if (!out || cap <= n) { sh_bt_buf_free(&b); return out ? -1 : n; }
-    memcpy(out, b.p, b.len + 1);
+    memcpy(out, b.p, b.n + 1);
     sh_bt_buf_free(&b);
     return n;
 }
@@ -430,14 +408,6 @@ static void bt_rows_free(bt_row_models *rows)
     memset(rows, 0, sizeof *rows);
 }
 
-static char *bt_dup(const char *s)
-{
-    size_t n = strlen(s) + 1;
-    char *d = (char *)malloc(n);
-    if (d) memcpy(d, s, n);
-    return d;
-}
-
 /* Records the row that owns `inherit` and its renderInfo model and size. A model string that is not plain path text
  * is dropped. */
 static void bt_rows_add(bt_row_models *rows, const char *inherit, const char *name,
@@ -465,9 +435,9 @@ static void bt_rows_add(bt_row_models *rows, const char *inherit, const char *na
     }
     r = &rows->row[rows->count];
     memset(r, 0, sizeof *r);
-    r->inherit = bt_dup(inherit);
-    r->sedef = bt_dup(name);
-    r->model = bt_dup(model);
+    r->inherit = sh_text(inherit);
+    r->sedef = sh_text(name);
+    r->model = sh_text(model);
     if (!r->inherit || !r->sedef || !r->model) {
         free(r->inherit); free(r->sedef); free(r->model);
         return;
@@ -477,20 +447,12 @@ static void bt_rows_add(bt_row_models *rows, const char *inherit, const char *na
     rows->count++;
 }
 
-static void *clean(const sig_result *r, size_t n, const char *name)
-{
-    size_t i;
-    for (i = 0; i < n; ++i)
-        if (r[i].name && !strcmp(r[i].name, name) && r[i].status == SIG_OK) return (void *)r[i].addr;
-    return NULL;
-}
-
 int sh_budget_table_install(const sig_result *results, size_t count)
 {
-    g_anchor = (const unsigned char *)clean(results, count, "DeclRegistryAnchor");
-    g_type = (type_fn)clean(results, count, "DeclTypeByName");
-    g_decl = (find_decl_fn)clean(results, count, "DeclFind");
-    g_register_fn = clean(results, count, "DeclRegisterFile");
+    g_anchor = (const unsigned char *)sig_pointer(results, count, "DeclRegistryAnchor");
+    g_type = (type_fn)sig_pointer(results, count, "DeclTypeByName");
+    g_decl = (find_decl_fn)sig_pointer(results, count, "DeclFind");
+    g_register_fn = sig_pointer(results, count, "DeclRegisterFile");
     if (!g_anchor || !g_type || !g_decl || !g_register_fn) {
         backend_log("BUDGET: snapLayers lookup unavailable; module filters fall back to every layer");
         return 0;
@@ -752,7 +714,9 @@ int sh_budget_table_slot(struct sh_iface *self, sh_budget_call *call)
     AcquireSRWLockShared(&g_lock);
     call->generation = g_generation;
     call->reached = fresh ? g_reached : 0;
-    if (call->op == SH_BUDGET_TABLE && g_table) {
+    if (call->op == SH_BUDGET_GENERATION) {
+        r = 1;
+    } else if (call->op == SH_BUDGET_TABLE && g_table) {
         r = (call->out = sh_iface_textn(g_table, g_table_len)) != NULL;
     } else if (call->op == SH_BUDGET_USAGE && g_usage_ok && fresh) {
         int n = sh_bt_usage_json(NULL, 0, g_limits, g_usage, g_reached, g_generation);

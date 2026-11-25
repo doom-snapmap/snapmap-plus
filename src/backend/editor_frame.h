@@ -31,10 +31,6 @@ void sh_editor_frame_set_read_filter(void (*filter)(const char *id, void *text, 
 /* 1 when the detour is installed and a filter is set. */
 int sh_editor_frame_read_filter_live(void);
 
-/* The editor Think entry as resolved (pre-hook, since the install overwrites the prologue and a later
- * scan finds nothing), or NULL before install or when the build could not resolve it. */
-void *sh_editor_frame_target(void);
-
 /* Could a rawmap save happen right now? 1 = yes. Changes nothing either way, so ask before applying a
  * destination of your own and a refusal cannot leave the save path moved. */
 int sh_editor_frame_can_rawmap_save(char **msg);

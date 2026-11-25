@@ -32,7 +32,4 @@ int sh_parmslots_decide(int kind, const char *name, sh_parmslots_read read, void
 /* Detour AllocParmState (both renderers). 1 when the guard is in place. */
 int sh_parmslots_install(const sig_result *results, size_t count, const uint8_t *module_base);
 
-/* Parms given a shared slot since the start, and the shared vector slot (-1 none). */
-long sh_parmslots_shared(int *spill_slot);
-
 #endif /* SNAPMAP_PLUS_PARMSLOTS_H */

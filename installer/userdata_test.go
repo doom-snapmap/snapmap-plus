@@ -6,8 +6,7 @@ import (
 	"testing"
 )
 
-// newDataDirs points LOCALAPPDATA and USERPROFILE at fresh temp dirs so every path helper (appDataDir,
-// oldAppDataDir, oldUserContentDir) resolves under the test's control. Returns (localAppData, userProfile).
+// Isolate both the current and earlier data homes.
 func newDataDirs(t *testing.T) (string, string) {
 	t.Helper()
 	la := t.TempDir()
@@ -17,163 +16,25 @@ func newDataDirs(t *testing.T) (string, string) {
 	return la, up
 }
 
-// TestMigrateUserData_scaffolds: a fresh profile still gets the empty content tree created.
-func TestMigrateUserData_scaffolds(t *testing.T) {
-	la, _ := newDataDirs(t)
-	migrateUserData()
-	for _, sub := range userContentSubdirs {
-		if _, err := os.Stat(filepath.Join(la, "snapmap-plus", sub)); err != nil {
-			t.Errorf("expected scaffolded subfolder %q, got: %v", sub, err)
-		}
-	}
-}
-
-// Content in %USERPROFILE%\snaphak is copied into app data and the verified source is removed.
-func TestMigrateUserData_foldsOldContentForward(t *testing.T) {
-	la, up := newDataDirs(t)
-	oldPrefab := filepath.Join(up, "snaphak", "prefabs", "arena.json")
-	if err := os.MkdirAll(filepath.Dir(oldPrefab), 0o755); err != nil {
+func TestEnsureUserDataTree(t *testing.T) {
+	local, profile := newDataDirs(t)
+	old := filepath.Join(profile, "snaphak", "prefabs", "arena.json")
+	oldData := filepath.Join(local, "open-snaphak")
+	writeF(t, old, "my prefab")
+	writeF(t, filepath.Join(oldData, "token"), "old token")
+	writeF(t, filepath.Join(oldData, "install.json"), "{\"doom_path\":\"old folder\"}")
+	ensureUserDataTree()
+	if _, err := os.Stat(filepath.Join(appDataDir(), "prefabs")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(oldPrefab, []byte("MY PREFAB"), 0o644); err != nil {
-		t.Fatal(err)
+	if readF(t, old) != "my prefab" || exists(filepath.Join(appDataDir(), "prefabs", "arena.json")) {
+		t.Fatal("unrelated prefab moved")
 	}
-
-	migrateUserData()
-
-	got, err := os.ReadFile(filepath.Join(la, "snapmap-plus", "prefabs", "arena.json"))
-	if err != nil || string(got) != "MY PREFAB" {
-		t.Fatalf("content not migrated to the new location: %q, %v", got, err)
+	if _, err := loadRecord(); err != errNotInstalled {
+		t.Fatalf("read the retired install record: %v", err)
 	}
-	// The source folder is removed after the copy.
-	if _, err := os.Stat(filepath.Join(up, "snaphak")); !os.IsNotExist(err) {
-		t.Errorf("the old %%USERPROFILE%%\\snaphak folder should be removed after a full migration, but it still exists")
-	}
-}
-
-// The retired package folders are neither copied nor created, and one in the source stays in place;
-// everything else still moves.
-func TestMigrateUserData_leavesRetiredPackageFolders(t *testing.T) {
-	la, up := newDataDirs(t)
-	oldPackage := filepath.Join(up, "snaphak", "overrides", "boss", "package.json") // retired package folder
-	oldPrefab := filepath.Join(up, "snaphak", "prefabs", "arena.json")
-	writeF(t, oldPackage, "{}")
-	writeF(t, oldPrefab, "MY PREFAB")
-
-	migrateUserData()
-
-	if got := readF(t, filepath.Join(la, "snapmap-plus", "prefabs", "arena.json")); got != "MY PREFAB" {
-		t.Fatalf("prefab not migrated: %q", got)
-	}
-	for _, retired := range []string{"overrides", "package-cache", "package-staging", "override-backups"} { // retired package folder names
-		if exists(filepath.Join(la, "snapmap-plus", retired)) {
-			t.Errorf("migration created the retired folder %s", retired)
-		}
-	}
-	if got := readF(t, oldPackage); got != "{}" {
-		t.Fatalf("the old package folder was not left in place: %q", got)
-	}
-	if exists(oldPrefab) {
-		t.Error("the migrated prefab was not retired from the old folder")
-	}
-}
-
-// The cache folder (the WebView2 profile) and a top-level webview2 folder are regenerable:
-// never copied and not required at the destination, so the rest still moves and they stay put.
-func TestMigrateUserData_skipsRegenerableCache(t *testing.T) {
-	la, up := newDataDirs(t)
-	oldCache := filepath.Join(up, "snaphak", "cache", "webview2", "EBWebView", "Local State")
-	oldProfile := filepath.Join(up, "snaphak", "webview2", "EBWebView", "Local State")
-	oldPrefab := filepath.Join(up, "snaphak", "prefabs", "arena.json")
-	writeF(t, oldCache, "cache")
-	writeF(t, oldProfile, "profile")
-	writeF(t, oldPrefab, "MY PREFAB")
-
-	migrateUserData()
-
-	if got := readF(t, filepath.Join(la, "snapmap-plus", "prefabs", "arena.json")); got != "MY PREFAB" {
-		t.Fatalf("prefab not migrated: %q", got)
-	}
-	for _, sub := range []string{"cache", "webview2"} {
-		if exists(filepath.Join(la, "snapmap-plus", sub)) {
-			t.Errorf("migration copied the regenerable folder %s", sub)
-		}
-	}
-	if got := readF(t, oldCache); got != "cache" {
-		t.Fatalf("the old cache was not left in place: %q", got)
-	}
-	if got := readF(t, oldProfile); got != "profile" {
-		t.Fatalf("the old profile was not left in place: %q", got)
-	}
-	if exists(oldPrefab) {
-		t.Error("the migrated prefab was not retired from the old folder")
-	}
-	for _, rel := range []string{"cache", "Cache/webview2/x", "webview2", "webview2/EBWebView"} {
-		if !regenerableContent(rel) {
-			t.Errorf("%s should be regenerable", rel)
-		}
-	}
-	for _, rel := range []string{"prefabs", "strings/x.json", "cached", "mods"} {
-		if regenerableContent(rel) {
-			t.Errorf("%s should not be regenerable", rel)
-		}
-	}
-}
-
-// TestMigrateUserData_neverClobbersNewer: a file already at the destination is not overwritten by a source
-// file of the same name, and re-running is a no-op.
-func TestMigrateUserData_neverClobbersNewer(t *testing.T) {
-	la, up := newDataDirs(t)
-	name := filepath.Join("prefabs", "keep.json")
-
-	oldFile := filepath.Join(up, "snaphak", name)
-	os.MkdirAll(filepath.Dir(oldFile), 0o755)
-	os.WriteFile(oldFile, []byte("OLD"), 0o644)
-
-	newFile := filepath.Join(la, "snapmap-plus", name)
-	os.MkdirAll(filepath.Dir(newFile), 0o755)
-	os.WriteFile(newFile, []byte("NEW"), 0o644)
-
-	migrateUserData()
-	migrateUserData() // idempotent
-
-	got, _ := os.ReadFile(newFile)
-	if string(got) != "NEW" {
-		t.Errorf("migration clobbered newer content: got %q, want %q", got, "NEW")
-	}
-	if got := readF(t, oldFile); got != "OLD" {
-		t.Fatalf("conflicting source was discarded: %q", got)
-	}
-}
-
-// TestLoadRecord_fallsBackToOldLocation: a record at %LOCALAPPDATA%\open-snaphak is found by loadRecord and
-// copied to the data folder.
-func TestLoadRecord_fallsBackToOldLocation(t *testing.T) {
-	la, _ := newDataDirs(t)
-	oldDir := filepath.Join(la, "open-snaphak")
-	os.MkdirAll(oldDir, 0o755)
-	os.WriteFile(filepath.Join(oldDir, "install.json"), []byte(`{"version":"v0.9.9","doom_path":"D:\\DOOM"}`), 0o644)
-
-	rec, err := loadRecord()
-	if err != nil {
-		t.Fatalf("loadRecord should have found the old record: %v", err)
-	}
-	if rec.Version != "v0.9.9" {
-		t.Errorf("wrong version from fallback record: %q", rec.Version)
-	}
-	if _, err := os.Stat(filepath.Join(la, "snapmap-plus", "install.json")); err != nil {
-		t.Errorf("the old record should have been migrated forward to the new location: %v", err)
-	}
-}
-
-// TestResolveToken_fallsBackToOldLocation: a token at %LOCALAPPDATA%\open-snaphak is still honored.
-func TestResolveToken_fallsBackToOldLocation(t *testing.T) {
-	la, _ := newDataDirs(t)
-	oldDir := filepath.Join(la, "open-snaphak")
-	os.MkdirAll(oldDir, 0o755)
-	os.WriteFile(filepath.Join(oldDir, "token"), []byte("ghp_oldtoken\n"), 0o600)
-
-	if got := resolveToken(flags{}); got != "ghp_oldtoken" {
-		t.Errorf("resolveToken should fall back to the old token location: got %q", got)
+	t.Setenv("SNAPMAP_PLUS_TOKEN", "")
+	if resolveToken(flags{}) != "" {
+		t.Fatal("read the retired token")
 	}
 }

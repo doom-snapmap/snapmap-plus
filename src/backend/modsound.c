@@ -915,13 +915,6 @@ void sh_modsound_print_status(void)
     }
 }
 
-static const sig_result *ms_clean(const sig_result *r, size_t n, const char *name)
-{
-    size_t i;
-    for (i = 0; i < n; ++i)
-        if (r[i].name && !strcmp(r[i].name, name)) return r[i].status == SIG_OK ? &r[i] : NULL;
-    return NULL;
-}
 
 static int ms_swap(void **slot, void *expect, void *with)
 {
@@ -935,14 +928,14 @@ static int ms_swap(void **slot, void *expect, void *with)
 
 int sh_modsound_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
-    const sig_result *lb = ms_clean(results, count, "AudioLoadBanks");
-    const sig_result *sb = ms_clean(results, count, "AudioBankSubmit");
-    const sig_result *on = ms_clean(results, count, "AudioFileOpenName");
-    const sig_result *cmd = ms_clean(results, count, "SoundLoadBanksCmd");
-    const sig_result *s_lb = ms_clean(results, count, "AudioLoadBankAsync");
-    const sig_result *s_new = ms_clean(results, count, "AudioCookieNew");
-    const sig_result *s_cb = ms_clean(results, count, "AudioBankLoadCallback");
-    const sig_result *s_site = ms_clean(results, count, "AudioBankCookieSite");
+    const sig_result *lb = sig_ok(results, count, "AudioLoadBanks");
+    const sig_result *sb = sig_ok(results, count, "AudioBankSubmit");
+    const sig_result *on = sig_ok(results, count, "AudioFileOpenName");
+    const sig_result *cmd = sig_ok(results, count, "SoundLoadBanksCmd");
+    const sig_result *s_lb = sig_ok(results, count, "AudioLoadBankAsync");
+    const sig_result *s_new = sig_ok(results, count, "AudioCookieNew");
+    const sig_result *s_cb = sig_ok(results, count, "AudioBankLoadCallback");
+    const sig_result *s_site = sig_ok(results, count, "AudioBankCookieSite");
     uintptr_t d_new = 0, d_ctor = 0, d_cb = 0, d_lb = 0;
     void **open_slots[SH_MODSOUND_MAX_SLOTS], **lb_slots[2];
     uintptr_t ss = 0, hw_slot = 0;

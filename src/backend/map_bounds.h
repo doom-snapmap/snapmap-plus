@@ -15,23 +15,17 @@
 /* Native snapEdit_minBlueprintFloor / snapEdit_maxBlueprintFloor magnitude. */
 #define SH_BOUNDS_NATIVE_FLOORS 25
 
-/* limit 0 keeps the native world box; otherwise [NATIVE, CEILING] units. */
+/* A map selects the native world box (0) or SH_BOUNDS_CEILING. */
 typedef struct sh_map_bounds { float limit; } sh_map_bounds;
 
 void  sh_map_bounds_default(sh_map_bounds *settings);
 int   sh_map_bounds_valid(const sh_map_bounds *settings);
-/* "1;<limit>". Unknown versions and malformed text refuse. */
+#define SH_BOUNDS_UNLOCKED_TEXT "1;32671"
 int   sh_map_bounds_decode(const char *text, sh_map_bounds *settings);
 int   sh_map_bounds_encode(const sh_map_bounds *settings, char *out, size_t cap);
-/* Map a requested value to a stored one: 0 or <= native keeps native (0),
- * larger values clamp to the ceiling. Non-finite input keeps native. */
-float sh_map_bounds_clamp(float requested);
 /* The world limit in units this setting selects (native when absent). */
 float sh_map_bounds_effective(const sh_map_bounds *settings);
 int   sh_map_bounds_overrides(const sh_map_bounds *settings);
-/* The settings row is a toggle: on when the stored limit is above native, and
- * turning it on stores the ceiling, off stores native. */
-int   sh_map_bounds_enabled(const sh_map_bounds *settings);
 void  sh_map_bounds_from_toggle(int on, sh_map_bounds *settings);
 /* Blueprint floor range that keeps the native proportion of floors to space. */
 int   sh_map_bounds_floors(float limit);

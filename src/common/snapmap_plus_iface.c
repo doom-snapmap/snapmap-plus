@@ -1,4 +1,4 @@
-/* Backend-owned shared interface factory, command registry, and work queue.
+/* Backend-owned shared interface factory and command registry.
  * The frontend calls the vtable; this module has no engine link dependency.
  * See snapmap_plus_iface.h for the fixed cross-DLL layout. */
 #include <windows.h>
@@ -62,59 +62,6 @@ static void iface_register_cmd(sh_iface *self, const char *name, sh_cmd_handler 
 }
 
 
-static void iface_unregister_cmd(sh_iface *self, const char *name)
-{
-    if (!self || !self->sub || !name) return;
-    sub_impl *si = (sub_impl *)self->sub;
-    EnterCriticalSection(&si->lock);
-    for (size_t i = 0; i < si->map.count; i++) {
-        if (strcmp(si->map.items[i].name, name) == 0) {
-            free(si->map.items[i].name);
-            si->map.items[i] = si->map.items[si->map.count - 1];
-            si->map.count--;
-            break;
-        }
-    }
-    LeaveCriticalSection(&si->lock);
-}
-
-/* Optional drain callback; it runs on the drain caller's thread. */
-static void (*g_tick_hook)(void) = NULL;
-
-void sh_iface_set_tick_hook(void (*fn)(void))
-{
-    g_tick_hook = fn;
-}
-
-/* Drain the queue on the calling thread (normally the frontend UI worker); detached work owns argv until its
- * handler returns. */
-static void iface_drain_work_queue(sh_iface *self)
-{
-    if (g_tick_hook) g_tick_hook();
-    if (!self || !self->sub) return;
-    sub_impl *si = (sub_impl *)self->sub;
-    sh_iface_sub *sub = &si->pinned;
-
-    EnterCriticalSection(&si->lock);
-    sh_work_item *begin = sub->wq_begin;
-    sh_work_item *end   = sub->wq_end;
-    /* Detach under the lock so handlers can enqueue without changing this iteration. */
-    sub->wq_begin = NULL;
-    sub->wq_end   = NULL;
-    sub->wq_cap   = NULL;
-    LeaveCriticalSection(&si->lock);
-
-    for (sh_work_item *it = begin; it != end; it++) {
-        if (it->handler) it->handler(it->ctx, it->argc, (const char **)it->argv);
-
-        if (it->argv) {
-            for (int i = 0; i < it->argc; i++) free(it->argv[i]);
-            free(it->argv);
-        }
-    }
-    free(begin);
-}
-
 /* Locked registry lookup; copy handler/context on a hit and return 1, else 0. */
 int sh_iface_lookup_cmd(sh_iface *self, const char *name, sh_cmd_handler *handler, void **ctx)
 {
@@ -132,56 +79,6 @@ int sh_iface_lookup_cmd(sh_iface *self, const char *name, sh_cmd_handler *handle
     }
     LeaveCriticalSection(&si->lock);
     return found;
-}
-
-/* Enqueue a deep copy of argv for later execution on the drain caller's thread. */
-int sh_iface_enqueue_work(sh_iface *self, sh_cmd_handler handler, void *ctx,
-                          int argc, const char **argv)
-{
-    if (!self || !self->sub || !handler) return 0;
-    sub_impl *si = (sub_impl *)self->sub;
-    sh_iface_sub *sub = &si->pinned;
-
-
-    char **argv_copy = NULL;
-    if (argc > 0 && argv) {
-        argv_copy = (char **)calloc((size_t)argc, sizeof(char *));
-        if (!argv_copy) return 0;
-        for (int i = 0; i < argc; i++) {
-            const char *s = argv[i] ? argv[i] : "";
-            size_t n = strlen(s) + 1;
-            char *c = (char *)malloc(n);
-            if (!c) { for (int j = 0; j < i; j++) free(argv_copy[j]); free(argv_copy); return 0; }
-            memcpy(c, s, n);
-            argv_copy[i] = c;
-        }
-    } else {
-        argc = 0;
-    }
-
-    EnterCriticalSection(&si->lock);
-
-    size_t cur_len = (size_t)(sub->wq_end - sub->wq_begin);
-    size_t cur_cap = (size_t)(sub->wq_cap - sub->wq_begin);
-    if (cur_len == cur_cap) {
-        size_t ncap = cur_cap ? cur_cap * 2 : 8;
-        sh_work_item *nb = (sh_work_item *)realloc(sub->wq_begin, ncap * sizeof(sh_work_item));
-        if (!nb) {
-            LeaveCriticalSection(&si->lock);
-            if (argv_copy) { for (int i = 0; i < argc; i++) free(argv_copy[i]); free(argv_copy); }
-            return 0;
-        }
-        sub->wq_begin = nb;
-        sub->wq_end   = nb + cur_len;
-        sub->wq_cap   = nb + ncap;
-    }
-    sub->wq_end->handler = handler;
-    sub->wq_end->ctx     = ctx;
-    sub->wq_end->argc    = argc;
-    sub->wq_end->argv    = argv_copy;
-    sub->wq_end++;
-    LeaveCriticalSection(&si->lock);
-    return 1;
 }
 
 /* Owned text: process-heap strings, so the window frees them through
@@ -243,8 +140,6 @@ static void iface_free_text(sh_iface *self, void *text)
  * optional ones may stay null. */
 static sh_iface_vtbl g_iface_vtbl_live = {
     .register_cmd     = iface_register_cmd,     /* +0x188 */
-    .unregister_cmd   = iface_unregister_cmd,   /* +0x190 */
-    .drain_work_queue = iface_drain_work_queue, /* +0x1a0 */
     .free_text        = iface_free_text,        /* +0x3a0 */
 };
 
@@ -299,26 +194,21 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
 
     g_iface_vtbl_live.id_dev_layer_hidden    = s->id_dev_layer_hidden;    /* +0x280 */
 
-    g_iface_vtbl_live.wire_edit_generation   = s->wire_edit_generation;   /* +0x288 */
 
     g_iface_vtbl_live.apply_sync             = s->apply_sync;             /* +0x290 */
 
-    g_iface_vtbl_live.normalize_timeline_inherit = s->normalize_timeline_inherit; /* +0x298 */
 
     g_iface_vtbl_live.push_to_stack          = s->push_to_stack;          /* +0x2A0 */
 
     g_iface_vtbl_live.clear_stack            = s->clear_stack;            /* +0x2A8 */
     g_iface_vtbl_live.manipulation_in_progress = s->manipulation_in_progress; /* +0x2C0 */
 
-    g_iface_vtbl_live.find_material           = s->find_material;           /* +0x2C8 */
     g_iface_vtbl_live.get_preview             = s->get_preview;             /* +0x2D0 */
     g_iface_vtbl_live.request_preview         = s->request_preview;         /* +0x2D8 */
-    g_iface_vtbl_live.list_materials          = s->list_materials;          /* +0x2E0 */
     g_iface_vtbl_live.list_assets             = s->list_assets;             /* +0x2E8 */
     g_iface_vtbl_live.material_rect           = s->material_rect;           /* +0x2F0 */
     g_iface_vtbl_live.sound_preview           = s->sound_preview;           /* +0x2F8 */
     g_iface_vtbl_live.sound_session           = s->sound_session;           /* +0x300 */
-    g_iface_vtbl_live.resolve_prefab_model    = s->resolve_prefab_model;    /* +0x308 */
     g_iface_vtbl_live.request_prefab_mesh     = s->request_prefab_mesh;     /* +0x310 */
     g_iface_vtbl_live.get_prefab_mesh         = s->get_prefab_mesh;         /* +0x318 */
     g_iface_vtbl_live.resolve_prefab_defaults = s->resolve_prefab_defaults; /* +0x320 */
@@ -331,7 +221,6 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.delete_entities         = s->delete_entities;         /* +0x350 */
     g_iface_vtbl_live.prefab_grab_status      = s->prefab_grab_status;      /* +0x358 */
     g_iface_vtbl_live.module_prefab           = s->module_prefab;           /* +0x360 */
-    g_iface_vtbl_live.timeline_tile           = s->timeline_tile;           /* +0x368 */
     g_iface_vtbl_live.budget                  = s->budget;                  /* +0x370 */
     g_iface_vtbl_live.mods                    = s->mods;                    /* +0x378 */
     g_iface_vtbl_live.prefab_watch            = s->prefab_watch;            /* +0x380 */
@@ -353,13 +242,7 @@ sh_iface *sh_iface_create(void)
     si->map.items   = NULL;
     si->map.count   = 0;
     si->map.cap     = 0;
-    si->pinned.wq_begin = NULL;
-    si->pinned.wq_end   = NULL;
-    si->pinned.wq_cap   = NULL;
     /* Preserve the ABI fields while the actual registry resides in si->map. */
-    si->pinned.map_nil  = &si->map;
-    si->pinned.map_root = NULL;
-    si->pinned.map_size = 0;
 
     obj->vtbl = &g_iface_vtbl_live;     /* +0x00 */
     /* Publish the vtable size so a frontend never reads past a shorter table; the other reserved bytes stay zero. */

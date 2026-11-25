@@ -13,32 +13,19 @@ void sh_map_bounds_default(sh_map_bounds *s)
 }
 int sh_map_bounds_valid(const sh_map_bounds *s)
 {
-    return s&&isfinite(s->limit)&&
-        (s->limit==0||(s->limit>SH_BOUNDS_NATIVE&&s->limit<=SH_BOUNDS_CEILING));
-}
-float sh_map_bounds_clamp(float requested)
-{
-    if(!isfinite(requested))return 0;
-    requested=floorf(requested);
-    if(requested<=SH_BOUNDS_NATIVE)return 0;
-    return requested>SH_BOUNDS_CEILING?SH_BOUNDS_CEILING:requested;
+    return s && (s->limit == 0 || s->limit == SH_BOUNDS_CEILING);
 }
 int sh_map_bounds_decode(const char *text,sh_map_bounds *out)
 {
-    sh_map_bounds s;int end=0;
-    if(!text||!out||strlen(text)>32||strncmp(text,"1;",2))return 0;
-    if(sscanf_s(text+2,"%f%n",&s.limit,&end)!=1||!end||text[2+end])return 0;
-    /* Anything at or below native is native, anything above clamps. */
-    if(!isfinite(s.limit)||s.limit<0)return 0;
-    s.limit=sh_map_bounds_clamp(s.limit);
-    *out=s;return 1;
+    if (!out || !text || strcmp(text, SH_BOUNDS_UNLOCKED_TEXT)) return 0;
+    out->limit = SH_BOUNDS_CEILING;
+    return 1;
 }
 int sh_map_bounds_encode(const sh_map_bounds *s,char *out,size_t cap)
 {
-    int n;
-    if(!out||!cap||!sh_map_bounds_valid(s))return 0;
-    n=snprintf(out,cap,"1;%.0f",s->limit);
-    return n>0&&(size_t)n<cap;
+    if (!out || cap < sizeof SH_BOUNDS_UNLOCKED_TEXT || !sh_map_bounds_overrides(s)) return 0;
+    memcpy(out, SH_BOUNDS_UNLOCKED_TEXT, sizeof SH_BOUNDS_UNLOCKED_TEXT);
+    return 1;
 }
 float sh_map_bounds_effective(const sh_map_bounds *s)
 {
@@ -47,10 +34,6 @@ float sh_map_bounds_effective(const sh_map_bounds *s)
 int sh_map_bounds_overrides(const sh_map_bounds *s)
 {
     return sh_map_bounds_valid(s)&&s->limit>0;
-}
-int sh_map_bounds_enabled(const sh_map_bounds *s)
-{
-    return sh_map_bounds_overrides(s)&&s->limit>SH_BOUNDS_NATIVE;
 }
 void sh_map_bounds_from_toggle(int on,sh_map_bounds *s)
 {
@@ -99,11 +82,6 @@ static char g_native[CV_COUNT][32];
 static int g_captured;
 static float g_active=SH_BOUNDS_NATIVE;
 
-static const sig_result *binding(const sig_result *r,size_t n,const char *name)
-{
-    size_t i;for(i=0;i<n;i++)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)return r+i;
-    return NULL;
-}
 
 /* The setting belongs to the open map and is held by map_settings.c: every
  * map parse reads it from the "bounds" key of the map's member's settings
@@ -206,7 +184,7 @@ int sh_map_bounds_install(const sig_result *results,size_t count,const uint8_t *
 {
     const sig_result *set;
     if(g_installed)return 1;
-    set=binding(results,count,"CvarSetString");
+    set=sig_ok(results,count,"CvarSetString");
     if(!set||!base) {
         backend_log("BOUNDS: map bounds unavailable on this build");return 0;
     }
@@ -224,7 +202,7 @@ static int bounds_begin(void *user,void *editor,void *map)
 {
     sh_map_bounds s;(void)user;(void)editor;
     if(!g_installed||!sh_map_bounds_read(map,&s))return 0;
-    g_map=map;g_saved=g_draft=sh_map_bounds_enabled(&s);
+    g_map=map;g_saved=g_draft=sh_map_bounds_overrides(&s);
     return 1;
 }
 static void bounds_populate(sh_settings_rows *rows,void *user)

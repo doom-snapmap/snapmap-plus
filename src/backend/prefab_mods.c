@@ -521,7 +521,18 @@ char *sh_prefab_mods_block_view(const char *block, size_t len, size_t *out_len)
     return out;
 }
 
-char *sh_prefab_mods_view_of(const char *text, size_t len, int tail, const char *meta_path, int *source, size_t *out_len)
+/* Older releases stored a prefab's unsaved details beside it. Only the installer reads them. */
+static int pm_earlier_file(const char *path)
+{
+    const char *ext = path ? strrchr(path, '.') : NULL;
+    if (!ext || _stricmp(ext, ".json")) return 0;
+    char *name = sh_textf("%.*s.meta.json", (int)(ext - path), path);
+    int earlier = !name || pm_exists(name);
+    free(name);
+    return earlier;
+}
+
+char *sh_prefab_mods_view_of(const char *text, size_t len, int tail, const char *path, int *source, size_t *out_len)
 {
     sh_prefab_block_span span;
     char *view = NULL;
@@ -535,18 +546,18 @@ char *sh_prefab_mods_view_of(const char *text, size_t len, int tail, const char 
         return view;
     }
     /* A <name>.meta.json sidecar with no block is reported, never read. */
-    if (found != 1 && meta_path && meta_path[0] && pm_exists(meta_path)) {
+    if (found != 1 && pm_earlier_file(path)) {
         if (source) *source = SH_PREFAB_META_EARLIER;
-        pm_logf("PREFABS: %s: " SH_PREFAB_EARLIER_TEXT, meta_path);
+        pm_logf("PREFABS: %s: " SH_PREFAB_EARLIER_TEXT, path);
     }
     return NULL;
 }
 
-int sh_prefab_mods_rows_of(const char *text, size_t len, const char *meta_path, sh_modmanifest_list *out)
+int sh_prefab_mods_rows_of(const char *text, size_t len, const char *path, sh_modmanifest_list *out)
 {
     size_t vlen = 0;
     int source = SH_PREFAB_META_NONE, n;
-    char *view = sh_prefab_mods_view_of(text, len, 0, meta_path, &source, &vlen);
+    char *view = sh_prefab_mods_view_of(text, len, 0, path, &source, &vlen);
     if (out) memset(out, 0, sizeof *out);
     if (source == SH_PREFAB_META_EARLIER) { free(view); return SH_PREFAB_ROWS_EARLIER; }
     n = sh_prefab_mods_view_rows(view, vlen, out);
@@ -643,7 +654,7 @@ char *sh_prefab_mods_module_file(const char *prefab, size_t len, const char *sum
     return out;
 }
 
-int sh_prefab_mods_meta_write(const char *body, size_t len, const char *path, const char *meta_path)
+int sh_prefab_mods_meta_write(const char *body, size_t len, const char *path)
 {
     mpj *b = NULL, *v = NULL;
     const mpj *m;
@@ -653,7 +664,7 @@ int sh_prefab_mods_meta_write(const char *body, size_t len, const char *path, co
     if (!path || !path[0]) return -1;
     text = sh_prefab_mods_read_file(path, &tlen);
     if (!text || !tlen) { free(text); return -1; }
-    view = sh_prefab_mods_view_of(text, tlen, 0, meta_path, &source, &vlen);
+    view = sh_prefab_mods_view_of(text, tlen, 0, path, &source, &vlen);
     if (source == SH_PREFAB_META_EARLIER) {
         /* Its details live in a sidecar that is not read: nothing is written, so they are not lost. */
         free(text);
@@ -862,7 +873,7 @@ static char *pm_export_text(void *ctx, const sh_modmanifest_list *rows, int move
     return sh_prefab_mods_embed(x->text, x->len, x->view, x->view_len, rows, len);
 }
 
-int sh_prefab_mods_export(const char *prefab_path, const char *meta_path, const char *name, const char *zip_utf8,
+int sh_prefab_mods_export(const char *prefab_path, const char *name, const char *zip_utf8,
                           char **msg)
 {
     modexport_stats st;
@@ -877,7 +888,7 @@ int sh_prefab_mods_export(const char *prefab_path, const char *meta_path, const 
     if (!modexport_is_zip_path(zip_utf8)) { pm_msg(msg, "Prefab %s was not exported: the file must end in .zip.", nm); return -1; }
     text = sh_prefab_mods_read_file(prefab_path, &len);
     if (!text || !len) { free(text); pm_msg(msg, "Prefab %s was not exported: its file could not be read.", nm); return -1; }
-    view = sh_prefab_mods_view_of(text, len, 0, meta_path, &source, &vlen);
+    view = sh_prefab_mods_view_of(text, len, 0, prefab_path, &source, &vlen);
     memset(&rows, 0, sizeof rows);
     n = source == SH_PREFAB_META_EARLIER ? SH_PREFAB_ROWS_EARLIER : sh_prefab_mods_view_rows(view, vlen, &rows);
     if (n == SH_PREFAB_ROWS_EARLIER) {
@@ -1115,7 +1126,7 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
     }
     case SH_MODULE_PREFAB_META_READ: {
         int source = SH_PREFAB_META_NONE;
-        char *view = sh_prefab_mods_view_of(call->text, call->text_len, call->tail, call->meta_path, &source, NULL);
+        char *view = sh_prefab_mods_view_of(call->text, call->text_len, call->tail, call->path, &source, NULL);
         pm_out(call, view ? view : "");
         free(view);
         return source;
@@ -1140,7 +1151,7 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
         pm_out(call, "");
         call->seq = 0;
         /* The block's rows. A sidecar-form prefab (or rows naming "id" and "bundle") is refused. */
-        n = sh_prefab_mods_rows_of(call->text, call->text_len, call->meta_path, &rows);
+        n = sh_prefab_mods_rows_of(call->text, call->text_len, call->path, &rows);
         if (n == SH_PREFAB_ROWS_EARLIER) {
             char *line = sh_textf("Prefab %s was not placed: it was saved by an earlier Snapmap+; run the Snapmap+ "
                                   "installer to update it.", nm);
@@ -1171,10 +1182,10 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
     case SH_MODULE_PREFAB_MODS_POLL:
         return sh_prefab_mods_poll(call->seq);
     case SH_MODULE_PREFAB_META_WRITE:
-        return sh_prefab_mods_meta_write(call->text, call->text_len, call->path, call->meta_path);
+        return sh_prefab_mods_meta_write(call->text, call->text_len, call->path);
     case SH_MODULE_PREFAB_EXPORT: {
         char *msg = NULL;
-        int r = sh_prefab_mods_export(call->path, call->meta_path, call->name, call->zip_path, &msg);
+        int r = sh_prefab_mods_export(call->path, call->name, call->zip_path, &msg);
         pm_out(call, msg);
         free(msg);
         return r;
@@ -1224,8 +1235,8 @@ static char *pm_root(void)
 }
 
 /* "<name>" or "<folder>/<name>" (UTF-8): the root first, then each folder.
- * 1 with *path, *meta and *name (each malloc'd). */
-static int pm_find_prefab(const char *key, char **path, char **meta, char **name)
+ * 1 with *path, *name (each malloc'd). */
+static int pm_find_prefab(const char *key, char **path, char **name)
 {
     char *root, *pattern;
     const char *slash = strchr(key, '/');
@@ -1233,7 +1244,7 @@ static int pm_find_prefab(const char *key, char **path, char **meta, char **name
     wchar_t *wpat;
     HANDLE h;
     int found = 0;
-    *path = *meta = *name = NULL;
+    *path = *name = NULL;
     if (!slash) slash = strchr(key, '\\');
     if (!(root = pm_root())) return 0;
     if (slash) {
@@ -1241,8 +1252,8 @@ static int pm_find_prefab(const char *key, char **path, char **meta, char **name
         *name = sh_text(slash + 1);
         if (folder && *name && sh_prefab_mods_valid_name(folder) && sh_prefab_mods_valid_name(*name)) {
             *path = sh_textf("%s%s\\%s.json", root, folder, *name);
-            *meta = sh_textf("%s%s\\%s.meta.json", root, folder, *name);
-            found = *path && *meta && pm_exists(*path);
+
+            found = *path && pm_exists(*path);
         }
         free(folder);
         free(root);
@@ -1251,8 +1262,8 @@ static int pm_find_prefab(const char *key, char **path, char **meta, char **name
     *name = sh_text(key);
     if (!*name || !sh_prefab_mods_valid_name(*name)) { free(root); return 0; }
     *path = sh_textf("%s%s.json", root, *name);
-    *meta = sh_textf("%s%s.meta.json", root, *name);
-    if (*path && *meta && pm_exists(*path)) { free(root); return 1; }
+
+    if (*path && pm_exists(*path)) { free(root); return 1; }
     pattern = sh_textf("%s*", root);
     wpat = pattern ? sh_mb_wpath(pattern) : NULL;
     free(pattern);
@@ -1265,11 +1276,10 @@ static int pm_find_prefab(const char *key, char **path, char **meta, char **name
             continue;
         if (!(leaf = sh_mb_utf8(fd.cFileName))) continue;
         free(*path);
-        free(*meta);
         *path = sh_textf("%s%s\\%s.json", root, leaf, *name);
-        *meta = sh_textf("%s%s\\%s.meta.json", root, leaf, *name);
+
         free(leaf);
-        if (*path && *meta && pm_exists(*path)) { found = 1; break; }
+        if (*path && pm_exists(*path)) { found = 1; break; }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     free(root);
@@ -1291,7 +1301,7 @@ static void pm_linef(const char *fmt, ...)
 void sh_prefab_mods_command(int argc, const char *const *argv)
 {
     const char *verb = argc > 0 ? argv[0] : NULL;
-    char *path = NULL, *meta = NULL, *name = NULL, *msg = NULL, *zip = NULL, *key = NULL;
+    char *path = NULL, *name = NULL, *msg = NULL, *zip = NULL, *key = NULL;
     if (!verb || !verb[0] || !_stricmp(verb, "help") || !strcmp(verb, "?")) {
         pm_print(SH_PREFAB_CMD_HELP);
         return;
@@ -1303,13 +1313,13 @@ void sh_prefab_mods_command(int argc, const char *const *argv)
         char *text;
         size_t tlen = 0, i;
         int n;
-        if (argc < 2 || !key || !pm_find_prefab(key, &path, &meta, &name)) {
+        if (argc < 2 || !key || !pm_find_prefab(key, &path, &name)) {
             pm_linef("sh_prefab mods: no prefab named \"%s\".", argc > 1 ? argv[1] : "");
             goto done;
         }
         text = sh_prefab_mods_read_file(path, &tlen);
         if (!text) { pm_linef("Prefab %s: its file cannot be read.", name); goto done; }
-        n = sh_prefab_mods_rows_of(text, tlen, meta, &rows);
+        n = sh_prefab_mods_rows_of(text, tlen, path, &rows);
         free(text);
         if (n == SH_PREFAB_ROWS_EARLIER) { pm_linef("Prefab %s: " SH_PREFAB_EARLIER_TEXT, name); goto done; }
         if (n < 0) {
@@ -1334,12 +1344,12 @@ void sh_prefab_mods_command(int argc, const char *const *argv)
     }
     if (!_stricmp(verb, "export")) {
         if (argc < 3) { pm_print("usage: sh_prefab export \"<name>\" \"<path.zip>\""); goto done; }
-        if (!key || !pm_find_prefab(key, &path, &meta, &name)) {
+        if (!key || !pm_find_prefab(key, &path, &name)) {
             pm_linef("sh_prefab export: no prefab named \"%s\".", argv[1]);
             goto done;
         }
         if (!(zip = pm_acp_to_utf8(argv[2]))) { pm_print("sh_prefab export: the ZIP path is not usable."); goto done; }
-        (void)sh_prefab_mods_export(path, meta, name, zip, &msg);
+        (void)sh_prefab_mods_export(path, name, zip, &msg);
         if (msg) pm_print(msg);
         goto done;
     }
@@ -1355,7 +1365,7 @@ void sh_prefab_mods_command(int argc, const char *const *argv)
     }
     pm_linef("sh_prefab: unknown verb \"%s\". %s", verb, SH_PREFAB_CMD_HELP);
 done:
-    free(path); free(meta); free(name); free(msg); free(zip); free(key);
+    free(path); free(name); free(msg); free(zip); free(key);
 }
 
 #ifdef SH_PREFAB_MODS_TESTING

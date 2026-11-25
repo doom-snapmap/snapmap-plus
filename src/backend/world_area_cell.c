@@ -46,11 +46,6 @@ static volatile LONG g_watch;
 static int g_settle,g_last_n,g_opened;
 static long long g_warned;
 
-static const sig_result *binding(const sig_result *r,size_t n,const char *name)
-{
-    size_t i;for(i=0;i<n;i++)if(r[i].name&&!strcmp(r[i].name,name)&&r[i].status==SIG_OK)return r+i;
-    return NULL;
-}
 static int read_float(uintptr_t at,float *out)
 {
     __try {*out=*(const volatile float*)at;return 1;}
@@ -70,7 +65,7 @@ int sh_world_area_cell_install(const sig_result *results,size_t count,const uint
     const char *why;char line[320];
     (void)base;
     if(g_live)return 1;
-    site=binding(results,count,"WorldAreaCellLoad");
+    site=sig_ok(results,count,"WorldAreaCellLoad");
     if(!site){why="the cell-size load was not found";goto unavailable;}
     if((why=sh_world_area_cell_check((const unsigned char*)site->addr,&constant)))goto unavailable;
     /* The load's disp32 is relative to the instruction's end, site + 8. */
