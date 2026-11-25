@@ -33,6 +33,7 @@ param(
                            "settings_tab.c", "map_bounds.c", "map_settings.c", "editor_zoom.c",
                            # Boot preload pacing (load-screen video lock, read poll).
                            "boot_pacing.c",
+                           "ribbonmotion.c", "ribbonmotion_math.c",
                            # Mod bundles, the local mods store, the sh_mods command and the Mods tab.
                            "modbundle.c", "modsalt.c", "modauthor.c", "strkeys.c", "modbankinfo.c", "modstock.c", "modprog.c", "modlook.c", "sdk.c", "sdkparse.c", "sdkvalues.c", "modeffect.c", "modenv.c", "modwound.c", "sdk_runtime.c", "programs/programs_layered.c", "programs/programs_particles.c", "programs/programs_hair.c", "parmslots.c", "parmslots_rule.c", "particlemotion.c", "particlemotion_sim.c", "particlemotion_planes.c", "particlemotion_sigs.c", "cachewrites.c", "cachewrites_rule.c", "cachewrites_sigs.c", "clip_events.c", "clip_events_rule.c", "md6_registry.c", "md6_registry_engine.c", "clip_events_sigs.c", "attach_tags.c", "attach_tags_rule.c", "attach_tags_sigs.c", "level_templates.c", "level_templates_rule.c", "level_templates_sigs.c", "encounter_spawn.c", "kill_score.c", "kill_score_rule.c", "kill_score_sigs.c", "sync_clock.c", "sync_clock_rule.c", "sync_clock_sigs.c", "modstore.c", "modcmd.c", "modui.c", "modmap.c",
                            # The mod store client (WinHTTP), upload/download, the rawmap ZIP export and the ZIP form.

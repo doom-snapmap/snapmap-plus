@@ -1838,6 +1838,18 @@ and module patches on a stand-in program (`tests/fixtures/modprog/lit.frag`),
 the derived `.bin` and SPIR-V against the engine's checks, and, given
 `-Doom`, the derivation from the installed game.
 
+### Spatial noise on ribbon nodes
+
+An imported ribbon can give each new node a velocity sampled from smooth three-dimensional noise at its world
+position. The game carries that velocity through the node's life. The sampled displacement can also shift the
+node at birth. Two explicitly authored edges keep their original separation.
+
+The generated native declaration uses the dormant turbulence block. A magnitude of `-84001` selects velocity
+and `-84002` also applies the displacement at birth. Frequency is spatial cycles per world unit. The first
+three `magic` channels give world displacement per axis, the fourth gives the time phase rate, and `velocity`
+scales displacement into world units per second. The renderer accepts this encoding only on a declaration in
+a mod's own namespace. Existing native turbulence keeps its normal interpretation.
+
 ### Clip events
 
 A mod adds animation event rows to its own clips when they play on a game
