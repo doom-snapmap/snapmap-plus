@@ -12,6 +12,7 @@
  *   GridWorldBounds               a module record's world box
  *   EditorMapToJson               (rawmap.c) the open map as JSON
  * Every engine read and call is SEH-guarded; a fault retires the module. */
+#include "safe_read.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -186,15 +187,12 @@ static int mp_ready_place(void)
 
 /* ------------------------------------------------------------ guarded reads */
 
-static int rd_i32(const void *p, int *v) { __try { *v = *(const int *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }
-static int rd_ptr(const void *p, void **v) { __try { *v = *(void *const *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }
-static int rd_u8(const void *p, unsigned char *v) { __try { *v = *(const unsigned char *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }
 
 static unsigned char *mp_editor(void)
 {
     unsigned char *ed = (unsigned char *)g_editor;
     void *map = NULL;
-    if (!ed || !rd_ptr(ed + ED_MAP_OFF, &map) || !map) return NULL;
+    if (!ed || !sh_read_ptr(ed + ED_MAP_OFF, &map) || !map) return NULL;
     return ed;
 }
 
@@ -204,18 +202,18 @@ static int mp_blueprint_idle(unsigned char *ed, int *state_out)
 {
     int state = 0, sub = 0, cur = 0;
     unsigned char pending = 1;
-    if (!rd_i32(ed + ED_STATE_OFF, &state)) return 0;
+    if (!sh_read_i32(ed + ED_STATE_OFF, &state)) return 0;
     if (state_out) *state_out = state;
     if (state != 1) return 0;
-    if (!rd_i32(ed + ED_MODE_OFF + MODE_SUBSTATE_OFF, &sub) || !rd_i32(ed + ED_MODE_OFF + MODE_CURRENT_OFF, &cur) ||
-        !rd_u8(ed + ED_MODE_OFF + MODE_PENDING_OFF, &pending)) return 0;
+    if (!sh_read_i32(ed + ED_MODE_OFF + MODE_SUBSTATE_OFF, &sub) || !sh_read_i32(ed + ED_MODE_OFF + MODE_CURRENT_OFF, &cur) ||
+        !sh_read_u8(ed + ED_MODE_OFF + MODE_PENDING_OFF, &pending)) return 0;
     return (sub == 1 || sub == 2) && cur == sub && !pending;
 }
 
 static void *mp_undo_cursor(unsigned char *ed)
 {
     void *list = NULL, *c = NULL;
-    if (rd_ptr(ed + ED_UNDO_OFF, &list) && list) rd_ptr((unsigned char *)list + ED_UNDO_CURSOR_OFF, &c);
+    if (sh_read_ptr(ed + ED_UNDO_OFF, &list) && list) sh_read_ptr((unsigned char *)list + ED_UNDO_CURSOR_OFF, &c);
     return c;
 }
 
@@ -223,7 +221,7 @@ static int mp_record_count(unsigned char *ed)
 {
     void *map = NULL;
     int n = -1;
-    if (rd_ptr(ed + ED_MAP_OFF, &map) && map) rd_i32((unsigned char *)map + MAP_RECORD_COUNT_OFF, &n);
+    if (sh_read_ptr(ed + ED_MAP_OFF, &map) && map) sh_read_i32((unsigned char *)map + MAP_RECORD_COUNT_OFF, &n);
     return n;
 }
 
@@ -465,8 +463,8 @@ void sh_module_prefab_tick(void *editor)
         InterlockedExchange(&g_phase, MP_IDLE);
         return;
     }
-    rd_i32(ed + ED_STATE_OFF, &state);
-    rd_i32(ed + ED_MODE_OFF + MODE_CURRENT_OFF, &current);
+    sh_read_i32(ed + ED_STATE_OFF, &state);
+    sh_read_i32(ed + ED_MODE_OFF + MODE_CURRENT_OFF, &current);
     if (phase == MP_INSTALL) {
         unsigned char limits = 0;
         if (!mp_blueprint_idle(ed, NULL)) {
@@ -567,10 +565,10 @@ int sh_module_prefab_selected_count(void)
     unsigned char *ed = mp_editor();
     void *sel = NULL;
     int state = 0, n = 0;
-    if (!ed || !rd_i32(ed + ED_STATE_OFF, &state)) return -1;
+    if (!ed || !sh_read_i32(ed + ED_STATE_OFF, &state)) return -1;
     if (state != 1) return 0;
-    if (!rd_ptr(ed + ED_SEL_OFF, &sel) || !sel) return 0;
-    if (!rd_i32((unsigned char *)sel + SEL_COUNT_OFF, &n) || n < 0) return -1;
+    if (!sh_read_ptr(ed + ED_SEL_OFF, &sel) || !sel) return 0;
+    if (!sh_read_i32((unsigned char *)sel + SEL_COUNT_OFF, &n) || n < 0) return -1;
     return n > MODULE_CAP ? MODULE_CAP : n;
 }
 
@@ -639,8 +637,8 @@ static int mp_capture_main(void *ctx)
         if (state != 1) { c->result = (c->op == SH_MODULE_PREFAB_SAVE) ? -2 : -4; return 0; }
         c->result = (c->op == SH_MODULE_PREFAB_SAVE) ? -1 : 0;
         /* Save also reads a selection made in the Selection substate. */
-        rd_i32(ed + ED_MODE_OFF + MODE_SUBSTATE_OFF, &sub);
-        rd_u8(ed + ED_MODE_OFF + MODE_PENDING_OFF, &pending);
+        sh_read_i32(ed + ED_MODE_OFF + MODE_SUBSTATE_OFF, &sub);
+        sh_read_u8(ed + ED_MODE_OFF + MODE_PENDING_OFF, &pending);
         if (c->op != SH_MODULE_PREFAB_SAVE || sub != 2 || pending) return 0;
     }
     __try {
@@ -900,11 +898,11 @@ int sh_module_prefab_slot(struct sh_iface *self, sh_module_prefab_call *call)
         int state = 0;
         void *map = NULL;
         call->blueprint = call->entity_mode = call->map_open = 0;
-        if (!ed || !rd_i32(ed + ED_STATE_OFF, &state)) return 0;
+        if (!ed || !sh_read_i32(ed + ED_STATE_OFF, &state)) return 0;
         call->blueprint = state == 1;
         call->entity_mode = state == 2;
         /* The editor's map object: NULL at the hub and once the editor has left the map. */
-        if (!rd_ptr(ed + ED_MAP_OFF, &map)) map = NULL;
+        if (!sh_read_ptr(ed + ED_MAP_OFF, &map)) map = NULL;
         call->map_open = map != NULL;
         return 1;
     }

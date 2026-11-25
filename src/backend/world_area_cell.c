@@ -4,6 +4,7 @@
  * disp32 is repointed, at a product-owned float that holds 512 except while SnapMapEditToSnapBuild
  * builds a map needing a coarser size. The frontend reads area extents from the built areas' bounds,
  * never from this value. */
+#include "safe_read.h"
 #include "world_area_cell.h"
 #include <string.h>
 
@@ -46,17 +47,12 @@ static volatile LONG g_watch;
 static int g_settle,g_last_n,g_opened;
 static long long g_warned;
 
-static int read_float(uintptr_t at,float *out)
-{
-    __try {*out=*(const volatile float*)at;return 1;}
-    __except(EXCEPTION_EXECUTE_HANDLER) {return 0;}
-}
 /* The bind's byte checks, the install's and the image test's one function: the load's bytes, then its constant. */
 const char *sh_world_area_cell_check(const unsigned char *site,uintptr_t *constant)
 {
     float native=0;
     if(!sh_world_area_cell_site(site,constant))return "the cell-size load has unexpected bytes";
-    if(!read_float(*constant,&native)||native!=SH_RENDER_AREA_CELL)return "the cell-size constant is not 512";
+    if(!sh_read_float(*constant,&native)||native!=SH_RENDER_AREA_CELL)return "the cell-size constant is not 512";
     return NULL;
 }
 int sh_world_area_cell_install(const sig_result *results,size_t count,const uint8_t *base)

@@ -1,6 +1,7 @@
 /* Optional higher-precision matrix, color and curve overrides for cs_dontuse: matrix and curve math use f64
  * instead of x87, and color packing keeps round-half-up. Hooks replace whole functions and stay disabled
  * until the command enables them. */
+#include "safe_read.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -121,11 +122,6 @@ uint32_t sh_algo_packrgba(const float *rgba)
 #define CURVE_OFF_PERIOD   0x21c   /* f32, used by edgeMode==2 (wrap) */
 
 /* Curve objects belong to the engine; guard reads against invalid pointers. */
-static int curve_rd_i32(const uint8_t *p, int *out)
-{
-    __try { *out = *(const int *)p; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
 static int curve_rd_u8(const uint8_t *p, uint8_t *out)
 {
     __try { *out = *p; return 1; }
@@ -222,7 +218,7 @@ float sh_algo_curveeval(const void *c, float t, uint8_t mode)
     const uint8_t *base = (const uint8_t *)c;
 
     int count = 0;
-    if (!curve_rd_i32(base + CURVE_OFF_COUNT, &count)) return 0.0f;
+    if (!sh_read_i32(base + CURVE_OFF_COUNT, &count)) return 0.0f;
     if (count < 1)  return 0.0f;
     if (count == 1) {
         float v0 = 0.0f;
@@ -243,7 +239,7 @@ float sh_algo_curveeval(const void *c, float t, uint8_t mode)
 
         int   edgeMode = 0;
         float period_f = 0.0f;
-        curve_rd_i32(base + CURVE_OFF_EDGEMODE, &edgeMode);
+        sh_read_i32(base + CURVE_OFF_EDGEMODE, &edgeMode);
         curve_rd_f32(base + CURVE_OFF_PERIOD, 0, &period_f);
         if (!curve_shape_ok(count, edgeMode, period_f)) {
             if (InterlockedExchange(&g_curve_shape_logged, 1) == 0) {

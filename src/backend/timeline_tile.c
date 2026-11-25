@@ -3,6 +3,7 @@
  * state, +0x1c8 entityDef; record +0x38 text, +0x58 inherit, +0x60 class; entity holder +0 refcount (undo
  * snapshots share holders; EntityDeshare unshares), +0x08 sedef, +0x158 record. Decl registry calls are the
  * ones grid_room_native.c uses. Every engine read is SEH-guarded; a fault retires the module. */
+#include "safe_read.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -151,8 +152,6 @@ static void tl_logf(const char *fmt, ...)
     backend_log(line);
 }
 
-static int rd_ptr(const void *p, void **v) { __try { *v = *(void *const *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }
-static int rd_i32(const void *p, int *v) { __try { *v = *(const int *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }
 
 static int str_eq_guarded(const char *s, const char *want)
 {
@@ -331,9 +330,9 @@ static const char *tl_row_key(const unsigned char *entry, const char **row)
 {
     void *sedef = NULL, *name = NULL, *record = NULL, *key = NULL;
     *row = NULL;
-    if (!rd_ptr(entry, &sedef) || !sedef || !rd_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &name)) return NULL;
+    if (!sh_read_ptr(entry, &sedef) || !sedef || !sh_read_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &name)) return NULL;
     *row = (const char *)name;
-    if (!rd_ptr(entry + ENTRY_RECORD_OFF, &record) || !record || !rd_ptr((unsigned char *)record + RECORD_INHERIT_OFF, &key))
+    if (!sh_read_ptr(entry + ENTRY_RECORD_OFF, &record) || !record || !sh_read_ptr((unsigned char *)record + RECORD_INHERIT_OFF, &key))
         return NULL;
     return (const char *)key;
 }
@@ -353,13 +352,13 @@ static void tl_scan_shared(int count)
         }
         for (k = i; j - i > 1 && k < j && !stock; ++k)
             if (tl_row_key(g_pal_entries + (size_t)k * PAL_STRIDE, &row) && row && strncmp(row, "mods/", 5))
-                (void)rd_ptr(g_pal_entries + (size_t)k * PAL_STRIDE, (void **)&stock);
+                (void)sh_read_ptr(g_pal_entries + (size_t)k * PAL_STRIDE, (void **)&stock);
         for (k = i; stock && k < j; ++k) {
             const void *sedef = NULL;
             if (!tl_row_key(g_pal_entries + (size_t)k * PAL_STRIDE, &row) || !row ||
                 !sh_tl_stock_row_first(row, NULL, stock) || g_nshared >= SHARED_MAX)
                 continue;
-            (void)rd_ptr(g_pal_entries + (size_t)k * PAL_STRIDE, (void **)&sedef);
+            (void)sh_read_ptr(g_pal_entries + (size_t)k * PAL_STRIDE, (void **)&sedef);
             g_shared_mod[g_nshared] = sedef;
             g_shared_stock[g_nshared++] = stock;
             if (g_nshared <= REBIND_LOG_MAX)
@@ -377,7 +376,7 @@ static int tl_scan_palette(const unsigned char *palette)
     g_tile_row = g_unknown_row = -1;
     g_tile_sedef = g_unknown_sedef = NULL;
     g_nshared = 0;
-    if (!rd_ptr(palette + PAL_ENTRIES_OFF, &entries) || !rd_i32(palette + PAL_COUNT_OFF, &count)) return 0;
+    if (!sh_read_ptr(palette + PAL_ENTRIES_OFF, &entries) || !sh_read_i32(palette + PAL_COUNT_OFF, &count)) return 0;
     g_pal_entries = (const unsigned char *)entries;
     g_pal_count = count;
     if (!entries || count <= 0 || count > PAL_MAX) return 1;
@@ -385,7 +384,7 @@ static int tl_scan_palette(const unsigned char *palette)
     for (i = 0; i < count; ++i) {
         void *sedef = NULL, *name = NULL;
         const unsigned char *entry = g_pal_entries + (size_t)i * PAL_STRIDE;
-        if (!rd_ptr(entry, &sedef) || !sedef || !rd_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &name)) continue;
+        if (!sh_read_ptr(entry, &sedef) || !sedef || !sh_read_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &name)) continue;
         if (g_tile_row < 0 && str_eq_guarded((const char *)name, SH_TL_TILE_SEDEF)) {
             g_tile_row = i; g_tile_sedef = sedef;
         } else if (g_unknown_row < 0 && str_eq_guarded((const char *)name, SH_TL_UNKNOWN_SEDEF)) {
@@ -401,12 +400,12 @@ static int tl_palette_current(const unsigned char *palette)
 {
     void *entries = NULL, *sedef = NULL;
     int count = 0;
-    if (!rd_ptr(palette + PAL_ENTRIES_OFF, &entries) || !rd_i32(palette + PAL_COUNT_OFF, &count)) return 0;
+    if (!sh_read_ptr(palette + PAL_ENTRIES_OFF, &entries) || !sh_read_i32(palette + PAL_COUNT_OFF, &count)) return 0;
     if ((const unsigned char *)entries != g_pal_entries || count != g_pal_count) return 0;
-    if (g_tile_row >= 0 && (!rd_ptr(g_pal_entries + (size_t)g_tile_row * PAL_STRIDE, &sedef) || sedef != g_tile_sedef))
+    if (g_tile_row >= 0 && (!sh_read_ptr(g_pal_entries + (size_t)g_tile_row * PAL_STRIDE, &sedef) || sedef != g_tile_sedef))
         return 0;
     if (g_unknown_row >= 0 &&
-        (!rd_ptr(g_pal_entries + (size_t)g_unknown_row * PAL_STRIDE, &sedef) || sedef != g_unknown_sedef))
+        (!sh_read_ptr(g_pal_entries + (size_t)g_unknown_row * PAL_STRIDE, &sedef) || sedef != g_unknown_sedef))
         return 0;
     return 1;
 }
@@ -419,8 +418,8 @@ static void tl_patch_record(void)
 {
     void *record = NULL, *cls = NULL, *text = NULL;
     if (g_tile_row < 0) return;
-    if (!rd_ptr(g_pal_entries + (size_t)g_tile_row * PAL_STRIDE + ENTRY_RECORD_OFF, &record) || !record) return;
-    if (!rd_ptr((unsigned char *)record + RECORD_CLASS_OFF, &cls)) return;
+    if (!sh_read_ptr(g_pal_entries + (size_t)g_tile_row * PAL_STRIDE + ENTRY_RECORD_OFF, &record) || !record) return;
+    if (!sh_read_ptr((unsigned char *)record + RECORD_CLASS_OFF, &cls)) return;
     if (str_eq_guarded((const char *)cls, SH_TL_CLASS)) return;
     if (g_patch_failed_entries == g_pal_entries) return;
     if (!sh_apply_engine_commit_record(record, sh_tl_record_json)) {
@@ -428,8 +427,8 @@ static void tl_patch_record(void)
         if (!g_patch_fail_logged) { g_patch_fail_logged = 1; backend_log("TL tile: prototype record patch refused"); }
         return;
     }
-    (void)rd_ptr((unsigned char *)record + RECORD_CLASS_OFF, &cls);
-    (void)rd_ptr((unsigned char *)record + RECORD_TEXT_OFF, &text);
+    (void)sh_read_ptr((unsigned char *)record + RECORD_CLASS_OFF, &cls);
+    (void)sh_read_ptr((unsigned char *)record + RECORD_TEXT_OFF, &text);
     if (!g_patch_logged) {
         int has_line = 0;
         __try { has_line = text && strstr((const char *)text, SH_TL_CLASS) != NULL; }
@@ -459,23 +458,23 @@ static void tl_rebind(unsigned char *editor)
     uint64_t hash;
     int substate = 0;
     if ((!g_tile_sedef || !g_unknown_sedef) && !g_nshared) return;
-    if (!rd_ptr(editor + ED_MAP_OFF, &map) || !map) { g_ent_seen = 0; return; }
-    if (!rd_ptr((unsigned char *)map + MAP_ENTITIES_OFF, &array_ptr) ||
-        !rd_i32((unsigned char *)map + MAP_ENTITY_COUNT_OFF, (int *)&count) || !array_ptr || count > ENTITY_MAX)
+    if (!sh_read_ptr(editor + ED_MAP_OFF, &map) || !map) { g_ent_seen = 0; return; }
+    if (!sh_read_ptr((unsigned char *)map + MAP_ENTITIES_OFF, &array_ptr) ||
+        !sh_read_i32((unsigned char *)map + MAP_ENTITY_COUNT_OFF, (int *)&count) || !array_ptr || count > ENTITY_MAX)
         return;
     array = (void **)array_ptr;
     hash = tl_hash_entities(array, count);
     if (g_ent_seen && array_ptr == g_ent_array && count == g_ent_count && hash == g_ent_hash) return;
-    if (rd_i32(editor + ED_ENTITY_MODE_OFF + MODE_SUBSTATE_OFF, &substate) && sh_tl_substate_blocks_rebind(substate))
+    if (sh_read_i32(editor + ED_ENTITY_MODE_OFF + MODE_SUBSTATE_OFF, &substate) && sh_tl_substate_blocks_rebind(substate))
         return;   /* retried once the held entity or wire is released */
     for (i = SH_TL_FIRST_ENTITY; i < count; ++i) {
         void *holder = array[i], *sedef = NULL, *record = NULL, *inherit = NULL, *cls = NULL;
         const void *want;
         int refs = 0, k;
-        if (!holder || !rd_ptr((unsigned char *)holder + HOLDER_SEDEF_OFF, &sedef) || !sedef ||
-            !rd_ptr((unsigned char *)holder + HOLDER_RECORD_OFF, &record) || !record ||
-            !rd_ptr((unsigned char *)record + RECORD_INHERIT_OFF, &inherit) ||
-            !rd_ptr((unsigned char *)record + RECORD_CLASS_OFF, &cls))
+        if (!holder || !sh_read_ptr((unsigned char *)holder + HOLDER_SEDEF_OFF, &sedef) || !sedef ||
+            !sh_read_ptr((unsigned char *)holder + HOLDER_RECORD_OFF, &record) || !record ||
+            !sh_read_ptr((unsigned char *)record + RECORD_INHERIT_OFF, &inherit) ||
+            !sh_read_ptr((unsigned char *)record + RECORD_CLASS_OFF, &cls))
             continue;
         __try { want = sh_tl_wanted_sedef((const char *)inherit, (const char *)cls, sedef,
                                           g_tile_sedef, g_unknown_sedef); }
@@ -484,7 +483,7 @@ static void tl_rebind(unsigned char *editor)
         if (!want || want == sedef) continue;
         /* Undo snapshots share holders; write a private copy. Without the
          * helper only an unshared holder is rebound. */
-        if (!sh_apply_engine_deshare_bound() && (!rd_i32(holder, &refs) || refs != 1)) continue;
+        if (!sh_apply_engine_deshare_bound() && (!sh_read_i32(holder, &refs) || refs != 1)) continue;
         if (!sh_apply_engine_deshare(&array[i]) || !(holder = array[i])) continue;
         *(const void **)((unsigned char *)holder + HOLDER_SEDEF_OFF) = want;
         if (InterlockedIncrement(&g_total_rebinds) <= REBIND_LOG_MAX)
@@ -591,8 +590,8 @@ int sh_timeline_tile_rebuild_palette(int *rows_before, int *rows_after)
     if (rows_after) *rows_after = -1;
     if (!ed || !g_build_orig || !g_heap_ok) return SH_TL_REBUILD_UNAVAILABLE;
     if (InterlockedCompareExchange(&g_rebuild_disabled, 0, 0)) return SH_TL_REBUILD_DISABLED;
-    if (rows_before) (void)rd_i32(ed + ED_PALETTE_OFF + PAL_COUNT_OFF, rows_before);
-    if (rd_i32(ed + ED_ENTITY_MODE_OFF + MODE_SUBSTATE_OFF, &substate) && sh_tl_substate_blocks_rebind(substate))
+    if (rows_before) (void)sh_read_i32(ed + ED_PALETTE_OFF + PAL_COUNT_OFF, rows_before);
+    if (sh_read_i32(ed + ED_ENTITY_MODE_OFF + MODE_SUBSTATE_OFF, &substate) && sh_tl_substate_blocks_rebind(substate))
         return SH_TL_REBUILD_BUSY;
     if (!sh_process_heap_enter(&g_heap, &heap)) return SH_TL_REBUILD_HEAP;
     __try {
@@ -604,7 +603,7 @@ int sh_timeline_tile_rebuild_palette(int *rows_before, int *rows_after)
             result = SH_TL_REBUILD_HEAP_LEAVE;
         }
     }
-    if (rows_after) (void)rd_i32(ed + ED_PALETTE_OFF + PAL_COUNT_OFF, rows_after);
+    if (rows_after) (void)sh_read_i32(ed + ED_PALETTE_OFF + PAL_COUNT_OFF, rows_after);
     return result;
 }
 

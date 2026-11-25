@@ -1,6 +1,7 @@
 /* Reveal the editor-decl visibility bits 0xC0 at +0x3CD, then put back exactly what the reveal changed
  * (the flags also affect wire coloring). GetDeclsOfType returns a node with array@+0x20, count@+0x28; the
  * array is engine-owned and never freed. */
+#include "safe_read.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -27,17 +28,7 @@ static volatile LONG g_shown     = 0;      /* 0 = hidden, 1 = shown. */
 static revealed     *g_revealed  = NULL;   /* what the reveal changed, for the hide */
 static uint32_t      g_revealed_count;
 
-static int safe_read_ptr(const void *src, void **out)
-{
-    __try { *out = *(void *const *)src; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
 
-static int safe_read_u32(const void *src, uint32_t *out)
-{
-    __try { *out = *(const uint32_t *)src; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
 
 /* Show every decl whose visibility pair is not fully set, remembering each one
  * changed. Returns 0 when the registry cannot be read (nothing changed). */
@@ -47,8 +38,8 @@ static int target_any_reveal(uint32_t *out_count, uint32_t *out_changed)
     uint32_t count = 0, i;
     *out_count = *out_changed = 0;
     list = ((get_decls_fn)g_get_decls)(DECL_TYPE_NAME);
-    if (!list || !safe_read_ptr((const uint8_t *)list + LIST_ARRAY_OFF, &array) ||
-        !safe_read_u32((const uint8_t *)list + LIST_COUNT_OFF, &count) || count > COUNT_CAP)
+    if (!list || !sh_read_ptr((const uint8_t *)list + LIST_ARRAY_OFF, &array) ||
+        !sh_read_u32((const uint8_t *)list + LIST_COUNT_OFF, &count) || count > COUNT_CAP)
         return 0;
     *out_count = count;
     free(g_revealed);
@@ -60,7 +51,7 @@ static int target_any_reveal(uint32_t *out_count, uint32_t *out_changed)
     for (i = 0; i < count; i++) {
         void *decl = NULL;
         uint8_t *fp;
-        if (!safe_read_ptr((const uint8_t *)array + (size_t)i * 8, &decl)) break;
+        if (!sh_read_ptr((const uint8_t *)array + (size_t)i * 8, &decl)) break;
         if (!decl) continue;
         fp = (uint8_t *)decl + DECL_FLAGS_OFF;
         __try {

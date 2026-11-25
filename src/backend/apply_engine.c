@@ -1,6 +1,7 @@
 /* Entity reflection, decl commits, and prefab staging for the shared interface. Deferred work runs through
  * clone_bss_apply on the engine command drain; apply_sync marshals off-main callers and refuses a missing transport.
  * Engine-owned strings and prefab arrays need process-heap lifetime across Play and map teardown. */
+#include "safe_read.h"
 #include <windows.h>
 #include <stdint.h>
 #include <limits.h>
@@ -275,16 +276,6 @@ static HANDLE          g_sync_ev = NULL;        /* manual-reset; created once at
 #define AE_MARSHAL_NOT_RUN       1   /* never drained; withdrawn -- the batch DEFINITELY did not run */
 #define AE_MARSHAL_LOST          2   /* picked up but no completion in time -- outcome unknown */
 
-static int ae_read_ptr(const void *src, void **out)
-{
-    __try { *out = *(void *const *)src; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
-static int ae_read_u32(const void *src, uint32_t *out)
-{
-    __try { *out = *(const uint32_t *)src; return 1; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
 /* Guarded diagnostic scalar reads. */
 static int ae_read_u8_safe(const void *src, unsigned *out)
 {
@@ -303,7 +294,7 @@ static int ae_on_main_thread(void)
 {
     uint32_t mt = 0;
     if (!g_main_thread_at) return -1;
-    if (!ae_read_u32(g_main_thread_at, &mt)) return -1;
+    if (!sh_read_u32(g_main_thread_at, &mt)) return -1;
     if (mt == 0) return -1;
     return (mt == GetCurrentThreadId()) ? 1 : 0;
 }
@@ -465,7 +456,7 @@ static int ae_block_survives_map(const void *p)
     unsigned tag = 0, flags = 0, lo = 0, hi = 0; int cookie = 0; void *sizeRaw = NULL;
     if (!ae_read_u8_safe(b - 0x10, &tag) || !ae_read_u8_safe(b - 0x0f, &flags) ||
         !ae_read_u8_safe(b - 0x0e, &lo)  || !ae_read_u8_safe(b - 0x0d, &hi) ||
-        !ae_read_u32_safe(b - 0x0c, &cookie) || !ae_read_ptr(b - 0x08, &sizeRaw))
+        !ae_read_u32_safe(b - 0x0c, &cookie) || !sh_read_ptr(b - 0x08, &sizeRaw))
         return 0;
     unsigned long long size = (unsigned long long)sizeRaw;
     unsigned long long x = size ^ (unsigned long long)(b - 0x10);
@@ -485,7 +476,7 @@ static const char *ae_block_heap_name(const void *p)
     unsigned tag = 0, flags = 0, lo = 0, hi = 0; int cookie = 0; void *sizeRaw = NULL;
     if (!ae_read_u8_safe(b - 0x10, &tag) || !ae_read_u8_safe(b - 0x0f, &flags) ||
         !ae_read_u8_safe(b - 0x0e, &lo)  || !ae_read_u8_safe(b - 0x0d, &hi) ||
-        !ae_read_u32_safe(b - 0x0c, &cookie) || !ae_read_ptr(b - 0x08, &sizeRaw))
+        !ae_read_u32_safe(b - 0x0c, &cookie) || !sh_read_ptr(b - 0x08, &sizeRaw))
         return "?(header unreadable)";
     unsigned long long size = (unsigned long long)sizeRaw;
     unsigned long long x = size ^ (unsigned long long)(b - 0x10);
@@ -508,7 +499,7 @@ static const uint8_t *ae_editor_session(void)
 {
     if (!g_editor) return NULL;
     void *mapObj = NULL;
-    if (!ae_read_ptr(g_editor + ED_MAP_OBJ_OFF, &mapObj) || mapObj == NULL) return NULL;
+    if (!sh_read_ptr(g_editor + ED_MAP_OBJ_OFF, &mapObj) || mapObj == NULL) return NULL;
     return g_editor;
 }
 
@@ -518,11 +509,11 @@ static int ae_entity_array(void **out_array, uint32_t *out_count)
     const uint8_t *ed = ae_editor_session();
     if (!ed) return 0;
     void *arrObj = NULL;
-    if (!ae_read_ptr(ed + ED_MAP_OBJ_OFF, &arrObj) || arrObj == NULL) return 0;
+    if (!sh_read_ptr(ed + ED_MAP_OBJ_OFF, &arrObj) || arrObj == NULL) return 0;
     void    *array = NULL;
     uint32_t count = 0;
-    if (!ae_read_ptr((const uint8_t *)arrObj + ARR_ENT_ARRAY_OFF, &array)) return 0;
-    if (!ae_read_u32((const uint8_t *)arrObj + ARR_ENT_COUNT_OFF, &count)) return 0;
+    if (!sh_read_ptr((const uint8_t *)arrObj + ARR_ENT_ARRAY_OFF, &array)) return 0;
+    if (!sh_read_u32((const uint8_t *)arrObj + ARR_ENT_COUNT_OFF, &count)) return 0;
     if (array == NULL || count > ENT_COUNT_CAP) return 0;
     *out_array = array;
     *out_count = count;
@@ -534,7 +525,7 @@ static void *ae_entity_ptr(void *array, uint32_t count, int id)
 {
     if (id < 0 || (uint32_t)id >= count) return NULL;
     void *e = NULL;
-    if (!ae_read_ptr((const uint8_t *)array + (size_t)id * 8, &e)) return NULL;
+    if (!sh_read_ptr((const uint8_t *)array + (size_t)id * 8, &e)) return NULL;
     return e;
 }
 
@@ -649,7 +640,7 @@ static char *ae_serialize_to_json(const char *typeName, void *cloneBase)
         g_entity_clone(cloneBase, tmpDef, 1);
         {
             void *defsub = NULL;
-            int got = ae_read_ptr(tmpDef + 0x150, &defsub);
+            int got = sh_read_ptr(tmpDef + 0x150, &defsub);
             (void)got;
         }
 
@@ -780,7 +771,7 @@ static int ae_deshare_slot(void **cell)
 {
     void *ent = NULL, *se = NULL;
     int refs = 0, pushed;
-    if (!cell || !ae_read_ptr(cell, &ent) || !ent) return 0;
+    if (!cell || !sh_read_ptr(cell, &ent) || !ent) return 0;
     if (!g_deshare) return 1;
     if (!ae_read_u32_safe((const uint8_t *)ent, &refs)) return 0;
     if (refs == 1) return 1;
@@ -789,7 +780,7 @@ static int ae_deshare_slot(void **cell)
     pushed = ae_push_heap_global();
     __try { se = g_deshare(cell); } __except (EXCEPTION_EXECUTE_HANDLER) { se = NULL; }
     if (pushed) ae_pop_heap();
-    if (!se || !ae_read_ptr(cell, &ent) || !ent || se != (void *)((uint8_t *)ent + 8)) return 0;
+    if (!se || !sh_read_ptr(cell, &ent) || !ent || se != (void *)((uint8_t *)ent + 8)) return 0;
     return 1;
 }
 
@@ -897,7 +888,7 @@ static int ae_entity_static_supported(const uint8_t *ent)
 {
     void *sedef = NULL;
     int num = 0;
-    if (!ent || !ae_read_ptr(ent + ENT_VALID_OFF + ENTRY_SEDEF_OFF, &sedef) || !sedef) return 0;
+    if (!ent || !sh_read_ptr(ent + ENT_VALID_OFF + ENTRY_SEDEF_OFF, &sedef) || !sedef) return 0;
     if (!ae_read_u32_safe((const uint8_t *)sedef + SEDEF_NET_STATIC_PATH_NUM, &num)) return 0;
     return num > 0;
 }
@@ -958,7 +949,7 @@ static int ae_apply_one(int id, const char *patched_text)
     void *ent = ae_entity_ptr(array, count, id);
     if (!ent) return 0;
     void *defsub = NULL;
-    if (!ae_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) return 0;
+    if (!sh_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) return 0;
 
     /* Omitted class/inherit keep the live values: empty replacements can raise fatal engine declaration errors. */
     {
@@ -1009,7 +1000,7 @@ static int ae_apply_one(int id, const char *patched_text)
         if (InterlockedExchange(&s_commit_probe_done, 1) == 0) {
             void *blob = NULL;
             int   onmain = ae_on_main_thread();
-            (void)ae_read_ptr((const uint8_t *)defsub + DECL_BLOB_OFF, &blob);
+            (void)sh_read_ptr((const uint8_t *)defsub + DECL_BLOB_OFF, &blob);
             char l[220];
             _snprintf_s(l, sizeof l, _TRUNCATE,
                         "APPLY commit: thread=%s (tid=%lu) decl-source blob=%p heap=%s",
@@ -1146,7 +1137,7 @@ static int ae_mkcmd_one(const char *prefab_text)
      * destroyed first; anything else is map-heap storage the next teardown releases. */
     {
         void *blobs = NULL;
-        if (g_prefab_ctor && g_prefab_dtor && ae_read_ptr(ed + PASTE_PREFAB_ENTPTR_OFF, &blobs) && blobs &&
+        if (g_prefab_ctor && g_prefab_dtor && sh_read_ptr(ed + PASTE_PREFAB_ENTPTR_OFF, &blobs) && blobs &&
             ae_block_survives_map(blobs)) {
             __try { g_prefab_dtor(staging); } __except (EXCEPTION_EXECUTE_HANDLER) {
                 backend_log("APPLY stage: releasing the previous staged prefab faulted; it is left allocated");
@@ -1242,7 +1233,7 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
     void *sel = NULL;
     int   sel_count = -1;
     g_place_why = "the editor would not clear the selection (deselect everything first)";
-    if (!ae_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || !sel ||
+    if (!sh_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || !sel ||
         !ae_read_u32_safe((const uint8_t *)sel + SEL_COUNT_OFF, &sel_count) || sel_count != 0) {
         char l[128];
         _snprintf_s(l, sizeof l, _TRUNCATE,
@@ -1558,7 +1549,7 @@ static char *slot_serialize_entity(sh_iface *self, int id)
      * this defsub, so they are rejected before cloning. */
     {
         void *defsub = NULL;
-        if (!ae_read_ptr((const uint8_t *)cloneBase + ENT_CLONE_DEFSUB_OFF, &defsub) ||
+        if (!sh_read_ptr((const uint8_t *)cloneBase + ENT_CLONE_DEFSUB_OFF, &defsub) ||
             defsub == NULL)
             return NULL;
     }
@@ -1602,8 +1593,8 @@ static int ae_entity_instance(int id)
     void *map = NULL, *owners = NULL;
     int owner = -1;
     if (!ed || id < 0) return -1;
-    if (!ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map) || !map) return -1;
-    if (!ae_read_ptr((const uint8_t *)map + MAP_ENT_INSTANCE_OFF, &owners) || !owners) return -1;
+    if (!sh_read_ptr(ed + ED_MAP_OBJ_OFF, &map) || !map) return -1;
+    if (!sh_read_ptr((const uint8_t *)map + MAP_ENT_INSTANCE_OFF, &owners) || !owners) return -1;
     if (!ae_read_u32_safe((const uint8_t *)owners + (size_t)id * 4, &owner)) return -1;
     return owner;
 }
@@ -1642,7 +1633,7 @@ static int ae_map_json(void *map, char **out, size_t *len)
     uint32_t main_id = 0;
     *out = NULL; *len = 0;
     if (!map || !g_idstr_ctor || !g_idstr_dtor || !g_editor_map_to_json || !g_main_thread_at ||
-        !ae_read_u32((const uint8_t *)g_main_thread_at, &main_id) ||
+        !sh_read_u32((const uint8_t *)g_main_thread_at, &main_id) ||
         main_id != GetCurrentThreadId()) return 0;
     __try {
         g_idstr_ctor(str, ""); initialized = 1;
@@ -1670,7 +1661,7 @@ int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx)
     (void)ctx;
     *out = NULL; *len = 0;
     ed = ae_editor_session();
-    if (!ed || !ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map)) return 0;
+    if (!ed || !sh_read_ptr(ed + ED_MAP_OBJ_OFF, &map)) return 0;
     return ae_map_json(map, out, len);
 }
 
@@ -1706,14 +1697,14 @@ static int ae_snapshot_box_size(unsigned index, float size[3], void *ctx)
     void *entities = NULL, *text = NULL;
     uint32_t count = 0, length = 0;
     const uint8_t *resolved;
-    if (snapshot && ae_read_u32(snapshot + AE_SNAPSHOT_COUNT_OFF, &count) &&
+    if (snapshot && sh_read_u32(snapshot + AE_SNAPSHOT_COUNT_OFF, &count) &&
         count <= ENT_COUNT_CAP && index < count &&
-        ae_read_ptr(snapshot + AE_SNAPSHOT_ENTITIES_OFF, &entities) && entities) {
+        sh_read_ptr(snapshot + AE_SNAPSHOT_ENTITIES_OFF, &entities) && entities) {
         resolved = (const uint8_t *)entities + (size_t)index * AE_SNAPSHOT_ENTITY_SIZE +
                    AE_DECL_RESOLVED_OFF;
-        if (ae_read_u32(resolved + IDSTR_LEN_OFF, &length) &&
+        if (sh_read_u32(resolved + IDSTR_LEN_OFF, &length) &&
             length && length < AE_DECL_TEXT_CAP &&
-            ae_read_ptr(resolved + IDSTR_DATA_OFF, &text) && text)
+            sh_read_ptr(resolved + IDSTR_DATA_OFF, &text) && text)
             /* Read but not a usable box: that box alone is left out. */
             return sh_nav_regions_decl_size((const char *)text, length, size) ? 1 : -1;
     }
@@ -1737,9 +1728,9 @@ static int ae_nav_snapshot_visit(const void *snapshot, const void *json_idstr, v
     uint32_t length = 0;
     void *text = NULL;
     int ok;
-    if (!ae_read_u32((const uint8_t *)json_idstr + IDSTR_LEN_OFF, &length) ||
+    if (!sh_read_u32((const uint8_t *)json_idstr + IDSTR_LEN_OFF, &length) ||
         !length || length >= 32 * 1024 * 1024 ||
-        !ae_read_ptr((const uint8_t *)json_idstr + IDSTR_DATA_OFF, &text)) return 0;
+        !sh_read_ptr((const uint8_t *)json_idstr + IDSTR_DATA_OFF, &text)) return 0;
     visit->box.snapshot = (const uint8_t *)snapshot;
     SH_PERF_BEGIN(t0);
     ok = sh_nav_regions_read_resolved((const char *)text, length, visit->out,
@@ -1791,16 +1782,16 @@ static int ae_nav_edit_modules(const void *edit_map, char *names, size_t name_ca
     int i;
     (void)ctx;
     if (!map || !names || !name_cap ||
-        !ae_read_ptr(map + MAP_MODULES_OFF, &records) ||
-        !ae_read_u32(map + MAP_MODULES_OFF + 8, &count) ||
+        !sh_read_ptr(map + MAP_MODULES_OFF, &records) ||
+        !sh_read_u32(map + MAP_MODULES_OFF + 8, &count) ||
         count > (uint32_t)cap || (count && !records)) return -1;
     for (i = 0; i < (int)count; i++) {
         void *wrapper = NULL, *decl = NULL, *name = NULL;
         char *dst = names + (size_t)i * name_cap;
         dst[0] = 0;
-        if (!ae_read_ptr((const uint8_t *)records + (size_t)i * MAP_MODULE_STRIDE, &wrapper) ||
-            !wrapper || !ae_read_ptr(wrapper, &decl) || !decl ||
-            !ae_read_ptr((const uint8_t *)decl + 8, &name) || !name) continue;
+        if (!sh_read_ptr((const uint8_t *)records + (size_t)i * MAP_MODULE_STRIDE, &wrapper) ||
+            !wrapper || !sh_read_ptr(wrapper, &decl) || !decl ||
+            !sh_read_ptr((const uint8_t *)decl + 8, &name) || !name) continue;
         __try { strncpy_s(dst, name_cap, (const char *)name, _TRUNCATE); }
         __except (EXCEPTION_EXECUTE_HANDLER) { dst[0] = 0; }
     }
@@ -1841,7 +1832,7 @@ int sh_apply_engine_nav_regions(sh_nav_map *out, void *ctx)
         }
         return 0;
     }
-    if (g_editor &&!ae_read_ptr(g_editor + ED_MAP_OBJ_OFF, &edit)) edit = NULL;
+    if (g_editor &&!sh_read_ptr(g_editor + ED_MAP_OBJ_OFF, &edit)) edit = NULL;
     memset(&src, 0, sizeof src);
     src.build = g_nav_build_map;
     src.edit = edit;
@@ -2034,7 +2025,7 @@ static int ae_block_is_volume(const uint8_t *block)
 {
     void *decl = NULL;
     int navpath = 0;
-    if (!block || !ae_read_ptr(block, &decl) || !decl) return 0;
+    if (!block || !sh_read_ptr(block, &decl) || !decl) return 0;
     if (!ae_read_u32_safe((const uint8_t *)decl + DECL_NAV_PATH_OFF, &navpath)) return 0;
     return navpath != 0;
 }
@@ -2048,7 +2039,7 @@ static int ae_block_uid(const uint8_t *block)
     const void *want = (const void *)(block - ENT_VALID_OFF);
     if (!ae_entity_array(&array, &count)) return -1;
     for (i = 0; i < count; i++) {
-        if (!ae_read_ptr((const uint8_t *)array + (size_t)i * 8, &slot)) continue;
+        if (!sh_read_ptr((const uint8_t *)array + (size_t)i * 8, &slot)) continue;
         if (slot == want) return (int)i;
     }
     return -1;
@@ -2080,8 +2071,8 @@ static int ae_undo_mark(const uint8_t *ed, void **cursor, int *count)
     void *stack = NULL;
     *cursor = NULL;
     *count = -1;
-    if (!ae_read_ptr(ed + ED_UNDO_STACK_OFF, &stack) || !stack) return 0;
-    if (!ae_read_ptr((const uint8_t *)stack + UNDO_CURSOR_OFF, cursor)) return 0;
+    if (!sh_read_ptr(ed + ED_UNDO_STACK_OFF, &stack) || !stack) return 0;
+    if (!sh_read_ptr((const uint8_t *)stack + UNDO_CURSOR_OFF, cursor)) return 0;
     if (!ae_read_u32_safe((const uint8_t *)stack + UNDO_COUNT_OFF, count)) return 0;
     return 1;
 }
@@ -2095,8 +2086,8 @@ static unsigned ae_fold_modules(unsigned h)
     void *map = NULL, *records = NULL;
     int count = 0;
 
-    if (!ed || !ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map) || !map) return h;
-    if (!ae_read_ptr((const uint8_t *)map + MAP_MODULES_OFF, &records) || !records) return h;
+    if (!ed || !sh_read_ptr(ed + ED_MAP_OBJ_OFF, &map) || !map) return h;
+    if (!sh_read_ptr((const uint8_t *)map + MAP_MODULES_OFF, &records) || !records) return h;
     count = sh_nav_bake_instance_count();
     if (count < 0 || count > MAP_MODULE_MAX) return h;
     h = ae_fold(h, &count, sizeof count);
@@ -2123,7 +2114,7 @@ static int ae_nav_live_volume_set(unsigned *set)
     if (!ae_entity_array(&array, &count)) return 0;
     memset(g_nav_now_bits, 0, sizeof g_nav_now_bits);
     for (i = 0; i < count; i++) {
-        if (!ae_read_ptr((const uint8_t *)array + (size_t)i * 8, &slot) || !slot) continue;
+        if (!sh_read_ptr((const uint8_t *)array + (size_t)i * 8, &slot) || !slot) continue;
         if (!ae_block_is_volume((const uint8_t *)slot + ENT_VALID_OFF)) continue;
         h = ae_fold(h, &i, sizeof i);
         if (i < NAV_UID_MAX) g_nav_now_bits[i >> 3] |= (unsigned char)(1u << (i & 7));
@@ -2211,8 +2202,8 @@ static int ae_nav_fingerprints(unsigned *shape, unsigned *tracked, unsigned *pre
     known = sh_nav_bake_volume_uids(uids, NAV_VOLUME_MAX);
     if (known < 0) known = 0;
     hs = ae_fold_modules(hs);
-    if (ed && ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map) && map)
-        ae_read_ptr((const uint8_t *)map + MAP_ENT_STATE_OFF, &states);
+    if (ed && sh_read_ptr(ed + ED_MAP_OBJ_OFF, &map) && map)
+        sh_read_ptr((const uint8_t *)map + MAP_ENT_STATE_OFF, &states);
     for (k = 0; k < known; k++) {
         int uid = uids[k], is_volume = 0;
         const uint8_t *block;
@@ -2667,7 +2658,7 @@ static void ae_nav_refresh_poll(void)
     }
 
     /* A different map object is a different map, and nothing cached survives it. */
-    if (!ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map_obj)) map_obj = g_nav_map_obj;
+    if (!sh_read_ptr(ed + ED_MAP_OBJ_OFF, &map_obj)) map_obj = g_nav_map_obj;
     if (map_obj != g_nav_map_obj) {
         if (sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_BUILDING)
             InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_FAILED);
@@ -3045,7 +3036,7 @@ void sh_apply_prefab_poll_play(void)
      * survive Play; the header is validated rather than assuming PushHeap succeeded. */
     void *blobArray = NULL;
     int survives = 0;
-    if (ae_read_ptr(ed + PASTE_PREFAB_ENTPTR_OFF, &blobArray) && blobArray)
+    if (sh_read_ptr(ed + PASTE_PREFAB_ENTPTR_OFF, &blobArray) && blobArray)
         survives = ae_block_survives_map(blobArray);
 
     int mine = (InterlockedCompareExchange(&g_we_staged, 0, 1) == 1);

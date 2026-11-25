@@ -1,6 +1,7 @@
 /* modserve_engine.c -- the engine side of modserve.h: decl registration through the registry, the existence
  * probe, the palette points, per-map activation and the serving verbs of sh_mods (status, rescan, palette
  * rebuild), which modcmd.c dispatches here. */
+#include "safe_read.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -2381,23 +2382,21 @@ int sh_modserve_launch_preload(const char *why)
     return rows_todo + map_todo;
 }
 
-static int me_rd_ptr(const void *p, void **v) { __try { *v = *(void *const *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }
-static int me_rd_i32(const void *p, int *v) { __try { *v = *(const int *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }
 
 static int me_count_mod_rows(void *palette, int *rows)
 {
     void *entries = NULL;
     int count = 0, i, mods = 0;
     *rows = -1;
-    if (!palette || !me_rd_ptr((unsigned char *)palette + PAL_ENTRIES_OFF, &entries) ||
-        !me_rd_i32((unsigned char *)palette + PAL_COUNT_OFF, &count)) return -1;
+    if (!palette || !sh_read_ptr((unsigned char *)palette + PAL_ENTRIES_OFF, &entries) ||
+        !sh_read_i32((unsigned char *)palette + PAL_COUNT_OFF, &count)) return -1;
     *rows = count;
     if (!entries || count <= 0 || count > PAL_MAX) return 0;
     for (i = 0; i < count; ++i) {
         void *sedef = NULL, *name = NULL;
         const unsigned char *entry = (const unsigned char *)entries + (size_t)i * PAL_STRIDE;
         int is_mod = 0;
-        if (!me_rd_ptr(entry, &sedef) || !sedef || !me_rd_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &name) || !name)
+        if (!sh_read_ptr(entry, &sedef) || !sedef || !sh_read_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &name) || !name)
             continue;
         __try { is_mod = sh_modserve_is_mod_sedef((const char *)name); }
         __except (EXCEPTION_EXECUTE_HANDLER) { is_mod = 0; }
@@ -2416,10 +2415,6 @@ static const unsigned me_pal_str_off[PAL_STR_FIELDS] = { 0x168, 0x1a0, 0x1f8, 0x
 static const char *const me_pal_str_name[PAL_STR_FIELDS] =
     { "display name", "model", "+0x1f8", "clipModelName", "clipModel type", "door lock message" };
 
-static int me_rd_u32(const void *p, unsigned *v)
-{
-    __try { *v = *(const unsigned *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
 
 /* 0 none, 1 process, 2 persist, 3 map, 4 not committed (released), 5 no
  * recognisable allocator header. */
@@ -2450,7 +2445,7 @@ static void me_palette_check(void)
     int count = 0, i, f, c, listed = 0, rows_bad = 0, rec_bad = 0, sorts = 0, unscoped = 0, guarded = 0;
     unsigned inline_n = 0, by_class[6] = { 0 };
     char why[96], line[400];
-    if (!palette || !me_rd_ptr(palette + PAL_ENTRIES_OFF, &entries) || !me_rd_i32(palette + PAL_COUNT_OFF, &count) ||
+    if (!palette || !sh_read_ptr(palette + PAL_ENTRIES_OFF, &entries) || !sh_read_i32(palette + PAL_COUNT_OFF, &count) ||
         !entries || count <= 0 || count > PAL_MAX) {
         sh_printf("sh_mods palette check: no editor palette yet\n");
         return;
@@ -2467,13 +2462,13 @@ static void me_palette_check(void)
         void *sedef = NULL, *name = NULL, *record = NULL;
         const char *sedef_name = "?";
         int row_bad = 0;
-        if (me_rd_ptr(entry, &sedef) && sedef && me_rd_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &name) && name)
+        if (sh_read_ptr(entry, &sedef) && sedef && sh_read_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &name) && name)
             sedef_name = (const char *)name;
         for (f = 0; f < PAL_STR_FIELDS; ++f) {
             const unsigned char *s = entry + me_pal_str_off[f];
             void *data = NULL;
             unsigned len = 0;
-            if (!me_rd_ptr(s + 0x10, &data) || !me_rd_u32(s + 8, &len)) continue;
+            if (!sh_read_ptr(s + 0x10, &data) || !sh_read_u32(s + 8, &len)) continue;
             if (!data || data == (const void *)(s + 0x1c)) { ++inline_n; continue; }
             c = me_ptr_class(data, why, sizeof why);
             ++by_class[c];
@@ -2495,7 +2490,7 @@ static void me_palette_check(void)
         }
         /* The record is an interior pointer (no header of its own): only a
          * released or map-heap block start counts. */
-        if (me_rd_ptr(entry + 0x150, &record) && record && (c = me_ptr_class(record, why, sizeof why)) >= 3 && c <= 4) {
+        if (sh_read_ptr(entry + 0x150, &record) && record && (c = me_ptr_class(record, why, sizeof why)) >= 3 && c <= 4) {
             ++rec_bad;
             row_bad = 1;
             if (listed < PAL_CHECK_LIST) {
@@ -2602,12 +2597,12 @@ static int pal_has(void *context, const char *sedef_name)
     void *entries = NULL;
     int count = 0, i, found = 0;
     (void)context;
-    if (!palette || !sedef_name || !me_rd_ptr(palette + PAL_ENTRIES_OFF, &entries) ||
-        !me_rd_i32(palette + PAL_COUNT_OFF, &count) || !entries || count <= 0 || count > PAL_MAX) return 0;
+    if (!palette || !sedef_name || !sh_read_ptr(palette + PAL_ENTRIES_OFF, &entries) ||
+        !sh_read_i32(palette + PAL_COUNT_OFF, &count) || !entries || count <= 0 || count > PAL_MAX) return 0;
     for (i = 0; i < count && !found; ++i) {
         void *sedef = NULL, *name = NULL;
         const unsigned char *entry = (const unsigned char *)entries + (size_t)i * PAL_STRIDE;
-        if (!me_rd_ptr(entry, &sedef) || !sedef || !me_rd_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &name) || !name)
+        if (!sh_read_ptr(entry, &sedef) || !sedef || !sh_read_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &name) || !name)
             continue;
         __try { found = !_stricmp((const char *)name, sedef_name); }
         __except (EXCEPTION_EXECUTE_HANDLER) { found = 0; }

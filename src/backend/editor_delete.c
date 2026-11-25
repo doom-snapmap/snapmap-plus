@@ -17,6 +17,7 @@
  * frees selection+0x50/+0x68/+0x80/+0xA8, VK 0x117E0C0 from 0x1203DB0) frees the released array and DOOM
  * stops with "Memory corruption before block!". So every native call runs in a verified process-heap
  * scope, and a request without one is refused unchanged. */
+#include "safe_read.h"
 #include <windows.h>
 #include <stdlib.h>
 #include <string.h>
@@ -93,18 +94,6 @@ static sh_editor_delete_engine g_engine;
 static int g_bound;
 
 /* Guarded engine memory access. */
-static int rd_ptr(const void *p, void **out)
-{
-    __try { *out = *(void *const *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
-static int rd_s32(const void *p, int *out)
-{
-    __try { *out = *(const int *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
-static int rd_u8(const void *p, uint8_t *out)
-{
-    __try { *out = *(const uint8_t *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
 static int rd_s64(const void *p, int64_t *out)
 {
     __try { *out = *(const int64_t *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
@@ -170,8 +159,8 @@ static int entity_alive(uint8_t *ents, uint32_t count, int id)
 {
     void *slot = NULL, *decl = NULL;
     if (id < 0 || (uint32_t)id >= count) return 0;
-    if (!rd_ptr(ents + (size_t)id * 8, &slot) || !slot) return 0;
-    if (!rd_ptr((uint8_t *)slot + SLOT_DECL_OFF, &decl)) return 0;
+    if (!sh_read_ptr(ents + (size_t)id * 8, &slot) || !slot) return 0;
+    if (!sh_read_ptr((uint8_t *)slot + SLOT_DECL_OFF, &decl)) return 0;
     return decl != NULL;
 }
 
@@ -186,12 +175,12 @@ static int portal_owned(uint8_t *map, size_t list_off, int id)
 {
     void *arr = NULL;
     int n = 0;
-    if (!rd_ptr(map + list_off, &arr) || !rd_s32(map + list_off + 8, &n)) return 1;
+    if (!sh_read_ptr(map + list_off, &arr) || !sh_read_i32(map + list_off + 8, &n)) return 1;
     if (n < 0 || n > LIST_LIMIT) return 1;
     if (n > 0 && !arr) return 1;
     for (int i = 0; i < n; i++) {
         int v = 0;
-        if (!rd_s32((uint8_t *)arr + (size_t)i * 4, &v)) return 1;
+        if (!sh_read_i32((uint8_t *)arr + (size_t)i * 4, &v)) return 1;
         if (v == id) return 1;
     }
     return 0;
@@ -237,12 +226,12 @@ static int batch(const int *ids, int count, sh_editor_delete_result *r)
     void *map = NULL, *sel = NULL, *screen = NULL;
     uint8_t deact = 0;
     int transition = 0, state = 0;
-    if (!rd_ptr(c.ed + ED_MAP_OFF, &map) || !map ||
-        !rd_ptr(c.ed + ED_SEL_OFF, &sel) || !sel ||
-        !rd_ptr(c.ed + ED_SCREEN_OFF, &screen) || !screen ||
-        !rd_u8(c.ed + ED_DEACT_OFF, &deact) || deact ||
-        !rd_s32(c.ed + ED_TRANSITION_OFF, &transition) || transition == EDITOR_TRANSITIONING ||
-        !rd_s32(c.ed + ED_STATE_OFF, &state))
+    if (!sh_read_ptr(c.ed + ED_MAP_OFF, &map) || !map ||
+        !sh_read_ptr(c.ed + ED_SEL_OFF, &sel) || !sel ||
+        !sh_read_ptr(c.ed + ED_SCREEN_OFF, &screen) || !screen ||
+        !sh_read_u8(c.ed + ED_DEACT_OFF, &deact) || deact ||
+        !sh_read_i32(c.ed + ED_TRANSITION_OFF, &transition) || transition == EDITOR_TRANSITIONING ||
+        !sh_read_i32(c.ed + ED_STATE_OFF, &state))
         return SH_EDITOR_DELETE_NOT_READY;
     if (state != EDITOR_ENTITY_MODE) return SH_EDITOR_DELETE_NOT_ENTITY;
     c.map = (uint8_t *)map;
@@ -253,10 +242,10 @@ static int batch(const int *ids, int count, sh_editor_delete_result *r)
     /* The native tick only dispatches from idle or Selection, in its tick
      * phase, with no other action queued for this frame. */
     int prev = 0, idle_phase = 0, selection_phase = 0, queued = 0;
-    if (!rd_s32(c.mode + MODE_CUR_OFF, &c.cur) || !rd_s32(c.mode + MODE_PREV_OFF, &prev) ||
-        !rd_s32(c.mode + MODE_IDLE_OFF + SUB_PHASE_OFF, &idle_phase) ||
-        !rd_s32(c.selection_sub + SUB_PHASE_OFF, &selection_phase) ||
-        !rd_s32(c.mode + MODE_QUEUED_OFF, &queued))
+    if (!sh_read_i32(c.mode + MODE_CUR_OFF, &c.cur) || !sh_read_i32(c.mode + MODE_PREV_OFF, &prev) ||
+        !sh_read_i32(c.mode + MODE_IDLE_OFF + SUB_PHASE_OFF, &idle_phase) ||
+        !sh_read_i32(c.selection_sub + SUB_PHASE_OFF, &selection_phase) ||
+        !sh_read_i32(c.mode + MODE_QUEUED_OFF, &queued))
         return SH_EDITOR_DELETE_NOT_READY;
     r->busy = SH_EDITOR_DELETE_BUSY_SUBSTATE;
     if (c.cur != SUBSTATE_IDLE && c.cur != SUBSTATE_SELECTION) return SH_EDITOR_DELETE_BUSY;
@@ -275,8 +264,8 @@ static int batch(const int *ids, int count, sh_editor_delete_result *r)
 
     void *ents = NULL;
     uint32_t ent_count = 0;
-    if (!rd_ptr(c.map + MAP_ENTS_OFF, &ents) || !ents ||
-        !rd_s32(c.map + MAP_ENTCOUNT_OFF, (int *)&ent_count) || ent_count > ENTITY_LIMIT)
+    if (!sh_read_ptr(c.map + MAP_ENTS_OFF, &ents) || !ents ||
+        !sh_read_i32(c.map + MAP_ENTCOUNT_OFF, (int *)&ent_count) || ent_count > ENTITY_LIMIT)
         return SH_EDITOR_DELETE_NOT_READY;
     c.ents = (uint8_t *)ents;
     c.ent_count = ent_count;
@@ -316,9 +305,9 @@ static int batch(const int *ids, int count, sh_editor_delete_result *r)
     /* Snapshot what the request will change. */
     int hover = -1;
     void *prior_ids = NULL;
-    if (!rd_s32(c.sel + SEL_HOVER_OFF, &hover) || !rd_s64(c.sel + SEL_WIRE_OFF, &c.wire) ||
-        !rd_s32(c.sel + SEL_COUNT_OFF, &c.prior_count) || c.prior_count < 0 ||
-        c.prior_count > LIST_LIMIT || !rd_ptr(c.sel + SEL_IDS_OFF, &prior_ids) ||
+    if (!sh_read_i32(c.sel + SEL_HOVER_OFF, &hover) || !rd_s64(c.sel + SEL_WIRE_OFF, &c.wire) ||
+        !sh_read_i32(c.sel + SEL_COUNT_OFF, &c.prior_count) || c.prior_count < 0 ||
+        c.prior_count > LIST_LIMIT || !sh_read_ptr(c.sel + SEL_IDS_OFF, &prior_ids) ||
         (c.prior_count > 0 && !prior_ids)) {
         status = SH_EDITOR_DELETE_NOT_READY;
         goto done;
@@ -327,7 +316,7 @@ static int batch(const int *ids, int count, sh_editor_delete_result *r)
         c.prior = (int *)malloc(sizeof(int) * (size_t)c.prior_count);
         if (!c.prior) goto done;
         for (int i = 0; i < c.prior_count; i++)
-            if (!rd_s32((uint8_t *)prior_ids + (size_t)i * 4, &c.prior[i])) {
+            if (!sh_read_i32((uint8_t *)prior_ids + (size_t)i * 4, &c.prior[i])) {
                 status = SH_EDITOR_DELETE_NOT_READY;
                 goto done;
             }
@@ -347,10 +336,10 @@ static int batch(const int *ids, int count, sh_editor_delete_result *r)
     if (ok) {
         int n = -1;
         void *now = NULL;
-        ok = rd_s32(c.sel + SEL_COUNT_OFF, &n) && n == ntargets && rd_ptr(c.sel + SEL_IDS_OFF, &now) && now;
+        ok = sh_read_i32(c.sel + SEL_COUNT_OFF, &n) && n == ntargets && sh_read_ptr(c.sel + SEL_IDS_OFF, &now) && now;
         for (int i = 0; ok && i < n; i++) {
             int v = -1;
-            ok = rd_s32((uint8_t *)now + (size_t)i * 4, &v) && in_bits(bits, c.ent_count, v);
+            ok = sh_read_i32((uint8_t *)now + (size_t)i * 4, &v) && in_bits(bits, c.ent_count, v);
         }
     }
     /* The capability builder and the action both fold the hovered entity into
@@ -377,7 +366,7 @@ static int batch(const int *ids, int count, sh_editor_delete_result *r)
     }
     if (ok) ok = call_caps(c.selection_sub, c.mode, c.ed);
     uint8_t caps = 0;
-    if (ok) ok = rd_u8(c.selection_sub + SELECTION_CAPS_OFF, &caps);
+    if (ok) ok = sh_read_u8(c.selection_sub + SELECTION_CAPS_OFF, &caps);
     if (!ok) {
         r->rolled_back = rollback(&c);
         goto done;
@@ -424,12 +413,12 @@ int sh_editor_delete_native_pending(void)
     int state = 0, cur = 0, prev = 0, idle_phase = 0, selection_phase = 0, queued = 0;
     if (!g_bound) return 0;
     uint8_t *ed = g_engine.editor, *mode = ed + ED_MODE_OFF;
-    if (!rd_ptr(ed + ED_MAP_OFF, &map) || !map) return 0;
-    if (!rd_s32(ed + ED_STATE_OFF, &state) || state != EDITOR_ENTITY_MODE) return 0;
-    if (!rd_s32(mode + MODE_CUR_OFF, &cur) || !rd_s32(mode + MODE_PREV_OFF, &prev) ||
-        !rd_s32(mode + MODE_IDLE_OFF + SUB_PHASE_OFF, &idle_phase) ||
-        !rd_s32(mode + MODE_SELECTION_OFF + SUB_PHASE_OFF, &selection_phase) ||
-        !rd_s32(mode + MODE_QUEUED_OFF, &queued))
+    if (!sh_read_ptr(ed + ED_MAP_OFF, &map) || !map) return 0;
+    if (!sh_read_i32(ed + ED_STATE_OFF, &state) || state != EDITOR_ENTITY_MODE) return 0;
+    if (!sh_read_i32(mode + MODE_CUR_OFF, &cur) || !sh_read_i32(mode + MODE_PREV_OFF, &prev) ||
+        !sh_read_i32(mode + MODE_IDLE_OFF + SUB_PHASE_OFF, &idle_phase) ||
+        !sh_read_i32(mode + MODE_SELECTION_OFF + SUB_PHASE_OFF, &selection_phase) ||
+        !sh_read_i32(mode + MODE_QUEUED_OFF, &queued))
         return 1;
     if (selection_phase != SELECTION_PHASE_TICK) return 1;
     if ((cur == SUBSTATE_IDLE || prev == SUBSTATE_IDLE) && idle_phase != IDLE_PHASE_TICK) return 1;
@@ -487,7 +476,7 @@ static int heap_leave(void)
 static int on_main_thread(void)
 {
     int id = 0;
-    if (!g_main_thread_at || !rd_s32(g_main_thread_at, &id) || id == 0) return -1;
+    if (!g_main_thread_at || !sh_read_i32(g_main_thread_at, &id) || id == 0) return -1;
     return (DWORD)id == GetCurrentThreadId() ? 1 : 0;
 }
 

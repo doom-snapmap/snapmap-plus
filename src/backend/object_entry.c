@@ -3,6 +3,7 @@
  * hands to the entry solver (VK FUN_1412b3780 / GL FUN_1412b2e60). The solver box-traces down in segments of
  * 18364 until one misses; ObjectEntryDrop (VK 0x1412b3823 / GL 0x1412b2f03, MOVSS xmm9,[rip+disp32]) is the
  * only reader of that constant (VK 0x14238e388 / GL 0x1423a80d8), so only its disp32 is repointed. */
+#include "safe_read.h"
 #include "object_entry.h"
 #include <string.h>
 
@@ -37,17 +38,12 @@ static drop_page *g_page;
 static sh_patch_handle g_patch;
 static int g_live;
 
-static int read_float(uintptr_t at,float *out)
-{
-    __try {*out=*(const volatile float*)at;return 1;}
-    __except(EXCEPTION_EXECUTE_HANDLER) {return 0;}
-}
 /* The bind's byte checks, the install's and the image test's one function: the load's bytes, then its constant. */
 const char *sh_object_entry_check(const unsigned char *site,uintptr_t *constant)
 {
     float native=0;
     if(!sh_object_entry_site(site,constant))return "the entry drop load has unexpected bytes";
-    if(!read_float(*constant,&native)||native!=SH_OBJECT_ENTRY_NATIVE_DROP)return "the entry drop constant is not 18364";
+    if(!sh_read_float(*constant,&native)||native!=SH_OBJECT_ENTRY_NATIVE_DROP)return "the entry drop constant is not 18364";
     return NULL;
 }
 int sh_object_entry_install(const sig_result *results,size_t count)
