@@ -2085,12 +2085,13 @@ int sh_modserve_scope_apply(const char *phase)
     return 1;
 }
 
+static int me_activate_bundles(const char *const *bundle_hashes, int n, const char *phase, int map_load);
+
 int sh_modserve_scope_activate(const char *phase)
 {
     char (*h)[SH_MODSERVE_HASH_HEX + 1] = NULL;
     const char **list = NULL;
-    sh_modserve_plan plan;
-    int n, i, unknown = 0;
+    int n, i, ready = 0;
     if (!phase) phase = "map";
     if (me_on_main() != 1 || !g_bound || me_in_play() == 1 || !sh_modserve_scope_map_open())
         return sh_modserve_scope_apply(phase);
@@ -2102,21 +2103,11 @@ int sh_modserve_scope_activate(const char *phase)
     if (n > 0 && h && list) {
         n = sh_modserve_scope_hashes(h, n);
         for (i = 0; i < n; ++i) list[i] = h[i];
-        if (sh_modserve_plan_bundles(list, n, &plan, &unknown) >= 0) {
-            if (plan.count) {
-                double t0 = me_now_ms();
-                /* As a map load runs it: requirements, the sources, the
-                 * pending re-parses (op_sources_published), then the loads. */
-                int ready = me_run(&plan, phase);
-                me_log("scope: %s: the map's %d declared bundle(s) activated (%d steps, %d ready, %d blocked) in %.1f ms",
-                       phase, n - unknown, plan.count, ready < 0 ? 0 : ready, plan.blocked, me_now_ms() - t0);
-            }
-            sh_modserve_plan_free(&plan);
-        }
-    } else if (n > 0) me_log("scope: %s: activation skipped (out of memory)", phase);
+        ready = me_activate_bundles(list, n, phase, 0);
+    } else if (n > 0) { me_log("scope: %s: activation skipped (out of memory)", phase); ready = -1; }
     free(list);
     free(h);
-    return sh_modserve_scope_apply(phase);
+    return ready < 0 ? -1 : sh_modserve_scope_apply(phase);
 }
 
 /* The plan's sources are registered; its loads have not run (me_run). A
@@ -2724,6 +2715,9 @@ static void me_ledger_sweep(const char *phase)
     } __finally {
         if (!sh_process_heap_leave(&heap)) me_log("%s: ledger: heap scope did not balance", phase);
     }
+    for (i = 0; i < decls.tally.ntypes; ++i)
+        me_log("%s: ledger: re-parsed %s (%s%s)", phase, decls.tally.types[i].type, decls.tally.types[i].names,
+               sh_modledger_tally_truncated(&decls.tally.types[i]) ? ", ..." : "");
     me_log("%s: ledger: %d held name(s) carried other bytes than the open map serves: %d decl(s) re-parsed, %d model(s), "
            "%d image(s) and %d anim(s) reloaded (%d failed, %d refused)%s%s%s", phase, s->n + s->dropped,
            decls.reparsed, raw.models, raw.images, raw.anims, decls.failed + raw.failed + raw.faulted, raw.refused,
@@ -2737,9 +2731,7 @@ static void me_ledger_sweep(const char *phase)
 
 int modserve_activate_bundles(const char *const *bundle_hashes, int n)
 {
-    sh_modserve_plan plan;
-    int unknown = 0, ready, main = me_on_main();
-    double t0;
+    int main = me_on_main();
     /* A new map: the last one's mod scripts end (they start at its Play). */
     if (main == 1) sh_script_hooks_gate(SH_SCRIPT_GATE_MAP_LOAD);
     if (main == 1) sh_clip_events_map_end();
@@ -2751,8 +2743,16 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     if (n <= 0 || !bundle_hashes) return 0;
     if (main != 1) { me_log("activation refused: not on the main thread"); return -1; }
     if (!g_bound) { me_log("activation refused: decl registry unavailable"); return -1; }
-    sh_modvt_before_pass("map");
-    sh_modsound_before_pass("map");
+    return me_activate_bundles(bundle_hashes, n, "map", 1);
+}
+
+static int me_activate_bundles(const char *const *bundle_hashes, int n, const char *phase, int map_load)
+{
+    sh_modserve_plan plan;
+    int unknown = 0, ready;
+    double t0;
+    sh_modvt_before_pass(phase);
+    sh_modsound_before_pass(phase);
     /* Stock banks the declared bundles' borrowed sound events need (modsound.h). */
     (void)sh_modsound_stock_before_map(bundle_hashes, n);
     (void)sh_strids_scope_check();
@@ -2760,13 +2760,13 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     me_ensure_probe();
     t0 = me_now_ms();
     if (sh_modserve_plan_bundles(bundle_hashes, n, &plan, &unknown) < 0) { me_log("activation refused: out of memory"); return -1; }
-    /* The map pass: held anims may be reloaded in place (g_anim_pass). */
-    g_anim_pass = me_in_play() != 1;
-    if (plan.count) ready = me_run(&plan, "map");
-    else { me_refresh_apply("map", 0, NULL); me_reparse_early("map", 0); me_reload_ungated("map", 0); ready = 0; }
-    me_ledger_sweep("map");
+    /* Only a map load can reload held animations in place. */
+    g_anim_pass = map_load && me_in_play() != 1;
+    if (plan.count) ready = me_run(&plan, phase);
+    else { me_refresh_apply(phase, 0, NULL); me_reparse_early(phase, 0); me_reload_ungated(phase, 0); ready = 0; }
+    me_ledger_sweep(phase);
     g_anim_pass = 0;
-    if (g_anims_waited) {
+    if (map_load && g_anims_waited) {
         int left = sh_modserve_refresh_pending_anims();
         if (!left) {
             me_log("map: the %d anim(s) that waited for a map load are settled (reloaded in place or already held); "
@@ -2778,7 +2778,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
             g_anims_waited = left;
         }
     }
-    me_log("activated %d bundles (%d steps, %d ready, %d blocked, %d not installed) in %.1f ms", n - unknown,
+    me_log("%s: activated %d bundles (%d steps, %d ready, %d blocked, %d not installed) in %.1f ms", phase, n - unknown,
            plan.count, ready < 0 ? 0 : ready, plan.blocked, unknown, me_now_ms() - t0);
     sh_modserve_plan_free(&plan);
     if (ready >= 0) me_sync_rows(bundle_hashes, n);

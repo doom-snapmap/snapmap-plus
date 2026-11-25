@@ -3447,7 +3447,7 @@ static int mu_scope_now_declared(const char *phase)
     int changed;
     if (!sh_modserve_scope_enabled()) return 0;
     changed = mu_listing_live();
-    if (!changed) return 0;
+    /* A composition can become ready while the map still lists the same bundle. */
     if (!e->scope_activate) { (void)mu_scope_apply(phase); return changed; }
     InterlockedExchange(&g_scope_owed, 0);
     (void)e->scope_activate(phase);

@@ -192,8 +192,8 @@ void sh_modui_note_changed(void);
 /* The publishing key's Settings requests (SH_MODS_ACT_KEY) and its state in the list document ("publishingKey"),
  * modclaim.h modclaim_key_action and modclaim_key_status_json: each answer malloc'd. Unbound, neither is offered. */
 void sh_modui_set_key(char *(*action)(const char *arg), char *(*status)(void));
-/* The open map's listing again from its live placed names and rows, applied when it changed (a placement added rows
- * to the current manifest: an imported prefab's units). Main thread: 1 changed, 0 not, -1 off the main thread. */
+/* Refresh the listing and register its current declarations and palette rows before a prefab is placed.
+ * Main thread: 1 if the listing changed, 0 if it stayed the same, -1 off the main thread. */
 int  sh_modui_scope_refresh(const char *why);
 
 /* The interface slot body (see snapmap_plus_iface.h, `mods`). */
