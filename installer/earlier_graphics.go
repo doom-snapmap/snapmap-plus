@@ -37,7 +37,7 @@ func earlierVector(text string) ([4]float64, error) {
 
 // Turn retired material parameters into the same author look as a current emit.
 func upgradeEarlierMaterial(original []byte) ([]byte, error) {
-	if !earlierLookKey.Match(original) && !earlierParticleProgram.Match(original) && !earlierParticleKey.Match(original) && !earlierLayerKey.Match(original) {
+	if !earlierLookKey.Match(original) && !earlierCompactLook.Match(original) && !earlierParticleProgram.Match(original) && !earlierParticleKey.Match(original) && !earlierLayerKey.Match(original) {
 		return original, nil
 	}
 	return migrateEarlierLook(string(original))

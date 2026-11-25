@@ -10,6 +10,8 @@ import (
 )
 
 var earlierLayerKey = regexp.MustCompile(`(?im)^[ \t]*(?:layerstilingfactor|multiblend(?:layerscale|heightmapscale|softness|albedoscale|normalscale|specularscale|smoothnessscale|emissivescale)|blendheightmapscale|blendlayer[0-4](?:tiling|emissive|specular)|blendlayer0heightmap|multilayerember(?:tiling|noise|hot)?)[ \t]+`)
+var earlierCompactLook = regexp.MustCompile(`(?im)^([ \t]*\{)([ \t]*look[ \t]+(?:layered|particle)\b)`)
+var earlierCompactEnd = regexp.MustCompile(`^([ \t]*\})([ \t]*(?://.*)?)$`)
 
 type earlierLook struct {
 	lines, keys, fields []string
@@ -61,7 +63,26 @@ func migrateEarlierLook(text string) ([]byte, error) {
 	if strings.Contains(text, "\r\n") {
 		eol = "\r\n"
 	}
-	m := earlierLook{lines: strings.Split(text, eol), values: map[string]string{}, drop: map[string]bool{}, first: -1}
+	lines := strings.Split(text, eol)
+	if earlierCompactLook.MatchString(text) {
+		depth, block := 0, false
+		for i, line := range lines {
+			if depth == 0 && !block {
+				if loc := earlierCompactLook.FindStringSubmatchIndex(line); loc != nil {
+					// Current material fields start on their own line.
+					end := line[loc[1]:]
+					if earlierCompactEnd.MatchString(end) {
+						end = eol + end
+					}
+					lines[i] = line[:loc[3]] + eol + line[loc[3]:loc[1]] + end
+					lines = strings.Split(strings.Join(lines, eol), eol)
+					break
+				}
+			}
+			materialLine(line, &depth, &block)
+		}
+	}
+	m := earlierLook{lines: lines, values: map[string]string{}, drop: map[string]bool{}, first: -1}
 	depth, block := 0, false
 	var particle, layered bool
 	for i, line := range m.lines {
