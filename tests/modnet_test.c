@@ -138,7 +138,7 @@ int main(void)
         base = modnet_base_url();
         CHECK(base && strcmp(base, longer) == 0);
         free(base);
-        _snprintf_s(out, sizeof out, _TRUNCATE, "%s\unit-long.zip", tmp);
+        _snprintf_s(out, sizeof out, _TRUNCATE, "%s\\unit-long.zip", tmp);
         code = modnet_get_unit_archive(unit, NULL, 0, out, 0, NULL, &r);
         CHECK(code != MODNET_E_CONFIG && code != MODNET_E_ARG && r.status != 0);   /* the request reached the store */
         free(longer);
@@ -149,7 +149,7 @@ int main(void)
     {
         static const char unit[] = "abababababababababababababababababababababababababababababababab";
         char out[MAX_PATH * 2];
-        _snprintf_s(out, sizeof out, _TRUNCATE, "%s\unit-fail.zip", tmp);
+        _snprintf_s(out, sizeof out, _TRUNCATE, "%s\\unit-fail.zip", tmp);
         code = modnet_get_unit_archive(unit, NULL, 0, out, 0, NULL, &r);
         CHECK(code == MODNET_E_NOT_FOUND && r.status == 404);   /* the stub holds nothing */
         stub_fail_next("GET /mods/unit/", 503);
@@ -162,6 +162,10 @@ int main(void)
         stub_fail_next("GET /mods/unit/", 429);
         code = modnet_get_unit_archive(unit, NULL, 0, out, 0, NULL, &r);
         CHECK(code == MODNET_E_RATE && modnet_transient(code));
+        stub_fail_next("GET /mods/unit/", 416);
+        CHECK(modnet_get_unit_archive(unit, NULL, 0, out, 1, NULL, &r) == MODNET_OK && r.status == 416);
+        stub_fail_next("GET /mods/unit/", 416);
+        CHECK(modnet_get_unit_archive(unit, NULL, 0, out, 0, NULL, &r) != MODNET_OK && r.status == 416);
         {
             /* Cancelled before the request is made. */
             volatile long cancel = 1;

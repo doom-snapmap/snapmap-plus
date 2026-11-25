@@ -942,11 +942,9 @@ static int mn_get_resumed(const char *route, const char *out_path, unsigned long
             have = 0;
             continue;
         }
-        if (code == MODNET_OK && r->status == 416 && have) {
-            /* The file already holds every byte. */
-            code = MODNET_OK;
-            r->status = 206;
-        } else if (code == MODNET_OK && r->status != 200 && r->status != 206) code = mn_status_fail(r, resp, rlen, "download");
+        /* A complete partial may receive 416. Its caller still verifies the file. */
+        if (code == MODNET_OK && r->status != 200 && r->status != 206 && !(r->status == 416 && have))
+            code = mn_status_fail(r, resp, rlen, "download");
         break;
     }
     free(range);

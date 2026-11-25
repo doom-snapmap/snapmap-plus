@@ -1899,7 +1899,11 @@ static int mc_fetch_blob(const char *sha, unsigned long long size, const modnet_
                          r.message ? r.message : modnet_code_text(code), r.status, have + r.received, size);
             break;
         }
-        if (sh_cache_put_blob(part, sha, size)) { cause = 0; break; }
+        if (sh_cache_put_blob(part, sha, size)) {
+            if (have && r.status == 206) mc_logf("MODS: content: file %.16s resumed at byte %llu (HTTP 206)", sha, have);
+            cause = 0;
+            break;
+        }
         /* the bytes were not the blob's: discarded by put_blob; once more from the start */
     }
     free(dir);
@@ -1955,6 +1959,7 @@ static int mc_fetch_archive(mc_unit *u, const char *hash, const modnet_io *io)
                 r.message ? r.message : modnet_code_text(code), r.status);
         goto done;
     }
+    if (have && r.status == 206) mc_logf("MODS: content: unit %.16s's archive resumed at byte %llu (HTTP 206)", hash, have);
     memset(&z, 0, sizeof z);
     if (!sh_zip_reader_open(&z, part, &cause_text)) {
         mc_logf("MODS: content: unit %.16s's archive did not read (%s)", hash, cause_text ? cause_text : "?");
