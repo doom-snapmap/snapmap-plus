@@ -93,7 +93,7 @@ Chromium's remote debugging port named by `%LOCALAPPDATA%\snapmap-plus\devtools-
 daemon (a release page never does, and `tools/bundle_guard.ps1` refuses a package that would). Frontend
 sources are in `src/ui/webview/`.
 
-For live tests with a separate set of mods, build with `-Diag -BenchMods`. This backend reads `%LOCALAPPDATA%\snapmap-plus\bench\mods` and keeps its map-content cache and publishing key in the same bench profile. The game's saves, renderer settings and normal Snapmap+ configuration still use the current Windows profile.
+For live tests with a separate set of mods, add `-snapmap-plus-bench` to the DOOM launch arguments (for example, `steam -applaunch 379720 -snapmap-plus-bench`). The release backend reads `%LOCALAPPDATA%\snapmap-plus\bench\mods` and keeps its map-content cache and publishing key in the same bench profile. The game's saves, renderer settings and normal Snapmap+ configuration still use the current Windows profile.
 
 The build is incremental. Each component script compiles its sources to objects under `build/obj/`
 with `cl /c /MP` (one compiler process per core) and then links them, all through the shared helpers

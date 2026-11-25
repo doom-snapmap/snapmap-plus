@@ -6,6 +6,7 @@
 #include "heap_out.h"
 #include <windows.h>
 #include <shellapi.h>
+#include <process.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1490,6 +1491,17 @@ static void test_nested(const char *tmp)
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH], fixture[MAX_PATH], got[MAX_PATH];
+    wchar_t exe[MAX_PATH];
+    if (argc >= 3 && !strcmp(argv[1], "--profile-probe")) {
+        const char *root = sh_ms_root(), *base = sh_mb_user_root();
+        const char *folder = !strcmp(argv[2], "bench") ? "bench\\mods" : "mods";
+        return !root || !base || _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\%s", base, folder) < 0 ||
+               strcmp(got, root) || root != sh_ms_root();
+    }
+    if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) return 2;
+    CHECK(_wspawnl(_P_WAIT, exe, L"modstore_test", L"--profile-probe", L"normal", NULL) == 0);
+    CHECK(_wspawnl(_P_WAIT, exe, L"modstore_test", L"--profile-probe", L"normal", L"-snapmap-plus-bench-extra", NULL) == 0);
+    CHECK(_wspawnl(_P_WAIT, exe, L"modstore_test", L"--profile-probe", L"bench", L"-snapmap-plus-bench", NULL) == 0);
     if (!GetFullPathNameA(argc > 1 ? argv[1] : "fixtures\\mods\\alex.r2-imp", sizeof fixture, fixture, NULL)) return 2;
     if (!mt_temp_dir("modstore", tmp, sizeof tmp)) { fprintf(stderr, "no temp dir\n"); return 2; }
     CHECK(sh_ms_set_root(NULL) && sh_ms_root() && strcpy_s(got, sizeof got, sh_ms_root()) == 0 && strstr(got, "\\snapmap-plus\\mods"));
