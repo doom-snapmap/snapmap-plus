@@ -9,7 +9,9 @@ const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
 const gen = require(path.join(root, 'tools', 'gen_programs.js'));
-const modprogC = fs.readFileSync(path.join(root, 'src', 'backend', 'modprog.c'), 'utf8').replace(/\r\n/g, '\n');
+const modprogC = ['modprog.c', 'programs/particles_splice.inc']
+  .map((file) => fs.readFileSync(path.join(root, 'src', 'backend', file), 'utf8'))
+  .join('\n').replace(/\r\n/g, '\n');
 const progs = gen.buildPrograms();
 
 // the strings of a C string-array table in modprog.c
@@ -163,6 +165,13 @@ test('the header reads exactly the program\'s textures', () => {
   assert.deepEqual(gen.hairSpec().samplers.map((x) => x[1]), table('SH_MODPROG_HR_TEXTURES'));
   // and none reads a render parm (the call blocks pass them in)
   for (const p of Object.values(progs)) assert.ok(!/\$\w+\.\w/.test(p.header), 'a parm read in a header');
+});
+
+test('published particle units retain their base shader', () => {
+  const base = progs.particlesBase;
+  const hash = require('node:crypto').createHash('sha256');
+  assert.equal(hash.update(base.header).update(base.call).update(base.glsl).digest('hex'),
+    '08e59f865bbabd7f1dc1b6f50debec5fd9cbc42bb12be1cb3f06e3f3237bf680');
 });
 
 test('the generated files are what the sources give (gen_programs.js --check)', () => {

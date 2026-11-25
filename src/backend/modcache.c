@@ -2096,7 +2096,11 @@ static int mc_product_ok(const mc_unit *u)
          * has compiled, after this check: this product's compiler answers for it and serves the name its own compile
          * spells (modserve.h sh_modserve_set_product_reader), so a unit pointing at one is not refused for it. */
         if (sh_mb_product_hashed(p->text) && !sh_modprog_owns(p->text)) continue;
-        if (!sh_modprog_owns(p->text) ||sh_modprog_read(p->text, &bytes, &len) != SH_MB_STOCK_OK || !bytes) {
+        char *archived = sh_modprog_pinned_path(p->text);
+        const char *path = archived ? archived : p->text;
+        int read = sh_modprog_owns(path) && sh_modprog_read(path, &bytes, &len) == SH_MB_STOCK_OK && bytes;
+        free(archived);
+        if (!read) {
             mc_logf("MODS: content: a unit names %s of Snapmap+'s own files, which this Snapmap+ does not make", p->text);
             ok = 0;
             continue;

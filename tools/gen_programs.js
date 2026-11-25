@@ -200,9 +200,9 @@ function layeredSpec() {
   };
 }
 
-function particlesSpec() {
+function particlesSpec(extended = true) {
   return {
-    file: 'particles.rp', name: 'EP',
+    file: 'particles.rp', name: extended ? 'EP' : 'EP_BASE', extended,
     // the shading's samplers and the material textures they are (the first three the program's own)
     samplers: [['ep_trans', 'transmap'], ['ep_depth', 'viewdepthmap'], ['ep_atlas', 'particleslightatlasmap'],
       ['ep_emissive', 'particleemissivemap']],
@@ -225,7 +225,14 @@ function hairSpec() {
 
 // What one program's source gives: { header, call (the OpenGL texts), glsl (the stage text), spirvSource }.
 function buildProgram(spec) {
-  const text = fs.readFileSync(path.join(edir, spec.file), 'utf8').replace(/\r\n/g, '\n');
+  let text = fs.readFileSync(path.join(edir, spec.file), 'utf8').replace(/\r\n/g, '\n');
+  if (spec.file === 'particles.rp') {
+    // Earlier published units pin the base program's exact bytes.
+    text = text.replace(/^#ifdef PARTICLE_DISTANCE_MASK\n([\s\S]*?)^#endif\n/gm, (_, body) => {
+      const [extended, base = ''] = body.split(/^#else\n/m);
+      return spec.extended ? extended : base;
+    });
+  }
   const secs = parseRp(text, spec.file);
   const byParm = new Map(spec.samplers.map(([v, parm]) => [parm, v]));
   const sampler = (use) => (lc, raw) => {
@@ -243,7 +250,7 @@ function buildProgram(spec) {
 }
 
 function buildPrograms() {
-  return { layered: buildProgram(layeredSpec()), particles: buildProgram(particlesSpec()), hair: buildProgram(hairSpec()) };
+  return { layered: buildProgram(layeredSpec()), particles: buildProgram(particlesSpec()), particlesBase: buildProgram(particlesSpec(false)), hair: buildProgram(hairSpec()) };
 }
 
 function compile(text) {
@@ -313,7 +320,9 @@ function outputs() {
   // each output: its file, the modules it embeds (source text and the C name of its words), its renderer
   return [
     [out, [[progs.layered.spirvSource, 'SH_MODPROG_ML_SPIRV']], (w) => renderProgram(progs.layered, { file: 'layered.c', desc: 'The layered surface', words: w })],
-    [epOut, [[progs.particles.spirvSource, 'SH_MODPROG_EP_SPIRV']], (w) => renderProgram(progs.particles, { file: 'particles.c', desc: 'The particle shading', words: w })],
+    [epOut, [[progs.particles.spirvSource, 'SH_MODPROG_EP_SPIRV'], [progs.particlesBase.spirvSource, 'SH_MODPROG_EP_BASE_SPIRV']],
+      (extended, base) => renderProgram(progs.particles, { file: 'particles.c', desc: 'The particle shading', words: extended }) +
+        '\n' + renderProgram(progs.particlesBase, { file: 'particles.c', desc: 'The base particle shading', words: base })],
     [hrOut, [[progs.hair.spirvSource, 'SH_MODPROG_HR_SPIRV']], (w) => renderProgram(progs.hair, { file: 'hair.c', desc: 'The hair programs\' death fade', words: w })],
     [fixtureOut, [[fixture, 'MODPROG_FIXTURE_SPIRV'], [epFixture, 'MODPROG_FIXTURE_EP_SPIRV'], [hrFixture, 'MODPROG_FIXTURE_HR_SPIRV']],
       (w, e, h) => renderFixture(fixture, epFixture, hrFixture, w, e, h)],

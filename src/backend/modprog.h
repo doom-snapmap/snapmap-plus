@@ -13,12 +13,13 @@
 #define SH_MODPROG_CONTAINER "snapmapplus"
 #define SH_MODPROG_PREFIX    "snapmapplus/layered/"
 #define SH_MODPROG_EP_PREFIX "snapmapplus/particles/"
+#define SH_MODPROG_EP_EXT_PREFIX "snapmapplus/particles-volume/"
 #define SH_MODPROG_HR_PREFIX "snapmapplus/hair/"
 
-/* Alternate prefixes for the particle and layered programs: owns and read answer them with the bytes of the
- * matching new-name path; list names only the new ones. */
-#define SH_MODPROG_OLD_PREFIX    "snapmapplus/multilayer/"
-#define SH_MODPROG_EP_OLD_PREFIX "snapmapplus/eternal/"
+#define SH_MODPROG_OLD_PREFIX "snapmapplus/multilayer/"
+
+/* Resolves a historical particle path only when checking a published unit's pinned bytes. Caller frees the result. */
+char *sh_modprog_pinned_path(const char *path);
 
 /* 1 when `path` (an archive path: '/' separated, any case) is a file the product derives, else 0. */
 int sh_modprog_owns(const char *path);
@@ -77,6 +78,7 @@ char *sh_modprog_effect_emitter(const char *fx_name);
  * `layerparms` line naming the registered image. Returns 1 with the text in *out (malloc'd), 0 when no old key is
  * written (*out NULL), -1 on failure. */
 int sh_modprog_legacy_material(const char *text, size_t len, char **out, size_t *out_len);
+int sh_modprog_pinned_material(const char *text, size_t len, char **out, size_t *out_len);
 
 /* The layered variant of a base program's decl text (its line ends kept): the blend's functions in its
  * hlsl_fp_header section and the call as the first statements of its CUSTOM_TEXTURE_INPUTS template. NULL when the
@@ -130,8 +132,10 @@ extern const unsigned SH_MODPROG_EP_SPIRV[];
 extern const char SH_MODPROG_EP_GLSL[];
 extern const char SH_MODPROG_EP_HEADER[];
 extern const char SH_MODPROG_EP_CALL[];
-extern const char *const SH_MODPROG_EP_PARMS[];
-extern const unsigned SH_MODPROG_EP_PARM_COUNT;
+extern const unsigned SH_MODPROG_EP_BASE_SPIRV_WORDS;
+extern const unsigned SH_MODPROG_EP_BASE_SPIRV[];
+extern const char SH_MODPROG_EP_BASE_GLSL[];
+extern const char SH_MODPROG_EP_BASE_HEADER[];
 extern const char *const SH_MODPROG_EP_TEXTURES[];
 extern const unsigned SH_MODPROG_EP_TEXTURE_COUNT;
 

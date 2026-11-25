@@ -306,10 +306,13 @@ func translateEarlierMod(src, dst string) (string, error) {
 		switch {
 		case strings.HasSuffix(item.author, ".decl"):
 			text := n.authorText(string(b))
-			if strings.HasPrefix(item.author, "materials/") {
-				text = earlierLookKey.ReplaceAllString(text, "${1}type${2}")
-			}
 			b = []byte(text)
+			if strings.HasPrefix(item.author, "materials/") {
+				b, err = upgradeParticleMaterial(b)
+				if err != nil {
+					return "", fmt.Errorf("%s: %w", item.author, err)
+				}
+			}
 		case strings.HasSuffix(item.author, ".lua"):
 			b = []byte(earlierLua(strings.ReplaceAll(string(b), "mods/"+id+"/", "mods/"+salt+"/")))
 		case strings.HasSuffix(item.author, ".bnk"):

@@ -707,6 +707,12 @@ int sh_modstock_verify(const char *source, const char *sha256, unsigned long lon
     int exists = 0;
     if (size) *size = 0;
     if (!source || !mst_unhex(sha256, want)) return SH_MB_STOCK_ABSENT;
+    char *archived = sh_modprog_pinned_path(source);
+    if (archived) {
+        int result = sh_modstock_verify(archived, sha256, size);
+        free(archived);
+        return result;
+    }
     if (sh_modprog_owns(source)) {
         char hex[SH_MB_HASH_HEX + 1];
         int r = mst_prog_identify(source, hex, &n);
@@ -731,6 +737,12 @@ int sh_modstock_read(const char *source, const char *sha256, unsigned char **byt
     if (bytes) *bytes = NULL;
     if (len) *len = 0;
     if (!source || !bytes || !len || !mst_unhex(sha256, want)) return SH_MB_STOCK_ABSENT;
+    char *archived = sh_modprog_pinned_path(source);
+    if (archived) {
+        int result = sh_modstock_read(archived, sha256, bytes, len);
+        free(archived);
+        return result;
+    }
     if (sh_modprog_owns(source)) {
         unsigned char *b = NULL;
         size_t n = 0;
@@ -820,6 +832,12 @@ int sh_modstock_container(const char *source, const char *sha256, char *out, siz
     int seen[MST_CONTAINERS] = { 0 }, which, c, kinds = 0;
     if (out && cap) out[0] = 0;
     if (!source || !source[0] || !out || !cap) return SH_MB_STOCK_ABSENT;
+    char *archived = sha256 ? sh_modprog_pinned_path(source) : NULL;
+    if (archived) {
+        int result = sh_modstock_container(archived, sha256, out, cap);
+        free(archived);
+        return result;
+    }
     if (sh_modprog_owns(source)) {
         char hex[SH_MB_HASH_HEX + 1];
         unsigned long long n = 0;

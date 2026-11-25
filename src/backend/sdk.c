@@ -7,6 +7,7 @@
 #include "modeffect.h"
 #include "modenv.h"
 #include "modlook.h"
+#include "modprog.h"
 #include "modwound.h"
 #include "sdkvalues.h"
 
@@ -101,5 +102,17 @@ int sh_sdk_compile(const char *path, const char *text, size_t len, char **out, s
 int sh_sdk_serve_compile(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
                          size_t why_len)
 {
-    return sh_sdk_compile(path, text, len, out, out_len, why, why_len, NULL, NULL);
+    const char *kind = sh_sdk_decl_type(path);
+    char *earlier = NULL;
+    size_t n = 0;
+    if (text && kind && !strcmp(kind, "material") && sh_modprog_pinned_material(text, len, &earlier, &n) < 0)
+        return SH_LOOK_OOM;
+    int r = sh_sdk_compile(path, earlier ? earlier : text, earlier ? n : len, out, out_len, why, why_len, NULL, NULL);
+    if (earlier && r == SH_LOOK_SAME) {
+        *out = earlier;
+        if (out_len) *out_len = n;
+        return SH_LOOK_CHANGED;
+    }
+    free(earlier);
+    return r;
 }

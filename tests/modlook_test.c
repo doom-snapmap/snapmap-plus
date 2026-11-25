@@ -444,6 +444,7 @@ static void test_particle_fields(void)
     if (x.out) {
         CHECK(vec_is(x.out, "particleuberparms3", 0.2f, 0.5f, 0.8f, 1));
         CHECK(vec_is(x.out, "smokebrightness", 0, 128, 256, 1));
+        CHECK(!strcmp(unq(value(x.out, "stageprogram", 0)), "snapmapplus/particles-volume/uberparticles"));
     }
     release(&x);
     /* the explosion: the gradient's colours, mode 4; unlit and defaults */

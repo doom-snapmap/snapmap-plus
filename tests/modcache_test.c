@@ -1121,6 +1121,7 @@ static void test_cache(const char *top)
 /* The product's own derived files (modprog.h), as a double: one path with known bytes. */
 #define PRODUCT_FILE  "snapmapplus/layered/derived_by_this_product.bimage"
 static const char PRODUCT_BYTES[] = "bytes this product derives";
+char *sh_modprog_pinned_path(const char *path) { (void)path; return NULL; }
 int sh_modprog_owns(const char *path) { return path && !_stricmp(path, PRODUCT_FILE); }
 int sh_modprog_read(const char *path, unsigned char **bytes, size_t *len)
 {
