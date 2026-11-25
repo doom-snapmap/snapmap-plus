@@ -221,6 +221,7 @@ $tests += @{ name = "level_templates_sigs_test"; src = 'level_templates_sigs_tes
 # The kill score (kill_score.h): a ported demon's type read as its stand-in's; with images, the Player Score
 # switch's pattern, its uniqueness, its window's one relocated short branch and its 18 field reads.
 $tests += @{ name = "encounter_spawn_test"; src = "encounter_spawn_test.c"; arg = "" }
+$tests += @{ name = "ribbonmotion_test"; src = 'ribbonmotion_test.c ..\src\backend\ribbonmotion_math.c ..\src\backend\modsalt.c'; arg = "" }
 $tests += @{ name = "kill_score_test"; src = 'kill_score_test.c ..\src\backend\kill_score_rule.c'; arg = "" }
 $tests += @{ name = "kill_score_sigs_test"; src = 'kill_score_sigs_test.c ..\src\backend\kill_score_sigs.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_SIGNATURE_SCAN_TESTING /DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # The sync clock (sync_clock_rule.c): which animators of a sync run on the player's clock, and one re-anchor's

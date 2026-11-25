@@ -71,6 +71,7 @@
 #include "attach_tags.h"
 #include "level_templates.h"
 #include "encounter_spawn.h"
+#include "ribbonmotion.h"
 #include "kill_score.h"
 #include "sync_clock.h"
 #include "typeinfo.h"
@@ -427,6 +428,8 @@ static void install_features(const sig_result *results, size_t db)
      * conductor row says it stands in for. */
     if (overrides_installed) {
         (void)sh_kill_score_install(g_doom_base);
+        if (!sh_ribbon_motion_install(results, db))
+            backend_log("RIBBON: sampled node motion is unavailable");
         if (!sh_encounter_spawn_install(results, db))
             backend_log("MODS: exact selection of ported actors sharing a spawn class is unavailable");
     }
