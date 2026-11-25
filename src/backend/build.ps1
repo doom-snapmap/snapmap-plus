@@ -68,13 +68,11 @@ param(
     [string]$Out = "XINPUT1_4.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.
     [switch]$Diag,
-    [switch]$BenchMods,
     # Pin the MSVC toolset for reproducible release builds. An empty value uses
     # the installed default; SNAPMAPPLUS_VCVARS_VER shares the pin with the UI build.
     [string]$VcVarsVer = $env:SNAPMAPPLUS_VCVARS_VER
 )
 $ErrorActionPreference = "Stop"
-if ($BenchMods -and !$Diag) { throw "-BenchMods requires -Diag" }
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $here)) "tools\cbuild.ps1")
@@ -101,7 +99,6 @@ if ($Diag) {
     # 302) exist only in this build.
     $Sources += "../fault_shield/shield_diag.c", "algo.c", "diag_status.c"
     $defs = "/DSH_DIAG"
-    if ($BenchMods) { $defs += " /DSH_BENCH_MODS" }
     $def = "xinput1_4_diag.def"
     Write-Host "[build] DIAGNOSTIC variant: +shield_diag.c +algo.c +diag_status.c /DSH_DIAG, xinput1_4_diag.def"
 }

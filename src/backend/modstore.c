@@ -160,22 +160,34 @@ int sh_ms_set_root(const char *root)
     return 1;
 }
 
+static INIT_ONCE g_ms_profile_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK ms_profile_root(PINIT_ONCE once, PVOID arg, PVOID *root)
+{
+    const char *base = sh_mb_user_root(), *folder = "mods";
+    int argc, i;
+    wchar_t **args;
+    (void)once;
+    (void)arg;
+    if (!base || !(args = CommandLineToArgvW(GetCommandLineW(), &argc))) return FALSE;
+    for (i = 1; i < argc; ++i) {
+        if (!wcscmp(args[i], L"-snapmap-plus-bench")) {
+            folder = "bench\\mods";
+            break;
+        }
+    }
+    LocalFree(args);
+    *root = sh_textf("%s\\%s", base, folder);
+    return *root != NULL;
+}
+
 const char *sh_ms_root(void)
 {
-    static char *volatile fallback;
-    const char *set = g_ms_root, *base;
-    char *made;
+    PVOID profile = NULL;
+    const char *set = g_ms_root;
     if (set) return set;
-    if (fallback) return fallback;
-    if (!(base = sh_mb_user_root())) return NULL;
-#ifdef SH_BENCH_MODS
-    made = sh_textf("%s\\bench\\mods", base);
-#else
-    made = sh_textf("%s\\mods", base);
-#endif
-    if (!made) return NULL;
-    if (InterlockedCompareExchangePointer((void *volatile *)&fallback, made, NULL) != NULL) free(made);
-    return fallback;
+    if (!InitOnceExecuteOnce(&g_ms_profile_once, ms_profile_root, NULL, &profile)) return NULL;
+    return (const char *)profile;
 }
 
 /* ------------------------------------------------------------ paths ---- */
