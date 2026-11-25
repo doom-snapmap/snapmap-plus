@@ -69,12 +69,12 @@ typedef struct {
     float bounds[6], planes[16][4];
     int plane_count;
     float volume;
-    int index;
+    float distance;
     float origin[3];
 } sdk_world_area;
 
 typedef struct { sdk_world_area *areas; int count; } sdk_area_list;
-typedef void (*sdk_add_area)(void *, const float *, void *, const void *, int, float, const float *, int);
+typedef void (*sdk_add_area)(void *, const float *, void *, const void *, int, float, const float *, float);
 typedef void (*sdk_erase_area)(sdk_area_list *, int);
 typedef char sdk_check_area_size[sizeof(sdk_world_area) == 0x138 ? 1 : -1];
 
@@ -131,7 +131,7 @@ static int add_environment_area(const char *name, sh_script_env_area *area)
             backend_log("Environment area: the environment list is full or these bounds are occupied.");
             return 0;
         }
-        add(area->world, area->bounds, area->decl, NULL, 0, 0, origin, -1);
+        add(area->world, area->bounds, area->decl, NULL, 0, 0, origin, -1.0f);
         if (area_index(list, area->bounds, area->decl) >= 0) return 1;
         backend_log("Environment area: the renderer did not retain the selected environment.");
         return 0;
