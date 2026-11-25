@@ -2091,7 +2091,8 @@ static int mp_image_shape(const char *path)
 {
     size_t hn = strlen(MP_IMAGE_HEAD), i;
     if (_strnicmp(path, MP_IMAGE_HEAD, hn)) return 0;
-    if (path[hn] == 'c' || path[hn] == 'C') hn++;
+    if (strlen(path + hn) == 24 && (path[hn] == 'c' || path[hn] == 'C')) hn++;
+    if (strlen(path + hn) != 23) return 0;
     for (i = 0; i < 16; i++) {
         char c = path[hn + i];
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return 0;
@@ -2256,6 +2257,26 @@ const char *sh_modprog_register_const_image(const float rgba[4])
     if (!rgba) return NULL;
     for (i = 0; i < 16; i++) memcpy(texel[i], rgba, sizeof texel[i]);
     if (!sh_modprog_bimage_rgba16f(4, 4, texel, &b, &n)) return NULL;
+    return mp_register("c", b, n);
+}
+
+const char *sh_modprog_register_ribbon_mask(float fade_in, float fade_out)
+{
+    float texel[256][4];
+    unsigned char *b = NULL;
+    size_t n = 0;
+    int i;
+    for (i = 0; i < 256; i++) {
+        float u = (float)i / 255, opacity = 1;
+        if (fade_in > 0 && u < fade_in) opacity = u / fade_in;
+        if (fade_out > 0 && (1 - u) < fade_out) {
+            float tail = (1 - u) / fade_out;
+            if (tail < opacity) opacity = tail;
+        }
+        texel[i][0] = texel[i][1] = texel[i][2] = 1;
+        texel[i][3] = opacity;
+    }
+    if (!sh_modprog_bimage_rgba16f(256, 1, texel, &b, &n)) return NULL;
     return mp_register("c", b, n);
 }
 

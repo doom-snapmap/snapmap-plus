@@ -822,13 +822,46 @@ static int lk_particle(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *o
     return SH_LOOK_CHANGED;
 }
 
+static int lk_ribbon(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *out_len)
+{
+    static const char *const drop[] = { "stageprogram" };
+    lk_buf gen = { 0 };
+    char *image = NULL;
+    size_t i;
+    for (i = 0; i < d->n; i++) {
+        lk_ln *line = &d->l[i];
+        lk_val v;
+        const char *path;
+        if (!line->key || !lk_ieq(line->a + line->ks, line->kn, "lengthfade")) continue;
+        if (image || lk_has_key(d, "ribbonmask")) {
+            free(image);
+            lk_fail(c, i, "write one lengthfade or ribbonmask for the trail.");
+            return SH_LOOK_MISTAKE;
+        }
+        lk_parse(line->a + line->v0, line->vn, &v);
+        if (v.kind != K_VEC || v.n != 2 || !(v.v[0] >= 0 && v.v[0] <= 1 && v.v[1] >= 0 && v.v[1] <= 1)) {
+            lk_fail(c, i, "lengthfade takes two fractions from 0 to 1, for example { 0.1, 0.2 }.");
+            return SH_LOOK_MISTAKE;
+        }
+        path = sh_modprog_register_ribbon_mask(v.v[0], v.v[1]);
+        if (!path || !(image = lk_image_name(path))) return SH_LOOK_OOM;
+        line->skip = 1;
+    }
+    lk_key(&gen, d->eol, "stageprogram", "ribbonblend");
+    if (image) lk_key(&gen, d->eol, "ribbonmask", image);
+    free(image);
+    if (!gen.oom) *out = lk_assemble(d, first, gen.p, drop, 1, out_len);
+    free(gen.p);
+    return *out ? SH_LOOK_CHANGED : SH_LOOK_OOM;
+}
+
 int sh_look_compile_notes(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
                           size_t why_len, char **notes)
 {
     lk_ctx c;
     lk_doc d;
     size_t i, first = (size_t)-1;
-    int r, layered;
+    int r, layered, ribbon;
     if (out) *out = NULL;
     if (out_len) *out_len = 0;
     if (notes) *notes = NULL;
@@ -854,13 +887,16 @@ int sh_look_compile_notes(const char *path, const char *text, size_t len, char *
         char word[32];
         lk_word(&d.l[first], word, sizeof word);
         layered = lk_ieq(word, strlen(word), "layered");
-        if (!layered && !lk_ieq(word, strlen(word), "particle")) {
-            lk_fail(&c, first, "'type' is '%s'; write layered or particle.", word);
+        ribbon = lk_ieq(word, strlen(word), "ribbon");
+        if (!layered && !ribbon && !lk_ieq(word, strlen(word), "particle")) {
+            lk_fail(&c, first, "'type' is '%s'; write layered, particle or ribbon.", word);
             lk_doc_free(&d);
             return SH_LOOK_MISTAKE;
         }
     }
-    r = layered ? lk_layered(&c, &d, first, out, out_len) : lk_particle(&c, &d, first, out, out_len);
+    if (ribbon) r = lk_ribbon(&c, &d, first, out, out_len);
+    else if (layered) r = lk_layered(&c, &d, first, out, out_len);
+    else r = lk_particle(&c, &d, first, out, out_len);
     lk_doc_free(&d);
     if (r == SH_LOOK_CHANGED && notes && c.notes.p) *notes = c.notes.p; else free(c.notes.p);
     if (r == SH_LOOK_MISTAKE) { free(*out); *out = NULL; }

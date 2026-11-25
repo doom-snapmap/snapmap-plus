@@ -318,6 +318,12 @@ blends back to the level's own. An effect's `environment` item does the same for
 undone when the map ends. A value that changes over time is held at its middle by `set_environment` (the build log
 says so); the environment itself, used for an area, draws it changing.
 
+## Ribbon materials
+
+A material with `type ribbon` draws with the game's ribbon program. Set `lengthfade { 0.1, 0.2 }` to fade in
+across the first tenth of the trail and fade out across its last fifth. The ribbon declaration supplies the
+length coordinate with `textureTangentStretch = true;`. Its main texture can tile and scroll independently.
+
 ## Screen text
 
 Use `show_text(player, place, text, [colour], [seconds])` to put a message on a player's HUD. The places are

@@ -396,6 +396,28 @@ static void test_stock_routes(void)
 
 /* ------------------------------------------------------------------------------------------ particle ---- */
 
+static void test_ribbon_length_fade(void)
+{
+    res x = compile("trail.decl", "{\n type ribbon\n transmap spark.tga\n tiling { 2, 1, -1, 0 }\n lengthfade { 0.1, 0.2 }\n}\n");
+    unsigned char *b;
+    size_t bytes = 0;
+    float t[4];
+    CHECK(x.r == SH_LOOK_CHANGED && x.out);
+    if (!x.out) return;
+    CHECK(has(value(x.out, "stageprogram", 0), "ribbonblend") && has(value(x.out, "transmap", 0), "spark.tga"));
+    b = image_bytes(unq(value(x.out, "ribbonmask", 0)), &bytes);
+    CHECK(b && bytes == IMG_DATA + 256u * 8);
+    if (b) {
+        image_texel(b, 0, t); CHECK(near4(t, 1, 1, 1, 0));
+        image_texel(b, 13, t); CHECK(near4(t, 1, 1, 1, 13 / 25.5f));
+        image_texel(b, 100, t); CHECK(near4(t, 1, 1, 1, 1));
+        image_texel(b, 230, t); CHECK(near4(t, 1, 1, 1, 25 / 51.0f));
+        image_texel(b, 255, t); CHECK(near4(t, 1, 1, 1, 0));
+        HeapFree(GetProcessHeap(), 0, b);
+    }
+    release(&x);
+}
+
 static void test_particle_fields(void)
 {
     static const char T[] =
@@ -512,7 +534,7 @@ static void test_mistakes(void)
         }
     }
     mistake("{\n\tdiffusemap d.tga\n\ttype layered\n}\n", "body.decl line 3: 'type' must be the first key of the material; move it to the top.");
-    mistake("{\n\ttype glossy\n}\n", "body.decl line 2: 'type' is 'glossy'; write layered or particle.");
+    mistake("{\n\ttype glossy\n}\n", "body.decl line 2: 'type' is 'glossy'; write layered, particle or ribbon.");
     /* the first mistake is the one reported, by its line; a comment or a quoted value does not hide a field */
     mistake("{\n\ttype layered\n\t// layer5 is not here\n\tlayer1repeat 2 // fine\n\tlayer9 a.tga\n\tlayer1scroll 2\n}\n",
             "body.decl line 5: 'layer9' is not a field of a layered material; a surface has layers 1 to 4.");
@@ -626,6 +648,7 @@ int main(int argc, char **argv)
     test_pool();
     test_stock_routes();
     test_particle_fields();
+    test_ribbon_length_fade();
     test_mistakes();
     test_not_looks();
     if (g_fixtures) test_legacy();
