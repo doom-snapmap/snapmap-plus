@@ -30,6 +30,28 @@ its identity and keeps its names apart from the game's and from every other mod'
 Snapmap+ keeps the permanent ID in `mod.json` and writes build information to `.build/manifest.json`.
 You can leave `.build/` out of source control and ZIPs. Refresh recreates it from the mod’s files.
 
+Building the example crate produces this layout in the data folder.
+
+```text
+snapmap-plus/
+├── mods/
+│   └── spark-crate/
+│       ├── mod.json
+│       ├── entities/
+│       ├── effects/
+│       ├── decls/
+│       ├── scripts/
+│       └── .build/
+│           └── manifest.json
+└── cache/
+    ├── served/
+    └── content/
+```
+
+Snapmap+ writes prepared local files into `cache/served/` when the game needs them.
+For a published map, `cache/content/` keeps its verified units and files between plays.
+Maps that use the same version reuse those files. Playing a map leaves the author's `mods/` folder alone.
+
 A file beside `mod.json` (a README, notes) and a folder whose name starts with `.` are not part of the mod. A file in
 any other top-level folder (`assets/` and `game/` included) is a mistake the build names, file by file.
 
