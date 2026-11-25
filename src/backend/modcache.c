@@ -194,10 +194,20 @@ static int mc_rmtree(const char *path)
 static int mc_move(const char *from, const char *to)
 {
     wchar_t *a = sh_mb_wpath(from), *b = sh_mb_wpath(to);
-    int ok = a && b && MoveFileExW(a, b, MOVEFILE_REPLACE_EXISTING);
+    DWORD error = ERROR_NOT_ENOUGH_MEMORY;
+    if (a && b) {
+        for (unsigned attempt = 0; ; attempt++) {
+            if (MoveFileExW(a, b, MOVEFILE_REPLACE_EXISTING)) { error = ERROR_SUCCESS; break; }
+            error = GetLastError();
+            if (attempt == 7 || (error != ERROR_SHARING_VIOLATION && error != ERROR_LOCK_VIOLATION &&
+                                 error != ERROR_ACCESS_DENIED)) break;
+            Sleep(16u << attempt);
+        }
+    }
     free(a);
     free(b);
-    return ok;
+    SetLastError(error);
+    return error == ERROR_SUCCESS;
 }
 
 static int mc_write(const char *path, const void *data, size_t len)
@@ -1730,8 +1740,14 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
         goto done;
     }
     sh_mb_free(&out);
-    /* Swap the new composition in: the old one (stand-ins) moves aside first and goes after. */
+    /* Keep the previous files until the new files and their sidecar are both in place. */
     AcquireSRWLockExclusive(&g_disk);
+    if (sh_cache_composed(chash, &had_complete) && had_complete) {
+        ReleaseSRWLockExclusive(&g_disk);
+        mc_rmtree(staging);
+        complete = ok = 1;
+        goto record;
+    }
     if (mc_dir_exists(dest)) {
         old = sh_textf("%s.old-%llu", dest, (unsigned long long)GetTickCount64());
         if (!old || !mc_move(dest, old)) {
@@ -1741,10 +1757,20 @@ static int mc_compose(const char *chash, const int *causes, int cause, char **wh
             goto done;
         }
     }
-    ok = mc_move(staging, dest) && mc_sidecar(side, &snapshot, units, complete);
+    if (!mc_move(staging, dest)) {
+        mc_logf("MODS: content: moving the prepared composition failed (Windows error %lu)", GetLastError());
+    } else if (mc_sidecar(side, &snapshot, units, complete)) {
+        ok = 1;
+    } else {
+        mc_logf("MODS: content: the composition's sidecar could not be replaced");
+        if (!mc_move(dest, staging))
+            mc_logf("MODS: content: moving the uncommitted composition aside failed (Windows error %lu)", GetLastError());
+    }
+    if (!ok && old && !mc_move(old, dest))
+        mc_logf("MODS: content: the earlier composition is retained at '%s' (Windows error %lu)", old, GetLastError());
     ReleaseSRWLockExclusive(&g_disk);
+    if (!ok) { reason = sh_text("the composition could not be put in place"); goto done; }
     if (old) mc_rmtree(old);
-    if (!ok) { mc_rmtree(staging); reason = sh_text("the composition could not be put in place"); goto done; }
     mc_logf("MODS: content: %s composed from %zu unit(s)%s%s", snapshot.name, nm, complete ? "" : ", with stand-ins for ",
             complete ? "" : "the objects that are not here");
     if (built) *built = 1;

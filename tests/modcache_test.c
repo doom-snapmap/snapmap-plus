@@ -586,6 +586,19 @@ static void test_cache(const char *top)
             free(t);
         }
         download(&barrel, &b, pack, 1);
+        {
+            char side[MAX_PATH * 3], *why = NULL;
+            HANDLE held;
+            _snprintf_s(side, sizeof side, _TRUNCATE, "%s\\content\\served\\%s.json", mt_cache_dir(mods3), chash);
+            held = CreateFileA(side, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+            CHECK(held != INVALID_HANDLE_VALUE);
+            CHECK(!sh_cache_compose_now(chash, SH_CACHE_ABSENT_OFFLINE, &why));
+            free(why);
+            t = read_text(path);
+            CHECK(t && strstr(t, "snapmaps/unknown"));
+            free(t);
+            if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
+        }
         load_rows(rows, 1, placed, 2);
         CHECK(sh_cache_composed(chash, &complete) && complete);
         {
