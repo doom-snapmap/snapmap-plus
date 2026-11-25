@@ -523,6 +523,7 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
 #include "../engine_build.h"
 #include "../typeinfo.h"
 #include "../modscene_decl.h"
+#include "script_hud_text.h"
 
 /* The first API_SIG_COUNT are required; the difficulty is optional. */
 enum { API_SIG_PROCESS, API_SIG_POST, API_SIG_CLEAR, API_SIG_ENTITY, API_SIG_TRACE, API_SIG_COUNT,
@@ -1211,7 +1212,7 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
     static const sh_script_engine engine = {
         e_resolve, e_spawn_id, e_slots, e_slot_spawn_id, e_kind, e_origin, e_axis, e_place, e_def_name, e_event,
         e_ai_health, e_ai_heal, e_ai_set_health, e_anim_node, e_spawn, e_trace, e_game_time_ms, e_ground,
-        e_difficulty, e_tag, e_event_format, e_trace_as_demon, e_event_flags, e_decl
+        e_difficulty, e_tag, e_event_format, e_trace_as_demon, e_event_flags, e_decl, sh_script_hud_text
     };
     sig_result own[API_SIG_ALL], lookup;
     int i;
@@ -1272,6 +1273,7 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
         g_finish = NULL;
         api_log("Mod scripts: the game's spawn calls were not found in this executable, so spawn() answers nil.");
     }
+    sh_script_hud_bind(results, count);
     sh_script_api_set_engine(&engine);
     sh_script_api_register();
     backend_log("SCRIPTS: entity, animation, world and time calls resolved");

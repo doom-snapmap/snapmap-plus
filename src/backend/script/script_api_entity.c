@@ -736,15 +736,14 @@ static int l_recolour(lua_State *L)
 typedef struct {
     uint32_t player;
     char name[48];
-    int active, timer;
+    int active, timer, slot;
 } hud_text;
 
 static void hud_remove(hud_text *h)
 {
     const sh_script_engine *e = sh_script_api_engine();
-    sh_script_earg arg = sh_script_earg_text('s', h->name);
-    if (h->active && e->resolve)
-        sh_script_api_event(e->resolve(h->player), "destroyHUDElement", &arg, 1, NULL);
+    if (h->active && e->resolve && e->hud_text)
+        e->hud_text(e->resolve(h->player), h->name, h->slot, "", NULL);
     h->active = 0;
 }
 
@@ -764,13 +763,6 @@ static int hud_expire(lua_State *L)
     return 0;
 }
 
-static float hud_extent(void *player, const char *event)
-{
-    sh_script_earg v;
-    if (!sh_script_api_event(player, event, NULL, 0, &v)) return 0;
-    return v.type == 'f' ? v.f : v.type == 'i' ? (float)v.i : 0;
-}
-
 static int l_show_text(lua_State *L)
 {
     const char *call = SDK_W(C_SHOW_TEXT);
@@ -780,12 +772,11 @@ static int l_show_text(lua_State *L)
     const char *text = lua_type(L, 3) == LUA_TSTRING && lua_rawlen(L, 3) == 0 ? "" :
                        sh_script_api_check_text(L, 3, call, "the text to show", SH_SCRIPT_TEXT_ANY);
     int slot = !strcmp(place, "top left") ? 0 : !strcmp(place, "top right") ? 1 : !strcmp(place, "bottom") ? 2 : -1;
-    int i, table, entry, ok;
+    int table, entry, ok;
     lua_Integer key;
     uint32_t id;
     double seconds = 0;
-    float width, height, rgba[4] = { 1, 1, 1, 1 };
-    sh_script_earg a[5];
+    float rgba[4] = { 1, 1, 1, 1 };
     hud_text *h;
 
     if (slot < 0) return sh_script_refuse(L, "\"%s\" takes \"top left\", \"top right\" or \"bottom\" as its place", call);
@@ -813,14 +804,12 @@ static int l_show_text(lua_State *L)
         lua_pushboolean(L, 1);
         return 1;
     }
-    width = hud_extent(player, "getViewWidth");
-    height = hud_extent(player, "getViewHeight");
-    if (!(width > 0 && height > 0)) { lua_pushboolean(L, 0); return 1; }
     if (!h) {
         lua_pop(L, 1);
         h = (hud_text *)lua_newuserdatauv(L, sizeof *h, 0);
         memset(h, 0, sizeof *h);
         h->player = id;
+        h->slot = slot;
         snprintf(h->name, sizeof h->name, "smp_%s_text_%d", sh_script_salt(L), slot);
         if (luaL_newmetatable(L, "sh.sdk.hudText")) {
             lua_pushcfunction(L, hud_close);
@@ -831,26 +820,8 @@ static int l_show_text(lua_State *L)
         lua_seti(L, table, key);
     }
     entry = lua_gettop(L);
-    a[0] = sh_script_earg_text('s', h->name);
-    if (!h->active) h->active = sh_script_api_event(player, "createHUDElement", a, 1, NULL);
-    ok = h->active;
-    if (ok) {
-        a[1] = sh_script_earg_float(width * (slot == 0 ? 0.25f : slot == 1 ? 0.75f : 0.5f));
-        a[2] = sh_script_earg_float(height * (slot == 2 ? 0.85f : 0.1f));
-        a[3] = sh_script_earg_float(width * 0.45f);
-        a[4] = sh_script_earg_float(height * 0.1f);
-        ok = sh_script_api_event(player, "setHUDElementPosition", a, 5, NULL);
-        for (i = 0; i < 4; i++) a[i + 1] = sh_script_earg_float(rgba[i]);
-        ok = ok && sh_script_api_event(player, "setHUDElementColor", a, 5, NULL);
-        a[1] = sh_script_earg_float(0.3f);
-        ok = ok && sh_script_api_event(player, "setHUDElementTextScale", a, 2, NULL);
-        a[1] = sh_script_earg_int(slot);
-        ok = ok && sh_script_api_event(player, "setHUDElementTextAlignment", a, 2, NULL);
-        a[1] = sh_script_earg_text('s', text);
-        ok = ok && sh_script_api_event(player, "setHUDElementText", a, 2, NULL);
-        a[1] = sh_script_earg_int(1);
-        ok = ok && sh_script_api_event(player, "showHUDElement", a, 2, NULL);
-    }
+    ok = e->hud_text && e->hud_text(player, h->name, slot, text, rgba);
+    if (ok) h->active = 1;
     shs_cancel_timer(L, h->timer);
     h->timer = 0;
     if (!ok) {

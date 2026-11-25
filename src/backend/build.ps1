@@ -51,7 +51,7 @@ param(
                            # Classes a mod's script supplies to the game's AI state machines.
                            "script/script_fsm.c", "script/script_fsm_sigs.c",
                            # Mod scripts: the entity, animation, world and time calls and their engine side.
-                           "script/script_api_common.c", "script/script_api_sigs.c", "script/script_api_entity.c", "script/script_api_world.c",
+                           "script/script_api_common.c", "script/script_api_sigs.c", "script/script_api_entity.c", "script/script_hud_text.c", "script/script_api_world.c",
                            # Mod scripts: the Script node (its row, the Relay hook, node():fire and vars).
                            "script/script_node.c", "script/script_node_row.c",
                            # Mod scripts' AI calls and the demon park.

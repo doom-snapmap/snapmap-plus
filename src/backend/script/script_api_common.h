@@ -111,6 +111,7 @@ typedef struct sh_script_engine {
     int      (*event_flags)(const char *name, int set);
     /* The loaded decl `name` of decl type `type` ("renderParm", ...) by the game's own find, or NULL. */
     void    *(*decl)(const char *type, const char *name);
+    int      (*hud_text)(void *player, const char *name, int slot, const char *text, const float rgba[4]);
 } sh_script_engine;
 
 /* The floor under pos from the world trace: straight down from SH_SCRIPT_GROUND_ABOVE above pos for
