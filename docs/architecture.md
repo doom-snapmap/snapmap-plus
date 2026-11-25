@@ -1582,11 +1582,9 @@ are appended to the fragment stage's material uniforms, and the emissive sheet i
 the texture `particleemissivemap`, added after the program's own. (The engine
 writes `particleuberparms` only for a material whose stage program it remaps to
 `uberparticles`, never for a material that names this program.)
-`SH_MODPROG_EP_PARMS` names the keys the constants had as render parms
-(`eternalparticle`, `eternalparticlefade`, `eternalparticlecolor`,
-`eternalparticlecolor2`), and a material that writes them is no longer converted (R-NM1). The rule is documented in `src/backend/programs/shaders/particles.rp`,
-the one source of both renderers' text. A liquid stage keeps the game's own
-blood shading.
+`src/backend/programs/shaders/particles.rp` supplies the shading for both
+renderers. `src/backend/programs/particles_splice.inc` installs it in the stock
+program. A liquid stage keeps the game's own blood shading.
 
 #### The hair programs
 
@@ -1604,14 +1602,17 @@ the base's. `hairnew`, the opaque pass, draws only where the pre-pass left depth
 variant. The rule is documented in `src/backend/programs/shaders/hair.rp`, the one source of both renderers' text. A
 material names them as it names any program: `zprepassprogram "snapmapplus/hair/hairprez"`.
 
-The programs were named `snapmapplus/multilayer/<base>` and `snapmapplus/eternal/uberparticles` before they stopped naming a source game; both old names are served until 1.0 for mods emitted before the rename (`SH_MODPROG_OLD_PREFIX`, `SH_MODPROG_EP_OLD_PREFIX`), answering with the new name's bytes.
+The installer upgrades materials in older mod folders to the current author format.
+For published maps, the player can still load an earlier pinned material and its
+recorded particle program. The resolver also recognises the earlier
+`snapmapplus/multilayer/` path for layered programs.
 
 #### The Graphics SDK: looks
 
 A mod describes a surface or a particle stage in plain terms and the product writes the engine's material for it
 ([the guide](graphics-sdk.md)). The compiler is `modlook.c` (`sh_look_compile`, pure text work): a material whose first
-key is `type` with the value `layered` or `particle` is read field by field (every field optional, the guide's
-defaults) and written as the keys of the two programs above, its other lines passing through unchanged. A layered look
+key is `type` selects the layered, particle, ribbon, recolourable or sky compiler.
+The compiler writes the engine keys for that look and carries through other material lines. A layered look
 becomes `ambientprogram "snapmapplus/layered/skinvmtr"` (or `skinvmtrwounds`), each layer image under its
 `blendlayer<i>...map` key, the mask as `layerblendmask`, the 28 vectors as the parameter image named by `layerparms`,
 and the two shared places `multilayerextramap0`/`1` filled in a fixed order (burn tile, burn glow, burn blood, base
@@ -1622,8 +1623,8 @@ with nothing the game's shading lacks) the material names `skinvmtr`, `skinvmtrw
 `particleshighq` and the product's programs are not involved. A value or a colour where an image is expected becomes a
 constant image, 4 x 4 RGBA16F, registered beside the parameter image at
 `generated/image/snapmapplus/look/c<16 hex digits of its SHA-256>.bimage` (`sh_modprog_register_const_image`; the
-same colour, the same path). A material that is not a look is not converted (R-NM1): one that writes the old keys
-is the author's to rewrite as a `type layered` material. A mistake in a look is one sentence
+same colour, the same path). Plain engine materials pass through the look compiler.
+A mistake in a look is one sentence
 naming the file, the line, the field and what to write (`SH_LOOK_MISTAKE`); a limit of the game never is.
 
 Two hooks use it. The builder reads every material decl of a mod through it (`sh_mb_set_look_compiler`, set in
