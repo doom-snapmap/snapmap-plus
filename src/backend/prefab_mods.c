@@ -11,6 +11,7 @@
 #include "modpublished.h"
 #include "modexport.h"
 #include "modcache.h"
+#include "modui.h"
 #include "modserve.h"
 #include "modsalt.h"
 #include "modstore.h"
@@ -760,6 +761,55 @@ static void pm_refuse_unasked(const char *name, const sh_modmanifest_list *rows,
     if (o->toast && msg && *msg) o->toast(*msg);
 }
 
+static int pm_join_pinned(const sh_modmanifest_list *pinned, char **cause)
+{
+    sh_modmanifest_list cur, use;
+    char **names = NULL;
+    size_t i, k, c, n = 0, cap = 0;
+    int r = 1;
+    memset(&use, 0, sizeof use);
+    (void)sh_modmanifest_current(&cur);
+    for (i = 0; i < pinned->count && r > 0; i++) {
+        const sh_modmanifest_row *p = &pinned->rows[i];
+        int other = 0, same = 0;
+        for (c = 0; c < cur.count; c++) {
+            if (strcmp(cur.rows[c].salt, p->salt)) continue;
+            if (!strcmp(cur.rows[c].build, p->build)) same = 1; else other = 1;
+        }
+        if (other && !same) {
+            /* one version per map: the installed version takes the prefab's objects when it has them all */
+            int carries = 1;
+            for (k = 0; k < p->name_count && carries; k++) carries = sh_modserve_root_carries(p->salt, p->names[k]) == 1;
+            if (carries) { pm_logf("PREFABS: %s: the map's own version serves the prefab's objects", sh_prefab_mods_label(p)); continue; }
+            pm_msg(cause, "this map uses another version of %s than the one the prefab carries", sh_prefab_mods_label(p));
+            r = -1;
+            break;
+        }
+        if (!sh_modmanifest_list_add(&use, p)) { pm_msg(cause, "Snapmap+ ran out of memory"); r = -1; break; }
+        for (k = 0; k < p->name_count; k++) {
+            if (n == cap) {
+                size_t next = cap ? cap * 2 : 16;
+                char **g = (char **)realloc(names, next * sizeof *g);
+                if (!g) { r = -1; break; }
+                names = g;
+                cap = next;
+            }
+            names[n++] = p->names[k];
+        }
+    }
+    if (r > 0 && use.count) {
+        sh_cache_on_load(&use, names, n);   /* composes each row from the cache, then the serving index again */
+        for (i = 0; i < use.count && r > 0; i++) if (sh_modmanifest_current_add_row(&use.rows[i]) < 0) r = -1;
+        if (r > 0) {
+            (void)sh_modui_scope_refresh("prefab");
+            pm_logf("PREFABS: %u row(s) of the prefab's own content joined the map", (unsigned)use.count);
+        } else pm_msg(cause, "Snapmap+ ran out of memory");
+    }
+    free(names);
+    sh_modmanifest_list_free(&use);
+    sh_modmanifest_list_free(&cur);
+    return r;
+}
 int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanifest_list *rows, const char *name,
                                 int *seq, char **msg)
 {
@@ -812,7 +862,8 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
         memset(&local, 0, sizeof local);
         for (i = 0; i < rows->count; i++)
             (void)sh_modmanifest_list_add(rows->rows[i].pinned ? &pinned : &local, &rows->rows[i]);
-        r = pinned.count ? (o->use_pinned ? o->use_pinned(&pinned, &why) : -1) : 1;
+        int (*join)(const sh_modmanifest_list *, char **) = o->use_pinned ? o->use_pinned : pm_join_pinned;
+        r = pinned.count ? join(&pinned, &why) : 1;
         if (r < 0) {
             pm_msg(msg, "Prefab %s was not placed: %s.", name && name[0] ? name : "prefab",
                    why ? why : "its mod content cannot be used in this map");
@@ -1382,7 +1433,6 @@ static char *pm_default_root(void) { return NULL; }
 #else
 #include <shlobj.h>
 #include "commands.h"
-#include "modui.h"
 #include "grid_room_native.h"
 #include "apply_engine.h"
 #include "ui_bridge.h"
@@ -1434,56 +1484,6 @@ static int eng_attach(const sh_modmanifest_row *row, char **note)
 
 static int eng_activate(const sh_modmanifest_list *rows) { return sh_modmanifest_activate(rows); }
 
-static int eng_use_pinned(const sh_modmanifest_list *pinned, char **cause)
-{
-    sh_modmanifest_list cur, use;
-    char **names = NULL;
-    size_t i, k, c, n = 0, cap = 0;
-    int r = 1;
-    memset(&use, 0, sizeof use);
-    (void)sh_modmanifest_current(&cur);
-    for (i = 0; i < pinned->count && r > 0; i++) {
-        const sh_modmanifest_row *p = &pinned->rows[i];
-        int other = 0, same = 0;
-        for (c = 0; c < cur.count; c++) {
-            if (strcmp(cur.rows[c].salt, p->salt)) continue;
-            if (!strcmp(cur.rows[c].build, p->build)) same = 1; else other = 1;
-        }
-        if (other && !same) {
-            /* one version per map: the installed version takes the prefab's objects when it has them all */
-            int carries = 1;
-            for (k = 0; k < p->name_count && carries; k++) carries = sh_modserve_root_carries(p->salt, p->names[k]) == 1;
-            if (carries) { pm_logf("PREFABS: %s: the map's own version serves the prefab's objects", sh_prefab_mods_label(p)); continue; }
-            pm_msg(cause, "this map uses another version of %s than the one the prefab carries", sh_prefab_mods_label(p));
-            r = -1;
-            break;
-        }
-        if (!sh_modmanifest_list_add(&use, p)) { pm_msg(cause, "Snapmap+ ran out of memory"); r = -1; break; }
-        for (k = 0; k < p->name_count; k++) {
-            if (n == cap) {
-                size_t next = cap ? cap * 2 : 16;
-                char **g = (char **)realloc(names, next * sizeof *g);
-                if (!g) { r = -1; break; }
-                names = g;
-                cap = next;
-            }
-            names[n++] = p->names[k];
-        }
-    }
-    if (r > 0 && use.count) {
-        sh_cache_on_load(&use, names, n);   /* composes each row from the cache, then the serving index again */
-        for (i = 0; i < use.count && r > 0; i++) if (sh_modmanifest_current_add_row(&use.rows[i]) < 0) r = -1;
-        if (r > 0) {
-            (void)sh_modmanifest_activate(&use);
-            (void)sh_modui_scope_refresh("prefab");
-            pm_logf("PREFABS: %u row(s) of the prefab's own content joined the map", (unsigned)use.count);
-        } else pm_msg(cause, "Snapmap+ ran out of memory");
-    }
-    free(names);
-    sh_modmanifest_list_free(&use);
-    sh_modmanifest_list_free(&cur);
-    return r;
-}
 static int eng_module_known(const char *name) { return sh_grid_native_module_known(name); }
 static void eng_print(const char *line) { sh_printf("%s\n", line); }
 static void eng_toast(const char *text)
@@ -1521,7 +1521,6 @@ static void pm_bind_defaults(void)
     o.toast = eng_toast;
     o.refresh = eng_refresh;
     o.call_main = eng_call_main;
-    o.use_pinned = eng_use_pinned;
     g_ops = o;
 
     g_ops_bound = 1;

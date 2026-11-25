@@ -64,6 +64,15 @@ void backend_log(const char *line)
 }
 
 static int g_activations;
+static int g_scope_refreshes;
+
+int sh_modui_scope_refresh(const char *phase)
+{
+    CHECK(!strcmp(phase, "prefab"));
+    g_scope_refreshes++;
+    return 1;
+}
+
 int modserve_activate_bundles(const char *const *bundle_hashes, int n)
 {
     (void)bundle_hashes;
@@ -1466,13 +1475,21 @@ static void resolving(const sh_modmanifest_row *door)
                                                       "version."));
     CHECK(!strcmp(F.last_print, msg) && F.attaches == 0 && F.activations == 0);   /* the local row did not reach the map */
     sh_modmanifest_list_free(&rows);
-    /* no op bound for the pinned rows */
+    /* Joining downloaded content registers its decls through the updated map scope. */
     reset_fakes();
     sh_prefab_mods_bind(&PM_OPS_NO_PINNED);
     memset(&rows, 0, sizeof rows);
     pinned_row(&rows, "presentm", "present.mod", unit);
-    r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
-    CHECK(r == SH_PREFAB_MODS_REFUSED && !strcmp(msg, "Prefab Door was not placed: its mod content cannot be used in this map."));
+    {
+        sh_modmanifest_list joined = {0};
+        int activations = g_activations, refreshes = g_scope_refreshes;
+        r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
+        CHECK(r == SH_PREFAB_MODS_PLACE && g_scope_refreshes == refreshes + 1);
+        CHECK(g_activations == activations);
+        (void)sh_modmanifest_current(&joined);
+        CHECK(joined.count == 1 && joined.rows[0].pinned && !strcmp(joined.rows[0].salt, "presentm"));
+        sh_modmanifest_list_free(&joined);
+    }
     sh_modmanifest_list_free(&rows);
 
     printf("-- a module prefab: DLC no row provides is refused first; a module a row provides is a mod\n");
