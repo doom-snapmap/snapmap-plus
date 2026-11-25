@@ -94,3 +94,56 @@ func TestEarlierFolderKeepsIncompatibleBinary(t *testing.T) {
 		t.Fatal("a failed translation modified the mod")
 	}
 }
+
+func TestEarlierCookedSpellingsAndBorrowedSound(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "earlier")
+	dst := filepath.Join(t.TempDir(), "author")
+	writeF(t, filepath.Join(src, "mod.json"), `{"id":"release-one","strings":{"en":{"mods/release-one/tile":"Tile"}},"companions":{"mods/release-one/tile":[{"entityDef":"mods/release-one/tile"}]}}`)
+	files := map[string]string{
+		"cooked/anim/md6/mods/release_one/clips/a.bmd6anim":                                "animation",
+		"generated/basemodel/md6/mods/release_one/m.bmd6model":                             "model",
+		"cooked/model/mods/release_one/preview.bmodel":                                     "preview",
+		"generated/swf/mods/release-one/screens/a.bswf":                                    "movie",
+		"generated/swf/mods/release-one/screens/a.bimage":                                  "frame",
+		"generated/image/textures/guis/snapmaps/entity_icons/mods/release_one/tile.bimage": "icon",
+		"generated/decls/sound/mods/release-one/ambient/hum.decl":                          `{ volume = -12; }`,
+		"generated/decls/entitydef/mods/release-one/tile.decl":                             `{ anim="md6/mods/release-one/clips/a.md6anim"; image="textures/guis/snapmaps/entity_icons/mods/release_one/tile.tga"; sound="mods/release-one/ambient/hum"; label="#str_mods/release-one/tile"; external="textures/guis/snapmaps/entity_icons/mods/another-pack/tile.tga"; }`,
+		"cooked/anim/md6/characters/humans/idle.bmd6anim":                                  "external clip",
+	}
+	for req, data := range files {
+		writeF(t, filepath.Join(src, "assets", filepath.FromSlash(req)), data)
+	}
+	if _, err := translateEarlierMod(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	for author, data := range map[string]string{
+		"animations/clips/a.bmd6anim": "animation", "meshes/m.bmd6model": "model",
+		"meshes/preview.bmodel": "preview", "movies/screens/a.bswf": "movie", "movies/screens/a.bimage": "frame",
+		"images/textures/guis/snapmaps/entity_icons/tile.bimage": "icon",
+		"decls/sound/ambient/hum.decl":                           `{ volume = -12; }`,
+		"native/cooked/anim/md6/characters/humans/idle.bmd6anim": "external clip",
+	} {
+		if got := readF(t, filepath.Join(dst, author)); got != data {
+			t.Errorf("%s: %q", author, got)
+		}
+	}
+	body := readF(t, filepath.Join(dst, "entities/tile.decl"))
+	for _, want := range []string{"animations/clips/a.md6anim", "images/textures/guis/snapmaps/entity_icons/tile.tga", "decls/sound/ambient/hum", "#str_tile", "textures/guis/snapmaps/entity_icons/mods/another-pack/tile.tga"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in %s", want, body)
+		}
+	}
+	var doc struct {
+		Companions map[string][]map[string]string
+		Strings    map[string]map[string]string
+	}
+	if err := json.Unmarshal([]byte(readF(t, filepath.Join(dst, "mod.json"))), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if rows := doc.Companions["entities/tile"]; len(rows) != 1 || rows[0]["entityDef"] != "entities/tile" || doc.Strings["en"]["tile"] != "Tile" {
+		t.Fatalf("descriptor: %+v", doc)
+	}
+	if _, err := earlierAuthorPath("release-one", "generated/image/textures/mods/another-pack/tile.bimage"); err == nil {
+		t.Fatal("claimed another mod's file")
+	}
+}

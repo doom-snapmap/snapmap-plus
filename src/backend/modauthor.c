@@ -236,7 +236,15 @@ int sh_ma_request(const char *salt, const char *path, char **request, char **cau
                            "example decls/damage/); move it into one", path, NULL);
         }
         *tslash = 0;
-        for (i = 0; i < MA_NNAMED; ++i)
+        if (!strcmp(type, "sound")) {
+            const char *leaf = strrchr(tslash + 1, '/');
+            size_t sl = strlen(salt);
+            leaf = leaf ? leaf + 1 : tslash + 1;
+            if (!_strnicmp(leaf, salt, sl) && leaf[sl] == '_') {
+                free(p);
+                return ma_fail(cause, "%s: this mod's own sound event belongs in sounds/", path, NULL);
+            }
+        } else for (i = 0; i < MA_NNAMED; ++i)
             if (!strcmp(type, MA_NAMED[i].type)) {
                 char *why = sh_textf("%%s: a %s decl goes in %s/; move it there", MA_NAMED[i].type, MA_NAMED[i].folder);
                 ma_fail(cause, why ? why : "%s: move it to its own folder", path, NULL);
@@ -314,13 +322,13 @@ char *sh_ma_path(const char *salt, const char *request)
         if (ts && ma_starts(ts + 1, own)) {
             size_t tl = (size_t)(ts - type);
             if (tl == 5 && !_strnicmp(type, "sound", 5)) {
-                /* the leaf carries the namespace (sh_ma_request); one without it is no author path's */
+                /* A namespaced leaf plays a custom bank event. A bare leaf borrows that stock Wwise event. */
                 const char *rest = ts + 1 + ol, *leaf = strrchr(rest, '/');
                 size_t sl = strlen(salt);
                 leaf = leaf ? leaf + 1 : rest;
                 if (!_strnicmp(leaf, salt, sl) && leaf[sl] == '_' && leaf[sl + 1])
                     return sh_textf("sounds/%.*s%s", (int)(leaf - rest), rest, leaf + sl + 1);
-                return sh_textf(SH_MA_NATIVE "%s", r);
+                return sh_textf("decls/sound/%s", rest);
             }
             for (i = 0; i < MA_NNAMED; ++i)
                 if (strlen(MA_NAMED[i].type) == tl && !_strnicmp(type, MA_NAMED[i].type, tl))

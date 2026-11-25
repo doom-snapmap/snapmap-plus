@@ -100,7 +100,7 @@ func earlierStringTables(doc map[string]any, n *earlierModNames) error {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			next := strings.TrimPrefix(key, n.id+"_")
+			next := strings.TrimPrefix(strings.TrimPrefix(key, "mods/"+n.id+"/"), n.id+"_")
 			if !earlierKey.MatchString(next) {
 				next = earlierBadKey.ReplaceAllString(strings.TrimSpace(next), "_")
 			}
@@ -172,6 +172,9 @@ func earlierBankEvents(b []byte, ids map[uint32]uint32) error {
 func earlierBank(src []byte, n earlierModNames) ([]byte, error) {
 	forward, back := map[uint32]uint32{}, map[uint32]uint32{}
 	for _, s := range n.sounds {
+		if !strings.HasPrefix(s, "sounds/") {
+			continue
+		}
 		leaf := path.Base(s)
 		a, b := earlierEvent(n.id+"_"+leaf), earlierEvent(leaf)
 		forward[a] = b
@@ -194,20 +197,34 @@ func earlierBank(src []byte, n earlierModNames) ([]byte, error) {
 	return out, nil
 }
 
-func earlierModJSONValue(v any, n earlierModNames) any {
+func earlierModJSONValue(v any, n earlierModNames) (any, error) {
 	switch a := v.(type) {
 	case map[string]any:
+		out := make(map[string]any, len(a))
 		for k, v := range a {
-			a[k] = earlierModJSONValue(v, n)
+			key := n.authorText(k)
+			if _, exists := out[key]; exists {
+				return nil, fmt.Errorf("descriptor keys coincide at %q", key)
+			}
+			next, err := earlierModJSONValue(v, n)
+			if err != nil {
+				return nil, err
+			}
+			out[key] = next
 		}
+		return out, nil
 	case []any:
 		for i, v := range a {
-			a[i] = earlierModJSONValue(v, n)
+			next, err := earlierModJSONValue(v, n)
+			if err != nil {
+				return nil, err
+			}
+			a[i] = next
 		}
 	case string:
-		return n.authorText(a)
+		return n.authorText(a), nil
 	}
-	return v
+	return v, nil
 }
 
 // Translate a private copy of an earlier folder or the verification source for a map's pinned build.
@@ -229,7 +246,7 @@ func translateEarlierMod(src, dst string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	n := earlierModNames{id: id, salt: salt, files: map[string]string{}, sounds: map[string]string{}, keys: map[string]string{}}
+	n := earlierModNames{id: id, salt: salt, files: map[string]string{}, sounds: map[string]string{}, keys: map[string]string{}, images: map[string]string{}}
 	var packages map[string]string
 	if descriptor == "package.json" {
 		packages, err = earlierPackageFiles(src, doc)
@@ -256,7 +273,7 @@ func translateEarlierMod(src, dst string) (string, error) {
 			return fmt.Errorf("conflicting asset %s", rel)
 		}
 		used[author] = true
-		n.add(author)
+		n.add(rel, author)
 		items = append(items, asset{file, author})
 		return nil
 	}
@@ -320,7 +337,8 @@ func translateEarlierMod(src, dst string) (string, error) {
 			if err != nil {
 				return "", fmt.Errorf("%s: %w", item.author, err)
 			}
-		case id != salt && bytes.Contains(b, []byte("mods/"+id+"/")):
+		case id != salt && (bytes.Contains(b, []byte("mods/"+id+"/")) ||
+			bytes.Contains(b, []byte("mods/"+strings.ReplaceAll(id, "-", "_")+"/"))):
 			return "", fmt.Errorf("%s embeds its earlier namespace inside binary data", item.author)
 		}
 		filename := filepath.Join(dst, filepath.FromSlash(item.author))
@@ -341,7 +359,10 @@ func translateEarlierMod(src, dst string) (string, error) {
 	}
 	for k, v := range doc {
 		if k != "strings" {
-			doc[k] = earlierModJSONValue(v, n)
+			doc[k], err = earlierModJSONValue(v, n)
+			if err != nil {
+				return "", err
+			}
 		}
 	}
 	if events, ok := doc["clip_events"]; ok {
