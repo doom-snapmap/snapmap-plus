@@ -850,6 +850,72 @@ static void env_stop(lua_State *L)
     lua_setfield(L, LUA_REGISTRYINDEX, SHS_REG_ENV);
 }
 
+#define ENV_AREA_MT "snapmap-plus.environment-area"
+#define ENV_AREAS "sh.sdk.environmentAreas"
+
+static int env_area_close(lua_State *L)
+{
+    sh_script_env_area *area = (sh_script_env_area *)luaL_checkudata(L, 1, ENV_AREA_MT);
+    const sh_script_sdk_runtime *rt = sh_script_sdk_runtime_get();
+    int ok = !area->decl || (rt->remove_area && rt->remove_area(area));
+    if (ok) area->decl = NULL;
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
+static int env_area_remove(lua_State *L)
+{
+    env_area_close(L);
+    if (lua_toboolean(L, -1)) {
+        luaL_getsubtable(L, LUA_REGISTRYINDEX, ENV_AREAS);
+        lua_pushvalue(L, 1);
+        lua_pushnil(L);
+        lua_rawset(L, -3);
+        lua_pop(L, 1);
+    }
+    return 1;
+}
+
+static int l_environment_area(lua_State *L)
+{
+    const char *call = SDK_W(C_ENVIRONMENT_AREA);
+    const char *name = sh_script_check_name(L, 1, call, 0, NULL);
+    const sh_script_sdk_runtime *rt = sh_script_sdk_runtime_get();
+    float a[3], b[3], bounds[6], volume = 1;
+    sh_script_api_check_vec(L, 2, call, "first corner", a);
+    sh_script_api_check_vec(L, 3, call, "opposite corner", b);
+    for (unsigned i = 0; i < 3; i++) {
+        bounds[i] = fminf(a[i], b[i]);
+        bounds[i + 3] = fmaxf(a[i], b[i]);
+        volume *= bounds[i + 3] - bounds[i];
+    }
+    if (!(volume > 0) || !isfinite(volume))
+        sh_script_refuse(L, "\"%s\" needs two corners enclosing a box with width, length and height", call);
+    if (!rt->add_area || !rt->remove_area) return nil1(L);
+    if (luaL_newmetatable(L, ENV_AREA_MT)) {
+        lua_pushcfunction(L, env_area_close);
+        lua_setfield(L, -2, "__gc");
+        lua_newtable(L);
+        lua_pushcfunction(L, env_area_remove);
+        lua_setfield(L, -2, "remove");
+        lua_setfield(L, -2, "__index");
+    }
+    lua_pop(L, 1);
+    sh_script_env_area *area = (sh_script_env_area *)lua_newuserdatauv(L, sizeof *area, 0);
+    memset(area, 0, sizeof *area);
+    memcpy(area->bounds, bounds, sizeof bounds);
+    int status = rt->add_area(name, area);
+    if (status < 0) sh_script_refuse(L, "\"%s\" needs an environment from this mod's environments folder", call);
+    if (!status) return nil1(L);
+    luaL_setmetatable(L, ENV_AREA_MT);
+    luaL_getsubtable(L, LUA_REGISTRYINDEX, ENV_AREAS);
+    lua_pushvalue(L, -2);
+    lua_pushboolean(L, 1);
+    lua_rawset(L, -3);
+    lua_pop(L, 1);
+    return 1;
+}
+
 static int l_set_environment(lua_State *L)
 {
     const char *call = SDK_W(C_SET_ENVIRONMENT);
@@ -923,6 +989,7 @@ void sh_script_api_entity_register(void)
     /* the Graphics SDK's calls, named from its words table (sdkwords.h) */
     sh_script_api_add(SH_SCRIPT_API_METHOD, SDK_W(C_RECOLOUR), l_recolour);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, SDK_W(C_SET_ENVIRONMENT), l_set_environment);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, SDK_W(C_ENVIRONMENT_AREA), l_environment_area);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, SDK_W(C_CLEAR_ENVIRONMENT), l_clear_environment);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, SDK_W(C_SHOW_TEXT), l_show_text);
 }

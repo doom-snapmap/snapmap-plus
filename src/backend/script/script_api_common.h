@@ -130,10 +130,17 @@ const sh_script_engine *sh_script_api_engine(void);
 /* The Graphics SDK's files as the server holds them (sdk_runtime.c), for the fx and set_environment calls. Each
  * answers the entityDef to spawn (malloc'd), or NULL when the mod has no such file; opening it also compiles it.
  * Unset (the tests), every answer is NULL. */
+typedef struct sh_script_env_area {
+    void *world, *scene, *decl;
+    float bounds[6];
+} sh_script_env_area;
+
 typedef struct sh_script_sdk_runtime {
     char *(*effect_emitter)(const char *fx_name);       /* "mods/<salt>/<name>" */
     char *(*environment_emitter)(const char *env_name); /* "mods/<salt>/<name>" */
     void  (*log)(const char *line);                     /* the backend log, for a skip that is never an error */
+    int (*add_area)(const char *env_name, sh_script_env_area *area);
+    int (*remove_area)(sh_script_env_area *area);
 } sh_script_sdk_runtime;
 void sh_script_set_sdk_runtime(const sh_script_sdk_runtime *rt);
 const sh_script_sdk_runtime *sh_script_sdk_runtime_get(void);

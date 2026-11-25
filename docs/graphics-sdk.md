@@ -21,7 +21,7 @@ The SDK has these parts:
   ([Environments](#environments)).
 - **Wounds in data**: a wound site (`decls/gorewounds/x.decl`) whose first key is `type wound` ([Wounds](#wounds)).
 - **Script calls**: `play_effect`, `move_effect`, `stop_effect`, `end_effects_at_once`, `set_environment`,
-  `clear_environment` and the entity calls `tint`, `glow` and `recolour` ([Scripts](#scripts), and
+  `environment_area`, `clear_environment` and the entity calls `tint`, `glow` and `recolour` ([Scripts](#scripts), and
   [Mod scripts](architecture.md#mod-scripts-entity-animation-and-world-calls)).
 
 Every word an author writes is listed once in the product (`src/backend/sdkwords.h`), so the compilers, their
@@ -318,6 +318,12 @@ An environment is a file in the mod's `environments/` folder (`environments/<nam
 blends back to the level's own. An effect's `environment` item does the same for as long as the item plays. Each is
 undone when the map ends. A value that changes over time is held at its middle by `set_environment` (the build log
 says so); the environment itself, used for an area, draws it changing.
+
+Use `environment_area(name, corner, opposite)` for a box players can walk into and out of. For example,
+`local area = environment_area("hell_red", {x=0,y=0,z=0}, {x=600,y=800,z=240})` gives a room its own
+environment. The game blends according to the current view and gives smaller overlapping boxes priority.
+The area lasts until the script ends, or until you call `area:remove()`. The call returns nil when the box
+is already occupied or the game's area list is full.
 
 ## A recolourable surface
 

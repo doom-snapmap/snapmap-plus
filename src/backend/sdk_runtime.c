@@ -12,6 +12,8 @@
 #include "modprog.h"
 #include "modserve.h"
 #include "sdk_runtime.h"
+#include "engine_build.h"
+#include "entity.h"
 #include "backend_log.h"
 #include "script/script_api_common.h"
 #include "../common/text.h"
@@ -62,11 +64,97 @@ static char *environment_emitter(const char *env_name)
     return em;
 }
 
+typedef struct {
+    void *env;
+    float bounds[6], planes[16][4];
+    int plane_count;
+    float volume;
+    int index;
+    float origin[3];
+} sdk_world_area;
+
+typedef struct { sdk_world_area *areas; int count; } sdk_area_list;
+typedef void (*sdk_add_area)(void *, const float *, void *, const void *, int, float, const float *, int);
+typedef void (*sdk_erase_area)(sdk_area_list *, int);
+typedef char sdk_check_area_size[sizeof(sdk_world_area) == 0x138 ? 1 : -1];
+
+/* DynamicSnapMap uses the game world here. The editor owns a separate render world. */
+static sdk_area_list *area_list(void **world, void **scene, sdk_add_area *add)
+{
+    const unsigned char *game = sh_entity_gamemgr();
+    uintptr_t base = (uintptr_t)GetModuleHandleW(NULL);
+    uint32_t expected = SH_RVA(0x1907ae0, 0x18fd540);
+    if (!game || !expected) return NULL;
+    *world = *(void **)(game + 0x285bf0);
+    if (!*world) return NULL;
+    *add = *(sdk_add_area *)(*(unsigned char **)*world + 0x38);
+    if ((uintptr_t)*add != base + expected) return NULL;
+    *scene = *(void **)((unsigned char *)*world + 0x852c0);
+    if (!*scene) return NULL;
+    sdk_area_list *list = (sdk_area_list *)((unsigned char *)*scene + 0xc550);
+    return list->count >= 0 && list->count <= 128 && (!list->count || list->areas) ? list : NULL;
+}
+
+static int area_index(const sdk_area_list *list, const float bounds[6], const void *env)
+{
+    for (int i = 0; i < list->count; i++) {
+        const sdk_world_area *a = &list->areas[i];
+        if (env && a->env != env) continue;
+        unsigned j = 0;
+        while (j < 6 && a->bounds[j] == bounds[j]) j++;
+        if (j == 6) return i;
+    }
+    return -1;
+}
+
+static int add_environment_area(const char *name, sh_script_env_area *area)
+{
+    const sh_script_engine *e = sh_script_api_engine();
+    size_t n;
+    unsigned char *text = served("env", name, &n);
+    if (!text) return -1;
+    HeapFree(GetProcessHeap(), 0, text);
+    area->decl = e && e->decl ? e->decl("env", name) : NULL;
+    if (!area->decl) return 0;
+    __try {
+        sdk_add_area add;
+        static const float origin[3] = { 0, 0, 0 };
+        sdk_area_list *list = area_list(&area->world, &area->scene, &add);
+        if (!list || list->count == 128 || area_index(list, area->bounds, NULL) >= 0) return 0;
+        add(area->world, area->bounds, area->decl, NULL, 0, 0, origin, -1);
+        return area_index(list, area->bounds, area->decl) >= 0;
+    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        return 0;
+    }
+}
+
+static int remove_environment_area(sh_script_env_area *area)
+{
+    __try {
+        void *world, *scene;
+        sdk_add_area add;
+        sdk_area_list *list = area_list(&world, &scene, &add);
+        if (!list || world != area->world || scene != area->scene) return 1;
+        int index = area_index(list, area->bounds, area->decl);
+        if (index >= 0) {
+            /* The stock box remover chooses the first equal volume. Keep other boxes of that volume intact. */
+            uint32_t rva = SH_RVA(0x1909f00, 0x18ff960);
+            if (!rva) return 0;
+            ((sdk_erase_area)((uintptr_t)GetModuleHandleW(NULL) + rva))(list, index);
+        }
+        return area_index(list, area->bounds, area->decl) < 0;
+    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        return 0;
+    }
+}
+
 void sh_sdk_runtime_install(void)
 {
     sh_script_sdk_runtime rt;
     rt.effect_emitter = effect_emitter;
     rt.environment_emitter = environment_emitter;
     rt.log = backend_log;
+    rt.add_area = add_environment_area;
+    rt.remove_area = remove_environment_area;
     sh_script_set_sdk_runtime(&rt);
 }
