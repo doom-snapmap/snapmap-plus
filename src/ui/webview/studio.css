@@ -273,7 +273,6 @@
   .field.grow input { width: 100%; }
   /* Center alignment prevents an empty dirty-note span from moving the buttons. */
   .section-label { display: flex; align-items: center; gap: 8px; font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 10px 0 4px; flex-shrink: 0; }
-  .schema-note { font-weight: 400; letter-spacing: 0; text-transform: none; font-style: italic; }
   .prob-count { font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: auto; }
   .prob-count .n-err { color: var(--sqErr); } .prob-count .n-warn { color: var(--sqWarn); }
 
@@ -703,7 +702,7 @@
   .mods-field-long .mods-field-value { line-height: 1.45; }
   .mods-line { padding: 2px 0; }
   .mods-rows-list { display: flex; flex-direction: column; gap: 1px; }
-  .mono, .mods-bundle .mods-field-value { font-family: Consolas, "Courier New", monospace; }
+  .mono { font-family: Consolas, "Courier New", monospace; }
   .mods-link { padding: 0; border: 0; background: none; color: var(--link); font: inherit; text-align: left; cursor: pointer; }
   .mods-link:hover { text-decoration: underline; }
   .mods-link:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }

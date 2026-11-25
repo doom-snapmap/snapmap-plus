@@ -10,14 +10,10 @@ function check(ok, message) {
   if (!ok) { console.error('[FAIL] ' + message); failures++; }
 }
 
-const begin = src.indexOf('  // --- prefab tree (pure) ---');
-const end = src.indexOf('  // --- prefab tree (pure) end ---', begin);
-if (begin < 0 || end < 0) throw new Error('could not extract the prefab tree logic');
-const keyBegin = src.indexOf('  function pfSelKey(r)');
-const keyEnd = src.indexOf('\n', keyBegin);
-if (keyBegin < 0) throw new Error('could not extract pfSelKey');
+const page = require('./page_fixture.js');
+const tree = page.between(src, '  // --- prefab tree (pure) ---', '  // --- prefab tree (pure) end ---');
 const api = {};
-new Function('api', src.slice(keyBegin, keyEnd) + '\n' + src.slice(begin, end) +
+new Function('api', page.lift(src, 'pfSelKey') + '\n' + tree +
   '\napi.pfVisibleRows = pfVisibleRows; api.pfRangeRows = pfRangeRows; api.pfPlanMove = pfPlanMove; api.pfSelKey = pfSelKey;')(api);
 
 const data = {

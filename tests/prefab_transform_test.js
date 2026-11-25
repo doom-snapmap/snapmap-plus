@@ -72,7 +72,7 @@ for (const anchor of [tilt, yaw90, mirrored]) {
     const stored=populate(e.world,e.axes,grabPoint,anchor);
     const shown=tx.applyFrame(stored.position,stored.axes,frame);
     vecNear(shown.position,e.world.map((v,i)=>v-grabPoint[i]),
-            'preview position is world relative to the grab point (det '+tx.determinant(anchor).toFixed(0)+')');
+            'preview position is world relative to the grab point');
     for (let r=0;r<3;r++) vecNear(shown.axes[r],e.axes[r],'preview axis '+r+' is the world axis');
   }
 }

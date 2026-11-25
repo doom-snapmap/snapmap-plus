@@ -8,16 +8,8 @@ const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'webview', 
 let failures = 0;
 function check(ok, message) { if (!ok) { console.error('[FAIL] ' + message); failures++; } }
 
-function lift(name) {
-  const at = html.indexOf('  function ' + name + '(');
-  if (at < 0) throw new Error('no function ' + name);
-  let i = html.indexOf('{', at), depth = 0;
-  for (; i < html.length; i++) {
-    if (html[i] === '{') depth++;
-    else if (html[i] === '}' && --depth === 0) break;
-  }
-  return html.slice(at, i + 1);
-}
+const page = require('./page_fixture.js');
+const lift = name => page.lift(html, name);
 
 /* A row element: innerHTML is the truth; its first child is the leading text node; textContent is
    every text in it, the pills included, as in a browser. */

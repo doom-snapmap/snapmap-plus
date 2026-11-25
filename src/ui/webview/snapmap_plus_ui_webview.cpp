@@ -36,7 +36,6 @@
 #include "game_identity.h"  /* the backend-provided game identity (startup argv) */
 #include "webview_profile.h" /* the WebView2 profile folder under cache\ */
 #include "folder_watch.h"   /* the debounce behind the prefabs folder watcher */
-#include "player_text.h"    /* the description text a player sees from the generated tables */
 #include "../sh_entity_desc.h"/* generated entity descriptions */
 #include "../sh_event_catalog.h"/* generated event names and argument types */
 #include "../sh_entity_asset_lists.h"/* generated per-class model and animation choices */
@@ -405,14 +404,18 @@ static std::wstring ui_wpath(const char *utf8)
     if (w.compare(0, 2, L"\\\\") == 0) return L"\\\\?\\UNC\\" + w.substr(2);
     return w;
 }
-/* %LOCALAPPDATA%\snapmap-plus, whole, or "" when the folder is unknown. */
-static std::wstring ui_local_snapmap_dir()
+static std::wstring ui_local_appdata()
 {
     PWSTR p = nullptr;
     std::wstring dir;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &p)) && p) dir = std::wstring(p) + L"\\snapmap-plus";
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &p)) && p) dir = p;
     if (p) CoTaskMemFree(p);
     return dir;
+}
+static std::wstring ui_local_snapmap_dir()
+{
+    std::wstring dir = ui_local_appdata();
+    return dir.empty() ? dir : dir + L"\\snapmap-plus";
 }
 static FILE *ui_open(const char *utf8_path, const wchar_t *mode)
 {
@@ -442,10 +445,7 @@ static const wchar_t *ui_fs_reason()
 /* %LOCALAPPDATA%\snapmap-plus, created when missing; "" when Windows cannot say. */
 static std::wstring ui_data_dir()
 {
-    PWSTR la = nullptr;
-    std::wstring dir;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &la)) && la) dir = std::wstring(la) + L"\\snapmap-plus";
-    if (la) CoTaskMemFree(la);
+    std::wstring dir = ui_local_snapmap_dir();
     if (!dir.empty()) SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);   /* no-op when it already exists */
     return dir;
 }
@@ -521,7 +521,7 @@ static int ui_entity_count_seh(int *out_ready)
 {
     __try {
         if (!g_iface || !g_iface->vtbl) return 0;
-        if (g_iface->vtbl->editor_ready_poll) *out_ready = g_iface->vtbl->editor_ready_poll(g_iface) ? 1 : 0;
+        if (out_ready && g_iface->vtbl->editor_ready_poll) *out_ready = g_iface->vtbl->editor_ready_poll(g_iface) ? 1 : 0;
         return g_iface->vtbl->entity_count ? g_iface->vtbl->entity_count(g_iface) : 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
@@ -562,7 +562,7 @@ static int ui_dev_hidden_seh(int id)
 }
 static int ui_collect(int *out_ready)
 {
-    *out_ready = 0;
+    if (out_ready) *out_ready = 0;
     g_ents.clear();
     if (!g_iface || !g_iface->vtbl) return 0;
     int count = ui_entity_count_seh(out_ready);
@@ -676,7 +676,7 @@ static int ui_get_selection_seh(int *out, int max)
  * engine's own table), so that count sizes the read. */
 static int ui_get_selection(std::vector<int> &ids)
 {
-    int ready = 0, count = ui_entity_count_seh(&ready);
+    int count = ui_entity_count_seh(nullptr);
     ids.assign((size_t)(count > 0 ? count : 0) + 1, 0);
     ids.resize((size_t)ui_get_selection_seh(ids.data(), (int)ids.size()));
     return (int)ids.size();
@@ -1137,7 +1137,7 @@ static void ui_poll_module_place()
 /* Tell the page which editor mode is up: Object Mode gates object prefabs, Blueprint
  * gates module prefabs, and in Blueprint the modules selected gate Create (-1 when
  * this backend cannot say). Posts on a change, or always when forced. */
-static void ui_post_editor_mode(bool force)
+static void ui_post_editor_mode(bool force, const sh_prefab_watch &watch)
 {
     int entity = 0, blueprint = 0, map_open = 0;
     if (g_iface && g_iface->vtbl && g_iface->vtbl->is_entity_mode) {
@@ -1148,8 +1148,6 @@ static void ui_post_editor_mode(bool force)
     call.op = SH_MODULE_PREFAB_STATE;
     if (ui_module_prefab_call(&call) == 1) { blueprint = call.blueprint ? 1 : 0; map_open = call.map_open ? 1 : 0; }
     /* The modules selected in Blueprint gate Create there; the entity count rides selCount. */
-    sh_prefab_watch watch;
-    ui_prefab_watch(&watch);
     int modules = blueprint ? watch.modules_selected : 0;
     int now = entity | (blueprint << 1) | (map_open << 2);
     if (!force && now == g_editor_mode_last && modules == g_editor_modules_last && call.editor_context == g_editor_context_last) return;
@@ -1722,6 +1720,15 @@ static void ui_send_state(int id, bool autoflag)
     json += L",\"displayname\":\""; json += sh_webview_json::escape_wide(dnm);  json += L"\"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
+static void ui_post_names(std::wstring &json, const std::vector<std::string> &names)
+{
+    for (size_t i = 0; i < names.size(); i++) {
+        if (i) json += L",";
+        json += L"\""; json += sh_webview_json::escape_wide(names[i].c_str()); json += L"\"";
+    }
+    json += L"]}";
+    g_webview->PostWebMessageAsJson(json.c_str());
+}
 /* Build + send the valid-values list for a datalist: {kind:"inherits"|"classes", inherit?, items:[...]}. */
 static void ui_send_enum(int classes, const char *inherit)
 {
@@ -1730,12 +1737,7 @@ static void ui_send_enum(int classes, const char *inherit)
     std::wstring json = classes ? L"{\"kind\":\"classes\",\"inherit\":\"" : L"{\"kind\":\"inherits\"";
     if (classes) { json += sh_webview_json::escape_wide(inherit ? inherit : ""); json += L"\""; }
     json += L",\"items\":[";
-    for (size_t i = 0; i < names.size(); i++) {
-        if (i) json += L",";
-        json += L"\""; json += sh_webview_json::escape_wide(names[i].c_str()); json += L"\"";
-    }
-    json += L"]}";
-    g_webview->PostWebMessageAsJson(json.c_str());
+    ui_post_names(json, names);
 }
 /* Keep SEH in a POD-only helper: MSVC forbids __try alongside C++ locals
  * that require unwinding. */
@@ -1756,12 +1758,7 @@ static void ui_send_arg_resclass(const char *resClass)
     if (!g_webview) return;
     std::vector<std::string> names = ui_take_packed(ui_run_arg_resclass(resClass));
     std::wstring json = L"{\"kind\":\"argResclass\",\"resClass\":\""; json += sh_webview_json::escape_wide(resClass ? resClass : ""); json += L"\",\"items\":[";
-    for (size_t i = 0; i < names.size(); i++) {
-        if (i) json += L",";
-        json += L"\""; json += sh_webview_json::escape_wide(names[i].c_str()); json += L"\"";
-    }
-    json += L"]}";
-    g_webview->PostWebMessageAsJson(json.c_str());
+    ui_post_names(json, names);
 }
 /* Look up entity descriptions in the generated table. */
 static const ShEntDesc *ui_lookup_desc(const std::string &name)
@@ -1778,9 +1775,8 @@ static const ShEntDesc *ui_lookup_desc(const std::string &name)
 /* {"summary":...}, or null when the entry has no description a player should see. */
 static void ui_json_desc_obj(std::wstring &json, const ShEntDesc *d)
 {
-    std::string text = d ? sh_player_text::summary(d->summary) : std::string();
-    if (text.empty()) { json += L"null"; return; }
-    json += L"{\"summary\":\""; json += sh_webview_json::escape_wide(text.c_str()); json += L"\"}";
+    if (!d || !d->summary[0]) { json += L"null"; return; }
+    json += L"{\"summary\":\""; json += sh_webview_json::escape_wide(d->summary); json += L"\"}";
 }
 static void ui_send_desc(const char *inherit, const char *classname)
 {
@@ -2253,13 +2249,13 @@ static void ui_send_event_docs()
         if (i) json += L",";
         const ShEvtDoc &d = SH_EVENT_DOCS[i];
         json += L"{\"name\":\""; json += sh_webview_json::escape_wide(d.name ? d.name : ""); json += L"\"";
-        json += L",\"summary\":\""; json += sh_webview_json::escape_wide(sh_player_text::summary(d.summary).c_str()); json += L"\"";
+        json += L",\"summary\":\""; json += sh_webview_json::escape_wide(d.summary); json += L"\"";
         json += L",\"args\":[";
         for (int a = 0; a < d.nArgs; a++) {
             if (a) json += L",";
             const ShEvtArgDoc &ad = d.args[a];
             json += L"{\"name\":\""; json += sh_webview_json::escape_wide(ad.name ? ad.name : ""); json += L"\"";
-            json += L",\"desc\":\""; json += sh_webview_json::escape_wide(sh_player_text::summary(ad.desc).c_str()); json += L"\"}";
+            json += L",\"desc\":\""; json += sh_webview_json::escape_wide(ad.desc); json += L"\"}";
         }
         json += L"]}";
     }
@@ -2630,10 +2626,8 @@ static void ui_send_budget_table()
 /* The prefab held in the 3D view as the page's ",\"held\":{...}" member, or ",\"held\":null".
  * The editor budget already counts what is held (usage held and after Space are identical for
  * object and module prefabs), so the page must not add it a second time. */
-static std::wstring ui_held_json()
+static std::wstring ui_held_json(const sh_prefab_watch &watch)
 {
-    sh_prefab_watch watch;
-    ui_prefab_watch(&watch);
     const std::string *name = nullptr, *folder = nullptr;
     const wchar_t *kind = L"";
     /* A held paste is this prefab only while it is the last one decided: Create New Timeline and
@@ -2652,26 +2646,16 @@ static std::wstring ui_held_json()
 
 static sh_prefab_host::usage_gate g_usage_gate;
 
-static void ui_send_budget_usage()
+/* A page request always receives the current usage. Editor ticks only post changes. */
+static void ui_send_budget_usage(const sh_prefab_watch &watch, bool requested)
 {
-    std::string body;
-    ui_budget_read(SH_BUDGET_USAGE, body);
-    std::wstring held = ui_held_json();
-    g_usage_wanted = true;
-    g_usage_gate.changed(body, sh_webview_json::to_utf8(held));   /* what the page now has */
-    ui_post_budget(L"budgetUsage", body, held);
-}
-
-/* UI cadence, once the page has asked: post the map's usage again whenever it or the held prefab
- * changed (an edit, a paste picked up, Space or Esc), never an unchanged value on a timer. */
-static void ui_budget_usage_poll()
-{
+    if (requested) g_usage_wanted = true;
     if (!g_usage_wanted) return;
     std::string body;
     ui_budget_read(SH_BUDGET_USAGE, body);
-    std::wstring held = ui_held_json();
-    if (!g_usage_gate.changed(body, sh_webview_json::to_utf8(held))) return;
-    ui_post_budget(L"budgetUsage", body, held);
+    std::wstring held = ui_held_json(watch);
+    if (g_usage_gate.changed(body, sh_webview_json::to_utf8(held)) || requested)
+        ui_post_budget(L"budgetUsage", body, held);
 }
 
 /* UI cadence: re-send the table after a palette rebuild, only once asked. */
@@ -3209,18 +3193,20 @@ static bool ui_mods_plain_folder(const std::wstring &name)
     return true;
 }
 
-/* A mod folder's path under mods\: its organizing folders and its own folder joined with '\', each
- * part a plain folder name (the page sends the row's group and folder). */
-static bool ui_mods_relative_folder(const std::wstring &path)
+static bool ui_mods_relative_path(const std::wstring &path, wchar_t separator)
 {
-    if (path.size() > 400) return false;
     size_t at = 0;
     for (;;) {
-        size_t cut = path.find(L'\\', at);
-        if (!ui_mods_plain_folder(path.substr(at, cut == std::wstring::npos ? std::wstring::npos : cut - at))) return false;
+        size_t cut = path.find(separator, at);
+        if (!ui_mods_plain_folder(path.substr(at, cut - at))) return false;
         if (cut == std::wstring::npos) return true;
         at = cut + 1;
     }
+}
+
+static bool ui_mods_relative_folder(const std::wstring &path)
+{
+    return path.size() <= 400 && ui_mods_relative_path(path, L'\\');
 }
 
 /* Open the store folder in Explorer, creating it when it is not there yet; with `folder`, that mod
@@ -3263,14 +3249,7 @@ static void ui_mods_open_folder(const std::wstring &folder)
  * or ".." part. */
 static bool ui_mods_relative_file(const std::wstring &path)
 {
-    if (path.empty()) return false;
-    size_t at = 0;
-    for (;;) {
-        size_t cut = path.find(L'/', at);
-        if (!ui_mods_plain_folder(path.substr(at, cut == std::wstring::npos ? std::wstring::npos : cut - at))) return false;
-        if (cut == std::wstring::npos) return true;
-        at = cut + 1;
-    }
+    return ui_mods_relative_path(path, L'/');
 }
 
 /* Open in editor (the Files view): one file of a mod folder, "<folder>\t<path below it>", in the
@@ -3418,7 +3397,9 @@ static void ui_send_prefabs()
     }
     json += L"}}";
     g_webview->PostWebMessageAsJson(json.c_str());
-    ui_post_editor_mode(true);
+    sh_prefab_watch watch;
+    ui_prefab_watch(&watch);
+    ui_post_editor_mode(true, watch);
 }
 
 /* Write a prefab's description and tags into its file's snapmapPlus block (the backend keeps its summary and
@@ -3764,7 +3745,9 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"budgetTable") {
                 ui_send_budget_table();
             } else if (cmd == L"budgetUsage") {
-                ui_send_budget_usage();
+                sh_prefab_watch watch;
+                ui_prefab_watch(&watch);
+                ui_send_budget_usage(watch, true);
             } else if (cmd == L"modsList") {
                 g_mods_page_seen = true;
                 ui_mods_begin(0, false, std::string());
@@ -4285,12 +4268,7 @@ static int ui_devtools_port(const wchar_t *local)
 
 static void ui_start_webview()
 {
-    std::wstring local, udf = L".";
-    {
-        PWSTR known = nullptr;
-        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &known)) && known) local = known;
-        if (known) CoTaskMemFree(known);
-    }
+    std::wstring local = ui_local_appdata(), udf = L".";
     bool have_local = !local.empty();
     if (have_local) udf = sh_webview_profile::path(local);
     ComPtr<ICoreWebView2EnvironmentOptions> options;
@@ -4619,12 +4597,12 @@ static void ui_think_loop()
              * displayed-state change poll. All emit only on an actual change. */
             if (was_visible && (frame % 10 == 0)) {
                 unsigned long long poll_started = ui_perf_now_us(), collect_us = 0;
-                int rdy = 0; int n = ui_collect_timed(&rdy, "poll", &collect_us);
+                int n = ui_collect_timed(nullptr, "poll", &collect_us);
                 uint64_t sig = ui_list_sig(n);
                 if (sig != g_last_list_sig) {
                     ui_rescan_timelines_timed(n, "entity-change");   /* change-gated, not a fixed timer */
                     g_last_list_sig = sig;
-                    ui_emit_list(n, rdy, "entity-change");
+                    ui_emit_list(n, ready, "entity-change");
                 }
 
                 /* Publish selection count regardless of sync direction for prefab creation. */
@@ -4637,10 +4615,12 @@ static void ui_think_loop()
                     ui_post_json(m);
                 }
                 /* Object Mode / Blueprint, for the Prefabs tab's Load and Create gates */
-                ui_post_editor_mode(false);
+                sh_prefab_watch watch;
+                ui_prefab_watch(&watch);
+                ui_post_editor_mode(false, watch);
                 /* The Limits section's table, after a palette rebuild, and its live usage. */
                 ui_budget_poll();
-                ui_budget_usage_poll();
+                ui_send_budget_usage(watch, false);
                 if (g_sync_on) {
                     /* mirror the WHOLE editor selection (any N) into the list, only when it changes. */
                     std::sort(selids.begin(), selids.end());

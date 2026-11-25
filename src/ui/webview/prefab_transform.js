@@ -138,7 +138,7 @@ var prefabTransform = (function () {
 
   return {finite:finite, vec3:vec3, orientationAxes:orientationAxes,
           composeMatrix:composeMatrix, composeBottomAnchoredBox:composeBottomAnchoredBox,
-          transformPoint:transformPoint, determinant:determinant, grabFrame:grabFrame,
+          transformPoint:transformPoint, grabFrame:grabFrame,
           applyFrame:applyFrame, BLOCKING_DEFAULT_SIZE:BLOCKING_DEFAULT_SIZE,
           isBlockingVolume:isBlockingVolume, navigationFlags:navigationFlags,
           countNavigationBoxes:countNavigationBoxes, parseScene:parseScene};
