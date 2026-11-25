@@ -68,6 +68,41 @@ func TestInstallEarlierContentAndRealPins(t *testing.T) {
 	}
 }
 
+func TestEarlierFolderOnLongProfilePath(t *testing.T) {
+	base := t.TempDir()
+	data := filepath.Join(base, strings.Repeat("p", max(1, 133-len(base)-1)))
+	if err := copyEarlierPinTree(filepath.Join("..", "tests", "fixtures", "store-retired", "data"), data); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(data, "mods", "alex.tiny@1.0.0+1")
+	want, err := earlierTreeHash(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pass := 0; pass < 2; pass++ {
+		if err := convertEarlierFolders(data); err != nil {
+			t.Fatalf("conversion %d: %v", pass, err)
+		}
+		records := filepath.Join(data, "backups", "earlier-data", "mod-folders")
+		entries, err := os.ReadDir(records)
+		if err != nil || len(entries) != 2 {
+			t.Fatalf("conversion records: %v, %v", entries, err)
+		}
+		found := false
+		for _, entry := range entries {
+			folder := filepath.Join(records, entry.Name())
+			original, err := earlierTreeHash(filepath.Join(folder, "original"))
+			if err != nil || !isRegular(filepath.Join(folder, "finished.json")) {
+				t.Fatalf("incomplete conversion record: %s, %v", folder, err)
+			}
+			found = found || original == want
+		}
+		if !found || !isRegular(filepath.Join(source, "mod.json")) {
+			t.Fatal("missing converted mod or original backup")
+		}
+	}
+}
+
 func TestEarlierVariableMap(t *testing.T) {
 	variable := func(name, value string) map[string]any {
 		return map[string]any{"info": map[string]any{"name": name, "~type": "snapVarInfo_t"}, "initialValue": value, "~type": "snapVarString_t"}

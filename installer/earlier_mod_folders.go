@@ -9,12 +9,30 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
+	"time"
 )
 
 func earlierPathExists(path string) bool {
 	_, err := os.Lstat(path)
 	return !os.IsNotExist(err)
+}
+
+// Windows can refuse a directory rename while another reader still has a child open.
+func renameEarlierFolder(src, dst string) error {
+	for attempt := 0; ; attempt++ {
+		err := os.Rename(src, dst)
+		if err == nil || runtime.GOOS != "windows" || attempt == 6 ||
+			!(errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.Errno(32))) {
+			return err
+		}
+		if _, statErr := os.Lstat(dst); !errors.Is(statErr, fs.ErrNotExist) {
+			return err
+		}
+		time.Sleep(25 * time.Millisecond << attempt)
+	}
 }
 
 type earlierModPlan struct {
@@ -129,7 +147,7 @@ func finishEarlierPlan(data, folder string, plan earlierModPlan) error {
 		if !inPlace && earlierPathExists(dst) {
 			return fmt.Errorf("a different mod now occupies %s", dst)
 		}
-		if err = os.Rename(src, backup); err != nil {
+		if err = renameEarlierFolder(src, backup); err != nil {
 			return err
 		}
 	}
@@ -139,7 +157,7 @@ func finishEarlierPlan(data, folder string, plan earlierModPlan) error {
 	}
 	if got != plan.Original {
 		if !earlierPathExists(src) {
-			if err := os.Rename(backup, src); err != nil {
+			if err := renameEarlierFolder(backup, src); err != nil {
 				return err
 			}
 		}
@@ -151,7 +169,7 @@ func finishEarlierPlan(data, folder string, plan earlierModPlan) error {
 	if err = os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
-	if err = os.Rename(stage, dst); err != nil {
+	if err = renameEarlierFolder(stage, dst); err != nil {
 		return err
 	}
 	return os.Rename(filepath.Join(folder, "plan.json"), filepath.Join(folder, "finished.json"))
@@ -299,7 +317,7 @@ func prepareEarlierFolder(data, records, src, dst string) error {
 	}
 	key := sha256.Sum256([]byte(rel + "\x00" + digest))
 	record := filepath.Join(records, hex.EncodeToString(key[:]))
-	if err = os.Rename(work, record); err != nil {
+	if err = renameEarlierFolder(work, record); err != nil {
 		return err
 	}
 	return finishEarlierPlan(data, record, plan)
