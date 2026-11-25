@@ -64,6 +64,7 @@ const char *sh_modprog_register_param_image(const float vec[][4], unsigned count
  * generated/image/snapmapplus/look/c<16 hex digits of the SHA-256 of its bytes>.bimage; served as the parameter image is. */
 const char *sh_modprog_register_const_image(const float rgba[4]);
 const char *sh_modprog_register_ribbon_mask(float fade_in, float fade_out);
+const char *sh_modprog_register_ribbon_age(const float length[2], const float life[2], const float colours[8]);
 
 /* Registers `text` as an SDK decl of `type` (any case) to be served at generated/decls/<type lower case>/<name>.decl and
  * returns its name, snapmapplus/sdk/<16 hex digits of the SHA-256 of type and text> (snapmapplus_sdk_<hex> for a table,
