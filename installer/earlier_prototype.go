@@ -32,8 +32,8 @@ func prototypeBody(encoded, digest string) []byte {
 	return body
 }
 
-// The prototype saved external package references and private placement aliases.
-// Neither establishes a current mod pin. Refuse the dependent map before staging any files.
+// Reject unsupported prototype references before staging a map or prefab.
+// Their package records and placement aliases cannot identify an exact mod build.
 func earlierPrototypeDependency(src []byte, root earlierObject) error {
 	raw := root["variables"]
 	if !bytes.Contains(raw, []byte("smpref.")) && !bytes.Contains(raw, []byte("smpbind.")) {

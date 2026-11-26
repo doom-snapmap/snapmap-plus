@@ -288,8 +288,8 @@ typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_in
 /* path: the prefab file; name (UTF-8); zip_path. Writes the prefab with its mods as one ZIP
  * (modexport.h); out is the message. 1 written, -1 refused. */
 #define SH_MODULE_PREFAB_EXPORT       11
-/* zip_path: a ZIP or JSON. Caches the included mod content and adds the prefab to the library at path.
- * out is {"ok","added","name","message"}. 1 added, 0 already in the library (content may have been added), -1 refused. */
+/* Import the ZIP or JSON at zip_path into the library at path, caching any included mod content.
+ * Write {"ok","added","name","message"} to out and return 1 for a new prefab, 0 for an existing prefab, or -1 on refusal. */
 #define SH_MODULE_PREFAB_IMPORT       12
 /* text: the prefab file, or its end when tail is 1. out is the view (empty without details).
  * Returns the source: 1 the block, 2 an earlier shape, 0 neither. */

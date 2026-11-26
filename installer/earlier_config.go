@@ -10,8 +10,8 @@ import (
 
 const maxConfigBytes = 64 * 1024
 
-// encoding/json replaces lone UTF-16 surrogates. The runtime rejects them.
-// JSON syntax has already been checked, so every escape is complete.
+// Match the runtime by rejecting lone UTF-16 surrogates before encoding/json replaces them.
+// The caller has already validated the JSON escape syntax.
 func configSurrogatesValid(data []byte) bool {
 	for {
 		i := bytes.IndexByte(data, '\\')

@@ -54,9 +54,9 @@ int   sh_prefab_mods_row_provides(const sh_modmanifest_list *rows, const char *n
 /* A row's name, the salt when it has no name (the refusal's label). */
 const char *sh_prefab_mods_label(const sh_modmanifest_row *row);
 
-/* {"count":N,"missing":M,"mods":[{"id","salt","build","size","installed","state","cause"}...]}: "id" the row's
- * display name. "installed" means its required content is available. "state" is "served", "missing"
- * or "incomplete". A local row can include a refusal in "cause". The caller frees the result. */
+/* The caller owns the JSON containing count, missing and mods. Each row has id (display name), salt, build,
+ * size, installed (all required content available), state (served, missing or incomplete), and an optional
+ * refusal cause for local rows. */
 char *sh_prefab_mods_status_json(const sh_modmanifest_list *rows, size_t *missing);
 
 /* The block for a view: "description" and "tags" from its "desc" and "tags", "mods" from `rows` (NULL keeps the

@@ -2625,8 +2625,8 @@ static int pal_has(void *context, const char *sedef_name)
     return pal_contains(sedef_name, 0);
 }
 
-/* An authored row registered during Refresh can precede the next palette build. Read the resolved entityDef
- * from those declarations as well. A removed or superseded mod row is no longer a provider. */
+/* Refresh can register an entityDef before the palette is rebuilt.
+ * Check the current declarations too, skipping rows the mod removed or replaced. */
 static int pal_has_actor(const char *actor)
 {
     const unsigned char *manager;

@@ -108,8 +108,8 @@ static void *sv_destroyed(void *def, unsigned flags)
     return sv_destroy(def,flags);
 }
 
-/* The filter reads slot->row->moduleAutomation and only dereferences an entry further when removing it.
- * Scope this one decision to the private snapshot. Its real entries are back before EntityClone and wiring. */
+/* The filter reads past slot->row->moduleAutomation only when removing an entry.
+ * Use the private snapshot for that check, then restore the real entries before EntityClone and wiring. */
 static void sv_filtered(void *store)
 {
     if (!sv_count) { sv_filter(store); return; }

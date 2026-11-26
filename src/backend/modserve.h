@@ -568,8 +568,8 @@ int  sh_modserve_scope_map_open(void);
  * map manifest reads placed names at a load only then. */
 int  sh_modserve_scope_relevant(void);
 
-/* The level load spawns entityDefs to build snapshot templates. Hide an undeclared installed namespace and
- * any refused entity or inert actor stand-in in a declared one. Scope off leaves the list intact. Any thread. */
+/* While building snapshot templates, any thread can call this to exclude undeclared mod namespaces,
+ * refused entities and inert actor stand-ins. With map scope disabled, it returns false for every name. */
 int  sh_modserve_level_hides(const char *name);
 
 /* The stock spawn-type bits a ported demon of the current listing stands in for, read from its conductor row

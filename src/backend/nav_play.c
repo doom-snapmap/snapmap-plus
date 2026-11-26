@@ -164,8 +164,8 @@ static int g_actor_source_ready;
 static void (*g_set_play_text)(void *, const char *, int);
 static sh_play_actor_text_fn g_actor_text;
 
-/* MapEntityForSnapEntity holds the editor entry in R14. It copies the returned text into a new runtime
- * declaration before parsing it. The saved record and its generated instance name stay intact. */
+/* MapEntityForSnapEntity keeps the editor entry in R14 and copies this text into the runtime declaration.
+ * Only that copy is edited, preserving the saved record and its generated instance name. */
 static void nav_set_actor_source(void *dest, const char *source, int length, const unsigned char *entry)
 {
     const char *text = source;

@@ -784,8 +784,8 @@ static int on_entity(lua_State *L)
     return 0;
 }
 
-/* Scope Enemy SDK callbacks to the declared actor and its unique behavior. Ordinary on.* handlers keep
- * their entityDef keys. Resolve reusable bindings while the map's scripts register, before the first scan. */
+/* Bind Enemy SDK callbacks to the declared actor and its behavior during script registration, before
+ * the first entity scan. Ordinary on.* handlers use their entityDef keys. */
 static int on_enemy(lua_State *L)
 {
     shs_mod *m = shs_mod_of(L);
