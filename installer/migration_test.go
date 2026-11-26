@@ -43,9 +43,11 @@ func TestStageEarlierArchiveWhileItsSourceIsOpen(t *testing.T) {
 	}
 	defer reader.Close()
 	var staged bytes.Buffer
-	changed, err := rewriteEarlierArchive(data, t.TempDir(), "", src, nil, &staged)
-	if err != nil || !changed || readF(t, src) != original {
-		t.Fatalf("staging an open export: changed %v, error %v", changed, err)
+	pins := newEarlierPins(data, "", nil)
+	pins.output = t.TempDir()
+	result, err := pins.rewriteArchive(src, "Maps", &staged)
+	if err != nil || !result.changed || readF(t, src) != original {
+		t.Fatalf("staging an open export: changed %v, error %v", result.changed, err)
 	}
 	updated, err := zip.NewReader(bytes.NewReader(staged.Bytes()), int64(staged.Len()))
 	if err != nil {

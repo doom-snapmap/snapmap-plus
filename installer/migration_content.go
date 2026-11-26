@@ -247,18 +247,21 @@ func (p *migrationPlan) document(src, dst, stage string, archive bool, pins *ear
 			return err
 		}
 		defer os.Remove(tmp.Name())
-		changed, err := rewriteEarlierArchive(pins.data, pins.output, pins.doom, src, pins.libraries, tmp, pins.placements)
+		result, err := pins.rewriteArchive(src, stage, tmp)
 		if closeErr := tmp.Close(); closeErr != nil {
 			return closeErr
 		}
 		if err != nil {
 			return fmt.Errorf("%s: %w", src, err)
 		}
-		if !changed {
+		if !result.changed {
 			return nil
 		}
 		if err = p.put(dst, tmp.Name(), stage, !legacy); err != nil {
 			return err
+		}
+		if result.vanilla {
+			p.VanillaMaps = append(p.VanillaMaps, filepath.Base(src))
 		}
 	} else {
 		raw, err := os.ReadFile(src)
@@ -280,21 +283,24 @@ func (p *migrationPlan) document(src, dst, stage string, archive bool, pins *ear
 		if stage == "" {
 			stage = exportStage(raw, side)
 		}
-		next, changed, err := convertEarlierPinnedJSON(raw, side, pins)
+		result, err := pins.migrateDocument(raw, side, stage)
 		if err != nil {
 			return fmt.Errorf("%s: %w", src, err)
 		}
 		retire := knownPrefabSide(side)
-		if !changed && !retire {
+		if !result.changed && !retire {
 			return nil
 		}
 		if stage == "Maps" || (p.Export != "" && stage == "Prefabs") {
-			if _, err = p.companion(dst, next, stage); err != nil {
+			if _, err = p.companion(dst, result.body, stage); err != nil {
 				return err
 			}
 		}
-		if err = p.putBytes(dst, next, stage, !legacy); err != nil {
+		if err = p.putBytes(dst, result.body, stage, !legacy); err != nil {
 			return err
+		}
+		if result.vanilla {
+			p.VanillaMaps = append(p.VanillaMaps, filepath.Base(src))
 		}
 		if retire {
 			if err = p.record(sideFile, fmt.Sprintf("%x", sha256.Sum256(side)), "", "", stage); err != nil {
@@ -321,6 +327,9 @@ func (p *migrationPlan) documents(pins *earlierPins) error {
 			}
 			err := walkLibrary(root, func(file string, e fs.DirEntry, _ error) error {
 				if e.IsDir() {
+					if sub == "rawmaps" && samePath(file, filepath.Join(root, "Updated saves", ".local")) {
+						return filepath.SkipDir
+					}
 					return nil
 				}
 				ext := strings.ToLower(filepath.Ext(file))
@@ -349,15 +358,15 @@ func (p *migrationPlan) documents(pins *earlierPins) error {
 	return nil
 }
 
-func (p *migrationPlan) nativeCopy(slot, sourceSHA, title string, out []byte) error {
+func (p *migrationPlan) nativeCopy(slot, sourceSHA, title string, result migratedDocument) error {
 	dir := filepath.Join(p.data, "rawmaps", "Updated saves")
+	hash := fmt.Sprintf("%x", sha256.Sum256(result.body))
 	for index := 1; ; index++ {
 		name := title + ".json"
 		if index > 1 {
 			name = fmt.Sprintf("%s (%d).json", title, index)
 		}
 		file := filepath.Join(dir, name)
-		hash := fmt.Sprintf("%x", sha256.Sum256(out))
 		if idx, ok := p.destinations[strings.ToLower(file)]; ok {
 			if p.Changes[idx].After != hash {
 				continue
@@ -372,12 +381,27 @@ func (p *migrationPlan) nativeCopy(slot, sourceSHA, title string, out []byte) er
 			}
 		}
 		start := len(p.Changes)
-		archive, err := p.companion(file, out, "Maps")
+		archive, err := p.companion(file, result.body, "Maps")
 		if err != nil {
 			return err
 		}
-		if err = p.putBytes(file, out, "Maps", false); err != nil {
+		if err = p.putBytes(file, result.body, "Maps", false); err != nil {
 			return err
+		}
+		if result.vanilla {
+			record, err := p.vanillaSlotFile(slot, sourceSHA)
+			if err != nil {
+				return err
+			}
+			body := pinJSON(vanillaSlot{Format: 1, Source: sourceSHA, Map: name, SHA256: hash})
+			if err := p.putBytes(record, body, "Maps", true); err != nil {
+				return err
+			}
+			if len(p.Changes) > start {
+				p.countDocument("Maps")
+				p.VanillaMaps = append(p.VanillaMaps, title)
+			}
+			return nil
 		}
 		if len(p.Changes) > start {
 			p.countDocument("Maps")

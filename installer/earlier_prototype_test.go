@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -45,7 +44,7 @@ func TestArchivedPrivatePlacementAndPackageReference(t *testing.T) {
 	b64 := base64.StdEncoding.EncodeToString(b.Bytes())
 	chunks := row("smpbind.1.2."+digest(b.Bytes()), b64[29:]) + "," + row("smpbind.0.2."+digest(b.Bytes()), b64[:29])
 	file := func(parent, rows string) []byte {
-		return []byte(`{"~type":"idSnapMap","entities":[{"~type":"idSnapEntity","displayName":` + string(pinJSON(alias)) + `,"entityDef":{"~type":"idDeclEntityDef","inherit":` + string(pinJSON(parent)) + `}}],"variables":{"string":[` + rows + `]}}`)
+		return []byte(`{"~type":"idSnapMap","entities":[{"~type":"idSnapEntity","uniqueId":1,"displayName":` + string(pinJSON(alias)) + `,"entityDef":{"~type":"idDeclEntityDef","inherit":` + string(pinJSON(parent)) + `}}],"variables":{"string":[` + rows + `]}}`)
 	}
 	external := []byte(`{"id":"local.boss-demons","name":"Boss demons","packed":1234,"sha256":"` + strings.Repeat("e", 64) + `"}`)
 	ref := row("smpref.delivery."+strings.Repeat("1", 64)+"."+digest(external), base64.StdEncoding.EncodeToString(external))
@@ -79,24 +78,23 @@ func TestArchivedPrivatePlacementAndPackageReference(t *testing.T) {
 		})
 	}
 	r := newUpdateRig(t, "dev")
+	oneStockRequest(t, r.doom, "generated/decls/entitydef/stock/actor.decl")
+	writeF(t, filepath.Join(r.doom, "base/snap_gameresources.pindex"), readF(t, filepath.Join(r.doom, "base/gameresources.pindex")))
 	path := filepath.Join(r.data, "rawmaps", "Bound.json")
 	good := filepath.Join(r.data, "rawmaps", "Neighbor.json")
 	original := file(alias, chunks+","+bounds)
 	writeF(t, path, string(original))
 	writeF(t, good, string(file("stock/actor", bounds)))
-	before, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	for i := 0; i < 2; i++ {
 		plan, clean, err := preparePlayerMigration(r.doom, r.data, "")
 		if err != nil {
 			clean()
 			t.Fatal(err)
 		}
-		if len(plan.Deferred) != 1 || !strings.Contains(plan.Deferred[0], alias) {
+		want := 1 - i
+		if len(plan.Deferred) != 0 || len(plan.VanillaMaps) != want {
 			clean()
-			t.Fatalf("missing map reason: %v", plan.Deferred)
+			t.Fatalf("wrong map disposition: %v, %v", plan.VanillaMaps, plan.Deferred)
 		}
 		err = plan.commit()
 		clean()
@@ -104,11 +102,7 @@ func TestArchivedPrivatePlacementAndPackageReference(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	after, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if readF(t, path) != string(original) || before.ModTime() != after.ModTime() || !strings.Contains(readF(t, good), `"format":2`) {
-		t.Fatalf("wrong originals or neighboring conversion in %s", r.data)
+	if strings.Contains(readF(t, path), "smpbind.") || strings.Contains(readF(t, path), alias) || !strings.Contains(readF(t, good), `"format":2`) {
+		t.Fatalf("wrong projected map or neighboring conversion in %s", r.data)
 	}
 }

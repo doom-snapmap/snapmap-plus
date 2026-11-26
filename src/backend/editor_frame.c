@@ -376,6 +376,7 @@ static int ef_read_text_detour(const char *id, void *text, void *a3, void *a4)
         return 0;
     }
     r = g_read_text_orig(id, text, a3, a4);
+    sh_rawmap_local_read(_ReturnAddress(), id, text, r);
     /* the cloud save's read of a publish's slot gets the published copy (modpublish.c) */
     if (r == 0 && (filter = g_read_filter) != NULL && text) filter(id, text, _ReturnAddress());
     return r;

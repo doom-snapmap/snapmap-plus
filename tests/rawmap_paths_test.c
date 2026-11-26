@@ -9,6 +9,8 @@
 #include <string.h>
 
 #include "../src/backend/rawmap.c"
+#include "saved_map_fixture.h"
+#include <process.h>
 
 /* ---- STUBS -------------------------------------------------------------------------------------
  * rawmap.c also holds the hooks, navmesh embedder and editor bridge, which the destination rules never reach, so those
@@ -1497,11 +1499,117 @@ static void a_unicode_path_is_read_and_written(void)
     clean_state();
 }
 
+static int vanilla_put(const char *file, const char *body)
+{
+    wchar_t *wide = sh_mb_wpath(file);
+    FILE *f = wide ? _wfopen(wide, L"wb") : NULL;
+    free(wide);
+    if (!f) return 0;
+    int ok = fwrite(body, 1, strlen(body), f) == strlen(body);
+    return fclose(f) == 0 && ok;
+}
+
+static int vanilla_trial(const char *root)
+{
+    static const char id[] = "001122334455667788AB", account[] = "123";
+    static const char old[] = "{\"~type\":\"idSnapMap\",\"snapmap-plus\":{\"format\":1,"
+                               "\"mods\":[{\"id\":\"tiny\",\"version\":\"1.0\",\"bundle\":\"legacy\"}]}}\n";
+    static const char clean[] = "{/* saved map */\"~type\":\"idSnapMap\"}\n";
+    static const char *dirs[] = {"rawmaps", "rawmaps\\Updated saves", "rawmaps\\Updated saves\\.local",
+        "rawmaps\\Updated saves\\.local\\123", "rawmaps\\Updated saves\\.local\\123\\001122334455667788ab",
+        "base", "base\\savegame.user", "base\\savegame.user\\123"};
+    char h[65], result[65], file[2048], record[2048], json[512];
+    unsigned char native[48] = {0}, sender[2] = {0};
+    if (_stricmp(root, sh_mb_user_root()) || !CreateDirectoryA(root, NULL)) return 1;
+    for (size_t i = 0; i < ARRAYSIZE(dirs); i++) {
+        _snprintf_s(file, sizeof file, _TRUNCATE, "%s\\%s", root, dirs[i]);
+        if (!CreateDirectoryA(file, NULL)) return 1;
+    }
+    bind_save_session(root, 123);
+    sh_mb_sha256_hex(old, sizeof old - 1, h);
+    sh_mb_sha256_hex(clean, sizeof clean - 1, result);
+    _snprintf_s(file, sizeof file, _TRUNCATE, "%s\\rawmaps\\Updated saves\\Empty map.json", root);
+    _snprintf_s(record, sizeof record, _TRUNCATE, "%s\\rawmaps\\Updated saves\\.local\\123\\001122334455667788ab\\%s.json", root, h);
+    _snprintf_s(json, sizeof json, _TRUNCATE, "{\"source\":\"%s\",\"sha256\":\"%s\",\"format\":1,\"map\":\"Empty map.json\"}", h, result);
+    CHECK(vanilla_put(record, json) && vanilla_put(file, clean));
+    g_deser_orig = fixture_deser;
+    *(int *)(native + 8) = (int)sizeof old - 1;
+    *(const char **)(native + 16) = old;
+    local_read_return = sender;
+    local_parse_return = sender + 1;
+    sh_rawmap_local_read(sender, id, native, 0);
+    CHECK(rawmap_parse_from(old, (void *)1, sender + 1) && !strcmp(g_parsed, clean));
+    CHECK(!g_open_is_rawmap && !g_open_unsaved);
+    CHECK(!rawmap_parse_from(old, (void *)1, sender + 1)); /* consumed */
+    sh_rawmap_local_read(sender + 1, id, native, 0);
+    CHECK(!rawmap_parse_from(old, (void *)1, sender + 1)); /* cloud read */
+    sh_rawmap_local_read(sender, id, native, 4);
+    CHECK(!rawmap_parse_from(old, (void *)1, sender + 1)); /* native read failed */
+    sh_rawmap_local_read(sender, id, native, 0);
+    CHECK(!rawmap_parse_from(old, (void *)1, sender));     /* unrelated parse */
+    sh_rawmap_local_read(sender, id, native, 0);
+    CHECK(!take_local_read(sender + 1, old, SH_MODPUB_PARSE_PUBLISHED_ONLINE));
+    sh_rawmap_local_read(sender, "001122334455667788FF", native, 0);
+    CHECK(!rawmap_parse_from(old, (void *)1, sender + 1));
+    bind_save_session(root, 456);
+    sh_rawmap_local_read(sender, id, native, 0);
+    CHECK(!rawmap_parse_from(old, (void *)1, sender + 1));
+    bind_save_session(root, 123);
+    *(int *)(native + 8) -= 1; /* trailing newline belongs to the source digest */
+    sh_rawmap_local_read(sender, id, native, 0);
+    CHECK(!rawmap_parse_from(old, (void *)1, sender + 1));
+    CHECK(vanilla_put(file, "{}\n"));
+    CHECK(!sh_local_map_copy(root, account, id, old, sizeof old - 1, NULL));
+    CHECK(vanilla_put(record, "{"));
+    CHECK(!sh_local_map_copy(root, account, id, old, sizeof old - 1, NULL));
+    static const struct { const char *src, *dst; int wanted; } cases[] = {
+#define PREVIOUS ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"id\":\"tiny\",\"bundle\":\"old\"}]}"
+        {"{\"~ty\\u0070e\":\"idSnap\\u004dap\"" PREVIOUS "}",
+         "{/* local */\"~ty\\u0070e\":\"idSnap\\u004dap\"}", 1},
+        {"{\"version\":1,\"instances\":[],\"entities\":[],\"instanceEntities\":{}" PREVIOUS "}",
+         "{\"version\":1,\"instances\":[],\"entities\":[],\"instanceEntities\":{}}", 1},
+        {"{\"version\":1,\"instances\":[],\"entities\":[]" PREVIOUS "}", "{\"version\":1,\"instances\":[],\"entities\":[]}", 0},
+        {"{\"~type\":\"idSnapMap\",\"entities\":[{\"name\":\"Stock\"}]}", "{\"~type\":\"idSnapMap\",\"entities\":[]}", 0},
+        {"{\"~type\":\"idSnapMap\",\"snapmap-plus\":{\"format\":2,\"mods\":[]}}", "{\"~type\":\"idSnapMap\"}", 0},
+        {old, "{\"~type\":\"idSnapEntityPrefab\"}", 0}, {old, "{\"~type\":\"idSnapMap\",\"snapmap-plus\":{}}", 0},
+        {old, "{\"~type\":\"idSnapMap\",\"~type\":\"idSnapMap\"}", 0}, {old, "{\"~type\":\"idSnapMap\"}/*", 0},
+        {old, "{\"~type\":\"idSnapMap\",\"entities\":[{\"name\":\"foreign\"}]}", 0},
+        {"{\"~type\":\"idSnapMap\",\"version\":12" PREVIOUS "}", "{\"~type\":\"idSnapMap\",\"version\":1/*gap*/2}", 0},
+        {"{\"~type\":\"idSnapMap\",\"entities\":[{\"uniqueId\":4}]" PREVIOUS "}",
+         "{\"~type\":\"idSnapMap\",\"entities\":[{\"uniqueId\":9}]}", 0},
+        {"{\"~type\":\"idSnapMap\",\"entities\":[{\"uniqueId\":4,\"customIcon\":{\"value\":\"mods/older/icon\"}}]" PREVIOUS "}",
+         "{\"~type\":\"idSnapMap\",\"entities\":[{\"uniqueId\":4,\"customIcon\":{\"value\":null}}]}", 1},
+        {"{\"~type\":\"idSnapMap\",\"instances\":[{\"moduleName\":\"room/a\",\"origin\":1}]" PREVIOUS "}",
+         "{\"~type\":\"idSnapMap\",\"instances\":[{\"moduleName\":\"room/a\",\"origin\":2}]}", 0},
+#undef PREVIOUS
+    };
+    for (size_t i = 0; i < ARRAYSIZE(cases); i++) {
+        size_t length = strlen(cases[i].src), actual = 0;
+        sh_mb_sha256_hex(cases[i].src, length, h);
+        sh_mb_sha256_hex(cases[i].dst, strlen(cases[i].dst), result);
+        _snprintf_s(record, sizeof record, _TRUNCATE, "%s\\rawmaps\\Updated saves\\.local\\123\\001122334455667788ab\\%s.json", root, h);
+        _snprintf_s(json, sizeof json, _TRUNCATE, "{\"format\":1,\"source\":\"%s\",\"sha256\":\"%s\",\"map\":\"Empty map.json\"}", h, result);
+        CHECK(vanilla_put(file, cases[i].dst) && vanilla_put(record, json));
+        char *out = sh_local_map_copy(root, account, id, cases[i].src, length, &actual);
+        CHECK(cases[i].wanted ? out && actual == strlen(cases[i].dst) && !memcmp(out, cases[i].dst, actual) : !out && actual == 0);
+        free(out);
+    }
+    printf("Local vanilla maps: %d checks, %d failed\n", g_checks, g_failed);
+    return g_failed != 0;
+}
+
 static int synthetic_main(void)
 {
     char archive[MAX_PATH];
 
     printf("rawmap_paths_test\n");
+    {
+        char dir[MAX_PATH], leaf[64], exe[MAX_PATH], quoted[MAX_PATH + 3];
+        _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "rawmap-vanilla-%lu", GetCurrentProcessId());
+        CHECK(temp_path(leaf, dir, sizeof dir) && GetModuleFileNameA(NULL, exe, sizeof exe));
+        _snprintf_s(quoted, sizeof quoted, _TRUNCATE, "\"%s\"", dir);
+        CHECK(_spawnl(_P_WAIT, exe, exe, "--local-map-test", "-snapmap-plus-bench", quoted, NULL) == 0);
+    }
     if (!make_json("rawmap_test_archive.json", archive, sizeof archive)) {
         fprintf(stderr, "could not create the temp fixture\n");
         return 1;
@@ -1560,6 +1668,16 @@ static void check_image(const char *path)
     if (!results) { g_image_fail = 1; free(base); return; }
     n = sig_resolve_all(base, results, cap);
     {
+        const uint8_t *local = image_site(base, results, n, "LocalMapReadCall", identity->vulkan);
+        const uint8_t *read = image_site(base, results, n, "ReadLocalSavedMapText", identity->vulkan);
+        const uint8_t *parse = image_site(base, results, n, "DeserializeFromJson", identity->vulkan);
+        const uint8_t *cloud = image_site(base, results, n, "CloudSaveSlotReadCall", identity->vulkan);
+        IMG_CHECK(sh_rawmap_bind_local_reads(local, read, parse));
+        IMG_CHECK(local_read_return == local + 5 && local_parse_return == local + 24);
+        IMG_CHECK(!sh_rawmap_bind_local_reads(cloud, read, parse));
+        IMG_CHECK(!sh_rawmap_bind_local_reads(local, read, cloud));
+    }
+    {
         uint32_t size = ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.SizeOfImage;
         const unsigned char *is_branch = (const unsigned char *)find_is_branch_map(base);
         const uint8_t *to_json = image_site(base, results, n, "EditorMapToJson", identity->vulkan);
@@ -1584,4 +1702,26 @@ static void check_image(const char *path)
     free(base);
 }
 
+#define main rawmap_tests
 IMAGE_TEST_MAIN("rawmap_paths_test", check_image, synthetic_main)
+#undef main
+
+int main(int argc, char **argv)
+{
+    if (argc == 4 && !strcmp(argv[1], "--local-map-test") && !strcmp(argv[2], "-snapmap-plus-bench"))
+        return vanilla_trial(argv[3]);
+    if (argc > 1 && !strcmp(argv[1], "--vanilla-copy")) {
+        if (argc != 7) return 2;
+        size_t n, m = 0, want = 0;
+        char *source = (char *)sh_mb_read_file(argv[5], INT_MAX, &n);
+        if (!source) return 2;
+        char *got = sh_local_map_copy(argv[2], argv[3], argv[4], source, n, &m);
+        int absent = !strcmp(argv[6], "-");
+        char *expected = absent ? NULL : (char *)sh_mb_read_file(argv[6], INT_MAX, &want);
+        int ok = absent ? !got : got && expected && m == want && !memcmp(got, expected, m);
+        printf("Local vanilla copy: %s (%zu source bytes, %zu result bytes)\n", ok ? "pass" : "fail", n, m);
+        free(source); free(got); free(expected);
+        return !ok;
+    }
+    return rawmap_tests(argc, argv);
+}

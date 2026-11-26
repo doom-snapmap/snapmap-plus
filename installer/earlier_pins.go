@@ -337,6 +337,9 @@ func (p *earlierPins) find() error {
 	}
 	return nil
 }
+
+var errEarlierBlobMismatch = errors.New("file differs from its recorded SHA-256")
+
 func copyPinFile(r io.ReadCloser, dst, hash string, size int64) error {
 	defer r.Close()
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
@@ -361,7 +364,7 @@ func copyPinFile(r io.ReadCloser, dst, hash string, size int64) error {
 		return cerr
 	}
 	if (size >= 0 && n != size) || hex.EncodeToString(h.Sum(nil)) != hash {
-		return fmt.Errorf("file differs from its recorded SHA-256 %s", hash)
+		return fmt.Errorf("%w %s", errEarlierBlobMismatch, hash)
 	}
 	if err = publishNativeCopy(temp.Name(), dst); err != nil {
 		if same, e := fileSHA256(dst); e == nil && same == hash {

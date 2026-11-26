@@ -12,6 +12,10 @@
  * supply the stolen instructions). Returns 1 when installed, else logs the refusal and returns 0. */
 int sh_rawmap_swap_install(void *deser_fn);
 
+/* Pair successful reads from the local model with their subsequent parse. The original read stays intact. */
+int sh_rawmap_bind_local_reads(const unsigned char *site, const void *read, const void *parse);
+void sh_rawmap_local_read(const void *caller, const char *slot, const void *native_text, int status);
+
 /* Every path here is a malloc'd string (free) from the process heap, safe on the game's threads.
  * A UTF-8 path as the wide long form ("\\?\C:\..." or "\\?\UNC\..."; a relative path is made
  * absolute first). NULL when empty, not UTF-8 (ERROR_INVALID_NAME) or out of memory. */

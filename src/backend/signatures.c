@@ -434,6 +434,9 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       0x11F4E80u, 0x11F40A0u },
 
 
+    { "LocalMapReadCall",
+      "E8 ?? ?? ?? ?? 8B D8 85 C0 75 1A 48 8B D7 48 8B 4C 24 38 E8 ?? ?? ?? ?? 84 C0 75 07 BB 04 00 00 00",
+      0x11C2C76u, 0x11C2046u },
     { "ReadLocalSavedMapText",
       /* (localId, idStr *text, ...): reads the slot's map.decl and inflates it into *text, returning 4 when the
        * read or inflate fails. Detoured by editor_frame.c (steal 17) so a rawmap reload never reads the

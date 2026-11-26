@@ -31,7 +31,8 @@ type migrationPlan struct {
 	Deferred                   []string `json:",omitempty"`
 	Changes                    []migrationChange
 	Empty                      []string
-	Maps, Prefabs              int `json:",omitempty"`
+	Maps, Prefabs              int      `json:",omitempty"`
+	VanillaMaps                []string `json:",omitempty"`
 	modFolders                 map[string]migrationMod
 	progress                   *migrationProgress
 	data, work                 string

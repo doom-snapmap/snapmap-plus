@@ -251,6 +251,8 @@ type missingEarlierPin struct {
 type missingEarlierPins struct {
 	items   []missingEarlierPin
 	sources []string
+	rows    []earlierObject
+	cause   error
 }
 
 func (e *missingEarlierPins) Error() string {
@@ -440,7 +442,7 @@ func (p *earlierPins) row(row earlierObject) (earlierObject, error) {
 	if last == nil {
 		last = fmt.Errorf("the original build files are unavailable")
 	}
-	return nil, &missingEarlierPins{items: []missingEarlierPin{{mod: id, build: candidates[0].hash, reason: last.Error()}}}
+	return nil, &missingEarlierPins{items: []missingEarlierPin{{mod: id, build: candidates[0].hash, reason: last.Error()}}, cause: last}
 }
 
 // The caller has verified and translated this embedded package in a private folder.

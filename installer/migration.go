@@ -228,6 +228,10 @@ func (p *migrationPlan) consent(yes bool) (bool, error) {
 		showMigrationCount("Maps and rawmaps", p.Maps, nil)
 		showMigrationCount("Prefabs", p.Prefabs, nil)
 	}
+	if len(p.VanillaMaps) > 0 {
+		ui.field("Make vanilla", strings.Join(p.VanillaMaps, "\n"), ansiYellow)
+		ui.Note("Earlier mod files are missing. These maps will lose their mod content and keep their stock content.")
+	}
 	if yes {
 		ui.Note("Back up your data before migrating.")
 		return true, nil

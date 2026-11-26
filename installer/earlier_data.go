@@ -23,6 +23,40 @@ func convertEarlierJSON(original, side []byte) ([]byte, bool, error) {
 	return convertEarlierJSONWithRows(original, side, nil)
 }
 
+type migratedDocument struct {
+	body    []byte
+	changed bool
+	vanilla bool
+}
+
+func (pins *earlierPins) migrateDocument(original, side []byte, stage string) (migratedDocument, error) {
+	out, changed, err := convertEarlierPinnedJSON(original, side, pins)
+	if err == nil {
+		return migratedDocument{body: out, changed: changed}, nil
+	}
+	var missing *missingEarlierPins
+	var prototype unavailablePrototype
+	if !errors.As(err, &missing) && !errors.As(err, &prototype) {
+		return migratedDocument{}, err
+	}
+	if stage == "Maps" && exportStage(original, side) == "Maps" {
+		if missing != nil && missing.cause != nil && !errors.Is(missing.cause, os.ErrNotExist) && !errors.Is(missing.cause, errEarlierBlobMismatch) {
+			return migratedDocument{}, missing.cause
+		}
+		out, err = projectVanillaMap(original, pins)
+		if err != nil {
+			return migratedDocument{}, err
+		}
+		return migratedDocument{body: out, changed: true, vanilla: true}, nil
+	}
+	if missing != nil {
+		if e := pins.preserveAvailable(missing.rows, missing); e != nil {
+			return migratedDocument{}, e
+		}
+	}
+	return migratedDocument{}, err
+}
+
 func convertEarlierPinnedJSON(original, side []byte, pins *earlierPins) ([]byte, bool, error) {
 	if pins == nil || pins.placements == nil || !under(pins.placements.plan.work, pins.output) {
 		return convertPinnedDocument(original, side, pins)
@@ -100,9 +134,7 @@ func convertPinnedDocument(original, side []byte, pins *earlierPins) ([]byte, bo
 	out, changed, err := convertEarlierMapContent(original, side, resolve, carried, check)
 	var missing *missingEarlierPins
 	if errors.As(err, &missing) {
-		if e := pins.preserveAvailable(checked, missing); e != nil {
-			return nil, false, e
-		}
+		missing.rows = checked
 	}
 	if err != nil {
 		return nil, false, err

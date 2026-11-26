@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -225,7 +224,7 @@ func TestAmbiguousUnembeddedPlacementRetainsBothOwners(t *testing.T) {
 	}
 }
 
-func TestMissingExactBuildSkipsOnlyDependentDocuments(t *testing.T) {
+func TestMissingExactBuildMakesMapsVanilla(t *testing.T) {
 	r := newUpdateRig(t, "dev")
 	rows := []earlierObject{
 		{"id": pinJSON("one.old"), "version": pinJSON("1"), "bundle": pinJSON(strings.Repeat("1", 64))},
@@ -250,12 +249,13 @@ func TestMissingExactBuildSkipsOnlyDependentDocuments(t *testing.T) {
 	raw := filepath.Join(r.data, "rawmaps", "Unavailable.json")
 	writeF(t, raw, missing)
 	archive := filepath.Join(r.data, "rawmaps", "Unavailable.zip")
-	writeF(t, archive, string(zipFiles(t, map[string]string{"old.json": missing})))
+	migrationZip(t, archive, missing)
 	neighbor := filepath.Join(r.data, "rawmaps", "Neighbor.json")
 	writeF(t, neighbor, healthy)
 	before := map[string]string{}
 	times := map[string]time.Time{}
-	for _, f := range append([]string{raw, archive}, filepath.Join(root, "701", "SNAPMAPS00000000000000000aaa", "map.decl"), filepath.Join(root, "701", "SNAPMAPS00000000000000000aaa", "map.decl.verify"), filepath.Join(root, "701", "SNAPMAPS00000000000000000ccc", "map.decl")) {
+	slot := filepath.Join(root, "701", "SNAPMAPS00000000000000000aaa")
+	for _, f := range []string{filepath.Join(slot, "map.decl"), filepath.Join(slot, "map.decl.verify"), filepath.Join(root, "701", "SNAPMAPS00000000000000000ccc", "map.decl")} {
 		before[f] = readF(t, f)
 		st, _ := os.Stat(f)
 		times[f] = st.ModTime()
@@ -265,15 +265,11 @@ func TestMissingExactBuildSkipsOnlyDependentDocuments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Deferred) != 3 {
-		t.Fatalf("unreported missing documents: %v", plan.Deferred)
+	if len(plan.Deferred) != 0 || len(plan.VanillaMaps) != 3 || plan.Maps != 5 {
+		t.Fatalf("wrong summary: %v vanilla, %d maps, %v skipped", plan.VanillaMaps, plan.Maps, plan.Deferred)
 	}
-	for _, notice := range plan.Deferred {
-		for _, row := range rows {
-			if !strings.Contains(notice, pinString(row, "id")+" @ "+pinString(row, "bundle")) {
-				t.Fatal(notice)
-			}
-		}
+	if readF(t, raw) != missing || exists(filepath.Join(r.data, "rawmaps", "Updated saves")) {
+		t.Fatal("preview changed player data")
 	}
 	if err = plan.commit(); err != nil {
 		t.Fatal(err)
@@ -287,15 +283,59 @@ func TestMissingExactBuildSkipsOnlyDependentDocuments(t *testing.T) {
 			t.Fatalf("mutated %s", f)
 		}
 	}
-	if exists(filepath.Join(r.data, "rawmaps", "Updated saves", "Map aaa.json")) || exists(filepath.Join(r.data, "rawmaps", "Updated saves", "Map ccc.json")) {
-		t.Fatal("unexpected native copy")
+	dir := filepath.Join(r.data, "rawmaps", "Updated saves")
+	if !exists(filepath.Join(dir, "Map aaa.json")) || exists(filepath.Join(dir, "Map ccc.json")) || strings.Contains(readF(t, raw), "smpmod1.") {
+		t.Fatal("wrong disposition for vanilla and modded maps")
 	}
-	for _, f := range []string{raw, archive} {
-		one, close, e := preparePlayerMigration(r.doom, r.data, f)
+	names := archiveNames(t, archive)
+	if len(names) != 2 || !names["Room.json"] || !names["thumbnail.txt"] {
+		t.Fatalf("wrong vanilla archive: %v", names)
+	}
+	source := journalHash([]byte(missing))
+	if found, err := plan.knownVanillaSlot(slot, source); err != nil || !found {
+		t.Fatalf("native slot not recognized: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(r.data, "cache")); err != nil {
+		t.Fatal(err)
+	}
+	repeat, finish, err := preparePlayerMigration(r.doom, r.data, "")
+	defer finish()
+	if err != nil || repeat.Maps != 0 || len(repeat.VanillaMaps) != 0 {
+		t.Fatalf("cache reset requeued maps: %v, %v", repeat, err)
+	}
+	otherAccount := filepath.Join(root, "702", filepath.Base(slot))
+	for _, other := range [][2]string{{slot, journalHash([]byte(healthy))}, {otherAccount, source}} {
+		if ok, err := plan.knownVanillaSlot(other[0], other[1]); err != nil || ok {
+			t.Fatalf("conversion matched a different native source: %v", err)
+		}
+	}
+	converted := filepath.Join(dir, "Map aaa.json")
+	writeF(t, converted, stock)
+	if ok, err := plan.knownVanillaSlot(slot, source); err != nil || ok {
+		t.Fatalf("accepted an edited conversion: %v", err)
+	}
+	repair, finishRepair, err := preparePlayerMigration(r.doom, r.data, "")
+	defer finishRepair()
+	if err != nil || len(repair.VanillaMaps) != 1 {
+		t.Fatalf("repair plan: %v, %v", repair, err)
+	}
+	if err = repair.commit(); err != nil || readF(t, converted) != stock || !exists(filepath.Join(dir, "Map aaa (2).json")) {
+		t.Fatalf("edited export was not preserved during repair: %v", err)
+	}
+	for _, name := range []string{"Selected.json", "Selected.zip"} {
+		f := filepath.Join(t.TempDir(), name)
+		if filepath.Ext(name) == ".zip" {
+			writeF(t, f, string(zipFiles(t, map[string]string{"old.json": missing})))
+		} else {
+			writeF(t, f, missing)
+		}
+		if err := convertEarlierExport(r.data, f); err != nil {
+			t.Fatal(err)
+		}
+		one, close, err := preparePlayerMigration(r.doom, r.data, f)
 		close()
-		var absent *missingEarlierPins
-		if one != nil || !errors.As(e, &absent) || len(absent.items) != 2 {
-			t.Fatalf("explicit request must report both missing pins: %v", e)
+		if err != nil || one.ready() {
+			t.Fatalf("explicit export did not finish on the first pass: %s: %v", name, err)
 		}
 	}
 }

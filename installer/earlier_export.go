@@ -99,35 +99,31 @@ func earlierArchiveDocument(z *zip.ReadCloser) (doc, side, index *zip.File, err 
 	return doc, side, index, nil
 }
 
-func rewriteEarlierArchive(data, output, doom, filename string, libraries []string, dest io.Writer, placements ...*earlierPlacements) (bool, error) {
+func (parent *earlierPins) rewriteArchive(filename, stage string, dest io.Writer) (migratedDocument, error) {
 	z, err := zip.OpenReader(filename)
 	if err != nil {
-		return false, err
+		return migratedDocument{}, err
 	}
 	defer z.Close()
 	doc, side, index, err := earlierArchiveDocument(z)
 	if err != nil {
-		return false, err
+		return migratedDocument{}, err
 	}
 	body, err := earlierEntry(doc)
 	if err != nil {
-		return false, err
+		return migratedDocument{}, err
 	}
 	var metadata []byte
 	if side != nil {
 		metadata, err = earlierEntry(side)
 		if err != nil {
-			return false, err
+			return migratedDocument{}, err
 		}
 	}
-	pins := newEarlierPins(data, doom, &z.Reader)
+	pins := newEarlierPins(parent.data, parent.doom, &z.Reader)
 	defer pins.close()
-	pins.output = output
-	pins.libraries = libraries
-	if len(placements) > 0 {
-		pins.placements = placements[0]
-	}
-	next, changed, err := convertEarlierPinnedJSON(body, metadata, pins)
+	pins.output, pins.libraries, pins.placements = parent.output, parent.libraries, parent.placements
+	result, err := pins.migrateDocument(body, metadata, stage)
 	carries := false
 	for _, f := range z.File {
 		if earlierBundleEntry(f.Name) {
@@ -135,39 +131,46 @@ func rewriteEarlierArchive(data, output, doom, filename string, libraries []stri
 			break
 		}
 	}
-	if err != nil || (!changed && !knownPrefabSide(metadata) && !carries) {
-		return false, err
+	if err != nil || (!result.changed && !knownPrefabSide(metadata) && !carries) {
+		return migratedDocument{}, err
 	}
 	out := zip.NewWriter(dest)
 	if err = out.SetComment(z.Comment); err != nil {
-		return false, err
+		return migratedDocument{}, err
 	}
 	existing := map[string]bool{}
 	for _, f := range z.File {
 		if (f == side && knownPrefabSide(metadata)) || f == index || earlierBundleEntry(f.Name) {
 			continue
 		}
+		name := strings.ToLower(f.Name)
+		if result.vanilla && (strings.HasPrefix(name, "units/") || strings.HasPrefix(name, "files/")) {
+			continue
+		}
 		if existing[f.Name] {
-			return false, fmt.Errorf("duplicate export entry %s", f.Name)
+			return migratedDocument{}, fmt.Errorf("duplicate export entry %s", f.Name)
 		}
 		existing[f.Name] = true
-		if f != doc || bytes.Equal(next, body) {
+		if f != doc || bytes.Equal(result.body, body) {
 			if err = out.Copy(f); err != nil {
-				return false, err
+				return migratedDocument{}, err
 			}
 			continue
 		}
 		header := f.FileHeader
 		w, err := out.CreateHeader(&header)
 		if err != nil {
-			return false, err
+			return migratedDocument{}, err
 		}
-		if _, err = w.Write(next); err != nil {
-			return false, err
+		if _, err = w.Write(result.body); err != nil {
+			return migratedDocument{}, err
 		}
 	}
-	if err = pins.addToArchive(out, existing); err != nil {
-		return false, err
+	if !result.vanilla {
+		if err = pins.addToArchive(out, existing); err != nil {
+			return migratedDocument{}, err
+		}
 	}
-	return true, out.Close()
+	result.changed = true
+	return result, out.Close()
 }

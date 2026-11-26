@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-// If a map or prefab is missing a mod, save the verified units it can still recover.
+// A deferred prefab can reuse its verified units on the next migration.
 type earlierRetry struct {
 	Original earlierObject
 	Row      earlierObject

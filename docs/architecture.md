@@ -141,7 +141,8 @@ earlier shape: a `variables.string` name in one of the families earlier builds
 wrote (`smpkg.`, `smpbind.`, `smpref.`, `smpmod1.`, `smpprod1.`,
 `smp.render.v1`, `smp.bounds.v1`, `smnav1.`), a format-1 member,
 or a member row naming an `id`
-or a `bundle`. Such a map is refused before anything reads it: the engine never
+or a `bundle`. For a local save the reader first checks for the installer's consented vanilla
+conversion as described below. An earlier map still reaching this point is refused: the engine never
 parses it (the detour answers a failed parse), the open map keeps its settings
 and manifest, the text is not changed, one `CARRIER: map refused:` line is
 logged and the load's refusal note is "This map was saved by an earlier
@@ -161,12 +162,16 @@ exactly the engine's bytes.
 
 The installer preflights recognized earlier mods, maps and prefabs and asks once before applying
 the changes. A temporary transaction supports resuming an interrupted conversion. A native DOOM save
-gets a converted copy under `rawmaps/Updated saves/`. DOOM creates the new native slot when
-the player opens the copy with **File > Load Rawmap** and chooses **Save As**.
-The installer verifies each earlier pin against its original build. Converted rawmaps with pins
-get a portable ZIP beside the JSON. When a required build is missing, the installer preserves
-the map and the verified units from its available pins for a later retry. After checking the
-library it retires verified historical snapshots and preserves edited or unrecognized files.
+gets a converted copy under `rawmaps/Updated saves/`. The installer verifies each earlier pin against
+its original build and packages the required units beside a fully recovered map.
+When any required earlier build is unavailable, it removes all map mods and repairs the surviving
+stock placements and their references. It lists those maps before consent. For a native save
+it also records the local account, slot ID, SHA-256 of the original inflated map, and SHA-256 of
+the converted file under `rawmaps/Updated saves/.local/`. The local reader uses that file on
+Edit or Play only after matching the original slot and both hashes. A newer native save takes
+precedence. Deleting the content cache leaves the converted map and its record together.
+Fully recovered modded native maps can be opened from their portable ZIP with **File > Load Rawmap**
+and saved with **Save As**. Verified historical snapshots are retired after checking the library.
 [Installer upgrade details](../installer/README.md#updating-earlier-mods-maps-and-prefabs)
 
 Navigation chunks: the engine's lexer sees the member only where Snapmap+ is

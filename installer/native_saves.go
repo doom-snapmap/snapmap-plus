@@ -131,14 +131,63 @@ func (p *migrationPlan) convertNativeSave(slot, title string, pins *earlierPins)
 		return nil
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(original))
+	if known, err := p.knownVanillaSlot(slot, digest); err != nil || known {
+		return err
+	}
 	if known, err := p.knownNativeCopy(slot, digest); err != nil || known {
 		return err
 	}
-	out, changed, err := convertEarlierPinnedJSON(original, nil, pins)
-	if err != nil || !changed {
+	result, err := pins.migrateDocument(original, nil, "Maps")
+	if err != nil || !result.changed {
 		return err
 	}
-	return p.nativeCopy(slot, digest, title, out)
+	return p.nativeCopy(slot, digest, title, result)
+}
+
+type vanillaSlot struct {
+	Format int    `json:"format"`
+	Source string `json:"source"`
+	Map    string `json:"map"`
+	SHA256 string `json:"sha256"`
+}
+
+// The native reader selects this map only for the same local account, slot and source bytes.
+func (p *migrationPlan) vanillaSlotFile(slot, source string) (string, error) {
+	name := strings.ToLower(filepath.Base(slot))
+	account := filepath.Base(filepath.Dir(slot))
+	if _, err := strconv.ParseUint(account, 10, 64); err != nil || !filepath.IsAbs(slot) || !pinHash(source) ||
+		len(name) != 28 || !strings.HasPrefix(name, "snapmaps") {
+		return "", fmt.Errorf("invalid local map slot")
+	}
+	if _, err := hex.DecodeString(name[8:]); err != nil {
+		return "", fmt.Errorf("invalid local map ID")
+	}
+	return filepath.Join(p.data, "rawmaps", "Updated saves", ".local", account, name[8:], source+".json"), nil
+}
+
+func (p *migrationPlan) knownVanillaSlot(slot, source string) (bool, error) {
+	file, err := p.vanillaSlotFile(slot, source)
+	if err != nil {
+		return false, err
+	}
+	if !plainPath(file) {
+		return false, fmt.Errorf("linked migrated map record")
+	}
+	raw, err := os.ReadFile(file)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var record vanillaSlot
+	if json.Unmarshal(raw, &record) != nil || !bytes.Equal(raw, pinJSON(record)) || record.Format != 1 ||
+		record.Source != source || record.SHA256 == source || !pinHash(record.SHA256) ||
+		!pinRelative(record.Map) || filepath.Base(record.Map) != record.Map || !strings.EqualFold(filepath.Ext(record.Map), ".json") {
+		return false, nil
+	}
+	hash, err := migrationFileHash(filepath.Join(p.data, "rawmaps", "Updated saves", record.Map))
+	return hash == record.SHA256, err
 }
 
 // Scan stock maps without allocating their uncompressed size.

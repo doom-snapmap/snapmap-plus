@@ -106,7 +106,7 @@ func TestHistoryRetiresOnlyVerifiedSnapshotAndSelectedUnit(t *testing.T) {
 	}
 }
 
-func TestHistoryPartialPeersRetryAfterOriginalRetires(t *testing.T) {
+func TestHistoryPartialPrefabRetainsOnlyItsAvailableUnits(t *testing.T) {
 	useEarlierUnitTool(t)
 	data := t.TempDir()
 	snap, _ := frozenTiny(t, data)
@@ -114,8 +114,8 @@ func TestHistoryPartialPeersRetryAfterOriginalRetires(t *testing.T) {
 	peerHash := fmt.Sprintf("%x", sha256.Sum256([]byte(canon)))
 	peer := tinyPin("mods/alex.peer/b")
 	peer["id"], peer["bundle"] = pinJSON("alex.peer"), pinJSON(peerHash)
-	mapFile := filepath.Join(data, "rawmaps", "mixed.json")
-	first := earlierTestMap(tinyPin("mods/alex.tiny/a"), peer)
+	mapFile := filepath.Join(data, "prefabs", "mixed.json")
+	first := string(pinJSON(map[string]any{"~type": "idSnapEntityPrefab", "snapmapPlus": map[string]any{"mods": []earlierObject{tinyPin("mods/alex.tiny/a"), peer}}}))
 	writeF(t, mapFile, first)
 	if err := convertEarlierData("", data); err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestHistoryPartialPeersRetryAfterOriginalRetires(t *testing.T) {
 	if len(contents) != 3 || !contents["pin.json"] || !contents["files/0e9e6000b10994ecc327e98e5bb149860c3e5823d420fef5935ef5c311bb9068"] {
 		t.Fatalf("retry stored unrelated content: %v", contents)
 	}
-	// Deleting the last map that needs this archive makes it safe to remove.
+	// Recovery units can be retired once no prefab needs them.
 	orphan := t.TempDir()
 	orphanFile := filepath.Join(orphan, "cache", "migration-units", keep[0].Name())
 	writeF(t, orphanFile, readF(t, filepath.Join(retryDir, keep[0].Name())))
@@ -153,9 +153,28 @@ func TestHistoryPartialPeersRetryAfterOriginalRetires(t *testing.T) {
 	if readF(t, mapFile) == first || earlierPathExists(next) || earlierPathExists(retryDir) {
 		t.Fatal("resolved peer did not convert/release recovery")
 	}
-	contents = archiveNames(t, companionPath(mapFile, 0))
-	if len(contents) != 5 || !contents["mixed.json"] || !contents["files/097992204f8099b0f29fbd9d4da5f343b563fec09de1c1052819be9caadc2d0f"] {
-		t.Fatalf("recovered map content: %v", contents)
+	rows, err := currentRows([]byte(readF(t, mapFile)))
+	if err != nil || len(rows) != 2 || !isRegular(filepath.Join(data, "cache", "content", "files", "09", "097992204f8099b0f29fbd9d4da5f343b563fec09de1c1052819be9caadc2d0f")) {
+		t.Fatalf("recovered prefab content: %v, %v", rows, err)
+	}
+}
+
+func TestPartialMapDropsAllPinsAndTheirUnneededContent(t *testing.T) {
+	useEarlierUnitTool(t)
+	data := t.TempDir()
+	snap, _ := frozenTiny(t, data)
+	missing := tinyPin("mods/alex.peer/b")
+	missing["id"], missing["bundle"] = pinJSON("alex.peer"), pinJSON(strings.Repeat("2", 64))
+	first := earlierTestMap(tinyPin("mods/alex.tiny/a"), missing)
+	mapFile := filepath.Join(data, "rawmaps", "mixed.json")
+	writeF(t, mapFile, first)
+	if err := convertEarlierData("", data); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := currentRows([]byte(readF(t, mapFile)))
+	if err != nil || len(rows) != 0 || earlierPathExists(snap) || earlierPathExists(companionPath(mapFile, 0)) ||
+		earlierPathExists(filepath.Join(data, "cache", "migration-units")) || earlierPathExists(filepath.Join(data, "cache", "content", "units")) {
+		t.Fatalf("partial map retained mod data: %v, %v", rows, err)
 	}
 }
 
@@ -220,7 +239,7 @@ func TestHistoryNativeCopyChecksBothDestinationsAndSlot(t *testing.T) {
 	}
 	plan.pins = pins
 	out := pinJSON(map[string]any{"~type": "idSnapMap", "snapmap-plus": map[string]any{"format": 2, "mods": []earlierObject{row}}})
-	if err = plan.nativeCopy(slot, hash, "Pinned", out); err != nil {
+	if err = plan.nativeCopy(slot, hash, "Pinned", migratedDocument{body: out, changed: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err = plan.commit(); err != nil {

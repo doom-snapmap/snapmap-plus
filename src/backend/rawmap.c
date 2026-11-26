@@ -18,6 +18,9 @@
 #pragma comment(lib, "ole32.lib")     /* CoTaskMemFree */
 #include "../common/profile_dir.h"
 #include "rawmap.h"
+#include "local_map_copy.h"
+#include "saved_maps.h"
+#include "modbundle.h"
 #include "feature_health.h"
 #include "hook.h"
 #include "backend_log.h"
@@ -46,6 +49,57 @@
 typedef int (*deser_fn_t)(const char *json, void *out_map);
 
 static deser_fn_t g_deser_orig = NULL;   /* the trampoline -> the real engine DeserializeFromJson */
+static const unsigned char *local_read_return, *local_parse_return;
+static __declspec(thread) struct { const char *text; int length; char slot[21]; } local_read;
+
+static int calls(const unsigned char *p, const void *target)
+{
+    int32_t offset;
+    if (*p != 0xe8 || !target) return 0;
+    memcpy(&offset, p + 1, sizeof offset);
+    return p + 5 + offset == target;
+}
+
+int sh_rawmap_bind_local_reads(const unsigned char *site, const void *read, const void *parse)
+{
+    /* The local model reads the slot, branches on failure, then parses that idStr's data. */
+    local_read_return = local_parse_return = NULL;
+    if (!site || !calls(site, read) || memcmp(site + 5, "\x8b\xd8\x85\xc0\x75\x1a\x48\x8b\xd7\x48\x8b\x4c\x24\x38", 14) ||
+        !calls(site + 19, parse)) return 0;
+    local_read_return = site + 5;
+    local_parse_return = site + 24;
+    return 1;
+}
+
+void sh_rawmap_local_read(const void *caller, const char *slot, const void *native_text, int status)
+{
+    local_read.text = NULL;
+    if (status || !local_read_return || caller != local_read_return || !native_text || !slot ||
+        strnlen(slot, 21) != 20 || strspn(slot, "0123456789abcdefABCDEF") != 20) return;
+    const unsigned char *s = native_text;
+    local_read.length = *(const int *)(s + 8);
+    memcpy(local_read.slot, slot, sizeof local_read.slot);
+    if (local_read.length > 0) local_read.text = *(const char *const *)(s + 16);
+}
+
+static int take_local_read(const void *caller, const char *text, int kind)
+{
+    int matched = text && text == local_read.text && caller == local_parse_return && kind == SH_MODPUB_PARSE_OTHER;
+    local_read.text = NULL;
+    return matched;
+}
+
+static char *local_copy_for_parse(const void *caller, const char *text, int kind)
+{
+    if (!take_local_read(caller, text, kind)) return NULL;
+    wchar_t *profile = sh_saved_map_profile();
+    const wchar_t *leaf = profile ? wcsrchr(profile, L'\\') : NULL;
+    char *account = leaf ? sh_mb_utf8(leaf + 1) : NULL;
+    char *copy = sh_local_map_copy(sh_mb_user_root(), account, local_read.slot, text, (size_t)local_read.length, NULL);
+    free(account);
+    free(profile);
+    return copy;
+}
 static volatile LONG g_swap_count = 0;
 static volatile LONG g_load_generation = 0;
 static SRWLOCK g_paths_lock = SRWLOCK_INIT;
@@ -887,12 +941,12 @@ static int rawmap_parse_is_reload(int parse_kind)
     return InterlockedCompareExchange(&g_in_reload, 0, 0) != 0 && parse_kind == SH_MODPUB_PARSE_OTHER;
 }
 
-static int sh_deser_detour(const char *json, void *out_map)
+static int rawmap_parse_from(const char *json, void *out_map, const void *caller)
 {
     if (g_deser_orig == NULL) return 0;   /* defensive: should never happen once installed */
     /* The return address is the engine caller's: PublishedMapRead+0x12A or SnapMapReadSizeLimit+0x5D for a
      * published read. */
-    g_parse_kind = sh_modpublished_classify(_ReturnAddress());
+    g_parse_kind = sh_modpublished_classify(caller);
     sh_map_render_loaded(NULL);
     sh_map_bounds_loaded(NULL);
 
@@ -903,6 +957,7 @@ static int sh_deser_detour(const char *json, void *out_map)
     sh_nav_bake_map_opened();
 
     if (rawmap_parse_is_reload(g_parse_kind)) {
+        local_read.text = NULL;
         char *line;
         unsigned long n;
         int rc;
@@ -925,7 +980,22 @@ static int sh_deser_detour(const char *json, void *out_map)
     }
     InterlockedExchange(&g_open_is_rawmap, 0);   /* the engine's own map: let the engine answer */
     open_identity_set(NULL);
-    return deser_prepared(json, out_map);
+    char *copy = local_copy_for_parse(caller, json, g_parse_kind);
+    if (!copy) return deser_prepared(json, out_map);
+    int result;
+    __try {
+        result = deser_prepared(copy, out_map);
+    } __finally {
+        free(copy);
+    }
+    backend_log(result ? "MAP: opened the updated vanilla copy of this local save" :
+                         "MAP: the updated vanilla copy failed to open");
+    return result;
+}
+
+static int sh_deser_detour(const char *json, void *out_map)
+{
+    return rawmap_parse_from(json, out_map, _ReturnAddress());
 }
 
 int sh_rawmap_swap_install(void *deser_fn)

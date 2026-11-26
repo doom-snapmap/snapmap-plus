@@ -57,6 +57,8 @@ static void assign_cstr(void *idstr, const char *text) { (void)idstr; strcpy_s(p
 /* A read that succeeds, and the read filter that sees it. */
 static int good_read(const char *id, void *text, void *a3, void *a4) { (void)id; (void)text; (void)a3; (void)a4; return 0; }
 static int filtered;
+void sh_rawmap_local_read(const void *caller, const char *slot, const void *text, int status)
+{ (void)caller; (void)slot; (void)text; (void)status; }
 static const void *filter_caller;
 static void t_filter(const char *id, void *text, const void *caller) { (void)id; (void)text; filtered++; filter_caller = caller; }
 /* LoadMap reads the slot it is named, as the engine does. */

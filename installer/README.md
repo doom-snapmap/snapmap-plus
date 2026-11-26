@@ -130,8 +130,8 @@ off. The changelog renderer stays colourless.
 
 Before confirmation, the migration summary lists each mod it will update once.
 Settings and shared mod data appear separately. Cyan marks planned changes and
-grey marks zero counts. A yellow warning names missing mod versions when a single
-item has to be skipped. You can continue with the other items and keep the original.
+grey marks zero counts. **Make vanilla** names each earlier map that will lose its
+mod content. A missing prefab dependency is reported separately.
 
 ## Layout contract
 
@@ -297,12 +297,17 @@ the listed folders before accepting. In automation, `--yes` accepts the plan.
    `.build/manifest.json` and moves generated serving and content caches
    outside `mods/`. If an earlier build removed a stock file that the author
    included, the installer restores it from DOOM when its recorded hash matches.
-   Earlier immutable build records remain available to convert exports that
-   name that exact build.
+   The installer uses earlier build records to recover the exact units needed
+   by maps and prefabs, then retires verified historical builds.
 2. **Maps.** Earlier modded rawmaps and ZIP exports receive current mod units.
-   For a recognized earlier native save or published cache map, open its
-   copy under `rawmaps/Updated saves/` with **File > Load Rawmap** and use
-   **Save As** in DOOM. The game's original save and published item stay intact.
+   When an earlier map's required mod files are missing, the same migration
+   makes the map vanilla. It removes all of the map's mods, their placements,
+   overrides and dependent links. Stock placements, their surviving logic,
+   and built-in Grid Rooms remain. For a native save converted this way,
+   open the same entry in **My Maps** to edit or play. Snapmap+ reads the
+   verified conversion from `rawmaps/Updated saves/` after DOOM reads the original slot.
+   A fully recovered modded native save also has a portable copy in that folder.
+   Open its ZIP with **File > Load Rawmap** and choose **Save As** in DOOM.
 3. **Prefabs.** The installer converts recognized mod pins in prefab JSON
    and ZIPs. Keep an earlier modded prefab's metadata beside its JSON so the
    conversion can carry its description, tags and scripts.
@@ -313,11 +318,12 @@ the installer remembers the entity's earlier name and owning mod under
 `cache/legacy-placements.json`. This lets a later rawmap or prefab export
 recover its placed object from the converted author folder.
 
-If a library map needs an unavailable historical build, the installer lists
-the map and missing build IDs, keeps the original and updates independent
-items. Restore the exact build to retry that map. Converting a single export
-reports that missing dependency directly. If two mods claimed the same
+The same policy applies to a single earlier map export. A prefab with an
+unavailable build keeps its source and can be retried when its build is restored.
+If two mods claimed the same
 placed entity, the installer reports the conflict and keeps the source files.
+If every room came from a missing mod, the installer reports that no room survives
+and preserves the source. The earlier map stored no geometry for those rooms.
 Interrupted
 updates resume from a temporary journal in the installer cache. The journal
 is removed when the updated content passes verification.

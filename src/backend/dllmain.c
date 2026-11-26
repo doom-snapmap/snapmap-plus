@@ -176,6 +176,8 @@ static void install_features(const sig_result *results, size_t db)
              "the editor frame hook is not installed", SH_FEATURE_RAWMAPS, NULL, NULL);
         {
             void *read_text = sig_pointer(results, db, "ReadLocalSavedMapText");
+            if (!sh_rawmap_bind_local_reads(sig_pointer(results, db, "LocalMapReadCall"), read_text, deser))
+                backend_log("MAP: the local map read could not be identified; updated copies remain available in Rawmaps");
             need(sh_editor_frame_carrier_install(read_text, sig_pointer(results, db, "IdStrAssignCStr")),
                  "a rawmap cannot be opened without reading one of your saved maps", SH_FEATURE_RAWMAPS, NULL, NULL);
         }
