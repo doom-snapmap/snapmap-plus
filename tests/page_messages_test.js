@@ -24,6 +24,37 @@ function fn(name) {
 const api = {};
 new Function('api', fn('fsFailText') + fn('pfPlaceToast') + '\napi.fs = fsFailText; api.place = pfPlaceToast;')(api);
 
+/* Run the shipped notice handlers. The host chooses between these messages in its crash scan. */
+const start = page.indexOf("if (d.kind === 'crashPending')");
+const end = page.indexOf(" else if (d.kind === 'editorSelect')", start);
+check(start >= 0 && end > start, 'crash notice handlers exist');
+const dispatch = new Function('d', 'crashInFlight', 'crashPopulate', 'showCrashModal', 'toast',
+  'let crashRecord; ' + page.slice(start, end));
+const calls = [];
+function notify(d, sending) {
+  calls.length = 0;
+  dispatch(d, sending, (rec, n) => calls.push([rec, n]), show => calls.push(show),
+           (msg, level) => calls.push([msg, level]));
+}
+const record = {kind: 'classA'};
+notify({kind: 'crashPending', record, count: 2}, false);
+check(calls.length === 2 && calls[0][0] === record && calls[0][1] === 2 && calls[1] === true,
+      'a terminal record opens one dialog with the native count');
+notify({kind: 'crashPending', record}, true);
+check(calls.length === 1 && calls[0][0] === record, 'a report already being sent does not reopen the dialog');
+notify({kind: 'faultRecovered', count: 2}, false);
+check(calls.length === 1 && calls[0][1] === 'warn' && /2 internal faults/.test(calls[0][0]),
+      'recovered records produce just the warning toast');
+
+const scanStart = host.indexOf('auto crash_scan_due =');
+const toastOutput = host.indexOf(String.raw`L"{\"kind\":\"faultRecovered\"`, scanStart);
+const scan = host.slice(scanStart, toastOutput);
+check(scanStart >= 0 && toastOutput > scanStart && scan.includes(String.raw`"{\"kind\":\"crashPending\"`) &&
+      scan.includes('bool startup = crash_scan_due == sh_crash_pending::scan::startup') &&
+      /if \(terminal > 0 && termName != g_crash_last_sent\)\s*\{\s*g_crash_last_sent = termName;/.test(scan) &&
+      scan.includes('else if (survived > 0 && terminal == 0 && !startup)'),
+      'the native scan announces each new terminal record once and suppresses recovered notices on startup or alongside a terminal');
+
 /* A refused file change names its cause, from the host's reason. */
 check(/cannot be used as a folder name in Windows\. Choose another name\./.test(api.fs({result: -1}, '"CON"', 'folder name')),
       'a name Windows refuses says so');
