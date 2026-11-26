@@ -1,6 +1,36 @@
 package main
 
-import "testing"
+import (
+	"io"
+	"strings"
+	"testing"
+	"testing/iotest"
+)
+
+func TestConfirmationRequiresFreshY(t *testing.T) {
+	old := confirmationInput
+	t.Cleanup(func() { confirmationInput = old })
+	for _, tc := range []struct {
+		input string
+		want  bool
+	}{
+		{"y\n", true}, {"Y\r\n", true}, {"n\n", false}, {"\r\n", false},
+		{"maybe\nY\n", false}, {"yes\n", false}, {"y", false}, {"", false},
+	} {
+		confirmationInput = func() io.ReadCloser { return io.NopCloser(strings.NewReader(tc.input)) }
+		if got := confirm(false, "Continue?"); got != tc.want {
+			t.Fatalf("answer %q: %v", tc.input, got)
+		}
+	}
+	confirmationInput = func() io.ReadCloser { return io.NopCloser(iotest.ErrReader(io.ErrClosedPipe)) }
+	if confirm(false, "Continue?") {
+		t.Fatal("accepted a failed keyboard read")
+	}
+	confirmationInput = func() io.ReadCloser { t.Fatal("--yes opened the keyboard"); return nil }
+	if !confirm(true, "Continue?") {
+		t.Fatal("--yes did not confirm")
+	}
+}
 
 // TestEnterDefault covers what a bare Enter does at the interactive prompt.
 func TestEnterDefault(t *testing.T) {

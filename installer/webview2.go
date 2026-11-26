@@ -52,7 +52,6 @@ func webview2Version() string {
 
 // ensureWebView2Runtime offers setup only when the runtime is missing.
 // The mod is already installed, so setup failure does not undo the bundle install.
-// Non-interactive use and --yes accept the bootstrapper prompt automatically.
 func ensureWebView2Runtime(f flags) {
 	if v := webview2Version(); v != "" {
 		ui.OK("WebView2 runtime: present (%s).", v)
@@ -60,15 +59,12 @@ func ensureWebView2Runtime(f flags) {
 	}
 	ui.Section("WebView2 runtime")
 	ui.Note("The Snapmap+ UI renders in Microsoft's Edge WebView2 runtime, which isn't installed on this machine.")
-	if !f.yes && isInteractive() {
-		if !confirm("Install the WebView2 runtime now (a ~2 MB download from Microsoft)?") {
-			ui.Skip("Snapmap+ is installed, but its window won't appear until the runtime is present.\n" +
-				"Get it later from https://developer.microsoft.com/microsoft-edge/webview2/ (the \"Evergreen\" runtime).")
-			return
-		}
-	} else {
-		ui.Note("Installing it now (a ~2 MB download from Microsoft)...")
+	if !confirm(f.yes, "Install the WebView2 runtime now (a ~2 MB download from Microsoft)?") {
+		ui.Skip("Snapmap+ is installed, but its window won't appear until the runtime is present.\n" +
+			"Get it later from https://developer.microsoft.com/microsoft-edge/webview2/ (the \"Evergreen\" runtime).")
+		return
 	}
+	ui.Note("Installing it now (a ~2 MB download from Microsoft)...")
 	if err := installWebView2Runtime(); err != nil {
 		ui.Warn("couldn't install the WebView2 runtime automatically (%v).\n"+
 			"Snapmap+ is installed. Get the runtime from https://developer.microsoft.com/microsoft-edge/webview2/\n"+

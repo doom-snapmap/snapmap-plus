@@ -35,7 +35,7 @@ func TestLegacyMigrationOnInstall(t *testing.T) {
 	ogFootprint(t, doom)
 	t.Setenv("LOCALAPPDATA", filepath.Join(tmp, "appdata"))
 
-	if err := cmdInstall(flags{doom: doom, local: synthDist(t, tmp, "v1")}); err != nil {
+	if err := cmdInstall(flags{yes: true, doom: doom, local: synthDist(t, tmp, "v1")}); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	for _, rel := range []string{
@@ -76,7 +76,7 @@ func TestLegacyMigrationOnInstall(t *testing.T) {
 
 	// and the migrated install uninstalls to truly-vanilla: no XINPUT1_3.dll, no snaphak\ or
 	// snapmap-plus\ left
-	if err := cmdUninstall(flags{}); err != nil {
+	if err := cmdUninstall(flags{yes: true}); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
 	for _, rel := range []string{"XINPUT1_3.dll", "XINPUT1_4.dll", "snaphak", "snapmap-plus"} {
@@ -103,7 +103,7 @@ func TestLoneDinput8IsNotLegacy(t *testing.T) {
 	if got := detectLegacy(doom); got != nil {
 		t.Fatalf("detectLegacy = %v, want nil (no marker present)", got)
 	}
-	if err := cmdInstall(flags{doom: doom, local: synthDist(t, tmp, "v1")}); err != nil {
+	if err := cmdInstall(flags{yes: true, doom: doom, local: synthDist(t, tmp, "v1")}); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	if got := readF(t, filepath.Join(doom, "dinput8.dll")); got != "some other mod" {
@@ -152,7 +152,7 @@ func TestLegacyBackupDropped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := cmdInstall(flags{doom: doom, local: synthDist(t, tmp, "v2")}); err != nil {
+	if err := cmdInstall(flags{yes: true, doom: doom, local: synthDist(t, tmp, "v2")}); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if exists(bak) {
@@ -165,7 +165,7 @@ func TestLegacyBackupDropped(t *testing.T) {
 	if len(rec.Backups) != 0 {
 		t.Errorf("Backups should be empty after the migration, got %v", rec.Backups)
 	}
-	if err := cmdUninstall(flags{}); err != nil {
+	if err := cmdUninstall(flags{yes: true}); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
 	if exists(filepath.Join(doom, "XINPUT1_3.dll")) || exists(filepath.Join(doom, "XINPUT1_4.dll")) {

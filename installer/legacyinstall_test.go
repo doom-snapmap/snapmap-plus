@@ -59,6 +59,20 @@ func legacyMockRelease(t *testing.T) *mockRelease {
 	return r
 }
 
+func TestDeclined2018InstallStopsBeforeDelegation(t *testing.T) {
+	r := newUpdateRig(t, "v1.0.0-beta.1")
+	writeF(t, filepath.Join(r.doom, "DOOMx64vk.exe"), fake2018)
+	writeF(t, filepath.Join(r.doom, "DOOMx64.exe"), fake2018)
+	newMockGitHub(t).publish(legacyMockRelease(t))
+	runs := fakeLegacyInstaller(t, false)
+	if err := runCommand("install", []string{"--doom", r.doom}, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(*runs) != 0 || exists(filepath.Join(r.data, selfExeAsset)) || exists(filepath.Join(r.doom, legacyProxy)) {
+		t.Fatal("declined installation ran or changed files")
+	}
+}
+
 // The 2018 build is installed, updated and reinstalled by v0.2.1-beta.19's own installer, downloaded
 // by tag, verified, and run under a name that never replaces the current installer's stable copy.
 func TestInstall2018BuildRunsTheLegacyInstaller(t *testing.T) {

@@ -107,12 +107,13 @@ func runCommand(cmd string, args []string, installerChecked bool) error {
 		}
 	}
 	f := parseFlags(args)
+	var err error
 	switch cmd {
 	case "install":
-		return cmdInstall(f)
+		err = cmdInstall(f)
 	case "update":
 		f.noSelf = f.noSelf || installerChecked
-		return cmdUpdate(f)
+		err = cmdUpdate(f)
 	case "uninstall":
 		return cmdUninstall(f)
 	case "convert":
@@ -138,11 +139,16 @@ func runCommand(cmd string, args []string, installerChecked bool) error {
 	case "help", "-h", "--help":
 		usage()
 		return nil
+	default:
+		if len(args) == 0 && (strings.EqualFold(filepath.Ext(cmd), ".json") || strings.EqualFold(filepath.Ext(cmd), ".zip")) {
+			return convertWithConsent(appDataDir(), cmd, false)
+		}
+		return errUnknownCommand
 	}
-	if len(args) == 0 && (strings.EqualFold(filepath.Ext(cmd), ".json") || strings.EqualFold(filepath.Ext(cmd), ".zip")) {
-		return convertWithConsent(appDataDir(), cmd, false)
+	if err == errInstallDeclined {
+		return nil
 	}
-	return errUnknownCommand
+	return err
 }
 
 // flags holds the parsed command-line options.

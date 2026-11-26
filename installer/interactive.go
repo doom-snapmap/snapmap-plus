@@ -178,27 +178,19 @@ func cleanLine(s string) string {
 	return strings.TrimSpace(s)
 }
 
-func isYes(s string) bool {
-	s = strings.ToLower(strings.TrimSpace(s))
-	return s == "" || s == "y" || s == "yes"
-}
+var confirmationInput = openConfirmationInput
 
-// isInteractive reports whether stdin is a real terminal -- so we only prompt when a human can answer.
-// Scripts / CI / piped input skip the confirmation automatically; force-skip with --yes.
-// Tests replace it so a console-attached test run never waits on a prompt.
-var isInteractive = func() bool {
-	fi, err := os.Stdin.Stat()
-	return err == nil && (fi.Mode()&os.ModeCharDevice) != 0
-}
-
-// confirm prints a yes/no prompt and returns true on yes (Enter / "y" / "yes"). Input that ends
-// before an answer counts as no.
-func confirm(prompt string) bool {
-	ui.Ask(prompt)
-	answer, open := readLineEOF()
-	ui.Answered(!open)
-	if !open {
+func confirm(yes bool, prompt string) bool {
+	if yes {
+		return true
+	}
+	input := confirmationInput()
+	if input == nil {
 		return false
 	}
-	return isYes(answer)
+	defer input.Close()
+	ui.Ask(prompt)
+	line, err := bufio.NewReader(input).ReadString('\n')
+	ui.Answered(err != nil)
+	return err == nil && strings.EqualFold(cleanLine(line), "y")
 }

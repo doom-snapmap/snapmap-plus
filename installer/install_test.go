@@ -40,7 +40,7 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 	}
 	writeF(t, filepath.Join(dist, "MANIFEST.sha256"), manifest)
 
-	if err := cmdInstall(flags{doom: doom, local: dist}); err != nil {
+	if err := cmdInstall(flags{yes: true, doom: doom, local: dist}); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	// The pre-existing XINPUT1_4.dll is not ours: it is kept in the data folder, never in DOOM.
@@ -61,7 +61,7 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 	// simulate runtime logs written since install that uninstall must clean
 	writeF(t, filepath.Join(doom, "snapmap-plus", "logs", "sh_backend.log"), "log")
 
-	if err := cmdUninstall(flags{}); err != nil {
+	if err := cmdUninstall(flags{yes: true}); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
 	if got := readF(t, filepath.Join(doom, "XINPUT1_4.dll")); got != "ORIGINAL" {
@@ -90,19 +90,19 @@ func TestUpdateDoesNotBackUpOwnDLL(t *testing.T) {
 	// install/update/uninstall lifecycle is exercised against that name too.
 	writeF(t, filepath.Join(doom, "DOOMx64.exe"), "exe")
 
-	if err := cmdInstall(flags{doom: doom, local: synthDist(t, tmp, "v1")}); err != nil {
+	if err := cmdInstall(flags{yes: true, doom: doom, local: synthDist(t, tmp, "v1")}); err != nil {
 		t.Fatalf("install v1: %v", err)
 	}
 	if exists(filepath.Join(doom, "XINPUT1_4.dll.snapmap-plus-bak")) {
 		t.Fatal("fresh install into a clean dir must not create a backup (there was no genuine file)")
 	}
-	if err := cmdInstall(flags{doom: doom, local: synthDist(t, tmp, "v2")}); err != nil { // an update
+	if err := cmdInstall(flags{yes: true, doom: doom, local: synthDist(t, tmp, "v2")}); err != nil { // an update
 		t.Fatalf("update: %v", err)
 	}
 	if exists(filepath.Join(doom, "XINPUT1_4.dll.snapmap-plus-bak")) {
 		t.Error("update must not back up our own previously-installed DLL")
 	}
-	if err := cmdUninstall(flags{}); err != nil {
+	if err := cmdUninstall(flags{yes: true}); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
 	if exists(filepath.Join(doom, "XINPUT1_4.dll")) {
@@ -122,7 +122,7 @@ func TestRuntimeConfigSurvivesInstallerLifecycle(t *testing.T) {
 	t.Setenv("USERPROFILE", filepath.Join(tmp, "profile"))
 	writeF(t, filepath.Join(doom, "DOOMx64vk.exe"), "exe")
 
-	if err := cmdInstall(flags{doom: doom, local: synthDist(t, tmp, "config-v1")}); err != nil {
+	if err := cmdInstall(flags{yes: true, doom: doom, local: synthDist(t, tmp, "config-v1")}); err != nil {
 		t.Fatalf("install v1: %v", err)
 	}
 	configPath := filepath.Join(localAppData, "snapmap-plus", "config.json")
@@ -135,12 +135,12 @@ func TestRuntimeConfigSurvivesInstallerLifecycle(t *testing.T) {
 		}
 	}
 
-	if err := cmdUpdate(flags{local: synthDist(t, tmp, "config-v2"), noSelf: true}); err != nil {
+	if err := cmdUpdate(flags{yes: true, local: synthDist(t, tmp, "config-v2"), noSelf: true}); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	assertConfig("update")
 
-	if err := cmdUninstall(flags{}); err != nil {
+	if err := cmdUninstall(flags{yes: true}); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
 	if exists(filepath.Join(localAppData, "snapmap-plus", "install.json")) {
@@ -148,7 +148,7 @@ func TestRuntimeConfigSurvivesInstallerLifecycle(t *testing.T) {
 	}
 	assertConfig("uninstall")
 
-	if err := cmdInstall(flags{doom: doom, local: synthDist(t, tmp, "config-v3")}); err != nil {
+	if err := cmdInstall(flags{yes: true, doom: doom, local: synthDist(t, tmp, "config-v3")}); err != nil {
 		t.Fatalf("reinstall: %v", err)
 	}
 	assertConfig("reinstall")

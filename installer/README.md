@@ -60,10 +60,10 @@ snapmap-plus help
 
 Any command also takes `--plain` (see [Output](#output)).
 
-With no arguments, the executable opens an interactive prompt. Installation,
-update and uninstall show a `[Y/N]` confirmation after checks when standard input is a
-terminal; `--yes` or `-y` skips that prompt, piped or redirected input never sees
-it, and input that ends before an answer counts as no. Both DOOM executables
+With no arguments, the executable opens an interactive command prompt.
+At every `[Y/N]` question, a fresh **Y** or **y** confirms. Any other answer
+or an unavailable keyboard declines. Unattended commands can pass `--yes` or `-y`.
+Both DOOM executables
 must be closed before changing installed DLLs: the check looks for any running
 `DOOMx64vk.exe` or `DOOMx64.exe` process by name, wherever it was started from.
 The Go lifecycle tests use temporary game and profile directories with a controlled
@@ -88,7 +88,9 @@ meanwhile.
 
 The installer identifies the DOOM build from the executables' SHA-256 before it
 downloads anything. On the 2018 build (Steam build 2642713) install, update and
-reinstall download v0.2.1-beta.19's own `snapmap-plus.exe`, verify it, and run its
+reinstall download v0.2.1-beta.19's own `snapmap-plus.exe` and verify it. The
+current installer asks once before starting the 2018 installation, which includes
+WebView2 when it is missing. After confirmation it runs the verified installer's
 `install` under the name `snapmap-plus-v0.2.1-beta.19.exe`, so that release's own
 steps happen; its copy of itself is then removed from `%LOCALAPPDATA%\snapmap-plus`
 and the current installer remains the stable copy (see

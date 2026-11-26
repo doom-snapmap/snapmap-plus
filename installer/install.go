@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+var errInstallDeclined = errors.New("installation declined")
+
 func cmdInstall(f flags) error {
 	doom, err := resolveDoom(f.doom)
 	if err != nil {
@@ -37,11 +39,6 @@ func cmdInstall(f flags) error {
 		return fmt.Errorf("DOOM is running -- close it and run this again (Snapmap+'s files can't be replaced while the game has them open)")
 	}
 	if build.build == build2018 {
-		if f.local == "" {
-			if err := selfInstall(f.force); err != nil {
-				return err
-			}
-		}
 		return installLegacyRelease(f, doom)
 	}
 	f.doom = doom // the installation a release choice is compared with
@@ -91,14 +88,14 @@ func cmdInstall(f flags) error {
 	if migration != nil && migration.ready() {
 		if !migration.consent(f.yes) {
 			ui.Skip("Cancelled.")
-			return nil
+			return errInstallDeclined
 		}
 		if err = migration.commit(); err != nil {
 			return fmt.Errorf("could not finish updating earlier content: %w; run the same command again", err)
 		}
-	} else if !f.yes && isInteractive() && !confirm(confirmMsg) {
+	} else if !confirm(f.yes, confirmMsg) {
 		ui.Skip("Cancelled -- nothing was changed.")
-		return nil
+		return errInstallDeclined
 	}
 	if f.local == "" {
 		if err := selfInstall(f.force); err != nil {
@@ -324,11 +321,9 @@ func cmdUninstall(f flags) error {
 		ui.Field("Version", "not recorded")
 	}
 	ui.PathField("Folder", doom)
-	if !f.yes && isInteractive() {
-		if !confirm(fmt.Sprintf("About to remove Snapmap+ from\n  %s\nand restore vanilla. Continue?", doom)) {
-			ui.Skip("Cancelled -- nothing was changed.")
-			return nil
-		}
+	if !confirm(f.yes, fmt.Sprintf("About to remove Snapmap+ from\n  %s\nand restore vanilla. Continue?", doom)) {
+		ui.Skip("Cancelled -- nothing was changed.")
+		return nil
 	}
 	removeLeftovers(doom, appDataDir(), "")
 	reportStartupTidy()

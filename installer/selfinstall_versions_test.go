@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"io"
 	"os"
 	"path/filepath"
@@ -95,23 +94,6 @@ func TestUnrecordedStableCopyIsReplaced(t *testing.T) {
 	}
 	if readF(t, stable) != string(installerBytes("v1.0.0-beta.1")) {
 		t.Fatal("an unrecorded owned copy was not replaced")
-	}
-}
-
-func withStdin(t *testing.T, input string) {
-	t.Helper()
-	saved := stdin
-	stdin = bufio.NewReader(strings.NewReader(input))
-	t.Cleanup(func() { stdin = saved })
-}
-
-// Input that ends before an answer is a no; Enter, y and yes are a yes.
-func TestConfirmTreatsEndOfInputAsNo(t *testing.T) {
-	for input, want := range map[string]bool{"": false, "\n": true, "y\n": true, "yes": true, "n\n": false, "no": false} {
-		withStdin(t, input)
-		if got := confirm("Continue?"); got != want {
-			t.Errorf("confirm with input %q = %v, want %v", input, got, want)
-		}
 	}
 }
 

@@ -9,8 +9,8 @@ import (
 )
 
 func TestMigrationShowsCurrentWorkAndStopsBeforeConsent(t *testing.T) {
-	oldUI, oldInput := ui, migrationInput
-	t.Cleanup(func() { ui, migrationInput = oldUI, oldInput })
+	oldUI, oldInput := ui, confirmationInput
+	t.Cleanup(func() { ui, confirmationInput = oldUI, oldInput })
 	c, output := testConsole(false)
 	ui = c
 	progress := startMigrationProgress()
@@ -27,7 +27,7 @@ func TestMigrationShowsCurrentWorkAndStopsBeforeConsent(t *testing.T) {
 		{mod: "doors", build: strings.Repeat("a", 64)}, {mod: "doors", build: strings.Repeat("b", 64)},
 	}})
 	p.reportDeferred()
-	migrationInput = func() io.ReadCloser { return io.NopCloser(strings.NewReader("n\n")) }
+	confirmationInput = func() io.ReadCloser { return io.NopCloser(strings.NewReader("n\n")) }
 	if p.consent(false) {
 		t.Fatal("accepted a declined migration")
 	}

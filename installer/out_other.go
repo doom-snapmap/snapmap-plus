@@ -7,8 +7,8 @@ import (
 	"os"
 )
 
-func openMigrationInput() io.ReadCloser {
-	if !isInteractive() {
+func openConfirmationInput() io.ReadCloser {
+	if !isConsoleFile(os.Stdin) {
 		return nil
 	}
 	return io.NopCloser(stdin)

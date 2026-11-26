@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -213,8 +212,6 @@ func showMigrationCount(label string, n int, names []string) {
 	ui.field(label, value, color)
 }
 
-var migrationInput = openMigrationInput
-
 func (p *migrationPlan) consent(yes bool) bool {
 	ui.Section("Migration summary")
 	if samePath(p.work, migrationJournal(p.data)) {
@@ -237,17 +234,8 @@ func (p *migrationPlan) consent(yes bool) bool {
 	}
 	if yes {
 		ui.Note("Back up your data before migrating.")
-		return true
 	}
-	input := migrationInput()
-	if input == nil {
-		return false
-	}
-	defer input.Close()
-	ui.Ask("Back up your data before migrating. Continue?")
-	line, err := bufio.NewReader(input).ReadString('\n')
-	ui.Answered(err != nil)
-	return err == nil && strings.EqualFold(cleanLine(line), "y")
+	return confirm(yes, "Back up your data before migrating. Continue?")
 }
 
 func (p *migrationPlan) commit() error {

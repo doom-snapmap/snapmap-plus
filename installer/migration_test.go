@@ -5,12 +5,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"testing/iotest"
 	"time"
 )
 
@@ -197,25 +195,6 @@ func TestMigrationConsentAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldInput := migrationInput
-	t.Cleanup(func() { migrationInput = oldInput })
-	for _, k := range []struct {
-		input string
-		yes   bool
-	}{
-		{"y\n", true}, {"Y\r\n", true}, {"n\n", false}, {"\r\n", false},
-		{"maybe\nY\n", false}, {"yes\n", false}, {"y", false}, {"", false},
-	} {
-		migrationInput = func() io.ReadCloser { return io.NopCloser(strings.NewReader(k.input)) }
-		if yes := plan.consent(false); yes != k.yes {
-			t.Fatalf("answer %q: %v", k.input, yes)
-		}
-	}
-	migrationInput = func() io.ReadCloser { return io.NopCloser(iotest.ErrReader(io.ErrClosedPipe)) }
-	if plan.consent(false) {
-		t.Fatal("accepted a failed keyboard read")
-	}
-	migrationInput = func() io.ReadCloser { return nil }
 	if plan.consent(false) {
 		t.Fatal("accepted migration without a keyboard")
 	}

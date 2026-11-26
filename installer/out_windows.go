@@ -15,8 +15,9 @@ const enableVirtualTerminalProcessing = 0x0004
 var procSetConsoleMode = syscall.NewLazyDLL("kernel32.dll").NewProc("SetConsoleMode")
 var procFlushConsoleInput = syscall.NewLazyDLL("kernel32.dll").NewProc("FlushConsoleInputBuffer")
 
-func openMigrationInput() io.ReadCloser {
-	if !isInteractive() || !(isConsoleFile(os.Stdin) || isConsoleFile(os.Stdout) || isConsoleFile(os.Stderr)) {
+func openConfirmationInput() io.ReadCloser {
+	fi, err := os.Stdin.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 || !(isConsoleFile(os.Stdin) || isConsoleFile(os.Stdout) || isConsoleFile(os.Stderr)) {
 		return nil
 	}
 	// Read the attached keyboard and discard keys queued before the question.

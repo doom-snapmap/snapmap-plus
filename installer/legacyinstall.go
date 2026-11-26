@@ -47,10 +47,21 @@ func installLegacyRelease(f flags, doom string) error {
 	if err != nil {
 		return err
 	}
-	args := []string{"install", "--doom", doom, "--release", legacyReleaseTag}
-	if f.yes {
-		args = append(args, "--yes")
+	question := fmt.Sprintf("Install Snapmap+ %s for the 2018 build in\n  %s?", legacyReleaseTag, doom)
+	if len(detectLegacy(doom)) > 0 {
+		ui.Note("This replaces the original SnapHak in the DOOM folder.")
 	}
+	ui.Note("The 2018 installer also installs Microsoft's WebView2 runtime if it is missing.")
+	if !confirm(f.yes, question) {
+		ui.Skip("Cancelled.")
+		return errInstallDeclined
+	}
+	if f.local == "" {
+		if err := selfInstall(f.force); err != nil {
+			return err
+		}
+	}
+	args := []string{"install", "--doom", doom, "--release", legacyReleaseTag, "--yes"}
 	if f.token != "" {
 		args = append(args, "--token", f.token)
 	}

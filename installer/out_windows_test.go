@@ -13,12 +13,12 @@ import (
 	"unsafe"
 )
 
-func TestMigrationReadsOnlyFreshConsoleInput(t *testing.T) {
+func TestConfirmationReadsOnlyFreshConsoleInput(t *testing.T) {
 	const child = "SNAPMAP_TEST_PROMPT_CONSOLE"
 	if os.Getenv(child) == "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMigrationReadsOnlyFreshConsoleInput$")
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestConfirmationReadsOnlyFreshConsoleInput$")
 		cmd.Env = append(os.Environ(), child+"=1")
 		const createNewConsole = 0x10
 		cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNewConsole, HideWindow: true}
@@ -33,7 +33,6 @@ func TestMigrationReadsOnlyFreshConsoleInput(t *testing.T) {
 	}
 	defer console.Close()
 	os.Stdin = console
-	isInteractive = func() bool { return true }
 	type keyEvent struct {
 		kind, pad             uint16
 		down                  int32
@@ -51,9 +50,9 @@ func TestMigrationReadsOnlyFreshConsoleInput(t *testing.T) {
 	}
 	enter := keyEvent{kind: 1, down: 1, count: 1, key: '\r', chr: '\r'}
 	typeLine([]keyEvent{enter})
-	in := openMigrationInput()
+	in := openConfirmationInput()
 	if in == nil {
-		t.Fatal("missing migration keyboard")
+		t.Fatal("missing confirmation keyboard")
 	}
 	defer in.Close()
 	typeLine([]keyEvent{{kind: 1, down: 1, count: 1, key: 'Y', chr: 'y'}, enter})

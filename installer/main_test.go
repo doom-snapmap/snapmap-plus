@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"testing"
 )
@@ -8,7 +9,7 @@ import (
 // TestMain keeps every test offline and non-interactive: run from a console, stdin is a terminal, and the
 // lifecycle tests must not depend on how an unanswered prompt resolves.
 func TestMain(m *testing.M) {
-	isInteractive = func() bool { return false }
+	confirmationInput = func() io.ReadCloser { return nil }
 	// No test reaches GitHub: an unmocked release lookup goes to a closed loopback port.
 	os.Setenv(apiBaseEnv, "http://127.0.0.1:1")
 	os.Exit(m.Run())
