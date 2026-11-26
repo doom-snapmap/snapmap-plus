@@ -463,8 +463,8 @@ static int normalize(float v[3])
 static void dir_angles(const float d[3], float out[3])
 {
     double h = sqrt((double)d[0] * d[0] + (double)d[1] * d[1]);
-    out[0] = (float)(-atan2((double)d[2], h) * 180.0 / PI) + 0.0f;   /* + 0: no negative zero */
-    out[1] = (float)(atan2((double)d[1], (double)d[0]) * 180.0 / PI) + 0.0f;
+    out[0] = d[2] == 0.0f ? 0.0f : (float)(-atan2((double)d[2], h) * 180.0 / PI);
+    out[1] = d[1] == 0.0f && d[0] >= 0.0f ? 0.0f : (float)(atan2((double)d[1], (double)d[0]) * 180.0 / PI);
     out[2] = 0;
 }
 
