@@ -500,6 +500,30 @@ static void test_empty_index(void)
     }
 }
 
+static int repair_loaded_unknown(void *context, const char *request)
+{
+    char text[2048];
+    int *unknown = (int *)context;
+    if (!strcmp(request, LIFT)) return 0;   /* The engine has not loaded this row yet. */
+    CHECK(!strcmp(request, "generated/decls/snapeditorentitydef/unknown/unknown.decl"));
+    (*unknown)++;
+    CHECK(provider_text(request, 0, text, sizeof text) && strstr(text, "#str_sh_unknown") &&
+          strstr(text, "SNAP_ENTITY_PLACE_AIR_UNALIGNED"));
+    return 1;
+}
+
+static void test_early_defaults(void)
+{
+    int unknown = 0, reads = 0;
+    char text[100];
+    CHECK(!sh_modserve_active());
+    CHECK(provider_text("decltree/snapeditorentitydef/custom/timeline.decl", 0, text, sizeof text));
+    CHECK(provider_text("generated/decls/snapEditorEntityDef/volume/blocking.decl", 1, text, sizeof text));
+    CHECK(!provider_text("generated/decls/snapEditorEntityDef/unknown/unknown.decl", 2, text, sizeof text));
+    CHECK(sh_overrides_repair_defaults(repair_loaded_unknown, &unknown, &reads) == 2 && unknown == 1 && reads == 1);
+    CHECK(sh_overrides_repair_defaults(repair_loaded_unknown, &unknown, &reads) == 1 && unknown == 1 && reads == 1);
+}
+
 static void test_index_and_isolation(void)
 {
     sh_modserve_stats st;
@@ -624,6 +648,7 @@ static void test_lookup(void)
 static void test_precedence(void)
 {
     char text[256];
+    int unknown = 0, reads = 0;
     log_clear();
     /* A new mod name reaches the engine through the provider's stream. */
     CHECK(provider_text(A_SEDEF, 0, text, sizeof text) && !strcmp(text, "{ entityDef \"mods/alexpink/imp\" }"));
@@ -631,6 +656,7 @@ static void test_precedence(void)
     /* Mode 2 is never served. */
     CHECK(!provider_text(A_SEDEF, 2, text, sizeof text));
     /* A bundle shadow of a built-in name wins over the built-in default (the player's expanded Lift tile). */
+    CHECK(sh_overrides_repair_defaults(repair_loaded_unknown, &unknown, &reads) == 0 && unknown == 0 && reads == 0);
     CHECK(provider_text(LIFT, 0, text, sizeof text) && !strcmp(text, "MODLIFT"));
     /* Map navigation wins. */
     CHECK(provider_text(NAV_NAME, 0, text, sizeof text) && !strcmp(text, "NAV"));
@@ -6954,6 +6980,7 @@ int main(void)
     build_fixture();
     test_index_listeners();
     test_empty_index();
+    test_early_defaults();
     test_product_hashed_served();
 
     test_index_and_isolation();

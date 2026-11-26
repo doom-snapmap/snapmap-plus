@@ -390,6 +390,24 @@ void *sh_overrides_test_stream_open_file(const char *path)
  * (decltree/<type>/<name>.decl) rather than generated/decls/, so these also answer that spelling. */
 static const char *const g_ov_product_decls[] = { "snapeditorentitydef/custom/" };
 
+#define OV_DEFAULT_COUNT (sizeof g_ov_baked_decls / sizeof g_ov_baked_decls[0])
+static volatile LONG g_default_settled[OV_DEFAULT_COUNT];
+
+int sh_overrides_repair_defaults(int (*visit)(void *, const char *), void *context, int *reads)
+{
+    int offered = 0;
+    for (size_t i = 0; i < OV_DEFAULT_COUNT; i++) {
+        const char *request = g_ov_baked_decls[i].name;
+        if (InterlockedCompareExchange(&g_default_settled[i], 0, 0) || sh_modserve_lookup(request, NULL)) continue;
+        offered++;
+        if (visit(context, request)) {
+            /* The provider marks a successful read during the visit. A failed parse is also tried only once. */
+            if (InterlockedExchange(&g_default_settled[i], 1)) (*reads)++;
+        }
+    }
+    return offered;
+}
+
 /* The baked default for `name`, or NULL if `name` is not a built-in. */
 static const ov_baked_decl_t *find_baked(const char *name)
 {
@@ -650,7 +668,10 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
             const ov_baked_decl_t *baked = find_baked(name);
             if (s == NULL && baked != NULL) {
                 s = make_mem_stream((const unsigned char *)baked->text, (long long)baked->len, name, 0);
-                if (s && src == NULL) src = "built-in";
+                if (s) {
+                    InterlockedExchange(&g_default_settled[baked - g_ov_baked_decls], 1);
+                    src = "built-in";
+                }
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             s = NULL;   /* a fault in the shadow path falls through to the original open */

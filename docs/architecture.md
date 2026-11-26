@@ -3999,6 +3999,12 @@ the bytes are unchanged, also when the open landed in the table it replaced.
 The pass logs `MODS: reparsed <n> <type> decl(s) the engine parsed before the
 serving index (...)` per type and one summary line.
 
+Before the Toybox is built, the editor also checks the built-in declarations.
+If DOOM already parsed the hidden stock Unknown row at startup, the editor
+reloads it through the provider so it appears under Custom. An installed mod
+that supplies the same row takes precedence. A row that already loaded through
+the provider needs no second load.
+
 Every in-place load the product runs (this re-parse, the refresh below, the
 gated reload of models and images) keeps the resource's lifetime at `+0x28`.
 `ResourceGenericLoad`'s failure path reconstructs the object in place and

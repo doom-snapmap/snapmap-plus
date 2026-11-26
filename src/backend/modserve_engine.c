@@ -1415,6 +1415,14 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
     return result;
 }
 
+static int me_reparse_default(void *context, const char *request)
+{
+    char type[SH_MB_TYPE_CAP], *name = NULL;
+    int done = sh_mb_logical_name(request, type, &name) && me_reparse_one(context, type, name, request, "Snapmap+");
+    free(name);
+    return done;
+}
+
 /* Inside process heap 0: from me_run's scope, or entered here. */
 static void me_reparse_early(const char *phase, int in_heap)
 {
@@ -1422,13 +1430,17 @@ static void me_reparse_early(const char *phase, int in_heap)
     sh_process_heap_scope heap = { 0 };
     double t0 = me_now_ms();
     int offered = 0, i;
-    if (!g_bound || !sh_modserve_active() || me_on_main() != 1) return;
+    if (!g_bound || me_on_main() != 1) return;
     memset(&r, 0, sizeof r);
     if (!in_heap && !sh_process_heap_enter(&g_heap, &heap)) {
         me_log("%s: early decls not re-parsed (process heap scope unavailable)", phase);
         return;
     }
-    __try { offered = sh_modserve_each_unopened_shadow(me_reparse_one, &r); }
+    __try {
+        if (!strcmp(phase, "editor"))
+            offered = sh_overrides_repair_defaults(me_reparse_default, &r, &r.through_provider);
+        offered += sh_modserve_each_unopened_shadow(me_reparse_one, &r);
+    }
     __finally {
         if (!in_heap && !sh_process_heap_leave(&heap)) me_log("%s: early-decl re-parse heap scope did not balance", phase);
     }
@@ -2321,7 +2333,8 @@ void sh_modserve_palette_before_build(void)
 {
     int first = !InterlockedExchange(&g_editor_pass_done, 1), todo = 0;
     me_pass_prelude("editor");
-    if (!g_bound || !sh_modserve_active()) return;
+    if (!g_bound) return;
+    if (!sh_modserve_active()) { me_reparse_early("editor", 0); return; }
     me_ensure_probe();
     (void)sh_companions_ensure("editor");
     /* A palette pass is the editor's: the PLAY mode a hub launch set at its launch boundary (modpublished.c),

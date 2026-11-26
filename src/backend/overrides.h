@@ -37,6 +37,10 @@ unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_l
  */
 int sh_overrides_uninstall(void);
 
+/* Offer built-in decls the game may have parsed before the provider was installed.
+ * A visitor returns 0 for a decl still waiting for its first load. */
+int sh_overrides_repair_defaults(int (*visit)(void *, const char *), void *context, int *reads);
+
 /* Runs the install's byte checks (the base idFile helper's prologue at its recorded RVA, the provider vtable
  * decoded from the constructor). Returns NULL when they hold, else the log line naming the failure. */
 const char *sh_overrides_check_sites(const uint8_t *module_base, const void *ctor_fn,
