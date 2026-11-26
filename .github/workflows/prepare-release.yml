@@ -156,7 +156,7 @@ jobs:
         uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8.1.3
         with:
           branch: changelog/${{ inputs.version }}
-          # The dispatch branch, so a release line other than main gets its entry proposed against itself.
+          # The dispatch branch, so a release line other than the default branch gets its entry proposed against itself.
           base: ${{ github.ref_name }}
           title: 'changelog: ${{ inputs.version }}'
           commit-message: |

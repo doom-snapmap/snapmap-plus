@@ -52,7 +52,7 @@ separate from the repository's write permissions. The intended deployment uses:
 4. The key is set as step-level `env:`, not job-wide, so no other step in that job sees it.
 5. `persist-credentials: false` on that job's checkout.
 6. `pip install --require-hashes` against [`tools/requirements.txt`](../tools/requirements.txt).
-7. A ruleset on `main` requiring code-owner review, so a drafted entry cannot merge itself.
+7. Branch protection on `one-shape` requiring code-owner review, so a drafted entry cannot merge itself.
 
 ### Setting it up
 

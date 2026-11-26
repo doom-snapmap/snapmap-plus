@@ -1,5 +1,5 @@
 # Build and publish a release on a version tag after the reviewed changelog entry is merged (docs/contributing.md).
-# The tag is vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-beta.N on a commit of main, and full CI runs on it first.
+# The tag is vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-beta.N on a commit of the default branch, and full CI runs on it first.
 # The release stays a draft until every asset is uploaded and read back; actions are SHA-pinned and artifacts attested.
 name: Release
 
@@ -24,10 +24,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Tag shape, main ancestry, reviewed notes
+      - name: Tag shape, default branch ancestry, reviewed notes
         shell: bash
         env:
           TAG: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$'; then
@@ -40,9 +41,9 @@ jobs:
             echo "::error::refusing to republish the final 2018 release v0.2.1-beta.19"
             exit 1
           fi
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::$TAG points at $GITHUB_SHA, which is not on main; tag a merged commit"
+          git fetch --no-tags origin "refs/heads/$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "::error::$TAG points at $GITHUB_SHA, which is not on $DEFAULT_BRANCH; tag a merged commit"
             exit 1
           fi
           python3 tools/changelog.py --section "$TAG" --out notes.md

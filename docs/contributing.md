@@ -296,7 +296,7 @@ that are merged but not yet tagged do not appear.
    fine. Follow it with a body of **one to three short sentences** -- see
    [Writing the commit body](#writing-the-commit-body) below, which is a hard requirement, not a style
    preference. Do not add agent/tool attribution or generated-by trailers.
-7. **Push** to your fork and open a **pull request against `main`**.
+7. **Push** to your fork and open a **pull request against `one-shape`**.
 8. The **CI gate** runs automatically, as three parallel jobs: a security scan (no-new-binaries ·
    capability-surface scan · gitleaks); the build (`build.ps1` / `package.ps1`, `tools/bundle_guard.ps1`,
    which asserts the bundle is the 2-file overlay, XInput ordinal parity, `tests/run-tests.ps1` and the
@@ -384,9 +384,9 @@ still apply, so choose a version that has no tag, changelog entry or draft branc
    behaviour change updates the docs in the SAME pull request matters here: those docs are what the drafter
    is grounded on, and a release whose docs were not updated gives it nothing to be right from.
 3. Merge it.
-4. Tag the merged commit on `main`: `git tag v1.0.1 && git push origin v1.0.1`. The website's
+4. Tag the merged commit on `one-shape`: `git tag v1.0.1 && git push origin v1.0.1`. The website's
    changelog reads published releases only, so the entry appears there when `release.yml` publishes it.
-5. `release.yml` refuses a tag with no entry, a `NEEDS WRITING` entry or a commit off `main`, so step 4
+5. `release.yml` refuses a tag with no entry, a `NEEDS WRITING` entry or a commit outside the default branch, so step 4
    cannot silently ship notes-free.
 
 If drafting fails -- an outage, a rate limit, a declined request -- the pull request still opens, carrying the
@@ -408,7 +408,7 @@ workflow refuses to draft from the entire history. Pass the last beta as the bas
 `base` when the default comparison is not the one wanted).
 
 `release.yml` checks the tag before building: it must be `vMAJOR.MINOR.PATCH` or
-`vMAJOR.MINOR.PATCH-beta.N`, point at a commit on `main`, and have a written changelog entry (the
+`vMAJOR.MINOR.PATCH-beta.N`, point at a commit on the default branch, and have a written changelog entry (the
 `NEEDS WRITING` draft is refused here and by the pull-request lint). The whole CI gate then runs on the
 tag. The release is created as a draft, every asset is uploaded and read back unchanged, and only then is
 it published, so the newest release never lacks its downloads.
