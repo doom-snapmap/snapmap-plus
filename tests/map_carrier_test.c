@@ -237,24 +237,32 @@ static void readers(void)
  * "bundle". A family's text that is not a variable's name (prose, an entity name, a value) is not one. */
 static void old_shapes(void)
 {
-    static const char *const families[] = {
-        "smpkg.my_pack.0.1.0123456789abcdef", "smpbind.x.0123456789abcdef", "smpref.y.0123456789abcdef",
-        "smpmod1.0.1", "smpprod1.v0.2.1", "smp.render.v1", "smp.bounds.v1",
-        "smnav1.cat/mod.monster48.0.1.0123456789abcdef.fedcba9876543210"
+    static const struct {const char *name,*value; int result;} vars[] = {
+        {"smpkg.my_pack.0.2.0123456789abcdef","QUJD",SH_MAP_OLD_VARIABLES},
+        {"smpmod1.0.1","{\\\"id\\\":\\\"tiny\\\",\\\"bundle\\\":\\\"damaged\\\"}",SH_MAP_OLD_VARIABLES},
+        {"smp.render.v1","1;0;0;0;0;0;0;0",SH_MAP_OLD_VARIABLES},
+        {"smp.render.v1","2;check the west door",0},{"smp.bounds.v1","2;900",0},
+        {"smp.render.v1","2;1;400;",SH_MAP_OLD_VARIABLES},
+        {"smp.bounds.v1","1;32672",SH_MAP_OLD_VARIABLES},
+        {"smnav1.cat/mod.monster48.0.1.0123456789abcdef.fedcba9876543210","QUJD",SH_MAP_OLD_VARIABLES},
+        {"smpkg.digest","0123456789abcdef",0},{"smpkg.my-lighting","QUJD",0},
+        {"smpmod1.favorite","soldier",0},{"smpmod1.0.1","{\\\"score\\\":2}",0},
+        {"smp.render.v1.custom","1;0",0},{"smpprod1.v0.2.1","",0},
+        {"smpbind.x.0123456789abcdef","",0},{"smpref.y.0123456789abcdef","",0}
     };
     char map[1024];
     size_t i;
-    printf("-- earlier shapes: each family and an id row is named; the current shape passes\n");
-    const char old_empty[] = "{\"snapmap-plus\":{\"format\":1}}";
+    printf("-- historical mod data in its owning variable or map member\n");
+    const char old_empty[] = "{\"snapmap-plus\":{\"format\":1,\"settings\":{\"season\":\"autumn\"},\"mods\":[]}}";
     sh_carrier_view v;
-    CHECK(sh_map_old_shape(old_empty,sizeof old_empty - 1) == SH_MAP_OLD_FORMAT);
+    CHECK(sh_map_old_shape(old_empty,sizeof old_empty - 1) == SH_MAP_OLD_NONE);
     CHECK(sh_carrier_view_read(old_empty,sizeof old_empty - 1,&v) && v.state == SH_CARRIER_MALFORMED);
     CHECK(sh_map_old_shape(ENGINE, sizeof ENGINE - 1) == SH_MAP_OLD_NONE);
-    for (i = 0; i < sizeof families / sizeof families[0]; i++) {
+    for (i = 0; i < sizeof vars / sizeof vars[0]; i++) {
         _snprintf_s(map, sizeof map, _TRUNCATE,
-                    "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":[{\"info\":{\"name\" : \"%s\","
-                    "\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"QUJD\",\"~type\":\"snapVarString_t\"}]}}", families[i]);
-        CHECK(sh_map_old_shape(map, strlen(map)) == SH_MAP_OLD_VARIABLES);
+                    "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":[{\"info\":{\"~type\":\"snapVarInfo_t\","
+                    "\"name\":\"%s\"},\"initialValue\":\"%s\",\"~type\":\"snapVarString_t\"}]}}", vars[i].name,vars[i].value);
+        CHECK(sh_map_old_shape(map, strlen(map)) == vars[i].result);
     }
     /* The same words elsewhere are not variables. */
     {
@@ -263,10 +271,10 @@ static void old_shapes(void)
         CHECK(sh_map_old_shape(prose, sizeof prose - 1) == SH_MAP_OLD_NONE);
     }
     /* An entity or object an author named like a family is not a variable. */
-    for (i = 0; i < sizeof families / sizeof families[0]; i++) {
+    for (i = 0; i < sizeof vars / sizeof vars[0]; i++) {
         _snprintf_s(map, sizeof map, _TRUNCATE,
                     "{\"entities\":[{\"entityDef\":{\"name\":\"%s\",\"className\":\"idSnapEntity\"}}],"
-                    "\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}", families[i]);
+                    "\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}", vars[i].name);
         CHECK(sh_map_old_shape(map, strlen(map)) == SH_MAP_OLD_NONE);
     }
     /* Member rows: the current row passes; an id or a bundle row is named. */
@@ -282,7 +290,7 @@ static void old_shapes(void)
         static const char fmt2_row[] = "{\"entities\":[],\"~type\":\"idSnapMap\",\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"aaaabbbb\","
             "\"size\":1,\"names\":[]}]}}";
         CHECK(sh_map_old_shape(now, sizeof now - 1) == SH_MAP_OLD_NONE);
-        CHECK(sh_map_old_shape(id_row, sizeof id_row - 1) == SH_MAP_OLD_ROWS);
+        CHECK(sh_map_old_shape(id_row, sizeof id_row - 1) == SH_MAP_OLD_NONE);
         CHECK(sh_map_old_shape(bundle_row, sizeof bundle_row - 1) == SH_MAP_OLD_ROWS);
         CHECK(sh_map_old_shape(names_only, sizeof names_only - 1) == SH_MAP_OLD_NONE);
         CHECK(sh_map_old_shape(at_row, sizeof at_row - 1) == SH_MAP_OLD_FORMAT);

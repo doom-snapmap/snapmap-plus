@@ -50,4 +50,20 @@ vm.runInNewContext(fs.readFileSync(modulePath, 'utf8'), browser);
 assert.equal(typeof browser.SnapmapDecl.create, 'function');
 assert.equal(JSON.stringify(browser.SnapmapDecl.create(null).tokenize('x = 3;')),
              JSON.stringify(structural.tokenize('x = 3;')));
+vm.runInNewContext(fs.readFileSync(path.join(path.dirname(modulePath), 'schema_slice.js'), 'utf8'), browser);
+const editor = languageModule.create(browser.DECL_SCHEMA);
+function inspect(className, text) {
+  const displayed = editor.naturalize(text);
+  assert.equal(displayed, text);
+  const result = editor.parse(editor.tokenize(displayed));
+  assert.equal(editor.checkSchema(result.rootEntries, className, result.diags), 'exact');
+  return result.diags;
+}
+const brain = 'edit = { aiEditable = { behaviors = { decl = "mods/orbit913/behaviors/ranger/orbit"; } } }';
+const encounter = 'edit = { encounterToSpawn = "mods/orbit913/encounters/ranger"; }';
+assert.deepEqual(inspect('idAI2', brain), []);
+assert.deepEqual(inspect('idPlaceableSnapAIEncounter', encounter), []);
+assert(inspect('idPlaceableSnapAIEncounter', brain).some(d => d.cat === 'unknown-field'));
+assert(inspect('idAI2', brain.replace('"mods/orbit913/behaviors/ranger/orbit"', '17')).some(d =>
+  d.cat === 'type' && d.msg.includes('idDeclAIBehavior')));
 console.log('decl_language_test: parser, schema isolation, completion and browser export passed');

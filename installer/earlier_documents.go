@@ -20,6 +20,7 @@ func earlierMapNamespaces(src []byte, ids map[string]string) []byte {
 		return src
 	}
 	view := earlierJSONText(src)
+	opaque := earlierOpaqueVariableSpans(view)
 	var out bytes.Buffer
 	last := 0
 	for at := 0; at < len(view); {
@@ -30,6 +31,13 @@ func earlierMapNamespaces(src []byte, ids map[string]string) []byte {
 		span[0] += at
 		span[1] += at
 		at = span[1]
+		for len(opaque) > 0 && opaque[0][1] <= span[0] {
+			opaque = opaque[1:]
+		}
+		if len(opaque) > 0 && span[0] >= opaque[0][0] {
+			at = opaque[0][1]
+			continue
+		}
 		raw := src[span[0]:span[1]]
 		if !bytes.Contains(bytes.ToLower(raw), []byte("mods")) {
 			continue
@@ -160,26 +168,26 @@ func earlierSetting(key, value string) (string, error) {
 	return "4;0", nil
 }
 
-// Replace one root member, preserving the bytes and order of the engine's own fields.
-func earlierSetMember(text []byte, name string, value json.RawMessage) ([]byte, error) {
+// An absent member has an empty span immediately before the closing brace.
+func earlierMemberSpan(text []byte, name string) (int, int, bool, error) {
 	start := len(text) - len(bytes.TrimPrefix(text, []byte{0xef, 0xbb, 0xbf}))
 	d := json.NewDecoder(bytes.NewReader(earlierJSONText(text[start:])))
 	if token, err := d.Token(); err != nil || token != json.Delim('{') {
-		return nil, fmt.Errorf("expected an object")
+		return 0, 0, false, fmt.Errorf("expected an object")
 	}
 	pairs, begin, end := 0, -1, -1
 	for d.More() {
 		k, err := d.Token()
 		if err != nil {
-			return nil, err
+			return 0, 0, false, err
 		}
 		var raw json.RawMessage
 		if err = d.Decode(&raw); err != nil {
-			return nil, err
+			return 0, 0, false, err
 		}
 		if k == name {
 			if begin >= 0 {
-				return nil, fmt.Errorf("duplicate member %q", name)
+				return 0, 0, false, fmt.Errorf("duplicate member %q", name)
 			}
 			end = start + int(d.InputOffset())
 			begin = end - len(raw)
@@ -187,15 +195,25 @@ func earlierSetMember(text []byte, name string, value json.RawMessage) ([]byte, 
 		pairs++
 	}
 	if _, err := d.Token(); err != nil {
-		return nil, err
+		return 0, 0, false, err
 	}
-	var replacement []byte
-	if begin >= 0 {
-		replacement = value
-	} else {
+	if begin < 0 {
 		begin = start + int(d.InputOffset()) - 1
 		end = begin
-		if pairs > 0 {
+	}
+	return begin, end, pairs > 0, nil
+}
+
+// Replace one root member, preserving the bytes and order of the engine's own fields.
+func earlierSetMember(text []byte, name string, value json.RawMessage) ([]byte, error) {
+	begin, end, hasMembers, err := earlierMemberSpan(text, name)
+	if err != nil {
+		return nil, err
+	}
+	replacement := []byte(value)
+	if begin == end {
+		replacement = nil
+		if hasMembers {
 			replacement = append(replacement, ',')
 		}
 		quoted, _ := json.Marshal(name)
@@ -207,6 +225,15 @@ func earlierSetMember(text []byte, name string, value json.RawMessage) ([]byte, 
 	out = append(out, text[:begin]...)
 	out = append(out, replacement...)
 	return append(out, text[end:]...), nil
+}
+
+// A neighboring JSON file belongs to Snapmap+ only when it carries recognizable prefab data.
+func knownPrefabSide(raw []byte) bool {
+	var side earlierObject
+	if json.Unmarshal(bytes.TrimPrefix(raw, []byte{0xef, 0xbb, 0xbf}), &side) != nil {
+		return false
+	}
+	return historicalRows(side["mods"])
 }
 
 func earlierPrefabBlock(side earlierObject) (earlierObject, error) {
@@ -245,7 +272,7 @@ func earlierPrefabBlock(side earlierObject) (earlierObject, error) {
 	return block, nil
 }
 
-func earlierRows(block earlierObject, resolve earlierRowResolver) (bool, error) {
+func earlierRows(block earlierObject, resolve earlierRowResolver, check earlierRowCheck) (bool, error) {
 	data := block["mods"]
 	if data == nil {
 		return false, nil
@@ -253,6 +280,11 @@ func earlierRows(block earlierObject, resolve earlierRowResolver) (bool, error) 
 	var rows []earlierObject
 	if err := json.Unmarshal(data, &rows); err != nil {
 		return false, err
+	}
+	if check != nil {
+		if err := check(rows); err != nil {
+			return false, err
+		}
 	}
 	changed := false
 	for i, row := range rows {
@@ -291,7 +323,7 @@ func earlierRows(block earlierObject, resolve earlierRowResolver) (bool, error) 
 	return changed, nil
 }
 
-func earlierMapBlock(raw json.RawMessage, resolve earlierRowResolver) (json.RawMessage, bool, error) {
+func earlierMapBlock(raw json.RawMessage, resolve earlierRowResolver, check earlierRowCheck) (json.RawMessage, bool, error) {
 	var block earlierObject
 	if err := json.Unmarshal(raw, &block); err != nil || block == nil {
 		return nil, false, fmt.Errorf("unreadable Snapmap+ map member")
@@ -300,9 +332,34 @@ func earlierMapBlock(raw json.RawMessage, resolve earlierRowResolver) (json.RawM
 	if err := json.Unmarshal(block["format"], &format); err != nil || (format != 1 && format != 2) {
 		return nil, false, nil
 	}
-	oldRows, err := earlierRows(block, resolve)
+	var nav []earlierNav
+	if format == 1 && json.Unmarshal(block["nav"], &nav) == nil {
+		for _, set := range nav {
+			if set.Module != "" && set.Class != "" && set.Digest != "" && set.Data != nil {
+				if e := set.check(); e != nil {
+					return nil, false, e
+				}
+			}
+		}
+	}
+	oldRows, err := earlierRows(block, resolve, check)
 	if err != nil {
 		return nil, false, err
+	}
+	nonempty := false
+	for _, k := range []string{"mods", "settings", "nav", "options", "choices", "objects"} {
+		var values any
+		if json.Unmarshal(block[k], &values) == nil {
+			switch v := values.(type) {
+			case []any:
+				nonempty = nonempty || len(v) > 0
+			case map[string]any:
+				nonempty = nonempty || len(v) > 0
+			}
+		}
+	}
+	if !nonempty {
+		return nil, false, nil
 	}
 	changed := format == 1 || oldRows
 	if changed {

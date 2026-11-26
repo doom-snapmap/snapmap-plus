@@ -674,10 +674,15 @@ static void refused_plainly(int parses_before, int refusals_before)
 static void earlier_shape_maps_are_refused(void)
 {
     static const char plain[] = "{\"~type\":\"idSnapMap\",\"entities\":[]}";
-    static const char *const families[] = {
-        "smpkg.a.0.1.0123456789abcdef", "smpbind.x.0123456789abcdef", "smpref.y.0123456789abcdef",
-        "smpmod1.0.1", "smpprod1.v0.2.1-beta.24", "smp.render.v1", "smp.bounds.v1",
-        "smnav1.ind_dlc/room.monster48.0.1.0123456789abcdef.fedcba9876543210" };
+    static const struct { const char *name, *value; int earlier; } families[] = {
+        {"smpkg.a.0.1.0123456789abcdef", "QUJD", 1},
+        {"smpmod1.0.1", "{\\\"id\\\":\\\"tiny\\\",\\\"bundle\\\":\\\"damaged\\\"}", 1},
+        {"smp.render.v1", "1;0;0;0;0;0;0;0", 1},
+        {"smp.render.v1","2;check the west door",0},{"smp.bounds.v1","2;900",0},
+        {"smp.render.v1","2;1;400;",1}, {"smp.bounds.v1", "1;32672", 1},
+        {"smnav1.ind_dlc/room.monster48.0.1.0123456789abcdef.fedcba9876543210", "QUJD", 1},
+        {"smpbind.x.0123456789abcdef", "QUJD", 0}, {"smpref.y.0123456789abcdef", "QUJD", 0},
+        {"smpprod1.v0.2.1-beta.24", "QUJD", 0}, {"smp.render.v1", "QUJD", 0} };
     char map[1024];
     size_t i;
     int parses, refusals;
@@ -692,10 +697,16 @@ static void earlier_shape_maps_are_refused(void)
     for (i = 0; i < sizeof families / sizeof families[0]; i++) {
         _snprintf_s(map, sizeof map, _TRUNCATE,
                     "{\"~type\":\"idSnapMap\",\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
-                    "{\"info\":{\"name\":\"%s\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"QUJD\"}]}}", families[i]);
+                    "{\"info\":{\"name\":\"%s\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"%s\"}]}}",
+                    families[i].name, families[i].value);
         parses = g_parses; refusals = log_refused;
-        CHECK(sh_deser_detour(map, (void *)1) == 0);
-        refused_plainly(parses, refusals);
+        if (families[i].earlier) {
+            CHECK(sh_deser_detour(map, (void *)1) == 0);
+            refused_plainly(parses, refusals);
+        } else {
+            CHECK(sh_deser_detour(map, (void *)1) == 1);
+            CHECK(g_parses == parses + 1 && log_refused == refusals && strcmp(map, g_parsed) == 0);
+        }
     }
     {
         static const char id_rows[] = "{\"~type\":\"idSnapMap\",\"entities\":[],\"snapmap-plus\":{\"format\":1,"

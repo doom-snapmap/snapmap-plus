@@ -23,6 +23,7 @@
 #include "modstore.h"
 #include "modregistry.h"
 #include "decl_tree.h"
+#include "direct_actor.h"
 #include "config_json.h"
 #include "backend_log.h"
 #include "text.h"
@@ -63,6 +64,7 @@ typedef struct ms_file {
     volatile LONG withdrawn;              /* 1 unavailable, 2 stock, 3 a placed encounter's stand-in */
     int encounter_need;                   /* one plus the encounter or single demon this file uses */
     int placeable_encounter;
+    int actor_standin;                    /* a composition's inert idAI2 and its matching private palette row */
     int refused;                          /* the game refused this source's own bytes */
     const unsigned char *refused_body;    /* composed bytes, if any, when the parse failed */
     size_t refused_len;
@@ -198,6 +200,7 @@ typedef struct ms_index {
     int *alts; int nalts, calts;          /* shadow paths' other providers (ms_file.alt_first) */
     int admitted, served_files, conflicts, composed, shadows;
     unsigned refusals, refusal_revision;
+    int has_actor_standins;
     uint64_t refused_entities;
     double build_ms;
     struct ms_index *prev;                /* the previous table (sh_modserve_index_retire frees it) */
@@ -224,6 +227,7 @@ static ms_index *volatile g_index;
  * (sh_modserve_index_retire): provider calls in flight on any thread, and
  * plans, whose steps name a table's strings. */
 static volatile LONG g_readers, g_plans_alive;
+static volatile LONG g_refusal_version;
 static sh_modserve_step *ms_steps_alloc(int n);
 static volatile LONG g_scope_on;      /* map scope (ms_scope_compute) */
 static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only);
@@ -549,19 +553,6 @@ static char *ms_pkey_heap(const char *type, const char *name)
 
 /* ------------------------------------------------------------------ files */
 
-/* Bundle trees can pass MAX_PATH, so files are opened through the wide API with the \\?\ prefix. `path` is
- * UTF-8, absolute, with '\' separators, as every store path in this file is. */
-static wchar_t *ms_wide(const char *path)
-{
-    size_t at = path[0] && path[1] == ':' && path[2] == '\\' ? 4 : 0;
-    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    wchar_t *out = n > 0 ? (wchar_t *)malloc(sizeof(wchar_t) * (at + (size_t)n)) : NULL;
-    if (!out) return NULL;
-    if (at) memcpy(out, L"\\\\?\\", sizeof(wchar_t) * 4);
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, out + at, n) <= 0) { free(out); return NULL; }
-    return out;
-}
-
 /* The whole file, of any size, read in pieces (one ReadFile moves at most
  * 4 GB); NULL when it cannot be read or is larger than `max`. */
 static unsigned char *ms_read_whole(const char *path, size_t max, size_t *len)
@@ -569,7 +560,7 @@ static unsigned char *ms_read_whole(const char *path, size_t max, size_t *len)
     HANDLE h;
     LARGE_INTEGER size;
     unsigned char *buf = NULL;
-    wchar_t *wide = ms_wide(path);
+    wchar_t *wide = sh_mb_wpath(path);
     *len = 0;
     if (!wide) return NULL;
     h = CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
@@ -599,7 +590,7 @@ static unsigned char *ms_read_whole(const char *path, size_t max, size_t *len)
 static long long ms_file_size(const char *path)
 {
     WIN32_FILE_ATTRIBUTE_DATA a;
-    wchar_t *wide = ms_wide(path);
+    wchar_t *wide = sh_mb_wpath(path);
     int got = wide && GetFileAttributesExW(wide, GetFileExInfoStandard, &a);
     free(wide);
     if (!got) return -1;
@@ -1453,7 +1444,7 @@ static int ms_scan_push(ms_scan_list *l, char *dir, char *rel, const char *place
 static void ms_scan_list_folder(const ms_scan_item *at, ms_scan_list *stack)
 {
     char *pattern = sh_textf("%s\\*", at->dir);
-    wchar_t *wpattern = pattern ? ms_wide(pattern) : NULL;
+    wchar_t *wpattern = pattern ? sh_mb_wpath(pattern) : NULL;
     WIN32_FIND_DATAW fd;
     HANDLE h = wpattern ? FindFirstFileW(wpattern, &fd) : INVALID_HANDLE_VALUE;
     size_t first = stack->n, a, z;
@@ -2127,10 +2118,73 @@ static char *ms_compose(const unsigned char *const *texts, const size_t *lens, i
     return out.p;
 }
 
+static int ms_static_before(const ms_index *x, int a, int b);
+
+/* Stock editor declarations are whole author copies. A field a mod left at its stock value claims nothing. */
+static char *ms_compose_editor(const ms_index *x, const int *files, int n, size_t *len)
+{
+    const char *request = x->files[files[0]].request;
+    unsigned char *stock = NULL;
+    size_t slen = 0;
+    unsigned long long size = 0;
+    char sha[SH_MB_HASH_HEX + 1], *text = NULL;
+    sh_dt_source *src = NULL;
+    int *order = NULL, used = 0;
+    sh_dt *tree;
+    if (sh_mb_stock_identify(request, sha, &size) != SH_MB_STOCK_OK ||
+        sh_mb_stock_read(request, sha, &stock, &slen, request, NULL) != SH_MB_STOCK_OK) return NULL;
+    src = (sh_dt_source *)calloc((size_t)n, sizeof *src);
+    order = (int *)malloc((size_t)n * sizeof *order);
+    if (!src || !order) goto done;
+    for (int i = 0; i < n; i++) {
+        int j = i, f = files[i];
+        while (j && ms_static_before(x, x->files[f].bundle, x->files[order[j-1]].bundle)) {
+            order[j] = order[j-1];
+            j--;
+        }
+        order[j] = f;
+    }
+    for (int i = 0; i < n; i++) {
+        const ms_file *f = &x->files[order[i]];
+        const ms_bundle *b = &x->bundles[f->bundle];
+        char cause[SH_DT_CAUSE_CAP], *one, *array;
+        unsigned char *raw;
+        size_t rlen, el;
+        if (used && !strcmp(b->id, src[used-1].key)) continue;
+        raw = ms_file_raw(f, &rlen);
+        if (!raw) goto done;
+        one = sh_dt_diff(request, (const char *)stock, slen, (const char *)raw, rlen, NULL, cause, sizeof cause);
+        HeapFree(GetProcessHeap(), 0, raw);
+        if (!one) goto done;
+        el = strlen(one);
+        array = (char *)malloc(el + 3);
+        if (!array) { free(one); goto done; }
+        array[0] = '['; memcpy(array + 1, one, el); array[el + 1] = ']'; array[el + 2] = 0;
+        free(one);
+        src[used].key = src[used].who = b->id;
+        src[used].edits = array;
+        src[used++].edits_len = el + 2;
+    }
+    tree = sh_dt_apply(request, (const char *)stock, slen, src, used, NULL, 0, NULL);
+    if (tree) { text = sh_dt_text(tree, len); sh_dt_free(tree); }
+done:
+    for (int i = 0; i < used; i++) free((void *)src[i].edits);
+    free(order);
+    free(src);
+    HeapFree(GetProcessHeap(), 0, stock);
+    return text;
+}
+
 /* The texts of `files[0..n)` composed in that order (ms_compose), skipping a file whose bytes an earlier one
  * carries; NULL when fewer than two texts differ or they do not compose (a file is not a decl or unreadable). */
 static char *ms_compose_files(const ms_index *x, const int *files, int n, size_t *len, int *added)
 {
+    if (n > 1 && x->files[files[0]].is_decl && x->files[files[0]].is_shadow && ms_editor_time(x->files[files[0]].request)) {
+        *len = 0;
+        *added = 0;
+        char *editor = ms_compose_editor(x, files, n, len);
+        if (editor) return editor;
+    }
     const unsigned char **texts = (const unsigned char **)calloc((size_t)(n ? n : 1), sizeof *texts);
     size_t *lens = (size_t *)calloc((size_t)(n ? n : 1), sizeof *lens);
     int nt = 0, k, q, ok = texts && lens;
@@ -2205,11 +2259,11 @@ static int ms_unresolved(const ms_index *x, const ms_avail *av, const ms_file *f
     int k, missing = 0;
     for (k = 0; k < f->need_count; ++k) {
         const ms_need *nd = &x->needs[f->need_first + k];
-        char *buf = ms_pkey_heap(nd->type, nd->name), *cand[2];
+        char *buf = ms_pkey_heap(nd->type, nd->name), *cand[SH_MB_NEED_REQUESTS];
         int c, nc, ok;
         ok = buf && ms_avail_has(av, buf);
         free(buf);
-        nc = ok ? 0 : sh_mb_need_requests(nd->type, nd->name, cand, 2);
+        nc = ok ? 0 : sh_mb_need_requests(nd->type, nd->name, cand, SH_MB_NEED_REQUESTS);
         for (c = 0; c < nc && !ok; ++c) ok = ms_avail_has(av, cand[c]);
         sh_mb_requests_free(cand, nc);
         if (!ok) missing++;
@@ -2412,7 +2466,9 @@ static int ms_resolve(ms_index *x)
             if (any_shadow) ms_record_alts(x, &avail, keys, i, j, winner, 1);
             if (composed) {
                 x->composed++;
-                how = sh_textf("composed: %d list entr%s of the other providers added to %s's text",
+                if (ms_editor_time(x->files[winner].request) && x->files[winner].is_shadow)
+                    how = sh_text("composed the mods' editor edits against the game's declaration; the first salt wins a shared field");
+                else how = sh_textf("composed: %d list entr%s of the other providers added to %s's text",
                                added, added == 1 ? "y" : "ies", ms_label(&x->bundles[x->files[winner].bundle]));
             } else how = sh_text(reason ? reason : "");
             if (ms_grow((void **)&x->conflict_list, &x->cconflict_list, x->nconflict_list + 1, sizeof(ms_conflict))) {
@@ -2425,7 +2481,10 @@ static int ms_resolve(ms_index *x)
                 c->composed = composed;
             }
             if (logged++ < MS_CONFLICT_LOGS) {
-                if (composed)
+                if (composed && ms_editor_time(x->files[winner].request) && x->files[winner].is_shadow)
+                    ms_log("conflict: editor edits of '%s' from %s: %s", keys[i].key, who.p && !who.oom ? who.p : "",
+                           how ? how : "");
+                else if (composed)
                     ms_log("conflict: %s '%s' is provided by %s; serving %s's text with the others' list entries "
                            "(%d added)", any_shadow ? "shadow" : "path", keys[i].key, who.p && !who.oom ? who.p : "",
                            ms_label(&x->bundles[x->files[winner].bundle]), added);
@@ -2561,10 +2620,10 @@ static int ms_provider(const ms_index *x, const char *type, const char *name)
  * a source extension). Resolved once per index build. */
 static int ms_need_provider(const ms_index *x, const char *type, const char *name)
 {
-    char *cand[2];
+    char *cand[SH_MB_NEED_REQUESTS];
     int p = ms_provider(x, type, name), n, i, hit = -1;
     if (p >= 0) return p;
-    n = sh_mb_need_requests(type, name, cand, 2);
+    n = sh_mb_need_requests(type, name, cand, SH_MB_NEED_REQUESTS);
     for (i = 0; i < n && hit < 0; ++i) {
         p = ms_find(x->slots, x->mask, cand[i]);
         if (p >= 0 && x->files[p].served) hit = p;
@@ -2690,12 +2749,42 @@ static int ms_refusal_provider(const ms_index *x, const ms_file *consumer, int w
     return pick;
 }
 
+static void ms_mark_actor_standins(ms_index *x)
+{
+    static const char def[] = SH_MODSERVE_STANDIN_CLASS("idAI2");
+    for (int i = 0; i < x->nfiles; ++i) {
+        ms_file *f = &x->files[i];
+        const ms_bundle *b = &x->bundles[f->bundle];
+        if (!b->place || strcmp(b->place, SH_MODSERVE_CONTENT) || f->size != sizeof def - 1 ||
+            !ms_is_type(f->ptype, "entityDef") || !f->pname || _strnicmp(f->pname, "mods/", 5)) continue;
+        const char *path = strchr(f->pname + 5, '/');
+        if (!path || (size_t)(path - (f->pname + 5)) != strlen(b->id) ||
+            _strnicmp(f->pname + 5, b->id, strlen(b->id))) continue;
+        char *name = sh_textf("mods/%s/" SH_MODSERVE_STANDIN_DIR "%s", b->id, path);
+        int row = name ? ms_provider(x, "snapEditorEntityDef", name) : -1;
+        free(name);
+        if (row < 0 || (row = ms_refusal_provider(x, f, row)) < 0 || x->files[row].bundle != f->bundle) continue;
+        size_t len = 0;
+        unsigned char *bytes = ms_file_raw(f, &len);
+        if (bytes && len == sizeof def - 1 && !memcmp(bytes, def, len)) {
+            f->actor_standin = 1;
+            x->has_actor_standins = 1;
+        }
+        if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+    }
+}
+
+static int ms_actor_unavailable(const ms_index *x, int winner)
+{
+    int pick = winner >= 0 ? ms_scoped(x, winner) : -1;
+    return pick >= 0 && (x->files[pick].withdrawn == 1 || x->files[pick].actor_standin);
+}
+
 /* Each edge points from a consumer to its selected provider. A refused override can still satisfy
  * the edge with verified game bytes. Consumers with no such fallback carry the failure onward. */
 static int ms_refusal_closure(ms_index *x)
 {
     int i, changed, published = 0;
-    uint64_t entities = 0;
     if (!x->refusals) return 0;
     for (i = 0; i < x->nfiles; ++i) {
         ms_file *f = &x->files[i];
@@ -2733,15 +2822,20 @@ static int ms_refusal_closure(ms_index *x)
         InterlockedExchange(&f->reg_state, 0);
         InterlockedExchange(&f->plan_seen, 0);
     }
-    for (i = 0; i < x->nfiles; ++i) {
-        int pick;
-        if (x->files[i].served && ms_is_type(x->files[i].ptype, "entityDef") &&
-            (pick = ms_scoped(x, i)) >= 0 && x->files[pick].withdrawn == 1)
-            entities = (entities ^ (uint64_t)(i + 1)) * 1099511628211ull;
-    }
-    if (entities != x->refused_entities) { x->refused_entities = entities; published = 1; }
-    if (published) x->refusal_revision++;
     return published;
+}
+
+static int ms_update_refusals(ms_index *x)
+{
+    uint64_t entities = 0;
+    if (!x->refusals && !x->has_actor_standins) return 0;
+    int changed = ms_refusal_closure(x);
+    for (int i = 0; i < x->nfiles; ++i)
+        if (x->files[i].served && ms_is_type(x->files[i].ptype, "entityDef") && ms_actor_unavailable(x, i))
+            entities = (entities ^ (uint64_t)(i + 1)) * 1099511628211ull;
+    if (entities != x->refused_entities) { x->refused_entities = entities; changed = 1; }
+    if (changed) x->refusal_revision++;
+    return changed;
 }
 
 /* Refresh: what the engine may hold from the replaced table. */
@@ -3393,8 +3487,7 @@ static int ms_reg_own(char ***owned, int *n, int *cap, char *text)
 static int ms_entity_unavailable(void *context, const char *name)
 {
     const ms_index *x = (const ms_index *)context;
-    int f = ms_provider(x, "entityDef", name);
-    return f >= 0 && (f = ms_scoped(x, f)) >= 0 && x->files[f].withdrawn == 1;
+    return ms_actor_unavailable(x, ms_provider(x, "entityDef", name));
 }
 
 static void ms_single_actor(void *context, int encounter, const char *actor)
@@ -3750,6 +3843,19 @@ static ms_body *ms_reg_rewrite(const ms_index *x, int file)
     return NULL;
 }
 
+/* A local row and its stand-in supplement are the only two declared builds of the same salt.
+ * Pick the real file until the game refuses it, then use the supplement for that path. */
+static int ms_local_or_standin(const ms_index *x, int first, int second)
+{
+    const ms_file *a = &x->files[first], *b = &x->files[second];
+    const ms_bundle *ab = &x->bundles[a->bundle], *bb = &x->bundles[b->bundle];
+    if (ab->rank < 0 || bb->rank < 0 || (ab->place == NULL) == (bb->place == NULL) ||
+        strcmp(ab->id, bb->id)) return -1;
+    int local = ab->place ? second : first;
+    if (x->files[local].withdrawn != 1) return local;
+    return ab->place ? first : second;
+}
+
 /* Set every admitted bundle's serve flags from the listing and the mode, then choose the file serving each
  * path (caller holds g_scope_lock and the build lock). Declared bundles serve everything they carry; a build
  * of a salt the map declares at another hash is inert. An undeclared bundle serves its names (root build only)
@@ -3853,7 +3959,18 @@ static int ms_scope_compute(ms_index *x, int mark)
                 const ms_bundle *cb = &x->bundles[x->files[cand[k]].bundle];
                 ok[k] = -1;
                 if (!ms_sv_allows(x, cand[k])) continue;
-                if (cb->rank >= 0) ok[k] = cb->rank, declared++;
+                if (cb->rank >= 0) {
+                    for (q = 0; q < nd; ++q) {
+                        int pick = ms_local_or_standin(x, d[q], cand[k]);
+                        if (pick < 0) continue;
+                        d[q] = pick;
+                        ok[q] = x->bundles[x->files[pick].bundle].rank;
+                        break;
+                    }
+                    if (q < nd) continue;
+                    ok[k] = cb->rank;
+                    declared++;
+                }
                 else if (ms_scope_always(cb)) ok[k] = 1000000L + k;
                 else continue;
                 d[nd] = cand[k];
@@ -3990,7 +4107,7 @@ static int ms_scope_compute(ms_index *x, int mark)
     if (av_built) free(av.keys);
     if (marked) InterlockedExchange(&x->expanded, 0);
     /* A new selection can break or restore a dependency. Recompose any affected registry entries. */
-    if (ms_refusal_closure(x)) changed += ms_scope_compute(x, mark);
+    if (ms_update_refusals(x)) changed += ms_scope_compute(x, mark);
     return changed;
 }
 
@@ -4179,23 +4296,29 @@ int sh_modserve_scope_mode_get(void)
 
 int sh_modserve_level_hides(const char *name)
 {
-    const ms_index *x = g_index;
+    const ms_index *x;
     const char *salt, *end;
     size_t n;
-    int i, known = 0;
-    if (!x || !name || _strnicmp(name, "mods/", 5)) return 0;
+    int hidden = 0;
+    if (!name || _strnicmp(name, "mods/", 5)) return 0;
     if (!InterlockedCompareExchange(&g_scope_on, 0, 0)) return 0;
     salt = name + 5;
     end = strchr(salt, '/');
     if (!end || end == salt) return 0;
     n = (size_t)(end - salt);
-    for (i = 0; i < x->nbundles; ++i) {
+    InterlockedIncrement(&g_readers);
+    x = g_index;
+    for (int i = 0; x && i < x->nbundles; ++i) {
         const ms_bundle *b = &x->bundles[i];
         if (!b->admitted || !b->id || strlen(b->id) != n || _strnicmp(b->id, salt, n)) continue;
-        if (InterlockedCompareExchange((volatile LONG *)&b->rank, 0, 0) >= 0) return 0;
-        known = 1;
+        if (InterlockedCompareExchange((volatile LONG *)&b->rank, 0, 0) >= 0) {
+            hidden = (x->refusals || x->has_actor_standins) && ms_actor_unavailable(x, ms_provider(x, "entityDef", name));
+            break;
+        }
+        hidden = 1;
     }
-    return known;
+    InterlockedDecrement(&g_readers);
+    return hidden;
 }
 
 int sh_modserve_scope_relevant(void)
@@ -4587,10 +4710,10 @@ static int ms_mkdirs_for(const char *path)
     for (p = dir + 3; *p; ++p) {
         if (*p != '\\') continue;
         *p = 0;
-        if ((wide = ms_wide(dir)) != NULL) { CreateDirectoryW(wide, NULL); free(wide); }
+        if ((wide = sh_mb_wpath(dir)) != NULL) { CreateDirectoryW(wide, NULL); free(wide); }
         *p = '\\';
     }
-    wide = ms_wide(dir);
+    wide = sh_mb_wpath(dir);
     ok = wide && (CreateDirectoryW(wide, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
     free(wide);
     free(dir);
@@ -4612,7 +4735,7 @@ static int ms_write_served(const char *path, const unsigned char *bytes, size_t 
     if (have) HeapFree(GetProcessHeap(), 0, have);
     if (same) return 1;
     tmp = sh_textf("%s.%lu.tmp", path, (unsigned long)GetCurrentProcessId());
-    if (tmp && ms_mkdirs_for(path) && (wide = ms_wide(path)) != NULL && (wtmp = ms_wide(tmp)) != NULL) {
+    if (tmp && ms_mkdirs_for(path) && (wide = sh_mb_wpath(path)) != NULL && (wtmp = sh_mb_wpath(tmp)) != NULL) {
         h = CreateFileW(wtmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             ok = WriteFile(h, bytes, (DWORD)len, &put, NULL) && put == (DWORD)len;
@@ -4632,7 +4755,7 @@ static int ms_write_served(const char *path, const unsigned char *bytes, size_t 
 static int ms_prune_served_dir(const ms_index *x, const char *sub)
 {
     char *dir = sh_textf("%s\\served\\%s", x->cache, sub), *pattern = dir ? sh_textf("%s\\*", dir) : NULL;
-    wchar_t *wide = pattern ? ms_wide(pattern) : NULL;
+    wchar_t *wide = pattern ? sh_mb_wpath(pattern) : NULL;
     WIN32_FIND_DATAW fd;
     HANDLE h = wide ? FindFirstFileW(wide, &fd) : INVALID_HANDLE_VALUE;
     int removed = 0, i, used;
@@ -4643,7 +4766,7 @@ static int ms_prune_served_dir(const ms_index *x, const char *sub)
         char *path = name ? sh_textf("%s\\%s", dir, name) : NULL;
         if (path) {
             for (used = 0, i = 0; i < x->nfiles && !used; ++i) used = x->files[i].disk && !_stricmp(x->files[i].disk, path);
-            if (!used && (wide = ms_wide(path)) != NULL) {
+            if (!used && (wide = sh_mb_wpath(path)) != NULL) {
                 if (DeleteFileW(wide)) removed++;
                 free(wide);
             }
@@ -4936,6 +5059,7 @@ int sh_modserve_index_build(const char *mods_root)
         return -1;
     }
     ms_resolve_needs(x);
+    ms_mark_actor_standins(x);
     ms_mark_editor_closure(x);
     for (i = 0; i < x->nbundles; ++i) x->admitted += x->bundles[i].admitted;
     ms_registry_relevant(x);
@@ -5138,6 +5262,7 @@ static int ms_lookup_hit(const char *request, sh_modserve_hit *out, int scoped)
         out->is_shadow = f->is_shadow;
         out->is_stock = f->stock != NULL;
         out->stock_source = f->stock;
+        out->author_path = f->path;
     }
     return 1;
 }
@@ -5476,13 +5601,424 @@ static int ms_open(const char *request, unsigned char **bytes, size_t *length)
     return 1;
 }
 
+/* Only the current map retains derived source bytes. Native declaration names are reused across maps and pins. */
+typedef struct ms_actor_row {
+    char *actor, *text;
+    char row[96];
+    int active, ready, preview;
+    char preview_build[SH_MODSERVE_HASH_HEX + 1];
+    struct ms_actor_row *next;
+} ms_actor_row;
+
+static int ms_request_salt(const char *request, char salt[SH_MODSERVE_HASH_HEX + 1]);
+static SRWLOCK g_actor_lock = SRWLOCK_INIT;
+static ms_actor_row *g_actor_rows;
+static ms_actor_row *g_previous_actors; /* only names, for a refused load over an open editor map */
+static volatile LONG g_actor_count, g_actor_preview;
+
+int sh_modserve_actor_prefab_pending(void) { return InterlockedCompareExchange(&g_actor_preview, 0, 0) != 0; }
+
+int sh_modserve_has_actor_rows(void) { return InterlockedCompareExchange(&g_actor_count, 0, 0) > 0; }
+
+static ms_actor_row *ms_actor_find(ms_actor_row *rows, const char *name)
+{
+    for (; rows; rows = rows->next) if (!_stricmp(rows->actor, name)) return rows;
+    return NULL;
+}
+
+static int (*g_actor_derives)(const char *cls, const char *base);
+static int ms_actor_parent_compatible(const char *name, const char *preview_build);
+
+void sh_modserve_set_actor_derives(int (*derives)(const char *, const char *))
+{
+    g_actor_derives = derives;
+}
+
+/* The map can set idAI2 on a generic parent. The spawn callback checks the resulting actor's native class. */
+int sh_modserve_iterator_uses(const char *actor)
+{
+    if (!actor || !*actor) return 0;
+    AcquireSRWLockShared(&g_actor_lock);
+    const ms_actor_row *row = ms_actor_find(g_actor_rows, actor);
+    int resolve_parent = !row || (!row->preview && !row->active);
+    int uses = row && !row->preview && row->active && row->ready;
+    ReleaseSRWLockShared(&g_actor_lock);
+    if (resolve_parent) {
+        InterlockedIncrement(&g_readers);
+        uses = ms_actor_parent_compatible(actor, NULL);
+        InterlockedDecrement(&g_readers);
+    }
+    return uses;
+}
+
+static ms_actor_row *ms_actor_id(const char *id, int file)
+{
+    for (ms_actor_row *r = g_actor_rows; r; r = r->next) {
+        size_t n = strlen(r->row);
+        if (r->active && !_strnicmp(id, r->row, n) && !_stricmp(id + n, file ? ".decl" : "")) return r;
+    }
+    return NULL;
+}
+
+int sh_modserve_actor_enabled(const char *id)
+{
+    int enabled;
+    if (!id || _strnicmp(id, SH_DIRECT_ACTOR_ID, sizeof(SH_DIRECT_ACTOR_ID) - 1)) return 0;
+    AcquireSRWLockShared(&g_actor_lock);
+    enabled = ms_actor_id(id, 0) != NULL;
+    ReleaseSRWLockShared(&g_actor_lock);
+    return enabled;
+}
+
+static int ms_actor_open(const char *request, unsigned char **bytes, size_t *len)
+{
+    const char *id = sh_direct_actor_key(request);
+    ms_actor_row *row;
+    int result = 0;
+    if (!id) return 0;
+    AcquireSRWLockShared(&g_actor_lock);
+    row = ms_actor_id(id, 1);
+    if (row && (!bytes || !len)) result = 1;
+    else if (row) {
+        *len = strlen(row->text);
+        *bytes = HeapAlloc(GetProcessHeap(), 0, *len + 1);
+        if (*bytes) { memcpy(*bytes, row->text, *len + 1); result = 1; }
+        else { *len = 0; result = -1; }
+    }
+    ReleaseSRWLockShared(&g_actor_lock);
+    return result;
+}
+
+/* Read the exact stock identity or the currently declared owner's bytes. A different mod and an unavailable
+ * or stood-in declaration cannot authorize a row. */
+static unsigned char *ms_actor_source(const char *name, const char *owner, const char *preview_build, size_t *len)
+{
+    char *request = sh_textf("generated/decls/entitydef/%s.decl", name);
+    unsigned char *bytes = NULL;
+    if (!request) return NULL;
+    if (!_strnicmp(name, "mods/", 5)) {
+        const ms_index *x = NULL;
+        char salt[SH_MODSERVE_HASH_HEX + 1];
+        const ms_file *f = ms_lookup_file(&x, request);
+        const ms_bundle *b = f ? &x->bundles[f->bundle] : NULL;
+        if (ms_request_salt(request, salt) && !strcmp(owner, salt) && f && f->path && !f->withdrawn && !f->actor_standin &&
+            !strcmp(b->id, salt) && (b->rank >= 0 || (preview_build && !strcmp(b->hash, preview_build)))) {
+            (void)sh_modserve_open(request, &bytes, len);
+        }
+    } else {
+        char sha[SH_MB_HASH_HEX + 1];
+        unsigned long long size;
+        if (sh_mb_stock_identify(request, sha, &size) == SH_MB_STOCK_OK)
+            (void)sh_mb_stock_read(request, sha, &bytes, len, request, NULL);
+    }
+    free(request);
+    return bytes;
+}
+
+static int ms_actor_parent_compatible(const char *name, const char *preview_build)
+{
+    char owner[SH_MODSERVE_HASH_HEX + 1] = "", **seen = NULL, *next = sh_text(name);
+    int count = 0, cap = 0, compatible = 0;
+    (void)ms_request_salt(name, owner);
+    while (next && sh_mb_check_source(next, NULL)) {
+        size_t len = 0;
+        unsigned char *bytes;
+        int repeated = 0;
+        for (int i = 0; i < count && !repeated; ++i) repeated = !_stricmp(next, seen[i]);
+        if (repeated || !ms_grow((void **)&seen, &cap, count + 1, sizeof *seen)) break;
+        seen[count++] = next;
+        if (_strnicmp(next, "mods/", 5)) owner[0] = 0; /* A stock declaration cannot acquire a mod parent. */
+        bytes = ms_actor_source(next, owner, preview_build, &len);
+        next = NULL;
+        if (!bytes) break;
+        {
+            sh_dt *t = sh_dt_parse((const char *)bytes, len, NULL, 0);
+            sh_dt_node *r = sh_dt_root(t), *f = sh_dt_child(r, "class");
+            if (f) {
+                if (f->val_n > 2 && f->val[0] == '"' && f->val[f->val_n - 1] == '"') {
+                    char *base = sh_textn(f->val + 1, f->val_n - 2);
+                    if (base)
+                        compatible = !strcmp(base, "idAI2") || !strcmp(base, "idEntity") ||
+                                     (g_actor_derives && g_actor_derives("idAI2", base) == 1);
+                    free(base);
+                }
+            }
+            else {
+                f = sh_dt_child(r, "inherit");
+                if (f && f->val_n > 2 && f->val[0] == '"' && f->val[f->val_n - 1] == '"')
+                    next = sh_textn(f->val + 1, f->val_n - 2);
+            }
+            sh_dt_free(t);
+        }
+        HeapFree(GetProcessHeap(), 0, bytes);
+    }
+    free(next);
+    for (int i = 0; i < count; ++i) free(seen[i]);
+    free(seen);
+    return compatible;
+}
+
+/* The editor keeps its idAI2 declaration and editable state. Play gets a separate, inert entity with the same pose. */
+static char *ms_actor_inert_pose(const char *source)
+{
+    static const char base[] = "{ inherit = \"snapmaps/unknown\"; class = \"idEntity\"; edit = { } }";
+    sh_dt *body = sh_dt_parse(source, strlen(source), NULL, 0);
+    sh_dt *safe = sh_dt_parse(base, sizeof base - 1, NULL, 0);
+    sh_dt_node *edit = sh_dt_child(sh_dt_root(body), "edit"), *out = sh_dt_child(sh_dt_root(safe), "edit");
+    sh_dt_node *kept[2];
+    char *text = NULL;
+    if (edit && out) {
+        sh_dt_node *position = sh_dt_child(edit, "spawnPosition"), *orientation = sh_dt_child(edit, "spawnOrientation");
+        if (position) kept[out->nkids++] = position;
+        if (orientation) kept[out->nkids++] = orientation;
+        out->kids = kept;
+        text = sh_dt_text(safe, NULL);
+    }
+    sh_dt_free(safe);
+    sh_dt_free(body);
+    return text;
+}
+
+const char *sh_modserve_actor_play_text(const char *inherit, const char *cls, const char *source, char **owned)
+{
+    const ms_index *index = NULL;
+    const ms_file *file;
+    char salt[SH_MODSERVE_HASH_HEX + 1], *request;
+    int available = 0;
+    *owned = NULL;
+    if (!inherit || _strnicmp(inherit, "mods/", 5) || !cls || _stricmp(cls, "idAI2") ||
+        !ms_request_salt(inherit, salt)) return source;
+    request = sh_textf("generated/decls/entitydef/%s.decl", inherit);
+    InterlockedIncrement(&g_readers);
+    file = request ? ms_lookup_file(&index, request) : NULL;
+    if (file && file->path && !file->withdrawn && !file->actor_standin && file->reg_state >= 0) {
+        const ms_bundle *bundle = &index->bundles[file->bundle];
+        available = !strcmp(bundle->id, salt) && (!sh_modserve_scope_enabled() || bundle->rank >= 0);
+    }
+    InterlockedDecrement(&g_readers);
+    free(request);
+    if (available) return source;
+    if (source) *owned = ms_actor_inert_pose(source);
+    return *owned ? *owned : "{ inherit = \"snapmaps/unknown\"; class = \"idEntity\"; }";
+}
+
+static void ms_actor_free(ms_actor_row *list)
+{
+    while (list) {
+        ms_actor_row *next = list->next;
+        free(list->actor); free(list->text); free(list); list = next;
+    }
+}
+
+static ms_actor_row *ms_actor_add(ms_actor_row **list, const char *actor)
+{
+    char sha[SH_MB_HASH_HEX + 1];
+    ms_actor_row *r;
+    if (!actor || !sh_mb_check_source(actor, NULL)) return NULL;
+    r = ms_actor_find(*list, actor);
+    if (r) return r;
+    if (!(r = calloc(1, sizeof *r))) return 0;
+    r->actor = sh_text(actor);
+    if (!r->actor) { free(r); return 0; }
+    ms_lower(r->actor);
+    sh_mb_sha256_hex(r->actor, strlen(r->actor), sha);
+    snprintf(r->row, sizeof r->row, SH_DIRECT_ACTOR_ID "%s", sha);
+    r->next = *list;
+    *list = r;
+    return r;
+}
+
+static int ms_actor_member(ms_json object, const char *wanted, ms_json *out)
+{
+    char key[40];
+    const char *v, *end;
+    if (!ms_jenter(&object, '{')) return 0;
+    while (ms_jnext(&object, '}') && ms_jmember(&object, key, sizeof key, &v, &end)) {
+        if (!strcmp(key, wanted)) { out->p = v; out->e = end; return 1; }
+    }
+    return 0;
+}
+
+static ms_actor_row *ms_actor_placements(const char *json, size_t len)
+{
+    ms_actor_row *list = NULL;
+    ms_json top, ents;
+    if (!json || !len) return NULL;
+    top.p = json; top.e = json + len;
+    if (len >= 3 && !memcmp(json, "\xef\xbb\xbf", 3)) top.p += 3;
+    if (!ms_actor_member(top, "entities", &ents) || !ms_jenter(&ents, '[')) return NULL;
+    while (ms_jnext(&ents, ']')) {
+        ms_json ent = { ents.p, ms_jskip(ents.p, ents.e) }, def, cls, name;
+        char type[16], *actor;
+        size_t size, n;
+        if (ent.e <= ent.p) break;
+        ents.p = ent.e;
+        if (!ms_actor_member(ent, "entityDef", &def) || !ms_actor_member(def, "className", &cls) ||
+            !sh_json_decode_string(cls.p, cls.e-cls.p, type, sizeof type, &n) || n != 5 || memcmp(type, "idAI2", 5) ||
+            !ms_actor_member(def, "inherit", &name)) continue;
+        size = (size_t)(name.e - name.p) + 1;
+        if (!(actor = malloc(size))) break;
+        if (sh_json_decode_string(name.p, size-1, actor, size, &n) && strlen(actor) == n)
+            (void)ms_actor_add(&list, actor);
+        free(actor);
+    }
+    return list;
+}
+
+/* Called on the main thread after the map's ordinary editor rows and actor definitions resolve. */
+static int ms_actor_apply(ms_actor_row *list, int (*covered)(const char *), int (*admit)(const char *, const char *))
+{
+    ms_actor_row *old;
+    int changed = 0, active = 0, preview = 0;
+    InterlockedIncrement(&g_readers);
+    for (ms_actor_row *r = list; r; r = r->next) {
+        preview |= r->preview;
+        if (covered(r->actor) || !ms_actor_parent_compatible(r->actor, r->preview_build)) continue;
+        r->text = sh_textf("{\n\tinherit = \"unknown/unknown\";\n\tedit = {\n\t\tentityDef = \"%s\";\n\t}\n}\n", r->actor);
+        if (r->text) { r->active = 1; active++; }
+    }
+    InterlockedDecrement(&g_readers);
+    AcquireSRWLockExclusive(&g_actor_lock);
+    old = g_actor_rows;
+    for (ms_actor_row *r = old; r; r = r->next) {
+        ms_actor_row *newer = ms_actor_find(list, r->actor);
+        if (newer && newer->active) newer->ready = r->active && r->ready;
+        else if (r->active) changed = 1;
+    }
+    g_actor_rows = list;
+    InterlockedExchange(&g_actor_count, active);
+    InterlockedExchange(&g_actor_preview, preview);
+    ReleaseSRWLockExclusive(&g_actor_lock);
+    ms_actor_free(old);
+    for (ms_actor_row *r = list; r; r = r->next) if (r->active && !r->ready) {
+        r->ready = admit(r->actor, r->row) == 1;
+        if (r->ready) changed = 1;
+    }
+    return changed;
+}
+
+int sh_modserve_direct_actor_rows(const char *json, size_t len, int (*covered)(const char *),
+                                  int (*admit)(const char *, const char *))
+{
+    if (!covered || !admit) return 0;
+    ms_actor_free(g_previous_actors);
+    g_previous_actors = NULL;
+    if (json)
+        for (ms_actor_row *r = g_actor_rows; r; r = r->next)
+            if (!r->preview) (void)ms_actor_add(&g_previous_actors, r->actor);
+    return ms_actor_apply(ms_actor_placements(json, len), covered, admit);
+}
+
+int sh_modserve_restore_actor_rows(int (*covered)(const char *), int (*admit)(const char *, const char *))
+{
+    ms_actor_row *previous = g_previous_actors;
+    g_previous_actors = NULL;
+    return ms_actor_apply(previous, covered, admit);
+}
+
+int sh_modserve_refresh_actor_rows(int (*covered)(const char *), int (*admit)(const char *, const char *))
+{
+    ms_actor_row *copy = NULL;
+    if (!g_actor_rows) return 0;
+    for (ms_actor_row *r = g_actor_rows; r; r = r->next) {
+        ms_actor_row *item = ms_actor_add(&copy, r->actor);
+        if (item) { item->preview = r->preview; strcpy_s(item->preview_build, sizeof item->preview_build, r->preview_build); }
+    }
+    return ms_actor_apply(copy, covered, admit);
+}
+
+int sh_modserve_prefab_has_direct_actors(const char *json, size_t len)
+{
+    ms_actor_row *placed = ms_actor_placements(json, len);
+    int result = placed != NULL;
+    ms_actor_free(placed);
+    return result;
+}
+
+/* A held prefab borrows its own exact resolved build. Keep all already-placed actors on their map scope. */
+int sh_modserve_prefab_actor_rows(const char *json, size_t len, const sh_modmanifest_list *rows,
+                                  int (*covered)(const char *), int (*admit)(const char *, const char *))
+{
+    ms_actor_row *placed = ms_actor_placements(json, len);
+    if (!placed && !sh_modserve_actor_prefab_pending()) return 0;
+    for (ms_actor_row *r = placed; r; r = r->next) {
+        char salt[SH_MODSERVE_HASH_HEX + 1];
+        r->preview = 1;
+        if (!ms_request_salt(r->actor, salt)) continue;
+        for (size_t i = 0; rows && i < rows->count; ++i) {
+            sh_modserve_bundle_ref build;
+            if (strcmp(rows->rows[i].salt, salt) || !sh_modserve_row_build(&rows->rows[i], &build)) continue;
+            strcpy_s(r->preview_build, sizeof r->preview_build, build.hash);
+            sh_modserve_bundle_ref_free(&build);
+            break;
+        }
+    }
+    for (ms_actor_row *r = g_actor_rows; r; r = r->next) if (!r->preview) {
+        ms_actor_row *item = ms_actor_add(&placed, r->actor);
+        if (item) { item->preview = 0; item->preview_build[0] = 0; }
+    }
+    return ms_actor_apply(placed, covered, admit);
+}
+
+int sh_modserve_finish_actor_rows(const char *json, size_t len,
+                                  int (*covered)(const char *), int (*admit)(const char *, const char *))
+{
+    if (!sh_modserve_actor_prefab_pending()) return 0;
+    if (!json) return sh_modserve_prefab_actor_rows(NULL, 0, NULL, covered, admit);
+    return ms_actor_apply(ms_actor_placements(json, len), covered, admit);
+}
+
+int sh_modserve_uses_stock_actor(const char *json, size_t len, int (*covered)(const char *))
+{
+    ms_actor_row *list = ms_actor_placements(json, len);
+    int uses = 0;
+    for (ms_actor_row *r = list; !uses && r; r = r->next) {
+        if (_strnicmp(r->actor, "mods/", 5) && !covered(r->actor))
+            uses = ms_actor_parent_compatible(r->actor, NULL);
+    }
+    ms_actor_free(list);
+    return uses;
+}
+
 int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
 {
     int r;
+    if (sh_modserve_has_actor_rows() && (r = ms_actor_open(request, bytes, length)) != 0) return r;
     InterlockedIncrement(&g_readers);
     r = ms_open(request, bytes, length);
     InterlockedDecrement(&g_readers);
     return r;
+}
+
+static int ms_enemy_decl(void *context, const char *type, const char *name, sh_dt **body)
+{
+    const ms_index *index = NULL;
+    char *request = sh_textf("generated/decls/%s/%s.decl", type, name);
+    const ms_file *file = request ? ms_lookup_file(&index, request) : NULL;
+    const ms_bundle *bundle = file ? &index->bundles[file->bundle] : NULL;
+    int present = bundle && !file->stock && !file->is_shadow && !_stricmp(bundle->id, (const char *)context) &&
+                  InterlockedCompareExchange((volatile LONG *)&bundle->rank, 0, 0) >= 0;
+    if (present && body) {
+        unsigned char *bytes = NULL;
+        size_t length = 0;
+        present = sh_modserve_open(request, &bytes, &length) == 1;
+        if (present) {
+            *body = sh_dt_parse((const char *)bytes, length, NULL, 0);
+            HeapFree(GetProcessHeap(), 0, bytes);
+            present = *body != NULL;
+        }
+    }
+    free(request);
+    return present;
+}
+
+char *sh_modserve_enemy_behavior(const char *salt, const char *entitydef)
+{
+    char *behavior;
+    InterlockedIncrement(&g_readers);
+    behavior = sh_dt_enemy_behavior(salt, entitydef, ms_enemy_decl, (void *)salt);
+    InterlockedDecrement(&g_readers);
+    return behavior;
 }
 
 int sh_modserve_open_disk(const char *request, unsigned char **bytes, size_t *length)
@@ -5510,6 +6046,7 @@ int sh_modserve_probe_claims(const char *path)
 {
     const ms_file *f;
     int claimed;
+    if (sh_modserve_has_actor_rows() && ms_actor_open(path, NULL, NULL)) return 1;
     InterlockedIncrement(&g_readers);
     f = ms_lookup_file(NULL, path);
     claimed = f && f->is_decl;
@@ -5582,12 +6119,7 @@ static int ms_need_blocks(const char *name)
     return !strncmp(name, "mods/", 5) || strstr(name, "/mods/") != NULL;
 }
 
-/* A decl a plan may register: every decl a bundle provides except shadows, edited copies and surfaces. A shadow
- * or a surface (a stock pointer at the game's own path, sh_mb_stock_restore) is served by the provider when the
- * game parses it and is never planned, except a pointer to a decl the product derives (ms_product_planned: an
- * SDK effect, a derived particle, material, table or fx, a platform program). Such a name is in no archive and
- * below engine lifecycle state 2 DeclFind finds a name only through a registered source (VK 0x14155ae90), so
- * it is planned as a mod's own decl is, needs first (MS_PLAN_PRODUCT_PROGRAMS 0: SDK decls only). */
+/* Register owned and product-derived declarations. A child can also bring in its campaign parent. */
 #define MS_PLAN_PRODUCT_PROGRAMS 1
 static int ms_product_planned(const ms_file *f)
 {
@@ -5600,6 +6132,29 @@ static int ms_plannable(const ms_index *x, const ms_file *f)
 {
     (void)x;
     return f->is_decl && !f->edit && (!ms_surface(f) || ms_product_planned(f)) && !f->is_shadow;
+}
+
+static char *ms_top_inherit(const unsigned char *text, size_t length);
+static unsigned char *ms_file_bytes(const ms_file *f, size_t *len);
+
+/* Register a supplied campaign parent before the engine parses its child. */
+static int ms_campaign_parent(const ms_file *child, const ms_file *candidate, char **parent, int *read)
+{
+    char container[32];
+    if (!candidate->is_restore || !candidate->is_decl || candidate->is_shadow || candidate->edit ||
+        !child->ptype || !candidate->ptype || !candidate->pname || _stricmp(child->ptype, candidate->ptype)) return 0;
+    if (!*read) {
+        size_t length;
+        unsigned char *text = ms_file_bytes(child, &length);
+        *read = 1;
+        if (text) {
+            *parent = ms_top_inherit(text, length);
+            HeapFree(GetProcessHeap(), 0, text);
+        }
+    }
+    return *parent && !_stricmp(*parent, candidate->pname) &&
+           sh_mb_stock_container(candidate->stock, NULL, container, sizeof container) &&
+           !strcmp(container, "gameresources");
 }
 
 /* Collect `roots` and the closure of bundle-provided decls they need into an
@@ -5622,6 +6177,8 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
     while (qh < nq) {
         int at = queue[qh++];
         const ms_file *f = ms_serving_file(x, at);
+        char *parent = NULL;
+        int read = 0;
         for (k = 0; k < f->need_count; ++k) {
             const ms_need *nd = &x->needs[f->need_first + k];
             int p = nd->file;
@@ -5634,8 +6191,13 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
                 }
                 continue;
             }
-            if (ms_plannable(x, &x->files[p]) && !in_plan[p]) { in_plan[p] = 1; queue[nq++] = p; }
+            if (!in_plan[p] && (ms_plannable(x, &x->files[p]) ||
+                ms_campaign_parent(f, ms_serving_file(x, p), &parent, &read))) {
+                in_plan[p] = 1;
+                queue[nq++] = p;
+            }
         }
+        free(parent);
     }
     /* Blocked needs propagate to dependents. */
     do {
@@ -5705,7 +6267,7 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
         /* The editor plan keeps every step for the session, since what a row's parse points at must outlive
          * the purges around Play; a decl an editor row needs is kept by whichever pass registers it first. */
         s->persist = persist_sedefs ? 1 : f->editor_closure ? 2 : 0;
-        s->shadow = f->is_shadow;   /* surfaces are never planned (ms_plannable) */
+        s->shadow = f->is_shadow;
         s->blocked = cause[order[i]];
         s->file = order[i];
         if (s->blocked) out->blocked++;
@@ -5975,7 +6537,10 @@ static void ms_refuse_file(ms_index *x, ms_file *f)
     f->refused_body = ms_original_body(f, &f->refused_len);
     if (!f->refused) x->refusals++;
     f->refused = 1;
-    if (ms_refusal_closure(x)) (void)ms_scope_compute(x, 1);
+    if (ms_update_refusals(x)) {
+        (void)ms_scope_compute(x, 1);
+        InterlockedIncrement(&g_refusal_version);
+    }
     ReleaseSRWLockShared(&g_scope_lock);
     ReleaseSRWLockExclusive(&g_build_lock);
 }
@@ -8258,6 +8823,11 @@ unsigned sh_modserve_test_gates_owned(void)
 
 /* ------------------------------------------------------------------ queries */
 
+int sh_modserve_refusal_version(void)
+{
+    return (int)InterlockedCompareExchange(&g_refusal_version, 0, 0);
+}
+
 int sh_modserve_root_lacks(const char *salt, const char *name)
 {
     const ms_index *x = g_index;
@@ -8277,7 +8847,8 @@ int sh_modserve_root_lacks(const char *salt, const char *name)
         int i;
         for (i = b->first_file; i < b->first_file + b->file_count; ++i) {
             const ms_file *f = &x->files[i];
-            if (f->placeable_encounter && f->withdrawn && f->pname && !_stricmp(f->pname, lower)) {
+            if (f->withdrawn && (f->placeable_encounter ||
+                (f->withdrawn == 1 && ms_is_type(f->ptype, "entityDef"))) && f->pname && !_stricmp(f->pname, lower)) {
                 lacks = SH_MODMANIFEST_LOCAL_REFUSED;
                 break;
             }
@@ -8527,10 +9098,11 @@ int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subjec
     }
     {
         const ms_bundle *b = declared >= 0 ? &x->bundles[declared] : skipped >= 0 ? &x->bundles[skipped] : NULL;
-        for (i = 0; !b && x && i < x->nbundles; ++i)   /* another build of the salt names it */
-            if (x->bundles[i].id && !strcmp(x->bundles[i].id, salt) && x->bundles[i].name && x->bundles[i].name[0]) b = &x->bundles[i];
-        /* Never the salt: a player who only plays maps never sees one. */
         title = b && b->name && b->name[0] ? b->name : row->name && row->name[0] ? row->name : "";
+        for (i = 0; !*title && x && i < x->nbundles; ++i) {
+            const ms_bundle *other = &x->bundles[i];
+            if (other->id && !strcmp(other->id, salt) && other->name) title = other->name;
+        }
     }
     if (declared < 0) {
         if (skipped >= 0)
@@ -9357,6 +9929,7 @@ long sh_modserve_open_count(const char *request)
 int sh_modserve_is_mod_sedef(const char *name)
 {
     const ms_index *x = g_index;
+    if (sh_modserve_actor_enabled(name)) return 1;
     if (!x || !name) return 0;
     /* ms_provider folds the key itself. */
     return ms_provider(x, "snapeditorentitydef", name) >= 0;
@@ -9407,7 +9980,8 @@ char *sh_modserve_bundle_name(const char *bundle_hash)
         const ms_bundle *b = &x->bundles[i];
         const char *leaf;
         if (!b->hash || _stricmp(b->hash, bundle_hash)) continue;
-        if (b->name && b->name[0]) return sh_text(b->name);
+        if (b->name && b->name[0] && !(b->place && b->id && !_stricmp(b->name, b->id))) return sh_text(b->name);
+        if (b->place) return sh_text("a mod");
         leaf = b->folder ? strrchr(b->folder, '\\') : NULL;
         leaf = leaf ? leaf + 1 : b->folder;
         return sh_text(leaf && leaf[0] ? leaf : "a mod");

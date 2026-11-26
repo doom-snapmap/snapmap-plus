@@ -303,11 +303,6 @@ static int pp_decode_md6_ex(const unsigned char *data, size_t len, pp_mesh *mesh
     return mesh->vertex_count > 0 && mesh->index_count > 0;
 }
 
-static int pp_decode_md6(const unsigned char *data, size_t len, pp_mesh *mesh)
-{
-    return pp_decode_md6_ex(data, len, mesh, NULL);
-}
-
 static int pp_ascii_space(unsigned char c)
 {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';

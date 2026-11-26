@@ -1,0 +1,7 @@
+{
+    inherit = "ai/default";
+    edit = {
+        renderModelInfo = { model = "stock/shared_rig"; }
+        aiEditable = { behaviors = { decl = "decls/aibehavior/decisions/advance"; } }
+    }
+}

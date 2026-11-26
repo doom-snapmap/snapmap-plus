@@ -102,6 +102,9 @@ static const site SITES[] = {
     { "strids.c",             "StridsSortBody",             SITE_SIG, 0, 16, REPLAYS, 0 },
     { "swf_textedit.c",       "SwfTextOnKeyCall",           SITE_SIG, 0, 15, REPLAYS, 0 },
     { "timeline_tile.c",      "SnapPaletteBuild",           SITE_SIG, 0, 18, REPLAYS, 0 },
+    { "timeline_tile.c",      "SnapPaletteBuild",           SITE_CALL_IN_SIG, 0xd6, 15, REPLAYS, 0 },
+    { "timeline_tile.c",      "SnapPalettePickerPlaceable", SITE_SIG, 0, 14, REPLAYS, 0 },
+    { "timeline_tile.c",      "SnapPaletteCategoryBound",   SITE_SIG, 0, 14, REPLAYS, 0 },
     { "modserve_engine.c",    "DeclResourceProbe",          SITE_SIG, 0, 21, REPLAYS, 0 },
     { "modserve_engine.c",    "ResourceLookup",             SITE_SIG, 0, 19, REPLAYS, 0 },
     { "modserve_engine.c",    "ResourceGenericLoad",        SITE_SIG, 0, 20, REPLAYS, 0 },
@@ -247,6 +250,19 @@ static void audit_bytes(const char *label, const site *s, const uint8_t *code, u
     report(label, s->owner, s->name, rva, fixed, boundary, notes, verdict, ok);
 }
 
+/* Independently recorded save-filter entry windows on the two supported executables. */
+static const struct {
+    const char *name;
+    uint32_t vk, gl;
+    size_t stolen;
+} SAVED_VIEWS[] = {
+    { "SavedViewBind",    0x12020d0, 0x12014a0, 21 },
+    { "SavedViewCopy",    0x119b890, 0x119aac0, 15 },
+    { "SavedViewAssign",  0x119ba50, 0x119ac80, 15 },
+    { "SavedViewDestroy", 0x1563640, 0x1564920, 15 },
+    { "SavedViewFilter",  0x1200ff0, 0x12003c0, 14 },
+};
+
 static void check_image(const char *path)
 {
     wchar_t wide[MAX_PATH];
@@ -265,6 +281,16 @@ static void check_image(const char *path)
     printf("image %s: %s\n", path, identity->label);
     if (db > SIG_RESULTS_MAX) db = SIG_RESULTS_MAX;
     (void)sig_resolve_all(base, results, SIG_RESULTS_MAX);
+
+    for (size_t i = 0; i < ARRAYSIZE(SAVED_VIEWS); i++) {
+        uint32_t rva = identity->vulkan ? SAVED_VIEWS[i].vk : SAVED_VIEWS[i].gl;
+        site row = { "saved_views.c", SAVED_VIEWS[i].name, 0, 0, SAVED_VIEWS[i].stolen, REPLAYS, 0 };
+        if ((size_t)rva + 48 > image_size) {
+            report(label, row.owner, row.name, rva, row.stolen, 0, "", "outside image", 0);
+        } else {
+            audit_bytes(label, &row, base + rva, rva, row.stolen);
+        }
+    }
 
     for (size_t i = 0; i < sizeof SITES / sizeof SITES[0]; i++) {
         const site *s = &SITES[i];
@@ -423,11 +449,11 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "backend\\editor_frame.c", 2 }, { "backend\\engine_dialog.c", 1 },
     { "backend\\grid_room_editor.c", 5 }, { "backend\\grid_room_native.c", 4 },
     { "backend\\grid_room_snap.c", 4 }, { "backend\\hook.c", 5 },
-    { "backend\\nav_menu.c", 4 },
+    { "backend\\nav_menu.c", 4 }, { "backend\\saved_views.c", 1 },
     { "backend\\nav_play.c", 2 }, { "backend\\nav_preview.c", 2 },
     { "backend\\patch.c", 2 }, { "backend\\rawmap.c", 3 },
     { "backend\\smoke.c", 1 }, { "backend\\strids.c", 1 }, { "backend\\swf_textedit.c", 1 },
-    { "backend\\timeline_tile.c", 2 }, { "backend\\modserve_engine.c", 3 },
+    { "backend\\timeline_tile.c", 5 }, { "backend\\modserve_engine.c", 3 },
     { "backend\\modpublished.c", 8 }, { "backend\\modlobby.c", 4 }, { "backend\\modpublish.c", 1 },
     { "backend\\companion_engine.c", 1 }, { "backend\\modhud_scene.c", 1 }, { "backend\\modscene_place.c", 1 },
     { "backend\\modtypeinfo.c", 2 }, { "backend\\modvt.c", 3 }, { "backend\\modvt_resident.c", 1 },

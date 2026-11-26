@@ -268,6 +268,33 @@ static void relative_short_jcc_preserves_both_paths(void)
     VirtualFree(page, 0, MEM_RELEASE);
 }
 
+static void record_growth(void)
+{
+    enum { count = 260 };
+    unsigned char targets[count][STOLEN] = {0};
+    void *owned[count] = {0};
+    int baseline = hook_owned_count();
+
+    for (int i = 0; i < count; ++i) {
+        owned[i] = hook_prepare(targets[i], detour, STOLEN);
+        if (!owned[i]) {
+            CHECK(owned[i] != NULL);
+            break;
+        }
+    }
+    CHECK(hook_owned_count() == baseline + count);
+    CHECK(hook_prepare(targets[0], detour, STOLEN) == NULL);
+    CHECK(hook_owned_count() == baseline + count);
+    for (int i = 0; i < count; i += 2)
+        if (owned[i]) CHECK(hook_unpatch(owned[i]));
+    for (int i = 0; i < count; i += 2)
+        owned[i] = hook_prepare(targets[i], detour, STOLEN);
+    CHECK(hook_owned_count() == baseline + count);
+    for (int i = 0; i < count; ++i)
+        if (owned[i]) CHECK(hook_unpatch(owned[i]));
+    CHECK(hook_owned_count() == baseline);
+}
+
 int main(void)
 {
     rip_lea_preserves_addresses();
@@ -295,6 +322,8 @@ int main(void)
     sh_patch_test_observe_write(before_target_write);
     CHECK(hook_commit((void *)published_original) == B2_PATCH_OK);
     CHECK(observed_writes == 1 && hook_is_installed((void *)published_original));
+    record_growth();
+    CHECK(hook_is_installed((void *)published_original));
     CHECK(target(7, &tag) == 1014);
 
     /* Failed removal is not an installed state. Its live detour can still call through. */

@@ -55,8 +55,8 @@ int   sh_prefab_mods_row_provides(const sh_modmanifest_list *rows, const char *n
 const char *sh_prefab_mods_label(const sh_modmanifest_row *row);
 
 /* {"count":N,"missing":M,"mods":[{"id","salt","build","size","installed","state","cause"}...]}: "id" the row's
- * name (else its salt), "state" under row_state ("served", "missing" or "incomplete", with the refusal
- * sentence for the last two); a build a ZIP's import holds counts as served. malloc'd. */
+ * display name. "installed" means its required content is available. "state" is "served", "missing"
+ * or "incomplete". A local row can include a refusal in "cause". The caller frees the result. */
 char *sh_prefab_mods_status_json(const sh_modmanifest_list *rows, size_t *missing);
 
 /* The block for a view: "description" and "tags" from its "desc" and "tags", "mods" from `rows` (NULL keeps the
@@ -158,19 +158,19 @@ void  sh_prefab_mods_set_root(const char *dir);
 int   sh_prefab_mods_kept(sh_modmanifest_list *rows);
 
 /* `sh_prefab`: argv[0] is the verb (NULL or "help" prints the verbs):
- *   mods "<name>"                 the prefab's mods and whether each is installed, in
+ *   mods "<name>"                 the prefab's mods and whether their content is available in
  *                                 the open map's context (it changes nothing)
  *   export "<name>" "<path.zip>"  the prefab with its mods, as one ZIP
  *   import "<path>"               a .zip, or a .json in an extracted export folder:
- *                                 install the mods, add the prefab to the library
+ *                                 cache the included mod content and add the prefab to the library
  * A name may be "<folder>/<name>". Game thread. */
 void  sh_prefab_mods_command(int argc, const char *const *argv);
 
 #define SH_PREFAB_CMD_NAME "sh_prefab"
 #define SH_PREFAB_CMD_HELP "Prefabs and their mods: 'sh_prefab mods \"<name>\"' lists the mods a prefab needs and whether " \
-    "each is installed; 'sh_prefab export \"<name>\" \"<path.zip>\"' writes the prefab with its mods to one ZIP; " \
-    "'sh_prefab import \"<path.zip or path.json>\"' puts its mod content into the content cache (nothing is " \
-    "installed) and adds the prefab to the library (a .json imports the extracted export folder it is in)."
+    "their content is ready. 'sh_prefab export \"<name>\" \"<path.zip>\"' writes the prefab and its required mod " \
+    "content to one ZIP. 'sh_prefab import \"<path.zip or path.json>\"' adds the prefab to the library and caches " \
+    "the included content from the ZIP or extracted export folder."
 
 struct sh_module_prefab_call;
 /* The details and mods operations of the module_prefab slot (snapmap_plus_iface.h): MODS_RECORD, MODS_STATUS,

@@ -16,6 +16,7 @@
 #include <knownfolders.h>
 #pragma comment(lib, "shell32.lib")   /* SHGetKnownFolderPath */
 #pragma comment(lib, "ole32.lib")     /* CoTaskMemFree */
+#include "../common/profile_dir.h"
 #include "rawmap.h"
 #include "feature_health.h"
 #include "hook.h"
@@ -132,10 +133,11 @@ static char *default_rawmap_path(void)
 {
     PWSTR known = NULL;
     char *root = NULL, *out;
-    if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &known)) && known)
+    known = sh_profile_dir();
+    if (known)
         root = sh_rawmap_path_utf8(known);
     if (known) CoTaskMemFree(known);
-    out = root ? sh_textf("%s\\snapmap-plus\\rawmap.json", root) : sh_text("snapmap-plus\\rawmap.json");
+    out = root ? sh_textf("%s\\rawmap.json", root) : NULL;
     free(root);
     return out;
 }
@@ -388,6 +390,13 @@ static sh_rawmap_edit_id_fn g_edit_id;
 
 void sh_rawmap_set_edit_id_reader(sh_rawmap_edit_id_fn fn) { g_edit_id = fn; }
 
+int sh_rawmap_edit_local_id(char *out, size_t cap)
+{
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    return g_edit_id && g_edit_id(out, cap) == 1 && out[0];
+}
+
 /* `name` is the rawmap's file name; NULL clears it. Out of memory, the open map is named "rawmap". */
 static void open_identity_set(const char *name)
 {
@@ -414,9 +423,8 @@ static void open_borrow_reset(void)
 static int open_still_borrowed(void)
 {
     char id[64] = "";
-    sh_rawmap_edit_id_fn fn = g_edit_id;
     int same = 1;
-    if (!fn || fn(id, sizeof id) != 1 || !id[0]) return 1;
+    if (!sh_rawmap_edit_local_id(id, sizeof id)) return 1;
     AcquireSRWLockExclusive(&g_open_lock);
     if (!g_borrowed_id[0]) strncpy_s(g_borrowed_id, sizeof g_borrowed_id, id, _TRUNCATE);
     else same = !strcmp(g_borrowed_id, id);
@@ -587,7 +595,7 @@ static void carrier_describe_guarded(const sh_carrier_view *view)
 /* Prepare the chosen JSON before native parsing: refuse a map in an earlier shape (*refused set, NULL
  * returned), else rebuild navigation state, read the "snapmap-plus" member's data and strip the member last.
  * Returns an owned process-heap buffer or NULL to use the original. */
-static char *prepare_map_buffer(const char *json, int *refused)
+static char *prepare_map_buffer(const char *json, int *refused, char **published)
 {
     sh_carrier_view view;
     sh_modmanifest_list rows = {0};
@@ -599,6 +607,15 @@ static char *prepare_map_buffer(const char *json, int *refused)
         sh_modmanifest_list_free(&rows);
         *refused = 1;
         return NULL;
+    }
+    if (g_parse_kind != SH_MODPUB_PARSE_OTHER) {
+        int changed = sh_modmanifest_freeze_local_rows(&rows, json, len);
+        if (changed < 0 || (changed && !(*published = sh_modmanifest_write(json, len, &rows, NULL, NULL, 0)))) {
+            sh_modmanifest_list_free(&rows);
+            sh_modmanifest_load_refuse(RAWMAP_CHECK_FAULTED);
+            *refused = 1;
+            return NULL;
+        }
     }
     carrier_describe_guarded(&view);
     sh_navmesh_build_from_map(json, len, &view.nav);
@@ -832,13 +849,14 @@ int sh_rawmap_reopen_after_mods(char **note)
 /* Parse the chosen bytes after preparation and record the map's render settings. */
 static int deser_prepared(const char *json, void *out_map)
 {
-    char *prepared;
+    char *prepared = NULL, *published = NULL;
     int refused = 0;
     /* A read that is not a published map's is the editor's: a row whose build is gone is served by another
      * build of its salt. */
     sh_modmanifest_set_editor_load(g_parse_kind == SH_MODPUB_PARSE_OTHER);
     sh_cache_published_probe(g_parse_kind != SH_MODPUB_PARSE_OTHER);
-    prepared = prepare_map_buffer(json, &refused);
+    prepared = prepare_map_buffer(json, &refused, &published);
+    if (published) json = published;
     sh_cache_published_probe(0);
     sh_modmanifest_set_editor_load(0);
     if (refused) {
@@ -847,6 +865,7 @@ static int deser_prepared(const char *json, void *out_map)
         shield_note_refused_load();
         sh_map_settings_loaded(0);
         sh_modpublished_parse_seen(g_parse_kind, json, out_map, 0);
+        if (published) HeapFree(GetProcessHeap(), 0, published);
         return 0;
     }
     int rc = g_deser_orig(prepared ? prepared : json, out_map);
@@ -858,6 +877,7 @@ static int deser_prepared(const char *json, void *out_map)
     if (rc) sh_map_bounds_loaded(out_map);
     if (rc) sh_world_area_cell_map_opened();
     if (prepared) HeapFree(GetProcessHeap(), 0, prepared);
+    if (published) HeapFree(GetProcessHeap(), 0, published);
     return rc;
 }
 

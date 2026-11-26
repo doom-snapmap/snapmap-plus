@@ -3022,7 +3022,8 @@ static void test_the_placement_grid_is_cut_where_the_floor_was_cut(void)
     shipped = sh_aas_write(a, &shipped_len);
     CHECK(model && shipped);
     if (!model || !shipped) goto done;
-    CHECK(sh_nav_overlay_triangle_count(model, model_len) == 8);
+    CHECK(fixture_grid_triangles(model, model_len) == 8);
+    CHECK(fixture_grid_triangles(model, model_len - 1) == -1);
     CHECK_MSG(sh_nav_overlay_build(model, model_len, shipped, shipped_len, shipped, shipped_len,
                                    sh_aas_count(a, SH_AAS_L_AREAS), &out, &out_len, &st) == 0 && !out,
               "an uncut floor keeps the stock model");
@@ -3053,7 +3054,7 @@ static void test_the_placement_grid_is_cut_where_the_floor_was_cut(void)
     CHECK_MSG(st.cut_areas == rep.floors_cut, "one cut per floor area the bake cut");
     CHECK_MSG(st.pieces == rep.floors_cut + rep.floor_pieces_added, "every piece of them");
     CHECK_MSG(st.triangles_after > st.triangles_before, "the cut floor takes more triangles");
-    CHECK(sh_nav_overlay_triangle_count(out, out_len) == st.triangles_after);
+    CHECK(fixture_grid_triangles(out, out_len) == st.triangles_after);
     drawn = ov_floor_area(out, p, 2, &inside, &flipped, &roof);
     /* Both are float coordinates near 2000: rounding along the seams, not a gap. */
     CHECK_MSG(fabs(drawn - pieces) < 16.0, "the grid covers exactly the floor the bake kept");

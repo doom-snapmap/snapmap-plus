@@ -1,6 +1,7 @@
 /* Editor operations behind the shared UI interface. Field offsets are build-dependent; SEH contains access
  * faults, but a readable incompatible layout can still produce incorrect engine state. */
 #include "safe_read.h"
+#include "../common/profile_dir.h"
 #include <windows.h>
 #include <shlobj.h>
 #include <knownfolders.h>
@@ -1085,10 +1086,11 @@ static char *slot_resolve_prefab_path(sh_iface *self, const char *prefix, const 
     PWSTR wide = NULL;
     char *base = NULL, *path;
     (void)self;
-    if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &wide)) && wide)
+    wide = sh_profile_dir();
+    if (wide)
         base = sh_rawmap_path_utf8(wide);
     if (wide) CoTaskMemFree(wide);
-    path = base ? sh_iface_textf("%s/snapmap-plus/%s%s", base, prefix ? prefix : "", name ? name : "") : NULL;
+    path = base ? sh_iface_textf("%s/%s%s", base, prefix ? prefix : "", name ? name : "") : NULL;
     free(base);
     return path;
 }

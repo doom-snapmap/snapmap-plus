@@ -33,6 +33,9 @@ static int       g_end_pending;
 static int       g_end_handlers;             /* the deferred map end runs end handlers */
 static int       g_active;
 static int       g_started;                  /* the prepared mods have had their first tick */
+static volatile LONG g_enemy_bindings;
+static char *(*g_enemy_behavior)(const char *, const char *);
+static void (*g_scan_entities)(void);
 static double    g_now, g_dt;
 static const sh_script_source *g_source;
 
@@ -662,7 +665,13 @@ static const unsigned k_bits[] = { SH_SCRIPT_BIND_SPAWN, SH_SCRIPT_BIND_THINK, S
 /* The kinds whose second value names what in the animation they wait for. */
 #define SHS_KEYED(kind) ((kind) == SHS_KIND_ANIM || (kind) == SHS_KIND_FRAME)
 
-static int add_bind(shs_mod *m, const char *full, unsigned bit)
+void sh_script_set_enemy_ops(char *(*behavior_of)(const char *, const char *), void (*scan)(void))
+{
+    g_enemy_behavior = behavior_of;
+    g_scan_entities = scan;
+}
+
+static int add_binding(shs_mod *m, const char *full, unsigned bit, char *behavior)
 {
     int i, ok = 1;
     AcquireSRWLockExclusive(&g_lock);
@@ -675,14 +684,24 @@ static int add_bind(shs_mod *m, const char *full, unsigned bit)
             else { m->binds = b; m->cbinds = c; }
         }
         if (ok && !(m->binds[i].name = _strdup(full))) ok = 0;
-        if (ok) { m->binds[i].kinds = 0; m->nbinds++; }
+        if (ok) {
+            m->binds[i].kinds = 0;
+            m->binds[i].behavior = behavior;
+            behavior = NULL;
+            m->nbinds++;
+        }
     }
     if (ok) m->binds[i].kinds |= bit;
     ReleaseSRWLockExclusive(&g_lock);
+    free(behavior);
     return ok;
 }
 
-/* Append the function at `fn` to the list t[key] of the table at `t`. */
+static int add_bind(shs_mod *m, const char *full, unsigned bit)
+{
+    return add_binding(m, full, bit, NULL);
+}
+
 /* Push a lower-case copy of s (ASCII letters; any length) and return it. */
 static const char *push_lower(lua_State *L, const char *s)
 {
@@ -693,6 +712,7 @@ static const char *push_lower(lua_State *L, const char *s)
     return lua_tostring(L, -1);
 }
 
+/* Append the function at `fn` to the list t[key] of the table at `t`. */
 static void list_append(lua_State *L, int t, const char *key, int fn)
 {
     if (lua_getfield(L, t, key) != LUA_TTABLE) {
@@ -708,16 +728,33 @@ static void list_append(lua_State *L, int t, const char *key, int fn)
 
 /* on.spawn / think / remove / damage / death / pain / projectile (name, fn);
  * on.animation(name, notify, fn); on.frame_event(name, command, fn). */
+static void append_handler(lua_State *L, int table, const char *key, const char *notify, int fn)
+{
+    if (notify) {
+        if (lua_getfield(L, table, key) != LUA_TTABLE) {
+            lua_pop(L, 1);
+            lua_newtable(L);
+            lua_pushvalue(L, -1);
+            lua_setfield(L, table, key);
+        }
+        list_append(L, lua_gettop(L), notify, fn);
+        lua_pop(L, 1);
+    } else list_append(L, table, key, fn);
+}
+
 static int on_entity(lua_State *L)
 {
     shs_mod *m = shs_mod_of(L);
     int kind = (int)lua_tointeger(L, lua_upvalueindex(1));
     char call[24];
     const char *full, *notify = NULL;
+    const char *alias = lua_tostring(L, lua_upvalueindex(2));
     int fn = SHS_KEYED(kind) ? 3 : 2;
     _snprintf_s(call, sizeof call, _TRUNCATE, "on.%s", k_kinds[kind]);
     call[sizeof call - 1] = 0;
     full = sh_script_check_name(L, 1, call, 0, NULL);
+    if (alias && strcmp(alias + 1, full))
+        return sh_script_refuse(L, "This enemy binding belongs to a different entityDef");
     if (kind == SHS_KIND_FRAME) {
         size_t n;
         const char *s = lua_type(L, 2) == LUA_TSTRING ? lua_tolstring(L, 2, &n) : NULL;
@@ -739,18 +776,77 @@ static int on_entity(lua_State *L)
                          lua_isnoneornil(L, fn) ? "nothing" : luaL_typename(L, fn));
     lua_getfield(L, LUA_REGISTRYINDEX, SHS_REG_HANDLERS);
     lua_getfield(L, -1, k_kinds[kind]);
-    if (SHS_KEYED(kind)) {
-        if (lua_getfield(L, -1, full) != LUA_TTABLE) {
-            lua_pop(L, 1);
-            lua_newtable(L);
-            lua_pushvalue(L, -1);
-            lua_setfield(L, -3, full);
-        }
-        list_append(L, lua_gettop(L), notify, fn);
-    } else list_append(L, lua_gettop(L), full, fn);
-    if (!add_bind(m, full, k_bits[kind])) luaL_error(L, "not enough memory");
+    append_handler(L, lua_gettop(L), full, notify, fn);
+    if (alias) append_handler(L, lua_gettop(L), alias, notify, fn);
+    if (!add_bind(m, full, k_bits[kind]) || (alias && !add_bind(m, alias, k_bits[kind])))
+        luaL_error(L, "not enough memory");
     m->handlers++;
     return 0;
+}
+
+/* Scope Enemy SDK callbacks to the declared actor and its unique behavior. Ordinary on.* handlers keep
+ * their entityDef keys. Resolve reusable bindings while the map's scripts register, before the first scan. */
+static int on_enemy(lua_State *L)
+{
+    shs_mod *m = shs_mod_of(L);
+    const char *full = sh_script_check_name(L, 1, "enemy_sdk.bind", 0, NULL);
+    const char *alias = lua_pushfstring(L, "\1%s", full);
+    char *behavior = !g_started && g_enemy_behavior ? g_enemy_behavior(m->salt, full) : NULL;
+    size_t n = strlen(m->salt);
+    int i;
+    if (!behavior || _strnicmp(behavior, "mods/", 5) || _strnicmp(behavior + 5, m->salt, n) ||
+        behavior[5 + n] != '/' || !behavior[6 + n]) {
+        free(behavior);
+        lua_getglobal(L, "on");
+        return 1;
+    }
+    if (!add_binding(m, alias, 0, behavior)) return luaL_error(L, "not enough memory");
+    lua_newtable(L);
+    for (i = 0; i < SHS_KINDS; i++) {
+        lua_pushinteger(L, i);
+        lua_pushstring(L, alias);
+        lua_pushcclosure(L, on_entity, 2);
+        lua_setfield(L, -2, k_kinds[i]);
+    }
+    return 1;
+}
+
+int sh_script_enemy_bindings_ready(void)
+{
+    return InterlockedCompareExchange(&g_enemy_bindings, 0, 0) != 0;
+}
+
+sh_script_handle sh_script_enemy_record(uint32_t spawn_id, const char *behavior, int *full)
+{
+    int i, j, owner = -1;
+    const char *alias = NULL;
+    sh_script_handle h = 0;
+    if (!behavior || _strnicmp(behavior, "mods/", 5) || !sh_script_enemy_bindings_ready()) return 0;
+    AcquireSRWLockShared(&g_lock);
+    for (i = 0; i < g_nmods; i++) {
+        shs_mod *m = g_modv[i];
+        if (!m->in_map || m->status != SH_SCRIPT_RUNNING) continue;
+        for (j = 0; j < m->nbinds; j++) {
+            const shs_bind *b = &m->binds[j];
+            if (!b->kinds || !b->behavior || _stricmp(behavior, b->behavior)) continue;
+            if (alias) goto done;
+            alias = b->name;
+            owner = m->hook;
+        }
+    }
+    if (alias) h = sh_script_handles_claim(owner, spawn_id, alias, full);
+done:
+    ReleaseSRWLockShared(&g_lock);
+    return h;
+}
+
+sh_script_handle sh_script_record_actor(void *entity, uint32_t spawn_id, const char *const *mod_chain,
+                                       int count, const char *(*behavior_of)(void *), int *full)
+{
+    if (count < 0) return 0;
+    if (count) return sh_script_hooks_record(spawn_id, mod_chain, count, full);
+    if (!entity || !behavior_of || !sh_script_enemy_bindings_ready()) return 0;
+    return sh_script_enemy_record(spawn_id, behavior_of(entity), full);
 }
 
 static int on_input(lua_State *L)
@@ -1055,6 +1151,7 @@ static int job_open(lua_State *L)
         lua_setfield(L, -2, k_kinds[i]);
     }
     lua_pushcfunction(L, on_input); lua_setfield(L, -2, "input");
+    lua_pushcfunction(L, on_enemy); lua_setfield(L, -2, "enemy");
     lua_pushcfunction(L, on_signal); lua_setfield(L, -2, "signal");
     lua_pushstring(L, "map_start"); lua_pushcclosure(L, on_map, 1); lua_setfield(L, -2, "map_start");
     lua_pushstring(L, "map_end"); lua_pushcclosure(L, on_map, 1); lua_setfield(L, -2, "map_end");
@@ -1258,7 +1355,10 @@ static void close_mod(shs_mod *m, int status)
     m->prepared = 0;
     {
         int k;
-        for (k = 0; k < m->nbinds; k++) free(m->binds[k].name);
+        for (k = 0; k < m->nbinds; k++) {
+            free(m->binds[k].name);
+            free(m->binds[k].behavior);
+        }
     }
     free(m->binds);
     m->binds = NULL;
@@ -1399,6 +1499,15 @@ static void start_all(void)
     for (i = 0; i < g_nmods && !g_end_pending; i++)
         if ((*g_modv[i]).in_map && (*g_modv[i]).prepared) open_mod(&(*g_modv[i]));
     g_started = 1;
+    if (!g_end_pending) {
+        for (i = 0; i < g_nmods; i++) {
+            shs_mod *m = g_modv[i];
+            int j;
+            for (j = 0; j < m->nbinds; j++)
+                if (m->binds[j].behavior && m->binds[j].kinds) { InterlockedExchange(&g_enemy_bindings, 1); break; }
+        }
+        if (g_scan_entities) g_scan_entities();
+    }
 }
 
 int sh_script_map_prepare(const sh_script_mod_desc *mods, int n, const sh_script_source *source,
@@ -1500,6 +1609,7 @@ int sh_script_started(void)
 static void end_all(int run_end_handlers)
 {
     int i;
+    InterlockedExchange(&g_enemy_bindings, 0);
     for (i = 0; i < g_nmods; i++) {
         shs_mod *m = &(*g_modv[i]);
         if (m->status == SH_SCRIPT_RUNNING && m->L && run_end_handlers && g_started) {

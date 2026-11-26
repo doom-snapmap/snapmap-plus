@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "soundpreview.h"
+#include "modsound.h"
 #include "snapmap_plus_iface.h"   /* sh_iface_text: the refusal handed to the window */
 #include "imgpreview.h"      /* sh_imgpreview_has -- the name gate in front of the engine's find */
 #include "engine_globals.h"
@@ -407,6 +408,7 @@ static void sp_do_session(int on)
     if (on) { g_session = 1; (void)sp_enter_mode(); return; }
     g_session = 0;
     sp_stop_emitter();
+    sh_modsound_preview(NULL);
     sp_leave_mode();
 }
 
@@ -414,6 +416,7 @@ static void sp_do_session(int on)
 static void sp_do_stop(void)
 {
     sp_stop_emitter();
+    sh_modsound_preview(NULL);
     /* Keep preview mode while the session is open; closing the session
      * restores audio.
      */
@@ -455,6 +458,7 @@ static void sp_do_play(const char *name)
     sp_stop_emitter();
 
     unsigned long long h = 0;
+    sh_modsound_preview(name);
     __try { g_preview(w, &h, name); }
     __except (EXCEPTION_EXECUTE_HANDLER) { h = 0; }
 
@@ -465,6 +469,7 @@ static void sp_do_play(const char *name)
                 name, h, h ? "" : " (engine declined)");
     backend_log(l);
     if (!h) {
+        sh_modsound_preview(NULL);
         sp_refuse(WHY_DECLINED);
         /* The engine set solo on the way in and nothing is playing, so hand the editor its audio
          * back -- unless a session is open, in which case the next click needs the mode anyway. */

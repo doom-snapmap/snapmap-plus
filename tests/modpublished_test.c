@@ -144,6 +144,7 @@ void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref)
 
 /* A local row's folder that is here but cannot be used (modserve.h): none here. */
 int sh_modserve_salt_installed(const char *salt) { (void)salt; return 0; }
+int sh_modserve_refusal_version(void) { return 0; }
 int sh_modserve_root_lacks(const char *salt, const char *name) { (void)salt; (void)name; return 0; }
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
@@ -698,12 +699,15 @@ static void unrecognized_parse_is_still_gated(void)
     CHECK(F.asks == 0 && F.fetch_calls == 1);
     CHECK(F.resumes == 1 && F.resume_hook == SH_MODPUB_BROWSER_PLAY && !strcmp(F.resume_text, PINNED_MAP));
 
-    /* Installed: it passes, unchanged. */
+    /* A legacy local row behind a foreign hook must reparse in published scope, even with a same-salt folder. */
     reset();
+    use_units();
     F.installed_a = 1;
     parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
-    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
-    CHECK(!sh_modpublished_holding() && !F.hold_ui);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick_until_idle();
+    CHECK(F.resumes == 1 && strstr(F.resume_text, "\"unavailable\":[]") && !strstr(F.resume_text, "\"local\":true"));
+
 }
 
 static void feed_play_is_gated(void)
@@ -1132,11 +1136,14 @@ static void warm_cache_joiner(void)
     /* Never seen (cached in an earlier session): read cold, so CacheReady's gate checks it. */
     CHECK(sh_modpub_decide(SH_MODPUB_CACHE_LOBBY, MANAGER, NULL, NULL, NULL, METADATA, "rev1") == 0);
     CHECK(g_cold_reads == 1 && !sh_modpublished_holding());
-    /* With no way to read it again, the pass already made (and its log line) stands. */
+    /* An unreadable cached map leaves the lobby and explains how to retry. */
     g_cold_ok = 0;
-    CHECK(sh_modpub_decide(SH_MODPUB_CACHE_LOBBY, MANAGER, NULL, NULL, NULL, METADATA, "rev1") == 1);
-    g_cold_ok = 1;
+    CHECK(sh_modpub_decide(SH_MODPUB_CACHE_LOBBY, MANAGER, NULL, NULL, NULL, METADATA, "rev1") == 0);
+    CHECK(g_leaves == 1 && !sh_modpublished_holding());
+    CHECK(!strcmp(sh_modpub_test_notice(), "This cached map could not be read to check its mods. Join the lobby again."));
     /* A browser read of the item: held, its content fetched, resumed. */
+    reset();
+    use_lobby();
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, PINNED_MAP, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     tick_until_idle();

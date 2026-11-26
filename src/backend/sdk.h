@@ -13,7 +13,11 @@
 int sh_sdk_compile(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
                    size_t why_len, char **notes, char **needs);
 
-/* The same without notes and needs: the server's filter (modserve.h sh_modserve_set_material_filter). */
+/* A pinned unit is compiled as it will be served. Author folders use the current format. */
+int sh_sdk_build_compile(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
+                         size_t why_len, char **notes, char **needs, int from_unit);
+
+/* The server's filter (modserve.h sh_modserve_set_material_filter). */
 int sh_sdk_serve_compile(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
                          size_t why_len);
 

@@ -201,7 +201,7 @@ sh_script_handle sh_script_hooks_record(uint32_t spawn_id, const char *const *na
         used += n;
         chain[used] = 0;
     }
-    h = sh_script_handles_add_named(mod, spawn_id, chain, full);
+    h = sh_script_handles_claim(mod, spawn_id, chain, full);
     free(chain);
     return h;
 }
@@ -302,6 +302,7 @@ int sh_script_hooks_reload(void)
 #include "script_api_body.h"
 #include "script_api_game.h"
 #include "../modui.h"
+#include "../modserve.h"
 
 #define LOAD_SCREEN_RUNNING_BYTE 0x4B2   /* idLoadScreen thread: 1 while it draws (load_screen_stop.c) */
 #define EDITOR_ACTIVE_BYTE       0x09    /* idSnapEditorLocal: set while editing, clear during every SnapMap Play */
@@ -517,15 +518,6 @@ static void run_tick(void)
     case SH_SCRIPT_TICK_RUN: {
         double dt;
         g_in_tick = 1;
-        if (!g_started) {
-            int walked = 0;
-            __try { walked = sh_script_hooks_walk_live(); }
-            __except (av_only(GetExceptionCode())) {
-                hooks_log("Mod scripts: a fault while reading the map's entities was contained; entities the spawn "
-                          "hook did not see are not driven by their scripts.");
-            }
-            if (walked) hooks_log("SCRIPTS: %d placed entities recorded from the live entity list", walked);
-        }
         g_started = 1;
         g_frame++;
         dt = frame_seconds();
@@ -664,18 +656,28 @@ int sh_script_hooks_walk_live(void)
         const char *names[CHAIN_MAX];
         uint32_t id;
         void *ent;
-        int n, full = 0;
+        int n, mod, full = 0;
         id = *(const uint32_t *)((const uint8_t *)gm + SH_SCRIPT_GAME_SPAWN_IDS + (size_t)num * 4);
         if (id == SH_SCRIPT_SPAWN_ID_NONE || id == SH_SCRIPT_SPAWN_ID_WORLD) continue;
-        if (sh_script_handles_find(id, NULL)) continue;
+        if (sh_script_handles_find(id, &mod) && mod >= 0) continue;
         ent = resolve_spawn_id(id);
         if (!ent) continue;
         n = sh_companions_def_chain(ent, names, CHAIN_MAX);
-        if (n <= 0) continue;
-        if (sh_script_hooks_record(id, names, n, &full)) added++;
+        if (sh_script_record_actor(ent, id, names, n, sh_script_ai_behavior, &full)) added++;
         else if (full) break;
     }
     return added;
+}
+
+static void scan_placed_entities(void)
+{
+    int walked = 0;
+    __try { walked = sh_script_hooks_walk_live(); }
+    __except (av_only(GetExceptionCode())) {
+        hooks_log("Mod scripts: a fault while reading the map's entities was contained; entities the spawn "
+                  "hook did not see are not driven by their scripts.");
+    }
+    if (walked) hooks_log("SCRIPTS: %d placed entities recorded from the live entity list", walked);
 }
 
 int sh_script_hooks_spawn_wanted(void)
@@ -685,16 +687,15 @@ int sh_script_hooks_spawn_wanted(void)
 
 void sh_script_hooks_after_spawn(void *entity, const char *const *names, int count)
 {
-    int mod, full = 0;
+    int full = 0;
     uint32_t id;
     if (!g_open || !entity) return;
-    mod = sh_script_hooks_owner_of(names, count);
-    if (mod < 0) return;
+    if (!count && !sh_script_enemy_bindings_ready()) return;
     if (is_client() == 1) return;   /* a client's entities are the server's; it runs no script */
     id = spawn_id_of(entity);
-    if (!sh_script_hooks_record(id, names, count, &full) && full && !InterlockedExchange(&g_full_logged, 1))
-        hooks_log("Mod scripts: there was not enough memory to record an entity of %s, so it is not driven by its "
-                  "scripts.", sh_script_hooks_mod_name(mod) ? sh_script_hooks_mod_name(mod) : "a mod");
+    if (!sh_script_record_actor(entity, id, names, count, sh_script_ai_behavior, &full) &&
+        full && !InterlockedExchange(&g_full_logged, 1))
+        hooks_log("Mod scripts: there was not enough memory to record a scripted entity.");
 }
 
 void sh_script_hooks_map_cancel(int during_load)
@@ -1105,6 +1106,7 @@ int sh_script_hooks_install(const sig_result *results, size_t count, const uint8
         sh_feature_off(SH_FEATURE_SCRIPT_SPAWNS, "the game's spawn function is not the expected one in this executable, "
                        "so only entities placed in the map reach scripts");
     sh_script_source_install(sh_modui_scripted_maps_allowed);
+    sh_script_set_enemy_ops(sh_modserve_enemy_behavior, scan_placed_entities);
     sh_companions_set_spawn_subscriber(sh_script_hooks_after_spawn, sh_script_hooks_spawn_wanted);
     (void)sh_load_screen_stop_add_map_end(sh_script_hooks_map_cancel);
     g_resolved = 1;

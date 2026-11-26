@@ -3,6 +3,7 @@
  * upload with progress, the pins of the resumed save, the refusals, S8, the feed post's claim and the launch step.
  */
 #include "heap_out.h"
+#include "saved_map_fixture.h"
 #include "../src/backend/modpublish.h"
 #include "../src/backend/modmanifest.h"
 #include "../src/backend/modnet.h"
@@ -364,6 +365,14 @@ int main(int argc, char **argv)
     CreateDirectoryA(cache, NULL);
     CHECK(sh_ms_set_root(store));
     CHECK(modnet_set_base_url("http://127.0.0.1:9/"));   /* nothing here reaches it: the store is the fake */
+    /* Copy to My Maps reads the same cache as the game's FSPATH_CACHE write. */
+    bind_game_paths(NULL, tmp, 0);
+    char *downloaded = sh_modpublish_cache_path("item", "rev");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\base\\doomsnapmaps\\published-maps\\item_rev_map.decl", tmp);
+    CHECK(downloaded && !strcmp(downloaded, path));
+    free(downloaded);
+    bind_game_paths("", NULL, 0);
+    CHECK(sh_modpublish_cache_path("item", "rev") == NULL);
     sh_modpublish_test_set_cache_root(cache);
     sh_modpublish_test_set_rows_for(t_rows_for);
     sh_modpin_set_folder(no_folder, NULL);
@@ -615,9 +624,7 @@ int main(int argc, char **argv)
         rows_pinned(1);
     }
 
-    /* A local row no folder here serves publishes as it is: players see stand-ins for its objects, S8 is the one
-     * notice, and nothing of it is claimed. */
-    printf("-- a mod that is not on this computer publishes with S8, its row local and nothing of it claimed\n");
+    printf("-- an unavailable mod publishes with S8, its local slot stays editable and its cloud row freezes\n");
     {
         int starts = F.starts, plans = g_fc.plans, claims = g_fc.claims, queued = g_fc.queued;
         F.toast[0] = 0;
@@ -631,15 +638,16 @@ int main(int argc, char **argv)
         {
             size_t mark = g_log_n;
             CHECK(engine_save() == 1);
-            /* a local row is no pin; the published copy's line counts the pinned rows only */
-            CHECK(strstr(g_log + mark, "the published copy carries 0 pinned row(s)") != NULL);
+            CHECK(strstr(g_log + mark, "the published copy carries 1 pinned row(s)") != NULL);
+            CHECK(strstr(g_slot, "\"local\":true") && !strstr(g_slot, "\"unavailable\""));
+            CHECK(!strstr(g_uploaded, "\"local\":true") && strstr(g_uploaded, "\"objects\":{}"));
+            CHECK(strstr(g_uploaded, "\"unavailable\":[\"mods/hellguar/entities/ai/hellguard\"]"));
         }
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc4", "rev1");
         PUMP_UNTIL(idle_all());
         CHECK(g_fc.claims == claims && g_fc.queued == queued);   /* nothing is claimed or queued */
 
-        /* a cloud save that does not read the slot. With no row pinned that is no failure: the published map is
-         * the slot's text, its rows local. */
+        /* An unchanged cloud item can skip reading the local slot. Its previous claim is retained. */
         {
             size_t mark;
             g_menu_notice[0] = 0;
@@ -650,8 +658,7 @@ int main(int argc, char **argv)
             mark = g_log_n;
             sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ccccccccccccccccccccccc4", "rev2");
             PUMP_UNTIL(idle_all());
-            CHECK(strstr(g_log + mark, "no row was pinned, so the published map is the slot's text as it is") != NULL);
-            CHECK(strstr(g_log + mark, "never reached Snapmap+") == NULL);
+            CHECK(strstr(g_log + mark, "never reached Snapmap+") != NULL);
             /* with a row pinned the save's text is new: a cloud save that never read it is the failure line */
             rows_pinned(1);
             publish(0);
@@ -983,6 +990,73 @@ int main(int argc, char **argv)
             CHECK(!strcmp(F.toast, "The map was not published: Snapmap+ cannot send its mod content with this game "
                                    "version. Use Send feedback in the Snapmap+ window."));
             g_cloud_unhooked = 0;
+        }
+        /* The same source folder supplies a real sibling. Its missing selected name is immutable across republish. */
+        {
+            sh_modmanifest_list wire = {0};
+            unsigned rejected = 0;
+            char frozen[65], old_wire[sizeof g_uploaded];
+            CHECK(sh_modmanifest_row_add_name(&g_rows.rows[0], "mods/repubm01/deleted"));
+            publish(1);
+            CHECK(engine_save() == 1 && strstr(g_slot, "\"local\":true") && !strstr(g_uploaded, "\"local\""));
+            CHECK(sh_modmanifest_read(g_uploaded, strlen(g_uploaded), &wire, &rejected) == 1 && !rejected);
+            CHECK(wire.count == 1 && wire.rows[0].pinned && wire.rows[0].unit_count == 1 &&
+                  !strcmp(wire.rows[0].units[0], now) && wire.rows[0].missing_count == 1 &&
+                  !strcmp(wire.rows[0].missing[0], "mods/repubm01/deleted"));
+            CHECK(strstr(g_menu_notice, "Deleted") && !strstr(g_menu_notice, "Tyrant from"));
+            strcpy_s(old_wire, sizeof old_wire, g_uploaded);
+            sh_modpublish_feed_post((void *)(uintptr_t)F.token, "eeeeeeeeeeeeeeeeeeeeeee1", "mixed");
+            PUMP_UNTIL(idle_all());
+            CHECK(g_fc.claim_n == 1 && !strcmp(g_fc.claim_units[0], now));
+            if (wire.count) {
+                strcpy_s(frozen, sizeof frozen, wire.rows[0].build);
+                CHECK(sh_modpin_row_differs(&wire.rows[0]) == 0);
+                mt_write(folder, "entities\\deleted.decl", V1);
+                CHECK(sh_ms_sync(NULL, NULL));
+                CHECK(sh_modserve_index_build(store) >= 1);
+                CHECK(sh_modpin_row_differs(&wire.rows[0]) == 1);
+                {
+                    sh_modserve_bundle_ref ref = {0};
+                    CHECK(!sh_modserve_row_build(&wire.rows[0], &ref)); /* foreign source alone is ineligible */
+                    sh_modserve_bundle_ref_free(&ref);
+                    const char *places[] = {"mods/repubm01/tyrant", "mods/repubm01/deleted"};
+                    sh_cache_on_load(&wire, (char *const *)places, 2);
+                    CHECK(sh_modserve_index_build(store) >= 1);
+                    CHECK(sh_modserve_row_build(&wire.rows[0], &ref) && ref.place && !strcmp(ref.place, SH_MODSERVE_CONTENT));
+                    sh_modserve_bundle_ref_free(&ref);
+                    unsigned mask = 0;
+                    CHECK(sh_cache_absent_causes(frozen, &mask) && mask == (1u << SH_CACHE_ABSENT_UNPUBLISHED));
+                }
+                sh_modmanifest_list_free(&g_rows);
+                CHECK(sh_modmanifest_list_add(&g_rows, &wire.rows[0]));
+                publish(1);
+                CHECK(engine_save() == 1 && !strcmp(old_wire, g_uploaded));
+                sh_modpublish_feed_post((void *)(uintptr_t)F.token, "eeeeeeeeeeeeeeeeeeeeeee1", "mixed2");
+                PUMP_UNTIL(idle_all());
+                CHECK(g_fc.claim_n == 1 && !strcmp(g_fc.claim_units[0], now));
+            }
+            sh_modmanifest_list_free(&wire);
+        }
+        /* A selected file disappears after the build. Even a failed whole fallback must keep the proven sibling. */
+        {
+            sh_modmanifest_row local = {0};
+            sh_modpin_row_result result = {0};
+            char live[MAX_PATH * 2], parked[MAX_PATH * 2];
+            mt_write(folder, "entities\\glitch.decl", V1);
+            CHECK(sh_ms_sync(NULL, NULL) && sh_modserve_index_build(store) >= 1);
+            snprintf(live, sizeof live, "%s\\entities\\glitch.decl", folder);
+            snprintf(parked, sizeof parked, "%s\\glitch-hold", tmp);
+            CHECK(MoveFileA(live, parked));
+            strcpy_s(local.salt, sizeof local.salt, "repubm01");
+            strcpy_s(local.build, sizeof local.build, SH_MODMANIFEST_LOCAL_BUILD);
+            CHECK(sh_modmanifest_row_add_name(&local, "mods/repubm01/tyrant"));
+            CHECK(sh_modmanifest_row_add_name(&local, "mods/repubm01/glitch"));
+            CHECK(sh_modpin_publish_row(&local, &result) == SH_MODPIN_PINNED);
+            CHECK(local.unit_count == 1 && local.missing_count == 1 && !strcmp(local.units[0], now) &&
+                  !strcmp(local.missing[0], "mods/repubm01/glitch"));
+            CHECK(MoveFileA(parked, live));
+            free(result.why);
+            sh_modmanifest_row_free(&local);
         }
         sh_modpin_set_folder(no_folder, NULL);
         sh_cache_set_mods_root(NULL);

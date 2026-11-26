@@ -8,16 +8,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 )
 
 var earlierCarrierName = regexp.MustCompile(`^smpkg\.([a-zA-Z0-9_.-]+)\.([0-9]{1,7})\.([0-9]{1,7})\.([0-9a-f]{16})$`)
-var earlierRetiredName = regexp.MustCompile(`^smp(?:bind|ref)\..+\.[a-f0-9]{16}$`)
 
 type earlierCarrier struct {
 	key, digest string
@@ -121,8 +122,14 @@ func (c *earlierCarrier) unpack(root string) error {
 	return nil
 }
 
-func earlierPlacedNames(root earlierObject, id string) []string {
-	var entities []struct{ EntityDef struct{ Inherit string } }
+func earlierPlacedNames(root earlierObject, id string, added earlierGlobalNames) []string {
+	var entities []struct {
+		Type      string `json:"~type"`
+		EntityDef struct {
+			Type    string `json:"~type"`
+			Inherit string
+		}
+	}
 	var modules []struct{ ModuleName string }
 	_ = json.Unmarshal(root["entities"], &entities)
 	_ = json.Unmarshal(root["instances"], &modules)
@@ -131,6 +138,10 @@ func earlierPlacedNames(root earlierObject, id string) []string {
 	for _, e := range entities {
 		if strings.HasPrefix(strings.ToLower(e.EntityDef.Inherit), own) {
 			seen[e.EntityDef.Inherit] = true
+		} else if e.Type == "idSnapEntity" && e.EntityDef.Type == "idDeclEntityDef" {
+			if f, _, ok := added.at(e.EntityDef.Inherit, "entitydef"); ok {
+				seen[f.reference] = true
+			}
 		}
 	}
 	for _, m := range modules {
@@ -146,27 +157,24 @@ func earlierPlacedNames(root earlierObject, id string) []string {
 	return names
 }
 
-type earlierCarriedResolver func(folder, id, display string, names []string) (earlierObject, error)
+type earlierCarriedResolver func(root earlierObject, deliveries map[string]*earlierCarrier, ids map[string]string) ([]json.RawMessage, error)
 
-func (c *earlierCarrier) pin(root earlierObject, resolve earlierCarriedResolver, ids map[string]string) (earlierObject, error) {
-	if resolve == nil {
-		return nil, fmt.Errorf("the installer must verify the mod carried by this map")
-	}
-	work, err := os.MkdirTemp("", "snapmap-plus-carried-*")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(work)
-	if err = c.unpack(work); err != nil {
-		return nil, err
+type carriedMod struct {
+	source, id, salt, display string
+	requests                  []string
+}
+
+func (c *earlierCarrier) readSource(work string) (carriedMod, error) {
+	if err := c.unpack(work); err != nil {
+		return carriedMod{}, err
 	}
 	src := filepath.Join(work, "source")
 	doc, name, err := earlierDescriptor(src)
 	if err != nil {
-		return nil, err
+		return carriedMod{}, err
 	}
 	if doc == nil {
-		return nil, fmt.Errorf("embedded package %s has no descriptor", c.key)
+		return carriedMod{}, fmt.Errorf("embedded package %s has no descriptor", c.key)
 	}
 	id, _ := doc["id"].(string)
 	if id == "" {
@@ -178,28 +186,95 @@ func (c *earlierCarrier) pin(root earlierObject, resolve earlierCarriedResolver,
 		doc["id"] = id
 		raw, err := json.Marshal(doc)
 		if err != nil {
-			return nil, err
+			return carriedMod{}, err
 		}
 		if err = writeAtomicFile(filepath.Join(src, name), raw); err != nil {
-			return nil, err
+			return carriedMod{}, err
 		}
 	}
-	dst := filepath.Join(work, "author")
-	salt, err := translateEarlierMod(src, dst)
+	_, salt, err := earlierModIdentity(doc)
 	if err != nil {
-		return nil, err
+		return carriedMod{}, err
+	}
+	files, err := earlierSourceFiles(src, name, doc, nil)
+	if err != nil {
+		return carriedMod{}, err
 	}
 	display, _ := doc["name"].(string)
 	if strings.TrimSpace(display) == "" {
 		display = id
 	}
-	names := earlierPlacedNames(root, strings.ToLower(id))
-	for i, name := range names {
-		names[i] = strings.ReplaceAll(name, "mods/"+id+"/", "mods/"+salt+"/")
+	return carriedMod{src, id, salt, display, slices.Sorted(maps.Keys(files))}, nil
+}
+
+// Earlier saves could carry several deliveries of the same mod. Build their compatible source files together.
+func (p *earlierPins) pinEarlierDeliveries(root earlierObject, deliveries map[string]*earlierCarrier, ids map[string]string, placed *earlierGlobalNames) ([]json.RawMessage, error) {
+	work, err := os.MkdirTemp("", "snapmap-plus-carried-*")
+	if err != nil {
+		return nil, err
 	}
-	row, err := resolve(dst, id, display, names)
-	if err == nil && id != salt {
-		ids[id] = salt
+	defer os.RemoveAll(work)
+	mods := map[string][]carriedMod{}
+	var order []string
+	for _, key := range slices.Sorted(maps.Keys(deliveries)) {
+		part, err := os.MkdirTemp(work, "delivery-*")
+		if err != nil {
+			return nil, err
+		}
+		m, err := deliveries[key].readSource(part)
+		if err != nil {
+			return nil, err
+		}
+		prior := mods[m.salt]
+		if len(prior) == 0 {
+			order = append(order, m.salt)
+		} else if prior[0].id != m.id {
+			return nil, fmt.Errorf("embedded packages %s and %s have the same namespace", prior[0].id, m.id)
+		}
+		mods[m.salt] = append(prior, m)
 	}
-	return row, err
+	var rows []json.RawMessage
+	for _, salt := range order {
+		parts := mods[salt]
+		m := parts[0]
+		var requests []string
+		for _, part := range parts {
+			requests = append(requests, part.requests...)
+		}
+		sort.Strings(requests)
+		added, err := p.sourceGlobalNames(m.id, work, slices.Compact(requests))
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range added.files {
+			if err := placed.add(f); err != nil {
+				return nil, err
+			}
+		}
+		joined := filepath.Join(work, salt)
+		for _, part := range parts {
+			folder := filepath.Join(filepath.Dir(part.source), "author")
+			_, err = translateEarlierFiles(part.source, folder, added, nil, nil, nil, p.doom)
+			if err != nil {
+				return nil, err
+			}
+			if err = copyEarlierPinTree(folder, joined); err != nil {
+				return nil, fmt.Errorf("embedded deliveries of %s: %w", m.id, err)
+			}
+		}
+		names := earlierPlacedNames(root, strings.ToLower(m.id), added)
+		row, err := p.pinCarried(joined, m.id, m.display, names)
+		if err != nil {
+			return nil, err
+		}
+		if m.id != salt {
+			ids[m.id] = salt
+		}
+		raw, err := json.Marshal(row)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, raw)
+	}
+	return rows, nil
 }

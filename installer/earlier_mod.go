@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -60,6 +62,14 @@ func earlierDescriptor(src string) (map[string]any, string, error) {
 		if err != nil {
 			return nil, "", err
 		}
+		if name == "package.json" && len(bytes.TrimSpace(b)) == 0 {
+			// Beta 4 used the presence of this file as the package marker.
+			for _, dir := range []string{"decls", "resources", "requirements", "images", "shaders", "strings", "hud"} {
+				if info, e := os.Lstat(filepath.Join(src, dir)); e == nil && info.IsDir() && plainPath(filepath.Join(src, dir)) {
+					return map[string]any{}, name, nil
+				}
+			}
+		}
 		var doc map[string]any
 		r := json.NewDecoder(bytes.NewReader(bytes.TrimPrefix(b, []byte{0xef, 0xbb, 0xbf})))
 		r.UseNumber()
@@ -89,6 +99,16 @@ func earlierModIdentity(doc map[string]any) (string, string, error) {
 
 func earlierStringTables(doc map[string]any, n *earlierModNames) error {
 	langs, _ := doc["strings"].(map[string]any)
+	shortName := func(key string) string {
+		return strings.TrimPrefix(strings.TrimPrefix(key, "mods/"+n.id+"/"), n.id+"_")
+	}
+	defined := map[string]bool{}
+	for _, raw := range langs {
+		table, _ := raw.(map[string]any)
+		for key := range table {
+			defined[shortName(key)] = true
+		}
+	}
 	for _, raw := range langs {
 		table, ok := raw.(map[string]any)
 		if !ok {
@@ -100,9 +120,14 @@ func earlierStringTables(doc map[string]any, n *earlierModNames) error {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			next := strings.TrimPrefix(strings.TrimPrefix(key, "mods/"+n.id+"/"), n.id+"_")
+			next := shortName(key)
 			if !earlierKey.MatchString(next) {
-				next = earlierBadKey.ReplaceAllString(strings.TrimSpace(next), "_")
+				trimmed := strings.TrimSpace(next)
+				// Keep significant padding when the unpadded key is separately defined, including in another language.
+				if trimmed == "" || !defined[trimmed] {
+					next = trimmed
+				}
+				next = earlierBadKey.ReplaceAllString(next, "_")
 			}
 			if next == "" {
 				return fmt.Errorf("empty earlier string key")
@@ -227,8 +252,56 @@ func earlierModJSONValue(v any, n earlierModNames) (any, error) {
 	return v, nil
 }
 
+func earlierSourceFiles(src, descriptor string, doc map[string]any, stock *earlierResourceRoot) (map[string]string, error) {
+	if descriptor == "package.json" {
+		files, err := earlierPackageFiles(src, doc, stock)
+		if err == nil && len(files) == 0 && doc["requirements"] == nil && doc["strings"] == nil && doc["hud"] == nil {
+			return nil, fmt.Errorf("the package contains no usable assets")
+		}
+		return files, err
+	}
+	files := map[string]string{}
+	assets := filepath.Join(src, "assets")
+	err := filepath.WalkDir(assets, func(file string, e fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !plainPath(file) {
+			return fmt.Errorf("linked mod asset %s", file)
+		}
+		if e.IsDir() {
+			return nil
+		}
+		if !e.Type().IsRegular() {
+			return fmt.Errorf("unreadable asset %s", file)
+		}
+		rel, err := filepath.Rel(assets, file)
+		if err != nil {
+			return err
+		}
+		files[filepath.ToSlash(rel)] = file
+		return nil
+	})
+	return files, err
+}
+
 // Translate a private copy of an earlier folder or the verification source for a map's pinned build.
 func translateEarlierMod(src, dst string) (string, error) {
+	return translateEarlierModWithNames(src, dst, nil)
+}
+
+func translateEarlierModWithNames(src, dst string, bundle *earlierBundle) (string, error) {
+	return translateEarlierAuthor(src, dst, bundle, nil, nil)
+}
+
+func translateEarlierAuthor(src, dst string, bundle *earlierBundle, consumed map[string]bool, recovered map[string]string) (string, error) {
+	var additions earlierGlobalNames
+	if bundle != nil {
+		additions = bundle.added
+	}
+	return translateEarlierFiles(src, dst, additions, consumed, recovered, nil, "")
+}
+func translateEarlierFiles(src, dst string, additions earlierGlobalNames, consumed map[string]bool, recovered map[string]string, discover func(string, []string) (earlierGlobalNames, error), doom string) (string, error) {
 	if !plainPath(src) || !plainPath(dst) {
 		return "", fmt.Errorf("linked mod folder")
 	}
@@ -239,6 +312,9 @@ func translateEarlierMod(src, dst string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if consumed != nil {
+		consumed[filepath.Join(src, descriptor)] = true
+	}
 	if descriptor == "package.json" && doc["id"] == nil {
 		doc["id"] = filepath.Base(src)
 	}
@@ -247,70 +323,51 @@ func translateEarlierMod(src, dst string) (string, error) {
 		return "", err
 	}
 	n := earlierModNames{id: id, salt: salt, files: map[string]string{}, sounds: map[string]string{}, keys: map[string]string{}, images: map[string]string{}}
-	var packages map[string]string
-	if descriptor == "package.json" {
-		packages, err = earlierPackageFiles(src, doc)
-		if err != nil {
-			return "", err
-		}
-		if len(packages) == 0 {
-			return "", fmt.Errorf("the package contains no usable assets")
-		}
+	stock := &earlierResourceRoot{doom: doom, work: filepath.Dir(dst)}
+	sourceFiles, err := earlierSourceFiles(src, descriptor, doc, stock)
+	if err != nil && !(descriptor != "package.json" && os.IsNotExist(err) && len(recovered) != 0 && !earlierPathExists(filepath.Join(src, "assets"))) {
+		return "", err
 	}
 	if err = earlierStringTables(doc, &n); err != nil {
 		return "", err
 	}
-	type asset struct{ src, author string }
+	type asset struct{ src, request, author, kind string }
 	var items []asset
-	assets := filepath.Join(src, "assets")
 	used := map[string]bool{}
-	addFile := func(file, rel string) error {
-		author, err := earlierAuthorPath(id, rel)
-		if err != nil {
-			return err
-		}
-		if !filepath.IsLocal(filepath.FromSlash(author)) || used[author] {
-			return fmt.Errorf("conflicting asset %s", rel)
-		}
-		used[author] = true
-		n.add(rel, author)
-		items = append(items, asset{file, author})
-		return nil
-	}
-	if descriptor == "package.json" {
-		keys := make([]string, 0, len(packages))
-		for rel := range packages {
-			keys = append(keys, rel)
-		}
-		sort.Strings(keys)
-		for _, rel := range keys {
-			if err = addFile(packages[rel], rel); err != nil {
+	for _, files := range []map[string]string{sourceFiles, recovered} {
+		for _, rel := range slices.Sorted(maps.Keys(files)) {
+			author, err := earlierAuthorPath(id, rel)
+			if err != nil {
 				return "", err
 			}
+			items = append(items, asset{src: files[rel], request: rel, author: author})
 		}
-	} else {
-		err = filepath.WalkDir(assets, func(file string, e fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if !plainPath(file) {
-				return fmt.Errorf("linked mod asset %s", file)
-			}
-			if e.IsDir() {
-				return nil
-			}
-			if !e.Type().IsRegular() {
-				return fmt.Errorf("unreadable asset %s", file)
-			}
-			rel, err := filepath.Rel(assets, file)
-			if err != nil {
-				return err
-			}
-			return addFile(file, filepath.ToSlash(rel))
-		})
 	}
-	if err != nil {
-		return "", err
+	if discover != nil {
+		var requests []string
+		for _, item := range items {
+			requests = append(requests, item.request)
+		}
+		additions, err = discover(id, requests)
+		if err != nil {
+			return "", err
+		}
+	}
+	for i := range items {
+		item := &items[i]
+		request := strings.ToLower(item.request)
+		item.kind = additions.kinds[request]
+		if add, ok := additions.files[request]; ok {
+			item.author = add.file
+		}
+		if !filepath.IsLocal(filepath.FromSlash(item.author)) || used[item.author] {
+			return "", fmt.Errorf("conflicting asset %s", item.request)
+		}
+		used[item.author] = true
+		if consumed != nil {
+			consumed[item.src] = true
+		}
+		n.add(item.request, item.author)
 	}
 	if err = os.Mkdir(dst, 0755); err != nil {
 		return "", err
@@ -320,9 +377,25 @@ func translateEarlierMod(src, dst string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		if item.kind != "" && !strings.HasSuffix(item.author, ".decl") {
+			if stock.verified[item.src] {
+				err = additions.retailOpaqueFile(b)
+			} else {
+				err = additions.opaqueFile(b)
+			}
+			if err != nil {
+				return "", fmt.Errorf("%s: %w", item.author, err)
+			}
+		}
 		switch {
 		case strings.HasSuffix(item.author, ".decl"):
 			text := n.authorText(string(b))
+			if item.kind != "" {
+				text, err = additions.decl(text, item.kind)
+				if err != nil {
+					return "", fmt.Errorf("%s: %w", item.author, err)
+				}
+			}
 			b = []byte(text)
 			if strings.HasPrefix(item.author, "materials/") {
 				b, err = upgradeEarlierMaterial(b)
@@ -331,7 +404,7 @@ func translateEarlierMod(src, dst string) (string, error) {
 				}
 			}
 		case strings.HasSuffix(item.author, ".lua"):
-			b = []byte(earlierLua(strings.ReplaceAll(string(b), "mods/"+id+"/", "mods/"+salt+"/")))
+			b = []byte(earlierLua(strings.ReplaceAll(n.stringReferences(string(b)), "mods/"+id+"/", "mods/"+salt+"/")))
 		case strings.HasSuffix(item.author, ".bnk"):
 			b, err = earlierBank(b, n)
 			if err != nil {
@@ -349,8 +422,24 @@ func translateEarlierMod(src, dst string) (string, error) {
 			return "", err
 		}
 	}
+	if descriptor == "package.json" && doc["schema"] == "snapmap-plus.override-package.v1" {
+		delete(doc, "schema")
+		if inventory, ok := doc["contents"].(map[string]any); ok {
+			for file, value := range inventory {
+				h, ok := value.(string)
+				if !ok || !pinHash(h) || !pinRelative(file) {
+					return "", fmt.Errorf("invalid earlier package inventory for %s", file)
+				}
+			}
+			delete(doc, "contents")
+		}
+		if _, ok := doc["restart_required"].(bool); ok {
+			delete(doc, "restart_required")
+		}
+	}
 	if descriptor == "bundle.json" {
-		for _, k := range []string{"files", "bundle", "build"} {
+		// The verified earlier build recorded these. Today's build derives the edited game paths from native/.
+		for _, k := range []string{"files", "bundle", "build", "shadows", "legacy"} {
 			delete(doc, k)
 		}
 	}

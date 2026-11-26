@@ -6,6 +6,8 @@
 
 /* Install the pre-build snapshot detour at its verified signature. */
 int sh_nav_play_install(void *snapbuild_fn);
+typedef const char *(*sh_play_actor_text_fn)(const char *inherit, const char *cls, const char *source, char **owned);
+int sh_nav_play_install_actor_source(const sig_result *results, size_t count, sh_play_actor_text_fn project);
 int sh_nav_play_install_instances(const sig_result *results, size_t count);
 int sh_nav_play_install_volume_contents(const sig_result *results, size_t count);
 /* Serve the bake's cut placement-grid models to the editor's surface rebuild. */

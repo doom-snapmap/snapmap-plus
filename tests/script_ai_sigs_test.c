@@ -358,6 +358,14 @@ static void check_image(const char *path)
         }
         CHECK(found == 1 && SH_AI_OFF_WEB_ANIMATOR == 0x222B8u);
     }
+    /* ExecuteChildFSM passes stateData.childFSMName to the owning manager on each supported image. */
+    {
+        const uint8_t *enter = base + (vk ? 0x5e4d90u : 0x5e4050u);
+        CHECK(!memcmp(enter + 0x0a, "\x48\x8b\x41\x30", 4));
+        CHECK(!memcmp(enter + 0x14, "\x48\x8b\x50\x58", 4));
+        CHECK(!memcmp(enter + 0x35, "\x49\x8b\x48\x30\x48\x8b\x01\xff\x50", 9));
+        CHECK(enter[0x3e] == SH_AI_FSM_FIND_CHILD_SLOT);
+    }
     if (rva[SH_AI_SIG_FSM_MOVE]) {
         /* the entrance move (script_ai_sigs.c AiFsmMove): finds the FSM by name (owner vtable +0x60), reads its states at
          * +0x38 (count +0x40), loads idTransitionCode's vtable by RTTI name, stores code 5 and moves through the FSM's

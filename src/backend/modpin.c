@@ -275,8 +275,8 @@ static void mpn_result(sh_modpin_row_result *out, const sh_modmanifest_row *row,
     out->why = why ? sh_text(why) : NULL;
 }
 
-int sh_modpin_row(sh_modmanifest_row *row, const char *map_json, size_t len, const char *content_root,
-                  sh_modpin_row_result *out)
+static int mpn_pin_row(sh_modmanifest_row *row, const char *map_json, size_t len, const char *content_root,
+                       sh_modpin_row_result *out, int publish)
 {
     sh_mb_bundle b;
     sh_unit_env env;
@@ -284,6 +284,7 @@ int sh_modpin_row(sh_modmanifest_row *row, const char *map_json, size_t len, con
     const char **roots = NULL, **hashes = NULL;
     char *folder = NULL, *why = NULL, *fail = NULL, *display = NULL;
     size_t n = 0, cap, i;
+    sh_modmanifest_row unproved = {0};
     int state = -1, whole_only = 0;
     if (!row) return -1;
     if (row->pinned || !_stricmp(row->salt, SH_MODMANIFEST_PRODUCT)) {
@@ -295,11 +296,12 @@ int sh_modpin_row(sh_modmanifest_row *row, const char *map_json, size_t len, con
     if (!folder || !sh_mb_load_folder(folder, &b) || !b.validated || _stricmp(b.id, row->salt)) {
         char *reason = sh_textf("%s is not on this computer as a built mod", sh_modmanifest_row_name(row)[0] ?
                                 sh_modmanifest_row_name(row) : row->salt);
-        mpn_logf("MODS: pin: %s; its row stays local", reason ? reason : "a mod");
+        mpn_logf("MODS: pin: %s", reason ? reason : "a mod is unavailable");
         mpn_result(out, row, SH_MODPIN_ABSENT, 0, 0, reason);
         free(reason);
         sh_mb_free(&b);
         free(folder);
+        if (publish && !sh_modmanifest_freeze_local(row)) return -1;
         return SH_MODPIN_ABSENT;
     }
     memset(&env, 0, sizeof env);
@@ -313,36 +315,48 @@ int sh_modpin_row(sh_modmanifest_row *row, const char *map_json, size_t len, con
     hashes = (const char **)calloc(cap, sizeof *hashes);
     if (!units || !roots || !hashes) goto done;
     /* Each placed object's unit; a map-level row adds the whole build. */
-    for (i = 0; i < row->name_count && !whole_only; i++) {
+    for (i = 0; i < row->name_count; i++) {
         size_t k;
         int dup = 0;
         if (!row->names[i] || !row->names[i][0]) continue;
         if (!mpn_unit_of(&b, folder, row->names[i], &env, &units[n], content_root, &why)) {
-            fail = sh_textf("%s: %s", row->names[i], why ? why : "the unit did not prove");
+            if (publish && units[n].absent_root) {
+                if (!sh_modmanifest_row_add_missing(row, row->names[i])) goto done;
+                free(why);
+                why = NULL;
+                continue;
+            }
+            if (!fail) fail = sh_textf("%s: %s", row->names[i], why ? why : "the unit did not prove");
             free(why);
             why = NULL;
             whole_only = 1;
-            break;
+            if (!publish) break;
+            if (!sh_modmanifest_row_add_name(&unproved, row->names[i])) goto done;
+            continue;
         }
         for (k = 0; k < n && !dup; k++) dup = !strcmp(units[k].hash, units[n].hash);
         if (dup) { sh_unit_free(&units[n]); memset(&units[n], 0, sizeof units[n]); continue; }
         n++;
     }
-    if (whole_only) {
-        for (i = 0; i < n; i++) sh_unit_free(&units[i]);
-        memset(units, 0, cap * sizeof *units);
-        n = 0;
-    }
-    if (whole_only || row->attached || !n) {
+    if (whole_only || row->attached || (!n && !row->unavailable)) {
         if (!mpn_unit_of(&b, folder, SH_UNIT_WHOLE, &env, &units[n], content_root, &why)) {
-            /* The whole build closes by definition: a failure here is the folder changing under the pin. */
-            mpn_logf("MODS: pin: %s could not be pinned (%s); its row stays local", b.name ? b.name : row->salt,
-                     why ? why : "?");
-            mpn_result(out, row, SH_MODPIN_ABSENT, 0, 0, why);
-            state = SH_MODPIN_ABSENT;
-            goto done;
-        }
-        n++;
+            mpn_logf("MODS: pin: %s could not be pinned as a whole (%s)", b.name ? b.name : row->salt, why ? why : "?");
+            if (!publish || !n) {
+                if (publish && !sh_modmanifest_freeze_local(row)) goto done;
+                mpn_result(out, row, SH_MODPIN_ABSENT, 0, 0, why);
+                state = SH_MODPIN_ABSENT;
+                goto done;
+            }
+            for (i = 0; i < unproved.name_count; i++)
+                if (!sh_modmanifest_row_add_missing(row, unproved.names[i])) goto done;
+            if (row->attached && !sh_modmanifest_row_add_missing(row, "*")) goto done;
+            whole_only = 0;
+        } else if (whole_only && n) {
+            for (i = 0; i < n; i++) sh_unit_free(&units[i]);
+            units[0] = units[n];
+            memset(&units[n], 0, sizeof units[n]);
+            n = 1;
+        } else n++;
     }
     for (i = 0; i < n; i++) {
         if (!mpn_store(&units[i], content_root)) goto done;
@@ -364,12 +378,30 @@ done:
     free(units);
     free((void *)roots);
     free((void *)hashes);
+    sh_modmanifest_row_free(&unproved);
     free(fail);
     free(display);
     free(folder);
     free(why);
     sh_mb_free(&b);
     return state;
+}
+
+int sh_modpin_row(sh_modmanifest_row *row, const char *map_json, size_t len, const char *content_root,
+                  sh_modpin_row_result *out)
+{
+    return mpn_pin_row(row, map_json, len, content_root, out, 0);
+}
+
+int sh_modpin_publish_row(sh_modmanifest_row *row, sh_modpin_row_result *out)
+{
+    return mpn_pin_row(row, NULL, 0, NULL, out, 1);
+}
+
+void sh_modpin_record_modules(sh_modmanifest_row *row, const char *map_json, size_t len)
+{
+    if (map_json && len && !row->modules)
+        (void)sh_cache_row_record_modules(row, map_json, len, mpn_read, NULL);
 }
 
 int sh_modpin_row_differs(const sh_modmanifest_row *row)
@@ -380,7 +412,7 @@ int sh_modpin_row_differs(const sh_modmanifest_row *row)
     char *folder;
     size_t k;
     int differs = 0;
-    if (!row || !row->pinned || !row->unit_count) return -1;
+    if (!row || !row->pinned || (!row->unit_count && !row->unavailable)) return -1;
     /* The installed version: the row as a local row of its salt resolves to the root folder. */
     memset(&local, 0, sizeof local);
     strcpy_s(local.salt, sizeof local.salt, row->salt);
@@ -398,6 +430,15 @@ int sh_modpin_row_differs(const sh_modmanifest_row *row)
     env.game_context = g_game_ctx;
     env.asked = g_asked;
     env.asked_count = g_nasked;
+    if (row->unavailable && !row->missing_count) differs = 1;
+    for (k = 0; k < row->missing_count && !differs; k++) {
+        sh_unit u = {0};
+        char *why = NULL;
+        differs = !strcmp(row->missing[k], SH_UNIT_WHOLE) ||
+                  mpn_unit_of(&b, folder, row->missing[k], &env, &u, NULL, &why);
+        sh_unit_free(&u);
+        free(why);
+    }
     for (k = 0; k < row->unit_count && !differs; k++) {
         char unit[SH_MB_HASH_HEX + 1], *root = NULL, *why = NULL;
         const char *name = row->roots && row->roots[k] ? row->roots[k] : SH_UNIT_WHOLE;

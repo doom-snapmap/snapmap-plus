@@ -68,10 +68,8 @@ int sh_carrier_object_string(const char *obj, const char *end, const char *key, 
 /* One line for the load log ("member: mods, settings, nav" or the malformed reason); empty with no member. */
 void sh_carrier_describe(const sh_carrier_view *view, char *out, size_t cap);
 
-/* Detects maps that carry Snapmap+ data in an unsupported shape: string variables in the author's table
- * (smpkg., smpbind., smpref., smpmod1., smpprod1., smp.render.v1, smp.bounds.v1, smnav1. names), or member rows
- * naming a mod by "id"/"bundle" or (format 1) "<salt>@<build>". The format-1 member itself also identifies an earlier map;
- * such a map is refused with SH_MAP_OLD_REFUSAL and its text is not changed. */
+/* Tests typed string-variable entries and earlier map members for recognized mod data.
+ * A producer version, an empty member or an author's similarly named variable is insufficient. */
 enum { SH_MAP_OLD_NONE = 0, SH_MAP_OLD_VARIABLES = 1, SH_MAP_OLD_ROWS = 2, SH_MAP_OLD_FORMAT = 3 };
 int sh_map_old_shape(const char *json, size_t len);
 int sh_map_old_shape_view(const char *json, size_t len, const sh_carrier_view *view);

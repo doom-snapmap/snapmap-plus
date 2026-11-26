@@ -24,6 +24,7 @@
 #include "modauthor.h"
 #include "modprog.h"
 #include "modstock.h"
+#include "modunit.h"
 #include "mod_test_util.h"
 #include "store_lock.h"
 #include "modstore.h"
@@ -697,22 +698,81 @@ static int count_closure(const sh_mb_bundle *b, const char *prefix)
     return n;
 }
 
+static char *pinned_source(void *path, const char *name)
+{
+    return !strcmp(name, "materials/fire.decl") ? _strdup((const char *)path) : NULL;
+}
+
+/* Compose the original blob through the same SDK installed at startup, then open the engine-facing text. */
+static void check_pinned_composition(const char *tmp, const char *folder, const char *req,
+                                     const char *original, const char *rendered, size_t rendered_len)
+{
+    char root[MAX_PATH], dest[MAX_PATH], source[MAX_PATH], raw_path[MAX_PATH];
+    char sha[65], stored[65], pin[65], manifest[512], *why = NULL;
+    const char *unit = manifest;
+    unsigned long long size = 0;
+    unsigned char *served = NULL;
+    size_t len = 0;
+    sh_mb_bundle build;
+    snprintf(root, sizeof root, "%s\\pinned", tmp);
+    snprintf(dest, sizeof dest, "%s\\mod", root);
+    snprintf(source, sizeof source, "%s\\materials\\fire.decl", folder);
+    snprintf(raw_path, sizeof raw_path, "%s\\materials\\fire.decl", dest);
+    sh_mb_sha256_hex(original, strlen(original), sha);
+    snprintf(manifest, sizeof manifest, "{\"files\":[{\"path\":\"materials/fire.decl\",\"sha256\":\"%s\",\"size\":%zu}],"
+             "\"format\":1,\"game\":[],\"mod\":{},\"root\":{\"kind\":\"mod\",\"name\":\"*\"}}", sha, strlen(original));
+    size_t unit_len = strlen(manifest);
+    sh_mb_sha256_hex(manifest, unit_len, pin);
+    int ok = sh_unit_compose(&unit, &unit_len, 1, pinned_source, source, "abcdefgh", "Pinned", &g_resolver, dest, &build, &why);
+    CHECK(ok);
+    if (!ok) {
+        fprintf(stderr, "pinned composition failed%s%s\n", why ? ": " : "", why ? why : "");
+        free(why);
+        return;
+    }
+    CHECK(build.units_of_count == 1 && !strcmp(build.units_of[0], pin));
+    sh_mb_free(&build);
+    CHECK(sh_mb_sha256_file(raw_path, &size, stored) && size == strlen(original) && !strcmp(stored, sha));
+    sh_modserve_set_material_filter(sh_sdk_serve_compile);
+    CHECK(sh_modserve_index_build(root) == 1);
+    CHECK(sh_modserve_open(req, &served, &len) && served && len == rendered_len && !memcmp(rendered, served, len));
+    if (served) HeapFree(GetProcessHeap(), 0, served);
+    sh_modserve_index_retire();
+    mt_remove_tree(root);
+}
+
 /* Historical units keep their original material text. */
-static void test_pinned_particle(void)
+static void test_pinned_particle(const char *tmp)
 {
     const char *req = "generated/decls/material/mods/abcdefgh/fire.decl";
     const char native[] = "{\n\tstageprogram \"snapmapplus/eternal/uberparticles\"\n\teternalparticle {1,2,3,4}\n}\n";
     const char authored[] = "{\n\tlook particle\n\tlighting lit\n\tnearfade {16, 8}\n}\n";
-    const char *samples[] = { native, authored };
-    for (size_t i = 0; i < 2; i++) {
+    const char parms[] = "{\n\teternalparticlefade {1,2,3,4}\n}\n";
+    const char *samples[] = { native, authored, parms };
+    const char *reason = "fire.decl uses an earlier material format. Run the Snapmap+ installer to update it.";
+    char folder[MAX_PATH];
+    sh_mb_bundle bundle;
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\earlier-material", tmp);
+    mt_write(folder, "mod.json", "{\"name\":\"Particles\",\"snapmap-plus\":{\"format\":2,\"salt\":\"abcdefgh\"}}");
+    sh_mb_set_sdk_compiler(sh_sdk_build_compile);
+    for (size_t i = 0; i < sizeof samples / sizeof samples[0]; i++) {
         char *out = NULL, why[256];
         size_t n = 0;
-        CHECK(sh_sdk_compile(req, samples[i], strlen(samples[i]), &out, &n, why, sizeof why, NULL, NULL) == SH_LOOK_SAME);
+        mt_write(folder, "materials\\fire.decl", samples[i]);
+        CHECK(!sh_mb_build(folder, NULL, &g_resolver, &bundle));
+        CHECK(bundle.errors == 1 && !strcmp(sh_mb_first_cause(&bundle), reason));
+        sh_mb_free(&bundle);
         CHECK(sh_sdk_serve_compile(req, samples[i], strlen(samples[i]), &out, &n, why, sizeof why) == SH_LOOK_CHANGED);
-        CHECK(out && n && strstr(out, "snapmapplus/particles/uberparticles") && !strstr(out, "eternal"));
+        CHECK(out && n && !strstr(out, "eternal"));
+        if (samples[i] != parms) CHECK(out && strstr(out, "snapmapplus/particles/uberparticles"));
         CHECK(out && strstr(out, "particleuberparms1"));
+        if (out && (g_doom_registered || samples[i] == parms))
+            check_pinned_composition(tmp, folder, req, samples[i], out, n);
         free(out);
     }
+    mt_write(folder, "materials\\fire.decl", "{\n\tsort particle\n\t// eternalparticle is part of this comment\n}\n");
+    CHECK(sh_mb_build(folder, NULL, &g_resolver, &bundle));
+    sh_mb_free(&bundle);
 }
 
 static void test_sdk(const char *tmp)
@@ -727,7 +787,7 @@ static void test_sdk(const char *tmp)
     CHECK(CreateDirectoryA(root, NULL));
     CHECK(mt_copy_tree(fixture_path("sdk-good", src, sizeof src), folder));
     sh_modprog_reset();
-    sh_mb_set_sdk_compiler(sh_sdk_compile);
+    sh_mb_set_sdk_compiler(sh_sdk_build_compile);
     CHECK(sh_mb_build(folder, NULL, &g_resolver, &b));
     if (b.errors) fprintf(stderr, "sdk folder refused: %s\n", sh_mb_first_cause(&b));
     CHECK(b.errors == 0);
@@ -851,7 +911,7 @@ int main(int argc, char **argv)
             g_doom_registered = 1;
         }
         sh_mb_set_script_check(sh_script_compile_check);
-        sh_mb_set_sdk_compiler(sh_sdk_compile);
+        sh_mb_set_sdk_compiler(sh_sdk_build_compile);
         sh_mb_set_look_compiler(sh_look_compile_notes);
         sh_mb_resolver r = { NULL, NULL, example_stock, NULL };
         int ok = sh_mb_build(argv[2], "spark123", &r, &b);
@@ -870,7 +930,7 @@ int main(int argc, char **argv)
         sh_modstock_register();
         g_doom_registered = 1;
     }
-    test_pinned_particle();
+    test_pinned_particle(tmp);
     test_sdk(tmp);
     test_tyrant(tmp);
     sh_modserve_set_material_filter(NULL);

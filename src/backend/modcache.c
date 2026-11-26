@@ -651,6 +651,9 @@ typedef struct mc_row {
     char *modules;                     /* the row's module records, JSON, or NULL */
     char *labels;                      /* the row's labels: each placed object's name as the author sees it, or NULL */
     mc_absent *absent; size_t nabsent; /* what its last composition stood in for */
+    int unavailable;
+    char **missing;
+    size_t missing_count;
     int broken;                        /* a row of no units: the local folder is here and cannot be used */
     int notice;                        /* the absent objects wait for the notice */
 } mc_row;
@@ -671,6 +674,7 @@ static void mc_row_clear(mc_row *r)
     }
     free(r->placed);
     free(r->pinfo);
+    sh_modmanifest_names_free(r->missing, r->missing_count);
     free(r->modules);
     free(r->labels);
     for (i = 0; i < r->nabsent; i++) { free(r->absent[i].object); free(r->absent[i].mod); }
@@ -773,6 +777,12 @@ void sh_cache_note_rows(const sh_modmanifest_list *rows, char *const *placed, si
         r->modules = row->modules ? sh_text(row->modules) : NULL;
         r->labels = row->labels ? sh_text(row->labels) : NULL;
         r->broken = row->local_broken;
+        r->unavailable = row->unavailable;
+        if (row->missing_count) r->missing = calloc(row->missing_count, sizeof *r->missing);
+        for (k = 0; r->missing && k < row->missing_count; k++) {
+            if (!(r->missing[k] = sh_text(row->missing[k]))) break;
+            r->missing_count++;
+        }
         r->n = row->unit_count;
         r->units = row->unit_count ? calloc(row->unit_count, sizeof *r->units) : NULL;
         r->roots = row->unit_count ? (char **)calloc(row->unit_count, sizeof *r->roots) : NULL;
@@ -845,6 +855,7 @@ int sh_cache_absent_causes(const char *chash, unsigned *mask)
                 long long cause = why && mpj_is_num(why) ? mpj_int(why) : 0;
                 *mask |= 1u << (cause > 0 && cause < 32 ? (unsigned)cause : 0u);
             }
+            if (mpj_get(j, "unavailable") && mpj_get(j, "unavailable")->b) *mask |= 1u << SH_CACHE_ABSENT_UNPUBLISHED;
             if (!*mask) *mask = 1u;   /* stood in, no cause recorded */
         }
     }
@@ -916,6 +927,7 @@ static int mc_cause_rank(int cause)
     case SH_CACHE_ABSENT_LOCAL: return 8;
     case SH_CACHE_ABSENT_LACKED: return 9;
     case SH_CACHE_ABSENT_REFUSED: return 10;
+    case SH_CACHE_ABSENT_UNPUBLISHED: return 11;
     default: return 10;
     }
 }
@@ -984,6 +996,9 @@ static char *mc_notice_sentence(const char *subject, int cause, int plural)
         break;
     case SH_CACHE_ABSENT_GAME:
         out = sh_textf("This map is playing without %s, which need%s a different version of DOOM's own files.", subject, plural ? "" : "s");
+        break;
+    case SH_CACHE_ABSENT_UNPUBLISHED:
+        out = sh_textf("This map is playing without %s because the author published the map without that content.", subject);
         break;
     case SH_CACHE_ABSENT_NOT_IN_STORE:
         out = sh_textf("This map is playing without %s, which %s not in the mod store yet.", subject, plural ? "are" : "is");
@@ -1526,7 +1541,8 @@ static void mc_module_marks(const mc_unit *units, size_t nunits, const char *sal
 }
 
 /* The sidecar beside a composition: what it holds. */
-static int mc_sidecar(const char *path, const mc_row *r, const mc_unit *units, int complete, const char *generation)
+static int mc_sidecar(const char *path, const mc_row *r, const mc_unit *units, int complete,
+                      const char *generation, const mpj *prior_shapes)
 {
     sh_text_buf t = {0};
     char field[200];
@@ -1554,14 +1570,36 @@ static int mc_sidecar(const char *path, const mc_row *r, const mc_unit *units, i
         first = 0;
     }
     sh_text_append_str(&t, "]");
-    if (!r->n) {
-        sh_text_append_str(&t, ",\"placed\":[");
-        for (i = 0; i < r->nplaced; i++) {
-            sh_text_append_str(&t, i ? ",\"" : "\"");
-            sh_text_append_str(&t, r->placed[i]);
-            sh_text_append_str(&t, "\"");
+    if (!complete) {
+        if (r->unavailable) {
+            sh_text_append_str(&t, ",\"unavailable\":true");
+            if (r->modules) {
+                char hash[SH_CACHE_HASH_HEX + 1];
+                sh_mb_sha256_hex(r->modules, strlen(r->modules), hash);
+                snprintf(field, sizeof field, ",\"moduleLayout\":\"%s\"", hash);
+                sh_text_append_str(&t, field);
+            }
         }
-        sh_text_append_str(&t, "]");
+        sh_text_append_str(&t, ",\"placements\":");
+        if (prior_shapes) {
+            char *shapes = mpj_dump(prior_shapes, NULL);
+            if (!shapes) { free(t.p); return 0; }
+            sh_text_append_str(&t, shapes);
+            free(shapes);
+        } else {
+            sh_text_append_str(&t, "{");
+            for (i = 0; i < r->nplaced; i++) {
+                const mc_placed_info *p = r->pinfo ? &r->pinfo[i] : NULL;
+                sh_text_append_str(&t, i ? ",\"" : "\"");
+                sh_text_append_str(&t, r->placed[i]);
+                if (!p || !p->known) { sh_text_append_str(&t, "\":null"); continue; }
+                sh_text_append_str(&t, "\":[\"");
+                sh_text_append_str(&t, p->cls ? p->cls : "");
+                snprintf(field, sizeof field, "\",%d,%d]", p->entrefs, p->varrefs);
+                sh_text_append_str(&t, field);
+            }
+            sh_text_append_str(&t, "}");
+        }
     }
     sh_text_append_str(&t, "}");
     ok = !t.oom && mc_write(path, t.p, t.n);
@@ -1569,48 +1607,46 @@ static int mc_sidecar(const char *path, const mc_row *r, const mc_unit *units, i
     return ok;
 }
 
-/* 1 when the composition's sidecar names exactly the units that are present now (nothing to compose again). */
-static int mc_side_same(const char *chash, const mc_unit *units, size_t n)
+/* Incomplete compositions can be reused when their available units and requested stand-in shapes still match. */
+static int mc_side_shapes_same(const mpj *j, const mc_row *r)
 {
-    char *side = mc_path("served\\%s.json", chash);
-    size_t len = 0, i, present = 0;
-    unsigned char *t = side ? sh_mb_read_file(side, 1u << 24, &len) : NULL;
-    mpj *j = t ? mpj_parse((const char *)t, len) : NULL;
-    const mpj *u = j ? mpj_get(j, "units") : NULL;
-    int same = u && u->type == MPJ_ARR;
-    for (i = 0; same && i < n; i++) {
+    const mpj *placements = mpj_get(j, "placements");
+    size_t i;
+    if (!placements || placements->type != MPJ_OBJ || (size_t)placements->n != r->nplaced) return 0;
+    if (r->unavailable) {
+        const mpj *layout = mpj_get(j, "moduleLayout");
+        if (r->modules) {
+            char hash[SH_CACHE_HASH_HEX + 1];
+            sh_mb_sha256_hex(r->modules, strlen(r->modules), hash);
+            if (!mpj_str_is(layout, hash)) return 0;
+        } else if (layout) return 0;
+    }
+    for (i = 0; i < r->nplaced; ++i) {
+        const mc_placed_info *p = r->pinfo ? &r->pinfo[i] : NULL;
+        const mpj *old = mpj_get(placements, r->placed[i]);
+        if (!old) return 0;
+        if (!p || !p->known) continue;
+        if (old->type != MPJ_ARR || old->n != 3 || !mpj_str_is(old->items[0], p->cls ? p->cls : "") ||
+            !mpj_is_num(old->items[1]) || mpj_int(old->items[1]) != p->entrefs ||
+            !mpj_is_num(old->items[2]) || mpj_int(old->items[2]) != p->varrefs) return 0;
+    }
+    return 1;
+}
+
+static int mc_side_same(const mpj *j, const mc_unit *units, const mc_row *r)
+{
+    const mpj *u = mpj_get(j, "units");
+    size_t i, present = 0;
+    if (!u || u->type != MPJ_ARR || !mc_side_shapes_same(j, r)) return 0;
+    for (i = 0; i < r->n; i++) {
         int k, found = 0;
         if (units[i].state != 1) continue;
         present++;
         for (k = 0; k < u->n && !found; k++) found = mpj_str_is(u->items[k], units[i].hash);
-        same = found;
+        if (!found) return 0;
     }
-    if (same && (size_t)u->n != present) same = 0;
-    mpj_free(j);
-    free(t);
-    free(side);
-    return same;
-}
-
-/* 1 when a row of no units' composition was made for exactly the names the map places now. */
-static int mc_side_same_placed(const char *chash, const mc_row *r)
-{
-    char *side = mc_path("served\\%s.json", chash);
-    size_t len = 0, i;
-    unsigned char *t = side ? sh_mb_read_file(side, 1u << 24, &len) : NULL;
-    mpj *j = t ? mpj_parse((const char *)t, len) : NULL;
-    const mpj *p = j ? mpj_get(j, "placed") : NULL;
-    int same = p && p->type == MPJ_ARR && (size_t)p->n == r->nplaced;
-    for (i = 0; same && i < r->nplaced; i++) {
-        int k, found = 0;
-        for (k = 0; k < p->n && !found; k++)
-            found = p->items[k]->type == MPJ_STR && p->items[k]->text && !_stricmp(p->items[k]->text, r->placed[i]);
-        same = found;
-    }
-    mpj_free(j);
-    free(t);
-    free(side);
-    return same;
+    if ((size_t)u->n != present) return 0;
+    return 1;
 }
 
 /* The absence causes the composition's sidecar recorded, for the absent units whose cause is still 0: what the last
@@ -1670,6 +1706,12 @@ static int mc_compose_once(const char *chash, const int *causes, int cause, char
             snapshot.modules = r->modules ? sh_text(r->modules) : NULL;
             snapshot.labels = r->labels ? sh_text(r->labels) : NULL;
             snapshot.broken = r->broken;
+            snapshot.unavailable = r->unavailable;
+            if (r->missing_count) snapshot.missing = calloc(r->missing_count, sizeof *snapshot.missing);
+            for (i = 0; snapshot.missing && i < r->missing_count; i++) {
+                if (!(snapshot.missing[i] = sh_text(r->missing[i]))) break;
+                snapshot.missing_count++;
+            }
             snapshot.n = r->n;
             snapshot.units = r->n ? calloc(r->n, sizeof *snapshot.units) : NULL;
             snapshot.roots = r->n ? (char **)calloc(r->n, sizeof *snapshot.roots) : NULL;
@@ -1698,7 +1740,10 @@ static int mc_compose_once(const char *chash, const int *causes, int cause, char
     had_complete = here && mpj_get(initial, "complete")->b;
     int check_modules = snapshot.modules && strcmp(snapshot.modules, "[]");
     if (here && had_complete && !check_modules) { ok = 1; goto record; }
-    if (here && !had_complete && mode == MC_PUBLISHED_PROBE) { ok = 1; goto done; }
+    if (here && !had_complete && mode == MC_PUBLISHED_PROBE) {
+        if (!snapshot.unavailable || mc_side_shapes_same(initial, &snapshot)) { ok = 1; goto done; }
+        mode = MC_LOAD;
+    }
 
     units = snapshot.n ? (mc_unit *)calloc(snapshot.n, sizeof *units) : NULL;
     manifests = snapshot.n ? (const char **)calloc(snapshot.n, sizeof *manifests) : NULL;
@@ -1719,7 +1764,7 @@ static int mc_compose_once(const char *chash, const int *causes, int cause, char
     }
     /* A row of no units (a local row whose folder is not here): every object the map places under its namespace
      * stands in. */
-    if (!snapshot.n) complete = 0;
+    if (!snapshot.n || snapshot.unavailable) complete = 0;
     if (mode != MC_PREFAB) mc_module_marks(units, snapshot.n, snapshot.salt, snapshot.modules);
     if (here && had_complete) { complete = ok = 1; goto record; }
     if (mode == MC_PREFAB && !complete) {
@@ -1735,22 +1780,22 @@ static int mc_compose_once(const char *chash, const int *causes, int cause, char
         if (here) mc_side_causes(chash, units, snapshot.n);
         for (i = 0; i < snapshot.n; i++) if (units[i].state != 1 && !units[i].cause) units[i].cause = cause;
     }
-    if (here && !complete &&
-        (snapshot.n ? mc_side_same(chash, units, snapshot.n) : mc_side_same_placed(chash, &snapshot))) {   /* nothing new */
-        if (causes) {
-            char *base = mc_path("served\\%s", chash), *sp = base ? sh_textf("%s.json", base) : NULL;
-            AcquireSRWLockExclusive(&g_disk);
-            current = base ? sh_composition_side(base) : NULL;
-            const mpj *gen = current ? mpj_get(current, "generation") : NULL;
-            const mpj *whole = current ? mpj_get(current, "complete") : NULL;
-            if (whole && whole->type == MPJ_BOOL && !whole->b && sp &&
-                (snapshot.n ? mc_side_same(chash, units, snapshot.n) : mc_side_same_placed(chash, &snapshot)))
-                (void)mc_sidecar(sp, &snapshot, units, 0, gen && gen->type == MPJ_STR ? gen->text : NULL);
-            ReleaseSRWLockExclusive(&g_disk);
+    if (here && !complete && mc_side_same(initial, units, &snapshot)) {
+        AcquireSRWLockExclusive(&g_disk);
+        current = mc_composition_info(chash);
+        const mpj *whole = mpj_get(current, "complete");
+        complete = whole && whole->type == MPJ_BOOL && whole->b;
+        ok = complete || mc_side_same(current, units, &snapshot);
+        if (ok && !complete && causes) {
+            char *sp = mc_path("served\\%s.json", chash);
+            const mpj *gen = mpj_get(current, "generation");
+            if (sp)
+                (void)mc_sidecar(sp, &snapshot, units, 0, gen && gen->type == MPJ_STR ? gen->text : NULL,
+                                 mpj_get(current, "placements"));
             free(sp);
-            free(base);
         }
-        ok = 1;
+        ReleaseSRWLockExclusive(&g_disk);
+        if (!ok) { *changed = 1; goto done; }
         goto record;
     }
 
@@ -1847,7 +1892,7 @@ publish:
             goto done;
         }
     }
-    ok = mc_mkdirs(dest) && mc_sidecar(side, &snapshot, units, complete, generation);
+    ok = mc_mkdirs(dest) && mc_sidecar(side, &snapshot, units, complete, generation, NULL);
     ReleaseSRWLockExclusive(&g_disk);
     if (!ok) { reason = sh_text("the composition's sidecar could not be put in place"); goto done; }
     mc_logf("MODS: content: %s composed from %zu unit(s)%s%s", snapshot.name, nm, complete ? "" : ", with stand-ins for ",
@@ -1866,13 +1911,20 @@ record:
             r->absent = NULL;
             r->nabsent = 0;
             r->notice = 0;
-            if (!complete && snapshot.n) {
-                r->absent = (mc_absent *)calloc(snapshot.n, sizeof *r->absent);
+            if (!complete && (snapshot.n || snapshot.unavailable)) {
+                r->absent = (mc_absent *)calloc(snapshot.n + snapshot.missing_count + 1, sizeof *r->absent);
                 for (i = 0; r->absent && i < snapshot.n; i++) {
                     if (units[i].state == 1) continue;
                     r->absent[r->nabsent].object = mc_object_label(&snapshot, snapshot.roots[i], 1);
                     r->absent[r->nabsent].mod = sh_text(mc_mod_label(snapshot.name, snapshot.salt));
                     r->absent[r->nabsent].cause = units[i].cause;
+                    r->nabsent++;
+                }
+                for (i = 0; r->absent && snapshot.unavailable && i < (snapshot.missing_count ? snapshot.missing_count : 1); i++) {
+                    const char *name = snapshot.missing_count ? snapshot.missing[i] : "*";
+                    r->absent[r->nabsent].object = mc_object_label(&snapshot, name, 0);
+                    r->absent[r->nabsent].mod = sh_text(mc_mod_label(snapshot.name, snapshot.salt));
+                    r->absent[r->nabsent].cause = SH_CACHE_ABSENT_UNPUBLISHED;
                     r->nabsent++;
                 }
                 r->notice = r->nabsent > 0;
@@ -2395,14 +2447,6 @@ void sh_cache_set_map_folders(const char *saved, const char *published)
     ReleaseSRWLockExclusive(&g_lock);
 }
 
-static char *mc_game_maps(const char *which)
-{
-    char local[MAX_PATH * 2];
-    DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", local, (DWORD)sizeof local);
-    if (!n || n >= sizeof local) return NULL;
-    return sh_textf("%s\\id Software\\DOOM\\base\\doomsnapmaps\\%s", local, which);
-}
-
 /* A growing list of hashes. */
 typedef struct mc_set { char (*v)[SH_CACHE_HASH_HEX + 1]; size_t n, cap; } mc_set;
 static int mc_set_has(const mc_set *s, const char *h)
@@ -2497,7 +2541,7 @@ static void mc_kept_dir(mc_kept *k, const char *dir)
     char **names;
     size_t n, i;
     int failed = 0;
-    if (!dir) return;
+    if (!dir) { k->unreadable++; return; }
     names = mc_list_ex(dir, "*.decl", 0, &n, &failed);
     if (failed) k->unreadable++;
     for (i = 0; names && i < n; i++) {
@@ -2528,8 +2572,8 @@ static void mc_kept_read(mc_kept *k, int drop_played)
     char *saved, *published;
     size_t bad = 0;
     AcquireSRWLockShared(&g_lock);
-    saved = g_saved_dir ? sh_text(g_saved_dir) : mc_game_maps("saved-maps");
-    published = g_published_dir ? sh_text(g_published_dir) : mc_game_maps("published-maps");
+    saved = g_saved_dir ? sh_text(g_saved_dir) : sh_saved_maps_cloud_dir(0);
+    published = g_published_dir ? sh_text(g_published_dir) : sh_saved_maps_cloud_dir(1);
     ReleaseSRWLockShared(&g_lock);
     if (sh_saved_maps_each(mc_kept_slot, k, &bad) < 0) k->unreadable++;
     k->unreadable += bad;
@@ -2800,7 +2844,7 @@ static void mc_report_add(mc_report *rep, const sh_modmanifest_row *row, const c
     r.map = sh_text(map);
     r.name = sh_text(sh_modmanifest_row_name(row)[0] ? row->name : "a mod");
     r.kind = kind;
-    r.complete = present == row->unit_count;
+    r.complete = !row->unavailable && present == row->unit_count;
     strcpy_s(r.hash, sizeof r.hash, row->build);
     if (!r.map || !r.name) rep->failed = 1;
     rep->rows[rep->nrows++] = r;
@@ -2880,8 +2924,8 @@ static void mc_report_run(mc_report *rep)
     free(root);
     free(links);
     AcquireSRWLockShared(&g_lock);
-    saved = g_saved_dir ? sh_text(g_saved_dir) : mc_game_maps("saved-maps");
-    published = g_published_dir ? sh_text(g_published_dir) : mc_game_maps("published-maps");
+    saved = g_saved_dir ? sh_text(g_saved_dir) : sh_saved_maps_cloud_dir(0);
+    published = g_published_dir ? sh_text(g_published_dir) : sh_saved_maps_cloud_dir(1);
     ReleaseSRWLockShared(&g_lock);
     (void)sh_saved_maps_each(mc_report_slot, rep, NULL);
     mc_report_dir(rep, saved, 0);
@@ -3010,6 +3054,10 @@ int sh_cache_stage_copy(const char *chash, sh_cache_copy *out, char **why)
     row = &rep.found.rows[0];
     title = sh_modmanifest_row_name(row)[0] ? row->name : "This mod";
     n = row->unit_count;
+    if (row->unavailable) {
+        reason = sh_textf("%s could not be copied because the published map is missing some of its mod content.", title);
+        goto done;
+    }
     units = n ? (mc_unit *)calloc(n, sizeof *units) : NULL;
     manifests = n ? (const char **)calloc(n, sizeof *manifests) : NULL;
     lens = n ? (size_t *)calloc(n, sizeof *lens) : NULL;

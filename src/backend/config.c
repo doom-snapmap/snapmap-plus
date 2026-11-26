@@ -11,6 +11,7 @@
 #include <wchar.h>
 
 #include "backend_log.h"
+#include "../common/profile_dir.h"
 #include "config.h"
 #include "config_json.h"
 #include "../common/wide_path.h"
@@ -481,14 +482,12 @@ static int resolve_paths_locked(void)
 #ifdef SH_CONFIG_TESTING
     if (g_test_local_appdata && wcslen(g_test_local_appdata) < SH_WPATH_MAX) {
         wcscpy_s(base, SH_WPATH_MAX, g_test_local_appdata);
-        length = sh_wpath_long(base, SH_WPATH_MAX);
+        length = sh_wpath_long(base, SH_WPATH_MAX) && sh_wpath_append(base, SH_WPATH_MAX, L"snapmap-plus");
     }
 #endif
-    if (!length) length = sh_wpath_local_appdata(base, SH_WPATH_MAX);
+    if (!length) length = sh_profile_long(base, SH_WPATH_MAX);
     if (!length) { free(base); return 0; }
-    g_config_dir = join_path(base, L"snapmap-plus");
-    free(base);
-    if (!g_config_dir) return 0;
+    g_config_dir = base;
     g_config_path = join_path(g_config_dir, L"config.json");
     return g_config_path != NULL;
 }

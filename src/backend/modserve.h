@@ -40,6 +40,29 @@ int sh_modserve_served_prune(void);
 
 /* Nonzero when the published table serves at least one path. */
 int sh_modserve_active(void);
+int sh_modserve_has_actor_rows(void);
+void sh_modserve_set_actor_derives(int (*derives)(const char *cls, const char *base));
+int sh_modserve_iterator_uses(const char *actor);
+int sh_modserve_actor_enabled(const char *row);
+/* Source for a Play map entity. Returns source unchanged for a healthy placement, or inert text; free *owned. */
+const char *sh_modserve_actor_play_text(const char *inherit, const char *cls, const char *source, char **owned);
+struct sh_modmanifest_list;
+int sh_modserve_actor_prefab_pending(void);
+int sh_modserve_prefab_has_direct_actors(const char *json, size_t len);
+int sh_modserve_prefab_actor_rows(const char *json, size_t len, const struct sh_modmanifest_list *rows,
+                                  int (*covered)(const char *), int (*admit)(const char *, const char *));
+int sh_modserve_finish_actor_rows(const char *json, size_t len,
+                                  int (*covered)(const char *), int (*admit)(const char *, const char *));
+void sh_modserve_prepare_prefab_actors(const char *json, size_t len, const struct sh_modmanifest_list *rows);
+void sh_modserve_finish_prefab_actors(const char *json, size_t len);
+int sh_modserve_refresh_actor_rows(int (*covered)(const char *), int (*admit)(const char *, const char *));
+int sh_modserve_restore_actor_rows(int (*covered)(const char *), int (*admit)(const char *, const char *));
+int sh_modserve_uses_stock_actor(const char *json, size_t len, int (*covered)(const char *));
+int sh_modserve_direct_actor_map_uses(const char *json, size_t len);
+int sh_modserve_direct_actor_rows(const char *json, size_t len, int (*exists)(const char *),
+                                  int (*admit)(const char *, const char *));
+void sh_modserve_prepare_direct_actors(const char *json, size_t len);
+void sh_modserve_restore_direct_actors(void);
 
 /* Where the backend learns what a map lists (the map scope's hook and
  * source, modmanifest.h and modui.c): a load, a save, the Play entry. */
@@ -59,6 +82,7 @@ typedef struct sh_modserve_hit {
     int         is_shadow;   /* request is a stock path the bundle replaces */
     int         is_stock;    /* a stock pointer, served from the installed game (size 0) */
     const char *stock_source;/* its installed source, or NULL */
+    const char *author_path; /* the source file's path within its mod */
 } sh_modserve_hit;
 
 /* Bank stems of their own : every
@@ -104,6 +128,9 @@ int sh_modserve_module_served(const char *module_name);
  * engine). A stock pointer's bytes come from the installed game through the stock reader (modstock.c). */
 int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length);
 
+/* The bound entityDef's own admitted AI behavior, including same-mod inherits. Caller frees. */
+char *sh_modserve_enemy_behavior(const char *salt, const char *entitydef);
+
 /* A served file's bytes as read from disk now, never from the cache: 1 with a HeapFree-able copy, 0 when no bundle
  * serves the name or it is not a plain file (a stock pointer, a composed text), -1 when unreadable. Lets
  * script_source.c check a file against its build. */
@@ -134,8 +161,7 @@ typedef struct sh_modserve_step {
     int         rank;        /* SH_MODSERVE_RANK_* */
     int         persist;     /* 1: keep through map purges (lifetime 4), every editor-plan step; 2: an editor-closure
                                 decl of another plan (ms_mark_editor_closure), unless the engine holds it permanently */
-    int         shadow;      /* always 0: shadows are served by the provider, never planned; a surface (modbundle.h
-                                sh_mb_stock_restore) is never a step either */
+    int         shadow;      /* always 0: shadows are served by the provider, never planned */
     const char *blocked;     /* NULL, or the first cause (static or index-owned text) */
     int         file;        /* index-internal file number */
     int         ready;       /* set by sh_modserve_plan_run: 1 ready, -1 not ready, 0 not run */
@@ -542,10 +568,8 @@ int  sh_modserve_scope_map_open(void);
  * map manifest reads placed names at a load only then. */
 int  sh_modserve_scope_relevant(void);
 
-/* 1 when a level load must not see the resource `name`: a name under an installed mod's salt ("mods/<salt>/...")
- * the listing does not declare. The engine keeps every decl the editor's passes registered and a level load builds a
- * snapshot template of every entityDef it holds (level_templates.h), so a mod reaches a map only when it declares
- * it. 0 with scope off, for any other name, and for a salt no installed mod carries. Any thread. */
+/* The level load spawns entityDefs to build snapshot templates. Hide an undeclared installed namespace and
+ * any refused entity or inert actor stand-in in a declared one. Scope off leaves the list intact. Any thread. */
 int  sh_modserve_level_hides(const char *name);
 
 /* The stock spawn-type bits a ported demon of the current listing stands in for, read from its conductor row
@@ -628,6 +652,8 @@ int sh_modserve_salt_installed(const char *salt);
  * stands in beside the folder (the content cache's stand-in composition of the salt serves only what the folder
  * lacks). 0 otherwise. */
 int sh_modserve_root_lacks(const char *salt, const char *name);
+/* Changes when a native refusal withdraws a definition or its dependents. */
+int sh_modserve_refusal_version(void);
 
 /* The asset rule: a map, rawmap or prefab needs the builds its manifest rows name. A row is SERVED when its build
  * (sh_modserve_row_build) is admitted and every name the row lists resolves, MISSING when it names none, INCOMPLETE

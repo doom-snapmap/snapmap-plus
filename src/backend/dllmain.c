@@ -60,6 +60,7 @@
 #include "nav_bake.h"
 #include "nav_menu.h"
 #include "nav_play.h"
+#include "direct_actor_iter.h"
 #include "commands.h"
 #include "cvars.h"
 #include "entity.h"
@@ -70,6 +71,7 @@
 #include "clip_events.h"
 #include "attach_tags.h"
 #include "level_templates.h"
+#include "saved_views.h"
 #include "encounter_spawn.h"
 #include "ribbonmotion.h"
 #include "kill_score.h"
@@ -93,6 +95,7 @@
 #include "backend_log.h"
 #include "host_image.h"
 #include "engine_globals.h"
+#include "saved_maps.h"
 #include "feature_health.h"
 #include "script/script_hooks.h"
 #include "script/script_compile.h"
@@ -140,8 +143,22 @@ static int need(int installed, const char *why, const char *feature, const char 
     return 0;
 }
 
+/* The PC save manager uses the current Steam user ID as the profile directory name. */
+static unsigned long long save_account(void)
+{
+    typedef void *(*get_user_fn)(void);
+    typedef unsigned long long (*get_id_fn)(void *);
+    HMODULE steam = GetModuleHandleW(L"steam_api64.dll");
+    if (!steam) return 0;
+    get_user_fn get_user = (get_user_fn)GetProcAddress(steam, "SteamUser");
+    get_id_fn get_id = (get_id_fn)GetProcAddress(steam, "SteamAPI_ISteamUser_GetSteamID");
+    void *user = get_user ? get_user() : NULL;
+    return user && get_id ? get_id(user) : 0;
+}
+
 static void install_features(const sig_result *results, size_t db)
 {
+    sh_saved_maps_bind((const void *)glb_resolve(g_doom_base, "cvar_system_slot", NULL), save_account);
     /* Map loading: rawmaps and the map carrier (mods, map settings) run inside
      * the DeserializeFromJson detour. */
     void *deser = sig_pointer(results, db, "DeserializeFromJson");
@@ -218,7 +235,7 @@ static void install_features(const sig_result *results, size_t db)
     /* and a look's derived images are served wherever their material has compiled, with no pointer */
     sh_modserve_set_product_reader(sh_modprog_read);
     sh_mb_set_look_compiler(sh_look_compile_notes);
-    sh_mb_set_sdk_compiler(sh_sdk_compile);           /* the build refuses a mistake in any of them */
+    sh_mb_set_sdk_compiler(sh_sdk_build_compile);
     sh_sdk_runtime_install();                         /* the script calls that play them */
     /* A new serving table may change a module's shipped navigation. */
     sh_modserve_set_index_listener(sh_nav_bake_invalidate_sources);
@@ -243,6 +260,8 @@ static void install_features(const sig_result *results, size_t db)
     }
     /* What a map uses of Snapmap+ itself flags it at every save (map_uses.h). */
     sh_modmanifest_set_uses(sh_map_uses);
+    sh_modmanifest_set_actor_rows(sh_modserve_prepare_direct_actors, sh_modserve_direct_actor_map_uses,
+                                 sh_modserve_restore_direct_actors);
     /* The free spawn-type bits' enum members, for the AI Filter's flags (modregistry.h). */
     sh_modserve_set_enum_extend(sh_typeinfo_enum_extend);
 
@@ -369,6 +388,8 @@ static void install_features(const sig_result *results, size_t db)
         void *snapbuild = sig_pointer(results, db, "SnapMapEditToSnapBuild");
         need(sh_nav_play_install(snapbuild), "the play build cannot be observed",
              SH_FEATURE_NAVIGATION, NULL, NULL);
+        need(sh_nav_play_install_actor_source(results, db, sh_modserve_actor_play_text),
+             "the Play build cannot isolate unavailable named actors", SH_FEATURE_MODS, NULL, NULL);
         sh_nav_play_install_instances(results, db);
         sh_nav_play_install_volume_contents(results, db);
         sh_nav_play_install_overlay(results, db);
@@ -400,10 +421,15 @@ static void install_features(const sig_result *results, size_t db)
 
     /* Bind reflection functions and the signed decl-manager accessor call site. */
     sh_typeinfo_install(results, db, g_doom_base);
+    sh_modserve_set_actor_derives(sh_typeinfo_class_derives);
 
     /* Owner-bound companions (companion_engine.h): CallSpawn is detoured only
      * when an admitted bundle declares companions. */
-    if (overrides_installed) (void)sh_companions_install(results, db, g_doom_base);
+    if (overrides_installed) {
+        (void)sh_companions_install(results, db, g_doom_base);
+        need(sh_companions_spawn_ready() && sh_direct_iter_install(results, db, g_doom_base),
+             "For Each AI cannot visit directly placed actors", SH_FEATURE_MODS, NULL, NULL);
+    }
     /* A render parm always gets a parm state slot (parmslots.h): the product's programs keep theirs, a parm past
      * a full range shares one instead of stopping the load. */
     (void)sh_parmslots_install(results, db, g_doom_base);
@@ -424,6 +450,8 @@ static void install_features(const sig_result *results, size_t db)
     /* Level templates (level_templates.h): a level load builds entity templates only for the mods its map
      * declares, so an installed mod's entityDefs never reach a map that does not use it. */
     if (overrides_installed) (void)sh_level_templates_install(g_doom_base);
+    if (!sh_saved_views_install(g_doom_base))
+        backend_log("MAP: explicit room-view preservation could not be installed");
     /* The kill score (kill_score.h): a ported demon's kill scores in the map's Player Score as the stock demon its
      * conductor row says it stands in for. */
     if (overrides_installed) {

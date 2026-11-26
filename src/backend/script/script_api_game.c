@@ -565,6 +565,7 @@ void sh_script_api_game_register(void)
 #include "../typeinfo.h"
 #include "script_walk.h"
 #include <shlobj.h>
+#include "../../common/profile_dir.h"
 #include "../../common/wide_path.h"
 
 #define DECL_NAME_OFF       0x08u
@@ -744,7 +745,7 @@ static const char *g_decl_class(const char *type)
 /* %LOCALAPPDATA%\snapmap-plus\script-cvars.json: the cvar restores a running map still owes. */
 static int journal_path(wchar_t *out, size_t cap)
 {
-    return sh_wpath_local_appdata(out, cap) && sh_wpath_append(out, cap, L"snapmap-plus/script-cvars.json");
+    return sh_profile_long(out, cap) && sh_wpath_append(out, cap, L"script-cvars.json");
 }
 
 static int g_cvar_journal(const char *json)

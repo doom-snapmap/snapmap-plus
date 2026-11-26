@@ -237,7 +237,7 @@ static void hud_visit(void *context, const char *salt, const char *hash, int pla
     if (!sh_json_parse_object(extra, strlen(extra), HUD_JSON_DEPTH, &root)) return;
     raw = sh_json_object_get(&root, "hud");
     if (raw) {
-        owner = c->label ? c->label(salt, hash) : NULL;
+        owner = c->label ? c->label(hash) : NULL;
         if (!sh_modhud_parse(raw, strlen(raw), owner ? owner : salt))
             hud_log("weapon-hud: the hud entry of %s is not a valid weapon ammo-display table; its rules are not used",
                     owner ? owner : salt);
@@ -397,26 +397,7 @@ static int hud_serves_now(const char *hash)
     return sh_modserve_bundle_scope(hash, &info) && info.names_live;
 }
 
-/* A mod by its name, else its folder, for the log (malloc'd). */
-static char *hud_label(const char *salt, const char *hash)
-{
-    sh_modmanifest_row row;
-    sh_modserve_bundle_ref ref;
-    char *out;
-    memset(&row, 0, sizeof row);
-    memset(&ref, 0, sizeof ref);
-    /* A salt and a build hash have one width each. */
-    if (strlen(salt) < sizeof row.salt && strlen(hash) < sizeof row.build) {
-        strcpy_s(row.salt, sizeof row.salt, salt);
-        strcpy_s(row.build, sizeof row.build, hash);
-        (void)sh_modserve_row_build(&row, &ref);
-    }
-    out = _strdup(ref.name && ref.name[0] ? ref.name : ref.folder && ref.folder[0] ? ref.folder : salt);
-    sh_modserve_bundle_ref_free(&ref);
-    return out;
-}
-
-static int hud_reload_index(void) { return sh_modhud_load(sh_modserve_each_bundle_extra, hud_serves_now, hud_label); }
+static int hud_reload_index(void) { return sh_modhud_load(sh_modserve_each_bundle_extra, hud_serves_now, sh_modserve_bundle_name); }
 
 int sh_modhud_install(const sig_result *results, size_t count)
 {

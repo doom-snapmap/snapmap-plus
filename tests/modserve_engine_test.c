@@ -34,6 +34,7 @@ void sh_script_game_cvar_recover_poll(void) {}
 static int g_smodel_begins, g_smodel_reloads;
 void sh_static_model_reload_begin(void) { g_smodel_begins++; }
 int sh_static_model_reloaded(const void *backing) { (void)backing; g_smodel_reloads++; return 1; }
+void sh_direct_iter_reset(void) {}
 void sh_modhud_scene_play_begin(void) {}
 void sh_modscene_place_play_begin(void) {}
 int sh_modstock_exists(const char *request) { (void)request; return 0; }
@@ -60,6 +61,7 @@ static unsigned char fe_new_sedef[SEDEF_NAME_OFF + sizeof(void *)];
 static unsigned char fe_record[0x58 + sizeof(void *)];
 static int fe_has_palette, fe_rebuilds;
 
+int sh_timeline_actor_filter_ready(void) { return fe_has_palette; }
 int sh_timeline_tile_rebuild_palette(int *before, int *after)
 {
     if (!fe_has_palette) return 0;
@@ -77,12 +79,15 @@ void sh_apply_engine_get_run_on_main(sh_run_on_main_fn *run_on_main) { if (run_o
 void sh_modvt_before_pass(const char *phase) { (void)phase; }
 void sh_modvt_print_status(void) {}
 void sh_modsound_before_pass(const char *phase) { (void)phase; }
+static unsigned audio_scope_checks;
+int sh_modsound_apply_rows(void) { audio_scope_checks++; return 0; }
 void sh_modsound_print_status(void) {}
 int sh_modsound_stock_before_map(const char *const *hashes, int n) { (void)hashes; (void)n; return 0; }
 void sh_strids_request_refresh(void) {}
 int sh_strids_scope_check(void) { return 0; }
 int sh_strids_refresh_pending(void) { return 0; }
 void sh_strids_set_process_heap(const struct sh_process_heap_api *api) { (void)api; }
+void sh_strids_set_language_reader(char *(*read_language)(void)) { (void)read_language; }
 int sh_editor_delete_native_pending(void) { return 0; }
 int sh_modtypeinfo_install(const struct sig_result *results, size_t count, const uint8_t *module_base)
 { (void)results; (void)count; (void)module_base; return 0; }
@@ -386,6 +391,9 @@ static void test_prefab_adds_a_row_to_the_open_palette(void)
 
 int main(void)
 {
+    fe_reset();
+    (void)sh_modserve_scope_apply("map exit");
+    CHECK(audio_scope_checks == 1);
     test_raw_names_grow();
     test_op_load_levels();
     test_reparse_drops_type_info();

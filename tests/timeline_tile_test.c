@@ -153,6 +153,54 @@ static void test_stock_row_first(void)
     CHECK(sh_tl_stock_row_first(NULL, m, s) == NULL);
 }
 
+static void test_actor_picker(void)
+{
+#define DIGEST "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    CHECK(!sh_tl_picker_offers(1, "custom/direct_actors/" DIGEST));
+    CHECK(!sh_tl_picker_offers(0, "custom/direct_actors/" DIGEST));
+    CHECK(sh_tl_picker_offers(1, "unknown/unknown"));
+    CHECK(sh_tl_picker_offers(1, "mods/example1/demons/encounter"));
+    CHECK(!sh_tl_picker_offers(0, "mods/example1/demons/encounter"));
+    CHECK(sh_tl_picker_offers(1, "mods/example1/custom/direct_actors/" DIGEST));
+    CHECK(sh_tl_picker_offers(1, "custom/direct_actors/" DIGEST "/other"));
+    CHECK(sh_tl_picker_offers(1, "custom/direct_actors/fe"));
+#undef DIGEST
+}
+
+static unsigned char *partition_test(unsigned char *first, unsigned char *end, const sh_tl_predicate *predicate)
+{
+    unsigned char copy[6 * SH_TL_PALETTE_STRIDE];
+    size_t n = 0, kept = 0;
+    for (int keep = 1; keep >= 0; keep--) {
+        for (unsigned char *r = first; r < end; r += SH_TL_PALETTE_STRIDE) {
+            if ((predicate->matches(r) == *predicate->keep) != keep) continue;
+            memcpy(copy + n, r, SH_TL_PALETTE_STRIDE);
+            n += SH_TL_PALETTE_STRIDE;
+            if (keep) kept = n;
+        }
+    }
+    memcpy(first, copy, n);
+    return first + kept;
+}
+
+static void test_equal_category_captions(void)
+{
+    unsigned char rows[6][SH_TL_PALETTE_STRIDE] = {0}, sedefs[6][0xa0] = {0};
+    const uint32_t tags[] = { 9, 7, 9, 8, 7, 1 };
+    unsigned char *first = rows[0], *end = rows[5];
+    for (int i = 0; i < 6; i++) {
+        *(uint32_t *)(sedefs[i] + 0x94) = tags[i];
+        *(unsigned char **)rows[i] = sedefs[i];
+        rows[i][32] = (unsigned char)i;
+    }
+    /* Five visible rows have one translated caption, the sixth is outside the picker's range. */
+    CHECK(sh_tl_category_end(first, end, partition_test) == rows[2]);
+    CHECK(rows[0][32] == 1 && rows[1][32] == 4);
+    CHECK(sh_tl_category_end(rows[2], end, partition_test) == rows[3] && rows[2][32] == 3);
+    CHECK(sh_tl_category_end(rows[3], end, NULL) == end && rows[3][32] == 0 && rows[4][32] == 2);
+    CHECK(rows[5][32] == 5 && sh_tl_category_end(end, end, NULL) == end);
+}
+
 static int synthetic_main(void)
 {
     test_table();
@@ -160,6 +208,8 @@ static int synthetic_main(void)
     test_record_json();
     test_rebind_decision();
     test_stock_row_first();
+    test_actor_picker();
+    test_equal_category_captions();
     if (g_fail) { printf("timeline_tile_test: FAILED\n"); return 1; }
     printf("timeline_tile_test: all passed\n");
     return 0;
@@ -181,6 +231,12 @@ static void check_image(const char *path)
     results = (sig_result *)calloc(cap, sizeof *results);
     if (!results) { g_image_fail = 1; free(base); return; }
     n = sig_resolve_all(base, results, cap);
+    const uint8_t *build = image_site(base, results, n, "SnapPaletteBuild", identity->vulkan);
+    IMG_CHECK(image_site(base, results, n, "SnapPaletteStablePartition", identity->vulkan) != NULL);
+    IMG_CHECK(image_site(base, results, n, "SnapPaletteCategoryBound", identity->vulkan) != NULL);
+    const unsigned char *admit = sh_timeline_tile_admit_target(build);
+    IMG_CHECK(admit && (uintptr_t)admit > lo && (uintptr_t)admit < hi);
+    IMG_CHECK(admit && (uintptr_t)admit - lo == (identity->vulkan ? 0x1159300u : 0x11584f0u));
     const uint8_t *site = image_site(base, results, n, "SnapPaletteSortCall", identity->vulkan);
     if (site) {
         const unsigned char *target = sh_timeline_tile_sort_target(site + SH_TIMELINE_SORT_CALL_OFF);

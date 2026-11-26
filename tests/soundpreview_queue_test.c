@@ -9,6 +9,7 @@
 static int failures;
 static int kick_count;
 static int overflow_logs;
+static char prepared_sound[SP_NAME_CAP];
 
 #define CHECK(expr) do { \
     if (!(expr)) { \
@@ -26,6 +27,19 @@ int sh_imgpreview_has(int kind, const char *name)
 {
     (void)kind;
     return name && name[0];
+}
+
+void sh_modsound_preview(const char *name)
+{
+    if (!name) CHECK(g_handle == 0);
+    strcpy_s(prepared_sound, sizeof prepared_sound, name ? name : "");
+}
+
+static void *play_prepared(void *world, unsigned long long *handle, const char *name)
+{
+    CHECK(strcmp(prepared_sound, name) == 0);
+    *handle = 17;
+    return world;
 }
 
 uintptr_t sig_addr_by_name(const sig_result *results, size_t n, const char *name)
@@ -149,6 +163,36 @@ static void check_refusals(void)
     g_preview = NULL;
 }
 
+static void check_bank_prepared_on_drain(void)
+{
+    static const char name[] = "mods/preview/preview_bell";
+    void *world = &g_slot;
+    reset_queue();
+    g_slot = (const uint8_t *)&world;
+    g_buffer_cmd = buffer_ok;
+    g_preview = play_prepared;
+    g_stop_bound = g_mode_on = 1;
+    CHECK(sh_soundpreview_play(name) == 1 && !prepared_sound[0]);
+    sp_drain_cmd();
+    CHECK(g_handle == 17 && strcmp(prepared_sound, name) == 0);
+    g_session = 1;
+    sh_soundpreview_stop();
+    sp_drain_cmd();
+    CHECK(!prepared_sound[0] && !g_handle);
+    CHECK(sh_soundpreview_play(name) == 1);
+    sp_drain_cmd();
+    CHECK(g_handle == 17);
+    g_mode_on = 0;
+    sh_soundpreview_set_session(0);
+    sp_drain_cmd();
+    CHECK(!g_session && !prepared_sound[0] && !g_handle);
+    g_slot = NULL;
+    g_preview = NULL;
+    g_handle = 0;
+    g_handle_world = NULL;
+    g_stop_bound = g_mode_on = 0;
+}
+
 int main(void)
 {
     reset_queue();
@@ -202,6 +246,7 @@ int main(void)
 
     check_settings_restored();
     check_refusals();
+    check_bank_prepared_on_drain();
 
     if (failures) {
         fprintf(stderr, "%d sound queue test(s) failed\n", failures);

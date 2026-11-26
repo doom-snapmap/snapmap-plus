@@ -161,6 +161,10 @@ int  sh_script_combat_launches(void);
 void sh_script_combat_note_hit(sh_script_handle victim, const char *decl, sh_script_handle attacker);
 int  sh_script_combat_last_hit(sh_script_handle victim, char **decl, sh_script_handle *attacker);
 
+/* The owner effect route shared by play_effect and a native wound opening. */
+int sh_script_combat_fx_condition(const char *name);
+int sh_script_combat_start_owner_fx(void *ent, int condition);
+
 /* 1 the first time `victim`'s death is reported this map, 0 after (the
  * engine may run its death path again for a gib). Any thread. */
 int  sh_script_combat_first_death(sh_script_handle victim);

@@ -27,6 +27,7 @@ long sh_vt_member_cell(const uint8_t *h, int level, unsigned x, unsigned y)
 
 #ifdef SH_DIAG   /* a release build carries only the pure helper above */
 #include "modvt.h"
+#include "../common/profile_dir.h"
 #include "megapreview.h"
 #include "host_image.h"
 #include "backend_log.h"
@@ -237,21 +238,22 @@ static int widen(const char *utf8, wchar_t *out, size_t cap)
     return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, out, (int)cap) > 0;
 }
 
-/* An absolute output path as given, or a bare name under %LOCALAPPDATA%\snapmap-plus\vt. */
+/* A bare diagnostic output name belongs to the explicitly selected test profile. */
 static int out_path(const char *arg, wchar_t *out, size_t cap)
 {
     static wchar_t name[VT_PATH_CAP];
-    const wchar_t *base = _wgetenv(L"LOCALAPPDATA");
+    wchar_t *base;
     if (!widen(arg, name, VT_PATH_CAP)) return 0;
     if ((name[0] && name[1] == L':') || name[0] == L'\\' || name[0] == L'/') {
         wcsncpy_s(out, cap, name, _TRUNCATE);
         return 1;
     }
-    if (!base || !base[0]) return 0;
-    _snwprintf_s(out, cap, _TRUNCATE, L"%ls\\snapmap-plus\\vt", base);
-    CreateDirectoryW(out, NULL);
-    _snwprintf_s(out, cap, _TRUNCATE, L"%ls\\snapmap-plus\\vt\\%ls", base, name);
-    return 1;
+    base = sh_profile_resolve(1);
+    if (!base) return 0;
+    int ok = wcscpy_s(out, cap, base) == 0 && sh_wpath_long(out, cap) &&
+        sh_wpath_append(out, cap, L"vt") && sh_wpath_ensure_dir(out) && sh_wpath_append(out, cap, name);
+    CoTaskMemFree(base);
+    return ok;
 }
 
 static int read_at(HANDLE h, unsigned long long off, void *buf, DWORD n)
@@ -336,7 +338,7 @@ static void do_decode(const char *family, int level, unsigned x, unsigned y, con
         return;
     }
     CloseHandle(h);
-    if (!out_path(out_arg, out, VT_PATH_CAP)) { vt_line("decode: the output folder cannot be resolved"); free(page); free(outbuf); return; }
+    if (!out_path(out_arg, out, VT_PATH_CAP)) { vt_line("decode: choose an absolute output path or an isolated test profile"); free(page); free(outbuf); return; }
     _snwprintf_s(side, VT_PATH_CAP, _TRUNCATE, L"%ls.page", out);
     if (!write_file(side, page, (size_t)size)) vt_line("decode: could not write %ls", side);
     {

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "nav_play.h"
+#include "direct_actor_iter.h"
 #include "nav_bake.h"
 #include "hook.h"
 #include "patch.h"
@@ -157,6 +158,67 @@ static int nav_play_call_target(uintptr_t site,uintptr_t *target)
     memcpy(&relative,(const void*)(site+1),4);*target=site+5+(intptr_t)relative;return 1;
 }
 
+static sh_patch_handle g_actor_source_patch;
+static void *g_actor_source_relay;
+static int g_actor_source_ready;
+static void (*g_set_play_text)(void *, const char *, int);
+static sh_play_actor_text_fn g_actor_text;
+
+/* MapEntityForSnapEntity holds the editor entry in R14. It copies the returned text into a new runtime
+ * declaration before parsing it. The saved record and its generated instance name stay intact. */
+static void nav_set_actor_source(void *dest, const char *source, int length, const unsigned char *entry)
+{
+    const char *text = source;
+    char *owned = NULL;
+    const unsigned char *record = *(const unsigned char *const *)(entry + 0x150);
+    const char *inherit = record ? *(const char *const *)(record + 0x58) : NULL;
+    const char *cls = record ? *(const char *const *)(record + 0x60) : NULL;
+    if (record) text = g_actor_text(inherit, cls, source, &owned);
+    __try {
+        g_set_play_text(dest, text, text == source ? length : 0);
+        if (g_build_map && source && text == source && cls && !_stricmp(cls, "idAI2") && sh_modserve_iterator_uses(inherit)) {
+            /* MapEntityForSnapEntity assigned this full instance name before copying the editable text. */
+            sh_direct_iter_place(*(const char *const *)((const uint8_t *)dest + 8), inherit);
+        }
+    }
+    __finally { free(owned); }
+}
+
+int sh_nav_play_install_actor_source(const sig_result *results, size_t count, sh_play_actor_text_fn project)
+{
+    const sig_result *site;
+    sig_result call;
+    uintptr_t target;
+    unsigned char expected[5], replacement[5] = {0xe8};
+    int32_t relative;
+    if (g_actor_source_ready) return 1;
+    if (!project) return 0;
+    if (g_actor_source_patch.live && code_unpatch(&g_actor_source_patch) != B2_PATCH_OK) return 0;
+    if (g_actor_source_relay) { VirtualFree(g_actor_source_relay, 0, MEM_RELEASE); g_actor_source_relay = NULL; }
+    for (size_t i = 0; i < count; ++i) {
+        site = &results[i];
+        if (!site->name || strcmp(site->name, "SnapEntityPlayText") || site->status != SIG_OK) continue;
+        call = *site;
+        call.addr += 21;
+        call.rva += 21;
+        if (!nav_play_call_target(call.addr, &target)) break;
+        g_actor_source_relay = nav_near_relay(call.addr, nav_set_actor_source, 1);
+        if (!g_actor_source_relay) break;
+        relative = (int32_t)((intptr_t)g_actor_source_relay - (intptr_t)(call.addr + 5));
+        memcpy(replacement + 1, &relative, 4);
+        memcpy(expected, (void *)call.addr, 5);
+        g_actor_text = project;
+        g_set_play_text = (void (*)(void *, const char *, int))target;
+        if (code_patch_call_sig(&call, expected, replacement, &g_actor_source_patch) == B2_PATCH_OK) {
+            g_actor_source_ready = 1;
+            return 1;
+        }
+        if (!g_actor_source_patch.live) { VirtualFree(g_actor_source_relay, 0, MEM_RELEASE); g_actor_source_relay = NULL; }
+        break;
+    }
+    return 0;
+}
+
 int sh_nav_play_install_volume_contents(const sig_result *results,size_t count)
 {
     const unsigned char *expected=k_gate_expected;
@@ -247,6 +309,7 @@ static int nav_snapbuild_detour(void *a, void *b, void *c)
      * hook boundary.
      */
     __try {
+        sh_direct_iter_reset();
         sh_map_render_build(b);
         sh_map_bounds_build(b);
         /* Before the native build subdivides the map into world areas. */

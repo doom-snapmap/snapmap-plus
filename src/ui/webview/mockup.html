@@ -221,7 +221,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       <div class="panel-head">
         <span class="panel-title">Prefabs</span><span class="badge" id="pfBadge">0</span>
         <div class="panel-actions">
-          <button type="button" class="btn icon icon-button" id="prefabImportBtn" title="Import a prefab export (its ZIP, or the .json of an extracted one): the prefab joins the list with what it needs" aria-label="Import Prefab"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-download"></use></svg></button>
+          <button type="button" class="btn icon icon-button" id="prefabImportBtn" title="Import a prefab ZIP or JSON file and any mod content it carries" aria-label="Import Prefab"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-download"></use></svg></button>
           <button type="button" class="btn icon icon-button" id="newFolderBtn" title="New Folder" aria-label="New Folder"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder-plus"></use></svg></button>
           <button type="button" class="btn primary icon icon-button" id="prefabCreateBtn" title="Create from Selection" aria-label="Create from Selection"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-plus"></use></svg></button>
         </div>
@@ -2454,7 +2454,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       // a module prefab answers the words a reader would filter by, whatever its own tags say
       for (var pk in prefabKinds) if (prefabKinds.hasOwnProperty(pk) && prefabKinds[pk] === 'modules')
         prefabTags[pk] = (prefabTags[pk] || []).concat(['blueprint', 'modules']);
-      // the mods each prefab records, with their installed state; the filter finds "mods" and "needs mods"
+      // Mark prefabs with missing content for the "needs mods" filter.
       prefabMods = {};
       var dmods = d.mods && typeof d.mods === 'object' ? d.mods : {};
       for (var mk2 in dmods) if (dmods.hasOwnProperty(mk2)) {
@@ -2465,6 +2465,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       }
       pfListLast = {root: d.root || [], folders: d.folders || []};
       renderPrefabList(pfListLast.root, pfListLast.folders);
+      if (selectedPrefabName) {
+        var selectedKey = (selectedPrefabFolder ? selectedPrefabFolder + '/' : '') + selectedPrefabName;
+        pfModsShown = prefabMods[selectedKey] || null;
+        pfShowMods(pfModsShown);
+      }
     } else if (d.kind === 'prefabFileResult') {
       var pfr = pfFileResultToast(d);
       if (pfr) toast(pfr.text, pfr.level);
@@ -2809,7 +2814,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // --- prefab tree (pure) end ---
   // --- prefab mods (pure) ---
   // The mods a prefab records (backend/prefab_mods.c, MODS_STATUS), as the host sends them:
-  // {count, missing, mods:[{id, salt, build, size, installed}]}, a JSON string or an object.
+  // The legacy "installed" flag means this prefab's required content is available locally.
   // Anything malformed reads as no mods.
   function pfModsParse(text) {
     var s = null;
@@ -2822,18 +2827,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
   // A mod by its recorded name; a mod recorded without one is never named by its salt.
   function pfModLabel(m) { return m.id && m.id !== m.salt ? m.id : 'an unnamed mod'; }
-  // A recorded mod's state, in the Mods tab's words for a mod and the open map: Not installed; else, with
-  // `mapState` (the Mods tab's mapStateOf, by the mod's namespace), In this map or Not in this map; else
-  // Installed (no map open, or the mods are not read yet).
+  // Only available content gets a separate map-membership label.
   function pfModState(m, mapState) {
-    if (m.installed !== true) return {text: 'Not installed', missing: true, inMap: false};
+    if (m.installed !== true) return {text: m.state === 'incomplete' ? 'Content incomplete' : 'Missing content', missing: true, inMap: false};
     var s = mapState && m.salt ? mapState(m.salt) : null;
     if (s && (s.state === 'whole' || s.state === 'objects' || s.state === 'needed')) return {text: 'In this map', missing: false, inMap: true};
     if (s && s.state === 'out') return {text: 'Not in this map', missing: false, inMap: false};
-    return {text: 'Installed', missing: false, inMap: false};
+    return {text: 'Content ready', missing: false, inMap: false};
   }
   // The list row's pill: null without mods; "Needs mods: <id> +N" naming the missing ones when any
-  // is not installed, else "Mods: <id> +N". The title lists every mod with its state.
+  // lacks content, else "Mods: <id> +N". The title lists every mod with its state.
   function pfModsBadge(st, mapState) {
     if (!st || !st.count) return null;
     var missing = st.mods.filter(function(m){ return m.installed !== true; });
@@ -2851,15 +2854,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       return {label: pfModLabel(m), state: s.text, missing: s.missing, inMap: s.inMap};
     });
     var note = st.missing
-      ? 'Needs mods: ' + (st.missing === 1 ? '1 is' : st.missing + ' are') + ' not installed. Install ' + (st.missing === 1 ? 'it' : 'them') + ' from the prefab\'s export with Install in the Mods tab, then Load / Place.'
-      : 'Every mod this prefab needs is installed.';
+      ? 'In the Prefabs tab, use Import to open the author\'s prefab ZIP. Then select the imported prefab and choose Load / Place.'
+      : 'All mod content this prefab needs is available.';
     return {rows: rows, note: note};
   }
-  // A Load / Place answer about mods: 3 the download is being asked for, -7 refused. Others are null.
+  // Load / Place can wait for cached content to be prepared or return a refusal.
   function pfModsLoadToast(d) {
     if (!d) return null;
     if (d.result === 3) return {text: d.message || ('Preparing mod content for "' + d.name + '"'), level: 'ok'};
-    if (d.result === -7) return {text: d.message || ('"' + d.name + '" was not placed: its mods are not installed'), level: 'warn'};
+    if (d.result === -7) return {text: d.message || ('"' + d.name + '" could not be placed in this map.'), level: 'warn'};
     return null;
   }
   // Export and Import answers ({op, ok, message, cancelled}); a cancelled dialog says nothing.
@@ -3140,8 +3143,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // The backend's module check for the selected module prefab (module_prefab_map.h): a line with the alert
   // icon naming the modules this editor cannot build, shown before Load; the backend refuses them anyway.
   // No check (no editor open) shows nothing.
-  // The mods the selected prefab records (Prefab Details): each with whether it is installed, and
-  // what Load / Place does about the missing ones. A prefab without mods hides the section.
+  // Prefab Details lists content availability and how to recover missing content.
   var pfModsShown = null;   // the selected prefab's mods, drawn again when the open map's mods change
   var pfListLast = null;    // the last prefab list, drawn again so its pills follow the open map's mods
   function pfShowMods(st) {
@@ -6609,13 +6611,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var name = document.getElementById('pcName').value; if (!name) return;
     pfLoadPlace(name, selectedPrefabFolder, selectedPrefabKind);
   });
-  // Export: the prefab and every mod it records, as one ZIP (the Windows Save dialog, as for rawmaps).
+  // Export the prefab and the mod content it uses as one ZIP.
   var prefabExportBtn = document.getElementById('prefabExportBtn');
   if (prefabExportBtn) prefabExportBtn.addEventListener('click', function(){
     var name = document.getElementById('pcName').value; if (!name) return;
     post({cmd:'exportPrefab', name: name, folder: selectedPrefabFolder});
   });
-  // Import: a prefab's ZIP; its mods are installed and the prefab joins the list.
+  // Import the prefab into the library and its carried content into the cache.
   var prefabImportBtn = document.getElementById('prefabImportBtn');
   if (prefabImportBtn) prefabImportBtn.addEventListener('click', function(){ post({cmd:'importPrefab'}); });
   var prefabDeleteBtn = document.getElementById('prefabDeleteBtn');

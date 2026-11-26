@@ -1,9 +1,5 @@
-/* modsound.h -- delivers installed mods' Wwise sound banks to the engine (build 13954591, no code patched): the
- * swapped open-by-name slots (every read-only qword holding AudioFileOpenName) serve a bank from its bundle's
- * file, and AudioBankSubmit submits it on the main thread in process heap 0. The LoadBanks slot
- * (idSoundHardware_WWise vtable +0x30) is swapped so s_loadBanks, s_reloadAudioEvents and s_restart run in heap 0
- * and resubmit every served bank. Stock banks a build's registries "banks" need load at the map pass through
- * operator new(0x130), the cookie ctor and the async LoadBank, waiting at most SH_MODSOUND_STOCK_WAIT_MS. */
+/* Authored Wwise banks follow the map's units and editor auditions. Stock bank requests and
+ * sound restarts use the native load path in process heap 0. */
 #ifndef SH_MODSOUND_H
 #define SH_MODSOUND_H
 
@@ -60,6 +56,9 @@ typedef struct sh_modsound_bank {
     char    *disk_path;     /* UTF-8, owned */
     uint64_t size;
     char     bundle[80];
+    char     build[65];
+    char    *author_path;
+    int      wanted;
     volatile long submitted_gen;   /* the LoadBanks generation of its submit; 0 when not submitted */
 } sh_modsound_bank;
 
@@ -68,6 +67,13 @@ typedef struct sh_modsound_table {
     int skipped;            /* stock pointers and repeated names, logged */
     sh_modsound_bank *banks;
 } sh_modsound_table;
+
+struct sh_modmanifest_list;
+int sh_modsound_note_rows(const struct sh_modmanifest_list *rows);
+void sh_modsound_select_banks(sh_modsound_table *table);
+/* Apply changed placed names. Returns 1 if the next main-thread pass must do it. */
+int sh_modsound_apply_rows(void);
+void sh_modsound_preview(const char *sound);
 
 /* Add one served file: 1 for a bank added, 0 for a file that is not a bank,
  * -1 for a bank refused (a stock pointer, no disk path, a leaf already in
@@ -161,6 +167,8 @@ typedef void *(*sh_modsound_cookie_ctor_fn)(void *self, const char *name);
 typedef void (*sh_modsound_bank_cb_fn)(uint32_t bank_id, const void *in_memory, int32_t result, int32_t pool, void *cookie);
 typedef int32_t (*sh_modsound_loadbank_fn)(const char *name, sh_modsound_bank_cb_fn callback, void *cookie, int32_t pool,
                                            uint32_t *bank_id);
+void sh_modsound_test_manager(void **slot);
+void sh_modsound_test_select(const char *salt);
 void sh_modsound_test_bind_stock(sh_modsound_opnew_fn op_new, sh_modsound_cookie_ctor_fn ctor,
                                  sh_modsound_loadbank_fn load_bank, sh_modsound_bank_cb_fn engine_callback,
                                  const sh_modsound_needs *needs, unsigned wait_ms);

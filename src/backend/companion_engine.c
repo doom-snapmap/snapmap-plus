@@ -8,6 +8,7 @@
 #include <string.h>
 #include "companion.h"
 #include "companion_engine.h"
+#include "direct_actor_iter.h"
 #include "companion_sites.h"
 #include "backend_log.h"
 #include "entity.h"
@@ -364,6 +365,11 @@ static void after_spawn(void *obj)
     if (!ent) return;
     decl = read_ptr(ent, ENT_DECL);
     if (!decl) return;
+    if (sh_direct_iter_awaiting_spawn()) {
+        gm = sh_entity_gamemgr();
+        if (gm && !g_is_client(gm))
+            sh_direct_iter_after_spawn(ent, decl_str(decl, DECL_NAME), decl_str(decl, DECL_INHERIT));
+    }
     /* Owners are mod names, so anything else leaves at once. */
     if (!sh_companion_owner_namespace(decl_str(decl, DECL_NAME)) &&
         !sh_companion_owner_namespace(decl_str(decl, DECL_INHERIT)))
@@ -392,12 +398,12 @@ static int def_chain(void *ent, const char **names, int cap)
 {
     void *decl, *manager = NULL;
     int n = 0;
-    if (!ent || cap <= 0) return 0;
+    if (!ent || cap <= 0) return -1;
     decl = read_ptr(ent, ENT_DECL);
-    if (!decl) return 0;
+    if (!decl) return -1;
     names[n] = decl_str(decl, DECL_NAME);
     if (!sh_companion_owner_namespace(names[n]) && !sh_companion_owner_namespace(decl_str(decl, DECL_INHERIT)))
-        return 0;
+        return names[n] ? 0 : -1;
     if (names[n]) n++;
     while (n < cap) {
         const char *inherit = decl_str(decl, DECL_INHERIT);
@@ -413,7 +419,7 @@ static int def_chain(void *ent, const char **names, int cap)
 
 int sh_companions_def_chain(void *entity, const char **names, int cap)
 {
-    if (!g_resolved || !g_decl) return 0;
+    if (!g_resolved || !g_decl) return -1;
     if (cap > INHERIT_DEPTH + 1) cap = INHERIT_DEPTH + 1;
     return def_chain(entity, names, cap);
 }
@@ -423,7 +429,7 @@ static void spawn_fanout(void *obj)
     const char *names[INHERIT_DEPTH + 1];
     void *ent = g_is_entity(obj);
     int n = ent ? def_chain(ent, names, INHERIT_DEPTH + 1) : 0;
-    if (n) g_spawn_sub(ent, names, n);
+    if (ent && n >= 0) g_spawn_sub(ent, names, n);
 }
 
 static void nested_after_spawn(void *obj)
@@ -601,8 +607,9 @@ int sh_companions_ensure(const char *phase)
     memset(&a, 0, sizeof a);
     a.resolved = g_resolved;
     a.installed = g_orig && hook_is_installed((void *)g_orig);
-    /* Mod scripts watch the spawn chain too, so it is armed for them without an owner. */
-    if (a.resolved && !a.installed && g_spawn_wanted && g_spawn_wanted() && on_main_thread() == 1) {
+    /* A map may use the spawn chain for scripts or direct actors without declaring companions. */
+    if (a.resolved && !a.installed && (sh_direct_iter_awaiting_spawn() || (g_spawn_wanted && g_spawn_wanted())) &&
+        on_main_thread() == 1) {
         if (prologue_ok()) return commit_detour(at);
         cl_log("COMPANIONS: CallSpawn's prologue is not the expected one (another detour?); not installed at the %s", at);
         return 0;

@@ -152,12 +152,16 @@ static volatile LONG g_resuming;       /* our own parse and original call are ru
 static int pub_row_state(const sh_modmanifest_row *row, const char *subject, char **cause)
 {
     if (cause) *cause = NULL;
+    /* A whole attachment published with no units has no actor or native file to register. */
+    if (row && row->unavailable && !row->unit_count && !row->missing_count && !row->modules)
+        return SH_MODPUB_ROW_SERVED;
     return g_ops.row_state ? g_ops.row_state(g_ops.context, row, subject, cause) : SH_MODPUB_ROW_MISSING;
 }
 
 static int pub_row_served(const sh_modmanifest_row *row)
 {
     /* A pinned row whose composition stands in for objects is fetched again at a play (modcache.h). */
+    if (row && row->unavailable && !row->unit_count && !row->missing_count && !row->modules) return 1;
     if (row && row->pinned && g_ops.content_complete && !g_ops.content_complete(g_ops.context, row)) return 0;
     return pub_row_state(row, NULL, NULL) == SH_MODPUB_ROW_SERVED;
 }
@@ -169,6 +173,7 @@ static int pub_row_places(const sh_modmanifest_row *row)
     size_t k;
     if (!row) return 0;
     if (!row->pinned) return row->name_count > 0;
+    for (k = 0; k < row->missing_count; k++) if (strcmp(row->missing[k], "*")) return 1;
     if (row->modules && row->modules[0] && strcmp(row->modules, "[]")) return 1;
     for (k = 0; k < row->unit_count; k++) if (row->roots && row->roots[k] && strcmp(row->roots[k], "*")) return 1;
     return 0;
@@ -670,7 +675,8 @@ static int pub_hold_begin(int hook, void *owner, const void *metadata, void *ext
     h->missing = calloc(rows->count ? rows->count : 1, sizeof(*h->missing));
     if (!h->missing) goto nomem;
     for (size_t i = 0; i < h->rows.count; i++) {
-        if (pub_row_served(&h->rows.rows[i])) continue;
+        if (!(record && record->kind == SH_MODPUB_PARSE_OTHER && pub_is_completion(hook) &&
+              h->rows.rows[i].unavailable) && pub_row_served(&h->rows.rows[i])) continue;
         h->missing[h->missing_count++] = i;
         h->missing_bytes += h->rows.rows[i].size;
     }
@@ -764,12 +770,40 @@ static void pub_joiner_ready(int hook, const char *item, const char *revision, i
     if (g_ops.scope_play) g_ops.scope_play(g_ops.context, "lobby join");
 }
 
+static int pub_freeze_unclassified(pub_record *record, int hook, void *owner)
+{
+    int changed;
+    char *text, *copy = NULL;
+    if (record->kind != SH_MODPUB_PARSE_OTHER) return 1;
+    changed = sh_modmanifest_freeze_local_rows(&record->rows, record->text, record->length);
+    if (!changed) return 1;
+    if (changed > 0 && record->text) {
+        text = sh_modmanifest_write(record->text, record->length, &record->rows, NULL, NULL, 0);
+        if (text) {
+            copy = sh_text(text);
+            HeapFree(GetProcessHeap(), 0, text);
+        }
+    }
+    if (copy) {
+        free(record->text);
+        record->text = copy;
+        record->length = strlen(copy);
+        sh_modmanifest_prepare_load(copy, record->length);
+        /* The native map object was parsed in the old local scope. Only a fresh parse can launch it. */
+        if (pub_is_completion(hook)) return 2;
+    }
+    pub_launch_refused(hook);
+    pub_leave_lobby(NULL, hook, owner);
+    pub_notice("This published map could not be read safely. Open it again from the map browser.");
+    return 0;
+}
+
 int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, void *extra,
                      const char *id, const char *revision)
 {
     char *item = NULL, *rev = NULL;
     pub_record *record = &g_record;
-    int begun, passed;
+    int begun, passed, fresh = 1;
     if (!g_ops_set || hook < 0 || hook >= SH_MODPUB_HOOKS || pub_is_local(hook) || pub_is_launch(hook)) return 1;
     if (InterlockedCompareExchange(&g_resuming, 0, 0)) return 1;
     if (!pub_on_main()) return 1;
@@ -778,16 +812,16 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         pub_seen *seen = pub_seen_find(id, revision);
         /* A warm answer no gate of this process saw, or a seen map whose rows are not the ones last listed and
          * activated: the cold read runs instead, and its CacheReady gate checks and activates the mods. */
-        if ((!seen || (seen->rows.count && !pub_current_is(&seen->rows))) && g_ops.cold_read &&
-            g_ops.cold_read(g_ops.context, owner, pub_s(id), pub_s(revision))) {
-            pub_logf("MODS: lobby map '%s' revision '%s' is cached; %s, so it is read again and gated", pub_s(id),
-                     pub_s(revision), seen ? "the mods last activated are another map's" : "this session never saw its manifest");
+        if (!seen || (seen->rows.count && !pub_current_is(&seen->rows))) {
+            if (g_ops.cold_read && g_ops.cold_read(g_ops.context, owner, pub_s(id), pub_s(revision))) {
+                pub_logf("MODS: lobby map '%s' revision '%s' is cached; %s, so it is read again and gated", pub_s(id),
+                         pub_s(revision), seen ? "the mods last activated are another map's" : "this session never saw its manifest");
+            } else {
+                pub_launch_refused(hook);
+                pub_leave_lobby(NULL, hook, owner);
+                pub_notice("This cached map could not be read to check its mods. Join the lobby again.");
+            }
             return 0;
-        }
-        if (!seen) {
-            pub_logf("MODS: lobby map '%s' revision '%s' is cached; this session never saw its manifest, "
-                     "so it is not gated", id ? id : "", revision ? revision : "");
-            return 1;
         }
         if (pub_refuse_scripts(hook, owner, &seen->rows)) return 0;
         if (!seen->rows.count || !pub_count_missing(&seen->rows)) {
@@ -834,6 +868,10 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         pub_record_clear(record);
         return held ? 0 : 1;
     }
+    if (pub_is_completion(hook) && !(fresh = pub_freeze_unclassified(record, hook, owner))) {
+        pub_record_clear(record);
+        return 0;
+    }
     if (pub_is_completion(hook) && g_ops.metadata_ids &&
         !g_ops.metadata_ids(g_ops.context, metadata, &item, &rev)) {
         free(item); free(rev);
@@ -846,7 +884,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
     if (pub_is_completion(hook)) pub_seen_note(pub_s(item), pub_s(rev), &record->rows);
     passed = -1;
     if (pub_refuse_scripts(hook, owner, &record->rows)) { pub_record_clear(record); passed = 0; goto out; }
-    if (!record->rows.count || !record->missing) {
+    if (!record->rows.count || (!record->missing && fresh != 2)) {
         int rows = record->rows.count > 0;
         pub_record_clear(record);   /* consumed */
         pub_joiner_ready(hook, item, rev, rows);
@@ -903,6 +941,10 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
     if (!record->valid || record->repeat || record->frame != g_frame || !record->rows.count) return 1;
     if (map && record->map != map) return 1;
     pub_notes_gated();
+    if (!pub_freeze_unclassified(record, hook, manager)) {
+        pub_record_clear(record);
+        return 0;
+    }
     /* A published read serves its published units: its rows are pinned, and a pinned row resolves to its composition
      * only, never the author's root at another build. */
     if (pub_refuse_scripts(hook, NULL, &record->rows)) { pub_record_clear(record); passed = 0; goto out; }
@@ -1635,7 +1677,8 @@ int sh_modpub_lobby_map_modded(const char *item, const char *revision)
 
 int sh_modpub_standin_shared(int cause)
 {
-    return cause == SH_CACHE_ABSENT_REMOVED || cause == SH_CACHE_ABSENT_NOT_IN_STORE || cause == SH_CACHE_ABSENT_GAME;
+    return cause == SH_CACHE_ABSENT_REMOVED || cause == SH_CACHE_ABSENT_NOT_IN_STORE ||
+           cause == SH_CACHE_ABSENT_GAME || cause == SH_CACHE_ABSENT_UNPUBLISHED;
 }
 
 /* The causes a start waits for, most actionable first, and what the host is told for each (%s: the mods). A cause

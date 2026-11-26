@@ -320,6 +320,15 @@ static void test_scan(void)
         sh_mb_scan_needs("entityDef", (const unsigned char *)ent, strlen(ent), collect, got);
         CHECK(!strcmp(got, want_ent));
         if (strcmp(got, want_ent)) fprintf(stderr, "  entityDef scan gave %s\n", got);
+        {
+            char *images[SH_MB_NEED_REQUESTS];
+            int count = sh_mb_need_requests("image", "mods/sample/map.tga$bc7", images, SH_MB_NEED_REQUESTS);
+            CHECK(count == 4 && !strcmp(images[0], "generated/image/mods/sample/map$bc7.bimage") &&
+                  !strcmp(images[1], "generated/decalatlas/mods/sample/map$bc7.bimage") &&
+                  !strcmp(images[2], "generated/image/mods/sample/map.bimage") &&
+                  !strcmp(images[3], "generated/decalatlas/mods/sample/map.bimage"));
+            sh_mb_requests_free(images, count);
+        }
         CHECK(sh_mb_need_requests("swf", "swf/switches/Switch2_Up.swf", cand, 2) == 1 &&
               !strcmp(cand[0], "generated/swf/switches/switch2_up.bswf"));
         CHECK(sh_mb_need_requests("swf", "swf/mods/a-b/gui.swf", cand, 2) == 1 &&

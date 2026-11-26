@@ -38,10 +38,13 @@ function Import-MsvcEnv([string]$VcVarsVer) {
     }
     $key = "$vcvars|$VcVarsVer"
     if ($env:SNAPMAPPLUS_MSVC_ENV -ne $key) {
+        $inherited = [Environment]::GetEnvironmentVariables('Process')
         # Names starting with "=" are cmd's per-drive working directories and are skipped.
         cmd /c "`"$vcvars`"$vcvarsArgs >nul 2>&1 && set" | ForEach-Object {
             if ($_ -match '^([^=]+)=(.*)$') {
-                [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+                if ($inherited[$matches[1]] -cne $matches[2]) {
+                    [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+                }
             }
         }
         if (-not (Get-Command cl -ErrorAction SilentlyContinue)) { throw "cl not on PATH after $vcvars" }

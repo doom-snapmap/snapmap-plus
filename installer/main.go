@@ -20,7 +20,7 @@ Usage:
   snapmap-plus install   [--doom <path>] [--local <dist-dir>] [--release <tag>] [--beta] [--force] [--yes]
   snapmap-plus update    [--doom <path>] [--release <tag>] [--beta] [--no-self] [--force] [--yes]
   snapmap-plus uninstall [--doom <path>] [--yes]
-  snapmap-plus convert <map or prefab.json|export.zip>
+  snapmap-plus convert <map or prefab.json|export.zip> [--yes]
   snapmap-plus changelog [<version>|latest|all]
   snapmap-plus status
   snapmap-plus version
@@ -116,10 +116,16 @@ func runCommand(cmd string, args []string, installerChecked bool) error {
 	case "uninstall":
 		return cmdUninstall(f)
 	case "convert":
-		if len(args) != 1 {
+		files := []string{}
+		for _, a := range args {
+			if a != "--yes" && a != "-y" {
+				files = append(files, a)
+			}
+		}
+		if len(files) != 1 {
 			return fmt.Errorf("choose one map, prefab or export file to update")
 		}
-		return convertEarlierExport(appDataDir(), args[0])
+		return convertWithConsent(appDataDir(), files[0], f.yes)
 	case "status":
 		return cmdStatus(f)
 	case "changelog":
@@ -134,7 +140,7 @@ func runCommand(cmd string, args []string, installerChecked bool) error {
 		return nil
 	}
 	if len(args) == 0 && (strings.EqualFold(filepath.Ext(cmd), ".json") || strings.EqualFold(filepath.Ext(cmd), ".zip")) {
-		return convertEarlierExport(appDataDir(), cmd)
+		return convertWithConsent(appDataDir(), cmd, false)
 	}
 	return errUnknownCommand
 }

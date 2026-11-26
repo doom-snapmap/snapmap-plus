@@ -149,6 +149,7 @@ static void ev_cat(const char *s)
 
 /* The temp memory of every fake demon: the order SnapMap's Follow left (tempMemory_Remove takes it, f_event). */
 static sh_ai_order g_order;
+static int g_native_body_busy, g_no_path_state, g_release_refused, g_order_reads;
 
 static int f_event(void *e, int ev, const sh_ai_arg *args, int n, double *ret)
 {
@@ -199,7 +200,13 @@ static int f_event(void *e, int ev, const sh_ai_arg *args, int n, double *ret)
 }
 
 static int f_park(void *e) { if (!((fent *)e)->parked) ev_cat("park\n"); ((fent *)e)->parked = 1; return 1; }
-static int f_release(void *e) { ev_cat("release\n"); ((fent *)e)->parked = 0; return 1; }
+static int f_release(void *e)
+{
+    if (g_release_refused) return -1;
+    ev_cat("release\n");
+    ((fent *)e)->parked = 0;
+    return 1;
+}
 static int f_anim_variable(void *ai, const char *name, float value)
 {
     if (strcmp(name, "hangoutIndex") && strcmp(name, "painIndex")) return 0;   /* the web's variables */
@@ -424,6 +431,14 @@ static int f_wound_hides(void *ai, const char *wound, const char *const *meshes,
     ev_cat(line);
     return 1;
 }
+static int f_wound_effect(void *ent, const char *wound, const char *condition)
+{
+    char line[240];
+    snprintf(line, sizeof line, "wound_effect %d %s %s\n", idx_of(ent), wound, condition);
+    ev_cat(line);
+    return !strcmp(condition, "FX_UNKNOWN") ? -3 : 1;
+}
+
 static const sh_script_ai_engine g_fake;
 static int f_anim_valid(void *ai, const char *node, unsigned tests, int side, unsigned seed, int *index)
 {
@@ -492,9 +507,16 @@ static int f_gore_init(void *ai)
 static int f_snapmap_order(void *ai, sh_ai_order *out)
 {
     (void)ai;
+    g_order_reads++;
     if (g_order.kind == SH_AI_ORDER_NONE) return 0;
     *out = g_order;
     return 1;
+}
+
+static int f_native_body_busy(void *ai, int check_path)
+{
+    (void)ai;
+    return check_path && g_no_path_state ? -1 : g_native_body_busy;
 }
 
 static const sh_script_ai_engine g_fake = {
@@ -507,7 +529,8 @@ static const sh_script_ai_engine g_fake = {
     f_laser_add, f_laser_remove, f_rear_footsteps,
     f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose,
     f_interrupt_blend, f_destructible, f_weapon_use, f_wound_damage_counts, f_snapmap_order,
-    f_release, f_anim_variable, f_relations, f_off_limits, f_world_clear, f_world_ground, f_request_pain
+    f_release, f_anim_variable, f_relations, f_off_limits, f_world_clear, f_world_ground, f_request_pain, f_wound_effect,
+    f_native_body_busy
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -1023,13 +1046,17 @@ static void test_removed_and_unavailable(void)
         "  if not kept then kept = self return end\n"
         "end)\n"
         "on.think('prop/rock', function(self)\n"
-        "  if kept then print('removed ' .. tostring(kept:move_to({x = 1, y = 1, z = 1})) .. ' ' .. tostring(kept:enemy())) end\n"
+        "  if kept then print('removed ' .. tostring(kept:move_to({x = 1, y = 1, z = 1})) .. ' ' .. tostring(kept:enemy()) .. ' ' .. tostring(kept:native_follow_path())) end\n"
         "end)\n"));
     tick();
     g_ent[1].live = 0;
+    g_order.kind = SH_AI_ORDER_PATH;
+    g_order_reads = 0;
     tick();
     tick();
-    CHECK(strstr(log_of("aaaaaaaa"), "removed false nil") != NULL);
+    CHECK(strstr(log_of("aaaaaaaa"), "removed false nil false") != NULL);
+    CHECK(g_order_reads == 0 && g_order.kind == SH_AI_ORDER_PATH);
+    g_order.kind = SH_AI_ORDER_NONE;
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_RUNNING);
     sh_script_map_end();
 
@@ -1706,6 +1733,24 @@ static void test_enemy_weapon_sdk(void)
 static void test_lasers_and_rear_feet(void)
 {
     const char *log;
+    int owner, helper, stock, first, second, accepted, other_site;
+    CHECK(sh_ai_set_wound_effect(&owner, 12, &first, 8));
+    CHECK(sh_ai_set_wound_effect(&helper, 18, &first, 9));
+    CHECK(sh_ai_wound_effect_at(&owner, 12, &first, 1, &accepted, &accepted) == 8);
+    CHECK(sh_ai_wound_effect_at(&helper, 18, &first, 1, &accepted, &accepted) == 9);
+    CHECK(sh_ai_wound_effect_at(&stock, 21, &first, 1, &accepted, &accepted) < 0);
+    CHECK(sh_ai_wound_effect_at(&owner, 12, &second, 1, &accepted, &accepted) < 0);
+    CHECK(sh_ai_wound_effect_at(&owner, 12, &first, 1, &other_site, &accepted) < 0);
+    CHECK(sh_ai_wound_effect_at(&owner, 12, &first, 0, &accepted, &accepted) < 0);
+    CHECK(sh_ai_wound_effect_at(&owner, 13, &first, 1, &accepted, &accepted) < 0);
+    CHECK(sh_ai_wound_effect_at(&owner, 12, &first, 1, &accepted, &accepted) == 8);
+    CHECK(sh_ai_set_wound_effect(&owner, 12, &first, 15));
+    CHECK(sh_ai_wound_effect_at(&owner, 12, &first, 1, &accepted, &accepted) == 15);
+    sh_ai_remove_wound_effects(12);
+    CHECK(sh_ai_wound_effect_at(&owner, 12, &first, 1, &accepted, &accepted) < 0);
+    CHECK(sh_ai_wound_effect_at(&helper, 18, &first, 1, &accepted, &accepted) == 9);
+    sh_script_ai_reset();
+    CHECK(sh_ai_wound_effect_at(&helper, 18, &first, 1, &accepted, &accepted) < 0);
     printf("-- wound_hides names the wound by its whole decl name and the meshes as written\n");
     CHECK(start(
         "api = 1\n"
@@ -1715,6 +1760,9 @@ static void test_lasers_and_rear_feet(void)
         "  if step ~= 1 then return end\n"
         "  print('hides ' .. tostring(self:wound_hides('wounds/brute/chest', { 'body$2@chest', 'body$3@chest' })))\n"
         "  print('none ' .. tostring(self:wound_hides('wounds/brute/armor', {})))\n"
+        "  assert(self:wound_effect('wounds/brute/chest', 'FX_CINEMATIC_4'))\n"
+        "  local ok, why = self:wound_effect('wounds/brute/armor', 'FX_UNKNOWN')\n"
+        "  assert(not ok and why == 'the effect condition is unavailable')\n"
         "  local names = {}\n"
         "  for i = 1, 48 do names[i] = 'm' .. i end\n"
         "  print('all ' .. tostring(self:wound_hides('wounds/brute/chest', names)))\n"
@@ -1723,6 +1771,7 @@ static void test_lasers_and_rear_feet(void)
     log = log_of("aaaaaaaa");
     CHECK(strstr(log, "hides true\nnone true\nall true\n") != NULL);
     CHECK(strstr(g_events, " m46 m47 m48\n") != NULL);
+    CHECK(strstr(g_events, "wound_effect 1 mods/aaaaaaaa/wounds/brute/chest FX_CINEMATIC_4\n") != NULL);
     CHECK(strstr(g_events, "wound_hides mods/aaaaaaaa/wounds/brute/chest: body$2@chest body$3@chest\n"
                            "wound_hides mods/aaaaaaaa/wounds/brute/armor:\n") != NULL);
     sh_script_map_end();
@@ -2538,6 +2587,81 @@ static void test_snapmap_order(void)
     sh_script_map_end();
 }
 
+static void test_stationary_enemy_native_path(void)
+{
+    const char *brain =
+        "api = 1\n"
+        "local n = 0\n"
+        "require('enemy_sdk').bind('ai/brute', {\n"
+        " spawn=function() end, remove=function() end, projectile=function() end,\n"
+        " damage=function() end, death=function() print('died') end,\n"
+        " pain=function(e) e:stop(); print('felt pain') end, frame=function() print('frame') end,\n"
+        " think=function(e) n=n+1; print('think '..n); local o=e:snapmap_order(); if o then print(o.kind) end end\n"
+        "})\n";
+    sh_script_handle actor;
+    const char *log;
+    int mod;
+    g_order.kind = SH_AI_ORDER_NONE;
+    g_native_body_busy = 0;
+    CHECK(start(brain));
+    g_order_reads = 0;
+    tick();
+    CHECK(g_order_reads == 1 && strstr(log_of("aaaaaaaa"), "think 1\n"));
+    actor = sh_script_handles_find(1, &mod);
+    g_order.kind = SH_AI_ORDER_PATH;
+    g_order.spawn_id = 2;
+    tick();
+    CHECK(g_order.kind == SH_AI_ORDER_PATH && strstr(g_events, "release\n"));
+    g_order.spawn_id = 3; /* A new path replaces the first while the stock parent waits. */
+    tick();
+    CHECK(g_order.kind == SH_AI_ORDER_PATH && g_order.spawn_id == 3);
+    g_order.kind = SH_AI_ORDER_NONE; /* The real engine removes its entry when it enters the path. */
+    g_native_body_busy = 1;
+    sh_script_queue_post(mod, SH_SCRIPT_EV_ANIM, actor, 0, 0, 0, "eternal", NULL);
+    sh_script_queue_post(mod, SH_SCRIPT_EV_PAIN, actor, 0, 0, 0, "test", NULL);
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "felt pain\n") && !strstr(log, "frame\n") && !strstr(log, "think 2\n"));
+    CHECK(!strstr(g_events, "park\n") && !strstr(g_events, "tempMemory_Remove"));
+    g_native_body_busy = 0;
+    g_order.kind = SH_AI_ORDER_ENTITY; g_order.spawn_id = 2;
+    tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "think 2\nentity\n"));
+    g_order.kind = SH_AI_ORDER_PATH;
+    tick();
+    sh_script_queue_post(mod, SH_SCRIPT_EV_DEATH, actor, 0, 0, 0, "", NULL);
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "died\nthink 3\n") && !strstr(stop_of("aaaaaaaa"), "stopped"));
+    sh_script_map_end();
+    g_order.kind = SH_AI_ORDER_NONE;
+    CHECK(start(brain));
+    tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "think 1\n"));
+    g_no_path_state = 1;
+    g_order.kind = SH_AI_ORDER_PATH;
+    tick();
+    CHECK(g_order.kind == SH_AI_ORDER_NONE && strstr(log_of("aaaaaaaa"), "think 2\npath\n"));
+    CHECK(!strstr(g_events, "release\n"));
+    g_no_path_state = 0;
+    g_release_refused = 1;
+    g_order.kind = SH_AI_ORDER_PATH;
+    tick();
+    CHECK(g_order.kind == SH_AI_ORDER_NONE && strstr(log_of("aaaaaaaa"), "think 3\npath\n"));
+    g_release_refused = 0;
+    {
+        sh_script_ai_engine bare = g_fake;
+        bare.frame = NULL;
+        sh_script_ai_set_engine(&bare);
+        g_order_reads = 0;
+        g_frame++;
+        sh_script_tick(g_frame * 0.1, 0.1);
+        CHECK(g_order_reads == 2 && strstr(log_of("aaaaaaaa"), "think 4\n"));
+        sh_script_ai_set_engine(&g_fake);
+    }
+    sh_script_map_end();
+}
+
 /* ai:release() hands the demon back to its own behaviour until the next command; ai:anim_variable(name, value)
  * sets a variable of its anim web by name. */
 static void test_release_and_anim_variable(void)
@@ -2709,11 +2833,78 @@ static void test_relations(void)
     }
 }
 
+typedef struct { const char *name, *selector; } path_data;
+typedef struct {
+    const void *const *vtable;
+    const char *type;
+    const path_data *data;
+    const void *linked;
+} path_state;
+typedef struct {
+    unsigned char pad[SH_AI_FSM_STATES - sizeof(void *)];
+    void *manager;
+    const path_state **states;
+    int count;
+} path_fsm;
+typedef struct { const void *const *vtable; const char *name; const path_fsm *child; } path_manager;
+
+static const char *const *path_type(const path_state *state) { return &state->type; }
+static const path_fsm *path_find(const path_manager *manager, const char *name)
+{
+    return !_stricmp(name, manager->name) ? manager->child : NULL;
+}
+
+static void test_native_path_child(void)
+{
+    const void *type_vtable[] = { path_type };
+    const void *manager_vtable[SH_AI_FSM_FIND_CHILD_SLOT / sizeof(void *) + 1] = { 0 };
+    path_data check_data = { "ac_snapmap_check" }, branch_data = { "behaviors_snapmap", "FSM_SnapMap" };
+    path_data follow_data = { "sm_force_followPath" }, done_data = { "idAIStateDone" };
+    path_state check = { type_vtable, "idShared_Passthrough_Immediate", &check_data };
+    path_state branch = { type_vtable, "idShared_ExecuteChildFSM", &branch_data };
+    path_state follow = { type_vtable, "idSnapMap_ForceFollowPath", &follow_data };
+    path_state done = { type_vtable, "idAIStateDone", &done_data };
+    const path_state *parent_states[] = { &check, &branch }, *child_states[] = { &done, &follow };
+    path_fsm child = { { 0 }, NULL, child_states, 2 }, unrelated = child;
+    path_manager manager = { manager_vtable, "FSM_snapMap", &child };
+    path_fsm alert = { { 0 }, &manager, parent_states, 2 };
+    sh_ai_path_fields fields = { offsetof(path_state, data), offsetof(path_data, name), offsetof(path_fsm, manager),
+                                 offsetof(path_data, selector), offsetof(path_state, linked) };
+    manager_vtable[SH_AI_FSM_FIND_CHILD_SLOT / sizeof(void *)] = path_find;
+    CHECK(sh_ai_fsm_has_native_path((const uint8_t *)&alert, &fields)); /* Idle stock child. */
+    branch.linked = &child;
+    CHECK(sh_ai_fsm_has_native_path((const uint8_t *)&alert, &fields)); /* Bound stock child. */
+    branch.linked = &unrelated;
+    CHECK(!sh_ai_fsm_has_native_path((const uint8_t *)&alert, &fields));
+    branch.linked = NULL;
+    branch_data.selector = "another FSM";
+    CHECK(!sh_ai_fsm_has_native_path((const uint8_t *)&alert, &fields));
+    manager.name = branch_data.selector; /* A differently named, genuinely selected child. */
+    CHECK(sh_ai_fsm_has_native_path((const uint8_t *)&alert, &fields));
+    branch_data.selector = "";
+    CHECK(!sh_ai_fsm_has_native_path((const uint8_t *)&alert, &fields));
+    branch_data.selector = manager.name;
+    follow.type = "idShared_Default";
+    CHECK(!sh_ai_fsm_has_native_path((const uint8_t *)&alert, &fields));
+    follow.type = "idSnapMap_ForceFollowPath";
+    child.count = 1;
+    CHECK(!sh_ai_fsm_has_native_path((const uint8_t *)&alert, &fields));
+    child.count = 2;
+    branch.type = "idShared_Default";
+    CHECK(!sh_ai_fsm_has_native_path((const uint8_t *)&alert, &fields));
+    branch.type = "idShared_ExecuteChildFSM";
+    check_data.name = "unrelated";
+    CHECK(!sh_ai_fsm_has_native_path((const uint8_t *)&alert, &fields));
+    check_data.name = "ac_snapmap_check";
+    manager.child = NULL;
+    CHECK(!sh_ai_fsm_has_native_path((const uint8_t *)&alert, &fields));
+}
+
 int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 59);
+    CHECK(sh_script_ai_register() == 61);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();
@@ -2721,6 +2912,7 @@ int main(int argc, char **argv)
 
     test_catalogue(argc > 1 ? argv[1] : "fixtures\\scripts\\event_registry_13954591.txt");
     test_args();
+    test_native_path_child();
     test_move_state();
     test_geometry();
     test_commands();
@@ -2738,6 +2930,7 @@ int main(int argc, char **argv)
     test_sight_against_a_wall();
     test_brain_calls();
     test_snapmap_order();
+    test_stationary_enemy_native_path();
     test_release_and_anim_variable();
     test_relations();
     test_focus_guard();

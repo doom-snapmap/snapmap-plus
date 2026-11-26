@@ -52,9 +52,11 @@ void sh_script_handles_reset(void);
  * the runtime dispatches on it (copied; NULL keeps none). */
 sh_script_handle sh_script_handles_add_named(int mod, uint32_t spawn_id, const char *names, int *full);
 
-/* A handle for an entity no scripted mod owns (a player, an attacker): the existing record, else a new one
- * the sweep never reports as spawned and releases as "gone" with its entity. 0 for none, world or no room. */
 #define SH_SCRIPT_HANDLE_FOREIGN (-2)
+
+/* Attach a proven binding, including to a previously observed read-only handle. */
+sh_script_handle sh_script_handles_claim(int mod, uint32_t spawn_id, const char *names, int *full);
+/* A read-only reference to any entity. The sweep reports no spawn until a binding claims it. */
 sh_script_handle sh_script_handles_ref(uint32_t spawn_id);
 
 /* The entityDef chain recorded with `h` into out ("" when none). Returns its

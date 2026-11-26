@@ -29,6 +29,20 @@ func tinyFixture(t *testing.T, data string) string {
 	}
 	return mod
 }
+func useEarlierUnitTool(t *testing.T) {
+	t.Helper()
+	if len(earlierUnitBinary) != 0 {
+		return
+	}
+	tool := tinyResolver(t, t.TempDir(), nil).tool
+	data, err := os.ReadFile(tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	earlierUnitBinary = data
+	t.Cleanup(func() { earlierUnitBinary = nil })
+}
+
 func tinyResolver(t *testing.T, data string, z *zip.Reader) *earlierPins {
 	t.Helper()
 	p := newEarlierPins(data, os.Getenv("SNAPMAP_TEST_DOOM"), z)
@@ -45,14 +59,54 @@ func tinyResolver(t *testing.T, data string, z *zip.Reader) *earlierPins {
 	}
 	return p
 }
-func TestEarlierPinExactObjectAndFallback(t *testing.T) {
+func TestEarlierUnitOutputLongPathAndWriteFailure(t *testing.T) {
 	data := t.TempDir()
 	src := tinyFixture(t, data)
-	builds := filepath.Join(data, "mods", ".builds")
-	if err := os.Mkdir(builds, 0755); err != nil {
+	p := tinyResolver(t, data, nil)
+	defer p.close()
+	if err := p.ready(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(src, filepath.Join(builds, filepath.Base(src))); err != nil {
+	if err := convertEarlierFolders(data); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(data, strings.Repeat("long-path-", 12), strings.Repeat("profile-", 12), "新しいフォルダー")
+	if err := os.MkdirAll(out, 0755); err != nil {
+		t.Fatal(err)
+	}
+	const pin = "b3572a296c0f48da68fae29d3f95dc452bbfc06bdd713201212ebfa156d4939d"
+	args := []string{"mod=.", "out=" + out, "names=mods/k03sc6ny/a", "compose=1"}
+	result, err := p.run(src, args...)
+	if err != nil || !strings.Contains(result, "\t"+pin+"\t") {
+		t.Fatalf("writing unit: %v, %s", err, result)
+	}
+	manifest := filepath.Join(out, "units", pin+".json")
+	raw, err := os.ReadFile(manifest)
+	if err != nil || fmt.Sprintf("%x", sha256.Sum256(raw)) != pin {
+		t.Fatalf("manifest %s: %v", manifest, err)
+	}
+	if !isRegular(filepath.Join(out, "0-unit", "entities", "a.decl")) || !isRegular(filepath.Join(out, "units", pin+".keep.txt")) {
+		t.Fatal("missing composed unit or file list")
+	}
+	if err := os.Remove(manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(manifest, 0755); err != nil {
+		t.Fatal(err)
+	}
+	result, err = p.run(src, args...)
+	if err == nil || strings.Contains(result, "\t"+pin+"\t") || !strings.Contains(result, "cannot write unit") {
+		t.Fatalf("unwritable manifest: %v, %s", err, result)
+	}
+}
+
+func TestEarlierPinExactObjectAndFallback(t *testing.T) {
+	data := t.TempDir()
+	builds := filepath.Join(data, "mods", ".builds")
+	if err := os.MkdirAll(builds, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyEarlierPinTree("testdata/earlier-tiny", filepath.Join(builds, "alex.tiny@1.0.0+1")); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
@@ -60,7 +114,7 @@ func TestEarlierPinExactObjectAndFallback(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	archives, err := filepath.Glob(filepath.Join(data, "backups", "earlier-data", "mod-folders", "builds-*", "original"))
+	archives, err := filepath.Glob(filepath.Join(data, "cache", "legacy-builds", "*", "bundle.canonical.json"))
 	if err != nil || len(archives) != 1 || exists(builds) {
 		t.Fatalf("unexpected build archives: %v (%v)", archives, err)
 	}

@@ -481,8 +481,14 @@ static void test_spin_heal(void)
 
 /* ------------------------------- the brute, through the AI and combat calls */
 
-typedef struct bent { uint32_t id; int kind, alive, parked; float pos[3], ax[9], vel[3]; char def[64], name[32]; } bent;
-static bent g_b[4];   /* 0 the brute, 1 the player, 2.. projectiles */
+typedef struct bent {
+    uint32_t id;
+    int kind, alive, parked;
+    float pos[3], ax[9], vel[3];
+    char def[64], name[32];
+    const char *definition, *behavior;
+} bent;
+static bent g_b[12];
 static int g_bn;
 static uint32_t g_b_enemy;   /* the brute's enemy's spawn id, 0 none */
 static char g_b_log[4096];
@@ -507,7 +513,12 @@ static int b_place(void *e, const float *o, const float *a)
     if (a) memcpy(((bent *)e)->ax, a, 36);
     return 1;
 }
-static int b_def(void *e, char *out, size_t cap) { strcpy_s(out, cap, ((bent *)e)->def); return 1; }
+static int b_def(void *entity, char *out, size_t cap)
+{
+    bent *e = (bent *)entity;
+    strncpy_s(out, cap, e->definition ? e->definition : e->def, _TRUNCATE);
+    return 1;
+}
 static int b_event(void *ent, const char *name, const sh_script_earg *a, int n, sh_script_earg *ret, int post)
 {
     bent *e = (bent *)ent;
@@ -530,7 +541,7 @@ static int b_event(void *ent, const char *name, const sh_script_earg *a, int n, 
 }
 static int b_no_health(void *ai, float *cur, float *max) { (void)ai; (void)cur; (void)max; return 0; }
 static int b_no_heal(void *ai, float v) { (void)ai; (void)v; return 0; }
-static int b_no_node(void *ai, char *out, size_t cap) { (void)ai; (void)out; (void)cap; return 0; }
+static char *b_no_node(void *ai) { (void)ai; return NULL; }
 static void *b_no_spawn(const char *def, const float o[3], float yaw, const char **why)
 {
     (void)def; (void)o; (void)yaw;
@@ -682,10 +693,14 @@ static void test_brute(void)
     sh_script_handles_set_resolver(resolve);
 }
 
+#include "script_enemy_host.h"
+
 int main(int argc, char **argv)
 {
     const char *base = argc > 1 ? argv[1] : "fixtures\\scripts";
-    strcpy_s(g_base, sizeof g_base, base);
+    int probe = argc > 1 && !strcmp(argv[1], "--enemy-host");
+    if (probe && argc != 6) return 2;
+    if (!probe) strcpy_s(g_base, sizeof g_base, base);
     sh_script_handles_set_resolver(resolve);
     sh_script_set_map_provider(provider, NULL);
     sh_script_node_set_ops(&k_node_ops);
@@ -693,11 +708,13 @@ int main(int argc, char **argv)
     sh_script_api_install(NULL, 0, NULL);   /* the entity, animation, world and time calls */
     (void)sh_script_ai_register();
     sh_script_combat_register();
+    if (probe) return enemy_host(argv[2], argv[3], argv[4], argv[5]);
     test_play();
     test_examples_compile();
     test_door_nodes();
     test_spin_heal();
     test_brute();
+    test_enemy_bindings();
     printf(g_fail ? "script_e2e_test: FAILED\n" : "script_e2e_test: ok\n");
     return g_fail;
 }

@@ -23,7 +23,8 @@ enum {
     SH_CACHE_ABSENT_LOCAL,           /* D6a: a local row whose mod folder is not on this computer (manager Q8) */
     SH_CACHE_ABSENT_BROKEN,          /* D6a: a local row whose mod folder is here but cannot be used (its build failed) */
     SH_CACHE_ABSENT_LACKED,          /* D6a: a name a local row lists that its mod folder, here, no longer has */
-    SH_CACHE_ABSENT_REFUSED          /* a required decl failed to parse */
+    SH_CACHE_ABSENT_REFUSED,         /* a required decl failed to parse */
+    SH_CACHE_ABSENT_UNPUBLISHED      /* the published row has no unit for this object */
 };
 
 /* Read the pinned rows still used by library prefabs. The importer and collector agree on a complete library view. */

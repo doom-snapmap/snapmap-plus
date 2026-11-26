@@ -38,16 +38,18 @@ static int has_parent(const char *rel)
     return 0;
 }
 
+int sh_cachewrite_matches(const char *rel)
+{
+    if (!rel || !*rel || has_parent(rel)) return 0;
+    return begins_dir(rel, "generated") || (begins_dir(rel, "maps") && ends_with(rel, strlen(rel), ".flight"));
+}
+
 int sh_cachewrite_redirect(const char *rel, const char *root, char *out, size_t cap)
 {
     static const char BASE[] = "\\base\\";
     size_t rn, ln, i, at;
-    if (!rel || !root || !*rel || !*root || !out) return 0;
-    if (is_sep(rel[0])) return 0;
-    if (((rel[0] >= 'A' && rel[0] <= 'Z') || (rel[0] >= 'a' && rel[0] <= 'z')) && rel[1] == ':') return 0;
-    if (has_parent(rel)) return 0;
+    if (!root || !*root || !out || !sh_cachewrite_matches(rel)) return 0;
     ln = strlen(rel);
-    if (!begins_dir(rel, "generated") && !(begins_dir(rel, "maps") && ends_with(rel, ln, ".flight"))) return 0;
     rn = strlen(root);
     while (rn && is_sep(root[rn - 1])) rn--;
     if (!rn) return 0;

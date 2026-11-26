@@ -1,4 +1,4 @@
-/* Injects custom #str_ mappings into the native language dictionary from the extra.strings.en of every admitted
+/* Injects custom #str_ mappings into the native language dictionary from the selected language of every admitted
  * mod bundle (sh_modserve_each_bundle_extra), then baked defaults; keys are case-insensitive, first writer wins, and
  * two bundles giving one key different text log a REFUSED line. A mod's own keys apply only from the build that
  * serves its names for the open map, its string edits only where its edits apply. Each pass plans the whole change
@@ -23,6 +23,8 @@ int sh_strids_rearm(void);
  * serving engine at install; a rearm without them does not run. */
 struct sh_process_heap_api;
 void sh_strids_set_process_heap(const struct sh_process_heap_api *api);
+/* The serving engine supplies the current sys_lang on each dictionary build. */
+void sh_strids_set_language_reader(char *(*read_language)(void));
 
 /* Any thread: a serving index was published, so the bundle layer may have changed. Only marks the refresh pending. */
 void sh_strids_request_refresh(void);

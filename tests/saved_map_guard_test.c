@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../src/fault_shield/saved_map_guard.c"
+#include "saved_map_fixture.h"
 
 static int failed, emitted, tells, prepared, stolen_seen;
 static char told[4096];
@@ -63,9 +64,10 @@ int main(void)
     wchar_t tmp[MAX_PATH], slot[MAX_PATH], acct[MAX_PATH], p1[MAX_PATH], p2[MAX_PATH];
     const char *names[3];
     char want[MAX_PATH];
-    GetTempPathW(MAX_PATH, tmp);
-    _snwprintf_s(root, MAX_PATH, _TRUNCATE, L"%ssmg_test_%lu", tmp, GetCurrentProcessId());
-    CreateDirectoryW(root, NULL);
+    DWORD path_len = GetTempPathW(MAX_PATH, tmp);
+    if (!path_len || path_len >= MAX_PATH ||
+        _snwprintf_s(root, MAX_PATH, _TRUNCATE, L"%ssmg_test_%lu_%llu", tmp, GetCurrentProcessId(), GetTickCount64()) < 0 ||
+        !CreateDirectoryW(root, NULL)) return 1;
     _snwprintf_s(saves, MAX_PATH, _TRUNCATE, L"%s\\savegame.user", root);
     _snwprintf_s(acct, MAX_PATH, _TRUNCATE, L"%s\\7656119", saves);
     _snwprintf_s(slot, MAX_PATH, _TRUNCATE, L"%s\\SNAPMAPS%S", acct, ID1);
@@ -76,8 +78,18 @@ int main(void)
     wfile(slot, L"map.decl", "zlib bytes the build cannot read");
     wfile(slot, L"map.decl.verify", "0123456789012345678901234567890123456789");
     wfile(slot, L"game.details", "checksum=1\nmetadata={\"name\":\"test5\",\"localId\":\"x\"}\n");
-    wcscpy_s(g_saves_root, SH_WPATH_MAX, saves);
+    static char save_profiles[SH_U8PATH_MAX];
+    CHECK(sh_wpath_utf8(saves, save_profiles, sizeof save_profiles));
+    sh_saved_maps_set_root(save_profiles);
+    bind_save_session("", 7656119);
     wcscpy_s(g_kept_root, SH_WPATH_MAX, kept);
+
+    /* A different signed-in user cannot cause this profile's rejected slot to be copied. */
+    bind_save_session("", 222);
+    names[0] = ID1;
+    run(names, 1);
+    CHECK(!tells && GetFileAttributesW(kept) == INVALID_FILE_ATTRIBUTES);
+    bind_save_session("", 7656119);
 
     /* A rejected slot is never deleted; a byte-exact copy is kept and named. */
     names[0] = "SNAPMAPSAAAA6E84712D438B91B0";
@@ -94,7 +106,7 @@ int main(void)
     CHECK(tells == 1 && strstr(told, "\"test5\"") && strstr(told, "with a copy to send in a report in"));
     CHECK(strlen(told) <= 255);   /* the engine's dialog holds 255 bytes */
     sh_wpath_utf8(kept, want, sizeof want);
-    CHECK(strstr(told, want) != NULL);
+    CHECK(strstr(told, want) || strstr(told, "your Snapmap+ profile under kept-maps\\SNAPMAPSAAAA6E84712D438B91B0"));
     CHECK(emitted >= 2);
 
     /* The scan runs at every My Maps visit: one sentence per slot per session,
@@ -128,10 +140,12 @@ int main(void)
         memset(&k, 0, sizeof k);
         k.result = SMG_KEPT_COPY;
         strcpy_s(k.folder, sizeof k.folder, "SNAPMAPSAAAA6E84712D438B91B0");
+        strcpy_s(k.where, sizeof k.where, "C:\\short\\kept-maps\\slot");
+        CHECK(smg_sentence(&k, said, sizeof said) && strstr(said, k.where));
         memset(k.title, 'T', 90);
         memset(k.where, 'p', 300);
         CHECK(smg_sentence(&k, said, sizeof said) && strlen(said) <= 255);
-        CHECK(strstr(said, "%LOCALAPPDATA%\\snapmap-plus\\kept-maps\\SNAPMAPSAAAA") != NULL);
+        CHECK(strstr(said, "your Snapmap+ profile under kept-maps\\SNAPMAPSAAAA") != NULL);
     }
 
     /* An unreadable list deletes nothing and does not fault. */
@@ -142,6 +156,7 @@ int main(void)
     g_sig.name = "DeleteBadSaveSlots"; g_sig.status = SIG_OK; g_sig.addr = (uintptr_t)&g_sig;
     CHECK(saved_map_guard_install(&g_sig, 1) && prepared == 1 && stolen_seen == 19);
 
+    cleanup();
     printf("saved_map_guard_test: %d failures\n", failed);
     return failed ? 1 : 0;
 }

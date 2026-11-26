@@ -70,6 +70,14 @@ static int g_scope_refreshes;
 static const char *g_expected_inherit;
 static int g_palette_checks, g_palette_rejected;
 
+static int staged_direct;
+void sh_modserve_prepare_prefab_actors(const char *json, size_t len, const sh_modmanifest_list *rows)
+{
+    (void)rows;
+    if (sh_modserve_prefab_has_direct_actors(json, len)) staged_direct++;
+}
+void sh_modserve_finish_prefab_actors(const char *json, size_t len) { (void)json; (void)len; }
+
 int sh_modserve_prefab_rows(const char *const *inherits, size_t count, const char **missing)
 {
     if (missing) *missing = NULL;
@@ -632,7 +640,7 @@ static void status(const sh_modmanifest_row *door)
     size_t missing = 9;
     char *json, out[2048];
     sh_module_prefab_call call;
-    printf("-- the status names each mod and whether it is installed\n");
+    printf("-- the status names each mod and whether its content is ready\n");
     memset(&rows, 0, sizeof rows);
     memset(&ghost, 0, sizeof ghost);
     strcpy_s(ghost.salt, sizeof ghost.salt, "ghostmod");
@@ -743,7 +751,7 @@ static int spit(const char *path, const void *data, size_t len)
     return ok;
 }
 
-static const char *const REFUSE_TAIL = " Ask its author for the prefab's .zip export.";
+static const char *const REFUSE_TAIL = " Use Import in the Prefabs tab to open the author's prefab ZIP.";
 
 static void rows_of(sh_modmanifest_list *rows, const sh_modmanifest_row *door, int with_ghost)
 {
@@ -1432,7 +1440,7 @@ static void resolving(const sh_modmanifest_row *door)
     reset_fakes();
     rows_of(&rows, door, 1);
     r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
-    _snprintf_s(want, sizeof want, _TRUNCATE, "This prefab was not placed: it needs ghost.mod, which is not on this computer.%s",
+    _snprintf_s(want, sizeof want, _TRUNCATE, "This prefab needs content from ghost.mod.%s",
                 REFUSE_TAIL);
     CHECK(r == SH_PREFAB_MODS_REFUSED && seq == 0 && !strcmp(msg, want));
     CHECK(F.prints == 1 && !strcmp(F.last_print, want) && F.toasts == 1 && !strcmp(F.last_toast, want));
@@ -1461,7 +1469,7 @@ static void resolving(const sh_modmanifest_row *door)
     }
     r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
     _snprintf_s(want, sizeof want, _TRUNCATE,
-                "This prefab was not placed: it needs ghost.mod, phantom.mod, which are not on this computer.%s", REFUSE_TAIL);
+                "This prefab needs content from ghost.mod, phantom.mod.%s", REFUSE_TAIL);
     CHECK(r == SH_PREFAB_MODS_REFUSED && !strcmp(msg, want) && !strcmp(F.last_print, want) && !strcmp(F.last_toast, want));
     CHECK(F.attaches == 0);   /* the served door is not attached either: nothing of a refused prefab reaches the map */
     sh_modmanifest_list_free(&rows);
@@ -1472,7 +1480,7 @@ static void resolving(const sh_modmanifest_row *door)
     pinned_row(&rows, "ghostmod", "ghost.mod", HASH_UNIT);   /* no manifest of it here */
     CHECK(sh_cache_unit_state(HASH_UNIT, NULL, NULL, NULL) == -1);
     r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
-    _snprintf_s(want, sizeof want, _TRUNCATE, "This prefab was not placed: it needs ghost.mod, which is not on this computer.%s",
+    _snprintf_s(want, sizeof want, _TRUNCATE, "This prefab needs content from ghost.mod.%s",
                 REFUSE_TAIL);
     CHECK(r == SH_PREFAB_MODS_REFUSED && !strcmp(msg, want) && !strcmp(F.last_print, want) && !strcmp(F.last_toast, want));
     CHECK(F.pinned_calls == 0 && F.attaches == 0 && sh_prefab_mods_poll(seq) == 0);
@@ -1501,7 +1509,7 @@ static void resolving(const sh_modmanifest_row *door)
     rows_of(&rows, NULL, 1);
     pinned_row(&rows, "presentm", "present.mod", unit);
     r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
-    CHECK(r == SH_PREFAB_MODS_REFUSED && F.pinned_calls == 0 && strstr(msg, "it needs ghost.mod, which is not on this computer."));
+    CHECK(r == SH_PREFAB_MODS_REFUSED && F.pinned_calls == 0 && strstr(msg, "This prefab needs content from ghost.mod."));
     sh_modmanifest_list_free(&rows);
 
     printf("-- the open map refuses the pinned rows: the cause, in the placement's sentence\n");
@@ -1570,7 +1578,7 @@ static void resolving(const sh_modmanifest_row *door)
         }
         /* The module the ghost row provides is a mod, not a missing room: the row is what is missing. */
         r = HO(msg, sh_prefab_mods_resolve_main(MODDED, sizeof MODDED - 1, &rows, "Rooms", &seq, HO_P(0)));
-        _snprintf_s(want, sizeof want, _TRUNCATE, "This prefab was not placed: it needs ghost.mod, which is not on this computer.%s",
+        _snprintf_s(want, sizeof want, _TRUNCATE, "This prefab needs content from ghost.mod.%s",
                     REFUSE_TAIL);
         CHECK(r == SH_PREFAB_MODS_REFUSED && !strcmp(msg, want) && seq == 0);
         /* Nothing waits: the next placement is not held up by it. */
@@ -1597,6 +1605,14 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Door.json", lib);
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_MODS_RESOLVE;
+    {
+        static const char actor[] = "{/*}*/\"entities\":[{\"entityDef\":{\"className\":\"idAI2\",\"inherit\":\"ai/demon/baron_coop\"}}]}";
+        int before = staged_direct, calls = F.main_calls;
+        call.text = actor;
+        call.text_len = sizeof actor - 1;
+        CHECK(pm_slot(&call, out, sizeof out) == SH_PREFAB_MODS_PLACE && staged_direct == before + 1 && F.main_calls == calls + 1);
+    }
+    reset_fakes();
     call.text = OBJECT_PREFAB;   /* no block, no sidecar */
     call.text_len = sizeof OBJECT_PREFAB - 1;
     call.path = NULL;
@@ -2074,8 +2090,8 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
             free(with);
             CHECK(HO2(name, msg, sh_prefab_mods_import(lone, libD, HO_P(0), HO_P(1))) == 1);
             CHECK(!strcmp(name, "Ghost door") &&
-                  !strcmp(msg, "Imported prefab Ghost door. It also needs ghost.mod, which the export "
-                               "does not carry."));
+                  !strcmp(msg, "Imported prefab Ghost door. Missing content from ghost.mod. "
+                               "Use Import in the Prefabs tab to open the author's full prefab ZIP."));
         }
         /* the same for a pinned row whose units are not carried, and for the units the prefab names but the ZIP lacks */
         {
@@ -2091,8 +2107,8 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
             sh_modmanifest_list_free(&gl);
             CHECK(HO2(name, msg, sh_prefab_mods_import(lone, libD, HO_P(0), HO_P(1))) == 1);
             CHECK(!strcmp(name, "Pinned ghost") &&
-                  !strcmp(msg, "Imported prefab Pinned ghost. It also needs ghost.mod, which the export "
-                               "does not carry."));
+                  !strcmp(msg, "Imported prefab Pinned ghost. Missing content from ghost.mod. "
+                               "Use Import in the Prefabs tab to open the author's full prefab ZIP."));
             /* the prefab as the export wrote it, without its units */
             {
                 static const char *const ONE[] = { "Door.json" };
@@ -2111,8 +2127,32 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
                     use_store(storeB);
                 }
                 CHECK(HO2(name, msg, sh_prefab_mods_import(lonez, libF, HO_P(0), HO_P(1))) == 1);
-                CHECK(!strcmp(msg, "Imported prefab Door. It also needs test.door, which the export "
-                                   "does not carry."));
+                CHECK(!strcmp(msg, "Imported prefab Door. Missing content from test.door. "
+                                   "Use Import in the Prefabs tab to open the author's full prefab ZIP."));
+                _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Door.json", libF);
+                text = slurp(path, &len);
+                CHECK(text && zip_door && len == zip_door_len && !memcmp(text, zip_door, len));
+                sh_modmanifest_list rows = {0};
+                size_t missing = 0;
+                CHECK(sh_prefab_mods_rows_of(text, len, path, &rows) == 1 && rows.rows[0].pinned);
+                char *status = sh_prefab_mods_status_json(&rows, &missing);
+                CHECK(status && missing == 1 && strstr(status, "\"installed\":false") && strstr(status, "\"state\":\"missing\""));
+                free(status);
+                int calls = F.pinned_calls, seq = 0;
+                CHECK(HO(msg, sh_prefab_mods_resolve_main(text, len, &rows, "Door", &seq, HO_P(0))) == SH_PREFAB_MODS_REFUSED &&
+                      strstr(msg, "needs content from test.door.") && F.pinned_calls == calls);
+                CHECK(HO2(name, msg, sh_prefab_mods_import(path, libF, HO_P(0), HO_P(1))) == 0 &&
+                      !strcmp(msg, "Prefab Door is already in your library. Missing content from test.door. "
+                                   "Use Import in the Prefabs tab to open the author's full prefab ZIP."));
+                CHECK(HO2(name, msg, sh_prefab_mods_import(zipA, libF, HO_P(0), HO_P(1))) == 0 &&
+                      !strcmp(msg, "Prefab Door is already in your library; its mod content was added."));
+                status = sh_prefab_mods_status_json(&rows, &missing);
+                CHECK(status && missing == 0 && strstr(status, "\"installed\":true") && strstr(status, "\"state\":\"served\""));
+                free(status);
+                CHECK(HO(msg, sh_prefab_mods_resolve_main(text, len, &rows, "Door", &seq, HO_P(0))) == SH_PREFAB_MODS_PLACE &&
+                      F.pinned_calls == calls + 1 && mod_folders(storeB) == 0);
+                sh_modmanifest_list_free(&rows);
+                free(text);
             }
         }
     }

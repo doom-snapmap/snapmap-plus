@@ -74,6 +74,7 @@ static size_t g_injected_n, g_injected_capacity;
 typedef struct strids_owned_row {
     char *id;
     void *key_handle;
+    void *value_handle;
     unsigned int hash;
     char *text;
     unsigned char original[32]; /* borrowed native pointers, restored on retirement */
@@ -193,6 +194,8 @@ static int find_live_owned(const strids_owned_row *row, uint32_t *at)
             if (g_index[i].index >= count) return -1;
             entry = array + (size_t)g_index[i].index * 32u;
             if (*(unsigned int *)entry != row->hash || *(void **)(entry + 8) != row->key_handle) return -1;
+            /* A new native language table can reuse the interned key with a different stock value. */
+            if (*(void **)(entry + 16) != row->value_handle) continue;
             if (found) return -1; /* Ambiguous ownership must not touch a row. */
             found = 1;
             *at = g_index[i].index;
@@ -353,7 +356,7 @@ static int strids_commit(void)
     strids_retirement *retire = NULL;
     char **keys = NULL;
     size_t i, nretire = 0, nnew = 0, kept;
-    int ok = 0;
+    int ok = 0, had_appended = 0, kept_appended = 0;
 
     g_table_changed = 0;
     if (g_pass_failed || !strids_table(&array, &count)) return 0;
@@ -364,9 +367,15 @@ static int strids_commit(void)
         uint32_t at = 0;
         int r = find_live_owned(&g_owned_rows[i], &at);
         if (r < 0) { free(live_at); return 0; }
+        if (!g_owned_rows[i].replaced) { had_appended = 1; kept_appended |= r; }
         if (r == 0) { owned_free(&g_owned_rows[i]); continue; }
         live_at[kept] = at;
         g_owned_rows[kept++] = g_owned_rows[i];
+    }
+    /* A full native reload can intern both the same key and the same edited value in a fresh stock row. */
+    if (had_appended && !kept_appended) {
+        for (i = 0; i < kept; i++) owned_free(&g_owned_rows[i]);
+        kept = 0;
     }
     if (kept != g_owned_n) {
         char line[160];
@@ -445,6 +454,7 @@ static int strids_commit(void)
         /* AtomicString assignment interns the text and writes its borrowed pointer, without releasing the
          * previous value; dictionary rows own no pool memory. */
         g_idstr_ctor(live + 16, w->text);
+        o->value_handle = *(void **)(live + 16);
         memcpy(live + 24, &length, 4);
         memcpy(live + 28, &length, 4);
         o->text = w->text;
@@ -474,6 +484,7 @@ static int strids_commit(void)
         o->id = w->id;
         w->id = NULL;
         o->key_handle = *(void **)(rec + 8);
+        o->value_handle = *(void **)(rec + 16);
         o->hash = steps[i].hash;
         o->text = w->text;
         w->text = NULL;
@@ -560,7 +571,36 @@ static void free_bundle_names(void)
 
 typedef struct strids_bundle_pass {
     int debug;
+    const char *locale;
 } strids_bundle_pass;
+
+static char *(*g_read_language)(void);
+
+void sh_strids_set_language_reader(char *(*read_language)(void))
+{
+    g_read_language = read_language;
+    sh_strids_request_refresh();
+}
+
+static const char *strids_locale(void)
+{
+    static const struct { const char *table, *locale; } languages[] = {
+        { "english", "en" }, { "french", "fr" }, { "german", "de" }, { "italian", "it" },
+        { "spanish", "es" }, { "latin_spanish", "es-419" }, { "portuguese", "pt" }, { "polish", "pl" },
+        { "russian", "ru" }, { "japanese", "ja" }, { "chinese", "zh-Hant" }
+    };
+    char *language = g_read_language ? g_read_language() : NULL;
+    const char *locale = "en";
+    for (size_t i = 0; language && i < sizeof languages / sizeof languages[0]; i++)
+        if (!_stricmp(language, languages[i].table)) { locale = languages[i].locale; break; }
+    free(language);
+    return locale;
+}
+
+static int strids_pair_cmp(const void *left, const void *right)
+{
+    return _stricmp(((const sh_json_member *)left)->key, ((const sh_json_member *)right)->key);
+}
 
 /* The bundles with strings, and whether the last pass applied their own keys and their string edits
  * (sh_strids_scope_check). */
@@ -578,13 +618,12 @@ static int strids_own_live(const char *hash)
     return hash && sh_modserve_bundle_scope(hash, &si) && si.names_live;
 }
 
-/* One admitted bundle: extra.strings.en is a flat object of key -> text without the #str_ prefix (a mod's keys
- * are <salt>_<name>). Other languages are ignored; a malformed strings object refuses that bundle's strings only. */
+/* Each key keeps its identity across languages. Missing translations use that mod's English text. */
 static void inject_bundle(void *context, const char *id, const char *hash, int place, const char *extra)
 {
     strids_bundle_pass *pass = (strids_bundle_pass *)context;
-    sh_json_object root = {0}, languages = {0}, pairs = {0};
-    const char *strings, *english;
+    sh_json_object root = {0}, languages = {0}, pairs = {0}, translated = {0};
+    const char *strings, *english, *selected;
     size_t before, name_cap, i;
     char *name;
     int owner, edits = 0, live = 1, own;
@@ -596,8 +635,12 @@ static void inject_bundle(void *context, const char *id, const char *hash, int p
     if (*strings != '{' || !sh_json_parse_object(strings, strlen(strings), STRIDS_BUNDLE_JSON_DEPTH, &languages))
         goto refused;
     english = sh_json_object_get(&languages, "en");
-    if (!english) goto done;
-    if (*english != '{' || !decode_pairs(english, strlen(english), &pairs)) goto refused;
+    selected = strcmp(pass->locale, "en") ? sh_json_object_get(&languages, pass->locale) : NULL;
+    if (!english && !selected) goto done;
+    if (english && !decode_pairs(english, strlen(english), &pairs)) goto refused;
+    if (selected && !decode_pairs(selected, strlen(selected), &translated)) goto refused;
+    if (translated.count > 1)
+        qsort(translated.members, translated.count, sizeof *translated.members, strids_pair_cmp);
     name_cap = strlen(id) + 1;
     if (g_bundle_names_n >= INT_MAX ||
         !strids_reserve((void **)&g_bundle_names, &g_bundle_names_capacity,
@@ -613,6 +656,7 @@ static void inject_bundle(void *context, const char *id, const char *hash, int p
     /* A key the game or the product defines is an edit of that string and applies where the mod's other edits
      * do (an editor-tweak mod's in every map, any other mod's in maps that declare it). */
     for (i = 0; i < pairs.count; i++) edits |= sh_strkey_is_edit(pairs.members[i].key, pairs.members[i].key_length);
+    for (i = 0; i < translated.count; i++) edits |= sh_strkey_is_edit(translated.members[i].key, translated.members[i].key_length);
     live = edits ? sh_modserve_bundle_edits_live(hash) : 0;
     own = strids_own_live(hash);
     AcquireSRWLockExclusive(&g_scoped_lock);
@@ -625,10 +669,17 @@ static void inject_bundle(void *context, const char *id, const char *hash, int p
         g_pass_failed = 1;
     }
     ReleaseSRWLockExclusive(&g_scoped_lock);
-    for (i = 0; i < pairs.count; i++) {
-        int edit = sh_strkey_is_edit(pairs.members[i].key, pairs.members[i].key_length);
+    for (i = 0; i < translated.count + pairs.count; i++) {
+        sh_json_member *member;
+        if (i < translated.count) member = &translated.members[i];
+        else {
+            member = &pairs.members[i - translated.count];
+            if (translated.count && bsearch(member, translated.members, translated.count,
+                                            sizeof *translated.members, strids_pair_cmp)) continue;
+        }
+        int edit = sh_strkey_is_edit(member->key, member->key_length);
         if (edit ? !live : !own) continue;
-        want_row(pairs.members[i].key, pairs.members[i].value_json, strlen(pairs.members[i].value_json), owner,
+        want_row(member->key, member->value_json, strlen(member->value_json), owner,
                  STRIDS_LAYER_BUNDLE);
     }
     if (pass && pass->debug) {
@@ -642,11 +693,12 @@ refused:
     {
         char line[256];
         _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "STRINGS: REFUSED the strings of bundle %s: expected extra.strings.en to be a JSON "
+                    "STRINGS: REFUSED the strings of bundle %s: expected each selected language to be a JSON "
                     "object of valid text strings and nonempty IDs", id);
         backend_log(line);
     }
 done:
+    sh_json_object_free(&translated);
     sh_json_object_free(&pairs);
     sh_json_object_free(&languages);
     sh_json_object_free(&root);
@@ -658,6 +710,7 @@ static void inject_bundles(void)
 {
     strids_bundle_pass pass;
     pass.debug = strids_debug();
+    pass.locale = strids_locale();
     if (sh_modserve_each_bundle_extra(inject_bundle, &pass) < 0) {
         g_pass_failed = 1;
         backend_log("STRINGS: REFUSED: the bundle string layer could not be read (out of memory)");

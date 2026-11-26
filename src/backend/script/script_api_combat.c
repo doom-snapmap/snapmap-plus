@@ -650,6 +650,11 @@ static int place_effect(lua_State *L, int ent_index, const float pos[3], const f
     return e->place(ent, pos, NULL);
 }
 
+int sh_script_combat_fx_condition(const char *name)
+{
+    return CE(fx_condition) && CE(start_fx) ? g_ce.fx_condition(name) : -1;
+}
+
 static int fx_condition(lua_State *L, int arg, const char *call)
 {
     const char *name = sh_script_api_check_text(L, arg, call, "the effect condition (FX_... of the entity's fx decl)", SH_SCRIPT_TEXT_ANY);
@@ -748,19 +753,23 @@ static int play_sdk_effect(lua_State *L, const char *emitter)
     return 1;
 }
 
+int sh_script_combat_start_owner_fx(void *ent, int condition)
+{
+    sh_script_earg args[2];
+    if (!ent || condition < 0) return 0;
+    if (fx_by_entity_call(ent)) return CE(start_fx) && g_ce.start_fx(ent, condition);
+    args[0] = sh_script_earg_no_anim();
+    args[1] = sh_script_earg_int(condition);
+    return sh_script_api_event(ent, "ae_startFX_Networked", args, 2, NULL);
+}
+
 /* play_effect(e, condition) or play_effect(effect, pos, [dir], [options]) or play_effect(effect, e, [joint], [options]) */
 static int l_fx(lua_State *L)
 {
     if (luaL_testudata(L, 1, "entity")) {
-        sh_script_earg a[2];
-        int cond;
         void *ent = sh_script_api_owned(L, 1, "play_effect", "start effects on", NULL);
-        cond = fx_condition(L, 2, "play_effect");
-        if (!ent || cond < 0) return bool1(L, 0);
-        if (fx_by_entity_call(ent)) return bool1(L, CE(start_fx) && g_ce.start_fx(ent, cond));
-        a[0] = sh_script_earg_no_anim();
-        a[1] = sh_script_earg_int(cond);
-        return bool1(L, sh_script_api_event(ent, "ae_startFX_Networked", a, 2, NULL));
+        int cond = fx_condition(L, 2, "play_effect");
+        return bool1(L, sh_script_combat_start_owner_fx(ent, cond));
     } else {
         float pos[3], dir[3];
         int have_dir;

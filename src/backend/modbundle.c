@@ -11,6 +11,7 @@
 #pragma comment(lib, "shell32.lib")   /* SHGetKnownFolderPath */
 #pragma comment(lib, "ole32.lib")     /* CoTaskMemFree */
 
+#include "../common/profile_dir.h"
 #include "modbundle.h"
 #include "modprog.h"    /* SH_MODPROG_CONTAINER: the render programs the product derives */
 #include "modlook.h"    /* sh_look_compile: the Graphics SDK's looks, checked and scanned as the engine reads them */
@@ -218,16 +219,12 @@ const char *sh_mb_user_root(void)
 {
     static char *volatile root;
     PWSTR known = NULL;
-    char *u, *made;
+    char *made;
     if (root) return root;
-    if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &known)) || !known) {
-        if (known) CoTaskMemFree(known);
-        return NULL;
-    }
-    u = sh_mb_utf8(known);
+    known = sh_profile_dir();
+    if (!known) return NULL;
+    made = sh_mb_utf8(known);
     CoTaskMemFree(known);
-    made = u ? sh_textf("%s\\snapmap-plus", u) : NULL;
-    free(u);
     if (!made) return NULL;
     /* The first thread to resolve it keeps its copy; a later one frees its own. */
     if (InterlockedCompareExchangePointer((void *volatile *)&root, made, NULL) != NULL) free(made);
@@ -1499,7 +1496,7 @@ int sh_mb_logical_name(const char *r, char type[SH_MB_TYPE_CAP], char **name)
 }
 
 /* The engine's binary name for an extension-differs load: "<root>/<list type>/<stem>.<ext>", stem = name
- * without extension, cut at '$', then every character outside [A-Za-z0-9$./\\] becomes '_' (':' kept at
+ * without extension or compression suffix, then every character outside [A-Za-z0-9$./\\] becomes '_' (':' kept at
  * index 1). The product lower-cases what the hook sees. */
 /* The engine's binary name as a heap string, or NULL (no stem, or out of memory). */
 static char *mb_binary_name(const char *root, const char *list, const char *name, const char *ext)
@@ -1522,6 +1519,18 @@ static char *mb_binary_name(const char *root, const char *list, const char *name
         out[i] = c;
     }
     return out;
+}
+
+/* Some material stages explicitly request a compressed image. Keep its on-disk suffix. */
+static char *mb_image_variant(const char *list, const char *name, const char *suffix)
+{
+    char *base = mb_binary_name("generated", list, name, "bimage"), *variant = NULL;
+    if (base) {
+        variant = sh_textf("%.*s%s.bimage", (int)(strlen(base) - 7), base, suffix);
+        if (variant) mb_lower(variant);
+        free(base);
+    }
+    return variant;
 }
 
 static char *mb_own_name(const char *name)
@@ -1626,12 +1635,14 @@ int sh_mb_need_requests(const char *type, const char *name, char *out[], int max
     }
     if (mb_ieq_n(type, tl, "image")) {
         if (mb_iends(name, nl, ".bimage")) { mb_put_req(out, &k, max, mb_own_name(name)); return k; }
+        const char *slash = strrchr(name, '/'), *suffix = strchr(slash ? slash : name, '$');
+        int decal = nl > 5 && !_strnicmp(name, "mods/", 5);
+        if (suffix && suffix[1] && strspn(suffix + 1, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") == strlen(suffix + 1)) {
+            mb_put_req(out, &k, max, mb_image_variant("image", name, suffix));
+            if (decal) mb_put_req(out, &k, max, mb_image_variant("decalatlas", name, suffix));
+        }
         mb_put_req(out, &k, max, mb_binary_name("generated", "image", name, "bimage"));
-        /* A mod's own decal image may sit in the decal atlas folder only: when
-         * a decal material loads, the engine puts its images into its decal
-         * atlas itself (generated/decalatlas/mods/<salt>/...). */
-        if (k && nl > 5 && !_strnicmp(name, "mods/", 5))
-            mb_put_req(out, &k, max, mb_binary_name("generated", "decalatlas", name, "bimage"));
+        if (decal) mb_put_req(out, &k, max, mb_binary_name("generated", "decalatlas", name, "bimage"));
         return k;
     }
     if (mb_ieq_n(type, tl, "model")) {
@@ -1641,6 +1652,15 @@ int sh_mb_need_requests(const char *type, const char *name, char *out[], int max
          * and 13954591 holds no cooked/model/md6/ row. */
         mb_put_req(out, &k, max, mb_binary_name("cooked", "model", name, "bmodel"));
         mb_put_req(out, &k, max, mb_binary_name("generated", "model", name, "bmodel"));
+        return k;
+    }
+    if (mb_ieq_n(type, tl, "discreteAnimation")) {
+        mb_put_req(out, &k, max, mb_iends(name, nl, ".dmodel") ? mb_own_name(name)
+                                                                : mb_binary_name("generated", "discreteanimation", name, "dmodel"));
+        return k;
+    }
+    if (mb_ieq_n(type, tl, "cm") && mb_starts(name, "generated/cm/") && mb_iends(name, nl, ".bcm")) {
+        mb_put_req(out, &k, max, mb_own_name(name));
         return k;
     }
     if (mb_ieq_n(type, tl, "swf")) {
@@ -1755,11 +1775,12 @@ static mb_tok mb_next_tok(const unsigned char *t, size_t len, size_t *pos)
 typedef struct mb_scan {
     const char *decl_type;
     int is_md6, is_sedef, is_material, is_animweb, is_fx, is_emitter, is_entitydef;
-    sh_mb_need_fn fn;
+    sh_mb_need_fn fn, optional;
     void *ctx;
     const char *block[MB_SCAN_DEPTH];
     size_t block_n[MB_SCAN_DEPTH];
     int depth;
+    mb_tok render_model, clip_name, clip_type;
 } mb_scan;
 
 /* 1 when a referenced name is a mod's ("mods/...") or one the Graphics SDK derives ("snapmapplus/..." or
@@ -1768,6 +1789,94 @@ static int mb_sdk_or_mod(const char *v, size_t vn)
 {
     return (vn > 5 && mb_ieq_n(v, 5, "mods/")) || (vn > 12 && mb_ieq_n(v, 12, "snapmapplus/")) ||
            (vn > 16 && mb_ieq_n(v, 16, "snapmapplus_sdk_"));
+}
+
+static int mb_in_block(const mb_scan *sc, const char *name)
+{
+    int i;
+    for (i = 0; i < sc->depth && i < MB_SCAN_DEPTH; i++)
+        if (sc->block[i] && mb_ieq_n(sc->block[i], sc->block_n[i], name)) return 1;
+    return 0;
+}
+
+typedef struct mb_ref_field {
+    const char *owner, *field, *type;
+    int list;
+} mb_ref_field;
+
+static const mb_ref_field MB_REF_FIELDS[] = {
+#include "mod_asset_fields.inc"
+};
+
+static const char *mb_reflected_field(const char *owner, const char *field, size_t len, int list)
+{
+    size_t lo = 0, hi = sizeof MB_REF_FIELDS / sizeof *MB_REF_FIELDS;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        const mb_ref_field *row = &MB_REF_FIELDS[mid];
+        int cmp = strcmp(owner, row->owner);
+        if (!cmp) {
+            size_t n = strlen(row->field);
+            cmp = _strnicmp(field, row->field, len < n ? len : n);
+            if (!cmp) cmp = len < n ? -1 : len > n ? 1 : list - row->list;
+        }
+        if (!cmp) return row->type;
+        if (cmp < 0) hi = mid;
+        else lo = mid + 1;
+    }
+    return NULL;
+}
+
+static const char *mb_asset_field(const mb_scan *sc, const char *key, size_t len)
+{
+    int list = len > 5 && mb_ieq_n(key, 5, "item[") && sc->depth > 0 && sc->depth <= MB_SCAN_DEPTH;
+    const char *type = list ? mb_reflected_field(sc->decl_type, sc->block[sc->depth-1], sc->block_n[sc->depth-1], 1)
+                            : mb_reflected_field(sc->decl_type, key, len, 0);
+    if (type) return type;
+    if (sc->is_md6 && mb_ieq_n(key, len, "sound")) return "sound";
+    if (sc->is_entitydef) {
+        if (mb_ieq_n(key, len, "componentDecl") && mb_in_block(sc, "aiConstants") && mb_in_block(sc, "components") &&
+            sc->depth > 0 && sc->depth <= MB_SCAN_DEPTH) {
+            static const char *const types[] = {
+#include "mod_ai_component_types.inc"
+            };
+            const char *p = sc->block[sc->depth-1];
+            size_t n = sc->block_n[sc->depth-1], index = 0, i = 4;
+            if (n < 6 || n > 7 || !mb_ieq_n(p, 4, "ptr[") || p[n-1] != ']') return NULL;
+            for (; i+1 < n; i++) {
+                if (p[i] < '0' || p[i] > '9') return NULL;
+                index = index * 10 + (size_t)(p[i]-'0');
+            }
+            return index < sizeof types / sizeof *types ? types[index] : NULL;
+        }
+        if (mb_ieq_n(key, len, "inventoryDecl") && mb_in_block(sc, "startingInventory")) return "inventory";
+        if (mb_ieq_n(key, len, "decl")) {
+            if (mb_in_block(sc, "behaviors")) return "aiBehavior";
+            if (mb_in_block(sc, "threatManagementDecls")) return "aiThreatManagement";
+        }
+        if (len > 8 && mb_ieq_n(key, 8, "animwebs") && key[8] == '[' && mb_in_block(sc, "animWebs")) return "animWeb";
+        if (mb_in_block(sc, "actorConstants") &&
+            ((len >= 19 && mb_ieq_n(key, 19, "footstepEffectTable") && (len == 19 || key[19] == '_')) ||
+             (len >= 20 && mb_ieq_n(key, 20, "ledgeGrabEffectTable") && (len == 20 || key[20] == '_'))))
+            return "projectileImpactEffect";
+    }
+    return NULL;
+}
+
+/* The native breakable grammar accepts unquoted paths, including Windows separators. */
+static void mb_breakable_need(mb_scan *sc, const char *type, const mb_tok *value)
+{
+    if (!value->n || value->p[0] == '_') return;
+    if (!memchr(value->p, '\\', value->n)) {
+        sc->optional(sc->ctx, type, value->p, value->n);
+    } else {
+        char *name = sh_textn(value->p, value->n);
+        size_t i;
+        if (!name) return;
+        for (i = 0; i < value->n; i++) if (name[i] == '\\') name[i] = '/';
+        sc->optional(sc->ctx, type, name, value->n);
+        free(name);
+    }
 }
 
 static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
@@ -1785,6 +1894,14 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
         return;
     }
     if (vn == 0 || v[0] == '_') return;
+    if (sc->optional && !strcmp(sc->decl_type, "breakable") && (quoted || val->kind == TK_WORD)) {
+        const char *type = NULL;
+        if (sc->depth == 1 && mb_ieq_n(k, kn, "model")) type = "discreteAnimation";
+        else if (parent && sc->depth == 2 && (mb_ieq_n(parent, parent_n, "explosion") ||
+                 mb_ieq_n(parent, parent_n, "trail") || mb_ieq_n(parent, parent_n, "decal")))
+            type = mb_reflected_field("breakable", k, kn, 0);
+        if (type) { mb_breakable_need(sc, type, val); return; }
+    }
     if (sc->is_material && mb_iends(k, kn, "program") && (quoted || val->kind == TK_WORD)) {
         sc->fn(sc->ctx, "renderProg", v, vn);
         return;
@@ -1812,10 +1929,33 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
         sc->fn(sc->ctx, "image", v, vn);
         return;
     }
+    if (sc->is_material && sc->optional && (quoted || val->kind == TK_WORD) &&
+        (mb_ieq_n(k, kn, "transmap") || (kn > 8 && mb_ieq_n(k, 8, "transmap") && k[8] >= '0' && k[8] <= '9'))) {
+        size_t i = 8;
+        while (i < kn && k[i] >= '0' && k[i] <= '9') i++;
+        if (i == kn) sc->optional(sc->ctx, "image", v, vn);
+    }
     if (!quoted) return;
     if (sc->depth == 1 && mb_ieq_n(k, kn, "inherit")) {
-        /* A mod parent orders registration; a stock parent is always present. */
         if (vn > 5 && mb_ieq_n(v, 5, "mods/")) sc->fn(sc->ctx, sc->decl_type, v, vn);
+        else if (sc->optional) sc->optional(sc->ctx, sc->decl_type, v, vn);
+        return;
+    }
+    if (sc->is_entitydef && sc->optional && parent && sc->depth == 3 &&
+        mb_ieq_n(sc->block[1], sc->block_n[1], "edit")) {
+        if (mb_ieq_n(parent, parent_n, "renderModelInfo") && mb_ieq_n(k, kn, "model")) sc->render_model = *val;
+        if (mb_ieq_n(parent, parent_n, "clipModelInfo")) {
+            if (mb_ieq_n(k, kn, "type")) sc->clip_type = *val;
+            if (mb_ieq_n(k, kn, "clipModelName")) sc->clip_name = *val;
+        }
+    }
+    if (sc->optional) {
+        const char *type = mb_asset_field(sc, k, kn);
+        if (type) sc->optional(sc->ctx, type, v, vn);
+    }
+    if (sc->optional && sc->is_fx && parent && mb_ieq_n(parent, parent_n, "modelParms") &&
+        mb_ieq_n(k, kn, "modelName") && !mb_iends(v, vn, ".md6")) {
+        sc->optional(sc->ctx, "model", v, vn);
         return;
     }
     if (sc->is_animweb && mb_ieq_n(k, kn, "name") && mb_iends(v, vn, ".md6anim")) {
@@ -1852,6 +1992,7 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
         if (mb_ieq_n(k, kn, "anim")) { sc->fn(sc->ctx, "anim", v, vn); return; }
     }
     if (mb_ieq_n(k, kn, "model") || mb_ieq_n(k, kn, "renderModelName")) {
+        if (sc->optional && mb_iends(v, vn, ".break")) { sc->optional(sc->ctx, "breakable", v, vn - 6); return; }
         if (mb_iends(v, vn, ".md6")) sc->fn(sc->ctx, "md6Def", v, vn);
         else if (mb_iends(v, vn, ".lwo") || mb_iends(v, vn, ".ase") || mb_iends(v, vn, ".ma") ||
                  mb_iends(v, vn, ".obj") || mb_iends(v, vn, ".fbx") || mb_iends(v, vn, ".bmodel"))
@@ -1887,7 +2028,7 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
     }
 }
 
-void sh_mb_scan_needs(const char *decl_type, const unsigned char *text, size_t len,
+static void mb_scan_refs(const char *decl_type, const unsigned char *text, size_t len, sh_mb_need_fn optional,
                       sh_mb_need_fn fn, void *ctx)
 {
     mb_scan sc;
@@ -1905,6 +2046,7 @@ void sh_mb_scan_needs(const char *decl_type, const unsigned char *text, size_t l
     sc.is_emitter = strcmp(decl_type, "particle") == 0 || strcmp(decl_type, "ribbon") == 0;
     sc.is_entitydef = strcmp(decl_type, "entityDef") == 0;
     sc.fn = fn;
+    sc.optional = optional;
     sc.ctx = ctx;
     for (;;) {
         t = mb_next_tok(text, len, &pos);
@@ -1941,6 +2083,11 @@ void sh_mb_scan_needs(const char *decl_type, const unsigned char *text, size_t l
             break;
         case TK_WORD:
         case TK_STR:
+            if (sc.optional && !strcmp(sc.decl_type, "breakable") && sc.depth == 3 &&
+                mb_ieq_n(sc.block[1], sc.block_n[1], "decal")) {
+                const char *type = mb_reflected_field("breakable", sc.block[2], sc.block_n[2], 1);
+                if (type) { mb_breakable_need(&sc, type, &t); break; }
+            }
             if (state == AFTER_KEY && key.p) {
                 mb_scan_value(&sc, &key, &t);
                 state = AFTER_VALUE;
@@ -1951,6 +2098,24 @@ void sh_mb_scan_needs(const char *decl_type, const unsigned char *text, size_t l
             break;
         }
     }
+    if (sc.is_entitydef && sc.optional) {
+        mb_tok model = {0};
+        if (!sc.clip_type.p || mb_ieq_n(sc.clip_type.p, sc.clip_type.n, "CLIPMODEL_RENDERMODEL"))
+            model = sc.render_model;
+        else if (mb_ieq_n(sc.clip_type.p, sc.clip_type.n, "CLIPMODEL_CUSTOM")) model = sc.clip_name;
+        if (model.n && !mb_iends(model.p, model.n, ".md6")) {
+            char *name = sh_textn(model.p, model.n);
+            char *request = name ? mb_binary_name("generated", "cm", name, "bcm") : NULL;
+            if (request) sc.optional(sc.ctx, "cm", request, strlen(request));
+            free(request);
+            free(name);
+        }
+    }
+}
+
+void sh_mb_scan_needs(const char *decl_type, const unsigned char *text, size_t len, sh_mb_need_fn fn, void *ctx)
+{
+    mb_scan_refs(decl_type, text, len, NULL, fn, ctx);
 }
 
 /* A bare (unquoted) word naming a mod resource whose name holds '-'. The engine's breakable and material
@@ -2469,7 +2634,7 @@ static int mb_str_cmp(const void *a, const void *b)
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
-typedef struct mb_need_ctx { sh_mb_file *file; int oom; } mb_need_ctx;
+typedef struct mb_need_ctx { sh_mb_file *file; int oom; const sh_mb_bundle *bundle; } mb_need_ctx;
 static void mb_need_cb(void *ctx, const char *type, const char *name, size_t n)
 {
     mb_need_ctx *c = (mb_need_ctx *)ctx;
@@ -3098,8 +3263,8 @@ static int mb_is_shadow(const sh_mb_bundle *b, const char *request)
 static int mb_resolve_one(sh_mb_bundle *b, const mb_req_index *own, const sh_mb_resolver *r,
                           const sh_mb_need *need)
 {
-    char *cand[2];
-    int n = sh_mb_need_requests(need->type, need->name, cand, 2), i, unknown = 0, found = 0;
+    char *cand[SH_MB_NEED_REQUESTS];
+    int n = sh_mb_need_requests(need->type, need->name, cand, SH_MB_NEED_REQUESTS), i, unknown = 0, found = 0;
     if (n <= 0) return 0;
     for (i = 0; i < n && !found; i++) if (mb_req_has(own, cand[i])) { b->needs.local++; found = 1; }
     if (!found && r && r->installed)
@@ -4544,13 +4709,180 @@ static const sh_mb_file *mb_file_at(const sh_mb_bundle *b, const char *request)
     return NULL;
 }
 
+/* A SnapMap-resident reference needs no manifest entry. Keep an authored or campaign-only provider. */
+static void mb_optional_provider(mb_need_ctx *c, const char *type, const char *value, size_t len, const char *name, int concrete)
+{
+    const sh_mb_stock_ops *ops = mb_stock();
+    char *req[SH_MB_NEED_REQUESTS], where[32];
+    int count, i, needed;
+    needed = concrete && mb_sdk_or_mod(value, len);
+    count = sh_mb_need_requests(type, name, req, SH_MB_NEED_REQUESTS);
+    for (i = 0; i < count && !needed; i++) {
+        const sh_mb_file *own = c->bundle ? mb_file_at(c->bundle, req[i]) : NULL;
+        if (own && own != c->file) needed = 1;
+        else if (ops && ops->container && ops->container(ops->context, req[i], NULL, where, sizeof where) == SH_MB_STOCK_OK)
+            needed = !strcmp(where, "gameresources") || !strcmp(where, SH_MODPROG_CONTAINER);
+    }
+    if (needed) mb_need_cb(c, type, name, len);
+    sh_mb_requests_free(req, count);
+}
+
+static void mb_optional_need(void *context, const char *type, const char *value, size_t len)
+{
+    mb_need_ctx *c = (mb_need_ctx *)context;
+    char *name = sh_textn(value, len);
+    size_t i;
+    if (!name) { c->oom = 1; return; }
+    if (!strcmp(type, "propUseComponent") || !strcmp(type, "propThinkComponent")) {
+        static const char *const use[] = {"propHealth", "propItem", "propUniversalAmmo", "propUseFreezeTag", "propUseSoulDrop"};
+        static const char *const think[] = {"propMoveable", "propThinkFreezeTag", "propThinkSoulDrop"};
+        int is_use = !strcmp(type, "propUseComponent");
+        const char *const *types = is_use ? use : think;
+        size_t count = is_use ? sizeof use / sizeof *use : sizeof think / sizeof *think;
+        for (i = 0; i < count; i++) mb_optional_provider(c, types[i], value, len, name, 0);
+    } else if (!strcmp(type, "inventory")) {
+        static const char *const inventory[] = { "weapon", "ammo", "inventory", "item" };
+        for (i = 0; i < sizeof inventory / sizeof *inventory; i++) mb_optional_provider(c, inventory[i], value, len, name, 0);
+    } else {
+        /* A breakable can still simulate without its optional effect. Follow the supplied provider when it exists. */
+        int required = !c->file || !c->file->ptype || strcmp(c->file->ptype, "breakable");
+        mb_optional_provider(c, type, value, len, name, required);
+    }
+    free(name);
+}
+
+static int mb_model_string(const unsigned char *data, size_t len, size_t *at, size_t *size)
+{
+    if (*at > len || len - *at < 4) return 0;
+    *size = mb_le32(data + *at);
+    *at += 4;
+    if (*size > len - *at) return 0;
+    *at += *size;
+    return 1;
+}
+
+/* Both static model versions put a material table after their surface and index records. */
+static size_t mb_static_material_table(const unsigned char *data, size_t len)
+{
+    size_t at = 12, size;
+    uint32_t i, j, magic, surfaces;
+    if (len < 16) return 0;
+    magic = mb_be32(data);
+    surfaces = mb_be32(data + 8);
+    if ((magic != 0x1a4c4d42 && magic != 0x1b4c4d42) || surfaces > len / 32) return 0;
+    for (i = 0; i < surfaces; i++) {
+        uint32_t patches, verts, indices;
+        if (!mb_model_string(data, len, &at, &size)) return 0;
+        if (magic == 0x1b4c4d42) at += 4;
+        if (at > len || len - at < 12) return 0;
+        patches = mb_be32(data + at + 8); at += 12;
+        for (j = 0; j < patches; j++) if (!mb_model_string(data, len, &at, &size)) return 0;
+        if (len - at < 52 || mb_be32(data + at + 8) != 0x1801f) return 0;
+        verts = mb_be32(data + at); indices = mb_be32(data + at + 4); at += 52;
+        if (verts > (len - at) / 48) return 0;
+        at += (size_t)verts * 48;
+        if (indices > (len - at) / 2) return 0;
+        at += (size_t)indices * 2;
+        if (len - at < 32 || mb_be32(data + at + 28) != magic) return 0;
+        at += 32;
+    }
+    return at;
+}
+
+static int mb_model_skip(size_t limit, size_t *at, uint32_t count, size_t width)
+{
+    if (*at > limit || (width && count > (limit - *at) / width)) return 0;
+    *at += (size_t)count * width;
+    return 1;
+}
+
+/* The skinned model has the same material table after its joints, shapes and mesh geometry. */
+static size_t mb_md6_material_table(const unsigned char *d, size_t len)
+{
+    size_t at = 12, size;
+    uint32_t count, i, vertices, triangles, blends;
+    int morph;
+    if (len < 16 || mb_be32(d) != 0x2b024d4d ||
+        !mb_model_string(d, len, &at, &size) || !mb_model_skip(len, &at, 25, 1) ||
+        !mb_model_string(d, len, &at, &size) || len - at < 2) return 0;
+    count = ((uint32_t)d[at] << 8) | d[at+1]; at += 2;
+    if (!mb_model_skip(len, &at, count, 1) || !mb_model_skip(len, &at, 24, 1) || len - at < 4) return 0;
+    count = mb_be32(d+at); at += 4;
+    for (i = 0; i < count; i++) if (!mb_model_string(d, len, &at, &size)) return 0;
+    if (!mb_model_skip(len, &at, 36, 1) || len - at < 4) return 0;
+    count = mb_be32(d+at); at += 4;
+    for (i = 0; i < count; i++) {
+        if (!mb_model_string(d, len, &at, &size) || !mb_model_string(d, len, &at, &size) || len-at < 37) return 0;
+        vertices = mb_be32(d+at+5); triangles = mb_be32(d+at+9); at += 37;
+        if (!mb_model_skip(len,&at,vertices,48) || !mb_model_skip(len,&at,triangles,6) || len-at < 13) return 0;
+        morph = d[at+12]; at += 13;
+        if (morph) {
+            int wide;
+            if (at == len) return 0;
+            wide = d[at++];
+            if (!mb_model_skip(len,&at,vertices,wide ? 8 : 4)) return 0;
+        }
+        if (len-at < 4) return 0;
+        blends = mb_be32(d+at); at += 4;
+        if (blends && !morph && !mb_model_skip(len,&at,blends,(size_t)vertices*8)) return 0;
+    }
+    return at;
+}
+
+static void mb_model_materials(const unsigned char *data, size_t len, int skinned, mb_need_ctx *c)
+{
+    size_t size, table, at;
+    uint32_t i, surfaces;
+    if (skinned) {
+        if (len < 8 || mb_be32(data+len-4) != 0x2b024d4d) return;
+        len -= 4;
+        at = mb_md6_material_table(data, len);
+    } else at = mb_static_material_table(data, len);
+    if (!at || len-at < 4) return;
+
+    surfaces = mb_be32(data + at); at += 4; table = at;
+    for (i = 0; i < surfaces; i++) {
+        if (!mb_model_string(data, len, &at, &size) || !size || len - at < 12 ||
+            memchr(data + at - size, 0, size)) return;
+        at += 12;
+    }
+    if (at != len) return;
+    at = table;
+    for (i = 0; i < surfaces && !c->oom; i++) {
+        mb_model_string(data, len, &at, &size);
+        mb_optional_need(c, "material", (const char *)data + at - size, size);
+        at += 12;
+    }
+}
+
+static int mb_cooked_material_needs(sh_mb_bundle *b, size_t i, const wchar_t *root)
+{
+    sh_mb_file *f = &b->files[i];
+    mb_need_ctx c = { f, 0, b };
+    unsigned char *bytes = NULL;
+    size_t len = 0;
+    int skinned = f->ptype && !strcmp(f->ptype, "baseModel") && mb_ends(f->request, ".bmd6model");
+    if (!skinned && (!f->ptype || strcmp(f->ptype, "model") || !mb_ends(f->request, ".bmodel"))) return 1;
+    if (f->stock) {
+        if (f->stock_source && sh_mb_stock_read(f->stock_source, f->blob, &bytes, &len, f->path, NULL) == SH_MB_STOCK_OK) {
+            mb_model_materials(bytes, len, skinned, &c);
+            HeapFree(GetProcessHeap(), 0, bytes);
+        }
+    } else if (f->size < SIZE_MAX && (bytes = mb_read_prefix(root, f->path, (size_t)f->size, &len)) != NULL) {
+        mb_model_materials(bytes, len, skinned, &c);
+        free(bytes);
+    }
+    if (f->need_count > 1) qsort(f->needs, f->need_count, sizeof(sh_mb_need), mb_need_cmp);
+    return !c.oom;
+}
+
 /* 1 when a need of (type, name) names something: a file of the bundle,
  * another installed bundle's, or an installed archive's. */
 static int mb_need_held(const sh_mb_bundle *b, const sh_mb_resolver *r, const char *type, const char *name)
 {
     const sh_mb_stock_ops *ops = mb_stock();
-    char *cand[2], where[32];
-    int n = sh_mb_need_requests(type, name, cand, 2), i, held = 0;
+    char *cand[SH_MB_NEED_REQUESTS], where[32];
+    int n = sh_mb_need_requests(type, name, cand, SH_MB_NEED_REQUESTS), i, held = 0;
     for (i = 0; i < n && !held; i++)
         held = mb_file_at(b, cand[i]) || (r && r->installed && r->installed(r->installed_context, cand[i]) == 1) ||
                (ops && ops->container && ops->container(ops->context, cand[i], NULL, where, sizeof where) == SH_MB_STOCK_OK);
@@ -4658,8 +4990,8 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
         size_t len = 0;
         if (sh_mb_stock_read(request, sha, &text, &len, f->path, NULL) == SH_MB_STOCK_OK) {
             if (sh_decl_text_well_formed(text, len)) {
-                mb_need_ctx nc = { f, 0 };
-                sh_mb_scan_needs(f->ptype, text, len, mb_need_cb, &nc);
+                mb_need_ctx nc = { f, 0, b };
+                mb_scan_refs(f->ptype, text, len, mb_optional_need, mb_need_cb, &nc);
                 if (nc.oom) { HeapFree(GetProcessHeap(), 0, text); mb_error(b, "out of memory"); return 0; }
                 qsort(f->needs, f->need_count, sizeof(sh_mb_need), mb_need_cmp);
             }
@@ -4668,6 +5000,7 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
         if (!mb_model_needs(b, idx, c->r, c->root)) { mb_error(b, "out of memory"); return 0; }
         f = &b->files[idx];
     }
+    if (!mb_cooked_material_needs(b, idx, c->root)) { mb_error(b, "out of memory"); return 0; }
     mb_emit_file(&one, f);
     if (one.oom) { free(one.p); mb_error(b, "out of memory"); return 0; }
     c->manifest += one.n + 1;
@@ -4892,9 +5225,9 @@ static void mb_closure_program(mb_closure *c, size_t file, const char *name)
 
 static void mb_closure_need(mb_closure *c, size_t file, size_t k)
 {
-    char *cand[2];
+    char *cand[SH_MB_NEED_REQUESTS];
     sh_mb_need need = c->b->files[file].needs[k];
-    int n = sh_mb_need_requests(need.type, need.name, cand, 2), held;
+    int n = sh_mb_need_requests(need.type, need.name, cand, SH_MB_NEED_REQUESTS), held;
     if (n <= 0) return;
     held = mb_closure_offer(c, file, &need, cand, n);
     if (c->stopped) { sh_mb_requests_free(cand, n); return; }
@@ -5388,7 +5721,7 @@ static void mb_spelled_text(sh_mb_bundle *b, const sh_mb_file *f, const unsigned
     }
 }
 
-static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_resolver *r)
+static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_resolver *r, int from_unit)
 {
     char ns_decl[SH_MB_ID_MAX + 8], ns_raw[SH_MB_ID_MAX + 8];
     mb_req_index own = { NULL, 0 };
@@ -5465,7 +5798,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             } else if (f->is_module) {
                 /* A module's entity texts are quoted strings: nothing to scan. */
             } else {
-                mb_need_ctx nc = { f, 0 };
+                mb_need_ctx nc = { f, 0, b };
                 mb_bare_ctx bc = { b, f };
                 char *look = NULL, *notes = NULL;
                 size_t look_len = 0;
@@ -5480,7 +5813,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                      * names the decl's type and name (an effect's emitter is named after it) */
                     char why[400];
                     int lr = sdk_fn(f->request, (const char *)text, len, &look, &look_len, why, sizeof why, &notes,
-                                    &sdk_needs);
+                                    &sdk_needs, from_unit);
                     if (lr == SH_LOOK_MISTAKE) {
                         /* the sentence names the file by its base name; the build names the file */
                         mb_error(b, "%s", why);
@@ -5518,7 +5851,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                     free(notes);
                 }
                 if (!refused)
-                    sh_mb_scan_needs(f->ptype, look ? (const unsigned char *)look : text, look ? look_len : len, mb_need_cb, &nc);
+                    mb_scan_refs(f->ptype, look ? (const unsigned char *)look : text, look ? look_len : len, mb_optional_need, mb_need_cb, &nc);
                 free(look);
                 if (nc.oom) mb_error(b, "out of memory");
                 qsort(f->needs, f->need_count, sizeof(sh_mb_need), mb_need_cmp);
@@ -5667,7 +6000,8 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
 
     /* Each md6Def's model is whole: its mesh's skeleton and default clip. */
     for (i = 0; i < b->file_count; i++)
-        if (b->files[i].is_decl && !mb_model_needs(b, i, r, root)) mb_error(b, "out of memory");
+        if (!mb_cooked_material_needs(b, i, root) || (b->files[i].is_decl && !mb_model_needs(b, i, r, root)))
+            mb_error(b, "out of memory");
 
     /* Campaign-only content the served decls need joins the bundle as
      * pointers before the needs are resolved. */
@@ -7146,7 +7480,7 @@ int sh_mb_salt_paths_check(const sh_mb_bundle *b, char **cause)
 
 /* -------------------------------------------------------------- build ---- */
 
-int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *resolver, sh_mb_bundle *out)
+static int mb_build(const char *folder, const char *salt, const sh_mb_resolver *resolver, sh_mb_bundle *out, int from_unit)
 {
     wchar_t *root, *desc_mod, *desc_pkg;
     DWORD attr;
@@ -7274,7 +7608,7 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
             mb_error(out, "%s", cause ? cause : "out of memory");
         free(cause);
     }
-    if (!out->errors) mb_check_files(out, root, resolver);
+    if (!out->errors) mb_check_files(out, root, resolver, from_unit);
 
     if (!out->errors) mb_derive_requirements(out, 1);
     mb_finish(out);
@@ -7283,6 +7617,16 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
 finish:
     free(root);
     return out->errors == 0;
+}
+
+int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *resolver, sh_mb_bundle *out)
+{
+    return mb_build(folder, salt, resolver, out, 0);
+}
+
+int sh_mb_build_composition(const char *folder, const char *salt, const sh_mb_resolver *resolver, sh_mb_bundle *out)
+{
+    return mb_build(folder, salt, resolver, out, 1);
 }
 
 /* ---------------------------------------------------------- tree hash ---- */

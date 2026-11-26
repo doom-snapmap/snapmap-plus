@@ -13,6 +13,10 @@
  * case-insensitively) with `generated/`, or begins with `maps/` and ends with `.flight`. Returns 0, with out
  * untouched, for any other write, a NULL or empty rel or root, an absolute rel, a `..` element, or a path over cap. */
 int sh_cachewrite_redirect(const char *rel, const char *root, char *out, size_t cap);
+int sh_cachewrite_matches(const char *rel);
+int sh_cachewrite_ansi(const wchar_t *path, char *out, size_t cap);
+/* Returns -1 for an unrelated engine write, otherwise the result of writing the cache. */
+int sh_cachewrite_wide(const wchar_t *saved, const char *rel, const void *data, size_t len);
 
 /* The signature table (cachewrites_sigs.c), declared where signatures.h is included first. */
 #ifdef BACKEND_SIGNATURES_H

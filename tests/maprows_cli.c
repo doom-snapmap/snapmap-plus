@@ -19,6 +19,7 @@ int sh_modserve_spawn_pins(void (*fn)(void *context, const char *salt, const cha
 int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
 { (void)slots; (void)keys; (void)n; (void)recompute; return 0; }
 int sh_modserve_salt_installed(const char *salt) { (void)salt; return 0; }
+int sh_modserve_refusal_version(void) { return 0; }
 int sh_modserve_root_lacks(const char *salt, const char *name) { (void)salt; (void)name; return 0; }
 int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 { (void)row; (void)out; return 0; }

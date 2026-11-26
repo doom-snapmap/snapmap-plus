@@ -3,10 +3,12 @@
  * It is the only caller of the per-slot delete, so the detour, which never calls the original, leaves the
  * player's own Delete alone. */
 #include <windows.h>
+#include "../backend/saved_maps.h"
 #include <shlobj.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "../common/profile_dir.h"
 #include "../common/wide_path.h"
 #include "fault_record.h"
 #include "../backend/hook.h"
@@ -28,9 +30,6 @@
 typedef void (*delete_bad_slots_fn)(void *helper, void *names);
 static delete_bad_slots_fn g_original;
 
-/* Where saves are read and where copies go: Saved Games\id Software\DOOM\base\
- * savegame.user and %LOCALAPPDATA%\snapmap-plus\kept-maps, both long form. */
-static wchar_t g_saves_root[SH_WPATH_MAX];
 static wchar_t g_kept_root[SH_WPATH_MAX];
 
 /* Slots already told about this session. */
@@ -68,27 +67,11 @@ static int smg_folder_name(const char *name, size_t len, char out[29])
     return 1;
 }
 
-static int smg_roots(void)
+static int smg_recovery_root(void)
 {
-    if (!g_saves_root[0]) {
-        PWSTR known = NULL;
-        static const GUID kSavedGames =
-            { 0x4C5C32FFu, 0xBB9D, 0x43b0, { 0xB5, 0xB4, 0x2D, 0x72, 0xE5, 0x4E, 0xAA, 0xA4 } };
-        if (FAILED(SHGetKnownFolderPath(&kSavedGames, 0, NULL, &known)) || !known) {
-            if (known) CoTaskMemFree(known);
-            return 0;
-        }
-        if (wcscpy_s(g_saves_root, SH_WPATH_MAX, known) != 0) g_saves_root[0] = L'\0';
-        CoTaskMemFree(known);
-        if (!g_saves_root[0] || !sh_wpath_long(g_saves_root, SH_WPATH_MAX)
-            || !sh_wpath_append(g_saves_root, SH_WPATH_MAX, L"id Software\\DOOM\\base\\savegame.user")) {
-            g_saves_root[0] = L'\0';
-            return 0;
-        }
-    }
     if (!g_kept_root[0]) {
-        if (!sh_wpath_local_appdata(g_kept_root, SH_WPATH_MAX)
-            || !sh_wpath_append(g_kept_root, SH_WPATH_MAX, L"snapmap-plus\\kept-maps")) {
+        if (!sh_profile_long(g_kept_root, SH_WPATH_MAX)
+            || !sh_wpath_append(g_kept_root, SH_WPATH_MAX, L"kept-maps")) {
             g_kept_root[0] = L'\0';
             return 0;
         }
@@ -96,28 +79,15 @@ static int smg_roots(void)
     return 1;
 }
 
-/* The slot's folder under any account folder of savegame.user. */
 static int smg_find_slot(const char *folder, wchar_t *out, size_t cap)
 {
-    static wchar_t glob[SH_WPATH_MAX];
-    WIN32_FIND_DATAW acct;
-    HANDLE h;
-    int found = 0;
-    wcscpy_s(glob, SH_WPATH_MAX, g_saves_root);
-    if (!sh_wpath_append(glob, SH_WPATH_MAX, L"*")) return 0;
-    h = FindFirstFileW(glob, &acct);
-    if (h == INVALID_HANDLE_VALUE) return 0;
-    do {
-        DWORD attr;
-        if (!(acct.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || acct.cFileName[0] == L'.') continue;
-        wcscpy_s(out, cap, g_saves_root);
-        if (!sh_wpath_append(out, cap, acct.cFileName) || !sh_wpath_append_utf8(out, cap, folder)) continue;
-        attr = GetFileAttributesW(out);
-        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)
-            && !(attr & FILE_ATTRIBUTE_REPARSE_POINT)) { found = 1; break; }
-    } while (FindNextFileW(h, &acct));
-    FindClose(h);
-    return found;
+    wchar_t *profile = sh_saved_map_profile();
+    int ok = profile && wcslen(profile) < cap && wcscpy_s(out, cap, profile) == 0;
+    free(profile);
+    if (!ok || !sh_wpath_append_utf8(out, cap, folder)) return 0;
+    DWORD attr = GetFileAttributesW(out);
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) &&
+           !(attr & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 
 /* 1 when the two files hold the same bytes. */
@@ -230,11 +200,12 @@ static void smg_keep(const char *folder, smg_kept *k)
     strcpy_s(k->folder, sizeof k->folder, folder);
     strcpy_s(k->title, sizeof k->title, folder);
     k->result = SMG_NOT_FOUND;
-    if (!smg_roots() || !smg_find_slot(folder, slot, SH_WPATH_MAX)) return;
+    if (!smg_find_slot(folder, slot, SH_WPATH_MAX)) return;
     smg_title(slot, k->title, sizeof k->title, folder);
     k->result = SMG_KEPT_IN_PLACE;
     sh_wpath_utf8(slot, k->where, sizeof k->where);
     /* kept-maps\SNAPMAPS<id>, or <id>-2, -3 ... when an existing copy holds other bytes. */
+    if (!smg_recovery_root()) return;
     if (!sh_wpath_ensure_dir(g_kept_root)) {
         static wchar_t parent[SH_WPATH_MAX];
         wchar_t *slash;
@@ -272,7 +243,7 @@ static int smg_told(const char *folder)
 
 /* The engine's dialog carries at most 255 bytes (engine_dialog.c), so the title
  * is cut at 40 bytes on a character boundary and a long folder path is named
- * by its known-folder form. */
+ * relative to the Snapmap+ profile. */
 #define SMG_SENTENCE_MAX 255
 #define SMG_TITLE_MAX 40
 
@@ -299,7 +270,7 @@ static int smg_sentence(const smg_kept *k, char *out, size_t cap)
         title, k->where);
     if (n > 0 && n <= SMG_SENTENCE_MAX) return 1;
     if (k->result == SMG_KEPT_COPY)
-        _snprintf_s(where, sizeof where, _TRUNCATE, "%%LOCALAPPDATA%%\\snapmap-plus\\kept-maps\\%s", k->folder);
+        _snprintf_s(where, sizeof where, _TRUNCATE, "your Snapmap+ profile under kept-maps\\%s", k->folder);
     else
         _snprintf_s(where, sizeof where, _TRUNCATE, "your saved games folder (%s)", k->folder);
     n = _snprintf_s(out, cap, _TRUNCATE, k->result == SMG_KEPT_COPY
@@ -334,7 +305,7 @@ static void smg_delete_bad_slots(void *helper, void *names)
                 shield_fault f = { "save", -1, line, 0, 0 };
                 shield_emit(&f);
             }
-            if (!smg_told(folder) && smg_sentence(&k, said, sizeof said)) shield_tell(said);
+            if (smg_sentence(&k, said, sizeof said) && !smg_told(folder)) shield_tell(said);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         shield_fault f = { "save", -1, "saved-map guard: the engine's list of unreadable slots could not be read; "

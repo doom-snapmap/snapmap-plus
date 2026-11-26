@@ -138,17 +138,17 @@ After any install, update or migration:
   build, `XINPUT1_3.dll` and `snapmap-plus\snapmap-plus-ui.dll`. A file of ours
   found anywhere else in the folder is removed: the other build's pair, a file an
   earlier release placed and the record lists, any other file under
-  `snapmap-plus\`, and the `<file>.snapmap-plus-bak` (or `.snaphak-bak`) backups
+  `snapmap-plus`, and the `<file>.snapmap-plus-bak` (or `.snaphak-bak`) backups
   earlier installers kept of our own DLLs. The original SnapHak's files are removed
   as before (see [Migration paths](#migration-paths)). The runtime folders the DLLs
-  write while the game runs, `snapmap-plus\logs\` and `snapmap-plus\crash\`, stay
+  write while the game runs, `snapmap-plus\logs` and `snapmap-plus\crash`, stay
   until uninstall.
 - **A file is ours** when the install record for this DOOM folder lists it, when its
   bytes are a file of the bundle being installed, or when it carries the string
   `snapmap-plus` (ASCII or UTF-16), which every Snapmap+ DLL does because it loads
-  and logs to `snapmap-plus\` paths; neither the original SnapHak nor an unrelated
+  and logs to `snapmap-plus` paths; neither the original SnapHak nor an unrelated
   XInput proxy does. A file at one of our names that is not ours, a file under
-  `snapmap-plus\` that is not ours, and the proxy-shaped names of other tools at the
+  `snapmap-plus` that is not ours, and the proxy-shaped names of other tools at the
   top level (`dinput8.dll*`, `xinput*`, `winmm.dll*`, `snaphak*`) stay where they are
   and are listed under "Other programs' files (left in place)".
 - **The pair goes in as one change.** Both files are written beside their targets
@@ -161,25 +161,25 @@ After any install, update or migration:
   folder, so uninstall restores vanilla by deleting the pair. The only file ever
   backed up is one that is not ours and that the pair replaces (another tool's
   `XINPUT1_4.dll`, say). Its backup is kept under the data folder's
-  `cache\installer\backup\`, never in DOOM, and uninstall puts it back. A backup an
+  `cache\installer\backup`, never in DOOM, and uninstall puts it back. A backup an
   earlier installer kept in DOOM is deleted when it is a copy of our own file, and
-  moved into `cache\installer\backup\` and recorded when it is not.
+  moved into `cache\installer\backup` and recorded when it is not.
 - **The data folder**, `%LOCALAPPDATA%\snapmap-plus`, holds `snapmap-plus.exe`,
   `install.json` and the player's own data (`config.json`,
-  `prefabs\`, `mods\`, `rawmap.json`, `test-maps\`, `cache\`, and the
+  `prefabs`, `mods`, `rawmap.json`, `test-maps`, `cache`, and the
   `pinned.json` file when present), and the saved GitHub `token` when present.
-  Recognized earlier `overrides\` packages become mod folders during install or update.
-  [Updating earlier maps, prefabs and mods](#updating-earlier-maps-prefabs-and-mods)
-  Empty `override-backups\`, `package-cache\` and `package-staging\` folders are
+  Recognized earlier `overrides` packages become mod folders during install or update.
+  [Updating earlier maps, prefabs and mods](#updating-earlier-mods-maps-and-prefabs)
+  Empty `override-backups`, `package-cache` and `package-staging` folders are
   removed; one that holds files is kept and listed.
 - **Uninstall** removes every file of ours from DOOM, restores any backup from
-  `cache\installer\backup\`, removes the runtime log and crash folders, the
+  `cache\installer\backup`, removes the runtime log and crash folders, the
   data folder's installer copy, `install.json` and the saved `token`, and leaves
   the player's data. An installer copy that is the one running cannot be removed: it
   stays, and `install.json` then records that copy alone. Without an install
   record, `uninstall --doom <path>` cleans that folder by content: it removes the
   files whose bytes show they are Snapmap+'s (the rule above) and nothing else. A
-  backup that cannot be put back stays in `cache\installer\backup\`, and the
+  backup that cannot be put back stays in `cache\installer\backup`, and the
   warning names its path.
 - **An unreadable `install.json`** (not valid JSON) is renamed to
   `install.json.unreadable` with a warning, and a new record is started, so the
@@ -231,7 +231,7 @@ to remove. A record with no `doom_path` holds only the installer's own state and
 means "not installed".
 
 A self-update stages and verifies the new image beside the old one, moves the old
-image into `cache\installer\` (beside it when the data folder is on another
+image into `cache\installer` (beside it when the data folder is on another
 volume), puts the new one in its place and removes the old one at once. A
 running image cannot be removed, so the one that started the update is recorded in
 `set_aside` and removed at the next start while its bytes are unchanged and its
@@ -247,18 +247,18 @@ step that has something to report.
 
 1. **From Chrispy's original SnapHak** (`dinput8.dll`, `snaphak_algo.dll` and the
    other files `legacy.go` recognises in DOOM; player data under
-   `%USERPROFILE%\snaphak\`). Detection needs one of its own marker files, so an
+   `%USERPROFILE%\snaphak`). Detection needs one of its own marker files, so an
    unrelated proxy DLL alone never triggers it. "Removing the original SnapHak"
    lists the removed files. Player files stay in the original profile.
 2. **From v0.2.1-beta.19** (its 2018 pair in an April 2024 folder, recorded or not,
-   and packages under `overrides\`). "Cleaning the DOOM folder" removes the 2018
+   and packages under `overrides`). "Cleaning the DOOM folder" removes the 2018
    pair. The installer places the April 2024 pair and updates recognized override packages. On the
    2018 build itself v0.2.1-beta.19's own installer runs, and the 2018 pair stays.
 3. **From v0.2.1-beta.20** (both pairs, backups of our own DLLs in DOOM,
    `installer-files.json`, `installer-versions.json`, `snapmap-plus.exe.updates.json`,
    `snapmap-plus.exe.old`). "Tidying the data folder" lists the retired records and
    images removed, "Cleaning the DOOM folder" the other build's pair and the backups,
-   with any backup of a file that was not ours moved into `cache\installer\backup\`.
+   with any backup of a file that was not ours moved into `cache\installer\backup`.
    Then the pair is installed.
 4. **From the current release**: a plain update. The pair is replaced and nothing
    else changes.
@@ -270,31 +270,56 @@ The installer verifies every manifest-listed bundle file before changing DOOM.
 There is one record, so installing into a second DOOM folder replaces the record of
 the first; uninstall the first folder before installing into another.
 
-The installer creates the current prefabs folder. Player files from the original SnapHak stay
-under %USERPROFILE%\snaphak. Current installer state and the saved token live under
-%LOCALAPPDATA%\snapmap-plus.
+The installer creates the current prefabs folder. Current installer state and
+the saved token live under `%LOCALAPPDATA%\snapmap-plus`. The installer checks
+for WebView2 and offers Microsoft's runtime bootstrapper when needed. See
+[packaging](../docs/packaging.md) for the installed file contract.
 
-`config.json` belongs to the backend. Install, update, uninstall and reinstall
-do not create, parse or rewrite it. Prefabs, strings and rawmaps also remain
-player-owned. The Go suite checks these preservation rules across an install
-and uninstall cycle.
+## Updating earlier mods, maps and prefabs
 
-The installer checks for WebView2 and offers Microsoft's runtime bootstrapper
-when needed. See [packaging](../docs/packaging.md) for the installed file contract.
+Install or update first checks the whole library and its pinned dependencies.
+If changes are needed, it lists the affected file counts and asks once.
+Press **Y** to apply them. **N**, Enter and end of input cancel the install
+before your content changes. For a manual copy of the earlier versions, copy
+the listed folders before accepting. In automation, `--yes` accepts the plan.
 
-## Updating earlier maps, prefabs and mods
+1. **Mods.** Earlier packages and recognized loose overrides move into the
+   current author layout. Disabled loose overrides stay in their original
+   folder with their preference. In a recognized `config.json`, the installer
+   retires `packages.embed_in_saved_maps` and `mods.upload_confirmed`. It keeps
+   the active `navmesh.embed_in_saved_maps` setting and preserves unrelated
+   preferences. It splits inline build data into
+   `.build/manifest.json` and moves generated serving and content caches
+   outside `mods/`. If an earlier build removed a stock file that the author
+   included, the installer restores it from DOOM when its recorded hash matches.
+   Earlier immutable build records remain available to convert exports that
+   name that exact build.
+2. **Maps.** Earlier modded rawmaps and ZIP exports receive current mod units.
+   For a recognized earlier native save or published cache map, open its
+   copy under `rawmaps/Updated saves/` with **File > Load Rawmap** and use
+   **Save As** in DOOM. The game's original save and published item stay intact.
+3. **Prefabs.** The installer converts recognized mod pins in prefab JSON
+   and ZIPs. Keep an earlier modded prefab's metadata beside its JSON so the
+   conversion can carry its description, tags and scripts.
 
-Install or update converts recognized earlier files in the Snapmap+ data folder. The installer
-keeps each original in `backups/earlier-data/`, including the build history from `mods/.builds/`.
-It converts installed mod folders into the author layout and reads an earlier map's exact mod build
-when turning its objects into units. If the original build is missing, the installer names the
-affected file and keeps it intact. Restore the missing build and rerun the same command.
+Vanilla maps and prefabs, including ZIPs, retain their bytes and timestamps.
+For an older map that used an installed custom entity without embedding its mod,
+the installer remembers the entity's earlier name and owning mod under
+`cache/legacy-placements.json`. This lets a later rawmap or prefab export
+recover its placed object from the converted author folder.
 
-A native DOOM map gets a converted copy in `rawmaps/Updated saves/`. Open the copy with
-**File > Load Rawmap** and use **Save As** in DOOM. For an export outside your profile, drop its
-JSON or ZIP file onto `snapmap-plus.exe`, or run `snapmap-plus convert "<file>"`. Keep a prefab's
-earlier metadata file beside its JSON. The installer folds its description, tags, scripts and
-other author data into the updated prefab.
+If a library map needs an unavailable historical build, the installer lists
+the map and missing build IDs, keeps the original and updates independent
+items. Restore the exact build to retry that map. Converting a single export
+reports that missing dependency directly. If two mods claimed the same
+placed entity, the installer reports the conflict and keeps the source files.
+Interrupted
+updates resume from a temporary journal in the installer cache. The journal
+is removed when the updated content passes verification.
+
+For a single export, drop its JSON or ZIP onto `snapmap-plus.exe` or run
+`snapmap-plus convert "<file>"`. The frozen installer for the 2018 game
+build uses that release's content format.
 
 ## Simulation harness
 
@@ -313,14 +338,14 @@ the folder is only read), so build detection sees the real game. The helper serv
 release folders packed from `dist/` as `release.yml` packs them, with the size and
 digest fields the installer verifies, and `SNAPMAP_PLUS_API_BASE` points the
 installer at it. Each scenario gets fresh scratch DOOM, data, profile and TEMP
-folders under `-Scratch` (default `%TEMP%\snapmap-plus-sim`), with
+folders under `-Scratch` (default `tests\obj\installer-sim`), with
 `LOCALAPPDATA`, `USERPROFILE` and `TEMP` pointed at them:
 
 | Scenario | Layout before | Steps |
 |---|---|---|
 | a | the original SnapHak in DOOM, prefabs, strings and a rawmap under `%USERPROFILE%\snaphak`, another tool's `dinput8.dll.doomforge.rollback` | install, uninstall |
-| b | v0.2.1-beta.19's 2018 pair in the April 2024 folder, its record and `installer-files.json`, `tests/fixtures/store-retired` as the data folder (`overrides\`, the retired `mods\` layout, `removed-mods\`) | update (the earlier installed mod and override become author folders), uninstall |
-| c | v0.2.1-beta.20: both pairs, three backups of our DLLs, another tool's file, `installer-files.json`, `installer-versions.json`, `snapmap-plus.exe.updates.json`, `snapmap-plus.exe.old`, an empty `override-backups\` | update, uninstall |
+| b | v0.2.1-beta.19's 2018 pair in the April 2024 folder, its record and `installer-files.json`, `tests/fixtures/store-retired` as the data folder (`overrides`, the retired `mods` layout, `removed-mods`) | update (the earlier installed mod and override become author folders), uninstall |
+| c | v0.2.1-beta.20: both pairs, three backups of our DLLs, another tool's file, `installer-files.json`, `installer-versions.json`, `snapmap-plus.exe.updates.json`, `snapmap-plus.exe.old`, an empty `override-backups` | update, uninstall |
 | d | none: `v0.3.0-sim.1` installs, then `v0.3.0-sim.2` is published | install, update (the installer updates itself first and relaunches), uninstall |
 
 Stand-ins for the DLLs of earlier releases carry the `snapmap-plus` marker, as the

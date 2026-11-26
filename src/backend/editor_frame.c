@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <shlobj.h>
+#include "saved_maps.h"
 #include <intrin.h>   /* _ReturnAddress: which engine read the filter sees */
 
 #include "editor_frame.h"
@@ -83,107 +83,12 @@ static ef_reload_request g_reload_request;
 static void *g_context_map;
 static unsigned long g_context_generation, g_context_id;
 
-/* LoadMap names a map by its save-directory id: the 20-hex suffix of a folder
- * <Saved Games>\id Software\DOOM\base\savegame.user\<account id>\SNAPMAPS<20 hex>. "Saved Games" is a
- * relocatable known folder (profile root as the fallback), and the engine keys a save by the `localId`
- * in its game.details, so the reload borrows an existing slot and the branch answer (rawmap.c) keeps Save off it. */
-
-/* The id must be exactly 20 hex digits. Checked because it is about to be handed to an engine
- * function as a name: anything else means we misread the directory layout. */
-static int valid_map_id(const wchar_t *s)
+/* A saved edit already identifies a slot in the current native session. */
+static int ef_reload_id(char *out, size_t cap)
 {
-    int n = 0;
-    for (; s[n]; n++) {
-        wchar_t c = s[n];
-        int hex = (c >= L'0' && c <= L'9') || (c >= L'A' && c <= L'F') || (c >= L'a' && c <= L'f');
-        if (!hex || n >= 20) return 0;
-    }
-    return n == 20;
-}
-
-/* The Saved Games folder (malloc'd), or NULL. */
-static wchar_t *saved_games_root(void)
-{
-    PWSTR wide = NULL;
-    wchar_t *out = NULL;
-    /* FOLDERID_SavedGames and FOLDERID_Profile. Spelled out rather than pulled from
-     * knownfolders.h's extern so this compiles the same regardless of which SDK headers the build
-     * picks up. */
-    static const GUID kSavedGames =
-        { 0x4C5C32FFu, 0xBB9D, 0x43b0, { 0xB5, 0xB4, 0x2D, 0x72, 0xE5, 0x4E, 0xAA, 0xA4 } };
-    static const GUID kProfile =
-        { 0x5E6C858Fu, 0x0E22, 0x4760, { 0x9A, 0xFE, 0xEA, 0x33, 0x17, 0xB6, 0x71, 0x73 } };
-
-    if (SUCCEEDED(SHGetKnownFolderPath(&kSavedGames, 0, NULL, &wide)) && wide)
-        out = sh_wtextf(L"%s", wide);
-    else if (wide) { CoTaskMemFree(wide); wide = NULL; }
-    if (!out && SUCCEEDED(SHGetKnownFolderPath(&kProfile, 0, NULL, &wide)) && wide)
-        out = sh_wtextf(L"%s\\Saved Games", wide);
-    if (wide) CoTaskMemFree(wide);
-    return out;
-}
-
-static int newest_saved_map_id(char *out, size_t cap)
-{
-    wchar_t *root, *base, *glob;
-    WIN32_FIND_DATAW acct;
-    HANDLE ha;
-    FILETIME best;
-    int found = 0;
-
-    if ((root = saved_games_root()) == NULL) return 0;
-    /* The long form: a relocated Saved Games folder may be of any depth. */
-    base = wcsncmp(root, L"\\\\", 2)
-         ? sh_wtextf(L"\\\\?\\%s\\id Software\\DOOM\\base\\savegame.user", root)
-         : sh_wtextf(L"\\\\?\\UNC%s\\id Software\\DOOM\\base\\savegame.user", root + 1);
-    free(root);
-    if (!base) return 0;
-    memset(&best, 0, sizeof best);
-
-    /* Walk the account folders. Usually one, but a shared machine can have several, and the newest
-     * map across all of them is a better answer than picking the first account we happen to see. */
-    glob = sh_wtextf(L"%s\\*", base);
-    ha = glob ? FindFirstFileW(glob, &acct) : INVALID_HANDLE_VALUE;
-    free(glob);
-    if (ha == INVALID_HANDLE_VALUE) { free(base); return 0; }
-    do {
-        WIN32_FIND_DATAW fd;
-        HANDLE hm;
-        if (!(acct.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-        if (acct.cFileName[0] == L'.') continue;
-
-        glob = sh_wtextf(L"%s\\%s\\SNAPMAPS*", base, acct.cFileName);
-        hm = glob ? FindFirstFileW(glob, &fd) : INVALID_HANDLE_VALUE;
-        free(glob);
-        if (hm == INVALID_HANDLE_VALUE) continue;
-        do {
-            wchar_t *decl, *details;
-            int whole;
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-            if (!valid_map_id(fd.cFileName + 8)) continue;   /* skip "SNAPMAPS" */
-
-            /* A correctly-named folder is not a saved map: deleting a map in DOOM leaves empty folders
-             * with their .verify sidecars, so require game.details and map.decl. */
-            decl = sh_wtextf(L"%s\\%s\\%s\\map.decl", base, acct.cFileName, fd.cFileName);
-            details = sh_wtextf(L"%s\\%s\\%s\\game.details", base, acct.cFileName, fd.cFileName);
-            whole = decl && details && GetFileAttributesW(decl) != INVALID_FILE_ATTRIBUTES &&
-                    GetFileAttributesW(details) != INVALID_FILE_ATTRIBUTES;
-            free(decl);
-            free(details);
-            if (!whole) continue;
-
-            if (found && CompareFileTime(&fd.ftLastWriteTime, &best) <= 0) continue;
-            best = fd.ftLastWriteTime;
-            /* The id is the engine's 20 hex digits, so this conversion is exact. */
-            if (!WideCharToMultiByte(CP_UTF8, 0, fd.cFileName + 8, -1, out, (int)cap, NULL, NULL)) continue;
-            found = 1;
-        } while (FindNextFileW(hm, &fd));
-        FindClose(hm);
-    } while (FindNextFileW(ha, &acct));
-    FindClose(ha);
-    free(base);
-
-    return found && out[0] != '\0';
+    if (sh_rawmap_edit_local_id(out, cap) && strlen(out) == 20 &&
+        strspn(out, "0123456789abcdefABCDEF") == 20) return 1;
+    return sh_saved_map_fallback(out, cap);
 }
 
 /* Is the editor live and holding a map? The map pointer survives leaving the editor, so a zero
@@ -579,17 +484,14 @@ int sh_editor_frame_request_reload(char **out_msg)
         return 0;
     }
 
-    /* WHICH map is borrowed does not matter: its files are never read (ef_read_text_detour), and
-     * the branch answer stops the slot being WRITTEN. The newest complete save is taken because
-     * the engine has certainly listed it. */
-    if (!newest_saved_map_id(request.id, sizeof request.id)) {
-        backend_log("EF: no saved map found under <Saved Games>\\id Software\\DOOM\\base\\savegame.user");
-        ef_msg(out_msg, "To open a rawmap, DOOM needs one saved map of yours: save any map once, then try again");
+    request.generation = sh_rawmap_load_generation();
+    request.map = ef_live_map((void *)g_editor_obj);
+    if (!ef_reload_id(request.id, sizeof request.id)) {
+        backend_log("EF: no saved map available for the active account and save path");
+        ef_msg(out_msg, "Open a saved map of yours or save this map once, then open the rawmap again");
         return 0;
     }
 
-    request.generation = sh_rawmap_load_generation();
-    request.map = ef_live_map((void *)g_editor_obj);
     AcquireSRWLockExclusive(&g_reload_lock);
     if (request.map == NULL || InterlockedCompareExchange(&g_reload_pending, 0, 0) != 0) {
         ReleaseSRWLockExclusive(&g_reload_lock);

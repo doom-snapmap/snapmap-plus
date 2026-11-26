@@ -9,6 +9,9 @@ import (
 )
 
 func TestEarlierModFolder(t *testing.T) {
+	useEarlierUnitTool(t)
+	rig := newUpdateRig(t, "dev")
+	oneStockRequest(t, rig.doom, "generated/decls/entitydef/stock/door.decl")
 	data := t.TempDir()
 	mod := filepath.Join(data, "mods", "Pack group", "My Pack")
 	desc := `{"id":"alex.tiny","version":"1.2.3","name":"My Pack","author":"Alex","clip_events":[],"strings":{"English":{"Label":"A"}}}`
@@ -24,7 +27,7 @@ func TestEarlierModFolder(t *testing.T) {
 	} {
 		writeF(t, filepath.Join(mod, name), body)
 	}
-	if err := convertEarlierData("", data); err != nil {
+	if err := convertEarlierData(rig.doom, data); err != nil {
 		t.Fatal(err)
 	}
 	salt := earlierSalt("alex.tiny")
@@ -47,12 +50,11 @@ func TestEarlierModFolder(t *testing.T) {
 	if lua := readF(t, filepath.Join(mod, "scripts/entry.lua")); !strings.Contains(lua, "self:position()") || !strings.Contains(lua, "on.animation()") || !strings.Contains(lua, "play_effect('mods/"+salt+"/door')") {
 		t.Fatal(lua)
 	}
-	originals, _ := filepath.Glob(filepath.Join(data, "backups/earlier-data/mod-folders/*/original", "mod.json"))
-	if len(originals) != 1 || readF(t, originals[0]) != desc {
-		t.Fatal("missing original")
+	if exists(filepath.Join(data, "backups")) {
+		t.Fatal("created a permanent mod backup")
 	}
 	writeF(t, filepath.Join(mod, "entities", "door.decl"), "author edited after upgrade")
-	if err := convertEarlierData("", data); err != nil || readF(t, filepath.Join(mod, "entities", "door.decl")) != "author edited after upgrade" {
+	if err := convertEarlierData(rig.doom, data); err != nil || readF(t, filepath.Join(mod, "entities", "door.decl")) != "author edited after upgrade" {
 		t.Fatalf("retry %v", err)
 	}
 }
@@ -77,7 +79,7 @@ func TestEarlierFolderResume(t *testing.T) {
 	if err := convertEarlierFolders(data); err != nil {
 		t.Fatal(err)
 	}
-	if !exists(backup) || readF(t, filepath.Join(mod, "mod.json")) != converted || !exists(filepath.Join(record, "finished.json")) {
+	if !exists(backup) || readF(t, filepath.Join(mod, "mod.json")) != converted || !exists(filepath.Join(record, "plan.json")) {
 		t.Fatal("incomplete recovery")
 	}
 }

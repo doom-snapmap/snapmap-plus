@@ -81,12 +81,9 @@ auto under `--yes`). This never blocks the mod install — the DLLs deploy regar
 
 ## Per-user data is NOT shipped
 
-The bundle ships no player content. At startup the backend creates `%LOCALAPPDATA%\snapmap-plus\`
-with its `prefabs\` folder, and nothing else (the `strings\` folder of earlier releases is retired and
-not read). Snapmap+'s small built-in default
-declarations are served from memory by the backend DLL. The companion window keeps its WebView2
-profile in `cache\webview2\`, regenerable data the installer never backs up or copies (an older
-top-level `webview2\` folder is renamed into `cache\` at the window's first start). The installer keeps
+Snapmap+ keeps player data under `%LOCALAPPDATA%\snapmap-plus\`. The backend serves its built-in
+declarations from memory. The companion stores its regenerable WebView2 profile in
+`cache\webview2\`. The installer keeps
 its own `cache\installer\` beside it, for replaced installer images and backups of files that were not
 ours.
 
@@ -94,14 +91,13 @@ ours.
 
 Installed mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`. Each current mod contains its
 author settings in `mod.json`, its asset folders, and its generated `.build/manifest.json`.
-Install or update converts recognized earlier mod folders, maps, prefabs and exports. It keeps
-original library files under `backups/earlier-data/` and prints the path to each converted native
-save. [Installer upgrade details](../installer/README.md#updating-earlier-maps-prefabs-and-mods)
+Install or update checks earlier mods, maps and prefabs and asks once before converting them.
+Make a manual copy first if you want to keep older versions. Native saves receive converted
+rawmap copies. [Installer upgrade details](../installer/README.md#updating-earlier-mods-maps-and-prefabs)
 
-The bundle also ships no `config.json`. That file is runtime-owned player data, separate from the
-installer's executable and `install.json` record. The installer never rewrites it and preserves it across
-update, uninstall, and reinstall; deleting it yourself resets preferences because the backend recreates
-defaults on the next startup.
+The backend creates `config.json` when it needs preferences. A consented migration removes
+recognized retired settings. Other settings and unknown config formats remain player-owned.
+Uninstall leaves the config in place. Deleting it yourself resets preferences on next startup.
 
 ## Supported build and the final 2018 release
 

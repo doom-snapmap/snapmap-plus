@@ -34,6 +34,10 @@ char  *sh_dt_text(const sh_dt *t, size_t *len);
 sh_dt_node *sh_dt_at(sh_dt_node *n, const char *path);
 /* The member of `n` with key word `key` (any case), when exactly one. */
 sh_dt_node *sh_dt_child(sh_dt_node *n, const char *key);
+/* Read the bound entityDef's effective AI behavior from this mod's typed declarations. A NULL body
+ * asks only whether the declaration exists; otherwise read supplies a parsed tree the caller owns. */
+typedef int (*sh_dt_enemy_read)(void *context, const char *type, const char *name, sh_dt **body);
+char *sh_dt_enemy_behavior(const char *salt, const char *entitydef, sh_dt_enemy_read read, void *context);
 void sh_dt_remove_child(sh_dt_node *parent, int index);
 /* Replace a scalar's value token (copied into the tree's arena). 1 on success. */
 int    sh_dt_set_value(sh_dt *t, sh_dt_node *n, const char *val, size_t len);

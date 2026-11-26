@@ -367,8 +367,8 @@ static void uw_needs(uw *w, const sh_mb_file *f)
 {
     size_t k;
     for (k = 0; k < f->need_count && !w->fail; k++) {
-        char *req[4];
-        int n = sh_mb_need_requests(f->needs[k].type, f->needs[k].name, req, 4), r, inside = 0;
+        char *req[SH_MB_NEED_REQUESTS];
+        int n = sh_mb_need_requests(f->needs[k].type, f->needs[k].name, req, SH_MB_NEED_REQUESTS), r, inside = 0;
         for (r = 0; r < n; r++) inside |= uw_reach_request(w, req[r]);
         uw_reach_name(w, f->needs[k].name, strlen(f->needs[k].name));
         if (!inside) uw_need_outside(w, &f->needs[k], req, n);
@@ -501,25 +501,43 @@ static void uw_banks(uw *w)
 
 /* A kept render program keeps its permutations, its cooked binaries and its SPIR-V: every file under
  * generated/renderprogs/ or generated/spirv/ that is the program's or spells its name. */
+static void uw_program_files(uw *w, const char *stem, const char *spirv_name)
+{
+    static const char *const binaries[] = { "_pc_vulkan.bin", "_pc.bin" };
+    static const char *const stages[] = { ".vspv", ".fspv", ".cspv" };
+    size_t i;
+    for (i = 0; i < sizeof binaries / sizeof *binaries; i++) {
+        char *request = sh_textf("%s%s", stem, binaries[i]);
+        if (!request) { uw_fail(w, "out of memory tracing %s", stem); return; }
+        uw_reach_request(w, request);
+        free(request);
+    }
+    for (i = 0; i < sizeof stages / sizeof *stages; i++) {
+        char *request = sh_mb_spirv_request(spirv_name, stages[i]);
+        if (!request) { uw_fail(w, "out of memory tracing %s", stem); return; }
+        uw_reach_request(w, request);
+        free(request);
+    }
+}
+
 static void uw_program(uw *w, const sh_mb_file *f)
 {
-    const char *leaf = f->pname ? strrchr(f->pname, '/') : NULL;
-    char part[31];
     size_t i;
-    leaf = leaf ? leaf + 1 : f->pname;
-    if (!leaf || !leaf[0]) return;
-    strncpy_s(part, sizeof part, leaf, _TRUNCATE);   /* the SPIR-V request cuts a long name into 30-character parts */
-    for (char *c = part; *c; c++) *c = (char)uw_lower((unsigned char)*c);
-    for (i = 0; i < w->b->file_count; i++) {
-        const sh_mb_file *g = &w->b->files[i];
-        char *program = NULL, mask[17];
-        int hit = 0;
-        if (w->keep[i] || g->absent) continue;
-        if (sh_mb_rp_permutation(g->request, &program, mask)) hit = program && !_stricmp(program, f->pname);
-        else if (!strncmp(g->request, "generated/renderprogs/", 22) || !strncmp(g->request, "generated/spirv/", 16))
-            hit = strstr(g->request, part) != NULL;
+    char *stem = sh_textf("generated/renderprogs/%s", f->pname);
+    if (!stem) { uw_fail(w, "out of memory tracing %s", f->pname); return; }
+    uw_program_files(w, stem, f->pname);
+    free(stem);
+    for (i = 0; i < w->b->file_count && !w->fail; i++) {
+        const char *request = w->b->files[i].request;
+        char *program = NULL;
+        int same = sh_mb_rp_permutation(request, &program, NULL) && !_stricmp(program, f->pname);
         free(program);
-        if (hit) uw_reach(w, i);
+        if (!same) continue;
+        uw_reach(w, i);
+        stem = sh_textn(request, strlen(request) - 5);
+        if (!stem) { uw_fail(w, "out of memory tracing %s", request); return; }
+        uw_program_files(w, stem, request);
+        free(stem);
     }
 }
 
@@ -790,6 +808,7 @@ static void uw_visit(uw *w, size_t i)
     const sh_mb_file *f = &w->b->files[i];
     w->registry = f->cls == SH_MB_CLASS_REPLACE;
     uw_needs(w, f);
+    if (f->is_decl && f->pname && uw_is(f, "renderProg")) uw_program(w, f);
     if (f->stock || f->absent) { w->registry = 0; return; }   /* the game's own bytes: its names are the game's */
     uw_visit_bytes(w, i);
     w->registry = 0;
@@ -822,7 +841,6 @@ static void uw_visit_bytes(uw *w, size_t i)
             free(engine);
         }
         if (uw_is(f, "sound")) uw_sound(w, f);
-        if (uw_is(f, "renderProg")) uw_program(w, f);
         if (uw_is(f, "entityDef")) uw_def(w, i);
     } else if (sh_mb_script_request(f->request, NULL, NULL) > 0) {
         uw_strings(w, bytes, len);
@@ -1383,8 +1401,8 @@ static void uw_prove(uw *w)
         const sh_mb_file *f = &w->b->files[i];
         if (!w->keep[i]) continue;
         for (k = 0; k < f->need_count && !w->fail; k++) {
-            char *req[4];
-            int n = sh_mb_need_requests(f->needs[k].type, f->needs[k].name, req, 4), r, in_build = 0, in_unit = 0;
+            char *req[SH_MB_NEED_REQUESTS];
+            int n = sh_mb_need_requests(f->needs[k].type, f->needs[k].name, req, SH_MB_NEED_REQUESTS), r, in_build = 0, in_unit = 0;
             for (r = 0; r < n; r++) {
                 size_t at = uw_lower_bound(w->reqs, w->nreqs, req[r]);
                 for (; at < w->nreqs && !strcmp(w->reqs[at].key, req[r]); at++) {
@@ -1418,7 +1436,7 @@ void sh_unit_free(sh_unit *u)
 
 /* The root's file for a placed name: the mod's file that provides it (a module, a Toybox row or an entityDef,
  * in that order), by its engine name, its request, or its author name. */
-static long uw_root_file(const uw *w, const char *name, int *kind)
+static long uw_root_file(const uw *w, const char *name, int *kind, int *absent)
 {
     static const struct { const char *type; int kind; } order[] = {
         { "snapModule", SH_UNIT_MODULE }, { "snapEditorEntityDef", SH_UNIT_TOYBOX }, { "entityDef", SH_UNIT_ENTITY } };
@@ -1426,12 +1444,15 @@ static long uw_root_file(const uw *w, const char *name, int *kind)
     size_t i;
     int t;
     long hit = -1;
+    *absent = own && (engine || uw_ns_at(name, strlen(name), w->salt, w->sl));
     for (t = 0; t < 3 && hit < 0; t++)
         for (i = 0; i < w->b->file_count && hit < 0; i++) {
             const sh_mb_file *f = &w->b->files[i];
-            if (f->absent || f->cls == SH_MB_CLASS_EDITOR || !uw_is(f, order[t].type)) continue;
+            if (f->absent || f->cls == SH_MB_CLASS_EDITOR) continue;
             if ((f->pname && ((own && !_stricmp(f->pname, own)) || (engine && !_stricmp(f->pname, engine)))) ||
                 (own && !_stricmp(f->request, own)) || !_stricmp(f->path, name)) {
+                *absent = 0;
+                if (!uw_is(f, order[t].type)) continue;
                 hit = (long)i;
                 *kind = order[t].kind;
             }
@@ -1446,7 +1467,7 @@ int sh_unit_of(const sh_mb_bundle *b, const char *folder, const char *name, cons
 {
     uw w;
     size_t i, k;
-    int ok = 0, whole;
+    int ok = 0, whole, absent = 0;
     long root = -1;
     if (why) *why = NULL;
     if (out) memset(out, 0, sizeof *out);
@@ -1475,7 +1496,15 @@ int sh_unit_of(const sh_mb_bundle *b, const char *folder, const char *name, cons
         for (i = 0; i < b->file_count; i++) if (b->files[i].cls != SH_MB_CLASS_EDITOR) uw_reach(&w, i);
     } else {
         char *rn, *dot;
-        if ((root = uw_root_file(&w, name, &out->kind)) < 0) {
+        if ((root = uw_root_file(&w, name, &out->kind, &absent)) < 0) {
+            if (absent) {
+                /* An inline asset, including a cooked image alias, can require the whole unit without being an object. */
+                uw_reach_name(&w, name, strlen(name));
+                for (i = 0; i < w.qtail; i++) {
+                    const sh_mb_file *f = &b->files[w.queue[i]];
+                    if (!f->absent && f->cls != SH_MB_CLASS_EDITOR) { absent = 0; break; }
+                }
+            }
             w.fail = sh_textf("%s is none of this mod's objects", name);
             goto done;
         }
@@ -1546,6 +1575,7 @@ done:
         else free(w.fail);
         w.fail = NULL;
         sh_unit_free(out);
+        out->absent_root = absent;
     }
     free(w.fail);
     if (w.owned) for (i = 0; i < b->file_count; i++) free(w.owned[i]);
@@ -1846,7 +1876,7 @@ int sh_unit_compose_ex(const char *const *manifests, const size_t *lens, size_t 
     }
     memset(&r, 0, sizeof r);
     if (resolver) { r.stock = resolver->stock; r.stock_context = resolver->stock_context; }
-    if (!sh_mb_build(dest, salt, &r, out)) {
+    if (!sh_mb_build_composition(dest, salt, &r, out)) {
         sh_text_set(&reason, "it does not build on its own: %s", sh_mb_first_cause(out));
         goto done;
     }

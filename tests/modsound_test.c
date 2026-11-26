@@ -9,6 +9,7 @@
 #include <string.h>
 #include <shlobj.h>
 #include "modsound.h"
+#include "modsound_view.h"
 #include "modbankinfo.h"
 #include "modbundle.h"
 #include "signatures.h"
@@ -19,6 +20,57 @@ void backend_log(const char *message) { (void)message; }
 
 static int g_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
+
+static void view_callback(uint32_t id, const void *p, int32_t result, int32_t pool, void *cookie)
+{
+    CHECK(id == 123 && p && result == 1 && pool == -1 && cookie == &g_fail);
+}
+
+static int view_queue(void *self, const sh_sound_request *q)
+{
+    CHECK(self && q->op <= 1 && q->source == 2 && q->length == 73 && q->id == 123 && q->pool == -1);
+    q->callback(q->id, q->bytes, 1, q->pool, q->cookie);
+    return 1;
+}
+
+static void test_view(void)
+{
+    char dir[MAX_PATH], path[MAX_PATH];
+    unsigned char bank[57] = {0};
+    sh_sound_view view;
+    FILE *f;
+    void *vt[] = {NULL,NULL,NULL,view_queue}, **manager = vt;
+    memcpy(bank, "BKHD", 4); bank[4] = 20; bank[8] = 113; bank[12] = 123;
+    memcpy(bank + 28, "DATA", 4); bank[32] = 4;
+    memcpy(bank + 36, "wave", 4);
+    memcpy(bank + 40, "HIRC", 4); bank[44] = 9; bank[48] = 1; bank[52] = 4;
+    /* Complete HIRC object with a single event id. */
+    {
+        unsigned char all[61];
+        memcpy(all, bank, sizeof bank); all[44] = 13; all[53] = 4;
+        all[57] = 89; all[58] = all[59] = all[60] = 0;
+        CHECK(GetTempPathA(sizeof dir, dir) && GetTempFileNameA(dir,"wvw",0,path));
+        CHECK(!fopen_s(&f,path,"wb"));
+        if (!f) return;
+        CHECK(fwrite(all, 1, sizeof all, f) == sizeof all); fclose(f);
+        CHECK(sh_sound_bank_has_event(path, sizeof all, 89) && !sh_sound_bank_has_event(path, sizeof all, 80));
+        CHECK(sh_sound_view_open(path, sizeof all, &view));
+        if (view.bytes) {
+            unsigned char *bytes = view.bytes;
+            CHECK(view.size == 73 && view.padded && !memcmp(bytes + 48, "wave", 4) &&
+                  (((uintptr_t)bytes + 48) & 15) == 0 && bytes[4] == 32);
+            CHECK(sh_sound_view_queue(&manager, &view, 0, view_callback, &g_fail) == 1);
+            CHECK(DeleteFileA(path));
+            CHECK(sh_sound_view_queue(&manager, &view, 1, view_callback, &g_fail) == 1);
+            sh_sound_view_close(&view);
+        }
+        all[44] = 31;
+        CHECK(!fopen_s(&f, path, "wb"));
+        if (f) { fwrite(all, 1, sizeof all, f); fclose(f); }
+        CHECK(!sh_sound_view_open(path, sizeof all, &view));
+    }
+    DeleteFileA(path);
+}
 
 static void test_names(void)
 {
@@ -516,6 +568,138 @@ static void test_stock(void)
     free(t);
 }
 
+static sh_sound_request view_jobs[12];
+static unsigned n_view_jobs;
+static int answer_loads;
+
+static int queue_view_later(void *self, const sh_sound_request *q)
+{
+    (void)self;
+    CHECK(heap_depth == 1);
+    if (n_view_jobs >= sizeof view_jobs / sizeof *view_jobs) return 2;
+    view_jobs[n_view_jobs++] = *q;
+    if (answer_loads && !q->op) q->callback(q->id, q->bytes, 1, q->pool, q->cookie);
+    return 1;
+}
+
+static void answer_view(unsigned n, int result)
+{
+    const sh_sound_request *q = &view_jobs[n];
+    q->callback(q->id, q->bytes, result, q->pool, q->cookie);
+}
+
+static void test_scoped_view_lifetime(void)
+{
+    static const char stem[] = "hx_view";
+    unsigned char data[56] = {0}, hardware[16] = {0};
+    char tmp[MAX_PATH], path[MAX_PATH];
+    void *vt[] = {NULL,NULL,NULL,queue_view_later}, **manager = vt, *object = &manager;
+    sh_modsound_table t = {0}, empty = {0};
+    FILE *f;
+    uint32_t id = sh_mb_fnv1_lower(stem, strlen(stem));
+    memcpy(data, "BKHD", 4); data[4] = 32; data[8] = 113; memcpy(data + 12, &id, 4);
+    memcpy(data + 40, "DATA", 4); data[44] = 8; memcpy(data + 48, "old data", 8);
+    CHECK(GetTempPathA(sizeof tmp, tmp) && GetTempFileNameA(tmp, "wav", 0, path));
+    CHECK(!fopen_s(&f, path, "wb"));
+    if (!f) return;
+    fwrite(data, 1, sizeof data, f); fclose(f);
+    CHECK(sh_modsound_table_add(&t, "sound/soundbanks/pc/hx_view.bnk", path, sizeof data, "hx", 0) == 1);
+    hardware[8] = 2;
+    sh_modsound_test_bind_stock(fake_new, fake_ctor, fake_lb, fake_ecb, NULL, 0);
+    sh_modsound_test_manager(&object);
+    sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &t);
+    CHECK(sh_modsound_test_pass() == 1 && n_view_jobs == 1);
+    CHECK(sh_modsound_test_pass() == 0 && n_view_jobs == 1);
+    CHECK(DeleteFileA(path));
+    sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &empty);
+    CHECK(sh_modsound_test_pass() == 0 && n_view_jobs == 2);
+    if (n_view_jobs != 2) return;
+    CHECK(view_jobs[1].op == 1 && view_jobs[1].id == id && view_jobs[1].bytes == view_jobs[0].bytes);
+    CHECK(!memcmp((const char *)view_jobs[1].bytes + 48, "old data", 8));
+    answer_view(1, 1);
+    /* A late load notification also holds the allocation until its callback returns. */
+    CHECK(!memcmp((const char *)view_jobs[0].bytes + 48, "old data", 8));
+    answer_view(0, 1);
+    memcpy(data + 48, "new data", 8);
+    CHECK(!fopen_s(&f, path, "wb"));
+    if (!f) return;
+    fwrite(data, 1, sizeof data, f); fclose(f);
+    sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &t);
+    CHECK(sh_modsound_test_pass() == 1 && n_view_jobs == 3);
+    if (n_view_jobs != 3) return;
+    CHECK(!memcmp((const char *)view_jobs[2].bytes + 48, "new data", 8)); answer_view(2, 1);
+    sh_modsound_test_loadbanks(hardware);
+    CHECK(n_view_jobs == 4 && view_jobs[2].bytes == view_jobs[3].bytes);
+    if (n_view_jobs != 4) return;
+    answer_view(3, 69);
+    sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &empty);
+    sh_modsound_test_pass();
+    CHECK(n_view_jobs == 5);
+    if (n_view_jobs != 5) return;
+    answer_view(4, 2); /* Unconfirmed unload keeps its bytes, then retries. */
+    sh_modsound_test_pass();
+    CHECK(n_view_jobs == 6 && view_jobs[5].bytes == view_jobs[4].bytes);
+    if (n_view_jobs == 6) answer_view(5, 54);
+    sh_modsound_test_manager(NULL);
+    sh_modsound_table_free(&t);
+    DeleteFileA(path);
+}
+
+static int make_event_bank(sh_modsound_table *t, const char *salt, char path[MAX_PATH])
+{
+    unsigned char data[77] = {0};
+    char tmp[MAX_PATH], request[96], event[64];
+    uint32_t id = sh_mb_fnv1_lower(salt, strlen(salt)), eid;
+    FILE *f;
+    snprintf(event, sizeof event, "play_%s_bell", salt);
+    eid = sh_mb_fnv1_lower(event, strlen(event));
+    memcpy(data, "BKHD", 4); data[4] = 32; data[8] = 113; memcpy(data + 12, &id, 4);
+    memcpy(data + 40, "DATA", 4); data[44] = 8;
+    memcpy(data + 56, "HIRC", 4); data[60] = 13; data[64] = 1;
+    data[68] = data[69] = 4; memcpy(data + 73, &eid, 4);
+    if (!GetTempPathA(sizeof tmp, tmp) || !GetTempFileNameA(tmp, "wav", 0, path) || fopen_s(&f, path, "wb")) return 0;
+    fwrite(data, 1, sizeof data, f); fclose(f);
+    snprintf(request, sizeof request, "sound/soundbanks/pc/%s.bnk", salt);
+    return sh_modsound_table_add(t, request, path, sizeof data, salt, 0) == 1;
+}
+
+static void test_reselection_and_audition(void)
+{
+    unsigned char hw[16] = {0}; char a[MAX_PATH], b[MAX_PATH];
+    sh_modsound_table t = {0};
+    void *vt[] = {NULL, NULL, NULL, queue_view_later}, **manager = vt, *object = &manager;
+    hw[8] = 2; n_view_jobs = 0; answer_loads = 1;
+    CHECK(make_event_bank(&t, "firstmod", a) && make_event_bank(&t, "nextmod", b));
+    sh_modsound_test_manager(&object);
+    sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hw, &t);
+    sh_modsound_test_select("firstmod"); CHECK(sh_modsound_test_pass() == 1);
+    sh_modsound_test_select("nextmod"); CHECK(sh_modsound_test_pass() == 1);
+    sh_modsound_test_select("firstmod"); CHECK(sh_modsound_test_pass() == 1);
+    CHECK(n_view_jobs == 5 && view_jobs[1].op && view_jobs[3].op);
+    if (n_view_jobs != 5) return;
+    CHECK(view_jobs[0].id == view_jobs[4].id && view_jobs[0].bytes != view_jobs[4].bytes);
+    answer_view(1, 1); answer_view(3, 1);
+    CHECK(!sh_modsound_test_pass());
+    sh_modsound_preview("mods/nextmod/nextmod_bell");
+    CHECK(n_view_jobs == 6 && view_jobs[5].id == view_jobs[2].id && !view_jobs[5].op);
+    CHECK(!sh_modsound_test_pass() && n_view_jobs == 6);
+    sh_modsound_preview(NULL);
+    CHECK(n_view_jobs == 7 && view_jobs[6].op && view_jobs[6].id == view_jobs[5].id);
+    if (n_view_jobs != 7) return;
+    answer_view(6, 1);
+    sh_modsound_preview("mods/firstmod/firstmod_bell"); sh_modsound_preview(NULL);
+    CHECK(n_view_jobs == 7); /* Closing the browser preserves the placed actor's bank. */
+    sh_modsound_test_select(NULL); CHECK(!sh_modsound_test_pass());
+    CHECK(n_view_jobs == 8 && view_jobs[7].op && view_jobs[7].bytes == view_jobs[4].bytes);
+    if (n_view_jobs == 8) answer_view(7, 1);
+    sh_modsound_test_select("firstmod"); CHECK(sh_modsound_test_pass() == 1 && n_view_jobs == 9);
+    sh_modsound_test_select(NULL); sh_modsound_test_pass();
+    if (n_view_jobs == 10) answer_view(9, 1);
+    CHECK(n_view_jobs == 10); answer_loads = 0;
+    sh_modsound_test_manager(NULL); sh_modsound_table_free(&t);
+    DeleteFileA(a); DeleteFileA(b);
+}
+
 /* The ms_submit_one refusal wording for a filtered name (G4's side note):
  * the wrapper answers 1 and loads nothing. */
 static void test_filtered_submit(void)
@@ -834,6 +1018,8 @@ static void test_image(const char *path)
         CHECK(site && sh_modsound_decode_cookie_site(base + site, &d_new, &d_ctor, &d_cb, &d_lb));
         CHECK(d_new - (uintptr_t)base == nw && d_cb - (uintptr_t)base == cb && d_lb - (uintptr_t)base == lbk);
         CHECK(d_ctor - (uintptr_t)base == (id->vulkan ? 0x2AF680u : 0x2AF840u));
+        CHECK((uintptr_t)sh_sound_view_manager(base + lbk) - (uintptr_t)base ==
+              (id->vulkan ? 0x7277340u : 0x5b86870u));
         printf("%s %s: stock banks: LoadBank 0x%x, operator new 0x%x, cookie ctor 0x%llx, callback 0x%x, site 0x%x\n",
                g_fail ? "BAD" : "OK ", id->vulkan ? "Vulkan" : "OpenGL", lbk, nw,
                (unsigned long long)(d_ctor - (uintptr_t)base), cb, site);
@@ -869,6 +1055,7 @@ static void test_image(const char *path)
 
 int main(int argc, char **argv)
 {
+    test_view();
     test_names();
     test_decode();
     test_table();
@@ -877,6 +1064,8 @@ int main(int argc, char **argv)
     test_needs();
     test_stock();
     test_filtered_submit();
+    test_scoped_view_lifetime();
+    test_reselection_and_audition();
     test_builder();
     for (int i = 1; i < argc; i++) test_image(argv[i]);
     if (getenv("SH_MODSOUND_FIXTURE")) test_fixture(getenv("SH_MODSOUND_FIXTURE"));

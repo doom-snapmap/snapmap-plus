@@ -19,6 +19,8 @@
 #include "modlook.h"
 #include "modprog.h"
 #include "modstock.h"
+#include "sdk.h"
+#include "text.h"
 #include "../src/backend/script/script_compile.h"
 
 #include "modserve.h"
@@ -46,17 +48,39 @@ static int stock_exists(void *ctx, const char *request)
 }
 static sh_mb_resolver g_resolver = { NULL, NULL, stock_exists, NULL };
 
+typedef struct {
+    const char *folder;
+    const sh_mb_bundle *stored;
+    int prepared;
+} loaded_sdk;
+
 static int game(void *ctx, const char *request, char sha256[SH_MB_HASH_HEX + 1], char *source, size_t cap)
 {
+    loaded_sdk *sdk = (loaded_sdk *)ctx;
     unsigned long long size = 0;
     int got;
-    (void)ctx;
+    if (sdk && !sh_modprog_owns(request) && (sh_mb_product_decl(request) || sh_mb_product_hashed(request))) {
+        /* A loaded manifest names SDK results whose bytes are derived in the process that reads them. */
+        if (!sdk->prepared) {
+            sh_mb_bundle derived;
+            sdk->prepared = sh_mb_build_composition(sdk->folder, sdk->stored->id, &g_resolver, &derived) ? 1 : -1;
+            sh_mb_free(&derived);
+        }
+        if (sdk->prepared < 0) return -1;
+    }
     if (sh_modprog_owns(request)) {
         unsigned char *bytes = NULL;
         size_t len = 0;
         if (sh_modprog_read(request, &bytes, &len) != SH_MB_STOCK_OK || !bytes) return -1;
         sh_mb_sha256_hex(bytes, len, sha256);
         HeapFree(GetProcessHeap(), 0, bytes);
+        if (sdk) {
+            for (size_t i = 0; i < sdk->stored->file_count; i++) {
+                const sh_mb_file *f = &sdk->stored->files[i];
+                if (f->stock && f->stock_source && !_stricmp(f->stock_source, request) && strcmp(f->blob, sha256))
+                    return -1;
+            }
+        }
         strcpy_s(source, cap, SH_MODPROG_CONTAINER);
         return 1;
     }
@@ -79,12 +103,84 @@ static char *source_of(void *ctx, const char *path)
     return out;
 }
 
+static int make_directory(const char *path)
+{
+    wchar_t *wide = sh_mb_wpath(path);
+    if (!wide) return 0;
+    int ok = CreateDirectoryW(wide, NULL);
+    if (!ok && GetLastError() == ERROR_ALREADY_EXISTS) {
+        DWORD attrs = GetFileAttributesW(wide);
+        ok = attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
+    }
+    free(wide);
+    return ok;
+}
+
+static FILE *open_output(const char *path)
+{
+    wchar_t *wide = sh_mb_wpath(path);
+    FILE *f = NULL;
+    if (wide) _wfopen_s(&f, wide, L"wb");
+    free(wide);
+    return f;
+}
+
 static int write_file(const char *path, const void *data, size_t len)
 {
-    FILE *f;
-    if (fopen_s(&f, path, "wb") || !f) return 0;
+    FILE *f = open_output(path);
+    if (!f) return 0;
     size_t n = fwrite(data, 1, len, f);
     return fclose(f) == 0 && n == len;
+}
+
+static int extract_stock(const char *request, const char *sha, const char *out)
+{
+    unsigned char *bytes = NULL;
+    size_t len = 0;
+    if (sh_modstock_read(request, sha, &bytes, &len) != SH_MB_STOCK_OK || !bytes) {
+        fprintf(stderr, "installed game file %s does not match this build\n", request);
+        return 0;
+    }
+    int ok = write_file(out, bytes, len);
+    HeapFree(GetProcessHeap(), 0, bytes);
+    return ok;
+}
+
+static int extract_stock_list(void)
+{
+    FILE *requests = NULL;
+    char line[8192];
+    int ok = 1;
+    if (fopen_s(&requests, "requests.txt", "rb") || !requests) return 0;
+    while (fgets(line, sizeof line, requests)) {
+        char *tab = strchr(line, '\t');
+        size_t end = strcspn(line, "\r\n");
+        if (!line[end] || !tab || tab - line != SH_MB_HASH_HEX) { ok = 0; break; }
+        line[end] = *tab = 0;
+        if (strspn(line, "0123456789abcdef") != SH_MB_HASH_HEX || !sh_mb_check_source(tab + 1, NULL) ||
+            !extract_stock(tab + 1, line, line)) { ok = 0; break; }
+    }
+    if (ferror(requests)) ok = 0;
+    fclose(requests);
+    return ok;
+}
+
+static int write_unit(const char *out, const sh_mb_bundle *bundle, const sh_unit *unit)
+{
+    char *path = sh_textf("%s\\units\\%s.json", out, unit->hash);
+    int ok = write_file(path, unit->manifest, unit->manifest_len);
+    free(path);
+    if (!ok) return 0;
+    path = sh_textf("%s\\units\\%s.keep.txt", out, unit->hash);
+    FILE *keep = open_output(path);
+    free(path);
+    if (!keep) return 0;
+    for (size_t i = 0; ok && i < bundle->file_count; i++) {
+        if (unit->keep[i])
+            ok = fprintf(keep, "%s\t%s\t%llu\t%s\n", bundle->files[i].stock ? "pointer" : "file", bundle->files[i].path,
+                         bundle->files[i].size, unit->from[i] >= 0 ? bundle->files[unit->from[i]].path : "(seed)") >= 0;
+    }
+    return fclose(keep) == 0 && ok;
 }
 
 static int run_cli(int argc, char **argv)
@@ -92,7 +188,7 @@ static int run_cli(int argc, char **argv)
     const char *mod = NULL, *out = NULL, *doom = NULL, *names = NULL;
     int compose = 0, loaded = 0, fallback = 0, bad = 0, k, n = 0;
     const char *stock_sha = NULL, *stock_source = NULL, *separator = ",";
-    char *list, *ctxp = NULL, *name, path[MAX_PATH], *cause = NULL;
+    char *list, *ctxp = NULL, *name, *cause = NULL;
     sh_mb_bundle b;
     sh_unit_env env;
     if (argc > 1 && !strncmp(argv[1], "verify=", 7)) {
@@ -113,14 +209,31 @@ static int run_cli(int argc, char **argv)
         else if (!strncmp(argv[k], "source=", 7)) stock_source = argv[k] + 7;
         else if (!strcmp(argv[k], "compose=1")) compose = 1;
     }
-    if (doom && stock_sha && stock_source) {
-        unsigned char *bytes = NULL;
-        size_t len = 0;
+    if (doom && argc > 1 && !strcmp(argv[1], "classify=1")) {
+        FILE *f = NULL;
+        char request[4096];
+        if (fopen_s(&f, "requests.txt", "rb") || !f) return 1;
         sh_modstock_set_install(doom);
-        if (sh_modstock_read(stock_source, stock_sha, &bytes, &len) != SH_MB_STOCK_OK || !bytes) return 1;
-        k = write_file("stock.bin", bytes, len);
-        HeapFree(GetProcessHeap(), 0, bytes);
-        return !k;
+        int ok = 1;
+        while (fgets(request, sizeof request, f)) {
+            size_t len = strcspn(request, "\r\n");
+            if (!len || !request[len]) { ok = 0; break; }
+            request[len] = 0;
+            int found = stock_exists(NULL, request);
+            if (found < 0) { ok = 0; break; }
+            printf("%d\t%s\n", found, request);
+        }
+        if (ferror(f)) ok = 0;
+        fclose(f);
+        return !ok;
+    }
+    if (doom && argc > 1 && !strcmp(argv[1], "stocks=1")) {
+        sh_modstock_set_install(doom);
+        return !extract_stock_list();
+    }
+    if (doom && stock_sha && stock_source) {
+        sh_modstock_set_install(doom);
+        return !extract_stock(stock_source, stock_sha, "stock.bin");
     }
     if (!mod || !out || !doom || !names) {
         fprintf(stderr, "usage: unit_cli mod=<folder> out=<folder> doom=<install root> names=<a,b,...> [compose=1]\n");
@@ -130,15 +243,19 @@ static int run_cli(int argc, char **argv)
     sh_modstock_register();
     sh_mb_set_script_check(sh_script_compile_check);
     sh_mb_set_look_compiler(sh_look_compile_notes);
-    CreateDirectoryA(out, NULL);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\units", out);
-    CreateDirectoryA(path, NULL);
+    sh_mb_set_sdk_compiler(sh_sdk_build_compile);
+    char *units = sh_textf("%s\\units", out);
+    int ready = make_directory(out) && make_directory(units);
+    free(units);
+    if (!ready) { fprintf(stderr, "cannot create the unit output under %s\n", out); return 1; }
     if (!(loaded ? sh_mb_load_folder(mod, &b) && b.validated : sh_mb_build(mod, NULL, &g_resolver, &b))) { fprintf(stderr, "the mod does not build: %s\n", sh_mb_first_cause(&b)); return 1; }
     if (!loaded && !sh_mb_write(&b, mod, &cause)) { fprintf(stderr, "not written: %s\n", cause ? cause : "?"); return 1; }
     printf("build %s\t%s\t%zu files\t%llu bytes\tspelled %s\n", b.id, b.hash, b.file_count, b.total_size,
            b.spelled[0] ? b.spelled : "-");
     memset(&env, 0, sizeof env);
+    loaded_sdk sdk = { mod, &b, 0 };
     env.game = game;
+    env.game_context = loaded ? &sdk : NULL;
     if (!strcmp(names, "@objects")) {
         /* Every object a map can place of this mod: the walk's root types (modunit.c uw_root_file) that the mod adds
          * under its namespace (a DOOM entityDef it replaces is a change of the mod, placed as DOOM's own). */
@@ -167,8 +284,6 @@ static int run_cli(int argc, char **argv)
     for (name = strtok_s(list, separator, &ctxp); name; name = strtok_s(NULL, separator, &ctxp), n++) {
         sh_unit u;
         char *why = NULL;
-        size_t i;
-        FILE *keep;
         if (fallback && !bad && !strcmp(name, SH_UNIT_WHOLE)) continue;
         if (!sh_unit_of(&b, mod, name, &env, &u, &why)) {
             printf("unit %s\tFAILED\t%s\n", name, why ? why : "?");
@@ -176,17 +291,13 @@ static int run_cli(int argc, char **argv)
             bad = 1;
             continue;
         }
-        printf("unit %s\t%s\t%d\t%zu\t%llu\t%zu\t%s\n", name, u.hash, u.kind, u.files, u.bytes, u.pointers, u.root);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\units\\%s.json", out, u.hash);
-        write_file(path, u.manifest, u.manifest_len);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\units\\%s.keep.txt", out, u.hash);
-        if (!fopen_s(&keep, path, "wb") && keep) {
-            for (i = 0; i < b.file_count; i++)
-                if (u.keep[i])
-                    fprintf(keep, "%s\t%s\t%llu\t%s\n", b.files[i].stock ? "pointer" : "file", b.files[i].path, b.files[i].size,
-                            u.from[i] >= 0 ? b.files[u.from[i]].path : "(seed)");
-            fclose(keep);
+        if (!write_unit(out, &b, &u)) {
+            fprintf(stderr, "cannot write unit %s under %s\n", u.hash, out);
+            sh_unit_free(&u);
+            bad = 1;
+            break;
         }
+        printf("unit %s\t%s\t%d\t%zu\t%llu\t%zu\t%s\n", name, u.hash, u.kind, u.files, u.bytes, u.pointers, u.root);
         if (compose) {
             const char *m[1];
             size_t len[1];
@@ -194,8 +305,8 @@ static int run_cli(int argc, char **argv)
             sh_mb_bundle c;
             m[0] = u.manifest;
             len[0] = u.manifest_len;
-            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%d-unit", out, n);
-            if (!sh_unit_compose(m, len, 1, source_of, &sc, b.id, b.name, &g_resolver, path, &c, &why)) {
+            char *path = sh_textf("%s\\%d-unit", out, n);
+            if (!path || !sh_unit_compose(m, len, 1, source_of, &sc, b.id, b.name, &g_resolver, path, &c, &why)) {
                 printf("compose %s\tFAILED\t%s\n", name, why ? why : "?");
                 bad = 1;
             } else {
@@ -203,6 +314,7 @@ static int run_cli(int argc, char **argv)
                 sh_mb_free(&c);
             }
             free(why);
+            free(path);
         }
         sh_unit_free(&u);
     }

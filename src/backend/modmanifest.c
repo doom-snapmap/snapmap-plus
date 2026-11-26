@@ -18,6 +18,8 @@
 #include "../common/text.h"
 
 #define MM_DEPTH_MAX 256u   /* JSON nesting a manifest scan follows */
+static void (*g_actor_rows)(const char *, size_t);
+static void (*g_restore_actors)(void);
 static int mm_space(char c) { return c == 0x20 || c == 0x09 || c == 0x0d || c == 0x0a; }
 static int mm_isdigit(char c) { return c >= '0' && c <= '9'; }
 static int mm_ishex(char c) { return mm_isdigit(c) || (c >= 'a' && c <= 'f'); }
@@ -33,6 +35,10 @@ void sh_modmanifest_row_free(sh_modmanifest_row *row)
     if (!row) return;
     for (i = 0; i < row->name_count; i++) free(row->names[i]);
     free(row->names);
+    for (i = 0; i < row->missing_count; i++) free(row->missing[i]);
+    free(row->missing);
+    row->missing = NULL;
+    row->missing_count = 0;
     free(row->name);
     free(row->choices);
     free(row->labels);
@@ -101,6 +107,17 @@ int sh_modmanifest_row_pin(sh_modmanifest_row *row, const char *const *roots, co
         free(u);
         return 0;
     }
+    if (row->unavailable) {
+        sh_sha256 s;
+        const char domain[] = "snapmap-plus/unavailable/1";
+        if (row->missing_count) qsort(row->missing, row->missing_count, sizeof *row->missing, mm_hash_cmp);
+        sh_sha256_init(&s);
+        sh_sha256_update(&s, domain, sizeof domain);
+        sh_sha256_update(&s, chash, strlen(chash));
+        for (i = 0; i < row->missing_count; i++)
+            sh_sha256_update(&s, row->missing[i], strlen(row->missing[i]) + 1);
+        sh_sha256_hex(&s, chash, SH_MOD_HASH_CHARS);
+    }
     if (row->roots) for (i = 0; i < row->unit_count; i++) free(row->roots[i]);
     free(row->roots);
     free(row->units);
@@ -136,22 +153,44 @@ void sh_modmanifest_list_free(sh_modmanifest_list *list)
     memset(list, 0, sizeof *list);
 }
 
-int sh_modmanifest_row_add_name(sh_modmanifest_row *row, const char *name)
+static int mm_add_name(char ***names, size_t *count, const char *name)
 {
     size_t i, n;
     char **grown, *copy;
-    if (!row || !name || !*name) return 0;
-    for (i = 0; i < row->name_count; i++)
-        if (!_stricmp(row->names[i], name)) return 1;
+    if (!name || !*name) return 0;
+    for (i = 0; i < *count; i++)
+        if (!_stricmp((*names)[i], name)) return 1;
     n = strlen(name);
     copy = (char *)malloc(n + 1);
     if (!copy) return 0;
     memcpy(copy, name, n + 1);
-    grown = (char **)realloc(row->names, (row->name_count + 1) * sizeof *grown);
+    grown = (char **)realloc((*names), (*count + 1) * sizeof *grown);
     if (!grown) { free(copy); return 0; }
-    row->names = grown;
-    row->names[row->name_count++] = copy;
+    *names = grown;
+    (*names)[(*count)++] = copy;
     return 1;
+}
+
+int sh_modmanifest_row_add_name(sh_modmanifest_row *row, const char *name)
+{
+    return row && mm_add_name(&row->names, &row->name_count, name);
+}
+
+int sh_modmanifest_row_add_missing(sh_modmanifest_row *row, const char *name)
+{
+    if (!row || !mm_add_name(&row->missing, &row->missing_count, name)) return 0;
+    row->unavailable = 1;
+    return 1;
+}
+
+int sh_modmanifest_freeze_local(sh_modmanifest_row *row)
+{
+    if (row->pinned) return 1;
+    for (size_t i = 0; i < row->name_count; i++)
+        if (!sh_modmanifest_row_add_missing(row, row->names[i])) return 0;
+    row->unavailable = 1;
+    row->size = 0;
+    return sh_modmanifest_row_pin(row, NULL, NULL, 0);
 }
 
 int sh_modmanifest_list_add(sh_modmanifest_list *list, const sh_modmanifest_row *row)
@@ -169,6 +208,8 @@ int sh_modmanifest_list_add(sh_modmanifest_list *list, const sh_modmanifest_row 
     slot = &list->rows[list->count];
     *slot = *row;
     slot->names = NULL;
+    slot->missing = NULL;
+    slot->missing_count = 0;
     slot->name_count = 0;
     slot->name = NULL;
     slot->choices = NULL;
@@ -183,6 +224,8 @@ int sh_modmanifest_list_add(sh_modmanifest_list *list, const sh_modmanifest_row 
         sh_modmanifest_row_free(slot);
         return 0;
     }
+    for (i = 0; i < row->missing_count; i++)
+        if (!sh_modmanifest_row_add_missing(slot, row->missing[i])) { sh_modmanifest_row_free(slot); return 0; }
     if (row->pinned) {
         const char **units = row->unit_count ? (const char **)calloc(row->unit_count, sizeof *units) : NULL;
         int ok = !row->unit_count || units;
@@ -438,19 +481,24 @@ static int mm_choice_find(const char *lines, const char *slot, char *key, size_t
 
 /* Append "slot\tkey\n" to *lines (malloc'd, NULL for none) unless the slot
  * is there. 0 when memory runs out. */
-char *sh_modmanifest_row_label(const sh_modmanifest_row *row, const char *placed)
+static char *mm_label(const char *labels, const char *placed)
 {
     const char *p, *nl;
     size_t n;
-    if (!row || !row->labels || !placed || !placed[0]) return NULL;
+    if (!labels || !placed || !placed[0]) return NULL;
     n = strlen(placed);
-    for (p = row->labels; *p; p = nl + 1) {
+    for (p = labels; *p; p = nl + 1) {
         const char *tab = strchr(p, '\t');
         nl = strchr(p, '\n');
         if (!tab || !nl || tab > nl) return NULL;
         if ((size_t)(tab - p) == n && !_strnicmp(p, placed, n)) return sh_textn(tab + 1, (size_t)(nl - tab - 1));
     }
     return NULL;
+}
+
+char *sh_modmanifest_row_label(const sh_modmanifest_row *row, const char *placed)
+{
+    return mm_label(row ? row->labels : NULL, placed);
 }
 
 static int mm_choice_add(char **lines, const char *slot, const char *key)
@@ -572,7 +620,21 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
                     if (!unit || !sh_modmanifest_valid_hash(unit, strlen(unit))) good = 0;
                     else { roots[n] = "*"; units[n] = unit; n++; }
                 }
-                if (good && !n) good = 0;
+                const char *missing = sh_json_object_get(&object, "unavailable");
+                if (good && missing) {
+                    const char *cursor = missing, *end = missing + strlen(missing), *elem;
+                    size_t len;
+                    int next;
+                    out->unavailable = 1;
+                    while ((next = mm_array_next(&cursor, end, &elem, &len)) == 1) {
+                        char *name = *elem == '"' ? mm_decode(elem, len) : NULL;
+                        good = name && sh_modmanifest_row_add_missing(out, name);
+                        free(name);
+                        if (!good) break;
+                    }
+                    if (*missing != '[' || next < 0) good = 0;
+                }
+                if (good && !n && !(objects && out->unavailable)) good = 0;
                 if (good && !sh_modmanifest_row_pin(out, roots, units, n)) good = 0;
                 for (k = 0; owned && k < (oo.count + 1) * 2; k++) free(owned[k]);
                 free(owned);
@@ -580,14 +642,12 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
                 free((void *)units);
                 sh_json_object_free(&oo);
                 if (!good) { MM_ERR("row '%s' names its objects' units wrongly", out->salt); goto done; }
-                /* A module stand-in's record is kept as written; one that does not read is dropped and the row stays. */
-                {
-                    const char *modules = sh_json_object_get(&object, "modules");
-                    if (modules && *modules == '[') out->modules = sh_text(modules);
-                }
+
             }
         }
     }
+    const char *modules = sh_json_object_get(&object, "modules");
+    if (modules && *modules == '[' && !(out->modules = sh_text(modules))) goto done;
     if (!mm_member_heap(&object, "name", &out->name, 0)) {
         MM_ERR("row '%s' has no valid name", out->salt); goto done;
     }
@@ -684,8 +744,16 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
             mm_put_quoted(&t, row->units[i]);
         }
         mm_put(&t, "}", 1);
+        if (row->unavailable) {
+            mm_put(&t, ",\"unavailable\":[", 16);
+            for (i = 0; i < row->missing_count; i++) {
+                if (i) mm_put(&t, ",", 1);
+                mm_put_quoted(&t, row->missing[i]);
+            }
+            mm_put(&t, "]", 1);
+            if (row->attached && !whole) mm_put(&t, ",\"attached\":true", 16);
+        }
         if (whole) { mm_put(&t, ",\"whole\":", 9); mm_put_quoted(&t, whole); }
-        if (row->modules && row->modules[0] == '[') { mm_put(&t, ",\"modules\":", 11); mm_put(&t, row->modules, strlen(row->modules)); }
     } else {
         mm_put(&t, ",\"local\":true", 13);
         mm_put(&t, ",\"names\":[", 10);
@@ -696,6 +764,7 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
         mm_put(&t, "]", 1);
         if (row->attached) mm_put(&t, ",\"attached\":true", 16);
     }
+    if (row->modules && row->modules[0] == '[') { mm_put(&t, ",\"modules\":", 11); mm_put(&t, row->modules, strlen(row->modules)); }
     if (mm_choice_count(row->choices)) {
         char *slot, *key;
         mm_put(&t, ",\"choices\":{", 12);
@@ -746,6 +815,7 @@ static int mm_merge_row(sh_modmanifest_list *out, sh_modmanifest_row *row)
 static const struct { unsigned bit; const char *word; } MM_USES[] = {
     { SH_MODMANIFEST_USES_MODULE_SIZES, "module-sizes" },
     { SH_MODMANIFEST_USES_NAVIGATION, "navigation" },
+    { SH_MODMANIFEST_USES_DIRECT_ACTORS, "direct-actors" },
 };
 
 /* 1 when the element is the product's entry, its words' bits added to *uses. */
@@ -1334,6 +1404,7 @@ static void mm_subst_load(const sh_modmanifest_list *list, const char *json, siz
 
 void sh_modmanifest_current_close(void)
 {
+    if (g_actor_rows) g_actor_rows(NULL, 0);
     sh_modmanifest_reset();
     mm_subst_load(NULL, NULL, 0);
 }
@@ -1411,6 +1482,12 @@ int sh_modmanifest_current_make_local(const char *salt, const char *build, const
         row->units = NULL;
         row->modules = NULL;
         row->unit_count = 0;
+        for (k = 0; k < row->missing_count; k++)
+            if (strcmp(row->missing[k], "*") && !sh_modmanifest_row_add_name(row, row->missing[k])) r = -1;
+        sh_modmanifest_names_free(row->missing, row->missing_count);
+        row->missing = NULL;
+        row->missing_count = 0;
+        row->unavailable = 0;
         row->pinned = 0;
         strcpy_s(row->build, sizeof row->build, build);
         for (k = 0; k < n; k++)
@@ -1647,6 +1724,13 @@ void sh_modmanifest_set_scope(sh_modmanifest_scope_fn scope, int (*armed)(void))
 void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve) { g_resolve = resolve; }
 static sh_modmanifest_content_fn volatile g_content;
 void sh_modmanifest_set_content(sh_modmanifest_content_fn fn) { g_content = fn; }
+static int (*g_uses_actors)(const char *, size_t);
+void sh_modmanifest_set_actor_rows(void (*fn)(const char *, size_t), int (*uses)(const char *, size_t), void (*restore)(void))
+{
+    g_actor_rows = fn;
+    g_uses_actors = uses;
+    g_restore_actors = restore;
+}
 static sh_modmanifest_uses_fn volatile g_uses;
 void sh_modmanifest_set_uses(sh_modmanifest_uses_fn fn) { g_uses = fn; }
 
@@ -1822,7 +1906,29 @@ int sh_modmanifest_current_restore_previous(void)
     mm_set_current(&rows);
     sh_modmanifest_list_free(&rows);
     (void)mm_choices_push(0);
+    if (g_restore_actors) g_restore_actors();
     return n;
+}
+
+int sh_modmanifest_freeze_local_rows(sh_modmanifest_list *rows, const char *json, size_t len)
+{
+    char **placed = NULL;
+    size_t count = 0;
+    int changed = 0, failed = 0;
+    for (size_t i = 0; !failed && i < rows->count; i++) {
+        sh_modmanifest_row *r = &rows->rows[i];
+        if (r->pinned) continue;
+        if (!changed && json) count = sh_modmanifest_placed_names(json, len, &placed, &failed);
+        for (size_t k = 0; !failed && k < count; k++) {
+            const char *name = placed[k];
+            if (!_strnicmp(name, "mods/", 5) && !_strnicmp(name + 5, r->salt, SH_MODMANIFEST_SALT_LEN) &&
+                name[5 + SH_MODMANIFEST_SALT_LEN] == '/' && !sh_modmanifest_row_add_name(r, name)) failed = 1;
+        }
+        if (!failed && !sh_modmanifest_freeze_local(r)) failed = 1;
+        changed = 1;
+    }
+    sh_modmanifest_names_free(placed, count);
+    return failed ? -1 : changed;
 }
 
 void sh_modmanifest_prepare_load(const char *json, size_t length)
@@ -1909,6 +2015,7 @@ void sh_modmanifest_content_for(const char *json, size_t length, const sh_modman
             if (!sh_modmanifest_composition_hash(r->salt, NULL, 0, none.build)) continue;
             none.name = r->name;   /* copied by the add */
             none.labels = r->labels;
+            none.modules = r->modules;
             none.size = r->size;
             none.pinned = 1;
             none.local_broken = lacking == SH_MODMANIFEST_LOCAL_REFUSED ? SH_MODMANIFEST_LOCAL_REFUSED :
@@ -1946,7 +2053,7 @@ void sh_modmanifest_content_for(const char *json, size_t length, const sh_modman
 
 void sh_modmanifest_load_rows(const char *json, size_t length, sh_modmanifest_list *list, unsigned rejected)
 {
-    int active;
+    int active, before;
     char *line, *names;
 
     mm_prev_take();
@@ -1956,6 +2063,7 @@ void sh_modmanifest_load_rows(const char *json, size_t length, sh_modmanifest_li
         mm_choices_load(NULL);
         mm_scope_load(json, length, NULL);
         (void)mm_activate_load(NULL);
+        if (g_actor_rows) g_actor_rows(json, length);
         return;
     }
     /* Pinned rows: the content cache composes what it can before the rows resolve (modcache.h). */
@@ -1965,10 +2073,22 @@ void sh_modmanifest_load_rows(const char *json, size_t length, sh_modmanifest_li
     /* The map scope first: the bundles' shadows and requirements are live
      * before their gameplay decls register; the registry choices before the
      * listing that computes the registries. */
+    before = sh_modserve_refusal_version();
     mm_subst_load(list, json, length);
     mm_choices_load(list);
     mm_scope_load(json, length, list);
     active = mm_activate_load(list);
+    if (sh_modserve_refusal_version() != before) {
+        /* A local entity can lose its definition during its first native parse. Give it its stand-in before validation. */
+        for (size_t i = 0; i < list->count; ++i) {
+            if (!mm_local_lacks(&list->rows[i])) continue;
+            sh_modmanifest_content_for(json, length, list);
+            mm_scope_load(json, length, list);
+            active = mm_activate_load(list);
+            break;
+        }
+    }
+    if (g_actor_rows) g_actor_rows(json, length);
     /* `active` counts the registration steps the activation found ready (new
      * names; a bundle of shadows and requirements has none), not bundles. */
     {
@@ -2239,7 +2359,10 @@ static int mm_save_pins(mm_save_ctx *ctx)
             units = c->unit_count ? (const char **)calloc(c->unit_count, sizeof *units) : NULL;
             if (c->unit_count && !units) { ok = 0; break; }
             for (u = 0; u < c->unit_count; u++) units[u] = c->units[u];
-            ok = sh_modmanifest_row_pin(r, (const char *const *)c->roots, units, c->unit_count);
+            r->unavailable = c->unavailable;
+            for (u = 0; ok && u < c->missing_count; u++)
+                ok = sh_modmanifest_row_add_missing(r, c->missing[u]);
+            if (ok) ok = sh_modmanifest_row_pin(r, (const char *const *)c->roots, units, c->unit_count);
             free((void *)units);
             if (ok && !sh_modmanifest_row_name(r)[0] && c->name) ok = sh_modmanifest_row_set_name(r, c->name);
             /* The module records travel with the units: a save keeps them as the load read them. */
@@ -2273,6 +2396,16 @@ static void mm_save_labels(mm_save_ctx *ctx, char **names, size_t count)
         sh_modmanifest_row *r = &ctx->list.rows[i];
         size_t sl = strlen(r->salt);
         char *kept = NULL;
+        if (r->unavailable) {
+            const char *saved = r->labels;
+            for (j = 0; !saved && j < cur.count; j++)
+                if (!strcmp(cur.rows[j].build, r->build)) saved = cur.rows[j].labels;
+            for (j = 0; saved && j < r->missing_count; j++) {
+                char *label = mm_label(saved, r->missing[j]);
+                if (label) (void)mm_choice_add(&kept, r->missing[j], label);
+                free(label);
+            }
+        }
         for (k = 0; k < count; k++) {
             char *label = NULL;
             if (!names[k] || _strnicmp(names[k], "mods/", 5) || _strnicmp(names[k] + 5, r->salt, sl) || names[k][5 + sl] != '/')
@@ -2305,6 +2438,7 @@ static void mm_save_keep_absent(mm_save_ctx *ctx)
         for (k = 0; k < cur.count; k++) {
             const sh_modmanifest_row *c = &cur.rows[k];
             if (c->pinned || strcmp(c->salt, r->salt)) continue;
+            if (!r->modules && c->modules && !(r->modules = sh_text(c->modules))) ctx->failed = 1;
             if (c->size) r->size = c->size;
             if (!sh_modmanifest_row_name(r)[0] && c->name) (void)sh_modmanifest_row_set_name(r, c->name);
             break;
@@ -2354,7 +2488,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
      * map-level mod, and nothing asks what it uses of the product: the save is
      * the engine's own bytes, without walking the map. */
     (void)sh_modmanifest_current_attached(&attached);
-    if (!stale && !attached.count && !sh_modserve_active() && !uses_fn) {
+    if (!stale && !attached.count && !sh_modserve_active() && !uses_fn && !g_uses_actors) {
         if (scope && g_scope_armed && g_scope_armed() > 0) scope(&ctx.list, NULL, 0, SH_MODSERVE_AT_SAVE);
         return NULL;
     }
@@ -2366,6 +2500,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     /* What the map uses of Snapmap+ itself (a resized module, its own navigation) flags it as modded: a game without
      * Snapmap+ cannot load it. */
     ctx.list.uses = uses_fn ? uses_fn(json, length, (const char *const *)names, count) : 0;
+    if (g_uses_actors && g_uses_actors(json, length)) ctx.list.uses |= SH_MODMANIFEST_USES_DIRECT_ACTORS;
     if (!stale && !attached.count && !sh_modserve_active() && !ctx.list.uses) {
         sh_modmanifest_names_free(names, count);
         sh_modmanifest_list_free(&attached);

@@ -1,6 +1,8 @@
 /* Exercise deferred saves across editor lifecycle changes without game code. */
 #include "heap_out.h"
 #include "../src/backend/editor_frame.c"
+#include "../src/common/wide_path.h"
+#include "saved_map_fixture.h"
 
 static unsigned long generation;
 static int writes, choices, failed, ticks, loads, done_rc = -1, done_faulted = -1, tells, fault_load;
@@ -9,6 +11,12 @@ static unsigned char editor[0x24000];
 static int map_a, map_b;
 #define CHECK(x) do { if (!(x)) { ++failed; printf("FAIL %d: %s\n", __LINE__, #x); } } while (0)
 
+static const char *edit_id;
+static char loaded_id[64];
+int sh_rawmap_edit_local_id(char *out, size_t cap)
+{
+    return edit_id && strcpy_s(out, cap, edit_id) == 0;
+}
 void backend_log(const char *message) { (void)message; }
 void sh_world_area_cell_editor_tick(void) {}
 void sh_fly_to_tick(void *editor) { (void)editor; ++ticks; }
@@ -59,6 +67,7 @@ static int load_map(void *ed, void *id)
     (void)ed;
     CHECK(!sh_editor_frame_map_context());
     ++loads;
+    strcpy_s(loaded_id, sizeof loaded_id, name);
     if (fault_load) RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, NULL);
     got = ef_read_text_detour(name, NULL, NULL, NULL);
     if (got != 0) return got;
@@ -93,9 +102,125 @@ static void reset(void)
     strcpy_s(current, sizeof current, "C:\\maps\\current.json");
 }
 
+/* Build complete and deleted slots entirely under the runner's private temporary directory. */
+static wchar_t *test_dir(const wchar_t *parent, const wchar_t *name)
+{
+    wchar_t *path = sh_wtextf(L"%s\\%s", parent, name);
+    if (!path || !CreateDirectoryW(path, NULL)) { printf("test directory failed: %lu\n", GetLastError()); exit(1); }
+    return path;
+}
+
+static void test_slot(const wchar_t *profile, const wchar_t *name, int complete, DWORD time)
+{
+    wchar_t *slot = test_dir(profile, name);
+    const wchar_t *files[] = { L"game.details", L"map.decl" };
+    for (int i = 0; i < (complete ? 2 : 1); ++i) {
+        wchar_t *path = sh_wtextf(L"%s\\%s", slot, files[i]);
+        HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        CHECK(file != INVALID_HANDLE_VALUE);
+        if (file != INVALID_HANDLE_VALUE) {
+            /* A genuine map.decl contains a four-byte checksum and zlib-compressed JSON. */
+            static const unsigned char map[] = { 0, 0, 0, 0, 120, 156, 171, 86, 202, 79, 202, 74, 77, 46, 41, 86, 178, 138, 142, 173, 5, 0, 38, 109, 5, 25 };
+            const char *account = wcsrchr(profile, L'\\') && !wcscmp(wcsrchr(profile, L'\\') + 1, L"111")
+                                ? "itemId=first" : "itemId=other";
+            DWORD wrote = 0;
+            CHECK(WriteFile(file, i ? (const void *)map : (const void *)account,
+                            i ? sizeof map : (DWORD)strlen(account), &wrote, NULL));
+            CloseHandle(file);
+        }
+        free(path);
+    }
+    HANDLE dir = CreateFileW(slot, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    FILETIME stamp = { time, 30000000 };
+    CHECK(dir != INVALID_HANDLE_VALUE && SetFileTime(dir, NULL, NULL, &stamp));
+    if (dir != INVALID_HANDLE_VALUE) CloseHandle(dir);
+    free(slot);
+}
+
+static void count_slot(void *context, const char *local_id, const char *item, const char *json, size_t len)
+{
+    int *counts = context;
+    if (!strcmp(local_id, "5C70EFF070704720BCA6") && !strcmp(item, "first")) counts[0]++;
+    if (!strcmp(local_id, "2342E40A735B43FB99A7") && !strcmp(item, "other")) counts[1]++;
+    CHECK(len == strlen(json) && strstr(json, "objects"));
+}
+
+static void test_reload_slots(void)
+{
+    static wchar_t temp[SH_WPATH_MAX];
+    static char redirected[SH_U8PATH_MAX], windows_saves[SH_U8PATH_MAX];
+    const char *active = "5C70EFF070704720BCA6", *other = "2342E40A735B43FB99A7";
+    char id[21], msg[HO_TEXT];
+    DWORD n = GetTempPathW(SH_WPATH_MAX, temp);
+    if (!n || n >= SH_WPATH_MAX || !sh_wpath_long(temp, SH_WPATH_MAX)) exit(1);
+    if (temp[wcslen(temp) - 1] == L'\\') temp[wcslen(temp) - 1] = 0;
+    wchar_t *name = sh_wtextf(L"reload-%lu-%llu-\x2603", GetCurrentProcessId(), GetTickCount64());
+    wchar_t *root = test_dir(temp, name), *base = test_dir(root, L"base");
+    wchar_t *profiles = test_dir(base, L"savegame.user"), *first = test_dir(profiles, L"111");
+    wchar_t *windows = test_dir(root, L"Saved Games"), *vendor = test_dir(windows, L"id Software");
+    wchar_t *doom = test_dir(vendor, L"DOOM"), *stock_base = test_dir(doom, L"base");
+    wchar_t *default_root = test_dir(stock_base, L"savegame.user"), *win = test_dir(default_root, L"222");
+    free(name);
+    CHECK(sh_wpath_utf8(root, redirected, sizeof redirected) && sh_wpath_utf8(default_root, windows_saves, sizeof windows_saves));
+    test_slot(first, L"SNAPMAPS5C70EFF070704720BCA6", 1, 100);
+    test_slot(first, L"SNAPMAPS11111111111111111111", 1, 50);
+    test_slot(first, L"SNAPMAPS22222222222222222222", 0, 200);
+    test_slot(first, L"SNAPMAPSZZZZZZZZZZZZZZZZZZZZ", 1, 300);
+    test_slot(win, L"SNAPMAPS2342E40A735B43FB99A7", 1, 400);
+    sh_saved_maps_set_root(windows_saves);
+    bind_save_session("", 0);
+    CHECK(sh_saved_map_fallback(id, sizeof id) && !strcmp(id, other));
+    bind_save_session(NULL, 0);
+    CHECK(!sh_saved_map_fallback(id, sizeof id) && sh_saved_maps_each(NULL, NULL, NULL) == -1);
+    char *missing = sh_textf("%s/missing", redirected);
+    bind_save_session(missing, 0);
+    CHECK(!sh_saved_map_fallback(id, sizeof id) && sh_saved_maps_each(NULL, NULL, NULL) == -1);
+    free(missing);
+
+    reset();
+    bind_save_session(redirected, 0);
+    edit_id = NULL;
+    int single[2] = {0};
+    CHECK(sh_saved_maps_each(count_slot, single, NULL) > 0 && single[0] == 1 && !single[1]);
+    CHECK(HO(msg, sh_editor_frame_request_reload(HO_P(0))));
+    sh_editor_frame_detour(editor, NULL);
+    CHECK(loads == 1 && !strcmp(loaded_id, active));
+    wchar_t *second = test_dir(profiles, L"222");
+    test_slot(second, L"SNAPMAPS2342E40A735B43FB99A7", 1, 500);
+    bind_save_session(redirected, 111);
+    int counts[2] = {0};
+    CHECK(sh_saved_maps_each(count_slot, counts, NULL) >= 2 && counts[0] == 1 && counts[1] == 1);
+    char *details = sh_saved_map_details(active);
+    CHECK(details && !strcmp(details, "itemId=first"));
+    free(details);
+    CHECK(sh_saved_map_details(other) == NULL);
+    CHECK(sh_saved_map_fallback(id, sizeof id) && !strcmp(id, active));
+    bind_save_session(redirected, 222);
+    CHECK(sh_saved_map_fallback(id, sizeof id) && !strcmp(id, other));
+    bind_save_session(redirected, 333);
+    CHECK(!sh_saved_map_fallback(id, sizeof id));
+    bind_save_session(redirected, 0);
+    CHECK(!sh_saved_map_fallback(id, sizeof id));
+
+    reset();
+    edit_id = active;
+    CHECK(HO(msg, sh_editor_frame_request_reload(HO_P(0))));
+    sh_editor_frame_detour(editor, NULL);
+    CHECK(loads == 1 && done_rc == 0 && !strcmp(loaded_id, active) && !disk_reads);
+    edit_id = "123456789012345678901234";   /* A cloud item is not a local slot. */
+    CHECK(!HO(msg, sh_editor_frame_request_reload(HO_P(0))) && !g_reload_pending);
+    edit_id = NULL;
+    bind_save_session(NULL, 0);
+    sh_saved_maps_set_root(NULL);
+    free(second); free(win); free(default_root); free(stock_base); free(doom); free(vendor); free(windows);
+    free(first); free(profiles); free(base); free(root);
+}
+
 int main(void)
 {
     char msg[HO_TEXT];
+    test_reload_slots();
     reset();
     CHECK(HO(msg, sh_editor_frame_request_rawmap_save_to("C:\\maps\\chosen.json", HO_P(0))));
     CHECK(!choices && !writes);

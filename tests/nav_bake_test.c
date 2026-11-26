@@ -1368,7 +1368,7 @@ static void test_the_preview_cuts_the_placement_grid(void)
             CHECK(!strncmp(name, "maps/smpnavgrid/", 16) && strstr(name, stock[ci]));
             CHECK(sh_nav_bake_overlay_open(name, &bytes, &len) == 1 && bytes);
             if (bytes) {
-                int t = sh_nav_overlay_triangle_count(bytes, len);
+                int t = fixture_grid_triangles(bytes, len);
                 if (t > triangles) triangles = t;
                 HeapFree(GetProcessHeap(), 0, bytes); bytes = NULL;
             }

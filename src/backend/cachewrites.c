@@ -10,6 +10,7 @@
 
 #include "signatures.h"
 #include "cachewrites.h"
+#include "wide_path.h"
 #include "backend_log.h"
 #include "hook.h"
 #include "patch.h"
@@ -20,6 +21,7 @@ typedef uint8_t (*atomic_write_fn)(const char *rel, int path_type, const void *b
 
 static atomic_write_fn g_write;
 static char g_root[MAX_PATH];
+static wchar_t g_saved[SH_WPATH_MAX];
 static size_t g_root_len;
 static volatile LONG g_redirected;
 static volatile LONG g_dir_logged;
@@ -34,26 +36,24 @@ static void cw_log(const char *fmt, ...)
     backend_log(line);
 }
 
-/* Resolves the Saved Games folder plus `\id Software\DOOM` in the ANSI code page the engine's narrow paths use.
- * Returns 0 when the folder is unknown or its name has a character that code page cannot spell. */
+/* Keep the Known Folder in UTF-16 and use the engine's narrow writer when the whole root fits it. */
 static int resolve_root(void)
 {
     static const GUID kSavedGames =
         { 0x4C5C32FFu, 0xBB9D, 0x43b0, { 0xB5, 0xB4, 0x2D, 0x72, 0xE5, 0x4E, 0xAA, 0xA4 } };
     static const char TAIL[] = "\\id Software\\DOOM";
     PWSTR wide = NULL;
-    BOOL lossy = FALSE;
-    int n;
     if (FAILED(SHGetKnownFolderPath(&kSavedGames, 0, NULL, &wide)) || !wide) {
         if (wide) CoTaskMemFree(wide);
         return 0;
     }
-    n = WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, wide, -1, g_root, (int)sizeof g_root, NULL, &lossy);
+    int known = wide[0] && wcscpy_s(g_saved, _countof(g_saved), wide) == 0;
     CoTaskMemFree(wide);
-    if (n <= 1 || lossy) { g_root[0] = '\0'; return 0; }
+    if (!known) return 0;
+    if (!sh_cachewrite_ansi(g_saved, g_root, sizeof g_root)) return 1;
     g_root_len = strlen(g_root);
     while (g_root_len && (g_root[g_root_len - 1] == '\\' || g_root[g_root_len - 1] == '/')) g_root[--g_root_len] = '\0';
-    if (!g_root_len || g_root_len + sizeof TAIL > sizeof g_root) { g_root[0] = '\0'; g_root_len = 0; return 0; }
+    if (!g_root_len || g_root_len + sizeof TAIL > sizeof g_root) { g_root[0] = '\0'; g_root_len = 0; return 1; }
     memcpy(g_root + g_root_len, TAIL, sizeof TAIL);
     g_root_len += sizeof TAIL - 1;
     return 1;
@@ -85,7 +85,14 @@ static uint8_t write_detour(const char *rel, int path_type, const void *buf, siz
     char path[MAX_PATH];
     int moved = 0;
     __try {
-        moved = sh_cachewrite_redirect(rel, g_root, path, sizeof path) && make_parents(path);
+        if (sh_cachewrite_redirect(rel, g_root, path, sizeof path)) moved = make_parents(path);
+        else {
+            int wide = sh_cachewrite_wide(g_saved, rel, buf, len);
+            if (wide >= 0) {
+                if (!wide && !InterlockedExchange(&g_dir_logged, 1)) cw_log("CACHE: could not write %s under Saved Games", rel);
+                return (uint8_t)wide;
+            }
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) { moved = 0; }
     if (!moved) return g_write(rel, path_type, buf, len);
     InterlockedIncrement(&g_redirected);
@@ -119,6 +126,7 @@ int sh_cachewrites_install(const uint8_t *module_base)
                "game folder");
         return 0;
     }
-    cw_log("CACHE: cache writes go to %s\\base (generated\\, maps\\*.flight)", g_root);
+    if (g_root[0]) cw_log("CACHE: cache writes go to %s\\base (generated\\, maps\\*.flight)", g_root);
+    else cw_log("CACHE: cache writes go to Saved Games\\id Software\\DOOM\\base using Windows Unicode paths (generated\\, maps\\*.flight)");
     return 1;
 }

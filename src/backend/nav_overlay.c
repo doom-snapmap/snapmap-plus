@@ -294,19 +294,6 @@ bad:
     return 0;
 }
 
-int sh_nav_overlay_triangle_count(const unsigned char *model, size_t model_len)
-{
-    ov_surface *list;
-    uint32_t count, i;
-    size_t tail;
-    long long triangles = 0;
-    if (!ov_surfaces(model, model_len, &list, &count, &tail)) return -1;
-    for (i = 0; i < count; i++) triangles += list[i].indices / 3;
-    free(list);
-    return triangles > 0x7fffffff ? -1 : (int)triangles;
-}
-
-
 typedef struct ov_area { int count; double (*c)[3]; } ov_area;
 
 static int ov_read_area(const sh_aas *a, unsigned area, ov_area *out)

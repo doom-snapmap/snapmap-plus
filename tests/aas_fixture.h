@@ -6,6 +6,22 @@ static const unsigned REC[22] = {
     16, 12, 12, 4, 40, 44, 16, 12, 4, 16, 1, 132, 128, 128, 128, 56, 4, 4, 60, 24, 24, 12
 };
 
+/* Both grid fixtures have one unpatched surface with this material. Read the
+ * indexed geometry from the served model independently of the overlay writer. */
+static int fixture_grid_triangles(const unsigned char *model, size_t len)
+{
+    static const char material[] = "test/aas_surface";
+    const size_t geometry = 16 + sizeof(material) - 1 + 4 + 12;
+    uint32_t vertices, indices;
+    if (!model || len < geometry + 52 + 36 || sh_aas_get_u32(model, 0) != 0x1b4c4d42 ||
+        sh_aas_get_u32(model, 8) != 1 || memcmp(model + 16, material, sizeof(material) - 1)) return -1;
+    vertices = sh_aas_get_u32(model, (unsigned)geometry);
+    indices = sh_aas_get_u32(model, (unsigned)geometry + 4);
+    if (indices % 3 || geometry + 52 + (uint64_t)vertices * 48 + (uint64_t)indices * 2 + 36 != len ||
+        sh_aas_get_u32(model + len - 8, 0) != 0x1b4c4d42) return -1;
+    return (int)(indices / 3);
+}
+
 static void put32(unsigned char *p, unsigned v)
 {
     p[0] = (unsigned char)(v >> 24); p[1] = (unsigned char)(v >> 16);

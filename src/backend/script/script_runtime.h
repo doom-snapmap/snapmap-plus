@@ -134,6 +134,13 @@ int sh_script_started(void);
 #define SH_SCRIPT_BIND_SIGNAL 0x200u   /* bound as "signal:<event>" */
 int sh_script_binds(const char *full_name, char *salt_out, size_t cap, unsigned *kinds);
 
+/* Read a bound actor's own served AI behavior at map start. Scan existing actors after registration. */
+void sh_script_set_enemy_ops(char *(*behavior_of)(const char *salt, const char *entitydef), void (*scan)(void));
+int sh_script_enemy_bindings_ready(void);
+sh_script_handle sh_script_enemy_record(uint32_t spawn_id, const char *behavior, int *full);
+sh_script_handle sh_script_record_actor(void *entity, uint32_t spawn_id, const char *const *mod_chain,
+                                       int count, const char *(*behavior_of)(void *), int *full);
+
 /* 1 when `handle` is an entity of a running mod (recorded in the handle table under it, not yet removed), with
  * its salt in salt_out. Any thread. */
 int sh_script_entity_owner(uint64_t handle, char *salt_out, size_t cap);

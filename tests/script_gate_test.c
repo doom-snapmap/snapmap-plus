@@ -40,6 +40,8 @@ void sh_feature_off(const char *feature, const char *why) { (void)feature; (void
 
 void *sh_entity_gamemgr(void) { return NULL; }
 int sh_companions_def_chain(void *entity, const char **names, int cap) { (void)entity; (void)names; (void)cap; return 0; }
+const char *sh_script_ai_behavior(void *entity) { (void)entity; return NULL; }
+char *sh_modserve_enemy_behavior(const char *salt, const char *entitydef) { (void)salt; (void)entitydef; return NULL; }
 int sh_companions_spawn_ready(void) { return 0; }
 void sh_companions_set_spawn_subscriber(sh_spawn_subscriber_fn fn, sh_spawn_wanted_fn wanted) { (void)fn; (void)wanted; }
 int sh_load_screen_stop_add_map_end(sh_map_end_fn fn) { (void)fn; return 1; }
@@ -68,37 +70,36 @@ void sh_ai_destructible_reset(void) { g_destructible_resets++; }
 
 #define SALT "gatemod1"
 #define HASH "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define PIN "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 static const char k_script[] = "api = 1\non.think(\"gate/thing\", function(self, dt) end)\n";
 static int g_map_mods;      /* rows of the open map: 0 or 1 */
 static int g_map_scripts;   /* the mod's scripts: 0 or 1 */
+static int g_pinned;
 
 int sh_modserve_scope_hashes(char (*out)[SH_MODSERVE_HASH_HEX + 1], int cap)
 {
-    if (out && cap >= 1 && g_map_mods) strcpy_s(out[0], SH_MODSERVE_HASH_HEX + 1, HASH);
+    if (out && cap >= 1 && g_map_mods) strcpy_s(out[0], SH_MODSERVE_HASH_HEX + 1, g_pinned ? PIN : HASH);
     return g_map_mods;
 }
 void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context)
 {
     if (g_map_mods) fn(context, SALT, HASH, 1, NULL, 1, 0);
+    if (g_pinned) fn(context, SALT, PIN, 1, NULL, 1, 1);
 }
 int sh_modserve_script_files(const char *salt, sh_modserve_script_fn fn, void *context)
 {
     if (!g_map_scripts || _stricmp(salt, SALT)) return 0;
-    if (fn) fn(context, "main.lua", "mods/" SALT "/scripts/main.lua", sizeof k_script - 1, "sum", HASH);
+    if (fn) fn(context, "main.lua", "mods/" SALT "/scripts/main.lua", sizeof k_script - 1, "sum", g_pinned ? PIN : HASH);
     return 1;
 }
 /* A local row's folder that is here but cannot be used (modserve.h): none here. */
 int sh_modserve_salt_installed(const char *salt) { (void)salt; return 0; }
+int sh_modserve_refusal_version(void) { return 0; }
 int sh_modserve_root_lacks(const char *salt, const char *name) { (void)salt; (void)name; return 0; }
-int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
+char *sh_modserve_bundle_name(const char *hash)
 {
-    (void)row;
-    memset(out, 0, sizeof *out);
-    out->name = _strdup("Gate Mod");
-    out->folder = _strdup("gate-mod");
-    return 1;
+    return _strdup(!strcmp(hash, PIN) ? "Published Gate Mod" : "Gate Mod");
 }
-void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref) { free(ref->name); free(ref->folder); free(ref->place); }
 int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
 {
     (void)request;
@@ -170,6 +171,13 @@ int main(void)
 
     /* A map with a scripted mod: prepared at Play, the frame hook installed once. */
     map(1, 1);
+    {
+        sh_script_mod_desc source;
+        g_pinned = 1;
+        CHECK(sh_script_source_map_mods(&source, 1) == 1 && !strcmp(source.name, "Published Gate Mod"));
+        g_pinned = 0;
+        CHECK(sh_script_source_map_mods(&source, 1) == 1 && !strcmp(source.name, "Gate Mod"));
+    }
     CHECK(gate(SH_SCRIPT_GATE_MAP_LOAD));
     CHECK(!sh_script_hooks_open() && !g_prepared);
     CHECK(gate(SH_SCRIPT_GATE_PLAY));

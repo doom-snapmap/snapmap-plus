@@ -194,17 +194,19 @@ void sh_script_handles_reset(void)
 static sh_script_handle add_locked(int mod, uint32_t spawn_id, const char *names, int *full)
 {
     sh_script_handle h = 0;
+    char *chain = NULL;
     int i = find_locked(spawn_id);
     if (i >= 0) {
         if (g_e[i].mod == mod || mod == SH_SCRIPT_HANDLE_FOREIGN) h = handle_of(i);
-    } else if ((i = take_slot()) < 0) {
+    } else if ((names && *names && !(chain = _strdup(names))) || (i = take_slot()) < 0) {
+        free(chain);
         if (full) *full = 1;
     } else {
         entry *e = &g_e[i];
         e->spawn_id = spawn_id;
         e->mod = (int16_t)mod;
         e->state = mod == SH_SCRIPT_HANDLE_FOREIGN ? ST_LIVE : ST_PENDING;
-        e->names = names && names[0] ? _strdup(names) : NULL;
+        e->names = chain;
         e->next = -1;
         e->prev = g_tail;
         if (g_tail >= 0) g_e[g_tail].next = i; else g_head = i;
@@ -223,6 +225,27 @@ sh_script_handle sh_script_handles_add_named(int mod, uint32_t spawn_id, const c
         return 0;
     AcquireSRWLockExclusive(&g_lock);
     h = add_locked(mod, spawn_id, names, full);
+    ReleaseSRWLockExclusive(&g_lock);
+    return h;
+}
+
+sh_script_handle sh_script_handles_claim(int mod, uint32_t spawn_id, const char *names, int *full)
+{
+    sh_script_handle h = 0;
+    int i;
+    if (full) *full = 0;
+    if (mod < 0 || mod > 0x7FFF || !names || !*names ||
+        spawn_id == SH_SCRIPT_SPAWN_ID_NONE || spawn_id == SH_SCRIPT_SPAWN_ID_WORLD) return 0;
+    AcquireSRWLockExclusive(&g_lock);
+    i = find_locked(spawn_id);
+    if (i >= 0 && g_e[i].mod == SH_SCRIPT_HANDLE_FOREIGN) {
+        g_e[i].names = _strdup(names);
+        if (g_e[i].names) {
+            g_e[i].mod = (int16_t)mod;
+            g_e[i].state = ST_PENDING;
+            h = handle_of(i);
+        } else if (full) *full = 1;
+    } else h = add_locked(mod, spawn_id, names, full);
     ReleaseSRWLockExclusive(&g_lock);
     return h;
 }

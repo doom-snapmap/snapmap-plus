@@ -159,13 +159,13 @@ parts in the order mods, settings, nav. No step writes a variable or touches
 `variables.allocCount`. A map with nothing to carry has no member and saves as
 exactly the engine's bytes.
 
-The installer updates recognized earlier maps, prefabs, mod folders and exports. It keeps the
-originals under `backups/earlier-data/` before replacing library files. A native DOOM save
+The installer preflights recognized earlier mods, maps and prefabs and asks once before applying
+the changes. A temporary transaction supports resuming an interrupted conversion. A native DOOM save
 gets a converted copy under `rawmaps/Updated saves/`. DOOM creates the new native slot when
 the player opens the copy with **File > Load Rawmap** and chooses **Save As**.
 An earlier pin requires its exact source build. If the installer cannot verify that build,
 it names the affected file so the player can restore the original build and retry.
-[Installer upgrade details](../installer/README.md#updating-earlier-maps-prefabs-and-mods)
+[Installer upgrade details](../installer/README.md#updating-earlier-mods-maps-and-prefabs)
 
 Navigation chunks: the engine's lexer sees the member only where Snapmap+ is
 not installed. Measured live on Vulkan, an undeclared root member holding one
@@ -511,15 +511,14 @@ game's own progress line, each checked against the hash the map names
 [The mod store transport](#the-mod-store-transport),
 [Publishing a map with mods](#publishing-a-map-with-mods) and
 [Published maps and missing mods](#published-maps-and-missing-mods)); that
-transport is for publications only. An exported rawmap or prefab is a ZIP that
-carries each mod exactly as it sits in the mods folder, its folder with
-`mod.json` and its folders by kind (`modexport.c`), and importing one is the ordinary
-install of those folders, so sharing stays offline; every rawmap save of a map
-that names mods writes that ZIP beside the JSON (see
-[Rawmaps that name mods](#rawmaps-that-name-mods) and
-[Prefabs that name mods](#prefabs-that-name-mods)). Plain saves never upload. The retired
-`%LOCALAPPDATA%\snapmap-plus\overrides\` tree is never read, served or written;
-no `package-cache` or `package-staging` folder is created.
+transport is for publications only. Offline exports carry the map or prefab JSON, the
+manifests of its pinned units and one copy of each file those units carry (`modexport.c`).
+Import verifies the hashes and stores the content in `cache/content/`. The player can then open the map
+or place the prefab using that content. Saving a rawmap as JSON also writes a companion ZIP when
+the map names mods. Prefab Export always writes a ZIP, including for a stock-only prefab.
+See [Rawmaps that name mods](#rawmaps-that-name-mods) and
+[Prefabs that name mods](#prefabs-that-name-mods). Plain saves never upload. The game reads active local mods under `mods/`.
+The installer can migrate recognized loose files from the retired `overrides/` folder. The game stores prepared files under `cache/`.
 
 ### The mod folder
 
@@ -1268,6 +1267,8 @@ bytes are one file, and a composed list decl reads a pointer's installed text.
 The builder's and the Mods tab's stock-name checks ask the bridge when the
 engine provider does not have a name.
 
+The unit compiler follows an actor's typed declaration references, including the native AI component slot. It also reads surface materials from cooked models, effect references from breakables and the matching program files from the game archives. An editable mod rebuilds with the current rules. A published map keeps the unit hashes recorded when it was published.
+
 The provider open (`ov_open_body` in `overrides.c`) serves, in order: the
 placement grid, map navigation, the generated Grid Room variants, installed
 mods, the built-in defaults, then the engine (a mod's version of a built-in
@@ -1318,11 +1319,11 @@ shadow, a new one lives under `generated/swf/mods/<salt>/` with its atlas
 
 Display text reaches the engine's `#str_` table through `strids.c`, which reads
 two layers and keeps the first writer of each key (case-insensitive): the
-`strings.en` object of every admitted bundle's author block (root folders
+current language object in every admitted bundle's `strings`, with its `en` values filling missing keys (root folders
 before the content cache's compositions, then by salt, then folder, through
 `sh_modserve_each_bundle_extra`), then the baked defaults. Keys omit the
 `#str_` prefix decls use (a mod's own keys reach the table as `<salt>_<name>`,
-the name rule's rewrite), and only `en` is read. A mod's own keys come only from a
+the name rule's rewrite). A mod's own keys come only from a
 build that serves its names for the open map (`sh_modserve_bundle_scope`
 `names_live`), so the root's build and a map's composition of one salt
 never compete: the map shows its own build's text. A string edit (a key the game or the
@@ -1825,8 +1826,10 @@ function every such write goes through, the engine's atomic write
 `<Saved Games>\id Software\DOOM\base\<rel>` for a write under `generated/` or
 a `.flight` file under `maps/` (`cachewrites_rule.c`, pure), making the
 folders below that root first. An absolute path makes the engine put its
-temp file beside the target and rename it there. Every other write, and one
-whose folder cannot be made, is passed through unchanged. The backend log has
+temp file beside the target and rename it there. If the Windows code page or
+the engine's path buffer cannot hold the destination, the detour writes the
+same cache bytes to a temporary sibling and replaces the target with wide
+Windows file calls. Unrelated writes still go through the engine. The backend log has
 one `CACHE:` line when it is ready.
 
 `src/backend/programs/` holds the layered surface and the particle shading behind the general
@@ -2794,7 +2797,10 @@ is touched, and a removed demon answers nil.
   it, the meshes are hidden with the game's own hide, in the same call, so no
   frame draws the wound and the skin together. Records are per demon and
   spawn id; a model shows at most 64 meshes separately (the mask's width).
-  It also takes any entity with a gore component (a mod's `idGoreEntity`):
+  `wound_effect(wound, condition)` registers one of an owned entity's effects for a wound.
+  The visual handler starts it on the owner only when called by a successful native wound opening.
+  A repeated registration replaces that owner's previous condition for the same wound.
+  The mesh method also takes any entity with a gore component (a mod's `idGoreEntity`):
   its model and the component's owner sit where a demon's do.
   `script_api_body.c` adds three entity methods on the same type walk as
   `e:get`: `sync_partner()` scans the map's `idSyncEntity`s for the one whose
@@ -2938,7 +2944,12 @@ is touched, and a removed demon answers nil.
   pieces; without a model 2016's FX_RENDERPARM update (VK 0x1416EA1D0) writes
   nothing. Only a manager without a model is given one.
   `enemy_sdk.bind` calls the brain's `bind(def)` first, where the brain names its
-  breakables.
+  breakables. During map startup the SDK also reads the actor's effective
+  `edit.aiEditable.behaviors.decl` from its served entityDef. A map-owned
+  idAI2 using that same resolved AI behavior gets its own instance of the brain
+  when exactly one bound enemy in the mod supplies it. The behavior must belong
+  to the same mod. Actors with a namespaced entityDef keep their named dispatch,
+  and ordinary `on.spawn` and other entityDef callbacks keep their original scope.
 - **The Enemy SDK's target rule.** `enemy_target` is DOOM 2016's
   `Shared_SocialRelationAvailable` on `relations()`: the condition's respect,
   emotion and awareness bands (by name; its constructor's defaults, VK
@@ -4575,10 +4586,9 @@ Every writer of the store serialises on one recursive lock, `modstore_lock`
 named mutex (`src/common/store_lock.h`, `Local\snapmap-plus-mods-<16 hex>`), which the record lock
 (`sh_mb_record_lock`) shares, so a second game waits instead of overwriting. The scan
 records each root salt's folder in the record's `salts` section.
-Each install and verification takes it; a rawmap or prefab import's install,
-`sh_mods install` and an export hold it around their whole step. A second
-writer waits for the first instead of failing, and logs one `MODS: store:
-waiting` line.
+Mod folder installation and verification take this lock. A second writer waits and logs one
+`MODS: store: waiting` line. Rawmap and prefab imports write their verified units and files
+to the separate content cache.
 
 ### The Mods tab's map scope
 
@@ -5030,14 +5040,13 @@ not install, nothing is counted missing and rawmaps load as before.
 
 Transport off the game's thread. A ZIP's import (File > Load Rawmap,
 `sh_rawmaps load`, `sh_mods import`), a save to a `.zip` and the companion
-`.zip` beside a `.json` save read and write every file of the map's mods, so
+`.zip` beside a `.json` save read or write the files carried by the map's pinned units, so
 each runs on a thread of its own (`rawmap.c`, one at a time; another request
 meanwhile is refused with "Snapmap+ is still importing or exporting another
 map; try again when it is done"). An import says "Importing <file> and its
 mods; it opens when that is done."; the main tick (`sh_rawmap_poll_main`) then
 holds the imported text and asks the editor to open the map again, which parses
-exactly those bytes. The store lock is taken only to choose and install
-builds, never while files are copied or read. Every path is UTF-8, held in a
+exactly those bytes. Every path is UTF-8, held in a
 heap string sized to it (the process heap, never an engine heap), and opened
 through the wide calls in the long form (`sh_rawmap_path_wide`), so a path of
 any depth Windows accepts loads, saves, exports and imports.
@@ -5230,7 +5239,8 @@ not changed. The Export dialog proposes `<name>.zip`.
 Import. `sh_prefab import "<path.zip or path.json>"` and the tab's Import (the
 Open dialog's "Prefab exports (*.zip, *.json)") take the ZIP, or a `.json`
 inside an extracted export folder: that folder is the export, the picked file is
-the prefab and its `units/` and `files/` folders sit beside it. The importer
+the prefab and its `units/` and `files/` folders sit beside it. A stock-only prefab can be imported
+from its JSON alone. The importer
 takes the one top-level `.json` (an `idSnapEntityPrefab`, or an `idSnapMap` that
 carries a block), first adds the prefab under the `.json`'s file name (a
 prefab of that name with the same bytes is left alone; one with other bytes is
@@ -5271,17 +5281,18 @@ reads "Preparing this map's mod content." The job makes this computer's publishi
 (`modclaim_signer`; see [The map content cache](#the-map-content-cache)),
 reads the paths players asked of the units this computer's claims name
 (`modclaim_asked`, which seeds the unit walk, see [Units](#units)), computes
-the unit of every local row from its folder's current build (`sh_modpin_row`),
+the units each local row can supply from its folder (`sh_modpin_publish_row`),
 and asks the store which units it holds (`modclaim_plan_units`). A unit the
 store lacks and this computer has the files of is missing (its bytes are the
 files the store does not hold); one the store lacks and this computer does not
 have is absent (S8); one moderation removed is removed.
 
-- A row whose mod is not on this computer (its folder is not built here)
-  does not stop the publish (the owner, 2026-11-18, the SPEC's S8 question:
-  the author proceeds). It publishes as it is, a local row, so players see
-  stand-ins for its objects; nothing of it is asked of the store or claimed,
-  and S8 below names its objects.
+- If the publisher no longer has an object, the published row records its name in
+  `unavailable`. Each player sees the same stand-in, including a player with an
+  editable copy of the mod installed. Any objects the publisher could pin still
+  travel as verified units. Only real unit hashes enter the store claim. The
+  author's saved slot keeps its local reference so repairing the folder and
+  publishing a new revision can restore the object.
 - Bytes to send: the editor's own Yes/No over the screens asks "Publishing
   uploads 212 MB of mod content that the mod store does not have yet.
   Publish?" (S7, `sh_modpublish_compose_question`). No ends the hold and leaves
@@ -5406,12 +5417,14 @@ Refresh result (`warnings`, the count) and each mod of the Mods tab's payload
 (`warnings`, every one, in plain words). A publish whose save
 carries rows also carries the search tag `mods`, so players can see that the
 map needs Snapmap+. So does a map that uses a feature of Snapmap+ itself that a
-game without it cannot load (`map_uses.c`: a Grid Room resized past its stock
-size, a Blocking Box marked for AI navigation): every save writes the
-product's own entry into the rows, `{"mod":"snapmap-plus","name":"Snapmap+",
-"uses":["module-sizes","navigation"]}` (not a row: nothing downloads and no
-gate holds it; `sh_modmanifest_list.uses`), and drops it when the map no
-longer uses them. Cameras, timelines, water volumes and logic leave a map
+game without it cannot load. Each save records the features in
+`sh_modmanifest_list.uses`. A resized Grid Room uses `module-sizes`, a Blocking
+Box marked for AI navigation uses `navigation`, and a stock actor placed by
+name uses `direct-actors` if its declaration needs a Snapmap+ editor row.
+For example, a map using only the last feature carries
+`{"mod":"snapmap-plus","name":"Snapmap+","uses":["direct-actors"]}`.
+This entry requires no download. Saving after removing the last such feature
+removes the entry. Cameras, timelines, water volumes and logic leave a map
 vanilla. Every local save keeps the tag in step with its rows: the
 `WriteLocalSavedMapText` detour adds it to the model the save writes when the
 save observer saw rows and removes it when it saw none (the model is copied
@@ -5807,9 +5820,10 @@ palette. Any other name refuses the placement before the engine sees it: slot
 result -6, one console line `Module prefab: needs module <name>; this room is
 not in your palette (DLC or a mod you do not have)` and a toast naming the rooms.
 A module a served mod provides is a mod row like any other (see
-[Prefabs that name mods](#prefabs-that-name-mods)): the save records it, Load /
-Place downloads and installs it before this check, and the check then finds it
-served; a module no row provides and the palette lacks is DLC, refused here.
+[Prefabs that name mods](#prefabs-that-name-mods)). Saving records its row. Load / Place activates an
+available local mod or composes pinned units already in the content cache. If mod content is missing,
+the player is asked for the prefab ZIP before placement. A module supplied by neither a mod row nor
+the palette is refused here.
 The engine has no safe outcome for such a name. The map validator (VK
 0x1412488e0 / GL 0x141247f10) drops the instance through HasModule ("Couldn't
 load module") and keeps its entities, and the record builder SnapMapEditCtor runs

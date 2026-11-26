@@ -3,9 +3,9 @@
 
 namespace sh_webview_profile {
 
-inline std::wstring path(const std::wstring &local)
+inline std::wstring path(const std::wstring &profile)
 {
-    return local + L"\\snapmap-plus\\cache\\webview2";
+    return profile + L"\\cache\\webview2";
 }
 
 }

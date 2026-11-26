@@ -31,6 +31,9 @@ typedef struct sh_modmanifest_row {
      * its `build` is their composition hash; a local row ("local": true) follows its salt's local folder and names no
      * unit until a publish or an export pins it. */
     int pinned;
+    int unavailable;       /* publication froze selected names without a unit, or a missing map-level attachment */
+    char **missing;
+    size_t missing_count;
     size_t unit_count;
     char (*units)[SH_MOD_HASH_CHARS + 1];   /* malloc'd: the objects' units in root order, then "whole" */
     char **roots;          /* malloc'd, parallel to units: the author root name, "*" for whole */
@@ -67,6 +70,7 @@ typedef struct sh_modmanifest_list {
 #define SH_MODMANIFEST_PRODUCT              "snapmap-plus"
 #define SH_MODMANIFEST_USES_MODULE_SIZES    1u   /* "module-sizes": a module resized past its stock size (grid_room.h) */
 #define SH_MODMANIFEST_USES_NAVIGATION      2u   /* "navigation": a Blocking Box marked for AI navigation (nav_regions.h) */
+#define SH_MODMANIFEST_USES_DIRECT_ACTORS   4u   /* named stock actors requiring a derived editor row */
 
 /* The product features a map text uses (bound at install to map_uses.h sh_map_uses): `names` are its placed names
  * (sh_modmanifest_placed_names). Returns SH_MODMANIFEST_USES_* bits. */
@@ -74,6 +78,8 @@ typedef unsigned (*sh_modmanifest_uses_fn)(const char *json, size_t length, cons
 void sh_modmanifest_set_uses(sh_modmanifest_uses_fn fn);
 
 void sh_modmanifest_row_free(sh_modmanifest_row *row);
+int sh_modmanifest_row_add_missing(sh_modmanifest_row *row, const char *name);
+int sh_modmanifest_freeze_local(sh_modmanifest_row *row);
 /* The row's display name, never NULL ("" for none). */
 const char *sh_modmanifest_row_name(const sh_modmanifest_row *row);
 /* Replace the row's display name with a copy of `name` (NULL or "": none). Returns 0 when memory runs out, leaving it
@@ -95,6 +101,7 @@ int  sh_modmanifest_composition_hash(const char *salt, const char *const *units,
  * places. It remembers the pinned rows and composes those whose composition is not on disk from what is here. */
 typedef void (*sh_modmanifest_content_fn)(const struct sh_modmanifest_list *rows, char *const *placed, size_t count);
 void sh_modmanifest_set_content(sh_modmanifest_content_fn fn);
+void sh_modmanifest_set_actor_rows(void (*fn)(const char *, size_t), int (*uses)(const char *, size_t), void (*restore)(void));
 /* Inside the content step, the map text it runs for (its length in *length), so the step can read what the map
  * saved of each placed object (its class and reference slots, for a stand-in); NULL outside the step. */
 const char *sh_modmanifest_content_text(size_t *length);
@@ -143,6 +150,8 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
 int sh_modmanifest_activate(const sh_modmanifest_list *rows);
 
 /* Read, retain and activate the map's rows. The parse detour removes the complete carrier. */
+/* Freeze old local rows at the published read boundary. 1 changed, 0 already pinned, -1 on failure. */
+int sh_modmanifest_freeze_local_rows(sh_modmanifest_list *rows, const char *json, size_t len);
 void sh_modmanifest_prepare_load(const char *json, size_t length);
 /* The load path already read and checked these rows. Takes their ownership; NULL clears the active scope. */
 void sh_modmanifest_load_rows(const char *json, size_t length, sh_modmanifest_list *rows, unsigned rejected);

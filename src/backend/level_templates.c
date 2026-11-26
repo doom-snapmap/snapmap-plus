@@ -61,8 +61,8 @@ static void lt_filter(void *list, int again)
     if (!items || count <= 0) return;
     hidden = sh_level_templates_filter(items, count, lt_name, sh_modserve_level_hides, &first);
     if (hidden && !again)
-        lt_log("MODS: scope: the level load builds no entity template for %d entityDef(s) of mods this map does not "
-               "declare (first: %s); %d of %d kept", hidden, first ? first : "?", count - hidden, count);
+        lt_log("MODS: scope: the level load builds no entity template for %d unavailable or undeclared mod entityDef(s) "
+               "(first: %s); %d of %d kept", hidden, first ? first : "?", count - hidden, count);
 }
 
 static void copy_detour(void *manager, void *list, char sort)

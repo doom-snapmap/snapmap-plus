@@ -4,7 +4,7 @@
  * checks, which a later tick settles from the published-items query's answer. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <shlobj.h>
+#include "saved_maps.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -246,7 +246,7 @@ char *sh_modpublish_cloud_text(const char *local_id, const char *text, size_t le
     if (out_length) *out_length = 0;
     if (!g_ops_set || !text || !length) return NULL;
     AcquireSRWLockExclusive(&g_upload_lock);
-    if (mp_upload_live_locked() && (!g_upload.local[0] || (local_id && !_stricmp(local_id, g_upload.local)))) {
+    if (mp_upload_live_locked() && g_upload.local[0] && local_id && !_stricmp(local_id, g_upload.local)) {
         size_t i;
         out = mp_upload_text_locked(text, length, out_length);
         for (i = 0; i < g_upload.rows.count; i++) n += g_upload.rows.rows[i].pinned != 0;   /* a local row is no pin */
@@ -274,6 +274,15 @@ void sh_modpublish_cloud_sum_note(const char *local_id, unsigned sum)
     ReleaseSRWLockExclusive(&g_upload_lock);
 }
 
+static int mp_cloud_required(const char *id)
+{
+    int required;
+    AcquireSRWLockShared(&g_upload_lock);
+    required = g_upload.armed && id && !_stricmp(id, g_upload.local);
+    ReleaseSRWLockShared(&g_upload_lock);
+    return required;
+}
+
 int sh_modpublish_cloud_sum_take(const char *local_id, unsigned *sum)
 {
     int got = 0;
@@ -294,7 +303,7 @@ void sh_modpublish_save_seen(const char *text, size_t length)
     unsigned long sequence = (unsigned long)InterlockedIncrement(&g_save_sequence);
     char *upload = NULL;
     size_t upload_length = 0;
-    if (!g_ops_set || InterlockedCompareExchange(&g_resuming, 0, 0)) return;
+    if (!g_ops_set) return;
     if (!mp_on_main()) { g_save.valid = 0; return; }
     /* a publish's save: what is published is the slot's text with the pinned rows */
     if (text && length) {
@@ -392,7 +401,8 @@ int sh_modpublish_save_tag(const char *local_id, void *model)
     if (!g_ops_set || !mp_on_main()) return 0;
     /* the published copy is the cloud save's read of this slot */
     AcquireSRWLockExclusive(&g_upload_lock);
-    if (mp_upload_live_locked() && !g_upload.local[0] && local_id && strlen(local_id) < sizeof g_upload.local)
+    if (mp_upload_live_locked() && !g_upload.local[0] && local_id && local_id[0] &&
+        (!g_tag.armed || !g_tag.local[0] || !_stricmp(g_tag.local, local_id)) && strlen(local_id) < sizeof g_upload.local)
         strcpy_s(g_upload.local, sizeof g_upload.local, local_id);
     ReleaseSRWLockExclusive(&g_upload_lock);
     if (g_tag.armed) {
@@ -435,8 +445,7 @@ typedef struct mp_job {
     volatile LONG done;
     int code;                                  /* MODNET_OK or the failure */
     char *why;                                 /* the failure, for the log (malloc'd) */
-    unsigned char *unbuilt;                    /* prepare: per row, 1 when it is local and no folder here serves it */
-    size_t nunbuilt;                           /* prepare: those rows (they publish as they are, local) */
+    size_t nunbuilt;                           /* rows with unavailable selections */
     int made_key;                              /* the key was made by this job (the first publish) */
     char *after;                               /* prepare: the absent or removed sentence, said after the publish */
     unsigned long long done_bytes, total_bytes;   /* upload progress, written by the worker */
@@ -458,7 +467,6 @@ static void mp_job_free(mp_job *job)
     free(job->ref);
     free(job->units);
     free(job->why);
-    free(job->unbuilt);
     free(job->after);
     free(job->removed);
     free(job->salts);
@@ -523,19 +531,21 @@ static char *mp_missing_sentence(const mp_job *job, int planned)
     int removed_only = !(planned && job->plan.absent) && !job->nunbuilt;
     char *subject, *out = NULL;
     size_t cap = units + 1;
-    for (r = 0; job->unbuilt && r < job->rows.count; r++)
-        if (job->unbuilt[r]) cap += job->rows.rows[r].name_count + 1;
+    for (r = 0; r < job->rows.count; r++)
+        cap += job->rows.rows[r].missing_count + 1;
     if (!(a = (sh_cache_absent *)calloc(cap, sizeof *a)) || !(names = (char **)calloc(cap, sizeof *names))) {
         free(a);
         return NULL;
     }
-    for (r = 0; job->unbuilt && r < job->rows.count; r++) {
+    for (r = 0; r < job->rows.count; r++) {
         const sh_modmanifest_row *row = &job->rows.rows[r];
         const char *mod = sh_modmanifest_row_name(row)[0] ? sh_modmanifest_row_name(row) : "a mod";
-        if (!job->unbuilt[r]) continue;
+        if (!row->unavailable) continue;
         /* the row's placed objects; a map-level row with none is the mod itself ("without Tyrant") */
-        for (k = 0; k < (row->name_count ? row->name_count : 1); k++) {
-            names[n] = sh_cache_object_name(row->name_count ? row->names[k] : "*");
+        for (k = 0; k < (row->missing_count ? row->missing_count : 1); k++) {
+            const char *placed = row->missing_count ? row->missing[k] : "*";
+            names[n] = sh_modmanifest_row_label(row, placed);
+            if (!names[n]) names[n] = sh_cache_object_name(placed);
             a[n].object = names[n] ? names[n] : "object";
             a[n].mod = mod;
             n++;
@@ -590,20 +600,11 @@ static int mp_prepare(mp_job *job, const modnet_io *io)
         sh_modpin_row_result r;
         memset(&r, 0, sizeof r);
         if (!row->pinned && _stricmp(row->salt, SH_MODMANIFEST_PRODUCT)) {
-            int state = sh_modpin_row(row, NULL, 0, NULL, &r);
-            /* No folder here serves it (modpin logs which): it publishes local, and players see stand-ins for its
-             * objects. */
-            if (state == SH_MODPIN_ABSENT) {
-                if (!job->unbuilt && !(job->unbuilt = (unsigned char *)calloc(job->rows.count, 1))) {
-                    free(r.why);
-                    free(units);
-                    return MODNET_E_NOMEM;
-                }
-                job->unbuilt[i] = 1;
-                job->nunbuilt++;
-            }
+            int state = sh_modpin_publish_row(row, &r);
             free(r.why);
+            if (state < 0) { free(units); return MODNET_E_NOMEM; }
         }
+        if (row->unavailable) job->nunbuilt++;
         for (k = 0; row->pinned && k < row->unit_count; k++)
             if (!mp_units_add(&units, &n, &cap, row->units[k])) { free(units); return MODNET_E_NOMEM; }
     }
@@ -815,6 +816,7 @@ typedef struct mp_hold {
     unsigned long long shown;                  /* the progress the pacifier shows */
     mp_job *job;                               /* the prepare job, then the upload job */
     modclaim_plan plan;                        /* what the store lacks, kept from the prepare */
+    sh_modmanifest_list prepared;              /* the exact rows for which upload was authorized */
     char *after;                               /* a notice for after the publish (absent, removed, queued), malloc'd */
 } mp_hold;
 
@@ -835,7 +837,7 @@ static mp_context g_ctx;
  * Set at the resume, cleared when a publish begins. */
 static struct { char (*v)[MODNET_HASH_HEX + 1]; size_t n; } g_left_out;
 static int g_editor_ticking;            /* inside sh_modpublish_editor_tick */
-static struct { int armed; ULONGLONG at; } g_pin;   /* the resumed PublishStart's save pins its rows */
+static struct { int armed, required; ULONGLONG at; sh_modmanifest_list rows; } g_pin;   /* the resumed PublishStart's save pins its rows */
 
 static void mp_ctx_clear(void)
 {
@@ -860,6 +862,7 @@ static void mp_hold_free(void)
             g_orphans = h->job;
         }
     }
+    sh_modmanifest_list_free(&h->prepared);
     modclaim_plan_free(&h->plan);
     free(h->after);
     memset(h, 0, sizeof(*h));
@@ -928,9 +931,12 @@ static void mp_resume(void)
                 if (h->plan.state[i] == MODCLAIM_ABSENT || h->plan.state[i] == MODCLAIM_REMOVED)
                     strcpy_s(g_left_out.v[g_left_out.n++], MODNET_HASH_HEX + 1, h->plan.units[i]);
     }
+    sh_modmanifest_list_free(&g_pin.rows);
+    g_pin.rows = h->prepared;
+    memset(&h->prepared, 0, sizeof h->prepared);
     mp_hold_free();
     mp_busy(editor, NULL);
-    g_pin.armed = 1;
+    g_pin.required = g_pin.armed = 1;
     g_pin.at = GetTickCount64();
     mp_log("MODS: publish: the map's mod content is ready; the publish screens close and the publish starts");
     if (g_ops.finish_close) g_ops.finish_close(g_ops.context, editor);
@@ -967,7 +973,7 @@ int sh_modpublish_publish_start(void *editor, unsigned char overwrite)
     memset(&rows, 0, sizeof rows);
     n = mp_rows_now(&rows);
     sh_modmanifest_list_free(&rows);
-    if (n <= 0) return 1;   /* a vanilla map: the engine publishes it as it always has */
+    if (!n) return 1;   /* a vanilla map: the engine publishes it as it always has */
     mp_log("MODS: publish: not started: a map with mods reached PublishStart without its FINISH hold");
     if (g_ops.publish_fail) g_ops.publish_fail(g_ops.context, editor);
     mp_editor_notice(editor, "The map was not published: Snapmap+ cannot send its mod content with this game version. "
@@ -990,7 +996,10 @@ static int mp_rows_now(sh_modmanifest_list *rows)
     char **names = NULL;
     size_t count = 0;
     int n;
-    if (g_ops.placed_names && g_ops.placed_names(g_ops.context, &names, &count) < 0) count = 0;
+    if (g_ops.placed_names && g_ops.placed_names(g_ops.context, &names, &count) < 0) {
+        sh_modmanifest_names_free(names, count);
+        return -1;
+    }
     n = g_rows_for((const char *const *)names, count, rows);
     sh_modmanifest_names_free(names, count);
     return n;
@@ -1000,8 +1009,6 @@ static int mp_rows_now(sh_modmanifest_list *rows)
 static int mp_hold_begin(void *editor, unsigned char overwrite)
 {
     mp_hold *h = &g_hold;
-    char **names = NULL;
-    size_t count = 0;
     sh_modmanifest_list rows;
     int n;
     if (g_ops.account_name) {
@@ -1010,16 +1017,18 @@ static int mp_hold_begin(void *editor, unsigned char overwrite)
         if (g_ops.account_name(g_ops.context, name, sizeof name)) modclaim_set_account_name(name);
     }
     if (g_ctx.kind != CTX_NONE) mp_ctx_clear();
+    sh_modmanifest_list_free(&g_pin.rows);
+    memset(&g_pin, 0, sizeof g_pin);
     mp_upload_clear();
     free(g_left_out.v);
     memset(&g_left_out, 0, sizeof g_left_out);
     memset(&rows, 0, sizeof rows);
-    if (g_ops.placed_names && g_ops.placed_names(g_ops.context, &names, &count) < 0) count = 0;
-    n = g_rows_for((const char *const *)names, count, &rows);
-    sh_modmanifest_names_free(names, count);
+    n = mp_rows_now(&rows);
     if (n <= 0) {
         sh_modmanifest_list_free(&rows);
-        return 1;   /* a vanilla map: the engine publishes it as it always has */
+        if (!n) return 1;
+        mp_editor_notice(editor, "The map was not published because its mod list could not be read. Save and publish again.");
+        return 0;
     }
     if (g_ops.cloud_ready && !g_ops.cloud_ready(g_ops.context)) {
         /* the published copy could not carry the pinned rows: players would play stand-ins */
@@ -1036,8 +1045,8 @@ static int mp_hold_begin(void *editor, unsigned char overwrite)
     if (!(h->job = mp_job_new(JOB_PREPARE, NULL, NULL, 0))) {
         sh_modmanifest_list_free(&rows);
         memset(h, 0, sizeof *h);
-        mp_log("MODS: publish: no memory to prepare the map's mod content; published as the engine would");
-        return 1;
+        mp_editor_notice(editor, "The map was not published because its mod content could not be prepared. Try again.");
+        return 0;
     }
     h->job->rows = rows;
     h->state = HOLD_PREPARING;
@@ -1047,58 +1056,73 @@ static int mp_hold_begin(void *editor, unsigned char overwrite)
     return 0;
 }
 
-/* The armed publish's save: its rows are pinned from the units the preparation computed (modpin.h; the same walk,
- * remembered, so this is a lookup). Bound with sh_modmanifest_set_pin. */
+/* The local save keeps its rows. Only its cloud copy receives the exact units approved at FINISH. */
 int sh_modpublish_pin_save(sh_modmanifest_list *rows, const char *json, size_t length)
 {
     size_t i;
-    int pinned = 0;
+    int ok, pinned = 0;
     if (!g_pin.armed) return 0;
-    if (GetTickCount64() - g_pin.at > MP_PIN_ARM_MS) { g_pin.armed = 0; return 0; }
     g_pin.armed = 0;
     mp_upload_clear();
-    for (i = 0; rows && i < rows->count; i++) {
-        sh_modpin_row_result r;
-        int state;
-        if (rows->rows[i].pinned || !_stricmp(rows->rows[i].salt, SH_MODMANIFEST_PRODUCT)) continue;
-        memset(&r, 0, sizeof r);
-        state = sh_modpin_row(&rows->rows[i], json, length, NULL, &r);
-        if (state == SH_MODPIN_PINNED || state == SH_MODPIN_WHOLE) pinned++;
-        else mp_logf("MODS: publish: a row could not be pinned at the save: %s", r.why ? r.why : "unknown");
-        free(r.why);
-    }
-    mp_logf("MODS: publish: the save pinned %d row(s) to their units for the published copy; the map's slot keeps its "
-            "own rows", pinned);
-    if (rows && rows->count) {
-        size_t k;
-        int ok;
-        AcquireSRWLockExclusive(&g_upload_lock);
-        for (k = 0; k < rows->count && sh_modmanifest_list_add(&g_upload.rows, &rows->rows[k]); k++) {}
-        g_upload.rows.uses = rows->uses;
-        ok = k == rows->count;
-        if (ok) {
-            g_upload.armed = 1;
-            g_upload.at = GetTickCount64();
-            /* the save observer reports this save next, with the next sequence */
-            g_upload.sequence = (unsigned long)InterlockedCompareExchange(&g_save_sequence, 0, 0) + 1;
+    ok = rows && rows->count == g_pin.rows.count && GetTickCount64() - g_pin.at <= MP_PIN_ARM_MS;
+    AcquireSRWLockExclusive(&g_upload_lock);
+    for (i = 0; ok && i < rows->count; i++) {
+        const sh_modmanifest_row *saved = &rows->rows[i], *prepared = &g_pin.rows.rows[i];
+        sh_modmanifest_row view = *prepared;
+        ok = prepared->pinned && !strcmp(saved->salt, prepared->salt);
+        if (ok && saved->pinned) ok = !strcmp(saved->build, prepared->build);
+        if (ok && !saved->pinned) {
+            ok = saved->name_count == prepared->name_count && saved->attached == prepared->attached;
+            for (size_t j = 0; ok && j < saved->name_count; j++) {
+                size_t k = 0;
+                while (k < prepared->name_count && _stricmp(saved->names[j], prepared->names[k])) k++;
+                ok = k < prepared->name_count;
+            }
+            pinned++;
         }
-        ReleaseSRWLockExclusive(&g_upload_lock);
-        if (!ok) { mp_upload_clear(); mp_log("MODS: publish: no memory for the published copy's rows; it carries the slot's"); }
+        view.labels = saved->labels;
+        view.choices = saved->choices;
+        view.modules = saved->modules ? saved->modules : prepared->modules;
+        if (ok) ok = sh_modmanifest_list_add(&g_upload.rows, &view);
+        if (ok && !saved->pinned)
+            sh_modpin_record_modules(&g_upload.rows.rows[i], json, length);
     }
-    return pinned > 0;
+    if (ok) {
+        g_upload.rows.uses = rows->uses;
+        g_upload.armed = 1;
+        g_upload.at = GetTickCount64();
+        g_upload.sequence = (unsigned long)InterlockedCompareExchange(&g_save_sequence, 0, 0) + 1;
+    }
+    ReleaseSRWLockExclusive(&g_upload_lock);
+    sh_modmanifest_list_free(&g_pin.rows);
+    if (!ok) mp_upload_clear();
+    return ok && pinned > 0;
 }
 
 int sh_modpublish_after_save(void *editor)
 {
     unsigned long long token;
     char line[MP_TEXT_CAP], size[32], over[32];
-    if (!g_ops_set || InterlockedCompareExchange(&g_resuming, 0, 0)) return 1;
+    if (!g_ops_set) return 1;
     if (!mp_on_main()) return 1;
     token = mp_token(editor);
     if (g_ctx.kind != CTX_NONE) mp_ctx_clear();
     g_ctx.editor = editor;
     g_ctx.token = token;
     g_ctx.at = GetTickCount64();
+    if (g_pin.required) {
+        g_pin.required = 0;
+        AcquireSRWLockShared(&g_upload_lock);
+        int ready = g_upload.armed && g_save.valid && g_upload.sequence == g_save.sequence && !g_save.local && g_upload.local[0];
+        ReleaseSRWLockShared(&g_upload_lock);
+        if (!ready || g_ctx.at - g_save.at > MP_SAVE_FRESH_MS) {
+            mp_upload_clear();
+            if (g_ops.publish_fail) g_ops.publish_fail(g_ops.context, editor);
+            mp_editor_notice(editor, "The map was not published because its prepared mod list changed or could not be saved. Save and publish again.");
+            memset(&g_ctx, 0, sizeof g_ctx);
+            return 0;
+        }
+    }
     if (!g_save.valid || g_ctx.at - g_save.at > MP_SAVE_FRESH_MS) {
         g_ctx.kind = CTX_UNKNOWN;
         mp_log("MODS: publish: the saved text was not seen; the publish continues without the mod check");
@@ -1132,11 +1156,14 @@ int sh_modpublish_after_save(void *editor)
         memset(&g_ctx, 0, sizeof g_ctx);
         return 0;
     }
-    if (g_save.local)
-        mp_logf("MODS: publish: %zu row(s) of the save were not pinned to units; players get stand-ins for them",
-                g_save.local);
+    if (g_save.local) {
+        if (g_ops.publish_fail) g_ops.publish_fail(g_ops.context, editor);
+        mp_editor_notice(editor, "The map was not published because its mod list still refers to local folders. Save and publish again.");
+        memset(&g_ctx, 0, sizeof g_ctx);
+        return 0;
+    }
     if (!g_save.nunits) {
-        g_ctx.kind = CTX_NO_ROWS;
+        g_ctx.kind = g_save.count ? CTX_KEEP : CTX_NO_ROWS;
         return 1;
     }
     g_ctx.kind = CTX_ROWS;
@@ -1180,21 +1207,13 @@ void sh_modpublish_feed_post(void *edit, const char *item_id, const char *revisi
     mp_job *job;
     if (!g_ops_set || !mp_on_main()) return;
     {
-        /* With a row pinned, a cloud save that never read the slot published it without its pins: players get
-         * stand-ins, a failure. With no row pinned the published map is the slot's text either way, its rows local. */
-        int live, served;
-        size_t i, pinned = 0;
         AcquireSRWLockShared(&g_upload_lock);
-        live = mp_upload_live_locked();
-        served = g_upload.served;
-        for (i = 0; live && i < g_upload.rows.count; i++) pinned += g_upload.rows.rows[i].pinned != 0;
+        int unread = g_upload.armed && !g_upload.served;
         ReleaseSRWLockShared(&g_upload_lock);
-        if (live && !served && pinned)
-            mp_log("MODS: publish: the cloud save's read of the slot never reached Snapmap+; the published map carries "
-                   "the slot's local rows, so players get stand-ins for its mods' objects");
-        else if (live && !served)
-            mp_log("MODS: publish: no row was pinned, so the published map is the slot's text as it is, its rows local: "
-                   "a player who has the mod plays it, others get stand-ins for its objects");
+        if (unread) {
+            mp_log("MODS: publish: the cloud save's read of the slot never reached Snapmap+; the previous published content could not be verified. Its claim is kept.");
+            g_ctx.kind = CTX_KEEP;
+        }
     }
     mp_upload_clear();   /* the published copy is uploaded */
     if (!item_id || !modnet_valid_ref(item_id)) {
@@ -1212,7 +1231,12 @@ void sh_modpublish_feed_post(void *edit, const char *item_id, const char *revisi
         job = mp_job_new(JOB_CLAIM, item_id, (const char (*)[MODNET_HASH_HEX + 1])g_ctx.units, g_ctx.nunits);
         if (!job) {
             mp_log("MODS: publish: no memory to queue the claim");
-            (void)modclaim_queue(item_id, NULL, 0);
+            const char **units = calloc(g_ctx.nunits, sizeof *units);
+            if (units) {
+                for (size_t i = 0; i < g_ctx.nunits; i++) units[i] = g_ctx.units[i];
+                (void)modclaim_queue(item_id, units, g_ctx.nunits);
+                free(units);
+            }
             mp_ctx_clear();
             return;
         }
@@ -1534,21 +1558,6 @@ static void mp_poll_checks(void)
 
 static char *g_cache_root;   /* tests: the cache folder (malloc'd), or NULL for the game's */
 
-/* The game's published-map cache folder (malloc'd), or NULL. */
-static char *mp_cache_root(void)
-{
-    PWSTR known = NULL;
-    char *local, *out;
-    if (g_cache_root) return sh_text(g_cache_root);
-    if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &known)) || !known) return NULL;
-    local = sh_mb_utf8(known);
-    CoTaskMemFree(known);
-    if (!local) return NULL;
-    out = sh_textf("%s\\id Software\\DOOM\\base\\doomsnapmaps\\published-maps", local);
-    free(local);
-    return out;
-}
-
 static int mp_plain_id(const char *s)
 {
     if (!s || !s[0] || strlen(s) > 128) return 0;
@@ -1561,7 +1570,9 @@ static int mp_plain_id(const char *s)
 char *sh_modpublish_cache_path(const char *item_id, const char *revision)
 {
     char *root, *out;
-    if (!mp_plain_id(item_id) || !mp_plain_id(revision) || !(root = mp_cache_root())) return NULL;
+    if (!mp_plain_id(item_id) || !mp_plain_id(revision)) return NULL;
+    root = g_cache_root ? sh_text(g_cache_root) : sh_saved_maps_cloud_dir(1);
+    if (!root) return NULL;
     out = sh_textf("%s\\%s_%s_map.decl", root, item_id, revision);
     free(root);
     return out;
@@ -1695,6 +1706,8 @@ static void mp_prepared(void)
     h->job = NULL;
     h->started = 0;
     h->waited = 0;
+    h->prepared = job->rows;
+    memset(&job->rows, 0, sizeof job->rows);
     if (job->code != MODNET_OK) {
         if (modnet_transient(job->code)) {
             mp_logf("MODS: publish: the mod store did not answer (%s); the publish goes on and its claim is queued",
@@ -1941,6 +1954,7 @@ void sh_modpublish_test_reset(void)
     mp_save_clear(&g_save);
     InterlockedExchange(&g_resuming, 0);
     memset(&g_tag, 0, sizeof g_tag);
+    sh_modmanifest_list_free(&g_pin.rows);
     memset(&g_pin, 0, sizeof g_pin);
     while (g_checks) { mp_check *c = g_checks; g_checks = c->next; free(c); }
     AcquireSRWLockExclusive(&g_answer_lock);
@@ -2569,22 +2583,22 @@ static void eng_cloud_read(const char *id, void *text, const void *caller)
     free(now);
     if (!out) return;
     /* the request's metadata read of this slot follows: its declChecksum becomes this text's, by the game's own hash */
-    if (g_eng.decl_hash) {
-        __try { sh_modpublish_cloud_sum_note(id, g_eng.decl_hash(out, (long long)length)); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the published copy's checksum faulted"); }
-    }
     __try {
+        unsigned sum = g_eng.decl_hash(out, (long long)length);
         g_eng.idstr_ctor(tmp, out);
         g_eng.idstr_assign(text, tmp);
         g_eng.idstr_dtor(tmp);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the published copy's text could not be set"); }
+        sh_modpublish_cloud_sum_note(id, sum);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: publish: the cloud copy's text or checksum could not be set");
+    }
     HeapFree(GetProcessHeap(), 0, out);
 }
 
 static int eng_cloud_ready(void *c)
 {
     (void)c;
-    return g_eng.cloud_read_ret && g_eng.cloud_meta_patch.live && sh_editor_frame_read_filter_live();
+    return g_eng.decl_hash && g_eng.cloud_read_ret && g_eng.cloud_meta_patch.live && sh_editor_frame_read_filter_live();
 }
 
 /* The cloud-save request's ReadLocalSaveMeta of the slot (relayed at CloudSaveMetaReadCall): read as the game reads
@@ -2595,15 +2609,23 @@ static int eng_cloud_meta_detour(const char *id, void *model, int a3, int a4)
 {
     int r = g_eng.meta_read(id, model, a3, a4);
     unsigned sum;
-    if (r != 0 || !model || !eng_live()) return r;
+    if (r != 0 || !eng_live()) return r;
+    int required = mp_cloud_required(id);
+    if (!model) return required ? 1 : r;
     __try {
         if (sh_modpublish_cloud_sum_take(id, &sum)) {
             unsigned was = *(unsigned *)((uint8_t *)model + ENG_MODEL_DECL_CHECKSUM);
             *(unsigned *)((uint8_t *)model + ENG_MODEL_DECL_CHECKSUM) = sum;
             if (was != sum)
                 backend_log("MODS: publish: the published copy's metadata names its own text's checksum, not the slot's");
+        } else if (required) {
+            backend_log("MODS: publish: the prepared slot's cloud text was not set; refusing its metadata");
+            r = 1;
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the published copy's metadata faulted"); }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (required) r = 1;
+        backend_log("MODS: publish: the published copy's metadata faulted");
+    }
     return r;
 }
 
@@ -2654,8 +2676,9 @@ static void eng_after_save_detour(void *editor)
     if (eng_live()) {
         __try { pass = sh_modpublish_after_save(editor); }
         __except (EXCEPTION_EXECUTE_HANDLER) {
-            backend_log("MODS: publish: the publish gate faulted; the publish continues natively");
-            pass = 1;
+            pass = !g_pin.required && !mp_upload_live();
+            backend_log("MODS: publish: the after-save check faulted");
+            if (!pass && g_ops.publish_fail) g_ops.publish_fail(g_ops.context, editor);
         }
     }
     if (pass) ((eng_editor_fn)g_eng.original[ENG_AFTER_SAVE])(editor);

@@ -10,6 +10,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include "timeline_tile.h"
+#include "direct_actor.h"
 
 const char sh_tl_record_json[] =
     "{\"customIcon\":{\"targetType\":\"idDeclSnapCustomIcon\",\"value\":null,\"~type\":\"|pointer\"},"
@@ -33,9 +34,54 @@ const void *sh_tl_stock_row_first(const char *current_row, const void *current, 
     return stock_row;
 }
 
+int sh_tl_picker_offers(int placeable, const char *row)
+{
+    const char *hash;
+    if (!placeable || !row || _strnicmp(row, SH_DIRECT_ACTOR_ID, sizeof(SH_DIRECT_ACTOR_ID) - 1)) return placeable;
+    hash = row + sizeof(SH_DIRECT_ACTOR_ID) - 1;
+    return strspn(hash, "0123456789abcdefABCDEF") != 64 || hash[64] != 0;
+}
+
 int sh_tl_substate_blocks_rebind(int substate)
 {
     return substate == 4 || substate == 7;
+}
+
+static __declspec(thread) uint32_t g_category_tag;
+
+static uint32_t tl_category_tag(const unsigned char *row)
+{
+    const unsigned char *sedef = *(const unsigned char *const *)row;
+    return *(const uint32_t *)(sedef + 0x94);
+}
+
+static unsigned char tl_category_matches(const unsigned char *row)
+{
+    return tl_category_tag(row) == g_category_tag;
+}
+
+unsigned char *sh_tl_category_end(unsigned char *first, unsigned char *end, sh_tl_partition partition)
+{
+    static const unsigned char keep = 1;
+    const sh_tl_predicate predicate = { &keep, tl_category_matches };
+    unsigned char *row, *boundary;
+    uint32_t tag, saved;
+    if (first == end) return end;
+    tag = tl_category_tag(first);
+    for (row = first + SH_TL_PALETTE_STRIDE; row < end; row += SH_TL_PALETTE_STRIDE) {
+        uint32_t next = tl_category_tag(row);
+        if (next < tag) tag = next;
+    }
+    for (boundary = first; boundary < end && tl_category_tag(boundary) == tag; boundary += SH_TL_PALETTE_STRIDE) {}
+    for (row = boundary; row < end; row += SH_TL_PALETTE_STRIDE)
+        if (tl_category_tag(row) == tag) {
+            saved = g_category_tag;
+            g_category_tag = tag;
+            __try { boundary = partition(boundary, end, &predicate); }
+            __finally { g_category_tag = saved; }
+            break;
+        }
+    return boundary ? boundary : end;
 }
 
 #include <windows.h>
@@ -61,6 +107,23 @@ const unsigned char *sh_timeline_tile_sort_target(const unsigned char *call_site
     return target;
 }
 
+/* The builder calls admission with the editor declaration and constructs a palette row only when it returns true. */
+const unsigned char *sh_timeline_tile_admit_target(const unsigned char *build)
+{
+    static const unsigned char prologue[] = {0x48,0x83,0xec,0x28,0x48,0x83,0xb9,0xc8,0x01,0,0,0,0x48,0x8b,0xd1};
+    static const unsigned char before[] = {0x48,0x8b,0xe8,0x48,0x8b,0xc8,0xe8};
+    static const unsigned char after[] = {0x84,0xc0,0x74,0x56,0x48,0x8b,0xd5};
+    int32_t rel;
+    if (!build) return NULL;
+    __try {
+        const unsigned char *call = build + 0xd6, *target;
+        if (memcmp(call - 6, before, sizeof before) || memcmp(call + 5, after, sizeof after)) return NULL;
+        memcpy(&rel, call + 1, sizeof rel);
+        target = call + 5 + rel;
+        return memcmp(target, prologue, sizeof prologue) ? NULL : target;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+}
+
 #ifndef SH_TIMELINE_TILE_PURE
 #include "apply_engine.h"
 #include "backend_log.h"
@@ -77,7 +140,7 @@ const unsigned char *sh_timeline_tile_sort_target(const unsigned char *call_site
 #define MODE_SUBSTATE_OFF   0x1ac
 #define PAL_ENTRIES_OFF     0x10
 #define PAL_COUNT_OFF       0x18
-#define PAL_STRIDE          0x6f0
+#define PAL_STRIDE          SH_TL_PALETTE_STRIDE
 #define PAL_MAX             100000
 #define ENTRY_RECORD_OFF    0x150
 #define SEDEF_NAME_OFF      0x08
@@ -282,6 +345,25 @@ static void tl_register(void)
  * reads clipModelName in released memory). Every sort here runs on process heap 0, as the builder does. */
 typedef void (*palette_sort_fn)(void *);
 static palette_sort_fn g_sort_orig;
+typedef unsigned char *(*tl_category_fn)(unsigned char *first, unsigned char *end, const void *key);
+static tl_category_fn g_category_orig;
+static sh_tl_partition g_category_partition;
+
+static unsigned char *tl_partition_category(unsigned char *first, unsigned char *end, const sh_tl_predicate *predicate)
+{
+    sh_process_heap_scope heap = {0};
+    unsigned char *boundary;
+    if (!g_heap_ok || !sh_process_heap_enter(&g_heap, &heap)) return NULL;
+    __try { boundary = g_category_partition(first, end, predicate); }
+    __finally { sh_process_heap_leave(&heap); }
+    return boundary;
+}
+
+static unsigned char *tl_category_bound(unsigned char *first, unsigned char *end, const void *key)
+{
+    unsigned char *bound = g_category_orig(first, end, key);
+    return sh_tl_category_end(first, bound, tl_partition_category);
+}
 static volatile LONG g_sorts, g_sorts_unscoped;
 
 static void tl_palette_sort(void *palette)
@@ -306,12 +388,45 @@ void sh_timeline_tile_sorts(int *sorts, int *unscoped, int *guarded)
     if (guarded) *guarded = g_sort_orig != NULL;
 }
 
+static unsigned char (*g_actor_admit)(void *);
+static unsigned char (*g_picker_offers)(void *);
+static __declspec(thread) int g_building_palette;
+
+int sh_timeline_actor_filter_ready(void) { return g_actor_admit && g_picker_offers; }
+
+static unsigned char tl_picker_offers(void *entry)
+{
+    unsigned char placeable = g_picker_offers(entry);
+    if (placeable) {
+        __try {
+            const unsigned char *decl = *(const unsigned char *const *)entry;
+            const char *row = *(const char *const *)(decl + SEDEF_NAME_OFF);
+            return (unsigned char)sh_tl_picker_offers(placeable, row);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { }
+    }
+    return placeable;
+}
+
+static unsigned char tl_actor_admit(void *declaration)
+{
+    if (g_building_palette && declaration) {
+        const char *row = NULL;
+        __try { row = *(const char *const *)((unsigned char *)declaration + SEDEF_NAME_OFF);
+            if (row && !_strnicmp(row, SH_DIRECT_ACTOR_ID, sizeof(SH_DIRECT_ACTOR_ID)-1) &&
+                !sh_modserve_actor_enabled(row)) return 0;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { }
+    }
+    return g_actor_admit(declaration);
+}
+
 static void tl_palette_build(void *palette, void *progress)
 {
     /* The palette enumerates the decl manager, so register before it runs. */
     if (!InterlockedCompareExchange(&g_faulted, 0, 0)) tl_register();
     sh_modserve_palette_before_build();   /* installed mods' editor rows */
-    g_build_orig(palette, progress);
+    ++g_building_palette;
+    __try { g_build_orig(palette, progress); }
+    __finally { --g_building_palette; }
     g_built_palette = palette;
     sh_modserve_palette_after_build(palette);
     g_pal_entries = NULL;   /* force a rescan and a fresh patch on the next tick */
@@ -546,6 +661,40 @@ int sh_timeline_tile_install(const sig_result *results, size_t count, const uint
         return 0;
     }
     backend_log("TL tile: palette build hook installed");
+    {
+        const sig_result *site = sig_ok(results, count, "SnapPaletteCategoryBound");
+        g_category_partition = (sh_tl_partition)sig_pointer(results, count, "SnapPaletteStablePartition");
+        void *st = site && g_category_partition ? sh_prepare_detour_sig(site, (void *)tl_category_bound, 14) : NULL;
+        g_category_orig = (tl_category_fn)st;
+        if (!st || sh_commit_detour(st) != B2_PATCH_OK) {
+            if (st && sh_uninstall_detour(st)) g_category_orig = NULL;
+            backend_log("Toybox: native category grouping unavailable");
+        }
+    }
+    {
+        const unsigned char *admit = sh_timeline_tile_admit_target((const unsigned char *)build->addr);
+        void *hook = admit ? hook_prepare((void *)admit, (void *)tl_actor_admit, 15) : NULL;
+        if (hook) {
+            g_actor_admit = (unsigned char (*)(void *))hook;
+            if (hook_commit(hook) != B2_PATCH_OK) {
+                (void)hook_unpatch(hook);
+                g_actor_admit = NULL;
+            }
+        }
+        if (!g_actor_admit) backend_log("direct actor: native palette admission check unavailable");
+    }
+    {
+        const sig_result *site = sig_ok(results, count, "SnapPalettePickerPlaceable");
+        void *hook = site ? sh_prepare_detour_sig(site, (void *)tl_picker_offers, 14) : NULL;
+        if (hook) {
+            g_picker_offers = (unsigned char (*)(void *))hook;
+            if (sh_commit_detour(hook) != B2_PATCH_OK) {
+                (void)sh_uninstall_detour(hook);
+                g_picker_offers = NULL;
+            }
+        }
+        if (!g_picker_offers) backend_log("direct actor: Add Object filtering unavailable");
+    }
     {
         /* The sort guard (tl_palette_sort). Without it only the released-string fix is lost; the build hook above
          * stands either way. */

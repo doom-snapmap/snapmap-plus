@@ -35,7 +35,7 @@ func TestNativeSaveCopies(t *testing.T) {
 	data, root := t.TempDir(), t.TempDir()
 	slot := filepath.Join(root, "profile", "SNAPMAPSaf01")
 	src := filepath.Join(slot, "map.decl")
-	body := "{\"entities\":[],\"~type\":\"idSnapMap\",\"snapmap-plus\":{\"format\":1,\"mods\":[]}}"
+	body := "{\"entities\":[],\"~type\":\"idSnapMap\",\"snapmap-plus\":{\"format\":1,\"settings\":{\"bounds\":\"1;32671\"}}}"
 	original := slotBody(t, src, body)
 	details := "metadata={\"name\":\"Hazard Room\"}\r\n"
 	writeF(t, filepath.Join(slot, "game.details"), details)
@@ -83,7 +83,7 @@ func TestNativeSaveScanAndConcurrentCopies(t *testing.T) {
 	bad := filepath.Join(root, "profile", "SNAPMAPSbad", "map.decl")
 	writeF(t, bad, "unexpected data")
 	good := filepath.Join(root, "profile", "SNAPMAPSgood", "map.decl")
-	original := slotBody(t, good, `{"entities":[],"snapmap-plus":{"format":1,"mods":[]}}`)
+	original := slotBody(t, good, `{"entities":[],"snapmap-plus":{"format":1,"settings":{"bounds":"1;32671"}}}`)
 	paths, err := convertEarlierNativeSaves(data, root)
 	if err == nil || len(paths) != 1 || !bytes.Equal(original, []byte(readF(t, good))) || readF(t, bad) != "unexpected data" {
 		t.Fatalf("recovery %v: %v", paths, err)

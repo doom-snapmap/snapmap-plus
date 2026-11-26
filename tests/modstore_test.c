@@ -1494,14 +1494,18 @@ int main(int argc, char **argv)
     wchar_t exe[MAX_PATH];
     if (argc >= 3 && !strcmp(argv[1], "--profile-probe")) {
         const char *root = sh_ms_root(), *base = sh_mb_user_root();
-        const char *folder = !strcmp(argv[2], "bench") ? "bench\\mods" : "mods";
-        return !root || !base || _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\%s", base, folder) < 0 ||
-               strcmp(got, root) || root != sh_ms_root();
+        if (!strcmp(argv[2], "invalid")) return root || base;
+        if (!root || !base || root != sh_ms_root()) return 1;
+        if (!strcmp(argv[2], "bench") && strcmp(base, "C:\\private bench")) return 1;
+        if (!strcmp(argv[2], "normal") && !strstr(base, "\\snapmap-plus")) return 1;
+        return _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\mods", base) < 0 || strcmp(got, root);
     }
     if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) return 2;
     CHECK(_wspawnl(_P_WAIT, exe, L"modstore_test", L"--profile-probe", L"normal", NULL) == 0);
     CHECK(_wspawnl(_P_WAIT, exe, L"modstore_test", L"--profile-probe", L"normal", L"-snapmap-plus-bench-extra", NULL) == 0);
-    CHECK(_wspawnl(_P_WAIT, exe, L"modstore_test", L"--profile-probe", L"bench", L"-snapmap-plus-bench", NULL) == 0);
+    CHECK(_wspawnl(_P_WAIT, exe, L"modstore_test", L"--profile-probe", L"bench", L"-snapmap-plus-bench", L"\"C:\\private bench\"", NULL) == 0);
+    CHECK(_wspawnl(_P_WAIT, exe, L"modstore_test", L"--profile-probe", L"invalid", L"-snapmap-plus-bench", NULL) == 0);
+    CHECK(_wspawnl(_P_WAIT, exe, L"modstore_test", L"--profile-probe", L"invalid", L"-snapmap-plus-bench", L"relative", NULL) == 0);
     if (!GetFullPathNameA(argc > 1 ? argv[1] : "fixtures\\mods\\alex.r2-imp", sizeof fixture, fixture, NULL)) return 2;
     if (!mt_temp_dir("modstore", tmp, sizeof tmp)) { fprintf(stderr, "no temp dir\n"); return 2; }
     CHECK(sh_ms_set_root(NULL) && sh_ms_root() && strcpy_s(got, sizeof got, sh_ms_root()) == 0 && strstr(got, "\\snapmap-plus\\mods"));

@@ -16,8 +16,9 @@
 #include "modserve.h"
 #include "grid_room.h"
 #include "modcache.h"
+#include "mp_json.h"
 #include "modkey.h"
-#include "saved_maps.h"
+#include "saved_map_fixture.h"
 #include "mod_test_util.h"
 
 #define SALT  "pk7salt1"
@@ -29,19 +30,25 @@ static int failures;
 /* Serving-layer doubles that modmanifest.c links. */
 static sh_modmanifest_list g_current_rows;
 int sh_modserve_active(void) { return 1; }
-int modserve_activate_bundles(const char *const *bundle_hashes, int count) { (void)bundle_hashes; (void)count; return 0; }
+static const char *g_refused_placed, *g_refuse_on_parse;
+int modserve_activate_bundles(const char *const *bundle_hashes, int count)
+{
+    (void)bundle_hashes;
+    if (count && g_refuse_on_parse) g_refused_placed = g_refuse_on_parse;
+    return 0;
+}
 void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref) { (void)ref; }
 /* A local row's folder that is here but cannot be used (modserve.h): none here. */
 static int g_salt_installed;
 int sh_modserve_salt_installed(const char *salt) { (void)salt; return g_salt_installed; }
-static const char *g_refused_placed;
+int sh_modserve_refusal_version(void) { return g_refused_placed != NULL; }
 int sh_modserve_root_lacks(const char *salt, const char *name)
 { (void)salt; return g_refused_placed && !strcmp(name, g_refused_placed) ? SH_MODMANIFEST_LOCAL_REFUSED : 0; }
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
     (void)row;
-    if (out) { memset(out, 0, sizeof *out); if (g_refused_placed) out->place = ""; }
-    return g_refused_placed != NULL;
+    if (out) { memset(out, 0, sizeof *out); if (g_refused_placed || g_refuse_on_parse) out->place = ""; }
+    return g_refused_placed != NULL || g_refuse_on_parse != NULL;
 }
 size_t modserve_bundles_for_names_visit(const char *const *names, size_t count, sh_modserve_closure_fn visit, void *context)
 { (void)names; (void)count; (void)visit; (void)context; return 0; }
@@ -546,6 +553,40 @@ static void test_cache(const char *top)
     CHECK(sh_cache_composed(chash, &complete) && complete);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", mt_composition(mods, chash));
     CHECK(mt_exists(path));
+    /* A missing object never hides a real sibling. Reopen A after B with the same salt and real unit. */
+    {
+        sh_modmanifest_row picked[2] = {0};
+        const char *gone[] = {"mods/" SALT "/missing_a", "mods/" SALT "/missing_b"};
+        const char *roots[] = {crate.root}, *hashes[] = {crate.hash};
+        for (int j = 0; j < 2; j++) {
+            strcpy_s(picked[j].salt, sizeof picked[j].salt, SALT);
+            CHECK(sh_modmanifest_row_add_missing(&picked[j], gone[j]));
+            CHECK(sh_modmanifest_row_pin(&picked[j], roots, hashes, 1));
+        }
+        CHECK(strcmp(picked[0].build, picked[1].build));
+        for (int pass = 0; pass < 3; pass++) {
+            int j = pass == 1;
+            const char *objects[] = {placed[0], gone[j]};
+            load_rows(&picked[j], 1, objects, 2);
+            CHECK(sh_cache_prepare(picked[j].build, NULL) == 0);
+            CHECK(sh_cache_composed(picked[j].build, &complete) && !complete);
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\entities\\crate.decl", mt_composition(mods, picked[j].build));
+            t = read_text(path);
+            CHECK(t && !strstr(t, "snapmaps/unknown"));
+            free(t);
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\entities\\missing_%c.decl", mt_composition(mods, picked[j].build), j ? 'b' : 'a');
+            t = read_text(path);
+            CHECK(t && strstr(t, "snapmaps/unknown"));
+            free(t);
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\entities\\missing_%c.decl", mt_composition(mods, picked[j].build), j ? 'a' : 'b');
+            CHECK(!mt_exists(path));
+            t = sh_cache_take_notice();
+            CHECK(t && strstr(t, "author published") && !strstr(t, "Crate"));
+            free(t);
+        }
+        sh_modmanifest_row_free(&picked[0]);
+        sh_modmanifest_row_free(&picked[1]);
+    }
     /* Every file of the composition is a link to its blob: no second copy on disk. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\images\\crate_d.bimage", mt_composition(mods, chash));
     CHECK(links_of(path) >= 2);
@@ -730,9 +771,10 @@ static void test_cache(const char *top)
             "{\"entityDef\":{\"className\":\"idPlaceableSnapAIEncounter\",\"inherit\":\"mods/" SALT "/demons/lamp\"},\"uniqueId\":1},"
             "{\"entityDef\":{\"className\":\"idPlaceableSnapAIEncounter\",\"inherit\":\"mods/" SALT "/demons/lamp2\"},\"uniqueId\":2},"
             "{\"entityDef\":{\"className\":\"idEntity\",\"inherit\":\"mods/" SALT "/plain\"},\"uniqueId\":3},"
-            "{\"entityDef\":{\"className\":\"bad\\\"class\",\"inherit\":\"mods/" SALT "/odd\"},\"uniqueId\":4}],"
-            "\"references\":{\"entityEntRefs\":{\"keyValues\":[0,1,1,3,3,3],\"values\":[5,0,0]},"
-            "\"entityVarRefs\":{\"keyValues\":[0,4,4,4,4,4],\"values\":[1,2,3,4]}}}";
+            "{\"entityDef\":{\"className\":\"bad\\\"class\",\"inherit\":\"mods/" SALT "/odd\"},\"uniqueId\":4},"
+            "{\"entityDef\":{\"className\":\"idAI2\",\"inherit\":\"mods/" SALT "/actors/borrowed\"},\"uniqueId\":5}],"
+            "\"references\":{\"entityEntRefs\":{\"keyValues\":[0,1,1,3,3,3,3],\"values\":[5,0,0]},"
+            "\"entityVarRefs\":{\"keyValues\":[0,4,4,4,4,4,4],\"values\":[1,2,3,4]}}}";
         sh_modmanifest_list list;
         _snprintf_s(mods5, sizeof mods5, _TRUNCATE, "%s\\player5\\mods", top);
         CreateDirectoryA(mods5, NULL);
@@ -785,6 +827,13 @@ static void test_cache(const char *top)
         t = read_text(path);
         CHECK(t && strstr(t, "snapmaps/unknown") && !strstr(t, "class ="));
         free(t);
+        /* A missing named actor still has the editor identity and reference counts its saved placement needs. */
+        _snprintf_s(path, sizeof path, _TRUNCATE,
+                    "%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\actors\\borrowed.decl", mt_composition(mods5, chash));
+        t = read_text(path);
+        CHECK(t && strstr(t, "entityDef = \"entities/actors/borrowed\";") && strstr(t, "placeable = false;") &&
+              strstr(t, "entRefs = {\n\t\t\tnum = 0;") && strstr(t, "varRefs = {\n\t\t\tnum = 0;"));
+        free(t);
         /* The present crate is served from its unit, not stood in for. */
         _snprintf_s(path, sizeof path, _TRUNCATE,
                     "%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\crate.decl", mt_composition(mods5, chash));
@@ -804,7 +853,7 @@ static void test_cache(const char *top)
                 if (sb.files[r].ptype && !_stricmp(sb.files[r].ptype, "snapEditorEntityDef") && sb.files[r].pname &&
                     !_strnicmp(sb.files[r].pname, "mods/" SALT "/snapmapplus_standin/", strlen("mods/" SALT "/snapmapplus_standin/")))
                     rows_found++;
-            CHECK(rows_found == 5);
+            CHECK(rows_found == 6);
             sh_mb_free(&sb);
         }
     }
@@ -946,7 +995,7 @@ static void test_cache(const char *top)
     /* The sweep: what no kept map names goes; a map only played keeps its content until "Remove content of maps
      * you only played". */
     {
-        char saved[MAX_PATH * 2], played[MAX_PATH * 2], saves[MAX_PATH * 2], err[128], *map;
+        char game_cache[MAX_PATH * 2], saved[MAX_PATH * 2], played[MAX_PATH * 2], saves[MAX_PATH * 2], err[128], *map;
         const char *body = "{\"entities\":[]}";
         sh_modmanifest_list one;
         sh_cache_sweep_stats st;
@@ -954,8 +1003,10 @@ static void test_cache(const char *top)
         const sh_unit *only[1] = { &crate };
         size_t len = 0;
         sh_cache_set_mods_root(mods);
-        _snprintf_s(saved, sizeof saved, _TRUNCATE, "%s\\player\\saved-maps", top);
-        _snprintf_s(played, sizeof played, _TRUNCATE, "%s\\player\\published-maps", top);
+        _snprintf_s(game_cache, sizeof game_cache, _TRUNCATE, "%s\\player", top);
+        _snprintf_s(saved, sizeof saved, _TRUNCATE, "%s\\base\\doomsnapmaps\\saved-maps", game_cache);
+        _snprintf_s(played, sizeof played, _TRUNCATE, "%s\\base\\doomsnapmaps\\published-maps", game_cache);
+        mt_mkdirs_for(saved);
         CreateDirectoryA(saved, NULL);
         CreateDirectoryA(played, NULL);
         sh_cache_set_map_folders(saved, played);
@@ -1165,7 +1216,18 @@ static void test_cache(const char *top)
             CHECK(sh_modmanifest_list_add(&one, &barrel_row));
             map = sh_modmanifest_write(body, strlen(body), &one, &len, err, sizeof err);
             CHECK(map != NULL);
+            /* The only local map that pins the barrel is under the game's redirected save path. */
+            char native[MAX_PATH * 2];
+            _snprintf_s(native, sizeof native, _TRUNCATE, "%s\\redirected", top);
+            _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\base\\savegame.user", native);
+            mt_mkdirs_for(saves);
             if (map) write_slot(saves, "0123456789ABCDEF0123", "aaaa", map, len);
+            bind_save_session(NULL, 0);
+            CHECK(sh_cache_sweep(1, NULL, 0, &st) && st.unreadable && !st.units_removed);
+            sh_cache_set_map_folders(NULL, NULL);
+            bind_game_paths(native, NULL, 0);
+            CHECK(sh_cache_sweep(0, NULL, 0, &st) && st.unreadable && !st.units_removed);
+            bind_game_paths(native, game_cache, 0);
             free(map);
             sh_modmanifest_list_free(&one);
             sh_modmanifest_row_free(&barrel_row);
@@ -1220,6 +1282,7 @@ static void test_cache(const char *top)
             CHECK(st.unreadable == 0 && st.units_removed == 1 && sh_cache_unit_state(crate.hash, NULL, NULL, NULL) == -1);
             CHECK(sh_cache_unit_state(barrel.hash, NULL, NULL, NULL) == 1);
         }
+        bind_save_session("", 0);
         sh_saved_maps_set_root(NULL);
         sh_modmanifest_row_free(&crate_row);
     }
@@ -1503,6 +1566,41 @@ static void test_local_standins(const char *top)
         t = sh_cache_take_notice();
         CHECK(t && strstr(t, "Arachnotron from Eternal Demons") && strstr(t, "could not load") && !strstr(t, "Tyrant"));
         free(t);
+        static const char direct[] = "{\"entities\":[{\"uniqueId\":5,\"entityDef\":{\"className\":\"idAI2\","
+            "\"inherit\":\"mods/" SALT "/arachnotron\"}},{\"uniqueId\":6,\"entityDef\":{\"className\":\"idAI2\","
+            "\"inherit\":\"mods/" SALT "/tyrant\"}}],\"snapmap-plus\":{\"format\":2,\"mods\":[{\"mod\":\"" SALT "\","
+            "\"name\":\"Eternal Demons\",\"local\":true,\"size\":0,\"names\":[\"mods/" SALT "/arachnotron\",\"mods/" SALT "/tyrant\"]}]}}";
+        g_refuse_on_parse = "mods/" SALT "/arachnotron";
+        sh_modmanifest_set_content(sh_cache_on_load);
+        sh_modmanifest_prepare_load(direct, sizeof direct - 1);
+        sh_modmanifest_set_content(NULL);
+        CHECK(g_refused_placed != NULL);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\entities\\arachnotron.decl", mt_composition(mods, none));
+        t = read_text(path);
+        CHECK(t && strstr(t, "\"idAI2\""));
+        free(t);
+        t = sh_cache_take_notice();
+        CHECK(t && strstr(t, "Arachnotron from Eternal Demons") && strstr(t, "could not load") && !strstr(t, "Tyrant"));
+        free(t);
+        {
+            mpj *map_with_wire = mpj_parse(direct, sizeof direct - 1);
+            static const char refs[] = "{\"entityEntRefs\":{\"keyValues\":[0,0,0,0,0,0,1,1],\"values\":[6]}}";
+            size_t len = 0;
+            CHECK(mpj_set(map_with_wire, "references", mpj_parse(refs, sizeof refs - 1)));
+            char *wired = mpj_dump(map_with_wire, &len);
+            sh_modmanifest_set_content(sh_cache_on_load);
+            if (wired) sh_modmanifest_prepare_load(wired, len);
+            sh_modmanifest_set_content(NULL);
+            free(wired);
+            mpj_free(map_with_wire);
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\decls\\snapeditorentitydef\\snapmapplus_standin\\arachnotron.decl",
+                        mt_composition(mods, none));
+            t = read_text(path);
+            CHECK(t && strstr(t, "entRefs = {\n\t\t\tnum = 1;"));
+            free(t);
+            free(sh_cache_take_notice());
+        }
+        g_refuse_on_parse = g_refused_placed = NULL;
         memset(&list, 0, sizeof list);
         CHECK(sh_modmanifest_read(map, sizeof map - 1, &list, NULL) == 1);
         sh_modmanifest_set_content(sh_cache_on_load);

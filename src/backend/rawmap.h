@@ -111,6 +111,7 @@ int sh_rawmap_open_unsaved(char **name);
  * iface_engine.c binds it. */
 typedef int (*sh_rawmap_edit_id_fn)(char *out, size_t cap);
 void sh_rawmap_set_edit_id_reader(sh_rawmap_edit_id_fn fn);
+int sh_rawmap_edit_local_id(char *out, size_t cap);
 
 /* Where the save and load messages go besides the log: the editor toast and
  * the game console (iface_engine.c binds both). Either may be NULL. */

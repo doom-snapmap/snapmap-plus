@@ -353,6 +353,14 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "80 BB 8E 0C 00 00 00 74 0A 81 A3 94 0C 00 00 FF FF FD FF "
       "48 8B 8B 08 08 00 00 41 83 C8 FF 8B 93 94 0C 00 00 48 8B 01 FF 50 30",
       0xAE48C8u, 0xAE3968u },
+    { "SnapMapIterateAI", /* idSnapMapGameEntityIterator_AI: walk the director's live 64-byte trackers. */
+      "41 56 48 83 EC 20 4C 8B F1 48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 0F 84 A6 00 00 00 "
+      "48 8B 0D ?? ?? ?? ?? 48 89 6C 24 38 48 89 7C 24 48 E8 ?? ?? ?? ?? 33 FF 48 8B E8 39 B8 10 0D 00 00",
+      0xA076C0u, 0xA068D0u },
+    { "SnapEntityPlayText", /* MapEntityForSnapEntity: R14 is the saved entry, then its text is copied into the Play decl. */
+      "49 8D 8E 50 01 00 00 E8 ?? ?? ?? ?? 48 8B D0 45 33 C0 48 8B CF E8 ?? ?? ?? ?? "
+      "33 D2 48 8B CF E8 ?? ?? ?? ?? 48 8B 57 08 49 8B 86 50 01 00 00 48 85",
+      0x11521D6u, 0x1151306u },
     { "SnapMapEditToSnapBuild", /* int(edit map, build map, ctx). Entry precedes all three BuildAAS calls
                                  * (+0x35C/+0x373/+0x38A), so nav_play reads live marks here
                                  * before conversion invalidates the editable entity state. */
@@ -1198,6 +1206,16 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B C4 56 57 41 54 41 56 41 57 48 81 EC 70 07 00 00 48 C7 44 24 50 FE FF FF FF "
       "48 89 58 18 48 89 68 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 60 07 00 00 "
       "4C 8B F2 4C 8B F9 33 DB 89 59 08 48 8B 41 10 48 89 41 28", 0x11AA710u, 0x11A9820u },
+    { "SnapPalettePickerPlaceable", /* The Add Object filter reads the palette row's placeable flag. */
+      "48 8B 01 0F B6 80 CC 03 00 00 D0 E8 24 01 C3 CC 48 8B 41 30 4C 63 C2 4E 8B 0C C0",
+      0x11AA6C0u, 0x11A97D0u },
+    { "SnapPaletteCategoryBound", /* Add Object's equal-caption range reads categoryNameTag at sedef+0x94. */
+      "40 53 55 57 48 83 EC 20 48 8B E9 48 8B FA 49 8B 08 48 81 C1 94 00 00 00 E8 ?? ?? ?? ?? "
+      "48 89 44 24 40 48 2B FD 48 B8 5D A8 39 09 C4 85 9A 93", 0x11A9650u, 0x11A8770u },
+    { "SnapPaletteStablePartition", /* The picker's own stable partition moves complete idSnapEntityEdit rows. */
+      "40 55 56 57 41 56 41 57 48 83 EC 60 48 C7 44 24 40 FE FF FF FF 48 89 9C 24 A0 00 00 00 "
+      "4D 8B F0 48 8B FA 48 8B D9 48 3B CA 0F 84 54 02 00 00 90 49 8B 46 08 48 8B CB FF D0 "
+      "49 8B 0E 3A 01 75 11 48 81 C3 F0 06 00 00", 0x11A6FE0u, 0x11A6100u },
     { "SnapPaletteSortCall", /* inside PasteInstantiate (VK 0x1411af070, GL 0x1411ae270): at offset 37 the E8 to
                               * SnapPaletteSort (VK 0x1411ab0a0, GL 0x1411aa1b0); its wrapper is a template
                               * shared with other lists. */

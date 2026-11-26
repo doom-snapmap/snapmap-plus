@@ -7,6 +7,7 @@
 #include "../src/backend/modstore.h"
 #include "../src/backend/modserve.h"
 #include "../src/backend/modstock.h"
+#include "../src/backend/modunit.h"
 #include "../src/backend/modmanifest.h"
 #include "mod_test_util.h"
 #include "mod_stock_fixture.h"
@@ -1089,6 +1090,18 @@ static const r7_blob *r7_spv(const char *stage)
 
 static void make_install7(const char *d7)
 {
+    static const unsigned char model[] = {
+        0x1b, 0x4c, 0x4d, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x0c, 0x00, 0x00, 0x00,
+        0x66, 0x69, 0x78, 0x74, 0x75, 0x72, 0x65, 0x2f, 0x73, 0x6b, 0x69, 0x6e, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x80, 0x1f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1b, 0x4c, 0x4d, 0x42,
+        0x00, 0x00, 0x00, 0x01, 0x0c, 0x00, 0x00, 0x00, 0x66, 0x69, 0x78, 0x74, 0x75, 0x72, 0x65, 0x2f,
+        0x73, 0x6b, 0x69, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
     const r7_blob *bin, *pbin, *vs, *fs;
     R7N = 0;
     bin = r7_bin(R7_DECL);
@@ -1099,6 +1112,29 @@ static void make_install7(const char *d7)
         entry g[] = {
             R7_T(R7_TW_DECL, R7_DECL), R7_B(R7_TW_BIN, bin), R7_B(R7_TW_VS, vs), R7_B(R7_TW_FS, fs),
             R7_T(R7_TW_PERM, R7_PERM), R7_B(R7_TW_PBIN, pbin), R7_B(R7_TW_PVS, vs), R7_B(R7_TW_PFS, fs),
+            R7_T("generated/decls/entitydef/ai/ordinary.decl", "{ edit = { unused = 1; } }"),
+            R7_T("generated/decls/entitydef/ai/campaign_ancestor.decl", "{ class = \"idEntity\"; }"),
+            R7_T("generated/decls/entitydef/ai/unrelated.decl", "{ class = \"idProp2\"; }"),
+            R7_T("generated/decls/entitydef/ai/campaign_actor.decl", "{ inherit = \"ai/campaign_ancestor\"; edit = { aiConstants = { components = { ptr = { ptr[15] = { componentDecl = \"fixture/shared\"; } } } } fxDecl = \"fixture/first\"; renderModelInfo = { model = \"models/hull.lwo\"; } clipModelInfo = { type = \"CLIPMODEL_RENDERMODEL\"; } } }"),
+            R7_T("generated/decls/aicomponent_waveblast/fixture/shared.decl", "{ edit = { shieldEntityDef = \"fixture/shield\"; } }"),
+            R7_T("generated/decls/aicomponent_flight/fixture/shared.decl", "{ edit = {} }"),
+            R7_T("generated/decls/entitydef/fixture/shield.decl", "{ edit = { renderModelInfo = { model = \"fixture/hull.break\"; } } }"),
+            R7_T("generated/discreteanimation/models/fragments.dmodel", "cooked breakable geometry"),
+            R7_T("generated/decls/breakable/fixture/hull.decl", "{\n model models/fragments.lwo\n explosion {\n fx fixture\\shatter\n }\n }"),
+            R7_T("generated/decls/fx/fixture/shatter.decl", "{ edit = {} }"),
+            R7_T("generated/cm/models/hull.bcm", "render-linked collision"),
+            R7_T("generated/cm/models/box.bcm", "unrelated collision"),
+            R7_T("generated/decls/fx/fixture/first.decl", "{ edit = { modelParms = { modelName = \"models/fixture.lwo\"; } } }"),
+            R7_T("generated/decls/material/fixture/skin.decl", "{\n// fixture skin\nstageprogram\ttw\ntransmap1\ttextures/fixture_mask$bc7\n}\n"),
+            R7_T("generated/image/textures/fixture_mask$bc7.bimage", "stage image"),
+            R7_T("generated/decls/material/fixture/second.decl", "{\nstageprogram\ttwin\n}\n"),
+            R7_T("generated/decls/renderprog/twin.decl", R7_DECL), R7_B("generated/renderprogs/twin_pc_vulkan.bin", bin),
+            R7_B("generated/spirv/twin.vspv", vs), R7_B("generated/spirv/twin.fspv", fs),
+            R7_T("generated/renderprogs/permutations/twin_0000000000000001.decl", R7_PERM),
+            R7_B("generated/renderprogs/permutations/twin_0000000000000001_pc_vulkan.bin", pbin),
+            R7_B("generated/spirv/generated/renderprogs/permutations/twin_0000000000000001.vspv", vs),
+            R7_B("generated/spirv/generated/renderprogs/permutations/twin_0000000000000001.fspv", fs),
+            { "cooked/model/models/fixture.bmodel", model, sizeof model, 0 },
             R7_T("generated/decls/renderprog/tp.decl", R7_DECL), R7_B("generated/renderprogs/tp_pc_vulkan.bin", bin),
             R7_B("generated/spirv/tp.vspv", vs), R7_B("generated/spirv/tp.fspv", fs),
             R7_T("generated/renderprogs/permutations/tp_0000000000000001.decl", R7_PERM),
@@ -1112,6 +1148,9 @@ static void make_install7(const char *d7)
             R7_B("generated/renderprogs/permutations/sw_0000000000000001_pc_vulkan.bin", pbin),
             R7_B("generated/spirv/generated/renderprogs/permutations/sw_0000000000000001.vspv", vs),
             R7_B("generated/spirv/generated/renderprogs/permutations/sw_0000000000000001.fspv", fs),
+            { "cooked/model/models/hull.bmodel", model, sizeof model, 0 },
+            { "cooked/model/models/box.bmodel", model, sizeof model, 0 },
+            R7_T("generated/decls/entitydef/ai/ordinary.decl", "{ edit = { stock = 1; } }"),
             R7_T(R7_SNAP_DEF, R7_DEF),
         };
         write_container(d7, "gameresources", g, (int)(sizeof g / sizeof g[0]));
@@ -1211,6 +1250,89 @@ static void test_text_identity(const char *tmp)
 
 /* The closure follows a material's shader: a campaign-only program comes whole (decl, .bin, SPIR-V and the
  * permutation's), a SnapMap program records only its name, and a missing permutation .bin fails the build. */
+static int unit_game(void *ctx, const char *path, char sha[SH_MB_HASH_HEX+1], char *source, size_t cap)
+{
+    unsigned long long size;
+    int present = sh_modstock_exists(path);
+    (void)ctx;
+    if (present != 1) return present;
+    return sh_modstock_identify(path, sha, &size) == SH_MB_STOCK_OK &&
+           sh_modstock_container(path, sha, source, cap) == SH_MB_STOCK_OK ? 1 : -1;
+}
+
+static void test_campaign_actor_unit(const char *tmp)
+{
+    static const char *const family[] = { R7_TW_DECL, R7_TW_BIN, R7_TW_VS, R7_TW_FS, R7_TW_PERM,
+                                         R7_TW_PBIN, R7_TW_PVS, R7_TW_PFS };
+    const sh_unit_env env = {unit_game};
+    char archive[MAX_PATH*2], root[MAX_PATH*2], folder[MAX_PATH*2], *cause = NULL;
+    const sh_mb_file *f;
+    sh_mb_bundle b;
+    sh_unit u;
+    size_t i;
+    _snprintf_s(archive,sizeof archive,_TRUNCATE,"%s\\parent-game",tmp);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\parent-actors", tmp);
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\actors", root);
+    make_install7(archive);
+    sh_modstock_set_install(archive);
+    mt_write(folder, "mod.json", "{\"name\":\"Campaign parents\"}");
+    r7_write_lf(folder, "generated/decls/entitydef/mods/tident07/first.decl", "{ inherit = \"ai/campaign_actor\"; }", "");
+    r7_write_lf(folder, "generated/decls/entitydef/mods/tident07/second.decl", "{ inherit = \"ai/ordinary\"; edit = { customMaterial = \"fixture/second\"; renderModelInfo = { model = \"models/box.lwo\"; } clipModelInfo = { type = \"CLIPMODEL_BOX\"; } } }", "");
+    if (!sh_mb_build(folder,"tident07",&RESOLVER,&b)) {
+        fprintf(stderr,"campaign actors: %s\n",sh_mb_first_cause(&b));
+        CHECK(0); sh_mb_free(&b); return;
+    }
+    f = find(&b,"generated/decls/entitydef/mods/tident07/first.decl");
+    CHECK(f && has_need(f,"entityDef","ai/campaign_actor"));
+    f = find(&b,"generated/decls/entitydef/mods/tident07/second.decl");
+    CHECK(f && !has_need(f,"entityDef","ai/ordinary"));
+    CHECK(!find(&b,"generated/decls/entitydef/ai/ordinary.decl"));
+    if (sh_unit_of(&b,folder,"mods/tident07/first",&env,&u,&cause)) {
+        CHECK(u.manifest && strstr(u.manifest,"ai/campaign_actor.decl") && strstr(u.manifest,"fixture/skin.decl"));
+        for (i=0; i<sizeof family/sizeof *family; i++) CHECK(strstr(u.manifest,family[i]));
+        CHECK(!strstr(u.manifest,"twin") && !strstr(u.manifest,"fixture/second"));
+        CHECK(strstr(u.manifest,"fixture_mask$bc7.bimage"));
+        CHECK(strstr(u.manifest,"generated/cm/models/hull.bcm"));
+        CHECK(strstr(u.manifest,"aicomponent_waveblast/fixture/shared.decl") && strstr(u.manifest,"entitydef/fixture/shield.decl"));
+        CHECK(!strstr(u.manifest,"aicomponent_flight/fixture/shared.decl"));
+        CHECK(strstr(u.manifest,"breakable/fixture/hull.decl") && strstr(u.manifest,"fx/fixture/shatter.decl"));
+        CHECK(strstr(u.manifest,"generated/discreteanimation/models/fragments.dmodel"));
+        sh_unit_free(&u);
+    } else { fprintf(stderr,"first: %s\n",cause ? cause : "?"); CHECK(0); }
+    free(cause); cause = NULL;
+    if (sh_unit_of(&b,folder,"mods/tident07/second",&env,&u,&cause)) {
+        CHECK(strstr(u.manifest,"twin_pc_vulkan.bin") && strstr(u.manifest,"twin_0000000000000001_pc_vulkan.bin"));
+        CHECK(!strstr(u.manifest,"ai/campaign_actor.decl") && !strstr(u.manifest,R7_TW_BIN));
+        CHECK(!strstr(u.manifest,"generated/cm/") && !strstr(u.manifest,"fixture_mask$bc7.bimage"));
+        sh_unit_free(&u);
+    } else { fprintf(stderr,"second: %s\n",cause ? cause : "?"); CHECK(0); }
+    free(cause);
+    sh_mb_free(&b);
+
+    r7_write_lf(folder, "generated/decls/entitydef/ai/ordinary.decl", "{ edit = { stock = 1; } }", "");
+    r7_write_lf(folder, "generated/decls/entitydef/ai/unrelated.decl", "{ class = \x22idProp2\x22; }", "");
+    if (!sh_mb_build(folder, "tident07", &RESOLVER, &b)) { CHECK(0); sh_mb_free(&b); return; }
+    CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))));
+    CHECK(sh_modserve_index_build(root) == 1);
+    {
+        const char *hash = b.hash;
+        sh_modserve_plan plan;
+        int unknown, ancestor = -1, parent = -1, child = -1;
+        int steps = sh_modserve_plan_bundles(&hash, 1, &plan, &unknown);
+        CHECK(steps > 0 && !unknown && !plan.blocked);
+        for (int step = 0; step < steps; step++) {
+            const char *name = plan.steps[step].name;
+            if (!strcmp(name, "ai/campaign_ancestor")) ancestor = step;
+            if (!strcmp(name, "ai/campaign_actor")) parent = step;
+            if (!strcmp(name, "mods/tident07/first")) child = step;
+            CHECK(strcmp(name, "ai/ordinary") && strcmp(name, "ai/unrelated"));
+        }
+        CHECK(ancestor >= 0 && ancestor < parent && parent < child);
+        sh_modserve_plan_free(&plan);
+    }
+    sh_mb_free(&b);
+}
+
 static void test_shader_closure(const char *tmp)
 {
     static const char *const whole[] = { R7_TW_DECL, R7_TW_BIN, R7_TW_VS, R7_TW_FS, R7_TW_PERM, R7_TW_PBIN, R7_TW_PVS,
@@ -1288,6 +1410,7 @@ int main(void)
     test_closure_store_path(tmp);
     test_text_identity(tmp);
     test_shader_closure(tmp);
+    test_campaign_actor_unit(tmp);
     sh_modstock_set_install(d1);
     test_store(tmp, d1, d2);
     sh_modstock_reset();

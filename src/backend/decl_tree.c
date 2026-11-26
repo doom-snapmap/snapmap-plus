@@ -1154,6 +1154,61 @@ sh_dt_node *sh_dt_at(sh_dt_node *n, const char *path)
     return n;
 }
 
+static int dt_own_name(const char *name, const char *salt)
+{
+    size_t n = strlen(salt);
+    return name && !_strnicmp(name, "mods/", 5) && !_strnicmp(name + 5, salt, n) &&
+           name[5 + n] == '/' && name[6 + n];
+}
+
+static char *dt_decl_value(const sh_dt_node *field)
+{
+    if (!field || !field->val || field->val_n < 3 || field->val[0] != '"' ||
+        field->val[field->val_n - 1] != '"') return NULL;
+    return sh_textn(field->val + 1, field->val_n - 2);
+}
+
+char *sh_dt_enemy_behavior(const char *salt, const char *entitydef, sh_dt_enemy_read read, void *context)
+{
+    char *parent = NULL, *behavior = NULL;
+    const char *name = entitydef;
+    sh_text_buf visited = {0};
+    if (!salt || !*salt || !read) return NULL;
+    while (dt_own_name(name, salt)) {
+        sh_dt *tree = NULL;
+        sh_dt_node *root, *field;
+        size_t at = 0;
+        /* A declaration may inherit through many files. Stop before reading the same name twice. */
+        while (at < visited.n && _stricmp(visited.p + at, name))
+            at += strlen(visited.p + at) + 1;
+        if (at < visited.n) break;
+        sh_text_append(&visited, name, strlen(name) + 1);
+        if (visited.oom) break;
+        if (!read(context, "entitydef", name, &tree) || !tree) {
+            sh_dt_free(tree);
+            break;
+        }
+        root = sh_dt_root(tree);
+        field = sh_dt_child(sh_dt_at(root, "edit/aiEditable/behaviors"), "decl");
+        if (field) {
+            behavior = dt_decl_value(field);
+            sh_dt_free(tree);
+            if (!dt_own_name(behavior, salt) || !read(context, "aibehavior", behavior, NULL)) {
+                free(behavior);
+                behavior = NULL;
+            }
+            break;
+        }
+        free(parent);
+        parent = dt_decl_value(sh_dt_child(root, "inherit"));
+        name = parent;
+        sh_dt_free(tree);
+    }
+    free(parent);
+    free(visited.p);
+    return behavior;
+}
+
 int sh_dt_set_value(sh_dt *t, sh_dt_node *n, const char *val, size_t len)
 {
     char *v;

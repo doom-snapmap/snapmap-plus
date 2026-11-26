@@ -415,6 +415,8 @@ The demon's gore graph names its wounds, as for any wound.
 
 ## Mistakes
 
+Run the Snapmap+ installer to update a mod whose material uses an earlier format. Previously published maps keep their original files and Snapmap+ reads those materials when the map opens.
+
 The build reads every typed material, effect, environment and wound and stops on a mistake with one sentence,
 for example:
 
@@ -471,8 +473,9 @@ materials, so a hand-made mod and a converted one use one surface.
   [The hair programs](architecture.md#the-hair-programs).
 - `type layered` compiles to `snapmapplus/layered/skinvmtr` or `skinvmtrwounds` (the game's lit skinned programs with
   the layer blend added); its numbers go into a small per-material parameter image the product derives, so the
-  program takes no render-parm slot of the engine's 1,024. `type particle` compiles to `snapmapplus/particles/
-  uberparticles`, whose numbers are kept in keys the game's own particle program already holds. See
+  program takes no render-parm slot of the engine's 1,024. A `type particle` material that needs a platform
+  program uses `snapmapplus/particles/uberparticles` or `snapmapplus/particles-volume/uberparticles`.
+  The SDK selects the volume variant for far fade or for a lit particle with a second glow-mask colour. Both use the game's existing particle keys. See
   [Render programs](architecture.md#render-programs).
 - Effects, particles, environments, wounds and values that change are compiled by `src/backend/sdk.c` and the files it calls (`modeffect.c`, `modenv.c`, `modwound.c`, `sdkvalues.c`); what they derive (particle decls, materials, tables, the fx an environment plays, an effect's emitter) is served by the product, and the build carries it as pointers. See [The Graphics SDK: effects, environments, values that change](architecture.md#the-graphics-sdk-effects-environments-values-that-change).
 - The compiler is `src/backend/modlook.c`; the build validates with it and the server serves its output. A material without a `type` is written in the game's own keys and is served as written. A material that compiles to the platform's layered program

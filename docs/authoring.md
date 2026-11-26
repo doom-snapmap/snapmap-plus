@@ -47,12 +47,19 @@ snapmap-plus/
 └── cache/
     ├── served/
     └── content/
+        ├── units/
+        ├── files/
+        ├── served/
+        └── partial/
 ```
 
 The shared `mods/snapmap-plus.json` records local mod identities and publishing history. Snapmap+ maintains it.
 Snapmap+ writes prepared local files into `cache/served/` when the game needs them.
-For a published map, `cache/content/` keeps its verified units and files between plays.
-Maps that use the same version reuse those files. Playing a map leaves the author's `mods/` folder alone.
+Opening a published map or importing a rawmap or prefab ZIP puts its verified units and files in `cache/content/`.
+Each unit lists the files its map needs. Their contents are stored once by hash under `files/`.
+The game reads the prepared map content under `content/served/`. Interrupted downloads can resume from `partial/`.
+Opening another published map reuses files already present and fetches any missing ones. Playing a map leaves the author's `mods/` folder alone.
+On upgraded installations, `cache/legacy-builds/` also keeps the records needed to open exports pinned to older releases.
 
 A file beside `mod.json` (a README, notes) and a folder whose name starts with `.` are not part of the mod. A file in
 any other top-level folder (`assets/` and `game/` included) is a mistake the build names, file by file.
@@ -62,6 +69,15 @@ any other top-level folder (`assets/` and `game/` included) is a mistake the bui
 `native/` holds only the DOOM files you change, each at DOOM's own path below it. The DOOM files your mod uses without
 changing them are found by the build and never copied; a copy that is the same as DOOM's own file is not needed, and
 the build says so. A binary in `native/` (a model, an image) replaces DOOM's file only in the maps that use the mod.
+
+Two installed mods can edit different fields of the same stock Toybox row or editor settings declaration. Both
+changes apply. If both set the same field differently, the mod whose salt sorts first supplies the value.
+Removing that mod reveals the remaining mod's value.
+
+To make a Toybox tab called Equipment, add `"strings": {"en": {"equipment": "Equipment"}}` to
+`mod.json`. Set `categoryNameTag = "#str_equipment";` on each Toybox row that belongs in the tab.
+The caption appears as Equipment in every game language unless you supply a translation. Other mods
+can use the same key or caption for their own tabs.
 
 A file that is not in a folder of the mod gets one of two sentences, depending on whether DOOM holds a file at that
 path:
@@ -86,8 +102,10 @@ its kind>.`
   the game writes them.
 - The game keeps a few names that begin like one of your folders (452 under `effects/`, one under `particles/`). To
   name one of those, write `native:` before it: `native:effects/explosion`.
-- Strings: a key in `mod.json`'s `strings` is yours, and a decl names it `#str_<key>`. A key that is one of the game's
-  own changes the game's text where your mod is used.
+- Strings: a key in `mod.json`'s `strings` is yours, and a decl names it `#str_<key>`. Reusing a key from DOOM or Snapmap+ changes the text of that existing item where your mod applies.
+  For example, `sh_category_1` names the built-in `*Custom` tab. Give a separate tab a key of its own. Put English text in `strings.en`. You can translate individual
+  keys under `it`, `fr`, `de`, `es`, `es-419`, `pt`, `pl`, `ru`, `ja` or `zh-Hant` in the same object. Keys without a
+  translation use your English text. Give the rows in one Toybox tab the same `categoryNameTag`.
 - In a script a call that takes one of your mod's things takes its name without the folder (`play_effect("sparks",
   pos)` plays `effects/sparks.decl`, `spawn("crate", pos)` places `entities/crate.decl`); `native("...")` names
   DOOM's.
@@ -199,9 +217,12 @@ as `#str_<salt>_crate_name`. A material of your own goes in `materials/` and is 
 (`customMaterial = "materials/crate_rust"`); the [Graphics SDK](graphics-sdk.md) shows two.
 ## A demon in SnapMap
 
-A demon of your own follows every SnapMap rule a stock demon does once SnapMap knows which stock demon it stands in
-for. That is one row, in your edited copy of the encounter conductor
-(`native/generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl`), beside the game's rows:
+The Toybox places an encounter. Its conductor chooses the actor to spawn. The actor's own definition and
+its parents supply the demon's health, model and behavior. Both a directly placed Baron and the Toybox
+Baron can therefore use the same combat behavior.
+
+To give a port a SnapMap encounter class, add a row beside the stock rows in your copy of the encounter
+conductor (`native/generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl`).
 
 ```
 item[18] = {
@@ -213,10 +234,35 @@ item[18] = {
 Use the stock demon's flag and a number unique to your mod for each port. Use that same number in its single encounter
 (`memberType = "524288";`) and, if supplied, its score (`aiType = "524288";`). Doomforge writes these rows for you.
 
+A Follow Path action wired to a path point gives the game control of the demon while it follows that path.
+A demon with a scripted ranged attack can follow it even when its attack never requests a move.
+
 The Toybox, Single Demon Encounter, Encounter List and Miniboss pickers let authors place the demon's own encounter.
 The selected single always spawns its actor. Stock encounters, waves and director tables keep their shipped contents.
 A map's AI Filter offers up to eleven distinct port classes. Additional ports share a class, preferring a port with
 the same stock stand-in. The filter, class modifiers and type-based score then follow the shared class.
+
+Selecting a Toybox demon in **Entities → Entity State** opens its placed encounter. The panel shows the class,
+the definition it inherits and the values changed on that placement. To read the demon's shared actor definition,
+open its file under `entities/` in the Mods tab. The same rule applies to pickups. An unmodified pickup can show
+an empty `edit` block and still inherit its model and interaction.
+
+For a boss bar, select the demon in a Miniboss Event and enable **Show On HUD** and **Show Health Bar**.
+Set Point of Interest wired to the placed encounter marks its living demon. Clear Point of Interest removes the marker.
+
+To place a demon directly, select an Unknown in **Entities → Entity State**. Set **Inherit** to the demon's full actor
+name, such as `ai/demon/baron_coop` for the stock Baron or `mods/zjpq12lo/ai/demon/tyrant` for the Eternal Demons
+Tyrant. Set **Classname** to `idAI2` and click **Save**. Position and orientation are enough. The actor definition
+supplies its health, model and behavior. Add an override only for a property you want to change on this placement.
+A Toybox encounter and a direct placement that name the same actor inherit the same demon defaults.
+The encounter also controls when the demon spawns and which encounter events fire.
+A published map that uses this named mod actor can carry its actor slice.
+
+An existing placement can also define its actor inline. Its `edit.aiEditable.behaviors.decl` must identify one
+registered brain in the owning mod for the Enemy SDK to run it. Inline references can require the whole mod on publish.
+
+**For Each AI** visits both named and inline demons. Its iterated actor can receive **Set Point of Interest**,
+**Clear Point of Interest** or **Kill** through an **AI Proxy**.
 
 ## A mod with nothing to place
 

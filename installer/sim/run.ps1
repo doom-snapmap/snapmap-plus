@@ -4,14 +4,14 @@
 # Keep this script ASCII for PowerShell 5.1.
 param(
     [string]$Doom = "",              # your DOOM 2016 folder; found through Steam when omitted
-    [string]$Scratch = "",           # default: %TEMP%\snapmap-plus-sim
+    [string]$Scratch = "",           # default: tests\obj\installer-sim
     [switch]$SkipNativeBuild,        # reuse build\ (still repackages dist\)
     [string]$Log = ""                # also write everything printed to this file
 )
 $ErrorActionPreference = "Stop"
 $installerDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $repo = Split-Path -Parent $installerDir
-if (-not $Scratch) { $Scratch = Join-Path $env:TEMP "snapmap-plus-sim" }
+if (-not $Scratch) { $Scratch = Join-Path $repo "tests\obj\installer-sim" }
 $Scratch = [System.IO.Path]::GetFullPath($Scratch)
 $tagA = "v0.3.0-sim.1"
 $tagB = "v0.3.0-sim.2"
@@ -90,6 +90,15 @@ foreach ($f in $gameFiles) {
     Copy-Item -LiteralPath (Join-Path $Doom $f) -Destination $dst
 }
 Say ("  copied {0} from {1}" -f ($gameFiles -join ", "), $Doom)
+
+# The retired package includes an image from this synthetic game archive.
+$fixtureGame = Join-Path $repo "tests\fixtures\store-retired\game"
+foreach ($name in @("base\gameresources.pindex", "base\gameresources.resources")) {
+    $dst = Join-Path $base $name
+    New-Item -ItemType Directory -Force (Split-Path -Parent $dst) | Out-Null
+    Copy-Item -LiteralPath (Join-Path $fixtureGame $name) -Destination $dst
+    $gameFiles += $name
+}
 
 $served = Join-Path $Scratch "served"
 New-Item -ItemType Directory -Force $served | Out-Null
@@ -208,7 +217,7 @@ try {
     Seed $s "beta19"
     $keepB = @("config.json", "mods\tinypack\mod.json", "mods\alex.tiny@1.0.0+1\mod.json")
     $keepB += @("removed-mods")
-    Step $s "update" @("update", "--yes", "--plain") "installed" $pair $keepB @("the other DOOM build's files") @("Converting mods")
+    Step $s "update" @("update", "--yes", "--plain") "installed" $pair $keepB @("the other DOOM build's files","Update earlier Snapmap+ content","Mods","Maps","Prefabs")
     Step $s "uninstall" @("uninstall", "--yes", "--plain") "uninstalled" @() $keepB @()
 
     # c) v0.2.1-beta.20: both pairs, backups, installer-files.json, updates.json, .old -> update, then uninstall.

@@ -29,6 +29,18 @@ const void *sh_tl_wanted_sedef(const char *inherit, const char *cls, const void 
  * and differs from it, else NULL; an editor tweak shadowing a stock name counts as stock. */
 const void *sh_tl_stock_row_first(const char *current_row, const void *current, const void *stock_row);
 
+#define SH_TL_PALETTE_STRIDE 0x6f0
+typedef struct sh_tl_predicate {
+    const unsigned char *keep;
+    unsigned char (*matches)(const unsigned char *row);
+} sh_tl_predicate;
+typedef unsigned char *(*sh_tl_partition)(unsigned char *first, unsigned char *end, const sh_tl_predicate *predicate);
+/* Split a native equal-caption span by its category tag while preserving the item order within each heading. */
+unsigned char *sh_tl_category_end(unsigned char *first, unsigned char *end, sh_tl_partition partition);
+
+/* Generated actor rows resolve map references but have no Add Object tile. */
+int sh_tl_picker_offers(int placeable, const char *row);
+
 /* EntityMode substates that hold an entity in the editor's hands (held
  * placement 4, wire drag 7). Entities are not rebound during them. */
 int sh_tl_substate_blocks_rebind(int substate);
@@ -37,6 +49,8 @@ int sh_tl_substate_blocks_rebind(int substate);
  * the wrapper's prologue, else NULL. The install's own check. */
 #define SH_TIMELINE_SORT_CALL_OFF 37  /* the E8 to the sort inside SnapPaletteSortCall */
 const unsigned char *sh_timeline_tile_sort_target(const unsigned char *call_site);
+const unsigned char *sh_timeline_tile_admit_target(const unsigned char *build);
+int sh_timeline_actor_filter_ready(void);
 
 #ifndef SH_TIMELINE_TILE_PURE
 #include "signatures.h"

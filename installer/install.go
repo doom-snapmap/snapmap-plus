@@ -33,15 +33,15 @@ func cmdInstall(f flags) error {
 	}
 	// A release install keeps a stable copy of snapmap-plus.exe; a refused one changes nothing,
 	// and a dev --local build is never copied.
-	if f.local == "" {
-		if err := selfInstall(f.force); err != nil {
-			return err
-		}
-	}
 	if checkDoomRunning() {
 		return fmt.Errorf("DOOM is running -- close it and run this again (Snapmap+'s files can't be replaced while the game has them open)")
 	}
 	if build.build == build2018 {
+		if f.local == "" {
+			if err := selfInstall(f.force); err != nil {
+				return err
+			}
+		}
 		return installLegacyRelease(f, doom)
 	}
 	f.doom = doom // the installation a release choice is compared with
@@ -74,16 +74,40 @@ func cmdInstall(f flags) error {
 		b.version, build.label, doom)
 	if len(legacy) > 0 {
 		ui.Warn("Found the original SnapHak in this DOOM folder. Snapmap+ replaces it, so its\n"+
-			"files (%d) will be removed. Your maps and prefabs under\n"+
-			"%%USERPROFILE%%\\snaphak stay in that folder.", len(legacy))
+			"files (%d) will be removed. Your recognized modded content is checked before installation.", len(legacy))
 		confirmMsg = fmt.Sprintf("About to remove the original SnapHak and install Snapmap+ %s for the %s DOOM build into\n  %s\nContinue?",
 			b.version, build.label, doom)
 	}
 	// FINAL gate -- runs only after every check passed (DOOM found, DOOM closed, bundle downloaded + verified).
-	if !f.yes && isInteractive() {
-		if !confirm(confirmMsg) {
-			ui.Skip("Cancelled -- nothing was changed.")
+	var migration *migrationPlan
+	if carriesMarker(filepath.Join(b.root, currentProxy), []byte(modBuildManifest)) {
+		var cleanup func()
+		migration, cleanup, err = preparePlayerMigration(doom, appDataDir(), "")
+		defer cleanup()
+		if err != nil {
+			return fmt.Errorf("before installing: %w", err)
+		}
+	}
+	if migration != nil && migration.ready() {
+		ui.Note("This install will update Snapmap+ %s and the following earlier content.", b.version)
+		ok, err := migration.consent(f.yes)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			ui.Skip("Cancelled.")
 			return nil
+		}
+		if err = migration.commit(); err != nil {
+			return fmt.Errorf("could not finish updating earlier content: %w; run the same command again", err)
+		}
+	} else if !f.yes && isInteractive() && !confirm(confirmMsg) {
+		ui.Skip("Cancelled -- nothing was changed.")
+		return nil
+	}
+	if f.local == "" {
+		if err := selfInstall(f.force); err != nil {
+			return err
 		}
 	}
 	ensureUserDataTree()
@@ -150,17 +174,6 @@ func cmdInstall(f flags) error {
 	if err := saveInstall(b.version, doom, build.build, rec); err != nil {
 		return fmt.Errorf("installed the files, but couldn't write the install record (%v) -- run: snapmap-plus update", err)
 	}
-	if carriesMarker(filepath.Join(doom, currentProxy), []byte(modBuildManifest)) {
-		if err := convertEarlierData(doom, appDataDir()); err != nil {
-			return fmt.Errorf("Snapmap+ is installed, but updating your earlier content could not finish (%w). Run the same install or update command again", err)
-		}
-		if err := upgradeModLayout(appDataDir()); err != nil {
-			return fmt.Errorf("Snapmap+ is installed, but updating your mod data could not finish (%w). Run the same install or update command again", err)
-		}
-		if err := upgradeGraphicsFolders(appDataDir()); err != nil {
-			return fmt.Errorf("Snapmap+ is installed, but updating older materials could not finish: %w", err)
-		}
-	}
 	ui.Blank()
 	ui.OK("Snapmap+ %s installed.", b.version)
 	ensureWebView2Runtime(f) // the HTML UI renders in the WebView2 runtime -- ensure it's present (never fails the install)
@@ -225,7 +238,7 @@ func describeEarlier(doom, build string, prior *installRecord, legacy []string, 
 	if len(legacy) > 0 {
 		return earlierInstall{"the original SnapHak",
 			"Its files are removed from the DOOM folder, your prefabs, strings and rawmaps under\n" +
-				"%USERPROFILE%\\snaphak are copied to %LOCALAPPDATA%\\snapmap-plus, and Snapmap+'s two files are installed."}
+				"%USERPROFILE%\\snaphak are checked for earlier modded content, and Snapmap+'s two files are installed."}
 	}
 	if prior == nil && !other && !baks && !retired {
 		if present {

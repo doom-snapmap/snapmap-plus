@@ -97,6 +97,7 @@ func earlierAuthorPath(id, request string) (string, error) {
 }
 
 var earlierNameToken = regexp.MustCompile(`(?:#str_|native:)?[A-Za-z0-9_.$/+@~-]+`)
+var earlierQuotedKey = regexp.MustCompile(`"#str_[^"\r\n]*"|'#str_[^'\r\n]*'`)
 var earlierKey = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 var earlierAuthorPrefix = regexp.MustCompile(`^(?:materials|effects|environments|particles|entities|images|animations|collision|movies|scripts|map-modules|virtual-textures|programs|meshes|sounds)/.+|^decls/[^/]+/.+`)
 var earlierLookKey = regexp.MustCompile(`(?im)^([ \t]*)look([ \t]+(?:layered|particle)\b)`)
@@ -152,9 +153,23 @@ func (n earlierModNames) add(request, author string) {
 	}
 }
 
+func (n earlierModNames) stringReferences(text string) string {
+	if strings.HasPrefix(text, "#str_") {
+		if next := n.keys[text[5:]]; next != "" {
+			return "#str_" + next
+		}
+	}
+	return earlierQuotedKey.ReplaceAllStringFunc(text, func(s string) string {
+		if key := n.keys[s[6:len(s)-1]]; key != "" {
+			return s[:6] + key + s[len(s)-1:]
+		}
+		return s
+	})
+}
+
 func (n earlierModNames) authorText(text string) string {
 	own := "mods/" + n.id + "/"
-	return earlierNameToken.ReplaceAllStringFunc(text, func(token string) string {
+	return earlierNameToken.ReplaceAllStringFunc(n.stringReferences(text), func(token string) string {
 		if strings.HasPrefix(token, "#str_") {
 			if key, ok := n.keys[token[5:]]; ok {
 				return "#str_" + key

@@ -184,6 +184,10 @@ int      sh_ai_fsm_code_yields(int code);
 int      sh_ai_pain_take_next(int alive, int playing, int now_ms, int until_ms);
 /* The index of the state named `want` among an FSM's n state names (a NULL name is skipped), -1 when none. */
 int      sh_ai_fsm_state_find(const char *const *names, int n, const char *want);
+/* Reflected offsets used to inspect the alert branch and the exact child its manager selects. */
+typedef struct { uint32_t data, name, manager, selector, linked; } sh_ai_path_fields;
+#define SH_AI_FSM_FIND_CHILD_SLOT 0x68u
+int sh_ai_fsm_has_native_path(const uint8_t *alert, const sh_ai_path_fields *fields);
 /* The move record an FSM's take-transition virtual is given to enter `target` at once, as the engine's own entrance
  * move builds it (SH_AI_SIG_FSM_MOVE): zeroed, the target state, idTransitionCode's vtable and code 5. */
 #define SH_AI_FSM_MOVE_SIZE       0x48u
@@ -550,7 +554,16 @@ typedef struct sh_script_ai_engine {
      * the pain graph's clip choice, the pending request and the alert cycle's FSM request, with `damage` as the
      * intensity. 1 the alert cycle took it, 0 refused (why says by what), -1 unavailable. */
     int      (*request_pain)(void *ai, int reaction, float damage, char *why, size_t cap);
+    /* Register one owner FX condition to start when the native wound actually opens. */
+    int (*wound_effect)(void *ent, const char *wound, const char *condition);
+    /* Verify the path state before handoff. Then 1 while the native body is busy, 0 when free, -1 unavailable. */
+    int (*native_body_busy)(void *ai, int check_path);
 } sh_script_ai_engine;
+
+int sh_ai_set_wound_effect(void *owner, uint32_t id, void *wound, int condition);
+int sh_ai_wound_effect_at(void *owner, uint32_t id, void *wound, int show,
+                          const void *call_return, const void *accepted_return);
+void sh_ai_remove_wound_effects(uint32_t id);
 
 /* The SnapMap order of a temp memory block (pure): keys[i] is the slot's key text (an interned GAME_STRING; NULL for an
  * empty slot), values[i] its 32-bit value. The first order key found wins: an entity order's value is the target's
@@ -755,6 +768,7 @@ void sh_script_ai_reset(void);
  * the first park, on the game thread) and register the calls with the engine seam. 1 when usable; 0 with one plain log
  * line, and the AI calls then refuse with "not available". */
 int sh_script_ai_install(const uint8_t *module_base);
+const char *sh_script_ai_behavior(void *entity);
 #endif
 
 /* ------------------------------------------------------------- signatures */

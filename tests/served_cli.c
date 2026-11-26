@@ -16,6 +16,7 @@
 #include "modbundle.h"
 #include "modlook.h"
 #include "modprog.h"
+#include "sdk.h"
 #include "modstock.h"
 #include "sha256.h"
 #include "../src/backend/script/script_compile.h"
@@ -131,6 +132,10 @@ int main(int argc, char **argv)
     if (doom) { sh_modstock_set_install(doom); sh_modstock_register(); g_doom_registered = 1; }
     sh_mb_set_script_check(sh_script_compile_check);
     sh_mb_set_look_compiler(sh_look_compile_notes);
+    sh_mb_set_sdk_compiler(sh_sdk_build_compile);
+    sh_modserve_set_material_filter(sh_sdk_serve_compile);
+    sh_modserve_set_product_owner(sh_modprog_owns);
+    sh_modserve_set_product_reader(sh_modprog_read);
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", root);
     h = FindFirstFileA(pattern, &fd);
     while (h != INVALID_HANDLE_VALUE) {
@@ -169,8 +174,6 @@ int main(int argc, char **argv)
         }
         if (!FindNextFileA(h, &fd)) { FindClose(h); h = INVALID_HANDLE_VALUE; }
     }
-    sh_modprog_reset();
-    sh_modserve_set_material_filter(sh_look_compile);
     {
         /* The launch preload's own share (modserve_engine.c sh_modserve_launch_preload): the index over the root and
          * the plan of every editor row and its closure, as at the hub with no map open. The engine's registration of

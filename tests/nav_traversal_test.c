@@ -138,6 +138,8 @@ static void build_table(void)
     write_family("imp", "LEDGE_DOWN", "jump_ledge_down_", 6, 0);
     dcl_row("LEAP_ACROSS_64", "zion/characters/monsters/imp/traversal/run_over_railing",
             1, -96.0, 0, 0.0);
+    dcl_row("RAIL_UP_64", "fixture/rail_up", 0, 0.0, 0, 0.0);
+    dcl_row("RAIL_DOWN_64", "fixture/rail_down", 0, 0.0, 0, 0.0);
     dcl_row("SWIM_UP_64", "zion/characters/monsters/imp/traversal/not_a_family", 0, 0.0, 0, 0.0);
     dcl_monster_end();
 
@@ -281,7 +283,7 @@ static void test_placeholder_rows_are_dropped(void)
 
     /* Written rows minus the 58-equivalents: the placeholders never become
      * animations, and neither does a family the table does not have. */
-    CHECK_MSG(sh_trav_test_row_count() == EXPECTED_ROWS, "placeholder rows must not be kept");
+    CHECK_MSG(sh_trav_test_row_count() == EXPECTED_ROWS, "only usable leap and ledge rows are kept");
 
     /* The zombie's LEDGE_UP stops at 128, so asking for 192 gets the 128 clip
      * rather than a path that resolves to nothing. */

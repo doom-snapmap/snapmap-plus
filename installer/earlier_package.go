@@ -35,9 +35,10 @@ func earlierSection(doc map[string]any, keys ...string) (map[string]any, error) 
 	return doc, nil
 }
 
-func earlierPackageFiles(src string, doc map[string]any) (map[string]string, error) {
+func earlierPackageFiles(src string, doc map[string]any, stock *earlierResourceRoot) (map[string]string, error) {
 	files := map[string]string{}
 	listed := map[string]bool{}
+	resources := map[string]earlierResource{}
 	component := map[string]bool{}
 	var paths []string
 	err := filepath.WalkDir(src, func(filename string, entry fs.DirEntry, err error) error {
@@ -67,6 +68,10 @@ func earlierPackageFiles(src string, doc map[string]any) (map[string]string, err
 	if err != nil {
 		return nil, err
 	}
+	wrapped, err := earlierWrappedFiles(src, paths, component, stock)
+	if err != nil {
+		return nil, err
+	}
 	for pass := 0; pass < 2; pass++ {
 		for _, rel := range paths {
 			dir := path.Dir(rel)
@@ -88,7 +93,7 @@ func earlierPackageFiles(src string, doc map[string]any) (map[string]string, err
 						return nil, err
 					}
 					for _, line := range strings.Split(string(text), "\n") {
-						parts := strings.Split(strings.TrimSpace(line), "\t")
+						parts := strings.Split(strings.TrimSuffix(line, "\r"), "\t")
 						if len(parts) < 2 || strings.HasPrefix(parts[0], "#") {
 							continue
 						}
@@ -99,7 +104,15 @@ func earlierPackageFiles(src string, doc map[string]any) (map[string]string, err
 						if !filepath.IsLocal(filepath.FromSlash(provider)) {
 							return nil, fmt.Errorf("invalid manifest file %s", provider)
 						}
-						listed[path.Join(dir, provider)] = true
+						key := path.Join(dir, provider)
+						listed[key] = true
+						if len(parts) == 3 {
+							item := earlierResource{parts[0], parts[1], provider, parts[2] == ""}
+							if prior, found := resources[key]; found && item != prior {
+								return nil, fmt.Errorf("conflicting package resources for %s", provider)
+							}
+							resources[key] = item
+						}
 					}
 				case folder == "requirements" && strings.HasSuffix(leaf, ".requirements") && !strings.Contains(leaf, "/"):
 					text, err := os.ReadFile(filename)
@@ -107,7 +120,7 @@ func earlierPackageFiles(src string, doc map[string]any) (map[string]string, err
 						return nil, err
 					}
 					for _, line := range strings.Split(string(text), "\n") {
-						parts := strings.Split(strings.TrimSpace(line), "\t")
+						parts := strings.Split(strings.TrimSuffix(line, "\r"), "\t")
 						if len(parts) != 3 || parts[0] != "cvar" || (parts[1] != "g_useResourceBlackList" && parts[1] != "g_useImageBlackList") || parts[2] != "0" {
 							continue
 						}
@@ -158,9 +171,19 @@ func earlierPackageFiles(src string, doc map[string]any) (map[string]string, err
 			req := ""
 			for _, prefix := range []struct{ old, next string }{{"assets/", ""}, {"decls/", "generated/decls/"}, {"images/", "generated/image/"}, {"shaders/generated/spirv/", "generated/spirv/"}, {"shaders/generated/renderprogs/", "generated/renderprogs/"}} {
 				if strings.HasPrefix(low, prefix.old) {
+					if prefix.old != "assets/" && !listed[rel] && !looseGameRequest(prefix.next+inner[len(prefix.old):]) {
+						continue
+					}
 					req = prefix.next + inner[len(prefix.old):]
 					break
 				}
+			}
+			if replacement, ok := wrapped[rel]; ok {
+				req = replacement
+			}
+			// Earlier model packages also carried material listings for their authors.
+			if !listed[rel] && strings.HasPrefix(low, "assets/cooked/model/") && strings.HasSuffix(low, ".materials.txt") {
+				continue
 			}
 			if req == "" && listed[rel] {
 				req = inner
@@ -175,10 +198,40 @@ func earlierPackageFiles(src string, doc map[string]any) (map[string]string, err
 			files[key] = filename
 		}
 	}
+	missing := map[string]earlierResource{}
+	providers := map[string]earlierResource{}
 	for file := range listed {
-		if !isRegular(filepath.Join(src, filepath.FromSlash(file))) {
+		if isRegular(filepath.Join(src, filepath.FromSlash(file))) {
+			continue
+		}
+		item, ok := resources[file]
+		if !ok || !item.valid() {
 			return nil, fmt.Errorf("package manifest refers to missing file %s", file)
 		}
+		key := strings.ToLower(item.request)
+		if prior, found := providers[key]; found && prior != item {
+			return nil, fmt.Errorf("conflicting installed-game resources for %s", item.request)
+		}
+		providers[key] = item
+		missing[item.request] = item
+	}
+	if len(missing) > 4096 {
+		return nil, fmt.Errorf("package exceeds the earlier manifest resource limit")
+	}
+	if len(missing) == 0 {
+		return files, nil
+	}
+	// Placement discovery needs only the names. Translation resolves the exact retail rows.
+	if stock == nil || stock.namesOnly {
+		for name := range missing {
+			if files[strings.ToLower(name)] == "" {
+				files[strings.ToLower(name)] = name
+			}
+		}
+		return files, nil
+	}
+	if err := stock.read(missing, files); err != nil {
+		return nil, err
 	}
 	return files, nil
 }

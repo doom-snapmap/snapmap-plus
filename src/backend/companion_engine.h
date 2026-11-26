@@ -10,8 +10,8 @@
  * 0x1413B34E0 GL 0x1413B3370); IsClient 0x140398370 / 0x140397C80; create 0x140384DF0 / 0x140384690 and finish
  * 0x1403BCF10 / 0x1403BC870 (modscene_sigs.c). Entity and vtable offsets are the named constants in the .c file. */
 
-/* The detour is committed only when an admitted bundle declares companions or the map's mod scripts need the
- * spawns (sh_companions_set_spawn_subscriber), at boot or at the next main-thread gate (sh_companions_ensure),
+/* The detour is committed when an admitted bundle declares companions, mod scripts need spawns or a directly
+ * placed actor needs its identity for For Each AI, at boot or the next main-thread gate (sh_companions_ensure),
  * and then stays for the session. */
 #ifndef SH_COMPANION_ENGINE_H
 #define SH_COMPANION_ENGINE_H
@@ -46,16 +46,13 @@ int sh_companions_ensure(const char *phase);
  * declares companions. */
 void sh_companions_refresh(void);
 
-/* Another subscriber of the spawn chain (mod scripts, script/script_hooks.h). On the main thread, after the companions
- * of every spawned idEntity whose entityDef or first inherit is in the mods namespace, it gets the entityDef's name
- * and its inherits while they stay in that namespace (at most 8). `wanted` returns 1 when it needs the detour, which
- * arms it at a gate even with no companion owner. Set once at boot; NULL clears. */
+/* After companions spawn, the subscriber gets each idEntity and its mod entityDef chain, empty for a
+ * map or game entity. A gate arms the detour when wanted, even without companions. */
 typedef void (*sh_spawn_subscriber_fn)(void *entity, const char *const *def_names, int count);
 typedef int  (*sh_spawn_wanted_fn)(void);
 void sh_companions_set_spawn_subscriber(sh_spawn_subscriber_fn fn, sh_spawn_wanted_fn wanted);
 
-/* Writes the same names for a live idEntity, up to cap; returns 0 when its entityDef is not in the mods namespace
- * or the decl lookups did not resolve. Main thread. */
+/* Writes the same names for a live idEntity, up to cap. Zero for a non-mod entityDef, -1 if unreadable. */
 int sh_companions_def_chain(void *entity, const char **names, int cap);
 
 /* The signature table, NULL-terminated. */

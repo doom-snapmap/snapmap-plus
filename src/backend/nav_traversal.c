@@ -10,9 +10,8 @@
 /* Ascending nominals make equal-distance ties select the smaller clip. */
 const int SH_TRAV_DISTANCE[SH_TRAV_DISTANCES] = { 64, 128, 192, 256, 384, 512 };
 
-/* The five families of six distances; selection uses ledge up/down and leaps. */
 static const char *const TRAV_FAMILY[] = {
-    "LEAP_ACROSS", "LEDGE_DOWN", "LEDGE_UP", "RAIL_DOWN", "RAIL_UP"
+    "LEAP_ACROSS", "LEDGE_DOWN", "LEDGE_UP"
 };
 #define TRAV_FAMILIES        ((int)(sizeof TRAV_FAMILY / sizeof TRAV_FAMILY[0]))
 #define TRAV_FAM_LEAP_ACROSS 0
@@ -58,7 +57,6 @@ typedef struct trav_anim {
 
 static SRWLOCK  g_trav_lock = SRWLOCK_INIT;
 static int      g_ready;
-static int      g_row_count;
 static int      g_decl_monster_count;
 static char     g_decl_monster[SH_TRAV_MAX_MONSTERS][SH_TRAV_NAME_CAP];
 static trav_anim g_anim[SH_TRAV_MAX_MONSTERS][TRAV_FAMILIES][SH_TRAV_DISTANCES];
@@ -68,7 +66,6 @@ static void trav_clear_locked(void)
     memset(g_decl_monster, 0, sizeof g_decl_monster);
     memset(g_anim, 0, sizeof g_anim);
     g_decl_monster_count = 0;
-    g_row_count = 0;
     g_ready = 0;
 }
 
@@ -250,7 +247,6 @@ static void trav_commit_row(int monster, const char *type, const char *path, flo
     if (!trav_split_type(type, &fam, &di)) return;
 
     slot = &g_anim[monster][fam][di];
-    if (!slot->have) g_row_count++;
     slot->have = 1;
     slot->offset_x = offset_x;
     strncpy_s(slot->path, sizeof slot->path, path, _TRUNCATE);
@@ -472,9 +468,12 @@ void sh_trav_test_reset(void)
 
 int sh_trav_test_row_count(void)
 {
-    int n;
+    int n = 0;
     AcquireSRWLockShared(&g_trav_lock);
-    n = g_row_count;
+    for (int monster = 0; monster < g_decl_monster_count; monster++)
+        for (int family = 0; family < TRAV_FAMILIES; family++)
+            for (int distance = 0; distance < SH_TRAV_DISTANCES; distance++)
+                n += g_anim[monster][family][distance].have;
     ReleaseSRWLockShared(&g_trav_lock);
     return n;
 }

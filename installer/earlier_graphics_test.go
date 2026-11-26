@@ -17,7 +17,7 @@ func TestEarlierParticleSourceAndCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for file, contents := range map[string][]byte{filepath.Join(mod, "mod.json"): []byte(`{"name":"Example"}`), path: original, manifest: []byte("immutable original")} {
+	for file, contents := range map[string][]byte{filepath.Join(mod, "mod.json"): []byte(`{"name":"Example"}`), path: original, manifest: []byte(`{"format":2,"salt":"a1234567","rules":1,"build":"generated"}`)} {
 		if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -25,7 +25,7 @@ func TestEarlierParticleSourceAndCache(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := upgradeGraphicsFolders(data); err != nil {
+	if err := convertEarlierData("", data); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(path)
@@ -40,24 +40,18 @@ func TestEarlierParticleSourceAndCache(t *testing.T) {
 	if bytes.Contains(got, []byte("eternalparticle")) || exists(manifest) {
 		t.Fatal("retained obsolete shader data")
 	}
-	if err := upgradeGraphicsFolders(data); err != nil {
+	if err := convertEarlierData("", data); err != nil {
 		t.Fatal(err)
 	}
 	again, _ := os.ReadFile(path)
 	if !bytes.Equal(again, got) {
 		t.Fatal("second conversion changed the source")
 	}
-	backups, _ := filepath.Glob(filepath.Join(data, "backups", "earlier-data", "*", "glow.decl"))
-	if len(backups) != 1 {
-		t.Fatalf("%d author backups", len(backups))
+	if exists(filepath.Join(data, "backups")) {
+		t.Fatal("unexpected permanent author backup")
 	}
-	b, _ := os.ReadFile(backups[0])
-	if !bytes.Equal(b, original) {
-		t.Fatal("author backup changed")
-	}
-	side, _ := filepath.Glob(filepath.Join(mod, ".build", "before-graphics-*.json"))
-	if len(side) != 1 || readF(t, side[0]) != "immutable original" {
-		t.Fatal("missing generated manifest backup")
+	if side, _ := filepath.Glob(filepath.Join(mod, ".build", "before-graphics-*.json")); len(side) > 0 {
+		t.Fatal("unexpected generated manifest duplicate")
 	}
 }
 

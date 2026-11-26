@@ -8,7 +8,6 @@
 #include "../../common/text.h"
 #ifndef SH_SCRIPT_PURE
 #include "../modserve.h"
-#include "../modmanifest.h"
 #include "../modbundle.h"
 #include "../backend_log.h"
 #endif
@@ -331,9 +330,7 @@ static int collect(uint64_t *seed)
     n = sh_modserve_scope_hashes(hashes, n);
     for (i = 0; i < n; i++) {
         hash_salt hs;
-        sh_modmanifest_row row;
-        sh_modserve_bundle_ref ref;
-        const char *seg;
+        char *name;
         src_mod *m;
         int k;
         for (k = 0; hashes[i][k]; k++) fnv = (fnv ^ (unsigned char)hashes[i][k]) * 1099511628211ull;
@@ -350,15 +347,9 @@ static int collect(uint64_t *seed)
             continue;
         }
         if (!sh_modserve_script_files(hs.salt, NULL, NULL)) continue;
-        memset(&row, 0, sizeof row);
-        strncpy_s(row.salt, sizeof row.salt, hs.salt, _TRUNCATE);
-        strncpy_s(row.build, sizeof row.build, hashes[i], _TRUNCATE);
-        memset(&ref, 0, sizeof ref);
-        (void)sh_modserve_row_build(&row, &ref);
-        seg = ref.folder && ref.folder[0] ? strrchr(ref.folder, '\\') : NULL;
-        m = mod_add(hs.salt, ref.name && ref.name[0] ? ref.name : seg ? seg + 1 : ref.folder && ref.folder[0] ? ref.folder
-                                                                                                        : "a mod");
-        sh_modserve_bundle_ref_free(&ref);
+        name = sh_modserve_bundle_name(hashes[i]);
+        m = mod_add(hs.salt, name ? name : "a mod");
+        free(name);
         if (!m) continue;
         sh_modserve_script_files(m->salt, keep_script, m);
     }

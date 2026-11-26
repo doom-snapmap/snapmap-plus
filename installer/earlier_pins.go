@@ -26,6 +26,7 @@ type earlierBlob struct {
 	Closure                     bool
 }
 type earlierBundle struct {
+	added                     earlierGlobalNames
 	originalFile              string
 	staged, salt, built       string
 	folder, id, version, hash string
@@ -39,8 +40,12 @@ type earlierBlobSource struct {
 	path   string
 }
 type earlierPins struct {
+	placements             *earlierPlacements
+	keepMissing            func(string, error) bool
 	blobs                  map[string][]earlierBlobSource
 	data, doom, temp, tool string
+	output                 string
+	libraries              []string
 	archive                *zip.Reader
 	entries                map[string]*zip.File
 	carried                map[string]*earlierBundle
@@ -54,7 +59,7 @@ type earlierPins struct {
 
 func newEarlierPins(data, doom string, z *zip.Reader) *earlierPins {
 	return &earlierPins{
-		data: data, doom: doom, archive: z,
+		data: data, output: data, doom: doom, archive: z,
 		entries: map[string]*zip.File{}, carried: map[string]*earlierBundle{}, candidates: map[string][]*earlierBundle{},
 		consumed: map[string]bool{}, content: map[string]string{}, observed: map[string]bool{}, blobs: map[string][]earlierBlobSource{},
 	}
@@ -109,8 +114,19 @@ func (p *earlierPins) inspect(folder string, inZIP bool) (*earlierBundle, error)
 	b := &earlierBundle{folder: folder, inZIP: inZIP}
 	canon, err := p.read(b, "bundle.canonical.json")
 	if errors.Is(err, fs.ErrNotExist) {
-		var doc, block earlierObject
-		if original, e := p.read(b, "mod.json"); e == nil && json.Unmarshal(original, &doc) == nil && json.Unmarshal(doc["snapmap-plus"], &block) == nil && pinHash(pinString(block, "bundle")) {
+		// A frozen pre-salt .builds snapshot used the author's mod.json format under bundle.json.
+		for _, name := range []string{"mod.json", "bundle.json"} {
+			var doc, block earlierObject
+			original, e := p.read(b, name)
+			if e != nil && !errors.Is(e, fs.ErrNotExist) {
+				return nil, e
+			}
+			if e != nil || json.Unmarshal(original, &doc) != nil || json.Unmarshal(doc["snapmap-plus"], &block) != nil || !pinHash(pinString(block, "bundle")) {
+				continue
+			}
+			if name == "bundle.json" && string(block["format"]) != "1" {
+				return nil, fmt.Errorf("unknown earlier snapshot in %s", folder)
+			}
 			if string(block["validated"]) == "false" || pinString(block, "cause") != "" {
 				return nil, fmt.Errorf("the earlier mod was not ready to use")
 			}
@@ -118,7 +134,8 @@ func (p *earlierPins) inspect(folder string, inZIP bool) (*earlierBundle, error)
 			if err != nil {
 				return nil, err
 			}
-			b.originalFile = "mod.json"
+			b.originalFile = name
+			break
 		}
 	}
 
@@ -138,21 +155,23 @@ func (p *earlierPins) inspect(folder string, inZIP bool) (*earlierBundle, error)
 		b.id, b.version, b.build, b.files, b.assets = meta.ID, meta.Version, meta.Build, meta.Files, true
 		b.hash = fmt.Sprintf("%x", sha256.Sum256(canon))
 		b.descriptor = canon
-		pretty, err := p.read(b, "bundle.json")
-		if err == nil {
-			var original, duplicate map[string]any
-			a, d := json.NewDecoder(bytes.NewReader(canon)), json.NewDecoder(bytes.NewReader(pretty))
-			a.UseNumber()
-			d.UseNumber()
-			if a.Decode(&original) != nil || d.Decode(&duplicate) != nil || duplicate["bundle"] != b.hash {
-				return nil, fmt.Errorf("bundle.json disagrees with the canonical build in %s", folder)
+		if b.originalFile != "bundle.json" {
+			pretty, err := p.read(b, "bundle.json")
+			if err == nil {
+				var original, duplicate map[string]any
+				a, d := json.NewDecoder(bytes.NewReader(canon)), json.NewDecoder(bytes.NewReader(pretty))
+				a.UseNumber()
+				d.UseNumber()
+				if a.Decode(&original) != nil || d.Decode(&duplicate) != nil || duplicate["bundle"] != b.hash {
+					return nil, fmt.Errorf("bundle.json disagrees with the canonical build in %s", folder)
+				}
+				delete(duplicate, "bundle")
+				if !reflect.DeepEqual(original, duplicate) {
+					return nil, fmt.Errorf("bundle.json disagrees with the canonical build in %s", folder)
+				}
+			} else if !errors.Is(err, fs.ErrNotExist) {
+				return nil, err
 			}
-			delete(duplicate, "bundle")
-			if !reflect.DeepEqual(original, duplicate) {
-				return nil, fmt.Errorf("bundle.json disagrees with the canonical build in %s", folder)
-			}
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return nil, err
 		}
 	} else {
 		if !errors.Is(err, fs.ErrNotExist) {
@@ -260,7 +279,8 @@ func (p *earlierPins) find() error {
 			if strings.HasPrefix(name, "mods/") && (!pinRelative(name) || !f.Mode().IsRegular()) {
 				return fmt.Errorf("invalid mod ZIP entry %s", name)
 			}
-			if strings.HasPrefix(name, "mods/") && (path.Base(name) == "bundle.canonical.json" || path.Base(name) == "mod.json") {
+			if strings.HasPrefix(name, "mods/") && (path.Base(name) == "bundle.canonical.json" || path.Base(name) == "mod.json" ||
+				(path.Base(name) == "bundle.json" && strings.Count(name, "/") == 2)) {
 				folders[path.Dir(name)] = true
 			}
 		}
@@ -272,8 +292,11 @@ func (p *earlierPins) find() error {
 			add(b)
 		}
 	}
-	for _, sub := range []string{"mods", "cache/content/served", "cache/served", "backups/earlier-data/mod-folders"} {
-		root := filepath.Join(p.data, filepath.FromSlash(sub))
+	roots := append([]string{}, p.libraries...)
+	for _, sub := range []string{"mods", "overrides", "cache/content/served", "cache/served", "cache/legacy-builds", "backups/earlier-data/mod-folders"} {
+		roots = append(roots, filepath.Join(p.data, filepath.FromSlash(sub)))
+	}
+	for _, root := range roots {
 		if !plainPath(root) {
 			continue
 		}
@@ -290,18 +313,23 @@ func (p *earlierPins) find() error {
 			if !plainPath(dir) {
 				return filepath.SkipDir
 			}
-			if isRegular(filepath.Join(dir, "mod.json")) || isRegular(filepath.Join(dir, "bundle.canonical.json")) {
-				b, err := p.inspect(dir, false)
-				if err == nil {
-					add(b)
-				} // Other installed mods may be unbuilt.
-				return filepath.SkipDir
+			primary := isRegular(filepath.Join(dir, "mod.json")) || isRegular(filepath.Join(dir, "bundle.canonical.json"))
+			if !primary {
+				switch strings.ToLower(e.Name()) {
+				case "assets", "files", "units", "partial":
+					return filepath.SkipDir
+				}
+				if !isRegular(filepath.Join(dir, "bundle.json")) {
+					return nil
+				}
 			}
-			switch strings.ToLower(e.Name()) {
-			case "assets", "files", "units", "partial":
-				return filepath.SkipDir
+			b, err := p.inspect(dir, false)
+			if err == nil {
+				add(b)
+			} else if !primary {
+				return nil // An unrelated bundle.json can sit above a real mod.
 			}
-			return nil
+			return filepath.SkipDir
 		})
 		if err != nil {
 			return err

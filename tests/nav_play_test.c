@@ -67,6 +67,71 @@ static int test_hook_publication(void)
     return publication_failures;
 }
 
+static unsigned actor_copies;
+static const char *actor_expected;
+static const char *project_actor(const char *inherit, const char *cls, const char *source, char **owned)
+{
+    *owned = NULL;
+    if (strcmp(inherit, "mods/nexttest/direct") || strcmp(cls, "idAI2")) return source;
+    *owned = _strdup("inert copy");
+    return *owned;
+}
+static void capture_actor_copy(void *dest, const char *text, int len)
+{
+    if (dest == &actor_copies && !strcmp(text,actor_expected) && len == (!strcmp(text,"original") ? 8 : 0))
+        actor_copies++;
+}
+static int test_play_actor_copy(void)
+{
+    unsigned char entry[0x150 + sizeof(void *)] = {0}, record[0x60 + sizeof(void *)] = {0};
+    static const char original[] = "original";
+    *(void **)(entry+0x150) = record;
+    *(const char **)(record+0x58) = "mods/nexttest/direct";
+    *(const char **)(record+0x60) = "idAI2";
+    g_actor_text = project_actor;
+    g_set_play_text = capture_actor_copy;
+    actor_expected = "inert copy";
+    nav_set_actor_source(&actor_copies,original,8,entry);
+    actor_expected = "original";
+    *(const char **)(record+0x58) = "ai/stock";
+    nav_set_actor_source(&actor_copies,original,8,entry);
+    *(void **)(entry+0x150) = NULL;
+    nav_set_actor_source(&actor_copies,original,8,entry);
+    return actor_copies != 3 || strcmp(original,"original");
+}
+
+extern const char *sh_nav_test_eligible, *sh_nav_test_instance, *sh_nav_test_parent;
+
+static int test_direct_actor_projection(void)
+{
+    unsigned char entry[0x158] = {0}, record[0x68] = {0}, dest[16] = {0};
+    const char *instance = "map01/placed_314", *parent = "creatures/future";
+    int failed = 0;
+    *(void **)(entry + 0x150) = record;
+    *(const char **)(dest + 8) = instance;
+    *(const char **)(record + 0x58) = parent;
+    *(const char **)(record + 0x60) = "idAI2";
+    sh_nav_test_eligible = parent;
+    nav_set_actor_source(dest, "original", 8, entry);
+    if (sh_nav_test_instance) failed++;
+    g_build_map = entry;
+    nav_set_actor_source(dest, "original", 8, entry);
+    if (sh_nav_test_instance != instance || sh_nav_test_parent != parent) failed++;
+    sh_nav_test_instance = NULL;
+    *(const char **)(record + 0x60) = "idEncounterManager";
+    nav_set_actor_source(dest, "original", 8, entry);
+    *(const char **)(record + 0x60) = "idAI2";
+    sh_nav_test_eligible = NULL;
+    nav_set_actor_source(dest, "original", 8, entry);
+    sh_nav_test_eligible = "mods/nexttest/direct";
+    *(const char **)(record + 0x58) = sh_nav_test_eligible;
+    nav_set_actor_source(dest, "original", 8, entry);
+    if (sh_nav_test_instance) failed++;
+    g_build_map = NULL;
+    sh_nav_test_eligible = NULL;
+    return failed;
+}
+
 static int synthetic_main(void)
 {
     unsigned char body[]={
@@ -102,6 +167,8 @@ static int synthetic_main(void)
     if(memcmp(code,body,sizeof body))failed++;
     VirtualFree(g_volume_contents_relay,0,MEM_RELEASE);
     VirtualFree(code,0,MEM_RELEASE);
+    failed+=test_play_actor_copy();
+    failed+=test_direct_actor_projection();
     failed+=test_hook_publication();
     failed+=test_snapshot_reads_the_converted_map();
     printf("nav_play_test: %d failures\n",failed);return failed?1:0;
@@ -139,6 +206,27 @@ static void check_image(const char *path)
             IMG_CHECK(ok);
             IMG_CHECK(target > lo && target < hi);
         }
+    }
+    {
+        const uint8_t *record = image_site(base, results, n, "SnapEntityPlayText", identity->vulkan);
+        uintptr_t getter = 0, setter = 0;
+        IMG_CHECK(record && nav_play_call_target((uintptr_t)record + 7, &getter));
+        IMG_CHECK(record && nav_play_call_target((uintptr_t)record + 21, &setter));
+        IMG_CHECK(getter - lo == (identity->vulkan ? 0x119bb80u : 0x119adb0u));
+        IMG_CHECK(setter - lo == (identity->vulkan ? 0x1563030u : 0x1564310u));
+        printf("  SnapEntityPlayText: getter 0x%zx, runtime copy 0x%zx\n", (size_t)(getter-lo), (size_t)(setter-lo));
+    }
+    {
+        int vk = identity->vulkan;
+        const uint8_t *it = image_site(base, results, n, "SnapMapIterateAI", vk);
+        uint32_t table = vk ? 0x24ad6a0u : 0x24c73f0u;
+        uint64_t preferred = ((IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew))->OptionalHeader.ImageBase;
+        uintptr_t target = 0;
+        IMG_CHECK(it && *(const uint64_t *)(base + table + 0x8e8) == preferred + (it - base));
+        IMG_CHECK(it && nav_play_call_target((uintptr_t)it + 0x10, &target) && target - lo == (vk ? 0x38f7e0u : 0x38f080u));
+        IMG_CHECK(it && nav_play_call_target((uintptr_t)it + 0x2e, &target) && target - lo == (vk ? 0x38f750u : 0x38eff0u));
+        IMG_CHECK(it && nav_play_call_target((uintptr_t)it + 0x9c, &target) && target - lo == (vk ? 0xa09ad0u : 0xa08cc0u));
+        IMG_CHECK(it && !memcmp(it + 0x94, "\xba\x2b\x00\x00\x00\x49\x8b\xce", 8));
     }
     free(results);
     (void)sh_host_test_bind_image(NULL, NULL);

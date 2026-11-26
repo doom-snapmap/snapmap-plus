@@ -174,6 +174,72 @@ int sh_ai_fsm_state_find(const char *const *names, int n, const char *want)
     return -1;
 }
 
+static int av_only(DWORD code)
+{
+    return code == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void *vfn(void *self, size_t slot)
+{
+    __try {
+        const uint8_t *vt;
+        if (!self) return NULL;
+        vt = *(const uint8_t * const *)self;
+        return vt ? *(void * const *)(vt + slot) : NULL;
+    } __except (av_only(GetExceptionCode())) { return NULL; }
+}
+
+#define FSM_STATES_MAX 256
+
+static const char *state_name_of(const uint8_t *state, uint32_t data_offset, uint32_t name_offset)
+{
+    const uint8_t *data = state ? *(const uint8_t *const *)(state + data_offset) : NULL;
+    return data ? *(const char *const *)(data + name_offset) : NULL;
+}
+
+static const uint8_t *named_fsm_state(const uint8_t *fsm, const char *name, const sh_ai_path_fields *fields)
+{
+    const uint8_t *const *states = *(const uint8_t *const *const *)(fsm + SH_AI_FSM_STATES);
+    int i, count = *(const int *)(fsm + SH_AI_FSM_STATE_COUNT);
+    if (!states || count < 0 || count > FSM_STATES_MAX) return NULL;
+    for (i = 0; i < count; i++) {
+        const char *actual = state_name_of(states[i], fields->data, fields->name);
+        if (actual && !strcmp(actual, name)) return states[i];
+    }
+    return NULL;
+}
+
+static int state_is(const uint8_t *state, const char *name)
+{
+    typedef const char *const *(*type_fn)(const void *);
+    type_fn get_type = (type_fn)vfn((void *)state, 0);
+    const char *const *type = get_type ? get_type(state) : NULL;
+    return type && *type && !strcmp(*type, name);
+}
+
+int sh_ai_fsm_has_native_path(const uint8_t *alert, const sh_ai_path_fields *fields)
+{
+    typedef const uint8_t *(*find_fn)(void *, const char *);
+    const uint8_t *branch, *data, *linked, *child, *follow;
+    const char *name;
+    void *manager;
+    find_fn find;
+    if (!alert || !fields || !named_fsm_state(alert, "ac_snapmap_check", fields)) return 0;
+    branch = named_fsm_state(alert, "behaviors_snapmap", fields);
+    if (!state_is(branch, "idShared_ExecuteChildFSM")) return 0;
+    data = *(const uint8_t *const *)(branch + fields->data);
+    name = *(const char *const *)(data + fields->selector);
+    if (!name || !*name) return 0;
+    /* ExecuteChildFSM looks up its declared name on the parent manager before binding childFSM. */
+    manager = *(void *const *)(alert + fields->manager);
+    find = (find_fn)vfn(manager, SH_AI_FSM_FIND_CHILD_SLOT);
+    child = find ? find(manager, name) : NULL;
+    linked = *(const uint8_t *const *)(branch + fields->linked);
+    if (!child || (linked && linked != child)) return 0;
+    follow = named_fsm_state(child, "sm_force_followPath", fields);
+    return state_is(follow, "idSnapMap_ForceFollowPath");
+}
+
 void sh_ai_fsm_move_init(unsigned char rec[SH_AI_FSM_MOVE_SIZE], const void *code_vtable, const void *target)
 {
     int code = SH_AI_FSM_MOVE_IMMEDIATE;
@@ -311,6 +377,9 @@ int sh_ai_muzzle_mode_parse(const char *word)
 
 typedef struct ai_rec {
     sh_script_handle handle;
+    int        native_path;
+    int        empty_order;
+    uint32_t   order_frame;
     int        aborts_sent;      /* setScriptAbort 0 0 and setScriptAbortFlags 0 0 posted */
     int        walk;             /* walk state last set, 0 none */
     sh_ai_move move;
@@ -431,6 +500,64 @@ int sh_ai_posed_leg(const sh_ai_leg_pose *p, const sh_ai_leg_joints *j, sh_ai_le
 
 static void force_via_reset(void);
 static void wound_owner_gone(sh_script_handle h, uint32_t spawn_id);
+typedef struct wound_effect_row {
+    struct wound_effect_row *next;
+    void *owner, *wound;
+    uint32_t spawn_id;
+    int condition;
+} wound_effect_row;
+static SRWLOCK g_effect_lock = SRWLOCK_INIT;
+static wound_effect_row *g_wound_effects;
+
+int sh_ai_set_wound_effect(void *owner, uint32_t id, void *wound, int condition)
+{
+    wound_effect_row *row;
+    if (!owner || !wound || id == SH_SCRIPT_SPAWN_ID_NONE || condition < 0) return 0;
+    AcquireSRWLockExclusive(&g_effect_lock);
+    for (row = g_wound_effects; row; row = row->next)
+        if (row->owner == owner && row->spawn_id == id && row->wound == wound) break;
+    if (!row) {
+        row = (wound_effect_row *)malloc(sizeof *row);
+        if (row) {
+            row->owner = owner; row->spawn_id = id; row->wound = wound;
+            row->next = g_wound_effects; g_wound_effects = row;
+        }
+    }
+    if (row) row->condition = condition;
+    ReleaseSRWLockExclusive(&g_effect_lock);
+    return row != NULL;
+}
+
+int sh_ai_wound_effect_at(void *owner, uint32_t id, void *wound, int show,
+                          const void *call_return, const void *accepted_return)
+{
+    wound_effect_row *row;
+    int effect = -1;
+    if (!show || !accepted_return || call_return != accepted_return) return -1;
+    AcquireSRWLockShared(&g_effect_lock);
+    for (row = g_wound_effects; row; row = row->next) {
+        if (row->owner == owner && row->spawn_id == id && row->wound == wound) {
+            effect = row->condition;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_effect_lock);
+    return effect;
+}
+
+void sh_ai_remove_wound_effects(uint32_t id)
+{
+    wound_effect_row **link, *row;
+    AcquireSRWLockExclusive(&g_effect_lock);
+    link = &g_wound_effects;
+    while ((row = *link) != NULL) {
+        if (id == SH_SCRIPT_SPAWN_ID_NONE || row->spawn_id == id) {
+            *link = row->next;
+            free(row);
+        } else link = &row->next;
+    }
+    ReleaseSRWLockExclusive(&g_effect_lock);
+}
 #ifndef SH_SCRIPT_PURE
 static void wound_meshes_remove(uint32_t spawn_id);
 #endif
@@ -451,6 +578,7 @@ void sh_script_ai_reset(void)
 #ifndef SH_SCRIPT_PURE
     wound_meshes_remove(SH_SCRIPT_SPAWN_ID_NONE);
 #endif
+    sh_ai_remove_wound_effects(SH_SCRIPT_SPAWN_ID_NONE);
     force_via_reset();
     sh_ai_pain_records_reset();
     sh_wound_count_reset();
@@ -735,7 +863,7 @@ static int step_in_flight(void *ai, sh_ai_step_state *st)
 static ai_rec *park(void *ai, sh_script_handle h)
 {
     ai_rec *r = rec_of(h);
-    if (!r) return NULL;
+    if (!r || r->native_path) return NULL;
     if (!g_engine->park(ai)) return NULL;
     if (!r->aborts_sent) {
         sh_ai_arg a[2];
@@ -1785,6 +1913,7 @@ static void wound_owner_gone(sh_script_handle h, uint32_t spawn_id)
     if (spawn_id != SH_SCRIPT_SPAWN_ID_NONE) wound_meshes_remove(spawn_id);
 #endif
     sh_wound_count_gone(spawn_id);
+    if (spawn_id != SH_SCRIPT_SPAWN_ID_NONE) sh_ai_remove_wound_effects(spawn_id);
 }
 
 /* --------------------------------------------- compositions over primitives */
@@ -2574,6 +2703,27 @@ static int l_wound_hides(lua_State *L)
     lua_pushstring(L, st == -2 ? "the wound is not a loaded gorewounds decl"
                     : st == -3 ? "the demon's model has no mesh of one of these names"
                                : "the game's wound display could not be reached");
+    return 2;
+}
+
+static int l_wound_effect(lua_State *L)
+{
+    void *ent = sh_script_api_owned(L, 1, "wound_effect", "register wound effects on", NULL);
+    const char *condition = sh_script_api_check_text(L, 3, "wound_effect", "an effect condition", SH_SCRIPT_TEXT_ANY);
+    const char *wound = sh_script_check_name(L, 2, "wound_effect", 1, NULL);
+    int result;
+    NEED_OP(L, wound_effect, "wound_effect");
+    if (!g_engine) return sh_script_refuse(L, "\"wound_effect\" is unavailable in this session");
+    if (ent && !g_engine->is_ai(ent) && !(g_gore_owner_test && g_gore_owner_test(ent))) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "this entity has no gore component");
+        return 2;
+    }
+    result = ent ? g_engine->wound_effect(ent, wound, condition) : -1;
+    lua_pushboolean(L, result == 1);
+    if (result == 1) return 1;
+    lua_pushstring(L, result == -2 ? "the wound is not a loaded gorewounds decl" :
+                      result == -3 ? "the effect condition is unavailable" : "the game's wound display could not be reached");
     return 2;
 }
 
@@ -3507,8 +3657,16 @@ static int l_snapmap_order(lua_State *L)
     sh_ai_order o;
     sh_ai_arg a;
     void *ai;
+    sh_script_handle h;
+    ai_rec *r;
     NEED_OP(L, snapmap_order, "snapmap_order");
-    ai = self_ai(L, "snapmap_order", NULL);
+    ai = self_ai(L, "snapmap_order", &h);
+    r = ai ? rec_of(h) : NULL;
+    if (r && (r->native_path || (r->empty_order && g_engine->frame && r->order_frame == g_engine->frame()))) {
+        r->empty_order = 0;
+        lua_pushnil(L);
+        return 1;
+    }
     if (!ai || g_engine->snapmap_order(ai, &o) != 1) { lua_pushnil(L); return 1; }
     memset(&a, 0, sizeof a);
     a.type = 's';
@@ -3530,14 +3688,10 @@ static int l_snapmap_order(lua_State *L)
 
 /* ai:release(): hands the demon back to its own behaviour (the park, above) until the script's next command,
  * dropping any held order, forced via, facing or move. */
-static int l_release(lua_State *L)
+static int release_body(void *ai, sh_script_handle h)
 {
-    sh_script_handle h = 0;
-    void *ai;
     int i;
-    NEED_OP(L, release, "release");
-    ai = self_ai(L, "release", &h);
-    if (!ai) { lua_pushboolean(L, 0); return 1; }
+    if (g_engine->release(ai) != 1) return 0;
     for (i = 0; i < g_nrecs; i++) {
         ai_rec *r = g_recs[i];
         if (r->handle != h) continue;
@@ -3548,7 +3702,43 @@ static int l_release(lua_State *L)
     }
     for (i = 0; i < g_nforce; i++)
         if (g_force_via[i].handle == h) force_via_drop(i--);
-    lua_pushboolean(L, g_engine->release(ai) == 1);
+    return 1;
+}
+
+static int l_release(lua_State *L)
+{
+    sh_script_handle h;
+    void *ai;
+    NEED_OP(L, release, "release");
+    ai = self_ai(L, "release", &h);
+    lua_pushboolean(L, ai && release_body(ai, h));
+    return 1;
+}
+
+/* Leave a Follow Path entry for the stock FSM to take. The Enemy SDK yields until that FSM returns the body. */
+static int l_native_follow_path(lua_State *L)
+{
+    sh_script_handle h;
+    sh_ai_order o;
+    ai_rec *r;
+    void *ai;
+    int pending;
+    if (!g_engine || !g_engine->snapmap_order || !g_engine->native_body_busy || !g_engine->release) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    ai = self_ai(L, "native_follow_path", &h);
+    if (!ai || !(r = rec_of(h))) { lua_pushboolean(L, 0); return 1; }
+    pending = g_engine->snapmap_order(ai, &o);
+    r->empty_order = pending == 0 && g_engine->frame != NULL;
+    if (r->empty_order) r->order_frame = g_engine->frame();
+    if (pending == 1 && o.kind == SH_AI_ORDER_PATH) {
+        if (!r->native_path && g_engine->native_body_busy(ai, 1) >= 0)
+            r->native_path = release_body(ai, h);
+    } else if (r->native_path && pending >= 0 && g_engine->native_body_busy(ai, 0) == 0) {
+        r->native_path = 0;
+    }
+    lua_pushboolean(L, r->native_path);
     return 1;
 }
 
@@ -3652,11 +3842,12 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "laser_add", l_laser_add },       { "laser_remove", l_laser_remove },
     { "rear_footsteps", l_rear_footsteps },
     { "wound_hides", l_wound_hides },
+    { "wound_effect", l_wound_effect },
     { "held", l_held },
     { "posed_legs", l_posed_legs },
     { "fk_reference_pose", l_fk_reference_pose }, { "eternal_interrupts", l_eternal_interrupts },
     { "wound_damage_counts", l_wound_damage_counts },
-    { "snapmap_order", l_snapmap_order },
+    { "snapmap_order", l_snapmap_order }, { "native_follow_path", l_native_follow_path },
     { "release", l_release },           { "anim_variable", l_anim_variable },
     { "relations", l_relations },       { "off_limits", l_off_limits },
 };
@@ -3724,11 +3915,6 @@ static const uint64_t   *g_path_global;
 static const uint8_t    *g_ai2_type;
 static int               g_detour_failed;
 
-static int av_only(DWORD code)
-{
-    return code == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH;
-}
-
 static void ai_log(const char *fmt, ...)
 {
     char *line;
@@ -3738,16 +3924,6 @@ static void ai_log(const char *fmt, ...)
     va_end(ap);
     if (line) backend_log(line);
     free(line);
-}
-
-static void *vfn(void *self, size_t slot)
-{
-    __try {
-        const uint8_t *vt;
-        if (!self) return NULL;
-        vt = *(const uint8_t * const *)self;
-        return vt ? *(void * const *)(vt + slot) : NULL;
-    } __except (av_only(GetExceptionCode())) { return NULL; }
 }
 
 /* A catalogue event through the shared event helper (script_api_common.h),
@@ -3814,6 +3990,15 @@ static int e_is_ai(void *entity)
         ok = lo <= hi && num >= lo && num <= hi;
     } __except (av_only(GetExceptionCode())) { ok = 0; }
     return ok;
+}
+
+const char *sh_script_ai_behavior(void *entity)
+{
+    if (!e_is_ai(entity)) return NULL;
+    __try {
+        const uint8_t *decl = *(const uint8_t *const *)((const uint8_t *)entity + SH_AI_OFF_BEHAVIOR_DECL);
+        return decl ? *(const char *const *)(decl + 8) : NULL;
+    } __except (av_only(GetExceptionCode())) { return NULL; }
 }
 
 static int e_origin(void *entity, float out[3])
@@ -4458,13 +4643,35 @@ typedef void (*ai_fsm_take_fn)(void *fsm, void *move, int *time, uint8_t now, ui
 static ai_game_time_fn g_game_time;
 static const void     *g_fsm_code_vt;   /* idTransitionCode's vtable, from the entrance move's lea */
 
-#define FSM_STATES_MAX 256
-
-/* The name of the state an FSM state object holds (its stateData's nameFromDecl), NULL when unreadable. */
-static const char *state_name_of(const uint8_t *st)
+static int has_native_path(const uint8_t *alert)
 {
-    const uint8_t *data = st ? *(const uint8_t *const *)(st + g_fsm_o_data) : NULL;
-    return data ? *(const char *const *)(data + g_fsm_o_state) : NULL;
+    const sh_rf_host *host = sh_script_reflect_host();
+    sh_rf_field manager, selector, linked;
+    sh_ai_path_fields fields;
+    if (!host ||
+        !sh_rf_find_field(host, "idFiniteStateMachine", "manager", &manager) || manager.size != sizeof(void *) ||
+        !sh_rf_find_field(host, "idStateData", "childFSMName", &selector) || selector.size != sizeof(void *) ||
+        !sh_rf_find_field(host, "idState", "childFSM", &linked) || linked.size != sizeof(void *)) return 0;
+    fields.data = g_fsm_o_data;
+    fields.name = g_fsm_o_state;
+    fields.manager = manager.offset;
+    fields.selector = selector.offset;
+    fields.linked = linked.offset;
+    return sh_ai_fsm_has_native_path(alert, &fields);
+}
+
+/* The stock path state returns to ac_default or yields to a native interaction, pain or death. */
+static int e_native_body_busy(void *ai, int check_path)
+{
+    const uint8_t *fsm = (const uint8_t *)alert_fsm_of(ai);
+    int busy = -1;
+    if (!fsm || !fsm_rf_ready()) return -1;
+    __try {
+        const char *state = state_name_of(*(const uint8_t *const *)(fsm + g_fsm_o_cur), g_fsm_o_data, g_fsm_o_state);
+        if (state && (!check_path || has_native_path(fsm)))
+            busy = strcmp(state, "ac_default") && strcmp(state, "behaviors") && strcmp(state, "ExecuteDoomscript");
+    } __except (av_only(GetExceptionCode())) { busy = -1; }
+    return busy;
 }
 
 /* 1 the alert cycle was moved into ac_default; 0 it was not in ExecuteDoomscript (nothing done); -1 a call, the
@@ -4481,13 +4688,13 @@ static int fsm_enter_default(void *fsm, int *time_ms)
     if (!fsm || !gm || !g_game_time || !g_fsm_code_vt || !fsm_rf_ready()) return -1;
     __try {
         const uint8_t *f = (const uint8_t *)fsm;
-        const char *cur = state_name_of(*(const uint8_t *const *)(f + g_fsm_o_cur));
+        const char *cur = state_name_of(*(const uint8_t *const *)(f + g_fsm_o_cur), g_fsm_o_data, g_fsm_o_state);
         if (!cur || strcmp(cur, "ExecuteDoomscript")) return 0;
         states = *(const uint8_t *const *const *)(f + SH_AI_FSM_STATES);
         n = *(const int *)(f + SH_AI_FSM_STATE_COUNT);
         if (!states || n <= 0) return -1;
         if (n > FSM_STATES_MAX) n = FSM_STATES_MAX;
-        for (i = 0; i < n; i++) names[i] = state_name_of(states[i]);
+        for (i = 0; i < n; i++) names[i] = state_name_of(states[i], g_fsm_o_data, g_fsm_o_state);
         at = sh_ai_fsm_state_find(names, n, "ac_default");
         if (at < 0) return -1;
         take = (ai_fsm_take_fn)vfn(fsm, SH_AI_FSM_TAKE_SLOT);
@@ -5526,6 +5733,69 @@ static int e_wound_hides(void *ai, const char *wound, const char *const *meshes,
     return 1;
 }
 
+/* Both renderers call the visual handler here after ShowWound has accepted the actual wound declaration. */
+typedef uintptr_t (*ai_wound_visuals_fn)(void *, void *, unsigned char);
+static ai_wound_visuals_fn g_visuals_orig;
+static const void *g_wound_visual_return;
+static int g_visuals_failed;
+
+static uintptr_t wound_visuals_detour(void *gore, void *wound, unsigned char show)
+{
+    void *owner;
+    int effect;
+    const void *site = _ReturnAddress();
+    uintptr_t result = g_visuals_orig(gore, wound, show);
+    if (!gore || !wound || !show || site != g_wound_visual_return) return result;
+    __try {
+        owner = *(void * const *)((const uint8_t *)gore + SH_AI_GORE_OWNER);
+        if (owner) {
+            effect = sh_ai_wound_effect_at(owner, spawn_id_of(owner), wound, show, site, g_wound_visual_return);
+            if (effect >= 0) sh_script_combat_start_owner_fx(owner, effect);
+        }
+    } __except (av_only(GetExceptionCode())) { }
+    return result;
+}
+
+static int install_wound_effect(void)
+{
+    static const unsigned char before[] = {0x41,0xb0,0x01,0x48,0x8b,0xcb,0x48,0x8b,0xd5,0xe8};
+    static const unsigned char after[] = {0x48,0x8b,0x94,0x24,0xb0,0,0,0};
+    static const unsigned char prologue[] = {0x40,0x53,0x55,0x56,0x48,0x81,0xec,0xb0,0,0,0,0x48,0x8b,0x05};
+    const uint8_t *site, *target;
+    void *trampoline;
+    sh_patch_status status;
+    if (g_visuals_orig && hook_is_installed((void *)g_visuals_orig)) return 1;
+    if (!g_wound_target || g_visuals_failed) return 0;
+    site = (const uint8_t *)g_wound_target + 0x32e;
+    if (memcmp(site - 9, before, sizeof before) || memcmp(site + 5, after, sizeof after)) return 0;
+    target = site + 5 + rel32_at(site + 1);
+    if (memcmp(target, prologue, sizeof prologue)) return 0;
+    trampoline = hook_prepare_rip_load((void *)target, wound_visuals_detour, 18, 11);
+    if (!trampoline) {
+        ai_log("Mod scripts: wound_effect registration failed: %s.", hook_last_failure());
+        return 0;
+    }
+    g_wound_visual_return = site + 5;
+    g_visuals_orig = (ai_wound_visuals_fn)trampoline;
+    status = hook_commit(trampoline);
+    if (status == B2_PATCH_OK) return 1;
+    if (hook_unpatch(trampoline)) g_visuals_orig = NULL;
+    else g_visuals_failed = 1;
+    ai_log("Mod scripts: wound_effect registration failed: %s.", sh_patch_status_str(status));
+    return 0;
+}
+
+static int e_wound_effect(void *ent, const char *name, const char *condition)
+{
+    void *wound = sh_script_combat_decl("gorewounds", name);
+    int effect = sh_script_combat_fx_condition(condition);
+    uint32_t id = spawn_id_of(ent);
+    if (!wound) return -2;
+    if (effect < 0) return -3;
+    if (id == SH_SCRIPT_SPAWN_ID_NONE || !install_wound_effect()) return -1;
+    return sh_ai_set_wound_effect(ent, id, wound, effect) ? 1 : -1;
+}
+
 /* ---- posed legs: the rig's targets and poles from the clips' own legs */
 
 typedef void (*ai_rig_entry_fn)(void *runtime, void *ctx, char align);
@@ -6001,7 +6271,8 @@ static const sh_script_ai_engine k_engine = {
     e_laser_add, e_laser_remove, e_rear_footsteps,
     e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose,
     e_interrupt_blend, e_destructible, e_weapon_use, e_wound_damage_counts, e_snapmap_order,
-    e_release, e_anim_variable, e_relations, e_off_limits, e_world_clear, e_world_ground, e_request_pain
+    e_release, e_anim_variable, e_relations, e_off_limits, e_world_clear, e_world_ground, e_request_pain, e_wound_effect,
+    e_native_body_busy
 };
 /* The table the calls use: k_engine less the calls whose game parts this executable lacks (they then refuse). */
 static sh_script_ai_engine g_live;
@@ -6130,8 +6401,9 @@ int sh_script_ai_install(const uint8_t *module_base)
         g_gore_comp = (uint32_t)rel32_at(site + SH_AI_GORE_SITE_COMP + 3);
         g_gore_init = (ai_gore_init_fn)(site + SH_AI_GORE_SITE_CALL + 5 + rel32_at(site + SH_AI_GORE_SITE_CALL + 1));
     } else g_live.gore_init = NULL;
-    if (r[SH_AI_SIG_SHOW_WOUND].addr && (site = (const uint8_t *)r[SH_AI_SIG_MESH_HIDE_SITE].addr) != NULL) {
-        g_wound_target = (ai_show_wound_fn)r[SH_AI_SIG_SHOW_WOUND].addr;
+    g_wound_target = (ai_show_wound_fn)r[SH_AI_SIG_SHOW_WOUND].addr;
+    if (!g_wound_target) g_live.wound_effect = NULL;
+    if (g_wound_target && (site = (const uint8_t *)r[SH_AI_SIG_MESH_HIDE_SITE].addr) != NULL) {
         g_mesh_index = (ai_mesh_index_fn)(site + SH_AI_MESH_SITE_INDEX + 5 + rel32_at(site + SH_AI_MESH_SITE_INDEX + 1));
         g_mesh_hide = (ai_mesh_hide_fn)(site + SH_AI_MESH_SITE_HIDE + 5 + rel32_at(site + SH_AI_MESH_SITE_HIDE + 1));
     } else g_live.wound_hides = NULL;

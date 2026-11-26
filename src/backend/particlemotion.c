@@ -86,14 +86,7 @@ static void origin_at(void **context, const uint32_t *born, float age, float lif
 /* Reads the emitter's frame from the context: unit axes, origin and eye; returns the scale. For a stage built in its
  * model's axes the scale comes from context_detour and *model (when given) is set, since the game's places are then
  * unscaled. */
-static float read_frame_ex(void **context, sh_motion_frame *fr, float eye[3], int *model);
-
-static float read_frame(void **context, sh_motion_frame *fr, float eye[3])
-{
-    return read_frame_ex(context, fr, eye, NULL);
-}
-
-static float read_frame_ex(void **context, sh_motion_frame *fr, float eye[3], int *model)
+static float read_frame(void **context, sh_motion_frame *fr, float eye[3], int *model)
 {
     const float *c = (const float *)context;
     float len[3], scale;
@@ -142,7 +135,7 @@ static int flight(void **context, const uint8_t *stage, const uint32_t *born, fl
     int i, model;
     *have = 0;
     sh_motion_read(stage, &m);
-    scale = read_frame_ex(context, &fr, NULL, &model);
+    scale = read_frame(context, &fr, NULL, &model);
     span = life < LAUNCH_SPAN ? life : LAUNCH_SPAN;
     origin_at(context, born, 0.0f, life, p0);
     origin_at(context, born, span, life, p1);
@@ -259,7 +252,7 @@ static int parent_place(void **context, const uint8_t *child, const uint32_t *bo
     if (!(delta >= 0.0f) || delta > plife) return 0;
     memcpy(pctx, context, sizeof pctx);
     *(const uint8_t **)pctx = parent;
-    read_frame(context, &fr, NULL);
+    read_frame(context, &fr, NULL, NULL);
     if (t_model_context == (void *)context) t_model_context = pctx;      /* the parent: the same model's axes */
     memset(prec, 0, sizeof prec);
     prec[0] = (uint32_t)p;
@@ -289,7 +282,7 @@ static void move_quad(void **context, const uint8_t *stage, const uint32_t *born
         if (parent == 0) { fold(verts); return; }
     }
     sh_motion_read(stage, &m);
-    read_frame(context, &fr, eye);
+    read_frame(context, &fr, eye, NULL);
     origin_at(context, born, age, life, pe);
     dead = flight(context, stage, born, age, life, parent == 1 ? from : NULL, p, v, &have, &start);
     if (g_trace > 0 && InterlockedDecrement(&g_trace) >= 0) {
@@ -319,7 +312,7 @@ static uint64_t write_detour(void **context, void *generation, void **cursor)
         __try {
             sh_motion_frame fr;
             uint32_t s;
-            read_frame(context, &fr, NULL);
+            read_frame(context, &fr, NULL, NULL);
             s = sh_family_seed(sh_family_salt(fr.origin, stage), (int)((uint32_t *)generation)[0]);
             ((uint32_t *)generation)[5] = s;
             ((uint32_t *)generation)[6] = s;

@@ -69,6 +69,9 @@ func TestInstallEarlierContentAndRealPins(t *testing.T) {
 }
 
 func TestEarlierFolderOnLongProfilePath(t *testing.T) {
+	useEarlierUnitTool(t)
+	rig := newUpdateRig(t, "dev")
+	oneStockRequest(t, rig.doom, "generated/image/stock/b.bimage")
 	base := t.TempDir()
 	data := filepath.Join(base, strings.Repeat("p", max(1, 133-len(base)-1)))
 	if err := copyEarlierPinTree(filepath.Join("..", "tests", "fixtures", "store-retired", "data"), data); err != nil {
@@ -80,25 +83,14 @@ func TestEarlierFolderOnLongProfilePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	for pass := 0; pass < 2; pass++ {
-		if err := convertEarlierFolders(data); err != nil {
+		if err := convertEarlierData(rig.doom, data); err != nil {
 			t.Fatalf("conversion %d: %v", pass, err)
 		}
-		records := filepath.Join(data, "backups", "earlier-data", "mod-folders")
-		entries, err := os.ReadDir(records)
-		if err != nil || len(entries) != 2 {
-			t.Fatalf("conversion records: %v, %v", entries, err)
+		if exists(filepath.Join(data, "backups")) || !isRegular(filepath.Join(source, "mod.json")) {
+			t.Fatal("missing converted folder or unexpected backup")
 		}
-		found := false
-		for _, entry := range entries {
-			folder := filepath.Join(records, entry.Name())
-			original, err := earlierTreeHash(filepath.Join(folder, "original"))
-			if err != nil || !isRegular(filepath.Join(folder, "finished.json")) {
-				t.Fatalf("incomplete conversion record: %s, %v", folder, err)
-			}
-			found = found || original == want
-		}
-		if !found || !isRegular(filepath.Join(source, "mod.json")) {
-			t.Fatal("missing converted mod or original backup")
+		if got, _ := earlierTreeHash(source); got == want {
+			t.Fatal("earlier folder not converted")
 		}
 	}
 }
@@ -151,7 +143,7 @@ func TestEarlierExport(t *testing.T) {
 	w := zip.NewWriter(&input)
 	for name, value := range map[string]string{
 		"Room.json":        `{"~type":"idSnapEntityPrefab","entities":[]}`,
-		"prefab.meta.json": `{"desc":"A room","scripts":["mymodule.lua"]}`,
+		"prefab.meta.json": `{"desc":"A room","scripts":["mymodule.lua"],"mods":[{"mod":"a1234567@` + strings.Repeat("0", 64) + `"}]}`,
 		"export.json":      `{"format":1,"bundles":[]}`, "files/preserved": "verbatim",
 	} {
 		s, err := w.Create(name)
@@ -166,7 +158,7 @@ func TestEarlierExport(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeF(t, file, input.String())
-	if err := runCommand(file, nil, false); err != nil {
+	if err := runCommand("convert", []string{file, "--yes"}, false); err != nil {
 		t.Fatal(err)
 	}
 	z, err := zip.OpenReader(file)
@@ -193,9 +185,8 @@ func TestEarlierExport(t *testing.T) {
 	if err := runCommand("convert", []string{file}, false); err != nil || readF(t, file) != before {
 		t.Fatalf("retry: %v", err)
 	}
-	backup, _ := filepath.Glob(filepath.Join(appDataDir(), "backups", "earlier-data", "*", "*.zip"))
-	if len(backup) != 1 || readF(t, backup[0]) != input.String() {
-		t.Fatal("missing original export")
+	if exists(filepath.Join(appDataDir(), "backups")) {
+		t.Fatal("created a permanent content backup")
 	}
 }
 
@@ -228,11 +219,11 @@ func TestEarlierMapAndPrefabFiles(t *testing.T) {
 		!strings.Contains(got, `"thing":7`) || !strings.Contains(got, engine) {
 		t.Fatalf("prefab %s", got)
 	}
-	if !strings.Contains(readF(t, filepath.Join(data, "maps", "empty.json")), `"format":2`) {
-		t.Fatal("empty format-1 map was not updated")
+	if !strings.Contains(readF(t, filepath.Join(data, "maps", "empty.json")), `"format":1`) {
+		t.Fatal("empty format-1 map was changed")
 	}
 	backups, _ := filepath.Glob(filepath.Join(data, "backups", "earlier-data", "*", "*"))
-	if len(backups) != 4 {
+	if len(backups) != 0 {
 		t.Errorf("backup count %d", len(backups))
 	}
 	// Resume after writing the inline document but before retiring its sidecar.
@@ -249,13 +240,13 @@ func TestEarlierDocumentKeepsConflictsAndUnsupportedPins(t *testing.T) {
 	body := `{"~type":"idSnapEntityPrefab","snapmapPlus":{"format":1,"description":"edited inline","tags":[],"mods":[]}}`
 	writeF(t, p, body)
 	writeF(t, side, `{"desc":"edited separately"}`)
-	if err := convertEarlierData("", data); err == nil || readF(t, p) != body || !exists(side) {
+	if err := convertEarlierData("", data); err != nil || readF(t, p) != body || !exists(side) {
 		t.Errorf("conflict: %v", err)
 	}
 	raw := filepath.Join(data, "rawmap.json")
 	pinned := `{"snapmap-plus":{"format":1,"mods":[{"mod":"a1234567@` + strings.Repeat("f", 64) + `","size":1}]}}`
 	writeF(t, raw, pinned)
-	if err := convertEarlierDocument(data, raw, false, nil); err == nil || readF(t, raw) != pinned {
+	if err := convertWithConsent(data, raw, true); err == nil || readF(t, raw) != pinned {
 		t.Errorf("missing pin: %v", err)
 	}
 	_, err := os.Stat(filepath.Join(data, "backups"))

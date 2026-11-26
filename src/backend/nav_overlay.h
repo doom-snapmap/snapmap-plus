@@ -46,7 +46,4 @@ int sh_nav_overlay_build(const unsigned char *model, size_t model_len,
                          const unsigned char *cut, size_t cut_len, unsigned first_area,
                          unsigned char **out, size_t *out_len, sh_nav_overlay_stats *stats);
 
-/* The triangle count of a .bmodel, or -1 when it does not parse. */
-int sh_nav_overlay_triangle_count(const unsigned char *model, size_t model_len);
-
 #endif

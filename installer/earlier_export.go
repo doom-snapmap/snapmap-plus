@@ -3,7 +3,6 @@ package main
 import (
 	"archive/zip"
 	"bytes"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,22 +16,7 @@ import (
 var errNotSnapmapExport = errors.New("archive contains no Snapmap+ map or prefab")
 
 func convertEarlierExport(data, filename string) error {
-	if data == "" || !plainPath(data) || !plainPath(filename) || !isRegular(filename) {
-		return fmt.Errorf("cannot read export %q", filename)
-	}
-	switch strings.ToLower(filepath.Ext(filename)) {
-	case ".json":
-		if strings.HasSuffix(strings.ToLower(filename), ".meta.json") {
-			return fmt.Errorf("choose the prefab file beside %s", filepath.Base(filename))
-		}
-		pins := newEarlierPins(data, earlierInstallDir(data), nil)
-		defer pins.close()
-		return convertEarlierDocument(data, filename, true, pins)
-	case ".zip":
-		return convertEarlierArchive(data, earlierInstallDir(data), filename)
-	default:
-		return fmt.Errorf("choose a Snapmap+ JSON or ZIP file")
-	}
+	return convertWithConsent(data, filename, true)
 }
 
 func earlierEntry(f *zip.File) ([]byte, error) {
@@ -48,7 +32,12 @@ func earlierInstallDir(data string) string {
 	if !strings.EqualFold(filepath.Clean(data), filepath.Clean(appDataDir())) {
 		return ""
 	}
-	if record, err := loadRecord(); err == nil && record != nil {
+	file := statePath(data)
+	if !plainPath(file) {
+		return ""
+	}
+	var record installRecord
+	if b, err := os.ReadFile(file); err == nil && json.Unmarshal(b, &record) == nil {
 		return record.DoomPath
 	}
 	return ""
@@ -110,68 +99,34 @@ func earlierArchiveDocument(z *zip.ReadCloser) (doc, side, index *zip.File, err 
 	return doc, side, index, nil
 }
 
-// Hold the original archive as a verified backup before replacing its directory entry.
-func keepEarlierArchive(data, filename, hash string) error {
-	key := fmt.Sprintf("%x", sha256.Sum256([]byte(filepath.Clean(filename)+"\x00"+hash)))
-	dst := filepath.Join(data, "backups", "earlier-data", key, filepath.Base(filename))
-	if !plainPath(dst) {
-		return fmt.Errorf("cannot back up %s through a link", filename)
-	}
-	if prior, err := fileSHA256(dst); err == nil {
-		if prior != hash {
-			return fmt.Errorf("backup of %s differs", filename)
-		}
-		return nil
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return err
-	}
-	f, err := os.CreateTemp(filepath.Dir(dst), ".install-export-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if err = f.Close(); err != nil {
-		return err
-	}
-	if err = copyFile(filename, f.Name()); err != nil {
-		return err
-	}
-	got, err := fileSHA256(f.Name())
-	if err != nil {
-		return err
-	}
-	if got != hash {
-		return fmt.Errorf("export changed before its backup finished")
-	}
-	return os.Rename(f.Name(), dst)
-}
-
-func convertEarlierArchive(data, doom, filename string) error {
+func rewriteEarlierArchive(data, output, doom, filename string, libraries []string, dest io.Writer, placements ...*earlierPlacements) (bool, error) {
 	z, err := zip.OpenReader(filename)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer z.Close()
 	doc, side, index, err := earlierArchiveDocument(z)
 	if err != nil {
-		return err
+		return false, err
 	}
 	body, err := earlierEntry(doc)
 	if err != nil {
-		return err
+		return false, err
 	}
 	var metadata []byte
 	if side != nil {
 		metadata, err = earlierEntry(side)
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 	pins := newEarlierPins(data, doom, &z.Reader)
 	defer pins.close()
+	pins.output = output
+	pins.libraries = libraries
+	if len(placements) > 0 {
+		pins.placements = placements[0]
+	}
 	next, changed, err := convertEarlierPinnedJSON(body, metadata, pins)
 	carries := false
 	for _, f := range z.File {
@@ -180,71 +135,39 @@ func convertEarlierArchive(data, doom, filename string) error {
 			break
 		}
 	}
-	if err != nil || (!changed && side == nil && index == nil && !carries) {
-		return err
+	if err != nil || (!changed && !knownPrefabSide(metadata) && !carries) {
+		return false, err
 	}
-	hash, err := fileSHA256(filename)
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(filename), ".install-export-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	defer tmp.Close()
-	out := zip.NewWriter(tmp)
+	out := zip.NewWriter(dest)
 	if err = out.SetComment(z.Comment); err != nil {
-		return err
+		return false, err
 	}
 	existing := map[string]bool{}
 	for _, f := range z.File {
-		if f == side || f == index || earlierBundleEntry(f.Name) {
+		if (f == side && knownPrefabSide(metadata)) || f == index || earlierBundleEntry(f.Name) {
 			continue
 		}
 		if existing[f.Name] {
-			return fmt.Errorf("duplicate export entry %s", f.Name)
+			return false, fmt.Errorf("duplicate export entry %s", f.Name)
 		}
 		existing[f.Name] = true
 		if f != doc || bytes.Equal(next, body) {
 			if err = out.Copy(f); err != nil {
-				return err
+				return false, err
 			}
 			continue
 		}
 		header := f.FileHeader
 		w, err := out.CreateHeader(&header)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if _, err = w.Write(next); err != nil {
-			return err
+			return false, err
 		}
 	}
 	if err = pins.addToArchive(out, existing); err != nil {
-		return err
+		return false, err
 	}
-	if err = out.Close(); err != nil {
-		return err
-	}
-	if err = tmp.Sync(); err != nil {
-		return err
-	}
-	if err = tmp.Close(); err != nil {
-		return err
-	}
-	if err = z.Close(); err != nil {
-		return err
-	}
-	if err = keepEarlierArchive(data, filename, hash); err != nil {
-		return err
-	}
-	got, err := fileSHA256(filename)
-	if err != nil {
-		return err
-	}
-	if got != hash {
-		return fmt.Errorf("export changed during conversion; retry")
-	}
-	return os.Rename(tmp.Name(), filename)
+	return true, out.Close()
 }

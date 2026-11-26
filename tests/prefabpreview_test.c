@@ -176,7 +176,7 @@ static void check_decoder(int md6)
 {
     unsigned char body[1024]; size_t len=md6?make_md6(body,sizeof body):make_bmodel(body,sizeof body);
     pp_mesh mesh; memset(&mesh,0,sizeof mesh);
-    int ok=md6?pp_decode_md6(body,len,&mesh):pp_decode_bmodel(body,len,&mesh);
+    int ok=md6?pp_decode_md6_ex(body,len,&mesh,NULL):pp_decode_bmodel(body,len,&mesh);
     CHECK(ok==1); CHECK(mesh.vertex_count==3); CHECK(mesh.index_count==3);
     CHECK(mesh.indices && mesh.indices[0]==0 && mesh.indices[1]==1 && mesh.indices[2]==2);
     CHECK(mesh.vertices && fabs(mesh.vertices[1].x-(md6?1.0f:2.0f))<0.001f);

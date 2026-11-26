@@ -9,6 +9,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include "modserve.h"
+#include "direct_actor.h"
+#include "direct_actor_iter.h"
 #include "script/script_api_game.h"
 #include "modhud_scene.h"
 #include "modscene_place.h"
@@ -713,6 +715,13 @@ static int gate_command(void *context, const char *line)
     return ok;
 }
 
+static char *me_language(void)
+{
+    char *language = NULL;
+    gate_read(NULL, "sys_lang", &language);
+    return language;
+}
+
 static const sh_modserve_gate_ops g_gate_ops = { NULL, gate_read, gate_set, NULL, gate_command };
 /* The cvar system unresolved: no cvar is set, the lines still run. */
 static const sh_modserve_gate_ops g_lines_ops = { NULL, NULL, NULL, NULL, gate_command };
@@ -1047,7 +1056,7 @@ static unsigned char me_probe_hook(void *self, const char *path, void *a, void *
 {
     int ours = 0;
     unsigned char r;
-    if (path && sh_modserve_active()) ours = sh_modserve_probe_claims(path);
+    if (path && (sh_modserve_active() || sh_direct_actor_key(path))) ours = sh_modserve_probe_claims(path);
     r = g_probe_orig(self, path, a, b, c, d, ours ? ((quiet & ~(uint64_t)0xff) | 1u) : quiet);
     return r ? r : (unsigned char)(ours ? 1 : 0);
 }
@@ -1138,7 +1147,7 @@ static void me_ensure_load(void)
     sh_modserve_stats st;
     if (g_load_orig || !g_load_sig_ok) return;
     sh_modserve_get_stats(&st);
-    if (!st.files) return;
+    if (!st.files && !sh_modserve_has_actor_rows()) return;
     tramp = sh_prepare_detour_sig(&g_load_sig, (void *)me_load_hook, LOAD_STOLEN);
     if (!tramp) {
         me_log("resource load detour refused; what kept objects load is kept only by name");
@@ -1253,6 +1262,7 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
     g_buffer_cmd = (buffer_cmd_fn)me_clean(results, count, "BufferCommandText");
     g_cmdsys = sh_resolve_cmdsys(results, count, module_base);
     g_cvar_slot = (const void *)glb_resolve(module_base, "cvar_system_slot", NULL);
+    sh_strids_set_language_reader(me_language);
     g_last_error = (const char *)glb_resolve(module_base, "last_error_msg", NULL);
     g_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
     g_res_head = (const void *)glb_resolve(module_base, "decl_resource_head", NULL);
@@ -1940,6 +1950,9 @@ static void me_refresh_watch(void)
     else InterlockedExchange(&g_refresh_watch, 0);
 }
 
+static int me_refresh_direct_actors(void);
+static void me_rebuild_actor_rows(int changed);
+
 int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
 {
     sh_modserve_refresh r;
@@ -1958,6 +1971,8 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
     }
     sh_modserve_last_diff(&d);
     rows = d.added_rows + d.changed_rows + d.gone_rows;
+    if (main == 1 && me_in_play() != 1 && (d.changed || d.gone || d.added_decls) && me_refresh_direct_actors())
+        InterlockedExchange(&g_palette_wanted, 1);
     later = d.added_decls - d.added_rows - d.added_active;   /* new names of mods no map has used yet */
     if (rows) InterlockedExchange(&g_palette_wanted, 1);
     if (!d.changed && !d.gone && !d.added_decls && !d.pending && !d.changed_scripts) {
@@ -2051,9 +2066,11 @@ int sh_modserve_scope_apply(const char *phase)
         return -1;
     }
     memset(&r, 0, sizeof r);
+    if (sh_modserve_scope_map_open() && me_in_play() != 1) me_rebuild_actor_rows(me_refresh_direct_actors());
     memset(&g, 0, sizeof g);
     held = sh_modserve_requirements_held();
     if (held) (void)sh_modserve_requirements_apply(me_gate_ops(), phase, &g);
+    (void)sh_modsound_apply_rows();
     /* The stock banks the declared bundles' borrowed sound events need: a mod
      * added to the open map (Use in this map) has its sounds at the next Play
      * without a map load, as the map pass gives a loaded map (modsound.h). */
@@ -2313,6 +2330,7 @@ void sh_modserve_palette_before_build(void)
         sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0)
         (void)sh_modserve_scope_apply("editor");
     (void)me_editor_rows("editor", first, &todo);
+    (void)me_refresh_direct_actors();
 }
 
 int sh_modserve_launch_preload(const char *why)
@@ -2516,7 +2534,7 @@ static void me_palette_check(void)
 void sh_modserve_palette_after_build(void *palette)
 {
     int rows, mods;
-    if (!sh_modserve_active()) return;
+    if (!sh_modserve_active() && !sh_modserve_has_actor_rows()) return;
     mods = me_count_mod_rows(palette, &rows);
     me_log("palette built: %d rows, %d from installed bundles", rows, mods);
     /* A mod row the game's type-info cache lacks is served its default tree
@@ -2605,6 +2623,106 @@ static int pal_has(void *context, const char *sedef_name)
 {
     (void)context;
     return pal_contains(sedef_name, 0);
+}
+
+/* An authored row registered during Refresh can precede the next palette build. Read the resolved entityDef
+ * from those declarations as well. A removed or superseded mod row is no longer a provider. */
+static int pal_has_actor(const char *actor)
+{
+    const unsigned char *manager;
+    int found = 0;
+    CRITICAL_SECTION *lock;
+    __try { manager = me_manager("snapEditorEntityDef"); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    if (!manager) return 0;
+    lock = me_lock();
+    __try {
+        const unsigned char *const *items = *(const unsigned char *const *const *)(manager + ME_LIST_ENTRIES);
+        int count = *(const int *)(manager + ME_LIST_COUNT);
+        for (int i = 0; items && i < count && count <= PAL_MAX && !found; ++i) {
+            const unsigned char *d = items[i], *target;
+            const char *row, *name;
+            if (!d || *(const void *const *)(d + ME_RES_LIST) != manager || d[RES_STATE_OFF] & 3) continue;
+            row = *(const char *const *)(d + SEDEF_NAME_OFF);
+            target = *(const unsigned char *const *)(d + SEDEF_ENTITYDEF_OFF);
+            if (!row || !target || !_strnicmp(row,SH_DIRECT_ACTOR_ID,sizeof(SH_DIRECT_ACTOR_ID)-1)) continue;
+            name = *(const char *const *)(target + ME_RES_NAME);
+            if (!name || _stricmp(actor, name)) continue;
+            if (!_strnicmp(row,"mods/",5)) {
+                char *request = sh_textf("generated/decls/snapeditorentitydef/%s.decl",row);
+                found = request && sh_modserve_lookup(request, NULL);
+                free(request);
+            } else found = 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { found = 0; }
+    me_unlock(lock);
+    return found;
+}
+
+static int pal_admit_actor(const char *actor, const char *row)
+{
+    const char *type = "snapEditorEntityDef";
+    char path[160];
+    unsigned state = 0, lifetime = 0;
+    int loaded = 0;
+    sh_process_heap_scope heap = {0};
+    me_closure kept;
+    me_ensure_probe();
+    if (!sh_process_heap_enter(&g_heap, &heap)) return 0;
+    me_closure_begin(&kept);
+    __try {
+        snprintf(path, sizeof path, "snapeditorentitydef/%s.decl", row);
+        if (op_source_registered(NULL, type, row) == 1 || op_register_file(NULL, type, row, path))
+            loaded = op_load(NULL, type, row, 1, &state, &lifetime) == 1;
+    } __finally {
+        me_closure_end(&kept, "direct actor", "editor row references");
+        if (!sh_process_heap_leave(&heap)) loaded = 0;
+    }
+    me_log("direct actor: %s editor identity for '%s'", loaded ? "registered" : "could not register", actor);
+    return loaded;
+}
+
+static int me_refresh_direct_actors(void)
+{
+    if (!g_bound || !sh_timeline_actor_filter_ready() || me_on_main() != 1) return 0;
+    return sh_modserve_refresh_actor_rows(pal_has_actor, pal_admit_actor);
+}
+
+int sh_modserve_direct_actor_map_uses(const char *json, size_t len)
+{
+    return g_bound && sh_timeline_actor_filter_ready() && me_on_main() == 1 &&
+        sh_modserve_uses_stock_actor(json, len, pal_has_actor);
+}
+
+void sh_modserve_prepare_direct_actors(const char *json, size_t len)
+{
+    if (!g_bound || !sh_timeline_actor_filter_ready() || me_on_main() != 1) return;
+    sh_direct_iter_reset();
+    me_rebuild_actor_rows(sh_modserve_direct_actor_rows(json, len, pal_has_actor, pal_admit_actor));
+}
+
+static void me_rebuild_actor_rows(int changed)
+{
+    int before, after;
+    if (changed && pal_ready(NULL) && sh_timeline_tile_rebuild_palette(&before,&after) != SH_TL_REBUILD_OK)
+        InterlockedExchange(&g_palette_wanted, 1);
+}
+
+void sh_modserve_prepare_prefab_actors(const char *json, size_t len, const struct sh_modmanifest_list *rows)
+{
+    if (!g_bound || !sh_timeline_actor_filter_ready() || me_on_main() != 1) return;
+    me_rebuild_actor_rows(sh_modserve_prefab_actor_rows(json, len, rows, pal_has_actor, pal_admit_actor));
+}
+
+void sh_modserve_finish_prefab_actors(const char *json, size_t len)
+{
+    if (!g_bound || !sh_timeline_actor_filter_ready() || me_on_main() != 1) return;
+    me_rebuild_actor_rows(sh_modserve_finish_actor_rows(json, len, pal_has_actor, pal_admit_actor));
+}
+
+void sh_modserve_restore_direct_actors(void)
+{
+    if (!g_bound || !sh_timeline_actor_filter_ready() || me_on_main() != 1) return;
+    me_rebuild_actor_rows(sh_modserve_restore_actor_rows(pal_has_actor, pal_admit_actor));
 }
 
 int sh_modserve_prefab_rows(const char *const *inherits, size_t count, const char **missing)

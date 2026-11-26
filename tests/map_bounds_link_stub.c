@@ -5,6 +5,18 @@ void sh_map_bounds_build(void *map){(void)map;}
 void sh_world_area_cell_build(void *map){(void)map;}
 void sh_world_area_cell_build_end(void){}
 void sh_world_area_cell_map_opened(void){}
+void sh_direct_iter_reset(void){}
+#include <string.h>
+const char *sh_nav_test_eligible, *sh_nav_test_instance, *sh_nav_test_parent;
+int sh_modserve_iterator_uses(const char *name)
+{
+    return sh_nav_test_eligible && name && !strcmp(sh_nav_test_eligible, name);
+}
+void sh_direct_iter_place(const char *name, const char *inherit)
+{
+    sh_nav_test_instance = name;
+    sh_nav_test_parent = inherit;
+}
 void sh_modserve_play_begin(void){}
 #include <stddef.h>
 int sh_script_hooks_open(void){return 0;}

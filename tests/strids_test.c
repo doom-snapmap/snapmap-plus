@@ -531,6 +531,48 @@ static void test_string_edits(void)
 
 /* The scope check covers every bundle with strings, however many: with 600
  * mods, a change to the last one's scope still asks for a refresh. */
+static const char *test_language;
+static char *read_language(void) { return _strdup(test_language); }
+
+static void test_localized_strings(void)
+{
+    const char *key = "snapentity_category_demons";
+    const fake_bundle mods[] = {
+        { "amber000", "", 0, 1, "{\"strings\":{\"en\":{\"amber000_tab\":\"Equipment\",\"amber000_borrow\":\"Pickup\","
+          "\"snapentity_category_demons\":\"Creatures\"},\"it\":{\"amber000_tab\":\"Armamento\","
+          "\"snapentity_category_demons\":\"Creature\",\"amber000_only\":\"Vista\"}}}" },
+        { "blue0000", "", 0, 1, "{\"strings\":{\"en\":{\"blue0000_tab\":\"Equipment\"},"
+          "\"it\":{\"blue0000_tab\":\"Armamento\"}}}" }
+    };
+    unsigned char native[32] = {0};
+    *(uint32_t *)native = fake_hash("#str_snapentity_category_demons");
+    fake_idstr_ctor(native + 8, "#str_snapentity_category_demons");
+    fake_idstr_ctor(native + 16, "DEMONS");
+    fake_insert(&g_dictionary, native);
+    test_language = "english";
+    sh_strids_set_language_reader(read_language);
+    set_bundles(mods, 2);
+    CHECK(rearm_strings() && !strcmp(value_for(key), "Creatures"));
+    CHECK(!strcmp(value_for("amber000_tab"), "Equipment") && !count_key("amber000_only"));
+
+    /* Native reload interns the same key and supplies its Italian stock value. */
+    g_dictionary.count = 0;
+    fake_idstr_ctor(native + 16, "DEMONI");
+    fake_insert(&g_dictionary, native);
+    test_language = "italian";
+    CHECK(rearm_strings() && !strcmp(value_for(key), "Creature"));
+    CHECK(!strcmp(value_for("amber000_tab"), "Armamento") && !strcmp(value_for("blue0000_tab"), "Armamento"));
+    CHECK(!strcmp(value_for("amber000_borrow"), "Pickup") && !strcmp(value_for("amber000_only"), "Vista"));
+    set_bundles(mods + 1, 1);
+    CHECK(rearm_strings() && !strcmp(value_for(key), "DEMONI") && !count_key("amber000_tab"));
+    CHECK(!strcmp(value_for("blue0000_tab"), "Armamento") && count_key("blue0000_tab") == 1);
+    test_language = "unknown";
+    CHECK(rearm_strings() && !strcmp(value_for("blue0000_tab"), "Equipment"));
+    set_bundles(NULL, 0);
+    sh_strids_set_language_reader(NULL);
+    CHECK(rearm_strings() && !count_key("blue0000_tab") && count_key(key) == 1);
+}
+
 static void test_scope_check_many_bundles(void)
 {
     static fake_bundle many[600];
@@ -946,6 +988,7 @@ static int synthetic_main(void)
     test_bundle_layer();
     test_namespaced_keys();
     test_string_edits();
+    test_localized_strings();
     test_scope_check_many_bundles();
     test_own_strings_follow_the_build();
     test_plain_map();

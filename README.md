@@ -124,7 +124,7 @@ Run the Snapmap+ installer to update earlier mods, maps and prefabs in your libr
 For a native SnapMap save, the installer prints the path to a copy in `rawmaps/Updated saves/`.
 Open it with **File > Load Rawmap** and use **Save As** in DOOM. For a JSON or ZIP export
 stored elsewhere, drop the file onto `snapmap-plus.exe`.
-[Updating earlier maps, prefabs and mods](installer/README.md#updating-earlier-maps-prefabs-and-mods)
+[Updating earlier maps, prefabs and mods](installer/README.md#updating-earlier-mods-maps-and-prefabs)
 
 ## Credits
 

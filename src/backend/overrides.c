@@ -23,6 +23,7 @@
 #include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline tile, Unknown, Lift, Blocking) */
 #include "engine_build.h"
 #include "modserve.h"             /* installed mod bundles, after every product source */
+#include "direct_actor.h"
 
 #define OPEN_SLOT_OFFSET SH_OVERRIDES_OPEN_SLOT
 
@@ -630,7 +631,7 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
 
     /* Installed mods rank below navigation and the Grid Room and above the built-in defaults and the engine, so
      * a mod's version of a built-in name is the one the editor reads. A file that cannot be read falls through. */
-    if (mode < 2 && name != NULL && sh_modserve_active()) {
+    if (mode < 2 && name != NULL && (sh_modserve_active() || sh_direct_actor_key(name))) {
         unsigned char *bytes = NULL;
         size_t length = 0;
         if (sh_modserve_open(name, &bytes, &length) > 0) {

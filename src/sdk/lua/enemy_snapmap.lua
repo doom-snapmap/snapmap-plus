@@ -4,8 +4,8 @@
 --
 -- Spawn Behavior (DOOM 2016 0x140737180): default, ambush (768-unit perception radius) and hunt act through the
 -- engine's perception; defend also holds a position within 512 units of the placement (ROLE_DEFEND), done here.
--- A Follow order (e:snapmap_order()) redirects every move the brain asks for to the order's goal and never starts a
--- move itself, because an animation asked for during a move the brain did not start cancels that move. Team and
+-- The Enemy SDK leaves path-point orders to SnapMap's own state. Other Follow orders redirect the brain's movement
+-- requests because an animation requested during a move the brain did not start cancels that move. Team and
 -- position are read from the engine every think; a jump no walk covers ends the order and the current move.
 -- Every read goes through the script API's general calls; without them the demon hears no order and finds no enemy.
 

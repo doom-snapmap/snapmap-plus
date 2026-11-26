@@ -64,4 +64,7 @@ int  sh_modpin_row_differs(const struct sh_modmanifest_row *row);
 int  sh_modpin_row(struct sh_modmanifest_row *row, const char *map_json, size_t len, const char *content_root,
                    sh_modpin_row_result *out);
 
+int sh_modpin_publish_row(struct sh_modmanifest_row *row, sh_modpin_row_result *out);
+void sh_modpin_record_modules(struct sh_modmanifest_row *row, const char *map_json, size_t len);
+
 #endif

@@ -62,6 +62,16 @@ int main(void)
     expect(ROCK_ENTITY, ROCK_PARENT,
            "edit = {\n\tspawnPosition = {\n\t\tx = 1100;\n\t\ty = 1500;\n\t\tz = 0.25;\n\t}\n}");
 
+    /* A map-owned idAI2 keeps its behavior; the Toybox placement inherits its encounter. */
+    const char *direct =
+        "edit = {\n\taiEditable = {\n\t\tbehaviors = {\n"
+        "\t\t\tdecl = \"mods/orbit913/behaviors/ranger/orbit\";\n\t\t}\n\t}\n}";
+    expect(direct, "edit = {\n}", direct);
+    expect("edit = {\n\tencounterToSpawn = \"mods/orbit913/encounters/ranger\";\n"
+           "\tspawnPosition = {\n\t\tz = 0.25;\n\t}\n}",
+           "edit = {\n\tencounterToSpawn = \"mods/orbit913/encounters/ranger\";\n}",
+           "edit = {\n\tspawnPosition = {\n\t\tz = 0.25;\n\t}\n}");
+
     /* A changed leaf keeps its block path, and only that leaf of it. */
     expect("edit = {\n\tclipModelInfo = {\n\t\ttype = \"CLIPMODEL_BOX\";\n\t\tsize = {\n\t\t\tx = 64;\n\t\t\ty = 128;\n\t\t}\n\t}\n\tisSolid = false;\n}",
            ROCK_PARENT,

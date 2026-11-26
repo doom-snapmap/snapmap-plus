@@ -274,10 +274,10 @@ typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_in
  * save-time closure over the prefab) into the file; out is the view. Returns the row count, -1 failed (file unchanged). */
 #define SH_MODULE_PREFAB_MODS_RECORD  6
 /* text: a view; out is {"count":N,"missing":M,"mods":[{"id","salt","build","size","installed","state","cause"}...]}
- * ("id" is the name the mod was recorded with). Returns M, -1 unreadable. */
+ * "id" is the display name, "installed" means the prefab's required content is here. Returns M, -1 unreadable. */
 #define SH_MODULE_PREFAB_MODS_STATUS  7
-/* text: the prefab file; name: its name. Returns 1 place now (every mod installed and in the
- * open map), 2 held for a download (poll MODS_POLL with seq), -6 a module the player cannot get (DLC), -7 refused,
+/* text: the prefab file; name: its name. Returns 1 place now, 2 held while local content is prepared
+ * (poll MODS_POLL with seq), -6 a module the player cannot get (DLC), -7 refused,
  * 0 no answer; out is the message for -6, -7 and 2. The caller strips the block before the engine sees the text. */
 #define SH_MODULE_PREFAB_MODS_RESOLVE 8
 /* seq from MODS_RESOLVE: 2 waiting, 1 ready (place now), 0 refused or dropped (the game showed why). */
@@ -288,8 +288,8 @@ typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_in
 /* path: the prefab file; name (UTF-8); zip_path. Writes the prefab with its mods as one ZIP
  * (modexport.h); out is the message. 1 written, -1 refused. */
 #define SH_MODULE_PREFAB_EXPORT       11
-/* zip_path: a .zip, or a .json inside an extracted export folder; path: the prefabs folder. Installs the mods and adds
- * the prefab; out is {"ok","added","name","message"}. 1 added, 0 already in the library (nothing written), -1 refused. */
+/* zip_path: a ZIP or JSON. Caches the included mod content and adds the prefab to the library at path.
+ * out is {"ok","added","name","message"}. 1 added, 0 already in the library (content may have been added), -1 refused. */
 #define SH_MODULE_PREFAB_IMPORT       12
 /* text: the prefab file, or its end when tail is 1. out is the view (empty without details).
  * Returns the source: 1 the block, 2 an earlier shape, 0 neither. */

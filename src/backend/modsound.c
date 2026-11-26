@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "modsound.h"
+#include "modsound_view.h"
+#include "modbundle.h"
 #include "modbankinfo.h"
 #ifndef SH_MODSOUND_PURE
 #include "backend_log.h"
@@ -145,7 +147,10 @@ void sh_modsound_table_free(sh_modsound_table *t)
 {
     int i;
     if (!t) return;
-    for (i = 0; i < t->count; i++) free(t->banks[i].disk_path);
+    for (i = 0; i < t->count; i++) {
+        free(t->banks[i].disk_path);
+        free(t->banks[i].author_path);
+    }
     free(t->banks);
     memset(t, 0, sizeof *t);
 }
@@ -385,6 +390,8 @@ static int32_t __fastcall ms_open_name(void *self, const wchar_t *name, int32_t 
     return 1;   /* AK_Success */
 }
 
+static int ms_submit_view(sh_modsound_bank *b, int *result);
+
 static int ms_submit_one(void *hw, sh_modsound_bank *b, LONG gen, const char *phase)
 {
     int r = 0, ok = 0;
@@ -395,7 +402,7 @@ static int ms_submit_one(void *hw, sh_modsound_bank *b, LONG gen, const char *ph
         return 0;
     }
     __try {
-        __try { r = g_submit(hw, b->leaf); ok = 1; }
+        __try { if (!ms_submit_view(b, &r)) r = g_submit(hw, b->leaf); ok = 1; }
         __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
     } __finally {
         if (!ms_heap_leave(&heap)) ms_log("%s: the process heap scope did not balance", phase);
@@ -424,6 +431,183 @@ static ms_opnew_fn g_opnew;
 static ms_ctor_fn g_cookie_ctor;
 static ms_loadbank_fn g_loadbank;
 static ms_cb_fn g_engine_cb;
+static void **g_bank_manager;
+
+/* The native memory bank is identified by both id and address. Keep one view per immutable bank name, including
+ * across map changes and s_loadBanks, where the sound system can still hold the original address. */
+typedef struct ms_view {
+    struct ms_view *next;
+    char leaf[SH_MODSOUND_LEAF_MAX];
+    sh_sound_view view;
+    HANDLE ready;
+    LONG generation;
+    volatile LONG refs;
+    int preview;
+} ms_view;
+static ms_view *g_views;
+static SRWLOCK g_retry_lock = SRWLOCK_INIT;
+static ms_view *g_unload_retry;
+
+typedef struct ms_view_result { ms_view *bank; void *native; } ms_view_result;
+
+static void ms_view_drop(ms_view *v)
+{
+    if (InterlockedDecrement(&v->refs)) return;
+    CloseHandle(v->ready);
+    sh_sound_view_close(&v->view);
+    free(v);
+}
+
+static void ms_view_callback(uint32_t id, const void *bytes, int32_t result, int32_t pool, void *cookie)
+{
+    ms_view_result *c = cookie;
+    g_engine_cb(id, bytes, result, pool, c->native);
+    SetEvent(c->bank->ready);
+    ms_view_drop(c->bank);
+    free(c);
+}
+
+static void ms_unload_callback(uint32_t id, const void *bytes, int32_t result, int32_t pool, void *cookie)
+{
+    ms_view *v = cookie;
+    (void)id; (void)bytes; (void)pool;
+    if (result == 1 || result == 54) { /* unloaded, or this (id,address) is absent after an audio reset */
+        ms_log("released %s (bank id %u, native unload result %d)", v->leaf, (unsigned)v->view.id, (int)result);
+        ms_view_drop(v);
+        return;
+    }
+    ms_log("unload of %s returned %d; keeping its media until Wwise releases it", v->leaf, (int)result);
+    AcquireSRWLockExclusive(&g_retry_lock);
+    v->next = g_unload_retry;
+    g_unload_retry = v;
+    ReleaseSRWLockExclusive(&g_retry_lock);
+}
+
+static void ms_unload_unused(sh_modsound_table *t)
+{
+    ms_view **link = &g_views, *v, *retire;
+    int i;
+    if (!g_bank_manager || !*g_bank_manager) return;
+    AcquireSRWLockExclusive(&g_retry_lock);
+    retire = g_unload_retry;
+    g_unload_retry = NULL;
+    ReleaseSRWLockExclusive(&g_retry_lock);
+    while ((v = *link) != NULL) {
+        for (i = 0; t && i < t->count; i++) if (!strcmp(v->leaf, t->banks[i].leaf)) break;
+        if (t && i < t->count && (t->banks[i].wanted || v->preview)) { link = &v->next; continue; }
+        if (t && i < t->count) InterlockedExchange(&t->banks[i].submitted_gen, 0);
+        *link = v->next;
+        v->next = retire;
+        retire = v;
+    }
+    while ((v = retire) != NULL) {
+        int result = 2;
+        ms_scope heap = {0};
+        retire = v->next;
+        if (ms_heap_enter(&heap)) {
+            __try {
+                result = sh_sound_view_queue(*g_bank_manager, &v->view, 1, ms_unload_callback, v);
+            } __finally {
+                if (!ms_heap_leave(&heap)) ms_log("unload: the process heap scope did not balance");
+            }
+        }
+        if (result != 1) ms_unload_callback(v->view.id, v->view.bytes, result, -1, v);
+    }
+}
+
+static int ms_submit_view(sh_modsound_bank *b, int *result)
+{
+    ms_view *v;
+    void *cookie;
+    ms_view_result *c;
+    if (!g_bank_manager || !*g_bank_manager || !g_cookie_ctor || !g_engine_cb ||
+        !sh_mbi_snapmap_loads(b->leaf)) return 0;
+    for (v = g_views; v && _stricmp(v->leaf, b->leaf); v = v->next) {}
+    if (!v) {
+        v = calloc(1, sizeof *v);
+        if (!v) return 0;
+        if (!sh_sound_view_open(b->disk_path, b->size, &v->view)) { free(v); return 0; }
+        if (v->view.id != sh_mb_fnv1_lower(b->leaf, strlen(b->leaf) - 4)) {
+            sh_sound_view_close(&v->view); free(v); return 0;
+        }
+        v->ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (!v->ready) { sh_sound_view_close(&v->view); free(v); return 0; }
+        strcpy_s(v->leaf, sizeof v->leaf, b->leaf);
+        v->refs = 1;
+        v->next = g_views;
+        g_views = v;
+    }
+    if (v->generation == g_gen) { *result = 1; return 1; }
+    c = malloc(sizeof *c);
+    if (!c) return 0;
+    cookie = g_opnew(SH_MODSOUND_COOKIE_SIZE);
+    if (!cookie) { free(c); return 0; }
+    c->native = g_cookie_ctor(cookie, b->leaf);
+    c->bank = v;
+    ResetEvent(v->ready);
+    v->generation = g_gen;
+    InterlockedIncrement(&v->refs);
+    *result = sh_sound_view_queue(*g_bank_manager, &v->view, 0, ms_view_callback, c);
+    /* The queue delivers no callback on immediate refusal. The native result callback owns the cookie. */
+    if (*result != 1) ms_view_callback(v->view.id, v->view.bytes, *result, -1, c);
+    return 1;
+}
+
+static int ms_clear_preview(void)
+{
+    ms_view *v;
+    int changed = 0;
+    for (v = g_views; v; v = v->next) {
+        changed |= v->preview;
+        v->preview = 0;
+    }
+    return changed;
+}
+
+static void ms_prepare_preview(sh_modsound_table *t, const char *sound)
+{
+    void *hw;
+    char event[512];
+    const char *leaf;
+    uint32_t id;
+    int i, selected = -1;
+    if (!sound || _strnicmp(sound, "mods/", 5) || !t) return;
+    leaf = strrchr(sound, '/');
+    if (!leaf || _snprintf_s(event, sizeof event, _TRUNCATE, "play_%s", leaf + 1) < 0) return;
+    id = sh_mb_fnv1_lower(event, strlen(event));
+    hw = ms_hardware();
+    if (!ms_hardware_ready(hw)) return;
+    for (i = 0; i < t->count; i++) {
+        sh_modsound_bank *b = &t->banks[i];
+        size_t salt = strlen(b->bundle);
+        if (_strnicmp(sound + 5, b->bundle, salt) || sound[5 + salt] != '/') continue;
+        if (selected >= 0 && b->submitted_gen != g_gen) continue;
+        if (sh_sound_bank_has_event(b->disk_path, b->size, id)) {
+            selected = i;
+            if (b->submitted_gen == g_gen) break;
+        }
+    }
+    if (selected >= 0) {
+        sh_modsound_bank *b = &t->banks[selected];
+        ms_view *v;
+        if (b->submitted_gen != g_gen) (void)ms_submit_one(hw, b, g_gen, "preview");
+        for (v = g_views; v; v = v->next) if (!strcmp(v->leaf, b->leaf)) {
+            v->preview = 1;
+            (void)WaitForSingleObject(v->ready, SH_MODSOUND_STOCK_WAIT_MS);
+            break;
+        }
+    }
+}
+
+void sh_modsound_preview(const char *sound)
+{
+    sh_modsound_table *t = g_table;
+    int previous;
+    if (ms_on_main() != 1) return;
+    previous = ms_clear_preview();
+    ms_prepare_preview(t, sound);
+    if (previous) ms_unload_unused(t);
+}
 static int g_stock_live;
 static unsigned g_stock_wait_ms = SH_MODSOUND_STOCK_WAIT_MS;
 static sh_modsound_needs *volatile g_needs;   /* published; retired tables are never freed */
@@ -602,16 +786,24 @@ static int ms_pass(const char *phase)
     void *hw;
     LONG gen = g_gen;
     int i, n = 0;
-    if (!t || !t->count || !g_submit) { InterlockedExchange(&g_pending, 0); return 0; }
+    if (!g_submit || ((!t || !t->count) && !g_views &&
+        !InterlockedCompareExchangePointer((void *volatile *)&g_unload_retry, NULL, NULL))) {
+        InterlockedExchange(&g_pending, 0); return 0;
+    }
     hw = ms_hardware();
     if (!ms_hardware_ready(hw)) {
         if (!InterlockedExchange(&g_pending, 1))
             ms_log("%s: %d bank(s) indexed; the sound system is not up yet, so they are submitted at the next pass", phase,
-                   t->count);
+                   t ? t->count : 0);
         return 0;
     }
-    for (i = 0; i < t->count; i++)
-        if (t->banks[i].submitted_gen != gen) n += ms_submit_one(hw, &t->banks[i], gen, phase);
+#ifndef SH_MODSOUND_PURE
+    if (!sh_modserve_scope_map_open() || sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_PLAY) ms_clear_preview();
+    if (t) sh_modsound_select_banks(t);
+#endif
+    ms_unload_unused(t);
+    for (i = 0; t && i < t->count; i++)
+        if (t->banks[i].wanted && t->banks[i].submitted_gen != gen) n += ms_submit_one(hw, &t->banks[i], gen, phase);
     InterlockedExchange(&g_pending, 0);
     return n;
 }
@@ -704,7 +896,7 @@ static int ms_same_table(const sh_modsound_table *a, const sh_modsound_table *b)
     if (!a || !b || a->count != b->count) return 0;
     for (i = 0; i < a->count; i++)
         if (strcmp(a->banks[i].leaf, b->banks[i].leaf) || strcmp(a->banks[i].disk_path, b->banks[i].disk_path) ||
-            a->banks[i].size != b->banks[i].size)
+            a->banks[i].size != b->banks[i].size || strcmp(a->banks[i].build,b->banks[i].build))
             return 0;
     return 1;
 }
@@ -727,6 +919,13 @@ static int ms_publish(sh_modsound_table *nt)
 }
 
 #ifdef SH_MODSOUND_TESTING
+void sh_modsound_test_manager(void **slot) { g_bank_manager = slot; }
+void sh_modsound_test_select(const char *salt)
+{
+    int i;
+    for (i = 0; g_table && i < g_table->count; ++i)
+        g_table->banks[i].wanted = salt && !strcmp(g_table->banks[i].bundle, salt);
+}
 void sh_modsound_test_bind(sh_modsound_open_fn original_open, sh_modsound_loadbanks_fn original_loadbanks,
                            sh_modsound_submit_fn submit, void *hardware, const sh_modsound_table *table)
 {
@@ -740,7 +939,8 @@ void sh_modsound_test_bind(sh_modsound_open_fn original_open, sh_modsound_loadba
         for (i = 0; i < table->count; i++) {
             char req[SH_MODSOUND_LEAF_MAX + 32];
             _snprintf_s(req, sizeof req, _TRUNCATE, "sound/soundbanks/pc/%s", table->banks[i].leaf);
-            sh_modsound_table_add(t, req, table->banks[i].disk_path, table->banks[i].size, table->banks[i].bundle, 0);
+            if (sh_modsound_table_add(t, req, table->banks[i].disk_path, table->banks[i].size, table->banks[i].bundle, 0) == 1)
+                t->banks[t->count - 1].wanted = 1;
         }
     }
     if (t) ms_publish(t);
@@ -792,7 +992,13 @@ static void ms_collect_file(void *context, const char *request, uint64_t size, c
     if (!sh_modsound_leaf(request, leaf, sizeof leaf)) return;
     if (!sh_modserve_lookup(request, &hit)) return;
     switch (sh_modsound_table_add(c->t, request, hit.disk_path, hit.size, hit.bundle_id, hit.is_stock)) {
-    case 1: c->banks++; break;
+    case 1: {
+        sh_modsound_bank *b = &c->t->banks[c->t->count - 1];
+        b->author_path = _strdup(hit.author_path ? hit.author_path : "");
+        if (hit.bundle_hash) strncpy_s(b->build, sizeof b->build, hit.bundle_hash, _TRUNCATE);
+        c->banks++;
+        break;
+    }
     case -1: ms_log("%s is not loaded: it is a stock pointer, another mod in use serves that name, or memory ran out",
                     leaf); break;
     default: break;
@@ -883,6 +1089,13 @@ void sh_modsound_before_pass(const char *phase)
     (void)ms_pass(phase);
 }
 
+int sh_modsound_apply_rows(void)
+{
+    if (!g_live) return 0;
+    if (ms_on_main() != 1) return g_table && g_table->count > 0;
+    (void)ms_pass("map sounds");
+    return 0;
+}
 
 void sh_modsound_print_status(void)
 {
@@ -981,6 +1194,7 @@ int sh_modsound_install(const sig_result *results, size_t count, const uint8_t *
         g_cookie_ctor = (ms_ctor_fn)d_ctor;
         g_engine_cb = (ms_cb_fn)d_cb;
         g_loadbank = (ms_loadbank_fn)d_lb;
+        g_bank_manager = sh_sound_view_manager((const uint8_t *)d_lb);
         g_stock_live = 1;
     }
     ms_rebuild();

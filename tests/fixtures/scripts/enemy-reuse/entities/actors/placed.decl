@@ -1,0 +1,3 @@
+{
+    inherit = "entities/actors/base";
+}

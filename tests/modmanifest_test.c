@@ -13,6 +13,8 @@
 #include "../src/backend/modsalt.h"
 #include "../src/backend/mp_json.h"
 #include "../src/backend/map_carrier.h"
+#include "../src/backend/modsound.h"
+#include "../src/backend/modpin.h"
 
 static int g_failed, g_checks;
 #define CHECK(expr) do {                                                         \
@@ -70,6 +72,7 @@ void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref)
 
 /* A local row's folder that is here but cannot be used (modserve.h): none here. */
 int sh_modserve_salt_installed(const char *salt) { (void)salt; return 0; }
+int sh_modserve_refusal_version(void) { return 0; }
 int sh_modserve_root_lacks(const char *salt, const char *name) { (void)salt; (void)name; return 0; }
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
@@ -642,6 +645,12 @@ static unsigned fake_uses(const char *json, size_t length, const char *const *na
     return g_uses_answer;
 }
 
+static int stock_actor_use(const char *json, size_t length)
+{
+    (void)length;
+    return strstr(json, "\"idAI2\"") != NULL;
+}
+
 static void product_entry(void)
 {
     static const char room[] = "{\"instances\":[{\"moduleName\":\"maps/modules/smpgrid/v1/m/1536_1536_512.decl\"}],"
@@ -685,6 +694,18 @@ static void product_entry(void)
     g_uses_answer = 0;
     CHECK(sh_modmanifest_on_save(room, sizeof room - 1, &n) == NULL);
     sh_modmanifest_set_uses(NULL);
+    {
+        const char actor[] = "{\"entities\":[{\"entityDef\":{\"inherit\":\"ai/demon/baron_coop\",\"className\":\"idAI2\"}}]}";
+        sh_modmanifest_set_actor_rows(NULL, stock_actor_use, NULL);
+        out = sh_modmanifest_on_save(actor, sizeof actor-1, &n);
+        CHECK(out && strstr(out, "\"uses\":[\"direct-actors\"]"));
+        CHECK(out && sh_modmanifest_read(out,n,&back,&rejected)==0 && !rejected &&
+              back.uses==SH_MODMANIFEST_USES_DIRECT_ACTORS && !back.count);
+        sh_modmanifest_list_free(&back);
+        if (out) HeapFree(GetProcessHeap(),0,out);
+        CHECK(sh_modmanifest_on_save(room,sizeof room-1,&n)==NULL);
+        sh_modmanifest_set_actor_rows(NULL,NULL,NULL);
+    }
     g_installed = INSTALLED;
     sh_modmanifest_reset();
 }
@@ -1424,8 +1445,110 @@ static void standin_pins(void)
     standin_pins_pinned();
 }
 
+static int sound_open = 1, pin_calls;
+int sh_modserve_scope_map_open(void) { return sound_open; }
+
+static const char sound_a[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+static const char sound_b[] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+char *sh_cache_manifest(const char *hash, size_t *len)
+{
+    const char *json = !strcmp(hash, sound_a) ? "{\"files\":[{\"path\":\"sounds/a.bnk\"},{\"path\":\"sounds/common.bnk\"}]}" :
+                                               "{\"files\":[{\"path\":\"sounds/b.bnk\"},{\"path\":\"sounds/common.bnk\"}]}";
+    *len = strlen(json);
+    return _strdup(json);
+}
+int sh_modpin_row(sh_modmanifest_row *r, const char *json, size_t len, const char *dir, sh_modpin_row_result *why)
+{
+    const char *hashes[] = {sound_a, sound_b};
+    (void)json; (void)len; (void)dir; (void)why;
+    pin_calls++;
+    return sh_modmanifest_row_pin(r, (const char *const *)r->names, hashes, r->name_count) ? SH_MODPIN_PINNED : -1;
+}
+
+static void sound_scope(void)
+{
+    installed fake = {0};
+    char *names[] = {"entities/a", "entities/b"};
+    sh_modsound_bank banks[4] = {0};
+    sh_modsound_table t = {0};
+    sh_modmanifest_row row = {0};
+    sh_modmanifest_list wanted = {0};
+    int i;
+    fake.salt = "1234abcd";
+    fake.name = "Test sounds"; fake.version = ""; fake.hash = sound_a; fake.place = "";
+    g_installed = &fake; g_installed_count = 1;
+    for (i = 0; i < 4; i++) {
+        strcpy_s(banks[i].build, sizeof banks[i].build, i == 3 ? sound_b : sound_a);
+        strcpy_s(banks[i].bundle, sizeof banks[i].bundle, i == 3 ? "othermod" : fake.salt);
+    }
+    banks[0].author_path = "sounds/a.bnk"; banks[1].author_path = "sounds/common.bnk";
+    banks[2].author_path = "sounds/b.bnk"; banks[3].author_path = "sounds/else.bnk";
+    t.banks = banks; t.count = 4;
+    strcpy_s(row.salt, sizeof row.salt, fake.salt);
+    strcpy_s(row.build, sizeof row.build, fake.hash);
+    row.names = names; row.name_count = 1;
+    wanted.rows = &row; wanted.count = 1;
+    sh_modsound_select_banks(&t);
+    CHECK(!banks[0].wanted && !banks[1].wanted);
+    CHECK(sh_modsound_note_rows(&wanted));
+    sh_modsound_select_banks(&t);
+    CHECK(banks[0].wanted && banks[1].wanted && !banks[2].wanted && !banks[3].wanted && pin_calls == 1);
+    CHECK(!sh_modsound_note_rows(&wanted));
+    sh_modsound_select_banks(&t);
+    CHECK(pin_calls == 1);
+    row.name_count = 2;
+    CHECK(sh_modsound_note_rows(&wanted)); sh_modsound_select_banks(&t);
+    CHECK(banks[0].wanted && banks[1].wanted && banks[2].wanted && !banks[3].wanted);
+    row.attached = 1;
+    CHECK(sh_modsound_note_rows(&wanted)); sh_modsound_select_banks(&t);
+    CHECK(banks[0].wanted && banks[1].wanted && banks[2].wanted && !banks[3].wanted && pin_calls == 2);
+    row.attached = 0; row.pinned = 1;
+    CHECK(sh_modsound_note_rows(&wanted)); sh_modsound_select_banks(&t);
+    CHECK(banks[0].wanted && banks[1].wanted && banks[2].wanted && !banks[3].wanted && pin_calls == 2);
+    sound_open = 0; sh_modsound_select_banks(&t);
+    CHECK(!banks[0].wanted && !banks[1].wanted && !banks[2].wanted && !banks[3].wanted);
+    sh_modsound_note_rows(NULL);
+    g_installed = NULL; g_installed_count = 0;
+}
+
+static void unavailable_wire(void)
+{
+    const char *raw = "{\"mod\":\"abcd1234\",\"name\":\"Rooms\",\"size\":9,\"local\":true,\"attached\":true,"
+                      "\"names\":[\"mods/abcd1234/room\"],\"labels\":{\"mods/abcd1234/room\":\"South Hall\"},"
+                      "\"modules\":[{\"name\":\"maps/modules/mods/abcd1234/room\",\"bounds\":[0,0,0,2,1,1]}]}";
+    sh_modmanifest_row row = {0}, back = {0};
+    sh_modmanifest_list list = {0};
+    char *wire, *again, *label;
+    CHECK(sh_modmanifest_parse_value(raw, strlen(raw), &row, NULL, 0));
+    CHECK(sh_modmanifest_list_add(&list, &row));
+    CHECK(sh_modmanifest_freeze_local_rows(&list, NULL, 0) == 1 && sh_modmanifest_freeze_local_rows(&list, NULL, 0) == 0);
+    CHECK(row.attached && !row.pinned && row.modules && row.name_count == 1);
+    wire = sh_modmanifest_format_value(&list.rows[0], NULL);
+    CHECK(wire && !strstr(wire, "\"local\":") && strstr(wire, "\"objects\":{}") &&
+          strstr(wire, "\"unavailable\":[\"mods/abcd1234/room\"]") && strstr(wire, "\"attached\":true"));
+    CHECK(wire && sh_modmanifest_parse_value(wire, strlen(wire), &back, NULL, 0));
+    CHECK(back.pinned && back.unavailable && back.unit_count == 0 && back.missing_count == 1 &&
+          back.attached && back.modules && !strcmp(back.modules, row.modules));
+    label = sh_modmanifest_row_label(&back, "mods/abcd1234/room");
+    CHECK(label && !strcmp(label, "South Hall"));
+    again = sh_modmanifest_format_value(&back, NULL);
+    CHECK(again && wire && !strcmp(again, wire));
+    free(again); free(label); free(wire);
+    sh_modmanifest_row_free(&back);
+    const char *bad[] = {
+        "{\"mod\":\"abcd1234\",\"size\":0,\"objects\":{}}",
+        "{\"mod\":\"abcd1234\",\"size\":0,\"objects\":{},\"unavailable\":false}",
+        "{\"mod\":\"abcd1234\",\"size\":0,\"objects\":{},\"unavailable\":[7]}"
+    };
+    for (size_t i = 0; i < 3; i++) CHECK(!sh_modmanifest_parse_value(bad[i], strlen(bad[i]), &back, NULL, 0));
+    sh_modmanifest_row_free(&row);
+    sh_modmanifest_list_free(&list);
+}
+
 int main(void)
 {
+    sound_scope();
+    unavailable_wire();
     printf("modmanifest_test\n");
     grammar();
     value_round_trip();

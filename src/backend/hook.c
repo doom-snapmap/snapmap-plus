@@ -1,7 +1,9 @@
 /* Reversible 14-byte absolute detours; callers choose the instruction boundaries. Explicit preparation variants
  * relocate one verified RIP-relative LEA, one RIP-relative 64-bit load, one relative call or one conditional jump. */
 #include <windows.h>
+#include <limits.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include "hook.h"
 #include "patch.h"
@@ -13,8 +15,7 @@ static void write_absjmp(uint8_t *p, void *dest)
     *(uint64_t *)(p + 6) = (uint64_t)dest;     /* the absolute 8-byte target follows inline */
 }
 
-/* Fixed records keep the original bytes and trampoline ownership until unpatch. */
-#define MAX_PATCHES 128
+/* Records keep the original bytes and callback ownership until unpatch. */
 typedef struct patch_record {
     void   *target;            /* engine fn whose prologue we overwrote */
     void   *tramp;             /* the trampoline (also this record's identity key) */
@@ -28,11 +29,23 @@ typedef struct patch_record {
 /* The table is shared by the bootstrap and the main thread (runtime installs); every public entry point holds
  * g_hook_lock. */
 static SRWLOCK      g_hook_lock = SRWLOCK_INIT;
-static patch_record g_patches[MAX_PATCHES];
+static patch_record *g_patches;
+static int          g_patch_capacity;
 static int          g_patch_count = 0;   /* high-water count of slots ever used */
 static const char  *g_last_failure = "none";
 
 const char *hook_last_failure(void) { return g_last_failure; }
+
+static void trim_records(void)
+{
+    while (g_patch_count && !g_patches[g_patch_count - 1].tramp && !g_patches[g_patch_count - 1].patch.live)
+        --g_patch_count;
+    if (!g_patch_count) {
+        free(g_patches);
+        g_patches = NULL;
+        g_patch_capacity = 0;
+    }
+}
 
 static void *prepare_locked(void *target, void *detour, size_t stolen, size_t offset, int relocation)
 {
@@ -95,16 +108,28 @@ static void *prepare_locked(void *target, void *detour, size_t stolen, size_t of
         if (!g_patches[i].patch.live && !g_patches[i].tramp) rec = &g_patches[i];
     }
     if (!rec) {
-        if (g_patch_count >= MAX_PATCHES) {
-            g_last_failure = "patch table full";
-            return NULL;
+        if (g_patch_count == g_patch_capacity) {
+            size_t capacity = g_patch_capacity ? (size_t)g_patch_capacity * 2 : 32;
+            patch_record *grown = capacity <= INT_MAX && capacity <= SIZE_MAX / sizeof *grown
+                                ? realloc(g_patches, capacity * sizeof *grown) : NULL;
+            if (!grown) {
+                g_last_failure = "could not allocate a registration record";
+                return NULL;
+            }
+            g_patches = grown;
+            g_patch_capacity = (int)capacity;
         }
         rec = &g_patches[g_patch_count++];
+        memset(rec, 0, sizeof *rec);
     }
 
     uint8_t *tramp = (uint8_t *)VirtualAlloc(NULL, emitted + 14, MEM_COMMIT | MEM_RESERVE,
                                              PAGE_EXECUTE_READWRITE);
-    if (!tramp) { g_last_failure = "trampoline allocation failed"; return NULL; }
+    if (!tramp) {
+        trim_records();
+        g_last_failure = "trampoline allocation failed";
+        return NULL;
+    }
     if (relocation == 1) {
         const uint8_t *lea = original + offset;
         int32_t displacement;
@@ -256,6 +281,7 @@ int hook_unpatch(void *tramp)
     for (int i = 0; i < g_patch_count; i++) {
         if (g_patches[i].tramp && g_patches[i].tramp == tramp) {
             reverted = revert_record(&g_patches[i]);
+            if (reverted) trim_records();
             break;
         }
     }
@@ -279,6 +305,7 @@ int hook_unpatch_all(void)
     AcquireSRWLockExclusive(&g_hook_lock);
     for (int i = g_patch_count - 1; i >= 0; i--)   /* Walk records in reverse slot order. */
         if (g_patches[i].tramp) n += revert_record(&g_patches[i]);
+    trim_records();
     ReleaseSRWLockExclusive(&g_hook_lock);
     return n;
 }

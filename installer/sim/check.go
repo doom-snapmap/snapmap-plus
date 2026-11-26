@@ -172,7 +172,6 @@ func cmdCheck(args []string, w io.Writer) (bool, error) {
 		}
 	}
 	cache := filepath.Join(data, "cache", "installer")
-	earlier := filepath.Join(data, "backups", "earlier-data")
 	for _, rel := range listFiles(data) {
 		top := topName(rel)
 		label, isPlayer := playerData[top]
@@ -194,8 +193,8 @@ func cmdCheck(args []string, w io.Writer) (bool, error) {
 				label = unexpected
 				fail("cache\\installer holds %s, which install.json does not record", rel)
 			}
-		case strings.HasPrefix(strings.ToLower(abs), strings.ToLower(earlier)+`\`):
-			label = "original player data and conversion records"
+		case strings.EqualFold(top, "backups"):
+			fail("the installer created a permanent player backup at %s", rel)
 		case isPlayer:
 		default:
 			label = unexpected

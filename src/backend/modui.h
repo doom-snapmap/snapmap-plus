@@ -103,6 +103,7 @@ typedef struct sh_modui_engine {
     /* The sound banks whose file changed after the game loaded them (sh_modsound_restart_banks): fn(context, bank
      * file name, owner salt) once each; returns the count. Main thread. */
     int (*restart_banks)(void (*fn)(void *context, const char *bank, const char *owner), void *context);
+    void (*finish_prefab_actors)(const char *json, size_t len);
 } sh_modui_engine;
 
 typedef struct sh_modui_map_info {

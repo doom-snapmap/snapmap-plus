@@ -3,10 +3,12 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -39,6 +41,95 @@ func (p *earlierPins) run(work string, args ...string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
+
+// Read the installed archives once for all the original stock sources in this folder.
+func (p *earlierPins) stockFiles(work string, files []earlierBlob) (map[string]string, error) {
+	paths := map[string]string{}
+	if len(files) == 0 {
+		return paths, nil
+	}
+	if err := p.ready(); err != nil {
+		return nil, err
+	}
+	dir, err := os.MkdirTemp(work, "stock-")
+	if err != nil {
+		return nil, err
+	}
+	var requests strings.Builder
+	for _, f := range files {
+		hash, source := f.Stock.SHA256, f.Stock.Source
+		if !pinHash(hash) || !pinRelative(source) || strings.ContainsAny(source, "\r\n\t") {
+			return nil, fmt.Errorf("invalid installed-game pointer for %s", f.Path)
+		}
+		if paths[hash] == "" {
+			fmt.Fprintf(&requests, "%s\t%s\n", hash, source)
+			paths[hash] = filepath.Join(dir, hash)
+		}
+	}
+	if err = os.WriteFile(filepath.Join(dir, "requests.txt"), []byte(requests.String()), 0600); err != nil {
+		return nil, err
+	}
+	if out, err := p.run(dir, "stocks=1"); err != nil {
+		return nil, fmt.Errorf("could not restore the original stock files: %s (%w)", strings.TrimSpace(out), err)
+	}
+	return paths, nil
+}
+
+// Some betas removed the author's stock copies after recording their hashes in mod.json.
+type prunedStock struct {
+	build string
+	paths map[string]bool
+}
+
+func prunedAuthorPaths(doc map[string]any) prunedStock {
+	block, _ := doc["snapmap-plus"].(map[string]any)
+	hash, _ := block["bundle"].(string)
+	if !pinHash(hash) {
+		return prunedStock{}
+	}
+	rows, _ := block["stock"].([]any)
+	paths := map[string]bool{}
+	for _, item := range rows {
+		row, _ := item.(map[string]any)
+		path, _ := row["path"].(string)
+		if row["inAssets"] == false && row["closure"] != true {
+			paths[path] = true
+		}
+	}
+	return prunedStock{hash, paths}
+}
+
+func (p *earlierPins) prunedAuthorFiles(src, work string, b *earlierBundle, removed prunedStock) (map[string]string, error) {
+	if len(removed.paths) == 0 {
+		return nil, nil
+	}
+	if b == nil || !b.assets || b.hash != removed.build {
+		return nil, fmt.Errorf("could not verify the earlier build of the stock files in %s", src)
+	}
+	var missing []earlierBlob
+	for _, f := range b.files {
+		if !removed.paths[f.Path] || f.Stock == nil || f.Closure {
+			continue
+		}
+		path := filepath.Join(src, filepath.FromSlash(f.Path))
+		if _, err := os.Lstat(path); err == nil {
+			continue
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+		missing = append(missing, f)
+	}
+	sources, err := p.stockFiles(work, missing)
+	if err != nil {
+		return nil, err
+	}
+	recovered := map[string]string{}
+	for _, f := range missing {
+		recovered[f.Request] = sources[f.Stock.SHA256]
+	}
+	return recovered, nil
+}
+
 func (p *earlierPins) stage(b *earlierBundle, work string) (string, error) {
 	if b.assets && b.inline {
 		var doc earlierObject
@@ -66,21 +157,27 @@ func (p *earlierPins) stage(b *earlierBundle, work string) (string, error) {
 			return "", e
 		}
 	}
+	var wanted []earlierBlob
+	for _, f := range b.files {
+		if b.assets && f.Stock != nil && !f.Closure {
+			wanted = append(wanted, f)
+		}
+	}
+	sources, err := p.stockFiles(work, wanted)
+	if err != nil {
+		return "", err
+	}
 	for _, f := range b.files {
 		dest := filepath.Join(root, filepath.FromSlash(f.Path))
 		if f.Stock != nil {
 			if f.Closure || !b.assets {
 				continue
 			}
-			stock := filepath.Join(work, "stock.bin")
-			if _, e := p.run(work, "stock="+f.Stock.SHA256, "source="+f.Stock.Source); e != nil {
-				return "", fmt.Errorf("installed game file %s does not match this build", f.Stock.Source)
-			}
-			r, e := os.Open(stock)
+			r, e := os.Open(sources[f.Stock.SHA256])
 			if e != nil {
 				return "", e
 			}
-			if e = copyPinFile(r, dest, f.Stock.SHA256, -1); e != nil {
+			if e := copyPinFile(r, dest, f.Stock.SHA256, -1); e != nil {
 				return "", e
 			}
 		} else if e := p.extract(b, f, dest); e != nil {
@@ -114,7 +211,14 @@ func (p *earlierPins) stage(b *earlierBundle, work string) (string, error) {
 		return "", e
 	}
 	if b.assets {
-		salt, e := translateEarlierMod(root, filepath.Join(work, "mod"))
+		if !b.inline {
+			var e error
+			b.added, e = p.globalNames(b, work)
+			if e != nil {
+				return "", e
+			}
+		}
+		salt, e := translateEarlierModWithNames(root, filepath.Join(work, "mod"), b)
 		if e != nil {
 			return "", e
 		}
@@ -130,9 +234,15 @@ func (p *earlierPins) stage(b *earlierBundle, work string) (string, error) {
 	return b.id, nil
 }
 
-func (p *earlierPins) row(row earlierObject) (earlierObject, error) {
+type missingEarlierPins struct{ items []string }
+
+func (e *missingEarlierPins) Error() string {
+	return "the original build files are unavailable: " + strings.Join(e.items, ", ")
+}
+
+func (p *earlierPins) candidatesForRow(row earlierObject) (string, []*earlierBundle, error) {
 	if err := p.index(); err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	id, hash, salted := strings.Cut(pinString(row, "mod"), "@")
 	version := pinString(row, "version")
@@ -140,11 +250,70 @@ func (p *earlierPins) row(row earlierObject) (earlierObject, error) {
 		id, hash = pinString(row, "id"), pinString(row, "bundle")
 	}
 	if !pinHash(hash) || !earlierID.MatchString(id) || (salted && !modSalt.MatchString(id)) {
-		return nil, fmt.Errorf("invalid earlier mod identity %q", id)
+		return "", nil, fmt.Errorf("invalid earlier mod identity %q", id)
 	}
 	var requestedBuild int64
 	if row["build"] != nil && json.Unmarshal(row["build"], &requestedBuild) != nil {
-		return nil, fmt.Errorf("invalid earlier build number")
+		return "", nil, fmt.Errorf("invalid earlier build number")
+	}
+
+	var names []string
+	var attached bool
+	if raw := row["names"]; raw != nil && json.Unmarshal(raw, &names) != nil {
+		return "", nil, fmt.Errorf("invalid earlier object names")
+	}
+	if raw := row["attached"]; raw != nil && json.Unmarshal(raw, &attached) != nil {
+		return "", nil, fmt.Errorf("invalid earlier attachment")
+	}
+	var found []*earlierBundle
+	for _, b := range p.candidates[hash] {
+		if strings.EqualFold(b.id, id) && salted == b.inline && (salted || version == b.version) && (row["build"] == nil || requestedBuild == b.build) {
+			found = append(found, b)
+		}
+	}
+	if len(found) == 0 {
+		if len(p.candidates[hash]) != 0 {
+			return "", nil, fmt.Errorf("the pinned identity disagrees with the original build %s", hash)
+		}
+		return "", nil, &missingEarlierPins{[]string{id + " @ " + hash}}
+	}
+	return id, found, nil
+}
+
+type earlierRowCheck func([]earlierObject) error
+
+func (p *earlierPins) checkRows(rows []earlierObject) error {
+	var missing []string
+	for _, row := range rows {
+		mod := pinString(row, "mod")
+		salt, hash, salted := strings.Cut(mod, "@")
+		if !salted && row["bundle"] == nil && row["id"] == nil {
+			continue
+		}
+		if salted && modSalt.MatchString(salt) && hash == strings.Repeat("0", 64) && row["id"] == nil && row["bundle"] == nil {
+			continue
+		}
+		_, _, err := p.candidatesForRow(row)
+		if err == nil {
+			continue
+		}
+		var absent *missingEarlierPins
+		if !errors.As(err, &absent) {
+			return err
+		}
+		missing = append(missing, absent.items...)
+	}
+	if len(missing) > 0 {
+		slices.Sort(missing)
+		return &missingEarlierPins{slices.Compact(missing)}
+	}
+	return nil
+}
+
+func (p *earlierPins) row(row earlierObject) (earlierObject, error) {
+	id, candidates, err := p.candidatesForRow(row)
+	if err != nil {
+		return nil, err
 	}
 	var names []string
 	var attached bool
@@ -159,10 +328,7 @@ func (p *earlierPins) row(row earlierObject) (earlierObject, error) {
 		}
 	}
 	var last error
-	for _, b := range p.candidates[hash] {
-		if !strings.EqualFold(b.id, id) || salted != b.inline || (!salted && version != b.version) || (row["build"] != nil && requestedBuild != b.build) {
-			continue
-		}
+	for _, b := range candidates {
 		if err := p.ready(); err != nil {
 			return nil, err
 		}
@@ -191,6 +357,9 @@ func (p *earlierPins) row(row earlierObject) (earlierObject, error) {
 		translated := make([]string, len(names))
 		for i, s := range names {
 			translated[i] = strings.ReplaceAll(s, "mods/"+id+"/", "mods/"+salt+"/")
+			if f, _, ok := b.added.at(s, "entitydef"); ok {
+				translated[i] = f.engine
+			}
 		}
 		next, err := p.slice(work, salt, display, translated, attached, b.built)
 		if err != nil {
@@ -236,7 +405,7 @@ func (p *earlierPins) row(row earlierObject) (earlierObject, error) {
 	if last == nil {
 		last = fmt.Errorf("the original build files are unavailable")
 	}
-	return nil, fmt.Errorf("%s @ %s: %w", id, hash, last)
+	return nil, fmt.Errorf("%s @ %s: %w", id, candidates[0].hash, last)
 }
 
 // The caller has verified and translated this embedded package in a private folder.
@@ -282,10 +451,16 @@ func copyEarlierPinTree(src, dst string) error {
 		}
 		to := filepath.Join(dst, rel)
 		if e.IsDir() {
-			return os.Mkdir(to, 0755)
+			return os.MkdirAll(to, 0755)
 		}
 		if !e.Type().IsRegular() {
 			return fmt.Errorf("invalid package file %s", name)
+		}
+		if isRegular(to) {
+			if identicalFiles(name, to) {
+				return nil
+			}
+			return fmt.Errorf("different files provide %s", rel)
 		}
 		return copyFile(name, to)
 	})
@@ -401,7 +576,7 @@ func (p *earlierPins) store(file, hash string, size int64, unit bool) error {
 		entry = "units/" + hash + ".json"
 		rel = entry
 	}
-	dst := filepath.Join(p.data, "cache", "content", filepath.FromSlash(rel))
+	dst := filepath.Join(p.output, "cache", "content", filepath.FromSlash(rel))
 	if !plainPath(dst) || !plainPath(file) {
 		return fmt.Errorf("linked mod content %s", entry)
 	}

@@ -159,6 +159,7 @@ static void mu_defaults(sh_modui_engine *e)
 {
     memset(e, 0, sizeof *e);
 #ifndef SH_MODUI_PURE
+    e->finish_prefab_actors = sh_modserve_finish_prefab_actors;
     e->script_info = mu_default_script_info;
     e->script_log = mu_default_script_log;
     e->script_mods = mu_default_script_mods;
@@ -197,6 +198,7 @@ void sh_modui_bind(const sh_modui_engine *engine)
         if (engine->refresh) g_engine.refresh = engine->refresh;
         if (engine->palette_rebuild) g_engine.palette_rebuild = engine->palette_rebuild;
         if (engine->stock_exists) g_engine.stock_exists = engine->stock_exists;
+        if (engine->finish_prefab_actors) g_engine.finish_prefab_actors = engine->finish_prefab_actors;
         if (engine->map_json) g_engine.map_json = engine->map_json;
         if (engine->map_info) g_engine.map_info = engine->map_info;
         if (engine->delete_entities) g_engine.delete_entities = engine->delete_entities;
@@ -3399,6 +3401,17 @@ static int mu_listing_set(const sh_modmanifest_list *rows, const char *const *na
     }
     for (i = 0; i < n; i++) list[i] = hashes[i];
     changed = sh_modserve_scope_set(list, n, map_open);
+#ifndef SH_MODUI_PURE
+    int sound_changed = 0;
+    if (map_open && name_count && (!rows || !rows->count)) {
+        sh_modmanifest_list placed;
+        if (sh_modmanifest_rows_for(names, name_count, &placed) >= 0) {
+            sound_changed = sh_modsound_note_rows(&placed);
+            sh_modmanifest_list_free(&placed);
+        }
+    } else sound_changed = sh_modsound_note_rows(map_open ? rows : NULL);
+    if (!changed && sound_changed) changed = sh_modsound_apply_rows();
+#endif
     free((void *)list);
     free(hashes);
     return changed;
@@ -3470,9 +3483,18 @@ int sh_modui_scope_refresh(const char *why) { return mu_on_main() ? mu_scope_now
 
 void sh_modui_prefab_finished(void)
 {
-    if (!sh_modserve_prefab_pending()) return;
+    const sh_modui_engine *e = mu_engine();
+    int actors = sh_modserve_actor_prefab_pending();
+    if (!actors && !sh_modserve_prefab_pending()) return;
     (void)sh_modui_scope_refresh("prefab placement");
     (void)sh_modserve_prefab_files(NULL, 0);
+    if (actors && e->finish_prefab_actors) {
+        char *map = NULL;
+        size_t len = 0;
+        int placed = e->map_json && e->map_json(&map, &len) > 0;
+        e->finish_prefab_actors(placed ? map : NULL, placed ? len : 0);
+        if (map) HeapFree(GetProcessHeap(), 0, map);
+    }
 }
 
 static int mu_scope_armed(void) { return sh_modserve_scope_relevant(); }

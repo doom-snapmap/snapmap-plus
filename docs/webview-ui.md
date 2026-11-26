@@ -112,8 +112,8 @@ crash submission use a short-lived HTTPS worker in the host and the
 | host to page | `loadPrefabResult {result, name, placed, reason}` | For an object prefab, posted once the game thread has decided: `placed` is `queued` ("<name>" is in hand: position it and press Space, or Esc to cancel), `staged` ("<name>" is staged but not in hand because <reason>: press Ctrl+V in the 3D view to place it; for a hovered entity, move the cursor off it first) or `unknown` (no decision within 2.5 s). Module prefabs and the mod outcomes below keep their own fields. |
 | host to page | `prefabDetail {..., folder, sig}` | The selected prefab now also carries its folder and a `size:mtime` content signature, and a module prefab carries its scene, so the Limits section can count its entities. |
 | page to host | `setDisplayNames {eids, names}` | Batch display-name writes through the `set_displayname` slot; the Timelines tree uses them for folder moves and renames. |
-| host to page | `prefabs {..., mods}` / `prefabDetail {..., modsStatus}` | The mods each prefab's block records, keyed like `meta`, as escaped `MODS_STATUS` JSON (`{count, missing, mods: [{id, salt, build, size, installed, state, cause}]}`, `id` being the mod's name, never its salt); see [Prefabs and their mods](#prefabs-and-their-mods). |
-| host to page | `loadPrefabResult {result: 3 \| -7, message}` | 3: the placement is held while its missing mods are asked for online; -7: refused because of its mods (the message says why, or is empty when the game's own notice did). |
+| host to page | `prefabs {..., mods}` / `prefabDetail {..., modsStatus}` | The mods each prefab's block records, keyed like `meta`, as escaped `MODS_STATUS` JSON (`{count, missing, mods: [{id, salt, build, size, installed, state, cause}]}`, `id` is the display name and `installed` indicates whether the required content is available); see [Prefabs and their mods](#prefabs-and-their-mods). |
+| host to page | `loadPrefabResult {result: 3 \| -7, message}` | 3 means local content is being prepared. -7 means placement was refused. The backend supplies the reason when available. |
 | page to host | `exportPrefab {name, folder}` / `importPrefab` | Open the Windows Save dialog for a prefab's ZIP, or the Open dialog for a ZIP or an extracted export's `.json`; the host answers `prefabFileResult {op, ok, message, name?, cancelled?}` and refreshes the list after an import. |
 
 ## Prefabs 3D preview
@@ -261,47 +261,45 @@ The page reads a prefab's details as the view, the flat object
 A prefab whose file has no block but a `<name>.meta.json` beside it, or a block
 in an earlier shape, is refused for placement and export with "This prefab was
 saved by an earlier Snapmap+; run the Snapmap+ installer to update it."; its details show nothing and an edit writes nothing. The list
-reads each prefab's view from at most the last 1 MB of its file (where the
-block is) for its tags, module kind and mods; it still never sends a scene,
+reads from the last 1 MB, extending the window if necessary to find the block
+with its tags, module kind and mods. A list message carries no scene,
 and a `.meta.json` is never listed as a prefab.
 
-The list shows a pill per prefab that records mods: "Mods: <name>" when every
-one is installed, "Needs mods: <name>" (warning colours) naming the missing ones
-otherwise, "+N" when there are more, and every mod with its state in the
-tooltip; the filter matches "mods" and "needs mods". A mod counts as installed
-under the asset rule (an installed folder of its salt provides every name the
-prefab's row lists, whatever its hash; `MODS_STATUS` rows carry `state`
-`served`, `missing` or `incomplete` and the refusal sentence as `cause`).
-Prefab Details shows a Mods section under the module warning: one row per mod with its state in the
-Mods tab's words for a mod and the open map ([A mod and the open map](#a-mod-and-the-open-map)): Not
-installed; with a map open, In this map (the map glyph) or Not in this map; else Installed. The pill's
-tooltip says the same per mod, and both follow the open map's mods as the document changes. Under the
-rows: "Needs mods: N are not installed. Install them from the prefab's export with Install in the
-Mods tab, then Load / Place.", or "Every mod this prefab needs is installed.". A mod recorded without a
-name is shown as "an unnamed mod", never by its salt. The right-click menu's Load / Place makes the head
-button's check (a module prefab places only in Blueprint, `pfLoadPlace`).
-The module warning stays above it; a module one of the rows provides is a
-mod, not a missing room.
+The list shows "Mods" when all recorded content is ready and "Needs mods" when
+some is missing. The pill names the first relevant mod, counts any others, and
+lists each mod's state in its tooltip. The filter matches "mods" and "needs mods".
 
-Load / Place asks the backend first (`MODS_RESOLVE`, with the whole file) for
-either kind of prefab; one that names no mods is answered without the game. It
-answers place now, held (the host follows it with `MODS_POLL` on each
-think-loop turn and places the prefab again, through the same Load / Place,
-once the mods are installed), a module the player cannot get, or refused. The
-page shows the backend's text as a toast. Export (Prefab Details head) always
-writes one ZIP, `<name>.json` and each mod as it is installed,
-`mods/<folder name>/mod.json` and its folders by kind (`mods/<folder name>/materials/...`), through the rawmap pickers'
-Save dialog with a "Prefab export (*.zip)" type, proposing `<name>.zip`; it and
-Import open in the last folder used for each, Downloads the first time (see
-File dialog folders above).
-Import (the list head: "Import a prefab export (its ZIP, or the .json of an extracted one): the prefab
-joins the list with what it needs") uses the Open dialog with "Prefab exports (*.zip, *.json)": a ZIP, or
-the `.json` inside an extracted export folder, whose `mods/` folder holds the mod folders
-(`rawmap_picker.h`, `for_prefab_dialog`).
-Import is the ordinary install of each mod folder into the root of `mods\`, as the
-Mods tab's install button does it; a carried folder whose salt an installed folder
-holds and whose names that folder provides is skipped. The backend reads and writes them
-on the UI thread, with no network.
+`MODS_STATUS` checks a local row against the content that serves its recorded
+object names. For a pinned row it checks the completed composition or its exact
+units and their files. The existing `installed` flag means the required content
+is available locally, including from an imported prefab. The row can report
+`served`, `missing` or `incomplete`. A local row may also include a reason in
+`cause`.
+
+Prefab Details shows "Content ready", "Missing content" or "Content incomplete".
+When a map is open, a ready row shows "In this map" or "Not in this map" using
+the Mods tab's map state for that salt. A missing row keeps its warning even
+when the map names that mod. If content is missing, the details direct the
+player to **Prefabs → Import** to open the author's prefab ZIP, then **Load / Place**
+on the imported prefab. The module warning and Blueprint placement check still
+apply. A mod without a recorded name appears as "an unnamed mod".
+
+Load / Place checks the whole prefab with `MODS_RESOLVE` before passing either
+object or module data to the editor. A local source can supply the objects
+directly. When pinned content needs preparation the host polls `MODS_POLL`,
+then retries the original placement in the same map. A refusal gives the
+backend's reason. Load / Place uses local content without contacting the store.
+
+**Export** in Prefab Details writes one ZIP with the prefab JSON, its required
+unit manifests under `units/` and the files those units need under `files/`.
+**Import** in the Prefabs tab reads that ZIP or the JSON in an extracted
+export alongside those directories. It adds the prefab to the library and
+reuses or caches its verified content. Import does not create an editable mod
+folder. A bare JSON can enter the library with missing content. Importing its
+full ZIP can repair an existing identical prefab without changing the prefab
+file. The host refreshes the list and the selected prefab's status after either
+kind of successful import. The dialogs remember their most recent folders
+and start in Downloads on first use.
 
 The list follows the prefabs folder: the host's folder watcher (`folder_watch.h`)
 sends a fresh `prefabs` list 300 ms after the last change of a burst under

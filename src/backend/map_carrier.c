@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "map_carrier.h"
+#include "config_json.h"
 #include "map_shards.h"
 
 #define CR_ERR(...) do { if (err && err_cap) _snprintf_s(err, err_cap, _TRUNCATE, __VA_ARGS__); } while (0)
@@ -446,58 +447,159 @@ int sh_carrier_object_string(const char *obj, const char *end, const char *key, 
     return 1;
 }
 
-/* The unsupported variable-name families (map_carrier.h, sh_map_old_shape). */
-static const char *const cr_old_families[] = {
-    "smpkg.", "smpbind.", "smpref.", "smpmod1.", "smpprod1.", "smp.render.v1", "smp.bounds.v1", "smnav1."
-};
-
-/* 1 when the string whose opening quote is at `quote` is the value of a
- * "name" member: ..."name" <ws> : <ws> "<family>... */
-static int cr_is_name_value(const char *json, const char *quote)
+static int cr_word(const char *s, size_t n, const char *word)
 {
-    const char *r = quote - 1;
-    while (r >= json && sh_shard_is_ws(*r)) r--;
-    if (r < json || *r != ':') return 0;
-    r--;
-    while (r >= json && sh_shard_is_ws(*r)) r--;
-    if (r - 5 < json) return 0;
-    return memcmp(r - 5, "\"name\"", 6) == 0;
+    return n == strlen(word) && memcmp(s, word, n) == 0;
+}
+
+static int cr_id(const char *s, size_t n, const char *punct)
+{
+    if (!n) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (!(s[i] >= 'a' && s[i] <= 'z') && !(s[i] >= 'A' && s[i] <= 'Z') &&
+            !sh_shard_is_digit(s[i]) && !memchr(punct, s[i], strlen(punct))) return 0;
+    return 1;
+}
+
+static int cr_salt(const char *s, size_t n)
+{
+    if (n != 8 || s[0] < 'a' || s[0] > 'z') return 0;
+    for (size_t i = 1; i < n; i++)
+        if (!(s[i] >= 'a' && s[i] <= 'z') && !sh_shard_is_digit(s[i])) return 0;
+    return 1;
+}
+
+static int cr_old_row(const char *obj, size_t n, int salt_only)
+{
+    const char *id, *mod;
+    size_t id_len, mod_len;
+    if (sh_carrier_object_string(obj, obj+n, "id", &id, &id_len) == 1 &&
+        id_len && cr_id(id,1,"") && cr_id(id,id_len,"._-") &&
+        sh_carrier_object_member(obj, obj+n, "bundle", NULL, NULL) == 1) return 1;
+    if (sh_carrier_object_string(obj, obj+n, "mod", &mod, &mod_len) != 1) return 0;
+    return (mod_len > 8 && mod[8] == '@' && cr_salt(mod,8)) || (salt_only && cr_salt(mod,mod_len));
+}
+
+static int cr_number(const char *s, size_t n)
+{
+    if (n < 1 || n > 7) return 0;
+    for (size_t i = 0; i < n; i++) if (!sh_shard_is_digit(s[i])) return 0;
+    return 1;
+}
+
+/* Read one dotted suffix backwards. Module and package names can themselves contain dots. */
+static int cr_suffix(const char *start, const char **end, int digest)
+{
+    const char *last = *end, *s = last;
+    while (s > start && s[-1] != '.') s--;
+    if (s == start) return 0;
+    if (digest) {
+        if (last - s != 16) return 0;
+        for (const char *p=s; p<last; p++)
+            if (!sh_shard_is_digit(*p) && !(*p >= 'a' && *p <= 'f')) return 0;
+    } else if (!cr_number(s,(size_t)(last-s))) return 0;
+    *end = s-1;
+    return 1;
+}
+
+static int cr_old_setting(const char *v, size_t n, int bounds)
+{
+    size_t i;
+    int digit=0;
+    if (n<3 || v[0]<'1' || v[0]>(bounds?'1':'4') || v[1]!=';') return 0;
+    for (i=2;i<n;i++) {
+        if (v[i]>='0' && v[i]<='9') digit=1;
+        else if (!v[i] || !strchr("+-.eE; ",v[i])) return 0;
+    }
+    return digit;
+}
+
+static int cr_old_variable(const char *name, size_t n, const char *v, size_t vn)
+{
+    const char *end = name+n, *start, *dot;
+    if (cr_word(name,n,"smp.render.v1") || cr_word(name,n,"smp.bounds.v1"))
+        return cr_old_setting(v,vn,cr_word(name,n,"smp.bounds.v1"));
+    if (n>8 && !memcmp(name,"smpmod1.",8)) {
+        size_t decoded;
+        char *row;
+        int old;
+        start = name+8;
+        dot = memchr(start,'.',(size_t)(end-start));
+        if (!dot || !cr_number(start,(size_t)(dot-start)) || !cr_number(dot+1,(size_t)(end-dot-1)) ||
+            !vn || v[cr_ws(v,vn,0)]!='{') return 0;
+        row = malloc(vn+1);
+        if (!row) return 1;
+        old = sh_native_json_decode_string(v-1,vn+2,row,vn+1,&decoded) && cr_old_row(row,decoded,0);
+        free(row);
+        return old;
+    }
+    if (n>6 && !memcmp(name,"smpkg.",6)) {
+        start = name+6;
+        return cr_suffix(start,&end,1) && cr_suffix(start,&end,0) && cr_suffix(start,&end,0) &&
+               cr_id(start,(size_t)(end-start),"._-");
+    }
+    if (n>7 && !memcmp(name,"smnav1.",7)) {
+        start = name+7;
+        if (!cr_suffix(start,&end,1) || !cr_suffix(start,&end,1) ||
+            !cr_suffix(start,&end,0) || !cr_suffix(start,&end,0)) return 0;
+        dot=end;
+        while (dot>start && dot[-1]!='.') dot--;
+        return dot>start && cr_id(dot,(size_t)(end-dot),"_-") &&
+               cr_id(start,(size_t)(dot-1-start),"./_-") && memchr(start,'/',(size_t)(dot-1-start));
+    }
+    return 0;
+}
+
+static int cr_old_variables(const char *json, size_t n)
+{
+    const char *vars, *rows, *end, *row;
+    size_t vn, rn, count;
+    if (!sh_shard_find(json,n,"\"smp",4) && !sh_shard_find(json,n,"\"smnav1.",8)) return 0;
+    if (sh_carrier_object_member(json,json+n,"variables",&vars,&vn)!=1 ||
+        sh_carrier_object_member(vars,vars+vn,"string",&rows,&rn)!=1) return 0;
+    end=rows+rn;
+    while (sh_carrier_array_next(&rows,end,&row,&count)==1) {
+        const char *info,*name,*type,*value;
+        size_t in,nn,tn,valn;
+        if (sh_carrier_object_member(row,row+count,"info",&info,&in)==1 &&
+            sh_carrier_object_string(info,info+in,"~type",&type,&tn)==1 && cr_word(type,tn,"snapVarInfo_t") &&
+            sh_carrier_object_string(info,info+in,"name",&name,&nn)==1 &&
+            sh_carrier_object_string(row,row+count,"initialValue",&value,&valn)==1 &&
+            cr_old_variable(name,nn,value,valn)) return 1;
+    }
+    return 0;
 }
 
 int sh_map_old_shape_view(const char *json, size_t len, const sh_carrier_view *view)
 {
-    size_t f;
-    if (!json || !len) return SH_MAP_OLD_NONE;
-    for (f = 0; f < sizeof cr_old_families / sizeof cr_old_families[0]; f++) {
-        size_t m = strlen(cr_old_families[f]), at = 0;
-        while (at < len) {
-            const char *hit = sh_shard_find(json + at, len - at, cr_old_families[f], m);
-            if (!hit) break;
-            at = (size_t)(hit - json) + 1;
-            if (hit > json && hit[-1] == '"' && cr_is_name_value(json, hit - 1)) {
-                /* A variable's name is followed by its info object's snapVarInfo_t; an entity or object an
-                 * author named so is not an unsupported shape. */
-                const char *q = (const char *)memchr(hit, '"', len - (size_t)(hit - json));
-                size_t w = q ? len - (size_t)(q + 1 - json) : 0;
-                if (w > 256) w = 256;
-                if (q && sh_shard_find(q + 1, w, "snapVarInfo_t", 13)) return SH_MAP_OLD_VARIABLES;
+    const char *block, *end, *rows, *elem;
+    size_t n, en;
+    if (!json || !len || !view) return SH_MAP_OLD_NONE;
+    if (cr_old_variables(json,len)) return SH_MAP_OLD_VARIABLES;
+    if (view->members!=1 || (view->format!=1 && view->format!=2)) return SH_MAP_OLD_NONE;
+    block=json+view->value_from;
+    end=json+view->value_to;
+    if (view->format==1) {
+        const char *settings,*value;
+        size_t sn,vn;
+        if (sh_carrier_object_member(block,end,"settings",&settings,&sn)==1 &&
+            ((sh_carrier_object_string(settings,settings+sn,"bounds",&value,&vn)==1 && cr_old_setting(value,vn,1)) ||
+             (sh_carrier_object_string(settings,settings+sn,"render",&value,&vn)==1 && cr_old_setting(value,vn,0))))
+            return SH_MAP_OLD_FORMAT;
+        if (sh_carrier_object_member(block,end,"nav",&rows,&n)==1) {
+            const char *nav_end=rows+n;
+            while (sh_carrier_array_next(&rows,nav_end,&elem,&en)==1) {
+                if (sh_carrier_object_string(elem,elem+en,"module",&value,&vn)==1 && vn &&
+                    sh_carrier_object_string(elem,elem+en,"class",&value,&vn)==1 && vn &&
+                    sh_carrier_object_string(elem,elem+en,"digest",&value,&vn)==1 && vn &&
+                    sh_carrier_object_member(elem,elem+en,"data",NULL,NULL)==1) return SH_MAP_OLD_FORMAT;
             }
         }
     }
-    if (view->format == 1) return SH_MAP_OLD_FORMAT;
-    if (view->mods.present) {
-        const char *cursor = json + view->mods.from, *end = json + view->mods.to, *elem;
-        size_t elem_len;
-        while (sh_carrier_array_next(&cursor, end, &elem, &elem_len) == 1) {
-            if (*elem != '{') continue;
-            const char *mod = NULL;
-            size_t mod_len = 0;
-            if (sh_carrier_object_member(elem, elem + elem_len, "id", NULL, NULL) == 1 ||
-                sh_carrier_object_member(elem, elem + elem_len, "bundle", NULL, NULL) == 1)
-                return SH_MAP_OLD_ROWS;
-            if (sh_carrier_object_string(elem, elem + elem_len, "mod", &mod, &mod_len) == 1 && memchr(mod, '@', mod_len))
-                return SH_MAP_OLD_ROWS;
-        }
+    if (sh_carrier_object_member(block,end,"mods",&rows,&n)==1) {
+        const char *mods_end=rows+n;
+        while (sh_carrier_array_next(&rows,mods_end,&elem,&en)==1)
+            if (cr_old_row(elem,en,view->format==1)) return view->format==1 ? SH_MAP_OLD_FORMAT : SH_MAP_OLD_ROWS;
     }
     return SH_MAP_OLD_NONE;
 }

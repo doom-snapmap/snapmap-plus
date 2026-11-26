@@ -11,6 +11,7 @@
 #include <dbghelp.h>
 #include "fault_shield.h"
 #include "../backend/host_image.h"
+#include "../common/profile_dir.h"
 #include "../common/wide_path.h"
 
 #pragma comment(lib, "shell32.lib")   /* SHGetKnownFolderPath */
@@ -181,9 +182,9 @@ static void dump_env(void)
         wcscpy_s(sub, SH_WPATH_MAX, g_dir);
         if (sh_wpath_append(sub, SH_WPATH_MAX, L"snapmap-plus")) dump_dir("DOOM\\snapmap-plus (our bundle)", sub);
     }
-    if (sh_wpath_local_appdata(sub, SH_WPATH_MAX) && sh_wpath_append(sub, SH_WPATH_MAX, L"snapmap-plus")) {
-        dump_dir("LOCALAPPDATA\\snapmap-plus (user data)", sub);
-        if (sh_wpath_append(sub, SH_WPATH_MAX, L"prefabs")) dump_dir("LOCALAPPDATA\\snapmap-plus\\prefabs", sub);
+    if (sh_profile_long(sub, SH_WPATH_MAX)) {
+        dump_dir("Snapmap+ profile", sub);
+        if (sh_wpath_append(sub, SH_WPATH_MAX, L"prefabs")) dump_dir("Snapmap+ profile prefabs", sub);
     }
     dump_modules();
 }

@@ -868,17 +868,15 @@ static void pm_refuse_unasked(const char *name, const sh_modmanifest_list *rows,
         pm_puts(&b, sh_prefab_mods_label(&rows->rows[i]));
         n++;
     }
-    if (b.bad || !n) pm_msg(msg, "This prefab was not placed: it needs mods you do not have. Ask its author for the "
-                               "prefab's .zip export.");
-    else pm_msg(msg, "This prefab was not placed: it needs %s, which %s not on this computer. Ask its author for the "
-                     "prefab's .zip export.", b.p, n == 1 ? "is" : "are");
+    if (b.bad || !n) pm_msg(msg, "This prefab needs mod content. Use Import in the Prefabs tab to open the author's prefab ZIP.");
+    else pm_msg(msg, "This prefab needs content from %s. Use Import in the Prefabs tab to open the author's prefab ZIP.", b.p);
     free(b.p);
     if (msg && *msg) { pm_print(*msg); pm_logf("PREFABS: prefab %s: %s", name && name[0] ? name : "prefab", *msg); }
     if (o->toast && msg && *msg) o->toast(*msg);
 }
 
 /* Only a placed entity's inherit is a palette key. Module names and strings in its editable properties are not. */
-static int pm_palette(const char *text, size_t len, const sh_modmanifest_list *rows, char **cause)
+static int pm_palette(const char *text, size_t len, const sh_modmanifest_list *rows, const sh_modmanifest_list *all, char **cause)
 {
     mpj *doc = text ? mpj_parse(text, len) : NULL;
     const mpj *entities = mpj_get(doc, "entities");
@@ -901,8 +899,10 @@ static int pm_palette(const char *text, size_t len, const sh_modmanifest_list *r
             names[count++] = key->text;
     }
     if (sh_modserve_prefab_files(hashes, n) < 0) goto done;
+    sh_modserve_prepare_prefab_actors(text, len, all);
     ok = sh_modserve_prefab_rows(names, (size_t)count, &missing);
     if (!ok) {
+        sh_modserve_finish_prefab_actors(NULL, 0);
         pm_msg(cause, "the editor could not load the palette row for %s", missing ? missing : "a mod object");
         (void)sh_modserve_prefab_files(NULL, 0);
     }
@@ -914,7 +914,8 @@ done:
     return ok;
 }
 
-static int pm_join_pinned(const char *text, size_t len, const sh_modmanifest_list *pinned, int editor, int *seq, char **cause)
+static int pm_join_pinned(const char *text, size_t len, const sh_modmanifest_list *pinned, const sh_modmanifest_list *all,
+                          int editor, int *seq, char **cause)
 {
     sh_modmanifest_list cur, use;
     char **names = NULL;
@@ -962,16 +963,17 @@ static int pm_join_pinned(const char *text, size_t len, const sh_modmanifest_lis
             goto done;
         }
         sh_cache_on_load(&use, names, n);
-        if (!pm_palette(text, len, &use, cause)) { r = -1; goto done; }
+        if (!pm_palette(text, len, &use, all, cause)) { r = -1; goto done; }
         for (i = 0; i < use.count && r > 0; i++) if (sh_modmanifest_current_add_row(&use.rows[i]) < 0) r = -1;
         if (r > 0) {
             (void)sh_modui_scope_refresh("prefab");
             pm_logf("PREFABS: %u row(s) of the prefab's own content joined the map", (unsigned)use.count);
         } else {
             (void)sh_modserve_prefab_files(NULL, 0);
+            sh_modserve_finish_prefab_actors(NULL, 0);
             pm_msg(cause, "Snapmap+ ran out of memory");
         }
-    }
+    } else if (r > 0) sh_modserve_prepare_prefab_actors(text, len, all);
 done:
     free(names);
     sh_modmanifest_list_free(&use);
@@ -990,7 +992,10 @@ static int pm_resolve_in_map(const char *text, size_t len, const sh_modmanifest_
         pm_msg(msg, SH_PREFAB_MAP_CHANGED);
         return SH_PREFAB_MODS_REFUSED;
     }
-    if (!rows || !rows->count) return SH_PREFAB_MODS_PLACE;
+    if (!rows || !rows->count) {
+        sh_modserve_prepare_prefab_actors(text, len, rows);
+        return SH_PREFAB_MODS_PLACE;
+    }
     /* Rows resolve in the open map's own context. A module prefab whose room no row provides and the palette
      * lacks (DLC the player does not own) cannot be installed. */
     if (text && sh_mp_is_module_file(text, len)) {
@@ -1035,7 +1040,7 @@ static int pm_resolve_in_map(const char *text, size_t len, const sh_modmanifest_
         memset(&local, 0, sizeof local);
         for (i = 0; i < rows->count; i++)
             (void)sh_modmanifest_list_add(rows->rows[i].pinned ? &pinned : &local, &rows->rows[i]);
-        r = !pinned.count ? 1 : o->use_pinned ? o->use_pinned(&pinned, &why) : pm_join_pinned(text, len, &pinned, editor, seq, &why);
+        r = !pinned.count ? 1 : o->use_pinned ? o->use_pinned(&pinned, &why) : pm_join_pinned(text, len, &pinned, rows, editor, seq, &why);
         if (r == SH_PREFAB_MODS_HELD) {
             pm_msg(msg, "Preparing mod content for %s.", name && name[0] ? name : "the prefab");
             sh_modmanifest_list_free(&pinned);
@@ -1053,6 +1058,7 @@ static int pm_resolve_in_map(const char *text, size_t len, const sh_modmanifest_
         }
         free(why);
         pm_prepare(&local, name);
+        if (!pinned.count || o->use_pinned) sh_modserve_prepare_prefab_actors(text, len, rows);
         sh_modmanifest_list_free(&pinned);
         sh_modmanifest_list_free(&local);
     }
@@ -1193,9 +1199,7 @@ static int pm_same_bytes(const char *path, const char *data, size_t len)
     return same;
 }
 
-/* The import's step between reading the export and installing its mods: the
- * prefab is added to the library first, so a refusal here installs nothing,
- * and a failed install removes the file again (nothing of the import stays). */
+/* Add the prefab to the library first. A failed cache import removes a newly added file. */
 typedef struct pm_import_ctx {
     const char *src;          /* the export's path, for its file name */
     const char *dir;          /* the library, with a trailing separator */
@@ -1288,26 +1292,28 @@ int sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char **
         return -1;
     }
     if (name_out) { *name_out = c.name; c.name = NULL; }
-    /* Rows the export names but does not carry: the placement asks for them. */
+    /* A JSON file can name content that did not come with it. */
     pm_puts(&extra, "");
     if (sh_prefab_mods_rows_of(text, len, NULL, &rows) > 0) {
         for (i = 0; i < rows.count; i++) {
             if (pm_installed(&rows.rows[i])) continue;
-            pm_puts(&extra, absent ? ", " : " It also needs ");
+            pm_puts(&extra, absent ? ", " : " Missing content from ");
             pm_puts(&extra, sh_prefab_mods_label(&rows.rows[i]));
             absent++;
         }
-        if (absent) pm_puts(&extra, ", which the export does not carry.");
+        if (absent) pm_puts(&extra, ". Use Import in the Prefabs tab to open the author's full prefab ZIP.");
     }
     sh_modmanifest_list_free(&rows);
     {
         const char *nm = name_out && *name_out ? *name_out : c.name ? c.name : "", *more = extra.p && !extra.bad ? extra.p : "";
-        if (c.result == 1)
-            pm_msg(msg, st.bundles_installed || st.bundles_present ? "Imported prefab %s with its mod content.%s"
-                                                                   : "Imported prefab %s.%s", nm, more);
+        if (absent)
+            pm_msg(msg, c.result == 1 ? "Imported prefab %s.%s" : "Prefab %s is already in your library.%s", nm, more);
+        else if (c.result == 1)
+            pm_msg(msg, st.bundles_installed || st.bundles_present ? "Imported prefab %s with its mod content."
+                                                                   : "Imported prefab %s.", nm);
         else if (st.bundles_installed || st.files)
-            pm_msg(msg, "Prefab %s is already in your library; its mod content was added.%s", nm, more);
-        else pm_msg(msg, "Prefab %s and its mod content are already here; nothing was changed.%s", nm, more);
+            pm_msg(msg, "Prefab %s is already in your library; its mod content was added.", nm);
+        else pm_msg(msg, "Prefab %s and its mod content are already here; nothing was changed.", nm);
     }
     pm_logf("PREFABS: import %s -> %s: %u row(s); %u unit(s) and %u file(s) into the content cache, %u unit(s) there "
             "already, in %.0f ms", src_utf8, c.result == 1 && c.path ? c.path : "(unchanged)", st.bundles,
@@ -1409,8 +1415,17 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
             pm_out(call, SH_PREFAB_EARLIER_TEXT);
             return SH_PREFAB_MODS_REFUSED;
         }
-        /* No rows: the placement goes on without mods. */
-        if (n <= 0 && !resume) {
+        /* Native prefab JSON can contain comments. Check the same entities the editor will place. */
+        size_t engine_len = 0;
+        char *engine = sh_prefab_mods_strip_copy(call->text, call->text_len, &engine_len);
+        if (call->text && !engine) {
+            sh_modmanifest_list_free(&rows);
+            pm_out(call, "Snapmap+ ran out of memory preparing the prefab.");
+            return SH_PREFAB_MODS_REFUSED;
+        }
+        engine_len = sh_prefab_block_strip_comments(engine, engine_len);
+        if (n <= 0 && !resume && !sh_modserve_prefab_has_direct_actors(engine, engine_len)) {
+            free(engine);
             sh_modmanifest_list_free(&rows);
             if (!o->editor_context || (call->editor_context && call->editor_context == o->editor_context()))
                 return SH_PREFAB_MODS_PLACE;
@@ -1420,16 +1435,18 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
         memset(&job, 0, sizeof job);
         job.resume = resume;
         job.editor = call->editor_context;
-        job.text = call->text;
-        job.len = call->text_len;
+        job.text = engine;
+        job.len = engine_len;
         job.rows = &rows;
         job.name = call->name ? call->name : "";
         if (!o->call_main || !o->call_main(pm_resolve_job_main, &job)) {
+            free(engine);
             sh_modmanifest_list_free(&rows);
             free(job.msg);
             pm_out(call, "The game did not answer, so this prefab's mods could not be checked. Try again.");
             return SH_PREFAB_MODS_NO_ANSWER;
         }
+        free(engine);
         sh_modmanifest_list_free(&rows);
         call->seq = job.seq;
         pm_out(call, job.msg);
@@ -1657,7 +1674,7 @@ void sh_prefab_mods_command(int argc, const char *const *argv)
             pm_linef("  %s: %s", sh_prefab_mods_label(&rows.rows[i]),
                      st < 0 ? (pm_pinned_here(&rows.rows[i]) ? "its content is on this computer"
                                                              : "its content is not on this computer")
-                     : st == SH_MODPUB_ROW_SERVED ? "installed" : cause && cause[0] ? cause : "not installed");
+                     : st == SH_MODPUB_ROW_SERVED ? "its content is on this computer" : cause && cause[0] ? cause : "missing content");
             free(cause);
         }
         sh_modmanifest_list_free(&rows);
@@ -1800,15 +1817,8 @@ static void pm_bind_defaults(void)
 
 static char *pm_default_root(void)
 {
-    PWSTR known = NULL;
-    char *base, *out;
-    if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &known)) || !known) return NULL;
-    base = sh_mb_utf8(known);
-    CoTaskMemFree(known);
-    if (!base) return NULL;
-    out = sh_textf("%s\\snapmap-plus\\prefabs\\", base);
-    free(base);
-    return out;
+    const char *base = sh_mb_user_root();
+    return base ? sh_textf("%s\\prefabs\\", base) : NULL;
 }
 
 void h_sh_prefab(idCmdArgs *a)

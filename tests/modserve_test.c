@@ -3548,10 +3548,49 @@ static int isolation_load(void *c, const char *type, const char *name, int persi
 static int cs_identify(void *c, const char *source, char sha[SH_MB_HASH_HEX + 1], unsigned long long *size);
 static int cs_read(void *c, const char *source, const char *sha, unsigned char **bytes, size_t *len);
 
+static void check_actor_play(const char *actor, const char *cls, int inert);
+
+static void make_refused_supplement(const char *content, char hash[65])
+{
+    static const char key[] = "snapmap-plus/composition/1\n1\nisolated\n";
+    static const char def[] = SH_MODSERVE_STANDIN_CLASS("idAI2");
+    static const char row[] = "{ edit = { entityDef = \"entities/arachnotron\";"
+        " displayNameTag = \"#str_sh_unknown\"; displayDescriptionTag = \"#str_sh_unknown_desc\";"
+        " flags = { placeable = false; editable = true; isMoveable = true; isDeletable = true; }"
+        " renderInfo = { alwaysDrawBounds = true; alwaysDrawLabel = true; }"
+        " entRefs = { num = 0; } varRefs = { num = 0; } } }";
+    static const char descriptor[] = "{\"name\":\"isolated\",\"snapmap-plus\":{\"format\":2,\"salt\":\"isolated\"}}";
+    char dir[MAX_PATH], path[MAX_PATH], *why = NULL;
+    sh_mb_bundle built;
+    sh_mb_sha256_hex(key, sizeof key - 1, hash);
+    snprintf(dir, sizeof dir, "%s\\%s", content, hash);
+    snprintf(path, sizeof path, "%s\\mod.json", dir);
+    write_file(path, descriptor, sizeof descriptor - 1);
+    snprintf(path, sizeof path, "%s\\entities\\arachnotron.decl", dir);
+    write_file(path, def, sizeof def - 1);
+    snprintf(path, sizeof path, "%s\\decls\\snapeditorentitydef\\" SH_MODSERVE_STANDIN_DIR "\\arachnotron.decl", dir);
+    write_file(path, row, sizeof row - 1);
+    CHECK(sh_mb_build_composition(dir, "isolated", NULL, &built));
+    CHECK(!built.units_of_count && built.file_count == 2);
+    if (built.file_count == 2) {
+        const sh_mb_file *palette = &built.files[0], *entity = &built.files[1];
+        CHECK(!strcmp(palette->ptype, "snapEditorEntityDef") && palette->need_count == 1 &&
+              !strcmp(palette->needs[0].name, entity->pname));
+        CHECK(!strcmp(entity->ptype, "entityDef") && entity->size == sizeof def - 1 && !entity->need_count);
+    }
+    CHECK(sh_mb_write(&built, dir, &why));
+    free(why);
+    sh_mb_free(&built);
+}
+
 static void test_refused_dependency(void)
 {
-    char root[MAX_PATH], content[MAX_PATH], top[MAX_PATH], hash[65], other[65], pinned[65];
-    const char *rows[] = { hash, other };
+    char root[MAX_PATH], content[MAX_PATH], top[MAX_PATH], hash[65], other[65], pinned[65], supplement[65];
+    const char *rows[] = { hash, other, supplement };
+    static const char standin_row[] = "mods/isolated/" SH_MODSERVE_STANDIN_DIR "/arachnotron";
+    static const char row_request[] = "generated/decls/snapeditorentitydef/mods/isolated/"
+                                      SH_MODSERVE_STANDIN_DIR "/arachnotron.decl";
+    sh_modserve_scope_info scope_info;
     char text[4096], edits[4096], cause[256], *one;
     static const char base[] = CONDUCTOR_HEAD "num = 2;" CONDUCTOR_STOCK_ITEMS CONDUCTOR_TAIL;
     static const char copy[] = CONDUCTOR_HEAD "num = 4;" CONDUCTOR_STOCK_ITEMS
@@ -3564,7 +3603,7 @@ static void test_refused_dependency(void)
     fx_file mod[] = {
         { "generated/decls/md6def/mods/isolated/body.md6.decl", "bad", -1, "md6Def", "mods/isolated/body.md6", NULL, '1' },
         { "generated/decls/material2/mods/isolated/skin.decl", "{}", -1, "material2", "mods/isolated/skin", NULL, '2' },
-        { "generated/decls/entitydef/mods/isolated/arachnotron.decl", "{}", -1, "entityDef", "mods/isolated/arachnotron",
+        { "generated/decls/entitydef/mods/isolated/arachnotron.decl", "{ class = \"idAI2\"; }", -1, "entityDef", "mods/isolated/arachnotron",
           "[{\"type\":\"md6Def\",\"name\":\"mods/isolated/body.md6\"},{\"type\":\"material2\",\"name\":\"mods/isolated/skin\"}]", '3' },
         { "generated/decls/snapeditorentitydef/mods/isolated/spawner.decl", "{ edit = { entityDef = \"mods/isolated/placed\"; } }", -1, "snapEditorEntityDef", "mods/isolated/spawner",
           "[{\"type\":\"entityDef\",\"name\":\"mods/isolated/arachnotron\"}]", '4' },
@@ -3608,6 +3647,9 @@ static void test_refused_dependency(void)
     (void)sh_modserve_plan_run(&p, &ops, "isolation");
     sh_modserve_plan_free(&p);
     CHECK(!strstr(g_calls, "L:entityDef:mods/isolated/arachnotron;") && strstr(g_calls, "L:entityDef:mods/isolated/tyrant;"));
+    check_actor_play("mods/isolated/arachnotron", "idAI2", 1);
+    check_actor_play("mods/isolated/tyrant", "idAI2", 0);
+    check_actor_play("mods/neighbor/healthy", "idAI2", 0);
     if (log_count_in(g_console_seen, "Snapmap+ mods:") != 1 || !strstr(g_console_seen, "Arachnotron in isolated"))
         fprintf(stderr, "%s", g_console_seen);
     CHECK(log_count_in(g_console_seen, "Snapmap+ mods:") == 1 && strstr(g_console_seen, "Arachnotron in isolated") &&
@@ -3620,28 +3662,65 @@ static void test_refused_dependency(void)
     CHECK(!sh_modserve_lookup(mod[5].path, NULL) && open_text(mod[6].path, text, sizeof text) == 1 &&
           strstr(text, "snapmaps/unknown") && strstr(text, "idPlaceableSnapAIEncounter") && !strstr(text, "encounterToSpawn"));
     CHECK(sh_modserve_root_lacks("isolated", mod[6].pname) == SH_MODMANIFEST_LOCAL_REFUSED);
+    CHECK(sh_modserve_root_lacks("isolated", mod[2].pname) == SH_MODMANIFEST_LOCAL_REFUSED);
     CHECK(!sh_modserve_root_lacks("isolated", mod[4].pname));
-    CHECK(sh_modserve_index_build(root) == 3);
+    /* The open map now supplies the refused direct placement from a composition of zero units. */
+    make_refused_supplement(content, supplement);
+    CHECK(sh_modserve_index_build(root) == 4);
+    (void)sh_modserve_scope_set(rows, 3, 1);
+    CHECK(sh_modserve_bundle_scope(hash, &scope_info) && scope_info.listed && !scope_info.in_place);
+    CHECK(sh_modserve_bundle_scope(supplement, &scope_info) && scope_info.listed && scope_info.in_place);
+    CHECK(open_text(mod[2].path, text, sizeof text) == 1 && !strcmp(text, SH_MODSERVE_STANDIN_CLASS("idAI2")));
+    CHECK(open_text(row_request, text, sizeof text) == 1 && strstr(text, "mods/isolated/arachnotron"));
+    g_calls[0] = 0;
+    CHECK(sh_modserve_plan_bundles(rows, 3, &p, &unknown) > 0 && !unknown);
+    (void)sh_modserve_plan_run(&p, &ops, "supplement");
+    sh_modserve_plan_free(&p);
+    CHECK(sh_modserve_plan_editor(&p) > 0);
+    (void)sh_modserve_plan_run(&p, &ops, "editor");
+    int row_step = step_index(&p, "snapEditorEntityDef", standin_row);
+    CHECK(row_step >= 0 && p.steps[row_step].ready == 1);
+    CHECK(strstr(g_calls, "R:snapEditorEntityDef:mods/isolated/" SH_MODSERVE_STANDIN_DIR "/arachnotron;"));
+    sh_modserve_plan_free(&p);
+    CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, mod[4].pname) && !strstr(text, mod[2].pname));
+    (void)sh_modserve_scope_source(SH_MODSERVE_AT_PLAY);
+    CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, mod[4].pname) && !strstr(text, mod[2].pname));
+    CHECK(sh_modserve_level_hides(mod[2].pname) && !sh_modserve_level_hides(mod[4].pname) &&
+          !sh_modserve_level_hides(neighbor[0].pname) && !sh_modserve_level_hides("ai/demon/baron_coop"));
+    check_actor_play(mod[2].pname, "idAI2", 1);
+    check_actor_play(mod[4].pname, "idAI2", 0);
+    (void)sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR);
+    CHECK(open_text(mod[4].path, text, sizeof text) == 1 && !strcmp(text, "{}"));
+    CHECK(open_text(neighbor[0].path, text, sizeof text) == 1 && !strcmp(text, "{}"));
+    (void)sh_modserve_scope_set(rows, 2, 1);
     CHECK(!sh_modserve_probe_claims(mod[2].path));
     rows[0] = pinned;
     (void)sh_modserve_scope_set(rows, 2, 1);
     CHECK(sh_modserve_lookup(mod[0].path, NULL) && sh_modserve_lookup(mod[2].path, NULL) && sh_modserve_lookup(neighbor[1].path, NULL));
+    check_actor_play("mods/isolated/arachnotron", "idAI2", 0);
     rows[0] = hash;
     (void)sh_modserve_scope_set(rows, 2, 1);
     CHECK(!sh_modserve_probe_claims(mod[2].path));
     make_bundle(root, "mixed pack", "isolated", 'd', NULL, mod, 7, NULL);
     g_block_edits = NULL;
     hash64('d', hash);
-    CHECK(sh_modserve_index_build(root) == 3);
+    CHECK(sh_modserve_index_build(root) == 4);
+    (void)sh_modserve_scope_set(rows, 3, 1);
+    CHECK(open_text(mod[2].path, text, sizeof text) == 1 && !strcmp(text, mod[2].body));
+    check_actor_play(mod[2].pname, "idAI2", 0);
+    CHECK(!sh_modserve_level_hides(mod[2].pname) && !sh_modserve_level_hides(mod[4].pname));
     (void)sh_modserve_scope_set(rows, 2, 1);
     g_calls[0] = 0;
     CHECK(sh_modserve_plan_bundles(rows, 2, &p, &unknown) >= 6 && !unknown);
     CHECK(sh_modserve_plan_unvisited(&p) > 0 && sh_modserve_plan_run(&p, &ops, "repair") == p.count);
     CHECK(strstr(g_calls, "L:md6Def:mods/isolated/body.md6;") && strstr(g_calls, "L:entityDef:mods/isolated/arachnotron;"));
+    check_actor_play("mods/isolated/arachnotron", "idAI2", 0);
+    CHECK(open_text(mod[2].path, text, sizeof text) == 1 && !strcmp(text, mod[2].body));
     CHECK(sh_modserve_lookup(mod[3].path, NULL) && sh_modserve_lookup(neighbor[1].path, NULL));
     CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "mods/isolated/arachnotron"));
     CHECK(open_text(mod[6].path, text, sizeof text) == 1 && strstr(text, "encounterToSpawn"));
     CHECK(!sh_modserve_root_lacks("isolated", mod[6].pname));
+    CHECK(!sh_modserve_root_lacks("isolated", mod[2].pname));
     sh_modserve_plan_free(&p);
     sh_modserve_set_console(NULL);
     (void)sh_modserve_scope_set(NULL, 0, 0);
@@ -4752,6 +4831,11 @@ static void test_serving_build_needs(void)
     hash64('6', hroot); hash64('7', hplace);
     sh_modserve_scope_enable(0);
     CHECK(sh_modserve_index_build(root) == 2);
+    {
+        char *display = sh_modserve_bundle_name(hplace);
+        CHECK(display && !strcmp(display, "a mod"));
+        free(display);
+    }
     ld.type = "md6Def"; ld.cls = "idDeclMD6"; ld.next = &ls; ld.entries = md6s; ld.count = 1;
     ls.type = "skeleton"; ls.cls = "idMD6Skel"; ls.next = NULL; ls.entries = skels; ls.count = 2;
     body.name = "mods/c3mod000/body.md6"; md6s[0] = &body;
@@ -4890,10 +4974,20 @@ static void test_two_builds_requirements(void)
 /* The game's whitelist, for a bundle that carries its own copy (a registry file, its diff the bundle's edits). */
 #define WL_BASE "{\n\tedit = {\n\t\tvalidEncounters = {\n\t\t\tnum = 2;\n\t\t\titem[0] = \"single_archvile\";\n" \
     "\t\t\titem[1] = \"single_zombie\";\n\t\t}\n\t}\n}\n"
+#define TWEAK_ROW "generated/decls/snapeditorentitydef/interactives/use_panel.decl"
+#define TWEAK_DEF "{ edit = { entityDef = \"interactives/use_panel\"; categoryNameTag = \"#str_%s\"; displayNameTag = \"#str_%s\"; flags = { placeable = true; } } }"
 static const char *cs_base(const char *source)
 {
+    if (!strcmp(source, TWEAK_ROW)) return "{ edit = { entityDef = \"interactives/use_panel\"; categoryNameTag = \"#str_snapentity_category_interactives\"; displayNameTag = \"#str_panel\"; flags = { placeable = true; } } }";
     if (!_stricmp(source, CONDUCTOR)) return CONDUCTOR_BASE;
     if (!_stricmp(source, WHITELIST)) return WL_BASE;
+    if (!strcmp(source, "generated/decls/entitydef/snapmaps/unknown.decl") ||
+        !strcmp(source, "generated/decls/entitydef/test/generic.decl")) return "{ class = \"idEntity\"; }";
+    if (!strcmp(source, "generated/decls/entitydef/test/actor.decl")) return "{ class = \"idActor\"; }";
+    if (!strcmp(source, "generated/decls/entitydef/test/unrelated.decl")) return "{ class = \"idProjectile\"; }";
+    if (!strcmp(source, "generated/decls/entitydef/test/invalid.decl")) return "{ class = \"invented\"; }";
+    if (!strcmp(source, "generated/decls/entitydef/test/unavailable.decl")) return "{ class = \"unresolved\"; }";
+    if (!strcmp(source, "generated/decls/entitydef/test/malformed.decl")) return "{ class = idEntity; }";
     return NULL;
 }
 static int cs_identify(void *c, const char *source, char sha[SH_MB_HASH_HEX + 1], unsigned long long *size)
@@ -5107,8 +5201,10 @@ static void test_salt_and_root(void)
      * pinned, as a composition of the content cache. */
     g_bundle_name = "Doors Pack";
     make_bundle(root, "My doors (work)", "kown0000", 'a', NULL, mine, 1, "{\"installedAt\": 100}");
+    g_bundle_name = "Published Doors";
     make_bundle(mt_cache_dir(root), "content\\served\\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "kown0000", 'b', NULL, theirs, 1, "{\"installedAt\": 900}");
     /* A copy of the author's folder (same salt, built later): one build per salt at the root. */
+    g_bundle_name = "Doors Pack";
     make_bundle(root, "My doors (copy)", "kown0000", 'e', NULL, stray, 1, "{\"installedAt\": 300}");
     g_bundle_name = NULL;
     /* Folders not in the current shape, unbuilt or failed. */
@@ -5160,6 +5256,12 @@ static void test_salt_and_root(void)
     CHECK(!strcmp(ad_served(SP_THING), "entityDef thing { mine }"));
     CHECK(sh_modserve_bundle_scope(hm, &si) && si.newest && !si.in_place && si.names_live);
     CHECK(sh_modserve_bundle_scope(hd, &si) && !si.newest && si.in_place && !si.names_live);
+    {
+        char *published = sh_modserve_bundle_name(hd), *local = sh_modserve_bundle_name(hm);
+        CHECK(published && !strcmp(published, "Published Doors") && local && !strcmp(local, "Doors Pack"));
+        free(local);
+        free(published);
+    }
 
     /* A local row (the player's own map) follows the root folder whatever build it records. */
     memset(&row, 0, sizeof row);
@@ -5758,6 +5860,337 @@ static void test_standin_names_after_real(void)
     CHECK(sh_modserve_index_build(g_root) >= 6);
 }
 
+static char g_direct_test_actor[160], g_direct_test_row[96];
+static int g_direct_covered, g_direct_offers;
+
+static int direct_test_exists(const char *name)
+{
+    return !strcmp(name, "snapmaps/unknown") || !strcmp(name, "mods/route999/has_tile") ||
+           !strcmp(name, "mods/route999/thing") || (g_direct_covered && !strcmp(name, "mods/route999/wanderer"));
+}
+
+static int direct_test_admit(const char *actor, const char *row)
+{
+    g_direct_offers++;
+    char path[256], target[200];
+    unsigned char *body = NULL;
+    size_t len = 0;
+    strcpy_s(g_direct_test_actor, sizeof g_direct_test_actor, actor);
+    strcpy_s(g_direct_test_row, sizeof g_direct_test_row, row);
+    snprintf(path,sizeof path,"decltree/snapeditorentitydef/%s.decl",row);
+    CHECK(sh_modserve_probe_claims(path));
+    snprintf(path,sizeof path,"generated/decls/snapeditorentitydef/%s.decl",row);
+    snprintf(target,sizeof target,"entityDef = \"%s\"",actor);
+    CHECK(sh_modserve_open(path,&body,&len)==1 && body && len && strstr((char *)body,target) &&
+          !strstr((char *)body,"flags") && strstr((char *)body,"inherit = \"unknown/unknown\""));
+    if (body) HeapFree(GetProcessHeap(),0,body);
+    return 1;
+}
+
+static void check_actor_play(const char *actor, const char *cls, int inert)
+{
+    static const char pose[] = "{ inherit = \"original\"; class = \"idAI2\"; edit = {"
+        "spawnPosition = { x = -1200; y = 1000; z = 0.25; }"
+        "spawnOrientation = { mat = { mat[0] = { x = 1; } mat[1] = { y = 1; } } }"
+        "actorConstants = { health = 700; } aiEditable = { behaviors = { decl = \"my/brain\"; } } } }";
+    char *owner = NULL;
+    const char *projected = sh_modserve_actor_play_text(actor, cls, pose, &owner);
+    if (inert) {
+        CHECK(owner && projected == owner && strstr(projected,"inherit = \"snapmaps/unknown\";") &&
+              strstr(projected,"class = \"idEntity\";") && strstr(projected,"x = -1200;") &&
+              strstr(projected,"z = 0.25;") && strstr(projected,"spawnOrientation") && strstr(projected,"mat[1]") &&
+              !strstr(projected,"idAI2") && !strstr(projected,"actorConstants") && !strstr(projected,"my/brain"));
+    } else CHECK(projected == pose && !owner);
+    free(owner);
+}
+
+static void test_direct_actor_rows(void)
+{
+#define ACTOR(name, text) {"generated/decls/entitydef/mods/route999/" name ".decl", text, -1, "entityDef", "mods/route999/" name, NULL, '1'}
+    static const fx_file defs[] = {
+        ACTOR("wanderer", "{ inherit = \"entities/unusual/base\"; }"),
+        ACTOR("unusual/base", "{ class = \"idAI2\"; }"),
+        ACTOR("has_tile", "{ class = \"idAI2\"; }"),
+        ACTOR("thing", "{ class = \"idEntity\"; }"),
+        ACTOR("foreign", "{ inherit = \"mods/route888/unusual/base\"; }"),
+        ACTOR("cycle", "{ inherit = \"entities/cycle\"; }"),
+        ACTOR("absent", SH_MODSERVE_STANDIN_CLASS("idAI2"))
+    };
+#undef ACTOR
+    static const fx_file other[] = {{"generated/decls/entitydef/mods/route888/unusual/base.decl",
+        "{ class = \"idAI2\"; }", -1,"entityDef","mods/route888/unusual/base",NULL,'2'}};
+    static const fx_file older[] = {{"generated/decls/entitydef/mods/route999/wanderer.decl",
+        "{ class = \"idProjectile\"; }", -1,"entityDef","mods/route999/wanderer",NULL,'3'},
+        {"generated/decls/entitydef/mods/route999/absent.decl", SH_MODSERVE_STANDIN_CLASS("idAI2"),
+          -1,"entityDef","mods/route999/absent",NULL,'3'},
+        {"generated/decls/snapeditorentitydef/mods/route999/" SH_MODSERVE_STANDIN_DIR "/absent.decl", "{}",
+          -1,"snapEditorEntityDef","mods/route999/" SH_MODSERVE_STANDIN_DIR "/absent",NULL,'3'}};
+#define E(cls, name) "{\"entityDef\":{\"className\":\"" cls "\",\"inherit\":\"" name "\"}}"
+    static const char map[] = "{\"entities\":[" E("idAI2","mods/route999/wanderer") "," E("idAI2","mods/route999/has_tile")
+        "," E("idAI2","mods/route999/wanderer") "," E("idAI2","mods/route999/wanderer")
+        "," E("idAI2","mods/route999/thing") "," E("idAI2","mods/route999/cycle") "," E("idAI2","mods/route999/foreign")
+        "," E("idAI2","mods/route999/missing") "," E("idEntity","mods/route999/unusual/base")
+        "," E("idAI2","mods/route888/unusual/base") "],\"unrelated\":" E("idAI2","mods/route999/unusual/base") "}";
+#undef E
+    char root[MAX_PATH], served[MAX_PATH], previous[65], hash[65];
+    const char *hashes[]={hash};
+    snprintf(root,sizeof root,"%s-direct\\mods",g_root);
+    mkdirs(root);
+    make_bundle(root,"named","route999",'a',NULL,defs,(int)(sizeof defs/sizeof defs[0]),NULL);
+    make_bundle(root,"foreign","route888",'b',NULL,other,1,NULL);
+    snprintf(served,sizeof served,"%s\\content\\served",mt_cache_dir(root));
+    mkdirs(served);
+    make_bundle(served,hash64('d',previous),"route999",'d',NULL,older,(int)(sizeof older/sizeof older[0]),NULL);
+    CHECK(sh_modserve_index_build(root)==3);
+    sh_modserve_scope_enable(1);
+    sh_modserve_scope_set(NULL,0,1);
+    CHECK(sh_modserve_direct_actor_rows(map,sizeof map-1,direct_test_exists,direct_test_admit)==0);
+    hash64('a',hash);
+    sh_modserve_scope_set(hashes,1,1);
+    CHECK(sh_modserve_direct_actor_rows(map,sizeof map-1,direct_test_exists,direct_test_admit)==1);
+    CHECK(!strcmp(g_direct_test_actor,"mods/route999/wanderer"));
+    CHECK(sh_modserve_iterator_uses("mods/route999/wanderer"));
+    CHECK(sh_modserve_iterator_uses("mods/route999/has_tile"));
+    CHECK(sh_modserve_iterator_uses("mods/route999/unusual/base")); /* edited direct placement before reload */
+    CHECK(sh_modserve_iterator_uses("mods/route999/thing")); /* The map overrides its generic parent with idAI2. */
+    CHECK(!sh_modserve_iterator_uses("mods/route999/cycle"));
+    CHECK(!sh_modserve_iterator_uses("mods/route999/foreign"));
+    CHECK(!sh_modserve_iterator_uses("mods/route999/missing"));
+    CHECK(!sh_modserve_iterator_uses("ai/demon/baron_coop"));
+    check_actor_play("mods/route999/wanderer","idAI2",0);
+    check_actor_play("mods/route999/absent","idAI2",0);
+    CHECK(!sh_modserve_level_hides("mods/route999/absent"));
+    check_actor_play("mods/route999/missing","idAI2",1);
+    check_actor_play("mods/route888/unusual/base","idAI2",1);
+    check_actor_play("mods/route999/missing","idEntity",0);
+    check_actor_play("ai/demon/baron_coop","idAI2",0);
+    check_actor_play("snapmaps/unknown","idAI2",0);
+    CHECK(g_direct_offers == 1 && sh_modserve_actor_enabled(g_direct_test_row));
+    CHECK(sh_modserve_direct_actor_rows(map,sizeof map-1,direct_test_exists,direct_test_admit)==0 && g_direct_offers==1);
+    g_direct_covered=1;
+    CHECK(sh_modserve_refresh_actor_rows(direct_test_exists,direct_test_admit)==1 && !sh_modserve_actor_enabled(g_direct_test_row));
+    g_direct_covered=0;
+    CHECK(sh_modserve_refresh_actor_rows(direct_test_exists,direct_test_admit)==1 && g_direct_offers==2);
+    sh_modserve_scope_set(NULL,0,1);
+    CHECK(sh_modserve_refresh_actor_rows(direct_test_exists,direct_test_admit)==1 && !sh_modserve_has_actor_rows());
+    CHECK(!sh_modserve_iterator_uses("mods/route999/wanderer") && !sh_modserve_iterator_uses("mods/route999/has_tile"));
+    CHECK(!sh_modserve_iterator_uses("mods/route999/thing"));
+    sh_modserve_scope_set(hashes,1,1);
+    CHECK(sh_modserve_refresh_actor_rows(direct_test_exists,direct_test_admit)==1 && g_direct_offers==3);
+    CHECK(sh_modserve_direct_actor_rows("{}",2,direct_test_exists,direct_test_admit)==1 && !sh_modserve_has_actor_rows());
+    CHECK(!sh_modserve_actor_enabled(g_direct_test_row));
+    CHECK(sh_modserve_restore_actor_rows(direct_test_exists,direct_test_admit)==1 && sh_modserve_actor_enabled(g_direct_test_row));
+    hashes[0]=previous;
+    sh_modserve_scope_set(hashes,1,1);
+    check_actor_play("mods/route999/absent","idAI2",1);
+    CHECK(sh_modserve_level_hides("mods/route999/absent"));
+    CHECK(!sh_modserve_iterator_uses("mods/route999/absent"));
+    CHECK(sh_modserve_refresh_actor_rows(direct_test_exists,direct_test_admit)==1 && !sh_modserve_has_actor_rows());
+    hashes[0]=hash;
+    sh_modserve_scope_set(hashes,1,1);
+    CHECK(sh_modserve_refresh_actor_rows(direct_test_exists,direct_test_admit)==1 && sh_modserve_actor_enabled(g_direct_test_row));
+    char named[MAX_PATH], request[256];
+    snprintf(request,sizeof request,"decltree/snapeditorentitydef/%s.decl",g_direct_test_row);
+    snprintf(named,sizeof named,"%s\\named",root);
+    remove_tree(named);
+    CHECK(sh_modserve_index_build(root)==2);
+    check_actor_play("mods/route999/wanderer","idAI2",1);
+    make_bundle(root,"named","route999",'a',NULL,defs,(int)(sizeof defs/sizeof defs[0]),"{\"validated\": false, \"firstCause\": \"damaged source\"}");
+    (void)sh_modserve_index_build(root);
+    check_actor_play("mods/route999/wanderer","idAI2",1);
+    make_bundle(root,"named","route999",'a',NULL,defs,(int)(sizeof defs/sizeof defs[0]),NULL);
+    (void)sh_modserve_index_build(root);
+    check_actor_play("mods/route999/wanderer","idAI2",0);
+    remove_tree(named);
+    (void)sh_modserve_index_build(root);
+    CHECK(sh_modserve_refresh_actor_rows(direct_test_exists,direct_test_admit)==1 && !sh_modserve_probe_claims(request));
+    CHECK(!sh_modserve_direct_actor_rows(NULL,0,direct_test_exists,direct_test_admit));
+    CHECK(!sh_modserve_probe_claims("decltree/snapeditorentitydef/custom/direct_actors/missing.decl"));
+    sh_modserve_scope_enable(0);
+    remove_tree(root);
+    CHECK(sh_modserve_index_build(g_root)>=6);
+}
+
+/* A local or portable prefab can borrow only its verified build before the first object is placed.
+ * A 64-parent chain and a cycle exercise the same lookup used by the map-load path. */
+static void test_direct_actor_prefab(void)
+{
+    static const char map[] = "{\"entities\":[{\"entityDef\":{\"className\":\"idAI2\",\"inherit\":\"mods/chain001/actor0\"}}]}";
+    static const char cycle[] = "{\"entities\":[{\"entityDef\":{\"className\":\"idAI2\",\"inherit\":\"mods/chain001/loop\"}}]}";
+    static const char other[] = "{\"entities\":[{\"entityDef\":{\"className\":\"idAI2\",\"inherit\":\"mods/other002/actor\"}}]}";
+    static fx_file files[66];
+    static char paths[66][96], names[66][48], bodies[66][76];
+    static const fx_file foreign = {"generated/decls/entitydef/mods/other002/actor.decl", "{ class = \"idAI2\"; }",
+        -1, "entityDef", "mods/other002/actor", NULL, 'b'};
+    char root[MAX_PATH], served[MAX_PATH], hash[65], stored[65], before[96], foreign_id[96];
+    const char *one[] = {hash};
+    sh_modmanifest_row row = {0};
+    sh_modmanifest_list rows = {0};
+    snprintf(root, sizeof root, "%s-prefab\\mods", g_root);
+    mkdirs(root);
+    for (int i = 0; i < 66; ++i) {
+        if (i == 65) strcpy_s(names[i], sizeof names[i], "mods/chain001/loop");
+        else snprintf(names[i], sizeof names[i], "mods/chain001/actor%d", i);
+        snprintf(paths[i], sizeof paths[i], "generated/decls/entitydef/%s.decl", names[i]);
+        if (i == 64) strcpy_s(bodies[i], sizeof bodies[i], "{ class = \"idEntity\"; }");
+        else if (i == 65) strcpy_s(bodies[i], sizeof bodies[i], "{ inherit = \"mods/chain001/loop\"; }");
+        else snprintf(bodies[i], sizeof bodies[i], "{ inherit = \"mods/chain001/actor%d\"; }", i + 1);
+        files[i] = (fx_file){paths[i], bodies[i], -1, "entityDef", names[i], NULL, 'a'};
+    }
+    make_bundle(root, "different", "other002", 'b', NULL, &foreign, 1, NULL);
+    make_bundle(root, "chain", "chain001", 'a', NULL, files, 66, NULL);
+    snprintf(served, sizeof served, "%s\\content\\served", mt_cache_dir(root));
+    mkdirs(served);
+    hash64('d',stored);
+    make_bundle(served, stored, "chain001", 'd', NULL, files, 66, NULL);
+    CHECK(sh_modserve_index_build(root) == 3);
+    sh_modserve_scope_enable(1);
+    hash64('b',hash);
+    sh_modserve_scope_set(one,1,1);
+    CHECK(sh_modserve_direct_actor_rows(other,sizeof other-1,direct_test_exists,direct_test_admit));
+    strcpy_s(foreign_id,sizeof foreign_id,g_direct_test_row);
+    strcpy_s(row.salt,sizeof row.salt,"chain001");
+    strcpy_s(row.build,sizeof row.build,SH_MODMANIFEST_LOCAL_BUILD);
+    rows.rows=&row;
+    rows.count=1;
+    CHECK(sh_modserve_prefab_actor_rows(map,sizeof map-1,&rows,direct_test_exists,direct_test_admit));
+    strcpy_s(before,sizeof before,g_direct_test_row);
+    CHECK(sh_modserve_actor_prefab_pending() && sh_modserve_actor_enabled(before) && sh_modserve_actor_enabled(foreign_id));
+    CHECK(!sh_modserve_iterator_uses("mods/chain001/actor0") && sh_modserve_iterator_uses("mods/other002/actor"));
+    CHECK(sh_modserve_finish_actor_rows(NULL,0,direct_test_exists,direct_test_admit));
+    CHECK(!sh_modserve_actor_prefab_pending() && !sh_modserve_actor_enabled(before) && sh_modserve_actor_enabled(foreign_id));
+    CHECK(!sh_modserve_prefab_actor_rows(cycle,sizeof cycle-1,&rows,direct_test_exists,direct_test_admit));
+    CHECK(!sh_modserve_finish_actor_rows(NULL,0,direct_test_exists,direct_test_admit));
+    row.pinned=1;
+    hash64('9', row.build);
+    CHECK(sh_modserve_prefab_files((const char (*)[65])&stored,1)==1);
+    CHECK(!sh_modserve_prefab_actor_rows(map,sizeof map-1,&rows,direct_test_exists,direct_test_admit));
+    CHECK(!sh_modserve_actor_enabled(before) && sh_modserve_actor_enabled(foreign_id));
+    strcpy_s(row.build,sizeof row.build,stored);
+    CHECK(sh_modserve_prefab_actor_rows(map,sizeof map-1,&rows,direct_test_exists,direct_test_admit));
+    CHECK(sh_modserve_refresh_actor_rows(direct_test_exists,direct_test_admit)==0 && sh_modserve_actor_enabled(before));
+    strcpy_s(hash,sizeof hash,stored);
+    sh_modserve_scope_set(one,1,1);
+    sh_modserve_prefab_files(NULL,0);
+    (void)sh_modserve_finish_actor_rows(map,sizeof map-1,direct_test_exists,direct_test_admit);
+    CHECK(!sh_modserve_actor_prefab_pending() && sh_modserve_actor_enabled(before) && !sh_modserve_actor_enabled(foreign_id));
+    CHECK(sh_modserve_iterator_uses("mods/chain001/actor0") && !sh_modserve_iterator_uses("mods/other002/actor"));
+    CHECK(!sh_modserve_direct_actor_rows(map,sizeof map-1,direct_test_exists,direct_test_admit) && sh_modserve_actor_enabled(before));
+    sh_modserve_direct_actor_rows(NULL,0,direct_test_exists,direct_test_admit);
+    sh_modserve_scope_enable(0);
+    remove_tree(root);
+    CHECK(sh_modserve_index_build(g_root)>=6);
+}
+
+static int direct_test_derives(const char *cls, const char *base)
+{
+    CHECK(!strcmp(cls, "idAI2"));
+    if (!strcmp(base, "unresolved")) return -1;
+    return !strcmp(base, "idActor");
+}
+
+static void test_direct_actor_class_override(void)
+{
+    static const struct { const char *cls, *parent; int row, iterator; } cases[] = {
+        {"idAI2", "test/generic", 1, 1},
+        {"idAI2", "test/actor", 1, 1},
+        {"idAI2", "snapmaps/unknown", 0, 1},
+        {"idAI2", "test/unrelated", 0, 0},
+        {"idAI2", "test/invalid", 0, 0},
+        {"idAI2", "test/unavailable", 0, 0},
+        {"idAI2", "test/malformed", 0, 0},
+        {"idAI2", "test/missing", 0, 0},
+        {"idEntity", "test/generic", 0, 0}
+    };
+    sh_mb_stock_ops stock = {0};
+    stock.identify = cs_identify;
+    stock.read = cs_read;
+    sh_mb_set_stock_ops(&stock);
+    sh_modserve_set_actor_derives(direct_test_derives);
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+        char map[256];
+        int before = g_direct_offers;
+        int len = snprintf(map, sizeof map, "{\"entities\":[{\"entityDef\":{\"className\":\"%s\",\"inherit\":\"%s\"}}]}",
+                           cases[i].cls, cases[i].parent);
+        CHECK(sh_modserve_uses_stock_actor(map, len, direct_test_exists) == cases[i].row);
+        CHECK(sh_modserve_direct_actor_rows(map, len, direct_test_exists, direct_test_admit) == cases[i].row);
+        CHECK(g_direct_offers == before + cases[i].row);
+        if (cases[i].row) CHECK(!strcmp(g_direct_test_actor, cases[i].parent));
+        if (!strcmp(cases[i].cls, "idAI2"))
+            CHECK(sh_modserve_iterator_uses(cases[i].parent) == cases[i].iterator);
+        sh_modserve_direct_actor_rows(NULL, 0, direct_test_exists, direct_test_admit);
+    }
+    sh_modserve_set_actor_derives(NULL);
+    CHECK(sh_modserve_iterator_uses("test/generic") && !sh_modserve_iterator_uses("test/actor"));
+    sh_mb_set_stock_ops(NULL);
+}
+
+static void test_enemy_behavior(void)
+{
+    enum { parents = 64 };
+    static const char salt[] = "enemies1";
+    static const char actor[] = "mods/enemies1/actors/one";
+    static const char behavior[] = "mods/enemies1/decisions/one";
+    static const fx_file files[] = {
+        {"generated/decls/entitydef/mods/enemies1/actors/one.decl", "{ inherit = \"entities/actors/base\"; }",
+         -1, "entityDef", "mods/enemies1/actors/one", NULL, '1'},
+        {"generated/decls/entitydef/mods/enemies1/actors/base.decl",
+         "{ edit = { aiEditable = { behaviors = { decl = \"decls/aibehavior/decisions/one\"; } } } }",
+         -1, "entityDef", "mods/enemies1/actors/base", NULL, '2'},
+        {"generated/decls/aibehavior/mods/enemies1/decisions/one.decl", "{}", -1, "aiBehavior",
+         "mods/enemies1/decisions/one", NULL, '3'},
+        {"generated/decls/entitydef/mods/enemies1/actors/stock.decl",
+         "{ inherit = \"entities/actors/base\"; edit = { aiEditable = { behaviors = { decl = \"ai/default\"; } } } }",
+         -1, "entityDef", "mods/enemies1/actors/stock", NULL, '4'},
+        {"generated/decls/entitydef/mods/enemies1/actors/missing.decl",
+         "{ edit = { aiEditable = { behaviors = { decl = \"mods/enemies1/actors/base\"; } } } }",
+         -1, "entityDef", "mods/enemies1/actors/missing", NULL, '5'},
+        {"generated/decls/entitydef/mods/enemies1/actors/loop.decl", "{ inherit = \"entities/actors/loop2\"; }",
+         -1, "entityDef", "mods/enemies1/actors/loop", NULL, '6'},
+        {"generated/decls/entitydef/mods/enemies1/actors/loop2.decl", "{ inherit = \"entities/actors/LOOP\"; }",
+         -1, "entityDef", "mods/enemies1/actors/loop2", NULL, '7'},
+        {"generated/decls/entitydef/mods/enemies1/actors/orphan.decl", "{ inherit = \"entities/actors/absent\"; }",
+         -1, "entityDef", "mods/enemies1/actors/orphan", NULL, '8'}
+    };
+    fx_file combined[_countof(files) + parents];
+    char paths[parents][96], names[parents][64], bodies[parents][64];
+    char root[MAX_PATH], top[MAX_PATH], hash[65], *resolved, *slash;
+    const char *pins[] = {hash};
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\enemy-behavior\\mods", top);
+    mkdirs(root);
+    hash64('a', hash);
+    memcpy(combined, files, sizeof files);
+    for (int i = 0; i < parents; ++i) {
+        snprintf(names[i], sizeof names[i], "mods/enemies1/chain/%d", i);
+        snprintf(paths[i], sizeof paths[i], "generated/decls/entitydef/%s.decl", names[i]);
+        if (i + 1 < parents) snprintf(bodies[i], sizeof bodies[i], "{ inherit = \"entities/chain/%d\"; }", i + 1);
+        else strcpy_s(bodies[i], sizeof bodies[i], "{ inherit = \"entities/actors/base\"; }");
+        combined[_countof(files) + i] = (fx_file){paths[i], bodies[i], -1, "entityDef", names[i], NULL, '9'};
+    }
+    make_bundle(root, salt, salt, 'a', NULL, combined, (int)_countof(combined), NULL);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_index_build(root) == 1);
+    sh_modserve_scope_set(NULL, 0, 1);
+    CHECK(!sh_modserve_enemy_behavior(salt, actor));
+    sh_modserve_scope_set(pins, 1, 1);
+    resolved = sh_modserve_enemy_behavior(salt, actor);
+    CHECK(resolved && !strcmp(resolved, behavior));
+    free(resolved);
+    CHECK(!sh_modserve_enemy_behavior(salt, "mods/enemies1/actors/stock"));
+    CHECK(!sh_modserve_enemy_behavior(salt, "mods/enemies1/actors/missing"));
+    CHECK(!sh_modserve_enemy_behavior("othersalt", actor));
+    CHECK(!sh_modserve_enemy_behavior(salt, "mods/enemies1/actors/loop"));
+    CHECK(!sh_modserve_enemy_behavior(salt, "mods/enemies1/actors/orphan"));
+    resolved = sh_modserve_enemy_behavior(salt, names[0]);
+    CHECK(resolved && !strcmp(resolved, behavior));
+    free(resolved);
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_build(g_root) >= 6);
+}
+
 static void test_dependency_names(void)
 {
     char top[MAX_PATH], root[MAX_PATH], out[4][SH_MODSERVE_HASH_HEX + 1], ha[65], hc[65];
@@ -6009,6 +6442,52 @@ static void test_index_retire(void)
 #define MX_SET  "generated/decls/snapeditorsettings/mixed.decl"
 #define MX_NEW  "generated/decls/entitydef/mods/xmixed00/thing.decl"
 #define PU_NEW  "generated/decls/entitydef/mods/ypure000/thing.decl"
+static void test_editor_tweak_composition(void)
+{
+    char root[MAX_PATH], alpha[MAX_PATH], parked[MAX_PATH], text[4096], a[512], b[512], *slash;
+    const char *list[2];
+    char ha[65], hb[65];
+    fx_file fa = { TWEAK_ROW, a, -1, "snapEditorEntityDef", "interactives/use_panel", NULL, 'a' };
+    fx_file fb = { TWEAK_ROW, b, -1, "snapEditorEntityDef", "interactives/use_panel", NULL, 'b' };
+    sh_mb_stock_ops ops = {0};
+    ops.identify = cs_identify;
+    ops.read = cs_read;
+    sh_mb_set_stock_ops(&ops);
+    strcpy_s(root, sizeof root, g_root);
+    slash = strrchr(root, '\\');
+    if (slash) *slash = 0;
+    strcat_s(root, sizeof root, "\\tweaks\\mods");
+    mkdirs(root);
+    snprintf(a, sizeof a, TWEAK_DEF, "tab", "panel");
+    snprintf(b, sizeof b, TWEAK_DEF, "tab", "caption");
+    g_bundle_extra = "\"strings\":{\"en\":{\"tab\":\"Equipment\"}},";
+    make_bundle(root, "z-folder", "amber000", '1', "\"" TWEAK_ROW "\"", &fa, 1, NULL);
+    g_bundle_extra = "\"strings\":{\"en\":{\"tab\":\"Equipment\",\"caption\":\"Panel\"}},";
+    make_bundle(root, "a-folder", "blue0000", '2', "\"" TWEAK_ROW "\"", &fb, 1, NULL);
+    g_bundle_extra = NULL;
+    hash64('1', ha); hash64('2', hb);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_index_build(root) == 2);
+    for (int order = 0; order < 3; order++) {
+        list[0] = order == 1 ? ha : hb;
+        list[1] = order == 1 ? hb : ha;
+        sh_modserve_scope_set(list, order ? 2 : 0, order != 0);
+        CHECK(open_text(TWEAK_ROW, text, sizeof text) == 1 && strstr(text, "#str_amber000_tab") &&
+              strstr(text, "#str_blue0000_caption") && strstr(text, "placeable = true") && !strstr(text, "#str_blue0000_tab"));
+    }
+    sh_modserve_scope_set(NULL, 0, 0);
+    snprintf(alpha, sizeof alpha, "%s\\z-folder", root);
+    snprintf(parked, sizeof parked, "%s\\.removed", root);
+    CHECK(MoveFileA(alpha, parked));
+    CHECK(sh_modserve_index_build(root) == 1 && open_text(TWEAK_ROW, text, sizeof text) == 1 &&
+          strstr(text, "#str_blue0000_tab") && !strstr(text, "#str_amber000_tab"));
+    CHECK(MoveFileA(parked, alpha));
+    CHECK(sh_modserve_index_build(root) == 2 && open_text(TWEAK_ROW, text, sizeof text) == 1 &&
+          strstr(text, "#str_amber000_tab") && strstr(text, "#str_blue0000_caption"));
+    sh_modserve_scope_enable(0);
+    sh_mb_set_stock_ops(NULL);
+}
+
 static void test_mixed_editor_bundle(void)
 {
     static const fx_file mixed[] = {
@@ -6068,9 +6547,44 @@ static void test_mixed_editor_bundle(void)
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
 
-/* A store whose root holds a character outside ASCII (a profile folder named
- * with an accent): the index boots from the store's own UTF-8 root and reads
- * a composition of the content cache under it, as the store wrote it. */
+static void test_long_index_path(const char *root)
+{
+    char group[244], dir[1024], material[1200], parked[1200];
+    wchar_t previous[32768], wroot[MAX_PATH];
+    DWORD n = GetCurrentDirectoryW(32768, previous);
+    int converted = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, root, -1, wroot, MAX_PATH);
+    CHECK(converted && n && n < 32768);
+    if (!converted || !n || n >= 32768) return;
+    wchar_t *remote = sh_mb_wpath("\\\\server\\share\\cache\\content");
+    CHECK(remote && !wcscmp(remote, L"\\\\?\\UNC\\server\\share\\cache\\content"));
+    free(remote);
+    int entered = SetCurrentDirectoryW(wroot);
+    CHECK(entered);
+    if (!entered) return;
+    memset(group, 'm', sizeof group - 1);
+    group[sizeof group - 1] = 0;
+    snprintf(dir, sizeof dir, "%s\xe9\xac\xbc", group);
+    snprintf(material, sizeof material, "%s\\entities\\p.decl", dir);
+    snprintf(parked, sizeof parked, "%s\\parked", dir);
+    wchar_t *short_dir = sh_mb_wpath("plain"), *long_dir = sh_mb_wpath(dir);
+    wchar_t *file = sh_mb_wpath(material), *hold = sh_mb_wpath(parked);
+    CHECK(file && wcslen(file) > MAX_PATH);
+    int moved = short_dir && long_dir && file && hold && MoveFileW(short_dir, long_dir);
+    CHECK(moved);
+    if (moved) {
+        CHECK(sh_modserve_index_build(".") == 2);
+        CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/uplain00/p.decl"), "entityDef p {}"));
+        CHECK(MoveFileW(file, hold));
+        log_clear();
+        CHECK(sh_modserve_index_build(".") == 1 && log_has("is missing from the folder"));
+        CHECK(MoveFileW(hold, file));
+        CHECK(MoveFileW(long_dir, short_dir));
+    }
+    CHECK(SetCurrentDirectoryW(previous));
+    free(short_dir); free(long_dir); free(file); free(hold);
+}
+
+/* A store whose root holds a character outside ASCII: index the store's own root and its cached composition. */
 static void test_store_root_utf8(void)
 {
     static const fx_file plain[] = {
@@ -6111,6 +6625,7 @@ static void test_store_root_utf8(void)
         row.pinned = 1;
         CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.place, SH_MODSERVE_CONTENT) && !strcmp(ref.hash, h8));
     }
+    test_long_index_path(root);
     sh_ms_set_root(NULL);
     strcpy_s(path, sizeof path, root);
     slash = strrchr(path, '\\');
@@ -6481,6 +6996,7 @@ int main(void)
     test_bundle_extra();
     test_scope();
     test_mixed_editor_bundle();
+    test_editor_tweak_composition();
     test_scope_providers();
     test_additive_determinism();
     test_additive_same_key();
@@ -6493,6 +7009,10 @@ int main(void)
     test_resource_lock();
     test_row_served();
     test_dependency_names();
+    test_enemy_behavior();
+    test_direct_actor_rows();
+    test_direct_actor_prefab();
+    test_direct_actor_class_override();
     test_static_model_refresh();
     test_miss_reporter_skips_probes();
     test_standin_names_after_real();

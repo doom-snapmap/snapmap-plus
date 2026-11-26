@@ -33,7 +33,7 @@ unsigned char sh_modhud_select(const char *weapon, unsigned char engine_mode);
  * it (only the first per salt is read), `label` names a mod for the log. Returns the rule count, -1 if the builds
  * could not be visited. */
 typedef int (*sh_modhud_each_fn)(sh_modserve_extra_fn fn, void *context);
-typedef char *(*sh_modhud_label_fn)(const char *salt, const char *hash);   /* malloc'd, or NULL */
+typedef char *(*sh_modhud_label_fn)(const char *hash);   /* malloc'd, or NULL */
 int sh_modhud_load(sh_modhud_each_fn each, int (*serves_now)(const char *bundle_hash), sh_modhud_label_fn label);
 
 /* The table is reread the next time the HUD asks (after an index change and at every Play entry). Any thread. */

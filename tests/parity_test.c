@@ -374,8 +374,8 @@ static void draw_need(void *ctx, const char *type, const char *name, size_t n)
  * name the product derives, and, with the installed game, a file it holds or an engine image). */
 static int draw_answered(const char *name, int *derived)
 {
-    char *cand[2];
-    int n = sh_mb_need_requests("image", name, cand, 2), i, ok = 0, ours = 0;
+    char *cand[SH_MB_NEED_REQUESTS];
+    int n = sh_mb_need_requests("image", name, cand, SH_MB_NEED_REQUESTS), i, ok = 0, ours = 0;
     *derived = 0;
     if (name[0] == '_') { sh_mb_requests_free(cand, n); return 1; }   /* _black, _white, _default: the engine's */
     for (i = 0; i < n && !ok; i++) {

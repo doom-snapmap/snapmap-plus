@@ -164,20 +164,11 @@ static INIT_ONCE g_ms_profile_once = INIT_ONCE_STATIC_INIT;
 
 static BOOL CALLBACK ms_profile_root(PINIT_ONCE once, PVOID arg, PVOID *root)
 {
-    const char *base = sh_mb_user_root(), *folder = "mods";
-    int argc, i;
-    wchar_t **args;
+    const char *base = sh_mb_user_root();
     (void)once;
     (void)arg;
-    if (!base || !(args = CommandLineToArgvW(GetCommandLineW(), &argc))) return FALSE;
-    for (i = 1; i < argc; ++i) {
-        if (!wcscmp(args[i], L"-snapmap-plus-bench")) {
-            folder = "bench\\mods";
-            break;
-        }
-    }
-    LocalFree(args);
-    *root = sh_textf("%s\\%s", base, folder);
+    if (!base) return FALSE;
+    *root = sh_textf("%s\\mods", base);
     return *root != NULL;
 }
 
@@ -2343,7 +2334,7 @@ static int ms_file_matches(const sh_mb_file *f, const char *type, const char *na
 
 int sh_ms_resolve_need(const sh_ms_list *l, const char *type, const char *name, sh_ms_hit *hit)
 {
-    char *cand[2] = { NULL, NULL };
+    char *cand[SH_MB_NEED_REQUESTS] = { NULL, NULL };
     int ncand;
     size_t i, k;
     const sh_mb_file *first = NULL;
@@ -2352,7 +2343,7 @@ int sh_ms_resolve_need(const sh_ms_list *l, const char *type, const char *name, 
     memset(&h, 0, sizeof h);
     h.status = SH_MS_MISS;
     if (!l || !type || !name) { if (hit) *hit = h; return SH_MS_MISS; }
-    ncand = sh_mb_need_requests(type, name, cand, 2);
+    ncand = sh_mb_need_requests(type, name, cand, SH_MB_NEED_REQUESTS);
     if (ncand < 0) ncand = 0;
     for (i = 0; i < l->count; i++) {
         const sh_ms_entry *e = &l->items[i];

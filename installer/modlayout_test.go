@@ -63,7 +63,7 @@ func TestInstallUpgradesModLayout(t *testing.T) {
 		if exists(old) || exists(filepath.Join(r.data, "mods", ".served")) || exists(filepath.Join(r.data, "mods", ".builds")) {
 			t.Fatal("a shared directory remains in the mods folder")
 		}
-		saved, err := filepath.Glob(filepath.Join(r.data, "backups/earlier-data/mod-folders/builds-*/original/pack@146a9dbac3758deb/mod.json"))
+		saved, err := filepath.Glob(filepath.Join(r.data, "cache/legacy-builds/pack@146a9dbac3758deb/mod.json"))
 		if err != nil || len(saved) != 1 || readF(t, saved[0]) != fmt.Sprintf(author, testModBlock) {
 			t.Fatal("the installer did not preserve the original build")
 		}
@@ -111,18 +111,20 @@ func TestUpgradeModLayoutRecoversOverlap(t *testing.T) {
 	pack := filepath.Join(mods, "group", "pack")
 	writeF(t, filepath.Join(pack, "mod.json"), author)
 	writeF(t, filepath.Join(pack, ".build", "manifest.json"), testModBlock)
+	if err := upgradeModLayout(data); err == nil || readF(t, filepath.Join(old, "other")) != "old content" || readF(t, filepath.Join(dst, "other")) != "current content" || readF(t, filepath.Join(pack, "mod.json")) != author {
+		t.Fatal("conflict did not preserve both sources before migration")
+	}
+	if err := os.Rename(filepath.Join(dst, "other"), filepath.Join(data, "user-kept-other")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(dst, blob), filepath.Join(data, "user-kept-partial-blob")); err != nil {
+		t.Fatal(err)
+	}
 	if err := upgradeModLayout(data); err != nil {
 		t.Fatal(err)
 	}
-	if exists(old) || readF(t, filepath.Join(dst, blob)) != "verified" ||
-		readF(t, filepath.Join(dst, "partial/longer.part")) != "abcdef" ||
-		readF(t, filepath.Join(dst, "partial/current.part")) != "abcdef" ||
-		readF(t, filepath.Join(dst, "other")) != "current content" {
-		t.Fatal("an overlapping cache did not preserve the usable files")
-	}
-	recovered, err := filepath.Glob(filepath.Join(cache, "recovered-mod-files-*", "content", "other"))
-	if err != nil || len(recovered) != 1 || readF(t, recovered[0]) != "old content" {
-		t.Fatal("different old cache file was not kept")
+	if readF(t, filepath.Join(dst, blob)) != "verified" || readF(t, filepath.Join(dst, "partial/longer.part")) != "abcdef" || readF(t, filepath.Join(dst, "partial/current.part")) != "abcdef" {
+		t.Fatal("lost verified cache data")
 	}
 	for _, rel := range []string{"maps/old", "mods/pack.old-34", "earlier/inner"} {
 		if got := readF(t, filepath.Join(mods, rel, "mod.json")); got != author {
@@ -174,12 +176,14 @@ func TestUpgradeModLayoutRetriesWithoutLosingAuthorData(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeF(t, sidecar, "pre-existing user file")
-	if err := upgradeModLayout(data); err != nil {
+	if err := upgradeModLayout(data); err == nil || readF(t, sidecar) != "pre-existing user file" || readF(t, path) != source {
+		t.Fatal("pre-existing author sidecar was displaced")
+	}
+	if err := os.Rename(sidecar, sidecar+".mine"); err != nil {
 		t.Fatal(err)
 	}
-	recovered, err := filepath.Glob(filepath.Join(data, "cache", "recovered-mod-files-*", "mods", "props", ".build", "manifest.json"))
-	if err != nil || len(recovered) != 1 || readF(t, recovered[0]) != "pre-existing user file" {
-		t.Fatal("an existing file in the build folder was overwritten")
+	if err := upgradeModLayout(data); err != nil {
+		t.Fatal(err)
 	}
 	if readF(t, linked) != source || readF(t, sidecar) != testModBlock || readF(t, path) != strings.Replace(source, testModBlock, testModIdentity, 1) {
 		t.Fatal("retry did not preserve the linked descriptor and split the mod")
@@ -205,11 +209,11 @@ func TestSameReleaseUpdateRetriesLayoutAndUninstallKeepsContent(t *testing.T) {
 	mkdirAll(t, sidecar)
 	writeF(t, filepath.Join(rig.data, "mods", ".content", "units", "kept.json"), "offline map")
 	writeF(t, filepath.Join(rig.doom, currentProxy), "another tool")
-	if err := cmdInstall(f); err == nil || !strings.Contains(err.Error(), "mod data could not finish") {
+	if err := cmdInstall(f); err == nil || !strings.Contains(err.Error(), "before installing") {
 		t.Fatalf("got %v for a busy manifest", err)
 	}
-	if rec, err := loadRecord(); err != nil || rec.Version != tag || len(rec.Backups) != 1 {
-		t.Fatalf("the installation and the foreign DLL's backup were not recorded: %+v, %v", rec, err)
+	if rec, _ := loadRecord(); (rec != nil && rec.Version == tag) || readF(t, filepath.Join(rig.doom, currentProxy)) != "another tool" {
+		t.Fatal("preflight failure installed the new release")
 	}
 	if err := os.Remove(sidecar); err != nil {
 		t.Fatal(err)

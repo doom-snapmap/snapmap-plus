@@ -21,9 +21,9 @@ new Function('api', src.slice(begin, end) +
   '\napi.parse = pfModsParse; api.badge = pfModsBadge; api.detail = pfModsDetail; api.loadToast = pfModsLoadToast;' +
   ' api.fileToast = pfFileResultToast; api.label = pfModLabel;')(api);
 
-/* MODS_STATUS rows: "id" is the row's name (else its salt), with the salt and the build. */
-const door = {id: 'test.door', salt: 'testdoor', build: 'a'.repeat(64), size: 100, installed: true};
-const ghost = {id: 'ghost.mod', salt: 'ghostmod', build: '9'.repeat(64), size: 1048576, installed: false};
+/* MODS_STATUS uses "installed" for available content from either source. */
+const door = {id: 'test.door', salt: 'testdoor', build: 'a'.repeat(64), size: 100, installed: true, state: 'served', cause: ''};
+const ghost = {id: 'ghost.mod', salt: 'ghostmod', build: '9'.repeat(64), size: 1048576, installed: false, state: 'missing', cause: ''};
 const both = JSON.stringify({count: 2, missing: 1, mods: [door, ghost]});
 
 /* Parsing: the host's escaped string or an object; anything malformed is no mods. */
@@ -42,7 +42,7 @@ check(api.badge({count: 1, missing: 1, mods: [{id: 'abcd1234', salt: 'abcd1234',
 check(api.badge(api.parse('')) === null, 'no mods, no pill');
 let b = api.badge(st);
 check(b && b.text === 'Needs mods: ghost.mod' && /pf-mods-missing/.test(b.cls), 'a missing mod names it: ' + JSON.stringify(b));
-check(b && b.title === 'test.door (installed)\nghost.mod (not installed)', 'the title lists every mod and its state');
+check(b && b.title === 'test.door (content ready)\nghost.mod (missing content)', 'the title lists every mod and its state');
 b = api.badge(api.parse({mods: [door]}));
 check(b && b.text === 'Mods: test.door' && b.cls === 'pf-mods', 'installed mods are listed: ' + JSON.stringify(b));
 b = api.badge(api.parse({mods: [door, Object.assign({}, door, {id: 'other.mod'})]}));
@@ -52,27 +52,31 @@ check(b && b.text === 'Needs mods: ghost.mod +1', 'only the missing ones are nam
 
 /* Prefab Details. */
 let d = api.detail(st);
-check(d.rows.length === 2 && d.rows[0].label === 'test.door' && d.rows[0].state === 'Installed' && !d.rows[0].missing &&
-      d.rows[1].state === 'Not installed' && d.rows[1].missing, 'one row per mod with its state');
-check(d.note === 'Needs mods: 1 is not installed. Install it from the prefab\'s export with Install in the Mods tab, then ' +
-      'Load / Place.', 'the note says what to do: ' + d.note);
+check(d.rows.length === 2 && d.rows[0].label === 'test.door' && d.rows[0].state === 'Content ready' && !d.rows[0].missing &&
+      d.rows[1].state === 'Missing content' && d.rows[1].missing, 'one row per mod with its state');
+const importHelp = "In the Prefabs tab, use Import to open the author's prefab ZIP. Then select the imported prefab and choose Load / Place.";
+check(d.note === importHelp, 'missing content directs the player to prefab import');
 /* A mod and the open map, in the Mods tab's words (its mapStateOf, by the mod's namespace). */
 const inMap = salt => ({state: salt === door.salt ? 'objects' : 'out'});
 d = api.detail(api.parse({mods: [door, Object.assign({}, door, {id: 'other.mod', salt: 'othermod'}), ghost]}), inMap);
 check(d.rows[0].state === 'In this map' && d.rows[0].inMap && d.rows[1].state === 'Not in this map' && !d.rows[1].inMap &&
-      d.rows[2].state === 'Not installed' && d.rows[2].missing, 'with a map open, each mod says whether the map uses it');
-check(api.detail(api.parse({mods: [door]}), () => null).rows[0].state === 'Installed', 'no map: installed');
+      d.rows[2].state === 'Missing content' && d.rows[2].missing, 'with a map open, each mod says whether the map uses it');
+check(api.detail(api.parse({mods: [door]}), () => null).rows[0].state === 'Content ready', 'no map: locally available content');
 b = api.badge(api.parse({mods: [door, ghost]}), inMap);
-check(b && b.title === 'test.door (in this map)\nghost.mod (not installed)', 'the pill title says the same: ' + JSON.stringify(b && b.title));
-check(api.detail(api.parse({mods: [ghost, ghost]})).note.indexOf('Needs mods: 2 are not installed.') === 0, 'plural note');
-check(api.detail(api.parse({mods: [door]})).note === 'Every mod this prefab needs is installed.', 'all installed');
+check(b && b.title === 'test.door (in this map)\nghost.mod (missing content)', 'the pill title says the same: ' + JSON.stringify(b && b.title));
+check(api.detail(api.parse({mods: [ghost, ghost]})).note === importHelp, 'one action for several missing mods');
+check(api.detail(api.parse({mods: [door]})).note === 'All mod content this prefab needs is available.', 'cache-only content is ready');
+const incomplete = Object.assign({}, ghost, {state: 'incomplete', cause: 'The folder is missing an object.'});
+d = api.detail(api.parse({mods: [incomplete]}), () => ({state: 'whole'}));
+check(d.rows[0].state === 'Content incomplete' && d.rows[0].missing && !d.rows[0].inMap && d.note === importHelp,
+      'a mod in the map may still lack an object this prefab needs');
 check(api.detail(api.parse('')).rows.length === 0 && api.detail(api.parse('')).note === '', 'no mods, no section');
 
 /* Load / Place answers about mods. */
-let t = api.loadToast({result: 3, name: 'Door', message: 'This prefab needs 1 mod you do not have; checking the mod store.'});
-check(t && t.level === 'ok' && t.text === 'This prefab needs 1 mod you do not have; checking the mod store.', 'held: the message');
+let t = api.loadToast({result: 3, name: 'Door', message: 'Preparing mod content for Door.'});
+check(t && t.level === 'ok' && t.text === 'Preparing mod content for Door.', 'held: the message');
 t = api.loadToast({result: -7, name: 'Door', message: ''});
-check(t && t.level === 'warn' && t.text === '"Door" was not placed: its mods are not installed', 'refused without text');
+check(t && t.level === 'warn' && t.text === '"Door" could not be placed in this map.', 'refused without text');
 t = api.loadToast({result: -7, name: 'Door', message: 'Another prefab is waiting for its mods.'});
 check(t && t.text === 'Another prefab is waiting for its mods.', 'refused with the backend text');
 check(api.loadToast({result: 1, name: 'Door'}) === null && api.loadToast({result: -6}) === null, 'other answers keep their toasts');
@@ -99,6 +103,23 @@ check(lp !== -1 && src.indexOf('var pml = pfModsLoadToast(d);', lp) !== -1 &&
       src.indexOf('var pml = pfModsLoadToast(d);', lp) < src.indexOf("d.prefabKind === 'modules'", lp),
       'mods answers are told before the kind-specific toasts');
 check(src.indexOf("d.kind === 'prefabFileResult'") !== -1, 'Export and Import answers are handled');
+/* Deliver real list messages twice to the page, keeping a same-named prefab in another folder missing. */
+const listStart = src.indexOf("d.kind === 'prefabs') {") + "d.kind === 'prefabs') {".length;
+const listEnd = src.indexOf("} else if (d.kind === 'prefabFileResult')", listStart);
+const deliver = new Function('d', 'pfModsParse', 'selectedPrefabName', 'selectedPrefabFolder', 'pfShowMods',
+  'var prefabTags, prefabKinds, prefabMods, pfListLast, pfModsShown; function renderPrefabList() {}' +
+  src.slice(listStart, listEnd) + '\nreturn prefabTags;');
+const observed = [];
+const listMods = {Door: {mods: [ghost]}, 'Hangar/Door': {mods: [ghost]}};
+const refresh = () => deliver({mods: listMods}, api.parse, 'Door', 'Hangar', st => observed.push(api.detail(st)));
+let tags = refresh();
+check(tags['Hangar/Door'].includes('needs mods') && observed[0].note === importHelp, 'selected prefab starts missing');
+listMods['Hangar/Door'] = {mods: [door]};
+tags = refresh();
+check(observed.length === 2 && observed[1].rows[0].state === 'Content ready' && tags.Door.includes('needs mods') &&
+      !tags['Hangar/Door'].includes('needs mods'), 'reimport updates the selected folder and the missing-content filter');
+check(/if \(kind == 3 && r >= 0\) ui_send_prefabs\(\);/.test(host),
+      'host refreshes even when an identical prefab gains only its cached content');
 /* A module prefab's missing-module warning is shown. */
 check(src.indexOf("pfShowModuleCheck(selectedPrefabKind === 'modules' ? d.moduleCheck : null)") !== -1 && /id="pcNeeds"/.test(src),
       'the module check warning is kept');

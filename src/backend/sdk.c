@@ -1,5 +1,6 @@
 /* sdk.c -- the Graphics SDK's compilers, one entry point (sdk.h). */
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -69,8 +70,8 @@ static char *join(char *a, char *b)
     return r;
 }
 
-int sh_sdk_compile(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
-                   size_t why_len, char **notes, char **needs)
+static int sdk_compile(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
+                       size_t why_len, char **notes, char **needs, int author)
 {
     const char *type = sh_sdk_decl_type(path);
     *out = NULL;
@@ -86,6 +87,20 @@ int sh_sdk_compile(const char *path, const char *text, size_t len, char **out, s
         /* a material: its values that change over time, then its type */
         char *v = NULL, *l = NULL, *ln = NULL;
         size_t vn = 0, lnn = 0;
+        if (author && text) {
+            char *earlier = NULL;
+            size_t n = 0;
+            int old = sh_modprog_pinned_material(text, len, &earlier, &n);
+            free(earlier);
+            if (old < 0) return SH_LOOK_OOM;
+            if (old) {
+                const char *base = strrchr(path, '/');
+                if (why && why_len)
+                    snprintf(why, why_len, "%s uses an earlier material format. Run the Snapmap+ installer to update it.",
+                             base ? base + 1 : path);
+                return SH_LOOK_MISTAKE;
+            }
+        }
         int rv = sdk_values_material_text(path, text, len, &v, &vn, why, why_len), rl;
         if (rv == 2) return SH_LOOK_MISTAKE;
         if (rv < 0) return SH_LOOK_OOM;
@@ -99,15 +114,23 @@ int sh_sdk_compile(const char *path, const char *text, size_t len, char **out, s
     }
 }
 
-int sh_sdk_serve_compile(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
-                         size_t why_len)
+int sh_sdk_compile(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
+                   size_t why_len, char **notes, char **needs)
 {
+    return sdk_compile(path, text, len, out, out_len, why, why_len, notes, needs, 1);
+}
+
+int sh_sdk_build_compile(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
+                         size_t why_len, char **notes, char **needs, int from_unit)
+{
+    if (!from_unit)
+        return sh_sdk_compile(path, text, len, out, out_len, why, why_len, notes, needs);
     const char *kind = sh_sdk_decl_type(path);
     char *earlier = NULL;
     size_t n = 0;
     if (text && kind && !strcmp(kind, "material") && sh_modprog_pinned_material(text, len, &earlier, &n) < 0)
         return SH_LOOK_OOM;
-    int r = sh_sdk_compile(path, earlier ? earlier : text, earlier ? n : len, out, out_len, why, why_len, NULL, NULL);
+    int r = sdk_compile(path, earlier ? earlier : text, earlier ? n : len, out, out_len, why, why_len, notes, needs, 0);
     if (earlier && r == SH_LOOK_SAME) {
         *out = earlier;
         if (out_len) *out_len = n;
@@ -115,4 +138,10 @@ int sh_sdk_serve_compile(const char *path, const char *text, size_t len, char **
     }
     free(earlier);
     return r;
+}
+
+int sh_sdk_serve_compile(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
+                         size_t why_len)
+{
+    return sh_sdk_build_compile(path, text, len, out, out_len, why, why_len, NULL, NULL, 1);
 }

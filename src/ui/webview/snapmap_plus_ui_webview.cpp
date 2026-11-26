@@ -34,6 +34,7 @@
 #include "prefab_grab.h"    /* SH_PREFAB_GRAB_*, and the saved-file check when the backend has no guard */
 #include "prefab_block.h"   /* a prefab file's snapmapPlus block: stripped before the engine sees the text */
 #include "game_identity.h"  /* the backend-provided game identity (startup argv) */
+#include "../../common/profile_dir.h"
 #include "webview_profile.h" /* the WebView2 profile folder under cache\ */
 #include "folder_watch.h"   /* the debounce behind the prefabs folder watcher */
 #include "../sh_entity_desc.h"/* generated entity descriptions */
@@ -135,8 +136,7 @@ static bool          g_pick_ok   = false;    /* false = cancelled */
 static std::wstring  g_pick_path;
 static std::wstring  g_pick_file_name;       /* Export Prefab: the name the dialog proposes */
 static std::string   g_pick_prefab_name, g_pick_prefab_folder;   /* Export Prefab: the prefab */
-/* A Load/Place held while its mods are fetched (backend/prefab_mods.c): the
- * placement to poll, and the prefab to place again once they are installed. */
+/* A placement to resume once its cached content has been prepared. */
 static int           g_mods_wait_seq = 0;
 static std::string   g_mods_wait_name, g_mods_wait_folder, g_mods_wait_body;
 static int           g_mods_resume_seq = 0;
@@ -404,18 +404,12 @@ static std::wstring ui_wpath(const char *utf8)
     if (w.compare(0, 2, L"\\\\") == 0) return L"\\\\?\\UNC\\" + w.substr(2);
     return w;
 }
-static std::wstring ui_local_appdata()
-{
-    PWSTR p = nullptr;
-    std::wstring dir;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &p)) && p) dir = p;
-    if (p) CoTaskMemFree(p);
-    return dir;
-}
 static std::wstring ui_local_snapmap_dir()
 {
-    std::wstring dir = ui_local_appdata();
-    return dir.empty() ? dir : dir + L"\\snapmap-plus";
+    PWSTR p = sh_profile_dir();
+    std::wstring dir = p ? p : L"";
+    if (p) CoTaskMemFree(p);
+    return dir;
 }
 static FILE *ui_open(const char *utf8_path, const wchar_t *mode)
 {
@@ -1406,7 +1400,7 @@ static bool ui_resolve_prefab_mods(const std::string &body)
     int r = ui_module_prefab_call(&call, &msg);
     ui_log(("load-prefab: mods of '" + g_load_prefab_name + "' resolve=" + std::to_string(r) + " seq=" +
             std::to_string(call.seq) + " (" + msg + ")").c_str());
-    if (r == 1) return true;                       /* every mod installed and in the open map */
+    if (r == 1) return true;
     if (r == 2 && call.seq > 0) {                  /* its carried content is being prepared */
         g_mods_wait_seq = call.seq;
         g_mods_wait_context = g_load_prefab_context;
@@ -1436,7 +1430,7 @@ static void ui_poll_prefab_mods()
                 g_mods_wait_seq, r);
     g_mods_wait_seq = 0;
     if (r == 1) {
-        /* Placed through the ordinary Load/Place, which finds every mod installed. */
+        /* Retry through the ordinary Load/Place in the original map. */
         g_mods_resume_seq = call.seq;
         g_load_prefab_context = g_mods_wait_context;
         g_load_prefab_name = g_mods_wait_name;
@@ -2091,7 +2085,7 @@ static void ui_finish_prefab_pick(int kind, bool picked, const std::string &zip8
     }
     m += L"}";
     ui_post_json(m.c_str());
-    if (kind == 3 && r == 1) ui_send_prefabs();
+    if (kind == 3 && r >= 0) ui_send_prefabs();  /* an existing prefab may have gained its missing content */
 }
 /* Act on a finished picker, on the UI thread from the think loop. */
 static void ui_finish_pick()
@@ -2503,7 +2497,7 @@ static std::string ui_module_prefab_check(const std::string &scene, const char *
     int r = ui_module_prefab_call(&call, &out);
     return r < 0 ? std::string() : out;
 }
-/* The mods a view records, with whether each is installed (SH_MODULE_PREFAB_MODS_STATUS):
+/* The mods a view records, with their local content status (SH_MODULE_PREFAB_MODS_STATUS):
  * its JSON, or empty when the view records none or this backend cannot answer. */
 static std::string ui_prefab_mods_status(const std::string &meta)
 {
@@ -4248,7 +4242,7 @@ static HRESULT on_environment_created(HRESULT result, ICoreWebView2Environment *
 static int ui_devtools_port(const wchar_t *local)
 {
     if (!local || !*local) return 0;
-    std::wstring path = std::wstring(local) + L"\\snapmap-plus\\devtools-port";
+    std::wstring path = std::wstring(local) + L"\\devtools-port";
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return 0;
     char buf[16] = {}; DWORD got = 0;
@@ -4268,12 +4262,12 @@ static int ui_devtools_port(const wchar_t *local)
 
 static void ui_start_webview()
 {
-    std::wstring local = ui_local_appdata(), udf = L".";
-    bool have_local = !local.empty();
-    if (have_local) udf = sh_webview_profile::path(local);
+    std::wstring local = ui_local_snapmap_dir();
+    if (local.empty()) { ui_log("The Snapmap+ profile could not be opened"); return; }
+    std::wstring udf = sh_webview_profile::path(local);
     ComPtr<ICoreWebView2EnvironmentOptions> options;
 #ifdef SH_DIAG
-    int devtools_port = have_local ? ui_devtools_port(local.c_str()) : 0;
+    int devtools_port = ui_devtools_port(local.c_str());
     if (devtools_port) {
         auto opts = Make<CoreWebView2EnvironmentOptions>();
         wchar_t args[64]; _snwprintf_s(args, _countof(args), _TRUNCATE, L"--remote-debugging-port=%d", devtools_port);

@@ -55,7 +55,7 @@ func convertEarlierNativeSaves(data, saveRoot string, pins ...*earlierPins) ([]s
 				resolver = pins[0]
 			}
 			path, err := convertNativeSave(data, dir, name[8:], resolver)
-			if err != nil {
+			if err != nil && !(resolver != nil && resolver.keepMissing != nil && resolver.keepMissing(dir, err)) {
 				failures = append(failures, fmt.Errorf("%s: %w", dir, err))
 			}
 			if path != "" {
@@ -96,6 +96,9 @@ func convertNativeSave(data, slot, id string, pins *earlierPins) (string, error)
 	}
 	defer z.Close()
 	var scan nativeMapMarker
+	if pins != nil && pins.placements != nil && len(pins.placements.byName) > 0 {
+		scan.placed = pins.placements
+	}
 	size, err := io.Copy(&scan, io.LimitReader(z, math.MaxInt32+1))
 	if err != nil {
 		return "", err
@@ -123,6 +126,9 @@ func convertNativeSave(data, slot, id string, pins *earlierPins) (string, error)
 	if int64(len(original)) != size {
 		return "", fmt.Errorf("map changed during conversion")
 	}
+	if !hasHistoricalEvidence(original, nil, pins) {
+		return "", nil
+	}
 	out, changed, err := convertEarlierPinnedJSON(original, nil, pins)
 	if err != nil || !changed {
 		return "", err
@@ -133,14 +139,19 @@ func convertNativeSave(data, slot, id string, pins *earlierPins) (string, error)
 
 // Scan stock maps without allocating their uncompressed size.
 type nativeMapMarker struct {
-	tail  []byte
-	found bool
+	placed *earlierPlacements
+	tail   []byte
+	found  bool
 }
 
 func (s *nativeMapMarker) Write(p []byte) (int, error) {
 	const marker = "\"snapmap-plus\""
 	if !s.found {
-		overlap := min(len(p), len(marker)-1)
+		width := len(marker) - 1
+		if s.placed != nil {
+			width = max(width, s.placed.width)
+		}
+		overlap := min(len(p), width)
 		edge := append(s.tail, p[:overlap]...)
 		for _, word := range []string{marker, `"smp`, `"smnav1.`} {
 			if bytes.Contains(edge, []byte(word)) || bytes.Contains(p, []byte(word)) {
@@ -148,11 +159,14 @@ func (s *nativeMapMarker) Write(p []byte) (int, error) {
 				break
 			}
 		}
-		if len(p) >= len(marker)-1 {
-			s.tail = append(s.tail[:0], p[len(p)-len(marker)+1:]...)
+		if !s.found && s.placed != nil {
+			s.found = s.placed.couldMention(p) || s.placed.couldMention(edge)
+		}
+		if len(p) >= width {
+			s.tail = append(s.tail[:0], p[len(p)-width:]...)
 		} else {
 			s.tail = append(s.tail, p...)
-			s.tail = s.tail[max(0, len(s.tail)-len(marker)+1):]
+			s.tail = s.tail[max(0, len(s.tail)-width):]
 		}
 	}
 	return len(p), nil

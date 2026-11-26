@@ -231,7 +231,11 @@ static void test_closure(const char *top)
     }
     {
         char *why = NULL;
-        CHECK(!sh_unit_of(&b, folder, "mods/" SALT "/nothing", &(sh_unit_env){ game_where, NULL, NULL, 0 }, &u, &why) && why);
+        CHECK(!sh_unit_of(&b, folder, "mods/" SALT "/nothing", &(sh_unit_env){ game_where, NULL, NULL, 0 }, &u, &why) && why && u.absent_root);
+        free(why);
+        why = NULL;
+        CHECK(!sh_unit_of(&b, folder, "mods/" SALT "/crate_d", &(sh_unit_env){ game_where, NULL, NULL, 0 }, &u, &why)
+              && why && !u.absent_root);
         free(why);
     }
     sh_mb_free(&b);
@@ -360,7 +364,7 @@ static void test_surface(const char *top)
     sh_mb_bundle b;
     sh_unit u;
     size_t i;
-    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\surface", top);
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\surface", top);
     write_pack(folder);
     mt_write(folder, "native\\generated\\decls\\material\\models\\mapobjects\\rock_kit.decl", g_surface_text);
     sh_mb_set_stock_ops(&g_surface_ops);

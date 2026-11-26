@@ -9,7 +9,7 @@
 /* The builder's rules number, written into the block as "rules"; a folder whose block carries another number is
  * built again once, so a product update reclassifies every own folder. Raise it when a build's classification,
  * edits or manifest change. */
-#define SH_MB_RULES           15
+#define SH_MB_RULES           16
 
 #define SH_MB_EARLIER "Run the Snapmap+ installer to update this mod from an earlier version."
 #define SH_MB_ID_MAX          64u
@@ -198,6 +198,8 @@ int  sh_mb_check_source(const char *source, char **cause);
  * (resolver->stock): an editor tweak, or a replacement whose derived edits are recorded (out->edits) and a
  * binary is refused. */
 int  sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *resolver, sh_mb_bundle *out);
+/* A unit composition keeps historical bytes and derives its dependencies from their rendering form. */
+int  sh_mb_build_composition(const char *folder, const char *salt, const sh_mb_resolver *resolver, sh_mb_bundle *out);
 
 /* A bundle's sentences, never NULL: the first error ("" when none), the
  * first warning and the block's cause. */
@@ -531,6 +533,7 @@ const char *sh_mb_decl_type(const char *folder, size_t folder_len);
 /* Request paths the engine would ask the provider for when it loads the logical (type, name): lower-cased, each
  * malloc'd (sh_mb_requests_free); returns the number written. A model name (.lwo, .ase, .ma, .obj, .fbx) is
  * cooked/model/<stem>.bmodel, then generated/model/<stem>.bmodel (md6 collision models ship only there). */
+#define SH_MB_NEED_REQUESTS 4
 int  sh_mb_need_requests(const char *type, const char *name, char *out[], int max);
 void sh_mb_requests_free(char *out[], int count);
 
@@ -553,11 +556,11 @@ typedef int (*sh_mb_look_fn)(const char *path, const char *text, size_t len, cha
                              size_t why_len, char **notes);
 void sh_mb_set_look_compiler(sh_mb_look_fn fn);
 
-/* The Graphics SDK's compilers (sdk.h sh_sdk_compile), set by the backend: when set, the build reads each
+/* The Graphics SDK's compilers (sdk.h sh_sdk_build_compile), set by the backend: when set, the build reads each
  * material, fx and env decl through it instead, and each `type name` line of *needs joins the file's needs, so
  * the closure brings the product's derived decls along as pointers. */
 typedef int (*sh_mb_sdk_fn)(const char *path, const char *text, size_t len, char **out, size_t *out_len, char *why,
-                            size_t why_len, char **notes, char **needs);
+                            size_t why_len, char **notes, char **needs, int from_unit);
 void sh_mb_set_sdk_compiler(sh_mb_sdk_fn fn);
 
 /* Bare (unquoted) words that name a mod resource ("mods/...") and contain '-', which the engine's breakable and

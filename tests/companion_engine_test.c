@@ -3,6 +3,17 @@
  * replaces the tables a spawn loop reads. */
 #include "../src/backend/companion_engine.c"
 
+static int direct_pending, client, allow_test_arm;
+static void *direct_entity;
+static const char *direct_name, *direct_parent;
+int sh_direct_iter_awaiting_spawn(void) { return direct_pending; }
+void sh_direct_iter_after_spawn(void *entity, const char *name, const char *inherit)
+{
+    direct_entity = entity;
+    direct_name = name;
+    direct_parent = inherit;
+}
+
 static int t_failed;
 #define CHECK(expr) do {                                                        \
     if (!(expr)) {                                                              \
@@ -23,7 +34,10 @@ const sig_entry SH_COMPANION_SIGNATURES[] = { { NULL } };
 const sig_entry SH_MODSCENE_SPAWN_SIGNATURES[] = { { NULL } };
 sig_status sig_resolve_one(const uint8_t *module_base, const sig_entry *sig, sig_result *out)
 { (void)module_base; (void)sig; (void)out; return (sig_status)1; }
-void *hook_prepare(void *target, void *detour, size_t stolen) { (void)target; (void)detour; (void)stolen; return NULL; }
+void *hook_prepare(void *target, void *detour, size_t stolen)
+{
+    return allow_test_arm && detour == (void *)callspawn_detour && stolen == SH_CALLSPAWN_STOLEN ? target : NULL;
+}
 const char *hook_last_failure(void) { return ""; }
 sh_patch_status hook_commit(void *tramp) { (void)tramp; return (sh_patch_status)0; }
 int hook_is_installed(void *tramp) { (void)tramp; return 0; }
@@ -130,7 +144,7 @@ static void fe_finish(void *gm, void *ent, int entnum, unsigned long long spawn_
 static void fe_callspawn(void *obj) { (void)obj; }
 static void fe_bind(void *ent, void *master, unsigned flags) { (void)ent; (void)master; (void)flags; }
 static void fe_add_target(void *ent, void *target) { (void)ent; (void)target; }
-static unsigned char fe_is_client(void *gm) { (void)gm; return 0; }
+static unsigned char fe_is_client(void *gm) { (void)gm; return (unsigned char)client; }
 void *sh_entity_gamemgr(void) { return g_gm; }
 
 static void fe_reset(void)
@@ -234,6 +248,27 @@ static void test_rebuild_waits_for_the_outer_spawn(void)
 
 int main(void)
 {
+    uint32_t thread = GetCurrentThreadId();
+    fe_reset();
+    g_orig = NULL;
+    g_target = (void *)SH_CALLSPAWN_PROLOGUE;
+    g_main_thread_at = &thread;
+    allow_test_arm = 1;
+    CHECK(!sh_companions_ensure("ordinary map"));
+    direct_pending = 1;
+    CHECK(sh_companions_ensure("first script-free direct actor"));
+    CHECK((void *)g_orig == g_target);
+    allow_test_arm = 0;
+    fe_reset();
+    fe_ent *placed = fe_entity(fe_decl_add("map11/direct_51", "ai/name"));
+    direct_pending = 1;
+    client = 1;
+    callspawn_detour(placed);
+    CHECK(!direct_entity);
+    client = 0;
+    callspawn_detour(placed);
+    CHECK(direct_entity == placed && !strcmp(direct_name, "map11/direct_51") && !strcmp(direct_parent, "ai/name"));
+    direct_pending = 0;
     test_companions_from_serving_build();
     test_rebuild_waits_for_the_outer_spawn();
     free_tables();

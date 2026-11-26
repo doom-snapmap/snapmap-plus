@@ -28,6 +28,7 @@ typedef struct shs_ent {
 
 typedef struct shs_bind {
     char    *name;           /* malloc'd, a full entityDef name of any length */
+    char    *behavior;       /* the map-local Enemy SDK route, when this binding supplies one */
     unsigned kinds;
 } shs_bind;
 

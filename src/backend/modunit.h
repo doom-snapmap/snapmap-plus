@@ -37,6 +37,7 @@ typedef struct sh_unit_env {
 
 typedef struct sh_unit {
     int kind;                    /* SH_UNIT_* */
+    int absent_root;             /* failed lookup: the built mod has no file providing the selected name */
     char *root;                  /* the root's author name (entities/tyrant), SH_UNIT_WHOLE for the mod */
     char hash[SH_MB_HASH_HEX + 1];   /* SHA-256 of the manifest: the unit's identity */
     char *manifest;              /* the canonical bytes, NUL-terminated */
