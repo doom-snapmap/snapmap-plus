@@ -89,11 +89,7 @@ func cmdInstall(f flags) error {
 		}
 	}
 	if migration != nil && migration.ready() {
-		ok, err := migration.consent(f.yes)
-		if err != nil {
-			return err
-		}
-		if !ok {
+		if !migration.consent(f.yes) {
 			ui.Skip("Cancelled.")
 			return nil
 		}

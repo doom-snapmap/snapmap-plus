@@ -2,14 +2,15 @@ package main
 
 import (
 	"archive/zip"
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -196,18 +197,27 @@ func TestMigrationConsentAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldIn, oldInteractive := stdin, isInteractive
-	t.Cleanup(func() { stdin = oldIn; isInteractive = oldInteractive })
+	oldInput := migrationInput
+	t.Cleanup(func() { migrationInput = oldInput })
 	for _, k := range []struct {
-		input         string
-		terminal, yes bool
-	}{{"", true, false}, {"\n", true, false}, {"n\n", true, false}, {"yes\n", true, true}, {"y\n", false, false}} {
-		stdin = bufio.NewReader(strings.NewReader(k.input))
-		isInteractive = func() bool { return k.terminal }
-		yes, err := plan.consent(false)
-		if yes != k.yes || (err != nil) == k.terminal {
-			t.Fatalf("answer %q: %v %v", k.input, yes, err)
+		input string
+		yes   bool
+	}{
+		{"y\n", true}, {"Y\r\n", true}, {"n\n", false}, {"\r\n", false},
+		{"maybe\nY\n", false}, {"yes\n", false}, {"y", false}, {"", false},
+	} {
+		migrationInput = func() io.ReadCloser { return io.NopCloser(strings.NewReader(k.input)) }
+		if yes := plan.consent(false); yes != k.yes {
+			t.Fatalf("answer %q: %v", k.input, yes)
 		}
+	}
+	migrationInput = func() io.ReadCloser { return io.NopCloser(iotest.ErrReader(io.ErrClosedPipe)) }
+	if plan.consent(false) {
+		t.Fatal("accepted a failed keyboard read")
+	}
+	migrationInput = func() io.ReadCloser { return nil }
+	if plan.consent(false) {
+		t.Fatal("accepted migration without a keyboard")
 	}
 	if readF(t, config) != orig || exists(migrationJournal(data)) {
 		t.Fatal("preflight modified player data")

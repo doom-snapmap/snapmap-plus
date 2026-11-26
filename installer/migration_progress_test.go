@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bufio"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,8 +9,8 @@ import (
 )
 
 func TestMigrationShowsCurrentWorkAndStopsBeforeConsent(t *testing.T) {
-	oldUI, oldInput, oldInteractive := ui, stdin, isInteractive
-	t.Cleanup(func() { ui, stdin, isInteractive = oldUI, oldInput, oldInteractive })
+	oldUI, oldInput := ui, migrationInput
+	t.Cleanup(func() { ui, migrationInput = oldUI, oldInput })
 	c, output := testConsole(false)
 	ui = c
 	progress := startMigrationProgress()
@@ -27,11 +27,9 @@ func TestMigrationShowsCurrentWorkAndStopsBeforeConsent(t *testing.T) {
 		{mod: "doors", build: strings.Repeat("a", 64)}, {mod: "doors", build: strings.Repeat("b", 64)},
 	}})
 	p.reportDeferred()
-	stdin = bufio.NewReader(strings.NewReader("\n"))
-	isInteractive = func() bool { return true }
-	ok, err := p.consent(false)
-	if ok || err != nil {
-		t.Fatalf("default answer: %v, %v", ok, err)
+	migrationInput = func() io.ReadCloser { return io.NopCloser(strings.NewReader("n\n")) }
+	if p.consent(false) {
+		t.Fatal("accepted a declined migration")
 	}
 	screen := output.String()
 	if !strings.Contains(screen, fieldLabel("Maps and rawmaps")+"1") ||

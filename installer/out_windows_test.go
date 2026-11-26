@@ -3,10 +3,64 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"os"
+	"os/exec"
 	"syscall"
 	"testing"
+	"time"
+	"unsafe"
 )
+
+func TestMigrationReadsOnlyFreshConsoleInput(t *testing.T) {
+	const child = "SNAPMAP_TEST_PROMPT_CONSOLE"
+	if os.Getenv(child) == "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMigrationReadsOnlyFreshConsoleInput$")
+		cmd.Env = append(os.Environ(), child+"=1")
+		const createNewConsole = 0x10
+		cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNewConsole, HideWindow: true}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("private test console: %v\n%s", err, out)
+		}
+		return
+	}
+	console, err := os.OpenFile("CONIN$", os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer console.Close()
+	os.Stdin = console
+	isInteractive = func() bool { return true }
+	type keyEvent struct {
+		kind, pad             uint16
+		down                  int32
+		count, key, scan, chr uint16
+		control               uint32
+	}
+	writeInput := syscall.NewLazyDLL("kernel32.dll").NewProc("WriteConsoleInputW")
+	typeLine := func(keys []keyEvent) {
+		t.Helper()
+		var written uint32
+		ok, _, err := writeInput.Call(console.Fd(), uintptr(unsafe.Pointer(&keys[0])), uintptr(len(keys)), uintptr(unsafe.Pointer(&written)))
+		if ok == 0 || int(written) != len(keys) {
+			t.Fatalf("writing console input: %v", err)
+		}
+	}
+	enter := keyEvent{kind: 1, down: 1, count: 1, key: '\r', chr: '\r'}
+	typeLine([]keyEvent{enter})
+	in := openMigrationInput()
+	if in == nil {
+		t.Fatal("missing migration keyboard")
+	}
+	defer in.Close()
+	typeLine([]keyEvent{{kind: 1, down: 1, count: 1, key: 'Y', chr: 'y'}, enter})
+	if line, err := bufio.NewReader(in).ReadString('\n'); err != nil || cleanLine(line) != "y" {
+		t.Fatalf("expected the fresh answer, got %q (%v)", line, err)
+	}
+}
 
 // A real console accepts virtual-terminal processing and gets its mode back afterwards; a pipe is not a
 // console and is never switched.

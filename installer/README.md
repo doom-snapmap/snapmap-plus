@@ -284,8 +284,7 @@ for WebView2 and offers Microsoft's runtime bootstrapper when needed. See
 
 Install or update first checks the whole library and its pinned dependencies.
 If changes are needed, it lists the affected file counts and asks once.
-Press **Y** to apply them. **N**, Enter and end of input cancel the install
-before your content changes. For a manual copy of the earlier versions, copy
+Answer **Y** to apply the migration. Any other answer cancels it. For a manual copy of the earlier versions, copy
 the listed folders before accepting. In automation, `--yes` accepts the plan.
 
 1. **Mods.** Earlier packages and recognized loose overrides move into the

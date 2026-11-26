@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -212,7 +213,9 @@ func showMigrationCount(label string, n int, names []string) {
 	ui.field(label, value, color)
 }
 
-func (p *migrationPlan) consent(yes bool) (bool, error) {
+var migrationInput = openMigrationInput
+
+func (p *migrationPlan) consent(yes bool) bool {
 	ui.Section("Migration summary")
 	if samePath(p.work, migrationJournal(p.data)) {
 		ui.Note("Resume the interrupted migration.")
@@ -234,15 +237,17 @@ func (p *migrationPlan) consent(yes bool) (bool, error) {
 	}
 	if yes {
 		ui.Note("Back up your data before migrating.")
-		return true, nil
+		return true
 	}
-	if !isInteractive() {
-		return false, fmt.Errorf("back up your data before migrating, then run in a terminal or pass --yes")
+	input := migrationInput()
+	if input == nil {
+		return false
 	}
+	defer input.Close()
 	ui.Ask("Back up your data before migrating. Continue?")
-	answer, open := readLineEOF()
-	ui.Answered(!open)
-	return open && (strings.EqualFold(answer, "yes") || strings.EqualFold(answer, "y")), nil
+	line, err := bufio.NewReader(input).ReadString('\n')
+	ui.Answered(err != nil)
+	return err == nil && strings.EqualFold(cleanLine(line), "y")
 }
 
 func (p *migrationPlan) commit() error {
@@ -285,11 +290,7 @@ func convertWithConsent(data, file string, yes bool) error {
 	if !plan.ready() {
 		return nil
 	}
-	accepted, err := plan.consent(yes)
-	if err != nil {
-		return err
-	}
-	if !accepted {
+	if !plan.consent(yes) {
 		ui.Skip("Migration cancelled.")
 		return nil
 	}
