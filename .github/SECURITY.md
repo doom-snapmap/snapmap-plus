@@ -32,7 +32,7 @@ stay current.
 - Any change to a supply-chain-critical path (the CI/release workflows, the build scripts, the installer)
   requires maintainer review before it can merge.
 - Every pull request runs the CI gate: the security guard, the Windows build and tests, and the installer's
-  checks. A release tag must be a `vMAJOR.MINOR.PATCH` (or `-beta.N`) tag on a commit of the default branch, and the whole
+  checks. A release tag must be a `vMAJOR.MINOR.PATCH` (or `-beta.N`) tag on a commit of `main`, and the whole
   gate runs again on it before anything is built.
 - A release is created as a draft; it is published only after every asset is uploaded and read back
   unchanged.

@@ -1,11 +1,11 @@
-# Build and test pull requests and one-shape without secrets; release.yml runs these jobs on a tag first.
+# Build and test pull requests and main without secrets; release.yml runs these jobs on a tag first.
 # Use pull_request, not pull_request_target, for untrusted fork code, and pin actions to commit SHAs.
 name: CI
 
 on:
   pull_request:
   push:
-    branches: [one-shape]
+    branches: [main]
   # Allow maintainers to rerun validation without another commit.
   workflow_dispatch:
   # The release gate.
