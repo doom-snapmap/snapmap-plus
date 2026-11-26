@@ -243,7 +243,8 @@ func fieldLabel(label string) string {
 func (c *console) Field(label, value string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.emitLocked(false, fieldLabel(label)+value)
+	prefix := fieldLabel(label)
+	c.emitLocked(false, prefix+strings.ReplaceAll(value, "\n", "\n"+strings.Repeat(" ", len(prefix))))
 }
 
 // PathField is Field for a value that is a path, muted when coloured.

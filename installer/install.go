@@ -68,7 +68,7 @@ func cmdInstall(f flags) error {
 	earlier := describeEarlier(doom, build.build, prior, legacy, own)
 	ui.Section("Earlier install")
 	ui.Field("Found", earlier.found)
-	ui.Note("%s", earlier.plan)
+	ui.Field("Action", earlier.plan)
 
 	confirmMsg := fmt.Sprintf("About to install Snapmap+ %s for the %s DOOM build into\n  %s\nContinue?",
 		b.version, build.label, doom)
@@ -259,7 +259,7 @@ func describeEarlier(doom, build string, prior *installRecord, legacy []string, 
 		found, gone = append(found, "retired installer records"), append(gone, "the retired records")
 	}
 	if len(found) == 0 {
-		return earlierInstall{"Snapmap+ " + ver, "An update: Snapmap+'s two files are replaced."}
+		return earlierInstall{"Snapmap+ " + ver, "Snapmap+'s two files are replaced."}
 	}
 	plan := upperFirst(joinAnd(gone)) + " are removed, then Snapmap+'s two files for this build are installed."
 	return earlierInstall{"Snapmap+ " + ver + " with " + joinAnd(found), plan}

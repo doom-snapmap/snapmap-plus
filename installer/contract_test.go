@@ -266,7 +266,7 @@ func TestContractPlainUpdateAndRecordShape(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(out, "Found:            Snapmap+ v1.0.0-beta.1") || !strings.Contains(out, "An update: Snapmap+'s two files are replaced") {
+	if !strings.Contains(out, "  Found:            Snapmap+ v1.0.0-beta.1\n  Action:           Snapmap+'s two files are replaced.") {
 		t.Errorf("output:\n%s", out)
 	}
 	wantDoom(t, "plain update", r.doom, "XINPUT1_4.dll", currentUIDll)

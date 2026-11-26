@@ -33,6 +33,11 @@ func TestFieldsShareOneValueColumn(t *testing.T) {
 			t.Errorf("value of %q starts at column %d, want %d", line, got, len(indent)+labelWidth)
 		}
 	}
+	b.Reset()
+	c.Field("Action", "first line\nsecond line")
+	if want := "  Action:           first line\n                    second line\n"; b.String() != want {
+		t.Errorf("multiline field = %q, want %q", b.String(), want)
+	}
 }
 
 func TestResultMarkersShareOneColumn(t *testing.T) {
