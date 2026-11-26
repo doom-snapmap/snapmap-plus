@@ -675,10 +675,17 @@ These backend files share the work:
   (an `assets\` folder) is refused by name with one of the two sentences of
   "The mod folder" above. Files beside `mod.json` (a README,
   `desktop.ini`, a `.git` folder) are ignored and never carried. A mod that
-  brings campaign content (a closure pointer or a surface) gets the
-  requirement `g_useResourceBlackList` 0 and `g_useImageBlackList` 0 derived by
-  every build and load (`mb_derive_requirements`); an author value for either
-  is replaced with a warning. The registered extra check
+  brings campaign content (a closure pointer or a surface) records
+  `g_useResourceBlackList` and `g_useImageBlackList` as 0 under `requirements.cvars`
+  in its source `mod.json` on a successful build. The UI, runtime and published
+  units use those settings. From rule 18, the source identity's optional `campaign_cvars`
+  object records each setting the builder changed. A null means the builder added
+  the setting. Any other value is the author's previous scalar. After the last
+  campaign dependency is removed, a successful build removes the entries it added
+  and restores the values it replaced. The record survives deleting `.build/` or
+  assigning a new salt. Rule 17 recorded no ownership, so its existing zeros are
+  kept as authored. The loader reconstructs missing settings when checking
+  a build made before rule 17 so its original hash still verifies. The registered extra check
   (`sh_mb_set_extra_check`, `modcontent.c`) reads the author's `scenes` and
   `hud` blocks with the game's grammar at build, so a mistake is the build's
   cause in the Mods tab.
@@ -974,8 +981,9 @@ returns the builder's installer prompt for a retired author key, a format-1 desc
 `package.json`. A current descriptor with an invalid salt reports the damaged field. A
 root folder with no block is "not built yet": the store's next scan salts and
 builds it. The
-product preserves the author's bytes and formatting when assigning an identity. Ordinary builds replace only
-`.build/manifest.json`. Removing it triggers a rebuild at the next scan with the same identity. Local assets
+product preserves the author's bytes and formatting when assigning an identity. A build writes
+detected console settings to `mod.json` when needed and saves its manifest in
+`.build/manifest.json`. Removing the manifest triggers a rebuild at the next scan with the same identity. Local assets
 live in the author's folders. The shared map cache can reuse their verified bytes.
 
 Identity is the salt (`modsalt.h`), never the folder name: an author may

@@ -140,6 +140,7 @@ func TestUpgradeModLayoutLeavesUnbuiltAndUnreadableDescriptors(t *testing.T) {
 	for i, contents := range []string{
 		`{"name":"new"}`,
 		`{"snapmap-plus":{"format":2,"salt":"abcdefgh"}}`,
+		`{"snapmap-plus":{"format":2,"salt":"abcdefgh","campaign_cvars":{"g_useResourceBlackList":null,"g_useImageBlackList":false}}}`,
 		`{"snapmap-plus":{"format":1,"salt":"abcdefgh","rules":3}}`,
 		`{"snapmap-plus":{"format":2,"salt":"bad","rules":3}}`,
 		`{"snapmap-plus":{"format":2,"salt":"abcdefgh","rules":3}`,
@@ -153,6 +154,39 @@ func TestUpgradeModLayoutLeavesUnbuiltAndUnreadableDescriptors(t *testing.T) {
 		if readF(t, path) != contents || exists(filepath.Join(folder, ".build")) {
 			t.Fatalf("unrecognized descriptor %d was changed", i)
 		}
+	}
+}
+
+func TestUpgradeModLayoutPreservesCampaignCVars(t *testing.T) {
+	const author = "{\r\n  \"requirements\" : {\"cvars\":{\"g_useResourceBlackList\":0,\"g_useImageBlackList\":\"0\"}},\r\n  \"snapmap-plus\" : %s\r\n}"
+	for _, tc := range []struct {
+		name      string
+		rules     int
+		ownership string
+	}{
+		{"rule 17 with no ownership", 17, ""},
+		{"inserted and overridden", 18, `,"campaign_cvars":{"g_useResourceBlackList":null,"g_useImageBlackList":"1"}`},
+		{"integer and boolean overrides", 18, `,"campaign_cvars":{"g_useResourceBlackList":1,"g_useImageBlackList":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := t.TempDir()
+			folder := filepath.Join(data, "mods", "pack")
+			path := filepath.Join(folder, "mod.json")
+			inline := fmt.Sprintf(`{ "rules":%d, "format":2, "salt":"a1234567", "build":"oldhash"%s }`, tc.rules, tc.ownership)
+			writeF(t, path, fmt.Sprintf(author, inline))
+			identity := `{"format":2,"salt":"a1234567"` + tc.ownership + "}"
+			for i := 0; i < 2; i++ {
+				if err := upgradeModLayout(data); err != nil {
+					t.Fatal(err)
+				}
+				if got := readF(t, path); got != fmt.Sprintf(author, identity) {
+					t.Fatalf("unexpected source after split: %s", got)
+				}
+				if got := readF(t, filepath.Join(folder, ".build", "manifest.json")); got != inline {
+					t.Fatalf("unexpected manifest after split: %s", got)
+				}
+			}
+		})
 	}
 }
 

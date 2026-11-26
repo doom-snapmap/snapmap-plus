@@ -2,6 +2,7 @@
  * the builder, the store and its client, the campaign-only closure and serving. A measurement over the real
  * store runs only when SH_MODSTOCK_DATA names a mods store (the install is SH_MODSTOCK_DOOM). */
 #include "heap_out.h"
+#include "../src/backend/config_json.h"
 #include "../src/backend/modauthor.h"
 #include "../src/backend/modnet.h"
 #include "../src/backend/modstore.h"
@@ -435,9 +436,118 @@ static int has_note(const sh_mb_bundle *b, const char *needle)
     return 0;
 }
 
+static char *read_descriptor(const char *dir)
+{
+    char path[MAX_PATH * 2];
+    size_t len = 0;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
+    return (char *)sh_mb_read_file(path, 1 << 20, &len);
+}
+
+static void check_written_requirements(const char *text, const char *expected)
+{
+    sh_json_object doc = {0};
+    const char *part = NULL;
+    char *canonical = NULL;
+    if (text && sh_json_parse_object(text, strlen(text), 64, &doc))
+        part = sh_json_object_get(&doc, "requirements");
+    if (part) canonical = sh_mb_requirements_canonical(part, strlen(part), NULL);
+    CHECK(canonical && !strcmp(canonical, expected));
+    free(canonical);
+    sh_json_object_free(&doc);
+}
+
+static void refresh_requirements(const char *dir, const char *expected, char hash[65])
+{
+    sh_mb_bundle b;
+    char cause[HO_TEXT], tree[65];
+    char *text;
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.requirements && !strcmp(b.requirements, expected));
+    CHECK(HO(cause, sh_mb_write(&b, dir, HO_P(0))));
+    memcpy(hash, b.hash, sizeof b.hash);
+    sh_mb_free(&b);
+    text = read_descriptor(dir);
+    check_written_requirements(text, expected);
+    free(text);
+    CHECK(sh_mb_tree_hash(dir, tree));
+    CHECK(sh_mb_load_folder(dir, &b) && !strcmp(b.hash, hash) && !strcmp(b.tree, tree) &&
+          b.requirements && !strcmp(b.requirements, expected));
+    sh_mb_free(&b);
+}
+
+static void test_campaign_cvar_ownership(const char *tmp)
+{
+#define IMAGE_ZERO "\"g_useImageBlackList\":\"0\","
+#define IMAGE_ONE "\"g_useImageBlackList\":\"1\","
+#define RESOURCE_ZERO "\"g_useResourceBlackList\":\"0\","
+#define OPTIONS(gates) "{\"commands\":{\"activate\":[\"echo ready\"]},\"cvars\":{" gates "\"r_fullscreen\":\"0\"}}"
+    static const struct { const char *name, *initial, *edited, *after; } cases[] = {
+        { "automatic", OPTIONS(""), NULL, OPTIONS("") },
+        { "authored-image", OPTIONS(IMAGE_ZERO), NULL, OPTIONS(IMAGE_ZERO) },
+        { "authored-conflict", OPTIONS("\"g_useImageBlackList\":1,"), NULL, OPTIONS(IMAGE_ONE) },
+        { "explicit-legacy", OPTIONS(IMAGE_ZERO RESOURCE_ZERO), NULL, OPTIONS(IMAGE_ZERO RESOURCE_ZERO) },
+        { "author-edit", OPTIONS(""), OPTIONS(IMAGE_ONE RESOURCE_ZERO), OPTIONS(IMAGE_ONE) },
+    };
+    static const char active[] = OPTIONS(IMAGE_ZERO RESOURCE_ZERO);
+    size_t i;
+    for (i = 0; i < sizeof cases / sizeof *cases; ++i) {
+        char dir[MAX_PATH * 2], desc[512], hash[65], repeated[65];
+        char *before, *after;
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\cvar-%s", tmp, cases[i].name);
+        _snprintf_s(desc, sizeof desc, _TRUNCATE,
+                    "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\",\"requirements\":%s}",
+                    cases[i].initial);
+        mt_write(dir, "mod.json", desc);
+        mt_write(dir, K_WEB, K_WEB_TEXT);
+        mt_write(dir, "decls\\animweb\\second.decl", K_WEB_TEXT);
+        mt_write(dir, "materials\\m.decl", "{\r\n\tdiffusemap = \"k/snap\";\r\n}\r\n");
+        refresh_requirements(dir, active, hash);
+        if (!strcmp(cases[i].name, "automatic")) {
+            char *source = read_descriptor(dir);
+            size_t n = 0;
+            char *copy = source ? sh_mb_salt_modjson(source, strlen(source), "tclose00", "tclose01", &n) : NULL;
+            CHECK(copy != NULL);
+            if (copy) mt_write(dir, "mod.json", copy);
+            free(copy);
+            free(source);
+        }
+        mt_delete(dir, K_WEB);
+        refresh_requirements(dir, active, hash);
+
+        if (cases[i].edited) {
+            sh_json_object doc = {0};
+            char *original = read_descriptor(dir), *edited = NULL;
+            if (original && sh_json_parse_object(original, strlen(original), 64, &doc) &&
+                sh_json_object_set(&doc, "requirements", cases[i].edited, 64))
+                edited = sh_json_serialize_object(&doc, 0, NULL);
+            CHECK(edited != NULL);
+            if (edited) mt_write(dir, "mod.json", edited);
+            free(edited);
+            free(original);
+            sh_json_object_free(&doc);
+        }
+        mt_delete(dir, "decls\\animweb\\second.decl");
+        mt_delete(dir, SH_MB_BUILD_MANIFEST);
+        refresh_requirements(dir, cases[i].after, hash);
+        before = read_descriptor(dir);
+        refresh_requirements(dir, cases[i].after, repeated);
+        after = read_descriptor(dir);
+        CHECK(before && after && !strcmp(before, after) && !strcmp(hash, repeated));
+        free(before);
+        free(after);
+    }
+#undef OPTIONS
+#undef RESOURCE_ZERO
+#undef IMAGE_ONE
+#undef IMAGE_ZERO
+}
+
 static void test_campaign_closure(const char *tmp)
 {
-    char d4[MAX_PATH * 2], dir[MAX_PATH * 2], cause[HO_TEXT], hash[65];
+    static const char source[] = "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}";
+    static const char required[] = "{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}";
+    char d4[MAX_PATH * 2], dir[MAX_PATH * 2], cause[HO_TEXT], hash[65], tree[65];
+    char *written, *again;
     sh_mb_bundle b;
     const sh_mb_file *f;
     const char *chain[] = { K_MD6, K_MESH, K_SKL };
@@ -446,12 +556,13 @@ static void test_campaign_closure(const char *tmp)
     _snprintf_s(d4, sizeof d4, _TRUNCATE, "%s\\d4", tmp);
     make_install4(d4);
     sh_modstock_set_install(d4);
+    test_campaign_cvar_ownership(tmp);
 
     /* animWeb -> md6Def -> mesh and skeleton: the whole chain becomes
      * pointers at the game's own paths, surfaces carried by nothing; the
      * md6Def's clip no archive holds is the game's own hole, not the mod's. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close1", tmp);
-    mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}");
+    mt_write(dir, "mod.json", source);
     mt_write(dir, K_WEB, K_WEB_TEXT);
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
     if (b.errors) fprintf(stderr, "  closure: %s\n", sh_mb_first_cause(&b));
@@ -466,24 +577,55 @@ static void test_campaign_closure(const char *tmp)
     CHECK(f && f->need_count == 3);
     CHECK(has_note(&b, "3 game files borrowed for completeness") && has_note(&b, "(first " K_MD6 ")"));
     CHECK(b.canonical && strstr(b.canonical, "\"source\":\"" K_SKL "\"") != NULL);
-    /* Campaign content derives the blacklist requirement the author never writes, and a load of the written
-     * block agrees. */
-    CHECK(b.requirements && !strcmp(b.requirements, "{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"));
-    CHECK(has_note(&b, "derived: the mod brings campaign content"));
+    CHECK(b.requirements && !strcmp(b.requirements, required));
     CHECK(HO(cause, sh_mb_write(&b, dir, HO_P(0))));
     memcpy(hash, b.hash, sizeof hash);
+    written = read_descriptor(dir);
+    check_written_requirements(written, required);
+    {
+        size_t len = 0;
+        char *packed = sh_mb_modjson_text(&b, NULL, 0, &len);
+        sh_mb_bundle loaded = {0};
+        CHECK(packed && sh_mb_load_text(packed, len, &loaded) && !strcmp(loaded.hash, hash));
+        sh_mb_free(&loaded);
+        free(packed);
+    }
     sh_mb_free(&b);
-    CHECK(sh_mb_load_folder(dir, &b) && !strcmp(b.hash, hash) && b.requirements && strstr(b.requirements, "g_useImageBlackList"));
+    CHECK(sh_mb_tree_hash(dir, tree));
+    CHECK(sh_mb_load_folder(dir, &b) && !strcmp(b.hash, hash) && !strcmp(b.tree, tree));
     sh_mb_free(&b);
     /* An author value is replaced, with a warning; other requirements stay. */
     {
-        char d2[MAX_PATH];
+        static const char author[] = "\"author\"  :  \"A. Mapper\"";
+        static const char command[] = "\"commands\" : { \"activate\" : [ \"echo hi\" ] }";
+        static const char other_cvar[] = "\"r_fullscreen\" : 0";
+        static const char mixed[] = "{\"commands\":{\"activate\":[\"echo hi\"]},\"cvars\":{\"g_useImageBlackList\":\"0\","
+                                    "\"g_useResourceBlackList\":\"0\",\"r_fullscreen\":\"0\"}}";
+        char d2[MAX_PATH], desc[512];
         _snprintf_s(d2, sizeof d2, _TRUNCATE, "%s\\close1b", tmp);
-        mt_write(d2, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\","
-                 "\"requirements\":{\"cvars\":{\"g_useImageBlackList\":1,\"r_fullscreen\":0}}}");
+        _snprintf_s(desc, sizeof desc, _TRUNCATE, "{\r\n  %s,\r\n  \"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},"
+                    "\r\n  \"name\":\"Closure test\",\r\n  \"requirements\":{%s,\"cvars\":{\"g_useImageBlackList\":1,%s}}}\r\n",
+                    author, command, other_cvar);
+        mt_write(d2, "mod.json", desc);
         mt_write(d2, K_WEB, K_WEB_TEXT);
         CHECK(sh_mb_build(d2, NULL, &RESOLVER, &b) && b.warnings == 1 && b.requirements &&
-              !strcmp(b.requirements, "{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\",\"r_fullscreen\":\"0\"}}"));
+              !strcmp(b.requirements, mixed));
+        CHECK(HO(cause, sh_mb_write(&b, d2, HO_P(0))));
+        again = read_descriptor(d2);
+        check_written_requirements(again, mixed);
+        CHECK(again && strstr(again, author) && strstr(again, command) && strstr(again, other_cvar) && strstr(again, "\r\n"));
+        free(again);
+        sh_mb_free(&b);
+        mt_write(d2, "mod.json", source);
+        CHECK(sh_mb_build(d2, NULL, &RESOLVER, &b));
+        {
+            const char *changed = "{\"name\":\"Edited during the build\"}";
+            mt_write(d2, "mod.json", changed);
+            CHECK(!HO(cause, sh_mb_write(&b, d2, HO_P(0))));
+            again = read_descriptor(d2);
+            CHECK(again && !strcmp(again, changed));
+            free(again);
+        }
         sh_mb_free(&b);
     }
     /* The builder block marks them as derived pointers; a rebuild derives
@@ -496,28 +638,77 @@ static void test_campaign_closure(const char *tmp)
         text = sh_mb_read_file(path, 1 << 20, &len);
         CHECK(text && strstr((const char *)text, "\"source\": \"" K_MESH "\"") && strstr((const char *)text, "\"closure\": true") &&
               !strstr((const char *)text, "inAssets"));
+        if (text) {
+            char legacy[MAX_PATH * 2];
+            _snprintf_s(legacy, sizeof legacy, _TRUNCATE, "%s\\close-legacy", tmp);
+            mt_write(legacy, "mod.json", source);
+            mt_write(legacy, SH_MB_BUILD_MANIFEST, (const char *)text);
+            CHECK(!sh_mb_load_folder(legacy, &b));
+            sh_mb_free(&b);
+            {
+                char *rules = strstr((char *)text, "\"rules\": ");
+                if (rules) memcpy(rules + strlen("\"rules\": "), "16", 2);
+                CHECK(rules != NULL);
+            }
+            mt_write(legacy, SH_MB_BUILD_MANIFEST, (const char *)text);
+            CHECK(sh_mb_load_folder(legacy, &b) && !strcmp(b.hash, hash));
+            sh_mb_free(&b);
+            again = read_descriptor(legacy);
+            CHECK(again && !strcmp(again, source));
+            free(again);
+        }
         free(text);
     }
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0 && !strcmp(b.hash, hash) && b.stock_count == 3);
     CHECK(has_note(&b, "3 game files borrowed for completeness"));
+    CHECK(HO(cause, sh_mb_write(&b, dir, HO_P(0))));
+    again = read_descriptor(dir);
+    CHECK(written && again && !strcmp(written, again));
+    free(again);
+    free(written);
+    sh_mb_free(&b);
+
+    /* A failed build keeps ownership. Removing the last use then removes the entire generated requirement. */
+    mt_write(dir, K_WEB, "{");
+    CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
+    CHECK(HO(cause, sh_mb_write_failed(&b, dir, HO_P(0))));
+    sh_mb_free(&b);
+    mt_delete(dir, K_WEB);
+    mt_write(dir, "materials\\m.decl", "{\r\n\tdiffusemap = \"k/snap\";\r\n}\r\n");
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && !b.requirements);
+    CHECK(HO(cause, sh_mb_write(&b, dir, HO_P(0))));
+    sh_mb_free(&b);
+    written = read_descriptor(dir);
+    CHECK(written && !strstr(written, "\"requirements\"") && !strstr(written, "\"campaign_cvars\""));
+    free(written);
+    CHECK(sh_mb_load_folder(dir, &b) && !b.requirements);
     sh_mb_free(&b);
 
     /* Names SnapMap loads on its own (snap_gameresources, or both archives)
      * gain nothing. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close2", tmp);
-    mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}");
+    mt_write(dir, "mod.json", source);
     mt_write(dir, "materials\\m.decl",
              "{\r\n\tdiffusemap = \"k/snap\";\r\n\tspecularmap = \"k/both\";\r\n}\r\n");
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.file_count == 1 && b.stock_count == 0 && b.needs.stock == 2);
     CHECK(!has_note(&b, "borrowed for completeness"));
+    CHECK(HO(cause, sh_mb_write(&b, dir, HO_P(0))));
+    again = read_descriptor(dir);
+    CHECK(again && !strcmp(again, source));
+    free(again);
     sh_mb_free(&b);
 
     /* A name no archive holds still fails as before. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close3", tmp);
-    mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}");
+    mt_write(dir, "mod.json", source);
+    mt_write(dir, "decls\\animweb\\valid.decl", K_WEB_TEXT);
     mt_write(dir, K_WEB, "{\r\n\tprops {\r\n\t\tmodelInfos {\r\n\t\t\t\"k/none.md6\" \"\"\r\n\t\t}\r\n\t}\r\n}\r\n");
-    CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b) && b.file_count == 1);
+    CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
     CHECK_CAUSE(b, "needs md6Def k/none.md6, which resolves to nothing");
+    CHECK(HO(cause, sh_mb_write_failed(&b, dir, HO_P(0))));
+    again = read_descriptor(dir);
+    CHECK(again && !strcmp(again, source));
+    free(again);
     sh_mb_free(&b);
 
     /* There is no file cap: 4095 carried images and the animWeb still bring the campaign model along. */
@@ -1275,7 +1466,7 @@ static void test_campaign_actor_unit(const char *tmp)
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\actors", root);
     make_install7(archive);
     sh_modstock_set_install(archive);
-    mt_write(folder, "mod.json", "{\"name\":\"Campaign parents\"}");
+    mt_write(folder, "mod.json", "{\"name\":\"Campaign parents\",\"\\u0072equirements\":{}}");
     r7_write_lf(folder, "generated/decls/entitydef/mods/tident07/first.decl", "{ inherit = \"ai/campaign_actor\"; }", "");
     r7_write_lf(folder, "generated/decls/entitydef/mods/tident07/second.decl", "{ inherit = \"ai/ordinary\"; edit = { customMaterial = \"fixture/second\"; renderModelInfo = { model = \"models/box.lwo\"; } clipModelInfo = { type = \"CLIPMODEL_BOX\"; } } }", "");
     if (!sh_mb_build(folder,"tident07",&RESOLVER,&b)) {
@@ -1288,6 +1479,8 @@ static void test_campaign_actor_unit(const char *tmp)
     CHECK(f && !has_need(f,"entityDef","ai/ordinary"));
     CHECK(!find(&b,"generated/decls/entitydef/ai/ordinary.decl"));
     if (sh_unit_of(&b,folder,"mods/tident07/first",&env,&u,&cause)) {
+        CHECK(u.manifest && strstr(u.manifest, "\"requirements\":{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"));
+        CHECK(u.manifest && !strstr(u.manifest, "\"campaign_cvars\""));
         CHECK(u.manifest && strstr(u.manifest,"ai/campaign_actor.decl") && strstr(u.manifest,"fixture/skin.decl"));
         for (i=0; i<sizeof family/sizeof *family; i++) CHECK(strstr(u.manifest,family[i]));
         CHECK(!strstr(u.manifest,"twin") && !strstr(u.manifest,"fixture/second"));

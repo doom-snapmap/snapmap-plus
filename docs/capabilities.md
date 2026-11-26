@@ -178,8 +178,8 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   animation_events, attachment_tags, any key of your own) is never reformatted or reordered. A mod has no version: a `version` you write is kept
   like any key of your own and means nothing to Snapmap+. A mod folder in a recognized earlier format shows the installer prompt. Files beside `mod.json` (a README,
   notes, `desktop.ini`) are ignored and never carried. A mistake in `scenes` or `hud` fails the
-  build with a sentence naming the block. A mod that brings campaign content gets the requirement
-  `g_useResourceBlackList` 0 and `g_useImageBlackList` 0 without writing it. The mods folder holds your mod folders and `snapmap-plus.json` (publish claims, links and mod IDs). Shared map downloads and engine-ready files live beside it under `cache/`.
+  build with a sentence naming the block. When a mod brings campaign content into SnapMap, the
+  builder sets `g_useResourceBlackList` and `g_useImageBlackList` to 0. The mods folder holds your mod folders and `snapmap-plus.json` (publish claims, links and mod IDs). Shared map downloads and engine-ready files live beside it under `cache/`.
 - A mod's identity is its salt: eight characters the product writes once into `mod.json`. The
   folder name is yours; rename a folder any time and it stays the same mod. A folder you drop into
   `mods\` with a `mod.json` of your own (no `snapmap-plus` part) is a new mod: at the next Refresh
@@ -457,6 +457,11 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   `movies/`. They load whenever the game asks for the movie, in the editor and in
   Play; a replaced movie the game already holds changes at the next map load, and one held since
   startup after a restart.
+- A successful build records the two blacklist settings in `mod.json` when the mod brings
+  campaign resources into SnapMap. Published maps carry the same settings to other players.
+  When you remove the last campaign resource and rebuild, Snapmap+ removes the settings it
+  added and restores any values it replaced. A zero from an older build that kept no record
+  of the change stays in the file.
 - A mod's `requirements` set console variables and run console commands while a map that uses it is
   open or played:
   `"requirements": {"cvars": {"<cvar>": <value>}, "commands": {"activate": ["<line>"], "deactivate":

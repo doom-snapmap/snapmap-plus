@@ -2239,6 +2239,8 @@ void sh_mb_free(sh_mb_bundle *b)
     free(b->author);
     free(b->homepage);
     free(b->requirements);
+    free(b->campaign_cvars);
+    free(b->updated_source);
     free(b->extra);
     free(b->canonical);
     free(b->registries);
@@ -5612,65 +5614,85 @@ done:
     free(outn);
 }
 
-/* Requirements the build can see: a mod that brings campaign content (a closure pointer, or a surface
- * restoring installed content SnapMap's provider cannot see) needs g_useResourceBlackList 0 and
- * g_useImageBlackList 0, so the author never writes them. An author value for either is replaced with a
- * warning (`report`: a build; a load derives the same silently, so the hash agrees). */
-static void mb_derive_requirements(sh_mb_bundle *b, int report)
+static const char *const mb_campaign_cvars[] = { "g_useResourceBlackList", "g_useImageBlackList" };
+
+static size_t mb_cvar_index(const mbj *obj, const char *name)
 {
-    static const char *const gates[] = { "g_useResourceBlackList", "g_useImageBlackList" };
-    char *cause = NULL, *canon;
-    mbj *req = NULL;
-    const mbj *cvars = NULL, *cmds = NULL;
-    mb_buf o = {0};
     size_t i;
-    int need = 0, k;
-    for (i = 0; i < b->file_count && !need; i++)
-        need = b->files[i].closure || b->files[i].cls == SH_MB_CLASS_SURFACE;
-    if (!need) return;
-    if (b->requirements) {
-        req = mbj_parse(b->requirements, strlen(b->requirements), NULL);
-        cvars = req ? mbj_get(req, "cvars") : NULL;
-        cmds = req ? mbj_get(req, "commands") : NULL;
-    }
-    mb_puts(&o, "{\"cvars\":{");
+    for (i = 0; obj && i < obj->count; i++)
+        if (mb_ieq_n(obj->keys[i], obj->klen[i], name)) return i;
+    return SIZE_MAX;
+}
+
+static int mb_cvar_ownership(const mbj *identity, char **text)
+{
+    const mbj *history = mbj_get(identity, "campaign_cvars");
+    mb_buf json = {0};
+    size_t i, found = 0;
+    int k;
+    *text = NULL;
+    if (!history) return 1;
+    if (history->t != MBJ_OBJ || history->count > 2) return 0;
     for (k = 0; k < 2; k++) {
-        if (k) mb_puts(&o, ",");
-        mb_put_jcstr(&o, gates[k]);
-        mb_puts(&o, ":\"0\"");
+        char number[32];
+        size_t len = 0;
+        i = mb_cvar_index(history, mb_campaign_cvars[k]);
+        if (i == SIZE_MAX) continue;
+        if (history->items[i]->t != MBJ_NULL &&
+            !mb_req_value(history->items[i], history->keys[i], number, sizeof number, &len, NULL)) return 0;
+        found++;
     }
-    for (i = 0; cvars && cvars->t == MBJ_OBJ && i < cvars->count; i++) {
-        const mbj *v = cvars->items[i];
-        int gate = 0;
-        for (k = 0; k < 2; k++) if (mb_ieq_n(cvars->keys[i], cvars->klen[i], gates[k])) gate = 1;
-        if (gate) {
-            if (report && (v->t != MBJ_STR || strcmp(v->s, "0")))
-                mb_warn(b, "mod.json requirements set %.*s, but this mod brings campaign content, which needs it 0; "
-                        "Snapmap+ sets it 0, so remove it from requirements", (int)cvars->klen[i], cvars->keys[i]);
-            continue;
+    if (found != history->count) return 0;
+    if (found && !mbj_canon(history, &json, NULL)) { free(json.p); return 0; }
+    *text = json.p;
+    return 1;
+}
+
+static int mb_uses_campaign(const sh_mb_bundle *b)
+{
+    size_t i;
+    for (i = 0; i < b->file_count; i++)
+        if (b->files[i].closure || b->files[i].cls == SH_MB_CLASS_SURFACE) return 1;
+    return 0;
+}
+
+static int mb_missing_legacy_cvars(sh_mb_bundle *b)
+{
+    mbj *req;
+    const mbj *cvars;
+    size_t i;
+    int k, present = 0;
+    if (!mb_uses_campaign(b)) return 0;
+    if (!b->requirements) return 1;
+    req = mbj_parse(b->requirements, strlen(b->requirements), NULL);
+    if (!req) { mb_error(b, "cannot read the mod's console settings"); return 0; }
+    cvars = mbj_get(req, "cvars");
+    for (i = 0; cvars && i < cvars->count; i++) {
+        for (k = 0; k < 2; k++) {
+            const char *key = cvars->keys[i];
+            if (!mb_ieq_n(key, cvars->klen[i], mb_campaign_cvars[k])) continue;
+            if (!strcmp(cvars->items[i]->s, "0")) {
+                if (!strcmp(key, mb_campaign_cvars[k])) present++;
+            }
         }
-        mb_puts(&o, ",");
-        mb_put_jstr(&o, cvars->keys[i], cvars->klen[i]);
-        mb_puts(&o, ":");
-        if (!mbj_canon(v, &o, NULL)) o.oom = 1;
     }
-    mb_puts(&o, "}");
-    if (cmds) {
-        mb_puts(&o, ",\"commands\":");
-        if (!mbj_canon(cmds, &o, NULL)) o.oom = 1;
-    }
-    mb_puts(&o, "}");
-    canon = o.oom ? NULL : sh_mb_requirements_canonical(o.p, o.n, &cause);
-    if (!canon) mb_error(b, "the requirements this mod needs could not be recorded (%s)", cause ? cause : "out of memory");
-    else {
-        free(b->requirements);
-        b->requirements = canon;
-        if (report) mb_note(b, "requirements: g_useResourceBlackList 0 and g_useImageBlackList 0, derived: the mod brings campaign "
-                "content");
-    }
-    free(cause);
-    free(o.p);
     mbj_free(req);
+    return present != 2;
+}
+
+static char *mb_campaign_source(const char *text, size_t len, size_t *written);
+
+static int mb_read_completed_requirements(sh_mb_bundle *b, const char *text, size_t len)
+{
+    mbj *doc = text ? mbj_parse(text, len, NULL) : NULL;
+    const mbj *req = mbj_get(doc, "requirements");
+    char *settings = req ? mb_requirements(req, NULL) : NULL;
+    int ok = doc && (!req || settings);
+    mbj_free(doc);
+    if (!ok) { mb_error(b, "cannot record the detected console settings in mod.json"); return 0; }
+    free(b->requirements);
+    b->requirements = settings;
+    return 1;
 }
 
 /* A native/ file whose bytes are DOOM's own is a pointer, never carried, and the build says the mod does not
@@ -6468,7 +6490,7 @@ static mbj *mb_read_manifest(const wchar_t *root, const char *salt)
 
 static int mb_load_root(sh_mb_bundle *out, const mbj *root, const mbj *block, int unbuilt)
 {
-    static const char *const bkeys[] = { "build", "built", "cause", "classes", "edits", "editor", "files", "format",
+    static const char *const bkeys[] = { "build", "built", "campaign_cvars", "cause", "classes", "edits", "editor", "files", "format",
                                          "registries", "rules", "salt", "scripts", "shadows", "spelled", "stock", "tree",
                                          "units_of", "warnings", NULL };
     const mbj *v, *files, *stock, *bundle, *sh;
@@ -6589,7 +6611,15 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, const mbj *block, in
     }
     mb_classify_all(out);
     mb_mark_edited(out);
-    mb_derive_requirements(out, 0);
+    if (out->rules < 17 && mb_missing_legacy_cvars(out)) {
+        /* An older bundle's hash includes settings its author file could omit. */
+        char *old = sh_textf("{\"requirements\":%s}", out->requirements ? out->requirements : "{}");
+        size_t n = 0;
+        char *completed = old ? mb_campaign_source(old, strlen(old), &n) : NULL;
+        out->legacy_cvars = mb_read_completed_requirements(out, completed, n);
+        free(completed);
+        free(old);
+    }
     mb_finish(out);
     if (!out->errors && strcmp(out->hash, bundle->s) != 0)
         mb_error(out, "mod.json was edited after its last build; press Refresh in the Mods tab to build it again");
@@ -6623,6 +6653,9 @@ static int mb_load_modjson(const char *text, size_t len, sh_mb_bundle *out, cons
     if (!text) { mb_error(out, "cannot read mod.json"); return 0; }
     root = mbj_parse(text, len, &cause);
     if (!root) { mb_error(out, "mod.json: %s", cause ? cause : "out of memory"); free(cause); return 0; }
+    if (!mb_cvar_ownership(mbj_get(root, SH_MB_BLOCK_KEY), &out->campaign_cvars)) {
+        mbj_free(root); mb_error(out, "mod.json has invalid campaign CVar ownership"); return 0;
+    }
     {
         /* The author's part read as the engine names it (modauthor.h), as the build read it. */
         const mbj *block = mbj_get(root, SH_MB_BLOCK_KEY), *salt = block ? mbj_get(block, "salt") : NULL;
@@ -6768,6 +6801,106 @@ static int mb_member_is(const char *t, const mb_member *m, const char *key)
     return m->key_end - m->key_at == k + 2 && memcmp(t + m->key_at + 1, key, k) == 0;
 }
 
+/* Edit only one requirements.cvars entry. Other tokens, including commands, keep their original bytes. */
+static char *mb_edit_campaign_cvar(const char *text, size_t len, const char *name, const char *value, size_t *written)
+{
+    const char *keys[] = { "requirements", "cvars", name };
+    size_t base = 0, span = len, count, open, i, at, tail, cut_from = 0, cut_to = 0;
+    mb_member *members;
+    mb_buf out = {0};
+    int level, j;
+    for (level = 0; level < 3; level++) {
+        const char *obj = text + base;
+        members = mb_members(obj, span, &count, &open);
+        if (!members) return NULL;
+        for (i = 0; i < count; i++) {
+            const mb_member *m = &members[i];
+            mbj *key;
+            int match;
+            if (mb_member_is(obj, m, keys[level])) break;
+            if (level != 2 && !memchr(obj + m->key_at, '\\', m->key_end - m->key_at)) continue;
+            key = mbj_parse(obj + m->key_at, m->key_end - m->key_at, NULL);
+            if (!key) { free(members); return NULL; }
+            match = key->n == strlen(keys[level]) && (level == 2
+                ? mb_ieq_n(key->s, key->n, name) : !memcmp(key->s, keys[level], key->n));
+            mbj_free(key);
+            if (match) break;
+        }
+        if (!value && i != count && (!level || count > 1)) {
+            /* Remove the outermost object made empty by deleting this setting. */
+            cut_from = base + (i ? members[i - 1].value_end : members[i].key_at);
+            cut_to = base + (!i && count > 1 ? members[1].key_at : members[i].value_end);
+        }
+        if (i == count) {
+            size_t indent;
+            if (!value) { free(members); *written = len; return mb_strndup(text, len); }
+            at = count ? members[count - 1].value_end : open + 1;
+            mb_put(&out, text, base + at);
+            if (count) mb_puts(&out, ",");
+            if (count && memchr(obj + open, '\n', members[0].key_at - open)) {
+                indent = members[0].key_at;
+                while (indent > open && (obj[indent - 1] == ' ' || obj[indent - 1] == '\t')) indent--;
+                mb_puts(&out, strstr(text, "\r\n") ? "\r\n" : "\n");
+                mb_put(&out, obj + indent, members[0].key_at - indent);
+            } else mb_puts(&out, " ");
+            for (j = level; j < 3; j++) {
+                mb_put_jcstr(&out, keys[j]);
+                mb_puts(&out, j == 2 ? ": " : ": { ");
+            }
+            mb_puts(&out, value);
+            for (j = level; j < 2; j++) mb_puts(&out, " }");
+            tail = base + at;
+        } else if (level == 2) {
+            mb_member m = members[i];
+            if (value) {
+                mb_put(&out, text, base + m.key_at);
+                mb_put_jcstr(&out, name);
+                mb_put(&out, obj + m.key_end, m.value_at - m.key_end);
+                mb_puts(&out, value);
+                tail = base + m.value_end;
+            } else {
+                mb_put(&out, text, cut_from);
+                tail = cut_to;
+            }
+        } else {
+            span = members[i].value_end - members[i].value_at;
+            base += members[i].value_at;
+            free(members);
+            continue;
+        }
+        free(members);
+        mb_put(&out, text + tail, len - tail);
+        if (out.oom) { free(out.p); return NULL; }
+        *written = out.n;
+        return out.p;
+    }
+    return NULL;
+}
+
+static char *mb_campaign_source(const char *text, size_t len, size_t *written)
+{
+    char *one = mb_edit_campaign_cvar(text, len, mb_campaign_cvars[0], "\"0\"", &len);
+    char *both = one ? mb_edit_campaign_cvar(one, len, mb_campaign_cvars[1], "\"0\"", written) : NULL;
+    free(one);
+    return both;
+}
+
+static int mb_source_update(const sh_mb_bundle *b, const char *text, size_t size,
+                            char **update, size_t *len, char **cause)
+{
+    char digest[SH_MB_HASH_HEX + 1];
+    *len = size;
+    *update = NULL;
+    if (!b->updated_source || b->errors) return 1;
+    if (!strcmp(b->updated_source, text)) return 1;
+    sh_mb_sha256_hex(text, size, digest);
+    if (strcmp(digest, b->cvar_source_hash))
+        return mb_cause(cause, "mod.json changed during the build; press Refresh to build the latest edits");
+    *len = strlen(b->updated_source);
+    *update = mb_strndup(b->updated_source, *len);
+    return *update != NULL || mb_cause(cause, "out of memory");
+}
+
 char *sh_mb_author_bytes(const char *t, size_t n, size_t *out_len, int *had_block)
 {
     size_t count = 0, open = 0, i, cut_from = 0, cut_to = 0;
@@ -6835,7 +6968,8 @@ static char *mb_pretty(const char *compact, size_t n)
     return p;
 }
 
-char *sh_mb_salt_modjson(const char *text, size_t n, const char *from, const char *salt, size_t *out_len)
+static char *mb_salt_source(const char *text, size_t n, const char *from, const char *salt,
+                            const char *ownership, size_t *out_len)
 {
     char *own, *moved = NULL, *block, *out;
     size_t own_len = 0, moved_len = 0, count = 0;
@@ -6850,6 +6984,7 @@ char *sh_mb_salt_modjson(const char *text, size_t n, const char *from, const cha
     if (count && moved) { free(own); own = moved; own_len = moved_len; }
     mb_puts(&o, "{\"format\":2,\"salt\":");
     mb_put_jcstr(&o, salt);
+    if (ownership) { mb_puts(&o, ",\"campaign_cvars\":"); mb_puts(&o, ownership); }
     mb_puts(&o, "}");
     block = o.oom ? NULL : mb_pretty(o.p, o.n);
     free(o.p);
@@ -6859,7 +6994,95 @@ char *sh_mb_salt_modjson(const char *text, size_t n, const char *from, const cha
     return out;
 }
 
+char *sh_mb_salt_modjson(const char *text, size_t n, const char *from, const char *salt, size_t *out_len)
+{
+    mbj *doc = text ? mbj_parse(text, n, NULL) : NULL;
+    char *history = NULL, *result = NULL;
+    if (doc && mb_cvar_ownership(mbj_get(doc, SH_MB_BLOCK_KEY), &history))
+        result = mb_salt_source(text, n, from, salt, history, out_len);
+    free(history);
+    mbj_free(doc);
+    return result;
+}
 
+/* A null entry remembers an insertion. A scalar remembers the author's value while the gate is forced off. */
+static int mb_plan_campaign_cvars(sh_mb_bundle *b, const char *text, size_t len, int needed)
+{
+    mbj *doc = mbj_parse(text, len, NULL);
+    const mbj *current = mbj_get(mbj_get(doc, "requirements"), "cvars");
+    const mbj *previous = mbj_get(mbj_get(doc, SH_MB_BLOCK_KEY), "campaign_cvars");
+    mb_buf history = {0};
+    char *edited = NULL;
+    size_t size = len;
+    int k, changed = 0, ok = 0;
+    if (!doc) goto done;
+    for (k = 0; k < 2; k++) {
+        const char *gate = mb_campaign_cvars[k], *key = gate, *replacement = NULL, *owner_key = NULL;
+        size_t pos = mb_cvar_index(current, gate), prior = mb_cvar_index(previous, gate);
+        const mbj *value = pos == SIZE_MAX ? NULL : current->items[pos];
+        const mbj *original = NULL;
+        mb_buf restored = {0};
+        int edit = 0;
+        int ours = prior != SIZE_MAX && value && !strcmp(current->keys[pos], gate) &&
+                   value->t == MBJ_STR && !strcmp(value->s, "0");
+        if (ours) {
+            original = previous->items[prior];
+            key = previous->keys[prior];
+            if (needed) owner_key = key;
+            else {
+                edit = 1;
+                if (original->t != MBJ_NULL) {
+                    if (!mbj_canon(original, &restored, NULL)) { free(restored.p); goto done; }
+                    replacement = restored.p;
+                }
+            }
+        } else if (needed) {
+            size_t n;
+            char number[32];
+            const char *setting = value ? mb_req_value(value, gate, number, sizeof number, &n, NULL) : NULL;
+            if (!setting || strcmp(setting, "0") || strcmp(current->keys[pos], gate)) {
+                if (setting && strcmp(setting, "0"))
+                    mb_warn(b, "Campaign content needs %s set to 0. The build remembers your value.", gate);
+                edit = 1;
+                replacement = "\"0\"";
+                owner_key = value ? current->keys[pos] : gate;
+                original = value;
+            }
+        }
+        if (owner_key) {
+            mb_puts(&history, history.n ? "," : "{");
+            mb_put_jcstr(&history, owner_key);
+            mb_puts(&history, ":");
+            if (original) {
+                if (!mbj_canon(original, &history, NULL)) { free(restored.p); goto done; }
+            } else mb_puts(&history, "null");
+        }
+        if (edit) {
+            char *next = mb_edit_campaign_cvar(edited ? edited : text, size, key, replacement, &size);
+            free(edited);
+            edited = next;
+            if (!edited) { free(restored.p); goto done; }
+        }
+        free(restored.p);
+        if (edit || (prior != SIZE_MAX && !ours)) changed = 1;
+    }
+    if (changed) {
+        if (history.n) mb_puts(&history, "}");
+        if (history.oom) goto done;
+        b->updated_source = mb_salt_source(edited ? edited : text, size, NULL, b->id, history.p, NULL);
+        if (!b->updated_source) goto done;
+        sh_mb_sha256_hex(text, len, b->cvar_source_hash);
+        free(b->campaign_cvars);
+        b->campaign_cvars = history.p;
+        history.p = NULL;
+    }
+    ok = 1;
+done:
+    free(history.p);
+    free(edited);
+    mbj_free(doc);
+    return ok;
+}
 /* ------------------------------------------- a new mod's strings keys ---- */
 /* At every scan that moves a folder's own content under its salt, its strings keys without the "<salt>_"
  * prefix (string edits aside) gain it and their "#str_<key>" references follow (sh_ms_assign_salt). A key is
@@ -7187,7 +7410,7 @@ static void mb_put_needs(mb_buf *o, const sh_mb_file *f)
 }
 
 /* The generated manifest stored under .build/. */
-static char *mb_block_text(const sh_mb_bundle *b)
+static char *mb_block_text(const sh_mb_bundle *b, int inline_source)
 {
     mb_buf o = {0};
     char num[32], *pretty;
@@ -7195,7 +7418,11 @@ static char *mb_block_text(const sh_mb_bundle *b)
     int first;
     mb_puts(&o, "{\"format\":2,\"salt\":");
     mb_put_jcstr(&o, b->id);
-    _snprintf_s(num, sizeof num, _TRUNCATE, ",\"rules\":%d", SH_MB_RULES);
+    if (inline_source && b->campaign_cvars) {
+        mb_puts(&o, ",\"campaign_cvars\":");
+        mb_puts(&o, b->campaign_cvars);
+    }
+    _snprintf_s(num, sizeof num, _TRUNCATE, ",\"rules\":%d", b->legacy_cvars ? b->rules : SH_MB_RULES);
     mb_puts(&o, num);
     _snprintf_s(num, sizeof num, _TRUNCATE, ",\"built\":%lld", b->built > 0 ? b->built : mb_now());
     mb_puts(&o, num);
@@ -7334,12 +7561,15 @@ static char *mb_author_synth(const sh_mb_bundle *b, size_t *out_len)
 
 static char *mb_modjson(const sh_mb_bundle *b, const char *author, size_t alen, size_t *out_len)
 {
-    char *own, *block, *out;
+    char *own, *block, *out, *update = NULL;
     size_t own_len = 0;
     if (!b || !b->canonical) return NULL;
+    if (author && !mb_source_update(b, author, alen, &update, &alen, NULL)) return NULL;
+    if (update) author = update;
     own = author ? sh_mb_author_bytes(author, alen, &own_len, NULL) : mb_author_synth(b, &own_len);
+    free(update);
     if (!own) return NULL;
-    block = mb_block_text(b);
+    block = mb_block_text(b, 1);
     out = block ? mb_splice(own, own_len, block, out_len) : NULL;
     free(own);
     free(block);
@@ -7351,10 +7581,24 @@ char *sh_mb_modjson_text(const sh_mb_bundle *b, const char *author_text, size_t 
     return mb_modjson(b, author_text, author_len, out_len);
 }
 
+char *sh_mb_read_unit_source(const sh_mb_bundle *b, const char *folder, size_t *size)
+{
+    char *path = sh_textf("%s\\mod.json", folder);
+    char *source = path ? (char *)sh_mb_read_file(path, MB_ANY_SIZE, size) : NULL;
+    free(path);
+    if (source && b->cvar_source_hash[0]) {
+        char *completed;
+        int ok = mb_source_update(b, source, *size, &completed, size, NULL);
+        if (!ok || completed) { free(source); source = completed; }
+    }
+    return source;
+}
+
 static int mb_write_manifest(const sh_mb_bundle *b, const char *folder, const char *block, char **cause)
 {
     wchar_t *root = folder ? sh_mb_wpath(folder) : NULL, *path = NULL, *manifest = NULL;
-    char *existing = NULL, *synth = NULL, *source = NULL;
+    char *existing = NULL, *synth = NULL, *source = NULL, *completed = NULL;
+    const char *input;
     size_t size = 0, length = 0;
     mbj *doc = NULL;
     const mbj *identity;
@@ -7371,9 +7615,20 @@ static int mb_write_manifest(const sh_mb_bundle *b, const char *folder, const ch
     identity = mbj_get(doc, SH_MB_BLOCK_KEY);
     salt = mb_identity(identity);
     if (identity && (!salt || strcmp(salt, b->id))) { mb_cause(cause, "The mod's identity changed; press Refresh."); goto done; }
-    if (!identity || identity->count > 2) {
-        source = sh_mb_salt_modjson(existing ? existing : synth, size, NULL, b->id, &length);
-        if (!source || !mb_write_wfile(path, source, length)) { mb_cause(cause, "cannot save the mod's identity"); goto done; }
+    input = existing ? existing : synth;
+    if (existing) {
+        if (!mb_source_update(b, existing, size, &completed, &size, cause)) goto done;
+        if (completed) input = completed;
+    }
+    if (!completed && (!identity || identity->count > (mbj_get(identity, "campaign_cvars") ? 3u : 2u))) {
+        source = existing ? sh_mb_salt_modjson(input, size, NULL, b->id, &length)
+                          : mb_salt_source(input, size, NULL, b->id, b->campaign_cvars, &length);
+        if (!source) { mb_cause(cause, "cannot prepare mod.json"); goto done; }
+        input = source;
+        size = length;
+    }
+    if ((!existing || strcmp(input, existing)) && !mb_write_wfile(path, input, size)) {
+        mb_cause(cause, "cannot save mod.json"); goto done;
     }
     manifest = mb_manifest_path(root, 1);
     ok = manifest && mb_write_wfile(manifest, block, strlen(block));
@@ -7381,6 +7636,7 @@ static int mb_write_manifest(const sh_mb_bundle *b, const char *folder, const ch
 done:
     mbj_free(doc);
     free(existing);
+    free(completed);
     free(synth);
     free(source);
     free(manifest);
@@ -7394,7 +7650,7 @@ int sh_mb_write(const sh_mb_bundle *b, const char *folder, char **cause)
     char *block;
     int ok;
     if (!b || b->errors || !b->canonical) return mb_cause(cause, "the mod has errors, so its build cannot be saved");
-    block = mb_block_text(b);
+    block = mb_block_text(b, 0);
     ok = mb_write_manifest(b, folder, block, cause);
     free(block);
     return ok;
@@ -7480,6 +7736,8 @@ int sh_mb_salt_paths_check(const sh_mb_bundle *b, char **cause)
 
 /* -------------------------------------------------------------- build ---- */
 
+static int mb_tree_hash(const char *folder, const char *descriptor, size_t len, char out[SH_MB_HASH_HEX + 1]);
+
 static int mb_build(const char *folder, const char *salt, const sh_mb_resolver *resolver, sh_mb_bundle *out, int from_unit)
 {
     wchar_t *root, *desc_mod, *desc_pkg;
@@ -7542,6 +7800,8 @@ static int mb_build(const char *folder, const char *salt, const sh_mb_resolver *
                 char *engine;
                 memcpy(out->id, id, SH_SALT_LEN);
                 out->id[SH_SALT_LEN] = 0;
+                if (!mb_cvar_ownership(block, &out->campaign_cvars))
+                    mb_error(out, "mod.json has invalid campaign CVar ownership");
                 /* The author's part read as the engine names it (modauthor.h): the mod's names under its salt and
                  * its strings keys <salt>_<key>. The file itself keeps the author's text. */
                 if (!sh_ma_string_keys((const char *)text, len, sh_strkey_is_edit, &out->own_keys, &out->own_key_count))
@@ -7569,7 +7829,6 @@ static int mb_build(const char *folder, const char *salt, const sh_mb_resolver *
             }
         }
         free(cause);
-        free(text);
     }
     mbj_free(rootj);
     free(desc_mod);
@@ -7610,11 +7869,33 @@ static int mb_build(const char *folder, const char *salt, const sh_mb_resolver *
     }
     if (!out->errors) mb_check_files(out, root, resolver, from_unit);
 
-    if (!out->errors) mb_derive_requirements(out, 1);
+    if (!out->errors) {
+        int needed = mb_uses_campaign(out);
+        if ((needed || out->campaign_cvars) && !mb_plan_campaign_cvars(out, (const char *)text, len, needed))
+            mb_error(out, "cannot update campaign console settings in mod.json");
+    }
+    if (!out->errors && out->updated_source) {
+        const char *completed = out->updated_source;
+        size_t size = strlen(completed), en = 0;
+        char *engine = sh_ma_json(out->id, completed, size, sh_strkey_is_edit, &en);
+        if (!engine && en == (size_t)-1) mb_error(out, "out of memory");
+        else if (mb_read_completed_requirements(out, engine ? engine : completed, engine ? en : size)) {
+            char projected[SH_MB_HASH_HEX + 1], current[SH_MB_HASH_HEX + 1];
+            if (!mb_tree_hash(folder, completed, size, projected) || !sh_mb_tree_hash(folder, current)
+                    || strcmp(current, out->tree))
+                mb_error(out, "cannot verify the mod's files after building; press Refresh to try again");
+            else {
+                memcpy(out->tree, projected, sizeof projected);
+                mb_note(out, "Updated the campaign console settings in mod.json.");
+            }
+        }
+        free(engine);
+    }
     mb_finish(out);
     out->validated = out->errors == 0;
     if (out->validated && out->built <= 0) out->built = mb_now();
 finish:
+    free(text);
     free(root);
     return out->errors == 0;
 }
@@ -7710,22 +7991,25 @@ static int mb_tent_cmp(const void *a, const void *b)
     return strcmp(((const mb_tent *)a)->rel, ((const mb_tent *)b)->rel);
 }
 
-int sh_mb_tree_hash(const char *folder, char out[SH_MB_HASH_HEX + 1])
+static int mb_tree_hash(const char *folder, const char *descriptor, size_t len, char out[SH_MB_HASH_HEX + 1])
 {
     wchar_t *root = folder ? sh_mb_wpath(folder) : NULL, *p, *assets;
     unsigned char *text = NULL;
     char *own = NULL;
-    size_t len = 0, own_len = 0, i;
+    size_t own_len = 0, i;
     mb_tlist l;
     sh_sha256 s;
     int ok = 0;
     out[0] = 0;
     if (!root) return 0;
     memset(&l, 0, sizeof l);
-    p = mb_wjoin(root, L"mod.json");
-    if (p) text = mb_read_wfile(p, MB_ANY_SIZE, &len);
-    free(p);
-    if (text) own = sh_mb_author_bytes((const char *)text, len, &own_len, NULL);
+    if (!descriptor) {
+        p = mb_wjoin(root, L"mod.json");
+        if (p) text = mb_read_wfile(p, MB_ANY_SIZE, &len);
+        free(p);
+        descriptor = (const char *)text;
+    }
+    if (descriptor) own = sh_mb_author_bytes(descriptor, len, &own_len, NULL);
     if (!own) goto done;
     sh_sha256_init(&s);
     sh_sha256_update(&s, "snapmap-plus tree 1\n", 20);
@@ -7768,6 +8052,11 @@ done:
     free(text);
     free(root);
     return ok;
+}
+
+int sh_mb_tree_hash(const char *folder, char out[SH_MB_HASH_HEX + 1])
+{
+    return mb_tree_hash(folder, NULL, 0, out);
 }
 
 /* ---------------------------------------------------- product record ---- */

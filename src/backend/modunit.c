@@ -1248,16 +1248,13 @@ static int uw_names_kept(const uw *w, const char *body)
 static void uw_mod_share(uw *w, ub *o)
 {
     static const char *const presentation[] = { "name", "description", "author", "homepage", SH_MB_BLOCK_KEY, NULL };
-    char *path = sh_textf("%s\\mod.json", w->folder);
-    unsigned char *text;
+    char *text;
     size_t len = 0;
     mpj *root, *share;
     int i, k, j;
-    if (!path) { w->oom = 1; return; }
-    text = sh_mb_read_file(path, (size_t)-1, &len);
-    free(path);
+    text = sh_mb_read_unit_source(w->b, w->folder, &len);
     if (!text) { uw_fail(w, "mod.json could not be read", NULL); return; }
-    root = mpj_parse((const char *)text, len);
+    root = mpj_parse(text, len);
     free(text);
     if (!root || root->type != MPJ_OBJ) { mpj_free(root); uw_fail(w, "mod.json is not a JSON object", NULL); return; }
     share = mpj_new(MPJ_OBJ);
@@ -1265,6 +1262,13 @@ static void uw_mod_share(uw *w, ub *o)
         const char *key = root->keys[i];
         mpj *v = root->items[i], *kept = NULL;
         int skip = 0;
+        if (strchr(key, '\\')) {
+            size_t length = 0;
+            char *decoded = ub_unescape(key, &length);
+            if (!decoded) { w->oom = 1; break; }
+            if (length == sizeof("requirements") - 1 && !memcmp(decoded, "requirements", length)) key = "requirements";
+            free(decoded);
+        }
         for (k = 0; presentation[k] && !skip; k++) skip = !strcmp(key, presentation[k]);
         if (skip || !v) continue;
         if (!strcmp(key, "strings") && v->type == MPJ_OBJ) {
