@@ -3,7 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 )
 
 func convertEarlierData(doom, data string) error {
@@ -20,11 +24,55 @@ func convertEarlierJSON(original, side []byte) ([]byte, bool, error) {
 }
 
 func convertEarlierPinnedJSON(original, side []byte, pins *earlierPins) ([]byte, bool, error) {
+	if pins == nil || pins.placements == nil || !under(pins.placements.plan.work, pins.output) {
+		return convertPinnedDocument(original, side, pins)
+	}
+	// Discard the units of a refused document without disturbing any successful sibling's content.
+	stage, err := os.MkdirTemp(pins.placements.plan.work, "document-*")
+	if err != nil {
+		return nil, false, err
+	}
+	defer os.RemoveAll(stage)
+	output, content := pins.output, pins.content
+	pins.output, pins.content = stage, map[string]string{}
+	out, changed, err := convertPinnedDocument(original, side, pins)
+	staged := pins.content
+	pins.output, pins.content = output, content
+	if err != nil {
+		return nil, false, err
+	}
+	for name, src := range staged {
+		rel, err := filepath.Rel(stage, src)
+		if err != nil || !filepath.IsLocal(rel) {
+			return nil, false, fmt.Errorf("invalid staged unit %s", name)
+		}
+		target := filepath.Join(pins.output, rel)
+		hash := strings.TrimSuffix(filepath.Base(name), ".json")
+		if existing, err := migrationFileHash(target); err != nil {
+			return nil, false, err
+		} else if existing == "" {
+			if err = os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return nil, false, err
+			}
+			if err = os.Rename(src, target); err != nil {
+				return nil, false, err
+			}
+		} else if existing != hash {
+			return nil, false, fmt.Errorf("different temporary unit content at %s", name)
+		}
+		pins.content[name] = target
+	}
+	return out, changed, nil
+}
+func convertPinnedDocument(original, side []byte, pins *earlierPins) ([]byte, bool, error) {
 	if pins == nil {
 		return convertEarlierJSON(original, side)
 	}
 	var added earlierGlobalNames
 	resolve := func(row earlierObject) (earlierObject, error) {
+		if prior, err := pins.restoreRetry(row, &added); err != nil || prior != nil {
+			return prior, err
+		}
 		next, err := pins.row(row)
 		if err != nil {
 			return nil, err
@@ -44,7 +92,18 @@ func convertEarlierPinnedJSON(original, side []byte, pins *earlierPins) ([]byte,
 	carried := func(root earlierObject, deliveries map[string]*earlierCarrier, ids map[string]string) ([]json.RawMessage, error) {
 		return pins.pinEarlierDeliveries(root, deliveries, ids, &added)
 	}
-	out, changed, err := convertEarlierMapContent(original, side, resolve, carried, pins.checkRows)
+	var checked []earlierObject
+	check := func(rows []earlierObject) error {
+		checked = append(checked, rows...)
+		return pins.checkRows(rows)
+	}
+	out, changed, err := convertEarlierMapContent(original, side, resolve, carried, check)
+	var missing *missingEarlierPins
+	if errors.As(err, &missing) {
+		if e := pins.preserveAvailable(checked, missing); e != nil {
+			return nil, false, e
+		}
+	}
 	if err != nil {
 		return nil, false, err
 	}

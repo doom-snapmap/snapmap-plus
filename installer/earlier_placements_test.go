@@ -46,7 +46,7 @@ func TestUnembeddedEarlierPlacedEntity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	slot := filepath.Join(root, "test", "SNAPMAPS321", "map.decl")
+	slot := filepath.Join(root, "701", "SNAPMAPS00000000000000000321", "map.decl")
 	original := slotBody(t, slot, body)
 	writeF(t, slot+".verify", "unaltered")
 	published := filepath.Join(os.Getenv("LOCALAPPDATA"), "id Software", "DOOM", "base", "doomsnapmaps", "published-maps", "Early.decl")
@@ -97,7 +97,9 @@ func TestUnembeddedEarlierPlacedEntity(t *testing.T) {
 	check(readF(t, raw), "snapmap-plus", "old-boss", "boss")
 	check(readF(t, prefab), "snapmapPlus", "my-overrides", "member/loose")
 	check(readF(t, filepath.Join(r.data, "rawmaps", "Updated saves", "Map 321.json")), "snapmap-plus", "old-boss", "boss")
-	check(readF(t, filepath.Join(r.data, "rawmaps", "Updated saves", "Early.json")), "snapmap-plus", "old-boss", "boss")
+	if exists(filepath.Join(r.data, "rawmaps", "Updated saves", "Early.json")) {
+		t.Fatal("imported a published service-cache file")
+	}
 	if !bytes.Equal([]byte(readF(t, slot)), original) || readF(t, slot+".verify") != "unaltered" || readF(t, published) != body {
 		t.Fatal("native source changed")
 	}
@@ -241,7 +243,7 @@ func TestMissingExactBuildSkipsOnlyDependentDocuments(t *testing.T) {
 		t.Fatal(err)
 	}
 	for id, doc := range map[string]string{"aaa": missing, "bbb": healthy, "ccc": stock} {
-		source := filepath.Join(root, "user", "SNAPMAPS"+id, "map.decl")
+		source := filepath.Join(root, "701", "SNAPMAPS00000000000000000"+id, "map.decl")
 		slotBody(t, source, doc)
 		writeF(t, source+".verify", "game verification")
 	}
@@ -253,7 +255,7 @@ func TestMissingExactBuildSkipsOnlyDependentDocuments(t *testing.T) {
 	writeF(t, neighbor, healthy)
 	before := map[string]string{}
 	times := map[string]time.Time{}
-	for _, f := range append([]string{raw, archive}, filepath.Join(root, "user", "SNAPMAPSaaa", "map.decl"), filepath.Join(root, "user", "SNAPMAPSaaa", "map.decl.verify"), filepath.Join(root, "user", "SNAPMAPSccc", "map.decl")) {
+	for _, f := range append([]string{raw, archive}, filepath.Join(root, "701", "SNAPMAPS00000000000000000aaa", "map.decl"), filepath.Join(root, "701", "SNAPMAPS00000000000000000aaa", "map.decl.verify"), filepath.Join(root, "701", "SNAPMAPS00000000000000000ccc", "map.decl")) {
 		before[f] = readF(t, f)
 		st, _ := os.Stat(f)
 		times[f] = st.ModTime()

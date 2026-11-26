@@ -89,7 +89,6 @@ func cmdInstall(f flags) error {
 		}
 	}
 	if migration != nil && migration.ready() {
-		ui.Note("This install will update Snapmap+ %s and the following earlier content.", b.version)
 		ok, err := migration.consent(f.yes)
 		if err != nil {
 			return err

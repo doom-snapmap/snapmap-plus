@@ -189,6 +189,9 @@ func (p *migrationPlan) keepMissingPins(path string, err error) bool {
 	switch {
 	case errors.As(err, &absent):
 		reason = absent
+		for _, source := range absent.sources {
+			p.needed[source] = true
+		}
 	case errors.As(err, &prototype):
 		reason = prototype
 	default:
@@ -196,11 +199,14 @@ func (p *migrationPlan) keepMissingPins(path string, err error) bool {
 	}
 	note := fmt.Sprintf("%s: %s", path, reason)
 	p.Deferred = append(p.Deferred, note)
-	ui.Warn("Kept %s.", note)
+	p.skippedName = briefItem(filepath.Base(path))
+	p.skippedPins = absent != nil
 	return true
 }
 
 func (p *migrationPlan) document(src, dst, stage string, archive bool, pins *earlierPins) (err error) {
+	p.progress.detail(filepath.Base(src))
+
 	if pins != nil && pins.keepMissing != nil {
 		defer func() {
 			if err != nil && pins.keepMissing(src, err) {
@@ -208,6 +214,13 @@ func (p *migrationPlan) document(src, dst, stage string, archive bool, pins *ear
 			}
 		}()
 	}
+
+	start := len(p.Changes)
+	defer func() {
+		if err == nil && len(p.Changes) > start {
+			p.countDocument(stage)
+		}
+	}()
 
 	legacy := !samePath(src, dst)
 	var original string
@@ -269,6 +282,11 @@ func (p *migrationPlan) document(src, dst, stage string, archive bool, pins *ear
 		if !changed && !retire {
 			return nil
 		}
+		if stage == "Maps" || (p.Export != "" && stage == "Prefabs") {
+			if _, err = p.companion(dst, next, stage); err != nil {
+				return err
+			}
+		}
 		if err = p.putBytes(dst, next, stage, !legacy); err != nil {
 			return err
 		}
@@ -325,7 +343,7 @@ func (p *migrationPlan) documents(pins *earlierPins) error {
 	return nil
 }
 
-func (p *migrationPlan) mapCopy(title string, out []byte) error {
+func (p *migrationPlan) nativeCopy(slot, sourceSHA, title string, out []byte) error {
 	dir := filepath.Join(p.data, "rawmaps", "Updated saves")
 	for index := 1; ; index++ {
 		name := title + ".json"
@@ -333,23 +351,35 @@ func (p *migrationPlan) mapCopy(title string, out []byte) error {
 			name = fmt.Sprintf("%s (%d).json", title, index)
 		}
 		file := filepath.Join(dir, name)
+		hash := fmt.Sprintf("%x", sha256.Sum256(out))
 		if idx, ok := p.destinations[strings.ToLower(file)]; ok {
-			if p.Changes[idx].After == fmt.Sprintf("%x", sha256.Sum256(out)) {
-				return nil
+			if p.Changes[idx].After != hash {
+				continue
 			}
-			continue
-		}
-		if earlierPathExists(file) {
+		} else if earlierPathExists(file) {
 			sum, err := migrationFileHash(file)
 			if err != nil {
 				return err
 			}
-			if sum == fmt.Sprintf("%x", sha256.Sum256(out)) {
-				return nil
+			if sum != hash {
+				continue
 			}
-			continue
 		}
-		return p.putBytes(file, out, "Maps", false)
+		start := len(p.Changes)
+		archive, err := p.companion(file, out, "Maps")
+		if err != nil {
+			return err
+		}
+		if err = p.putBytes(file, out, "Maps", false); err != nil {
+			return err
+		}
+		if len(p.Changes) > start {
+			p.countDocument("Maps")
+		}
+		if slot == "" {
+			return nil
+		}
+		return p.rememberNativeCopy(slot, sourceSHA, file, hash, archive)
 	}
 }
 
@@ -358,56 +388,5 @@ func (p *migrationPlan) native(pins *earlierPins) error {
 	if err != nil {
 		return err
 	}
-	// The game owns the integrity record. Its converted author copy can be opened and saved through DOOM.
-	tmp, err := os.MkdirTemp(p.work, "slots-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmp)
-	files, err := convertEarlierNativeSaves(tmp, root, pins)
-	if err != nil {
-		return err
-	}
-	for _, file := range files {
-		body, err := os.ReadFile(file)
-		if err != nil {
-			return err
-		}
-		if err = p.mapCopy(strings.TrimSuffix(filepath.Base(file), ".json"), body); err != nil {
-			return err
-		}
-	}
-	if local := os.Getenv("LOCALAPPDATA"); local != "" {
-		for _, kind := range []string{"saved-maps", "published-maps"} {
-			dir := filepath.Join(local, "id Software", "DOOM", "base", "doomsnapmaps", kind)
-			if err = walkLibrary(dir, func(file string, e fs.DirEntry, _ error) error {
-				if e.IsDir() {
-					return nil
-				}
-				name := strings.ToLower(e.Name())
-				if !strings.HasSuffix(name, ".decl") {
-					return nil
-				}
-				body, err := os.ReadFile(file)
-				if err != nil {
-					return err
-				}
-				if !hasHistoricalEvidence(body, nil, pins) {
-					return nil
-				}
-				next, changed, err := convertEarlierPinnedJSON(body, nil, pins)
-				if err != nil && p.keepMissingPins(file, err) {
-					return nil
-				}
-				if err != nil || !changed {
-					return err
-				}
-				title := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
-				return p.mapCopy(title, next)
-			}); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return p.nativeFrom(root, pins)
 }

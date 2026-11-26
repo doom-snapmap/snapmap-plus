@@ -14,26 +14,26 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
-// Existing slots stay owned by DOOM. Their converted copies open through File > Load Rawmap.
-func convertEarlierNativeSaves(data, saveRoot string, pins ...*earlierPins) ([]string, error) {
-	if data == "" || saveRoot == "" || !plainPath(data) || !plainPath(saveRoot) {
-		return nil, fmt.Errorf("could not locate the Snapmap+ data and native save folders")
+// Read the local slots in each native account. Service caches may contain someone else's map or an old revision.
+func (p *migrationPlan) nativeFrom(saveRoot string, pins *earlierPins) error {
+	if saveRoot == "" || !plainPath(saveRoot) {
+		return fmt.Errorf("could not locate the native save folder")
 	}
 	profiles, err := os.ReadDir(saveRoot)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var outputs []string
 	var failures []error
 	for _, profile := range profiles {
 		dir := filepath.Join(saveRoot, profile.Name())
-		if !profile.IsDir() || !plainPath(dir) {
+		if _, err := strconv.ParseUint(profile.Name(), 10, 64); err != nil || !profile.IsDir() || !plainPath(dir) {
 			continue
 		}
 		slots, err := os.ReadDir(dir)
@@ -43,56 +43,57 @@ func convertEarlierNativeSaves(data, saveRoot string, pins ...*earlierPins) ([]s
 		}
 		for _, slot := range slots {
 			name := slot.Name()
-			if !slot.IsDir() || len(name) <= len("SNAPMAPS") || !strings.EqualFold(name[:8], "SNAPMAPS") {
+			if !slot.IsDir() || len(name) != 28 || !strings.EqualFold(name[:8], "SNAPMAPS") {
 				continue
 			}
-			dir := filepath.Join(dir, name)
-			if !plainPath(dir) {
+			id := name[8:]
+			if _, err := hex.DecodeString(id); err != nil {
 				continue
 			}
-			var resolver *earlierPins
-			if len(pins) > 0 {
-				resolver = pins[0]
+			slotDir := filepath.Join(dir, name)
+			if !plainPath(slotDir) {
+				continue
 			}
-			path, err := convertNativeSave(data, dir, name[8:], resolver)
-			if err != nil && !(resolver != nil && resolver.keepMissing != nil && resolver.keepMissing(dir, err)) {
-				failures = append(failures, fmt.Errorf("%s: %w", dir, err))
+			title, err := nativeSlotTitle(slotDir, id)
+			if err == nil && title != "" {
+				p.progress.detail(title)
+				err = p.convertNativeSave(slotDir, title, pins)
 			}
-			if path != "" {
-				outputs = append(outputs, path)
+			if err != nil && !(pins != nil && pins.keepMissing != nil && pins.keepMissing(title, err)) {
+				failures = append(failures, fmt.Errorf("%s: %w", slotDir, err))
 			}
 		}
 	}
-	return outputs, errors.Join(failures...)
+	return errors.Join(failures...)
 }
 
-func convertNativeSave(data, slot, id string, pins *earlierPins) (string, error) {
+func (p *migrationPlan) convertNativeSave(slot, title string, pins *earlierPins) error {
 	path := filepath.Join(slot, "map.decl")
 	if !plainPath(path) {
-		return "", nil
+		return nil
 	}
 	stat, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", nil
+		return nil
 	}
 	if err != nil {
-		return "", err
+		return err
 	}
 	if !stat.Mode().IsRegular() {
-		return "", fmt.Errorf("map.decl is not a regular file")
+		return fmt.Errorf("map.decl is not a regular file")
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer f.Close()
 	source := bufio.NewReader(f)
 	if _, err = source.Discard(4); err != nil {
-		return "", err
+		return err
 	}
 	z, err := zlib.NewReader(source)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer z.Close()
 	var scan nativeMapMarker
@@ -101,40 +102,43 @@ func convertNativeSave(data, slot, id string, pins *earlierPins) (string, error)
 	}
 	size, err := io.Copy(&scan, io.LimitReader(z, math.MaxInt32+1))
 	if err != nil {
-		return "", err
+		return err
 	}
 	if size > math.MaxInt32 {
-		return "", fmt.Errorf("map exceeds the rawmap reader's size limit")
+		return fmt.Errorf("map exceeds the rawmap reader's size limit")
 	}
 	if _, err = source.Peek(1); err != io.EOF {
-		return "", fmt.Errorf("unexpected data after map.decl's zlib stream")
+		return fmt.Errorf("unexpected data after map.decl's zlib stream")
 	}
 	if !scan.found {
-		return "", nil
+		return nil
 	}
 	if _, err = f.Seek(4, io.SeekStart); err != nil {
-		return "", err
+		return err
 	}
 	source.Reset(f)
 	if err = z.(zlib.Resetter).Reset(source, nil); err != nil {
-		return "", err
+		return err
 	}
 	original, err := io.ReadAll(io.LimitReader(z, size+1))
 	if err != nil {
-		return "", err
+		return err
 	}
 	if int64(len(original)) != size {
-		return "", fmt.Errorf("map changed during conversion")
+		return fmt.Errorf("map changed during conversion")
 	}
 	if !hasHistoricalEvidence(original, nil, pins) {
-		return "", nil
+		return nil
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(original))
+	if known, err := p.knownNativeCopy(slot, digest); err != nil || known {
+		return err
 	}
 	out, changed, err := convertEarlierPinnedJSON(original, nil, pins)
 	if err != nil || !changed {
-		return "", err
+		return err
 	}
-	title := nativeMapTitle(slot, id)
-	return writeNativeCopy(filepath.Join(data, "rawmaps", "Updated saves"), title, out)
+	return p.nativeCopy(slot, digest, title, out)
 }
 
 // Scan stock maps without allocating their uncompressed size.
@@ -172,102 +176,43 @@ func (s *nativeMapMarker) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func nativeMapTitle(slot, id string) string {
-	title := "Map " + id
+// The metadata localId ties this directory to the native My Maps slot. Display names may repeat or be absent.
+func nativeSlotTitle(slot, id string) (string, error) {
 	path := filepath.Join(slot, "game.details")
-	if !plainPath(path) {
-		return title
+	if !plainPath(path) || !isRegular(path) {
+		return "", nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return title
+		return "", err
 	}
 	defer f.Close()
 	r := bufio.NewReader(f)
 	for {
 		line, err := r.ReadString('\n')
 		if value, ok := strings.CutPrefix(line, "metadata="); ok {
-			var meta struct{ Name string }
-			if json.Unmarshal([]byte(value), &meta) == nil {
-				clean := strings.Map(func(r rune) rune {
-					if r < 32 || strings.ContainsRune("<>:\"/\\|?*", r) {
-						return '_'
-					}
-					return r
-				}, meta.Name)
-				name := []rune(strings.Trim(clean, " ."))
-				name = name[:min(len(name), 80)]
-				if len(name) > 0 && filepath.IsLocal(string(name)+".json") {
-					return string(name)
+			var meta struct{ LocalID, Name string }
+			if json.Unmarshal([]byte(value), &meta) != nil || !strings.EqualFold(meta.LocalID, id) {
+				return "", nil
+			}
+			clean := strings.Map(func(r rune) rune {
+				if r < 32 || strings.ContainsRune("<>:\"/\\|?*", r) {
+					return '_'
 				}
+				return r
+			}, meta.Name)
+			name := []rune(strings.Trim(clean, " ."))
+			name = name[:min(len(name), 80)]
+			if len(name) > 0 && filepath.IsLocal(string(name)+".json") {
+				return string(name), nil
 			}
+			return "Untitled map", nil
 		}
-		if err != nil {
-			return title
-		}
-	}
-}
-
-func writeNativeCopy(dir, title string, out []byte) (string, error) {
-	if !plainPath(dir) {
-		return "", fmt.Errorf("linked rawmap destination %s", dir)
-	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(out)
-	digest := hex.EncodeToString(sum[:])
-	var staged *os.File
-	for i := 1; ; i++ {
-		name := title + ".json"
-		if i > 1 {
-			name = fmt.Sprintf("%s (%d).json", title, i)
-		}
-		path := filepath.Join(dir, name)
-		if !plainPath(dir) {
-			return "", fmt.Errorf("rawmap destination changed during conversion: %s", dir)
-		}
-		info, err := os.Lstat(path)
-		if err == nil {
-			if info.Mode().IsRegular() && info.Size() == int64(len(out)) {
-				hash, err := fileSHA256(path)
-				if err != nil {
-					return "", err
-				}
-				if hash == digest {
-					return "", nil
-				}
-			}
-			continue
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return "", err
-		}
-		if staged == nil {
-			staged, err = os.CreateTemp(dir, ".updated-map-*")
-			if err != nil {
-				return "", err
-			}
-			defer os.Remove(staged.Name())
-			_, err = staged.Write(out)
-			if err == nil {
-				err = staged.Sync()
-			}
-			closeErr := staged.Close()
-			if err != nil {
-				return "", err
-			}
-			if closeErr != nil {
-				return "", closeErr
-			}
-		}
-		if err = publishNativeCopy(staged.Name(), path); errors.Is(err, fs.ErrExist) {
-			i--
-			continue
+		if errors.Is(err, io.EOF) {
+			return "", nil
 		}
 		if err != nil {
 			return "", err
 		}
-		return path, nil
 	}
 }

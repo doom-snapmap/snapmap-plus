@@ -130,18 +130,28 @@ func (p *earlierPins) prunedAuthorFiles(src, work string, b *earlierBundle, remo
 	return recovered, nil
 }
 
+func (p *earlierPins) verifyInline(b *earlierBundle, work string) error {
+	if err := p.ready(); err != nil {
+		return err
+	}
+	var doc earlierObject
+	if err := json.Unmarshal(b.descriptor, &doc); err != nil {
+		return err
+	}
+	doc["snapmap-plus"] = b.block
+	if err := os.WriteFile(filepath.Join(work, "original.json"), pinJSON(doc), 0600); err != nil {
+		return err
+	}
+	if _, err := p.run(work, "verify="+b.hash); err != nil {
+		return fmt.Errorf("earlier author and build data do not match %s", b.hash)
+	}
+	return nil
+}
+
 func (p *earlierPins) stage(b *earlierBundle, work string) (string, error) {
 	if b.assets && b.inline {
-		var doc earlierObject
-		if err := json.Unmarshal(b.descriptor, &doc); err != nil {
+		if err := p.verifyInline(b, work); err != nil {
 			return "", err
-		}
-		doc["snapmap-plus"] = b.block
-		if err := os.WriteFile(filepath.Join(work, "original.json"), pinJSON(doc), 0600); err != nil {
-			return "", err
-		}
-		if _, err := p.run(work, "verify="+b.hash); err != nil {
-			return "", fmt.Errorf("earlier author and build data do not match %s", b.hash)
 		}
 	}
 	dir := "mod"
@@ -234,7 +244,10 @@ func (p *earlierPins) stage(b *earlierBundle, work string) (string, error) {
 	return b.id, nil
 }
 
-type missingEarlierPins struct{ items []string }
+type missingEarlierPins struct {
+	items   []string
+	sources []string
+}
 
 func (e *missingEarlierPins) Error() string {
 	return "the original build files are unavailable: " + strings.Join(e.items, ", ")
@@ -275,7 +288,7 @@ func (p *earlierPins) candidatesForRow(row earlierObject) (string, []*earlierBun
 		if len(p.candidates[hash]) != 0 {
 			return "", nil, fmt.Errorf("the pinned identity disagrees with the original build %s", hash)
 		}
-		return "", nil, &missingEarlierPins{[]string{id + " @ " + hash}}
+		return "", nil, &missingEarlierPins{items: []string{id + " @ " + hash}}
 	}
 	return id, found, nil
 }
@@ -293,6 +306,11 @@ func (p *earlierPins) checkRows(rows []earlierObject) error {
 		if salted && modSalt.MatchString(salt) && hash == strings.Repeat("0", 64) && row["id"] == nil && row["bundle"] == nil {
 			continue
 		}
+		if stored, e := p.retryFile(row); e != nil {
+			return e
+		} else if stored != "" {
+			continue
+		}
 		_, _, err := p.candidatesForRow(row)
 		if err == nil {
 			continue
@@ -305,7 +323,7 @@ func (p *earlierPins) checkRows(rows []earlierObject) error {
 	}
 	if len(missing) > 0 {
 		slices.Sort(missing)
-		return &missingEarlierPins{slices.Compact(missing)}
+		return &missingEarlierPins{items: slices.Compact(missing)}
 	}
 	return nil
 }
@@ -405,7 +423,7 @@ func (p *earlierPins) row(row earlierObject) (earlierObject, error) {
 	if last == nil {
 		last = fmt.Errorf("the original build files are unavailable")
 	}
-	return nil, fmt.Errorf("%s @ %s: %w", id, candidates[0].hash, last)
+	return nil, &missingEarlierPins{items: []string{fmt.Sprintf("%s @ %s (%s)", id, candidates[0].hash, last)}}
 }
 
 // The caller has verified and translated this embedded package in a private folder.

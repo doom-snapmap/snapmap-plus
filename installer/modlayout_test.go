@@ -60,12 +60,11 @@ func TestInstallUpgradesModLayout(t *testing.T) {
 				t.Fatalf("the generated manifest changed: %q", got)
 			}
 		}
-		if exists(old) || exists(filepath.Join(r.data, "mods", ".served")) || exists(filepath.Join(r.data, "mods", ".builds")) {
+		if exists(old) || exists(filepath.Join(r.data, "mods", ".served")) {
 			t.Fatal("a shared directory remains in the mods folder")
 		}
-		saved, err := filepath.Glob(filepath.Join(r.data, "cache/legacy-builds/pack@146a9dbac3758deb/mod.json"))
-		if err != nil || len(saved) != 1 || readF(t, saved[0]) != fmt.Sprintf(author, testModBlock) {
-			t.Fatal("the installer did not preserve the original build")
+		if exists(filepath.Join(r.data, "cache", "legacy-builds")) || readF(t, history) != fmt.Sprintf(author, testModBlock) {
+			t.Fatal("an unverified historical folder was rewritten")
 		}
 		if got := readF(t, filepath.Join(r.data, "cache", "served", "banks", "bank.bnk")); got != "sound" {
 			t.Fatal("sound bank did not survive the upgrade")

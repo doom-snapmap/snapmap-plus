@@ -163,8 +163,10 @@ The installer preflights recognized earlier mods, maps and prefabs and asks once
 the changes. A temporary transaction supports resuming an interrupted conversion. A native DOOM save
 gets a converted copy under `rawmaps/Updated saves/`. DOOM creates the new native slot when
 the player opens the copy with **File > Load Rawmap** and chooses **Save As**.
-An earlier pin requires its exact source build. If the installer cannot verify that build,
-it names the affected file so the player can restore the original build and retry.
+The installer verifies each earlier pin against its original build. Converted rawmaps with pins
+get a portable ZIP beside the JSON. When a required build is missing, the installer preserves
+the map and the verified units from its available pins for a later retry. After checking the
+library it retires verified historical snapshots and preserves edited or unrecognized files.
 [Installer upgrade details](../installer/README.md#updating-earlier-mods-maps-and-prefabs)
 
 Navigation chunks: the engine's lexer sees the member only where Snapmap+ is

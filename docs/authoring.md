@@ -59,7 +59,7 @@ Opening a published map or importing a rawmap or prefab ZIP puts its verified un
 Each unit lists the files its map needs. Their contents are stored once by hash under `files/`.
 The game reads the prepared map content under `content/served/`. Interrupted downloads can resume from `partial/`.
 Opening another published map reuses files already present and fetches any missing ones. Playing a map leaves the author's `mods/` folder alone.
-On upgraded installations, `cache/legacy-builds/` also keeps the records needed to open exports pinned to older releases.
+When you upgrade, the installer keeps the exact units used by your older maps and prefabs. For a separate old export, supply its original mod build or a self-contained export.
 
 A file beside `mod.json` (a README, notes) and a folder whose name starts with `.` are not part of the mod. A file in
 any other top-level folder (`assets/` and `game/` included) is a mistake the build names, file by file.

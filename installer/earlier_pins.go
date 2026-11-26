@@ -162,7 +162,7 @@ func (p *earlierPins) inspect(folder string, inZIP bool) (*earlierBundle, error)
 				a, d := json.NewDecoder(bytes.NewReader(canon)), json.NewDecoder(bytes.NewReader(pretty))
 				a.UseNumber()
 				d.UseNumber()
-				if a.Decode(&original) != nil || d.Decode(&duplicate) != nil || duplicate["bundle"] != b.hash {
+				if !json.Valid(pretty) || a.Decode(&original) != nil || d.Decode(&duplicate) != nil || duplicate["bundle"] != b.hash {
 					return nil, fmt.Errorf("bundle.json disagrees with the canonical build in %s", folder)
 				}
 				delete(duplicate, "bundle")

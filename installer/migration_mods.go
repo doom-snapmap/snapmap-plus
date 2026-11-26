@@ -64,8 +64,8 @@ func (p *migrationPlan) transferTree(source, dest, stage string, replace bool) e
 	})
 }
 
-// Keep the exact build record for older external exports. Its verified payloads share the ordinary blob store.
-func (p *migrationPlan) retainBuild(src, work string, consumed map[string]bool) (*earlierBundle, error) {
+// Verify the original record before translating the editable folder.
+func (p *migrationPlan) originalBuild(src, work string, consumed map[string]bool) (*earlierBundle, error) {
 	var doc, block earlierObject
 	for _, name := range []string{"mod.json", "bundle.json"} {
 		if b, err := os.ReadFile(filepath.Join(src, name)); err == nil && json.Unmarshal(b, &doc) == nil {
@@ -83,30 +83,11 @@ func (p *migrationPlan) retainBuild(src, work string, consumed map[string]bool) 
 	if !b.assets {
 		return nil, nil
 	}
-	dir := filepath.Join(p.data, "cache", "legacy-builds", b.hash)
 	if b.inline {
-		if err = p.pins.ready(); err != nil {
-			return nil, err
-		}
-		var original earlierObject
-		if err = json.Unmarshal(b.descriptor, &original); err != nil {
-			return nil, err
-		}
-		original["snapmap-plus"] = b.block
-		data := pinJSON(original)
-		if err = os.WriteFile(filepath.Join(work, "original.json"), data, 0600); err != nil {
-			return nil, err
-		}
-		if _, err = p.pins.run(work, "verify="+b.hash); err != nil {
-			return nil, fmt.Errorf("the author and build records disagree: %w", err)
-		}
-		if err = p.putBytes(filepath.Join(dir, "mod.json"), data, "Mods", false); err != nil {
+		if err = p.pins.verifyInline(b, work); err != nil {
 			return nil, err
 		}
 	} else {
-		if err = p.putBytes(filepath.Join(dir, "bundle.canonical.json"), b.descriptor, "Mods", false); err != nil {
-			return nil, err
-		}
 		for _, name := range []string{"bundle.canonical.json", "bundle.json"} {
 			consumed[filepath.Join(src, name)] = true
 		}
@@ -122,34 +103,13 @@ func (p *migrationPlan) retainBuild(src, work string, consumed map[string]bool) 
 			}
 		}
 	}
-	for _, f := range b.files {
-		if f.Stock != nil {
-			continue
-		}
-		hash := f.hash()
-		target := filepath.Join(p.data, "cache", "content", "files", hash[:2], hash)
-		current, err := migrationFileHash(target)
-		if err != nil {
-			return nil, err
-		}
-		if current == hash {
-			continue
-		}
-		file := filepath.Join(src, filepath.FromSlash(f.Path))
-		if h, err := migrationFileHash(file); err != nil {
-			return nil, err
-		} else if h != hash {
-			// An author may have edited this asset since publishing. Never record those bytes under the old identity.
-			continue
-		}
-		if err = p.put(target, file, "Mods", false); err != nil {
-			return nil, err
-		}
-	}
 	return b, nil
 }
 
 func (p *migrationPlan) convertMod(src, dst string, pruned prunedStock) error {
+	if p.held[src] {
+		return nil
+	}
 	if !samePath(src, dst) && earlierPathExists(dst) {
 		return fmt.Errorf("an existing mod already uses %s", dst)
 	}
@@ -164,9 +124,12 @@ func (p *migrationPlan) convertMod(src, dst string, pruned prunedStock) error {
 	}
 	target := filepath.Join(tmp, "converted")
 	consumed := map[string]bool{}
-	bundle, err := p.retainBuild(src, tmp, consumed)
+	bundle, err := p.originalBuild(src, tmp, consumed)
 	if err != nil {
 		return err
+	}
+	if bundle != nil && p.converting != nil {
+		p.converting[src] = true
 	}
 	recovered, err := p.pins.prunedAuthorFiles(src, tmp, bundle, pruned)
 	if err != nil {
@@ -316,6 +279,7 @@ func (p *migrationPlan) modLibrary(root, destination string, overrides bool) err
 		if doc == nil {
 			return nil
 		}
+		p.progress.detail(e.Name())
 		_, hasID := doc["id"].(string)
 		_, build := doc["snapmap-plus"].(map[string]any)
 		assets := earlierPathExists(filepath.Join(dir, "assets"))
@@ -490,40 +454,6 @@ func (p *migrationPlan) mods() error {
 			}
 		}
 	}
-	history := filepath.Join(mods, ".builds")
-	entries, err = os.ReadDir(history)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	for _, child := range entries {
-		dir := filepath.Join(history, child.Name())
-		if !child.IsDir() || !plainPath(dir) {
-			continue
-		}
-		known := false
-		if file := filepath.Join(dir, "mod.json"); isRegular(file) && plainPath(file) {
-			b, e := os.ReadFile(file)
-			if e != nil {
-				return e
-			}
-			_, block, _ := inlineModBuild(b)
-			known = block != nil
-		}
-		if !known {
-			_, e := p.pins.inspect(dir, false)
-			known = e == nil
-		}
-		if !known {
-			continue
-		}
-		if err = p.moveCache(dir, filepath.Join(p.data, "cache", "legacy-builds", child.Name())); err != nil {
-			return err
-		}
-	}
-	p.empty(history)
 	return nil
 }
 

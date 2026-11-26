@@ -38,7 +38,7 @@ func TestInstallEarlierContentAndRealPins(t *testing.T) {
 	}
 	hash := sha256.Sum256(embedded.Bytes())
 	carrier := fmt.Sprintf(`{"entities":[{"entityDef":{"inherit":"mods/local.door/a"}}],"variables":{"allocCount":[0,0,0,0,1],"string":[{"info":{"name":"smpkg.local.door.0.1.%x","~type":"snapVarInfo_t"},"initialValue":"%s"}]}}`, hash[:8], base64.StdEncoding.EncodeToString(embedded.Bytes()))
-	slotPath := filepath.Join(os.Getenv("USERPROFILE"), "Saved Games", "id Software", "DOOM", "base", "savegame.user", "fixture", "SNAPMAPSab01", "map.decl")
+	slotPath := filepath.Join(os.Getenv("USERPROFILE"), "Saved Games", "id Software", "DOOM", "base", "savegame.user", "701", "SNAPMAPS0000000000000000ab01", "map.decl")
 	native := slotBody(t, slotPath, carrier)
 	writeF(t, slotPath+".verify", "test integrity")
 	dist := synthDist(t, r.tmp, "upgrade")
@@ -125,8 +125,8 @@ func TestEarlierVariableMap(t *testing.T) {
 		t.Error("damaged navigation was silently kept")
 	}
 	data, root := t.TempDir(), t.TempDir()
-	slotBody(t, filepath.Join(root, "profile", "SNAPMAPSabcd", "map.decl"), string(b))
-	paths, err := convertEarlierNativeSaves(data, root)
+	slotBody(t, filepath.Join(root, "701", "SNAPMAPS0000000000000000abcd", "map.decl"), string(b))
+	paths, err := applyNativeMaps(t, data, root)
 	if err != nil || len(paths) != 1 {
 		t.Fatalf("map slot with variables only: %v, %v", paths, err)
 	}

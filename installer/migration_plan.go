@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -25,16 +26,22 @@ type migrationChange struct {
 }
 
 type migrationPlan struct {
-	Roots         []string
-	Export        string
-	Deferred      []string `json:",omitempty"`
-	Changes       []migrationChange
-	Empty         []string
-	data, work    string
-	journalHash   string
-	pins          *earlierPins
-	destinations  map[string]int
-	keepOverrides bool
+	Roots                      []string
+	Export                     string
+	Deferred                   []string `json:",omitempty"`
+	Changes                    []migrationChange
+	Empty                      []string
+	Maps, Prefabs              int `json:",omitempty"`
+	progress                   *migrationProgress
+	data, work                 string
+	skippedName                string
+	skippedPins                bool
+	journalHash                string
+	pins                       *earlierPins
+	destinations               map[string]int
+	keepOverrides              bool
+	held, needed, converting   map[string]bool
+	usedRecovery, keepRecovery map[string]bool
 }
 
 func migrationFileHash(path string) (string, error) {
@@ -64,6 +71,19 @@ func (p *migrationPlan) allows(path string) bool {
 		return false
 	}
 	if p.Export != "" {
+		if strings.EqualFold(filepath.Ext(p.Export), ".json") {
+			if samePath(path, companionPath(p.Export, 0)) {
+				return true
+			}
+			stem := strings.TrimSuffix(p.Export, filepath.Ext(p.Export))
+			tail, ok := strings.CutPrefix(path, stem+" (updated ")
+			if ok && strings.HasSuffix(tail, ").zip") {
+				i, err := strconv.Atoi(strings.TrimSuffix(tail, ").zip"))
+				if err == nil && i > 0 && samePath(path, companionPath(p.Export, i)) {
+					return true
+				}
+			}
+		}
 		if samePath(path, p.Export) || samePath(path, strings.TrimSuffix(p.Export, filepath.Ext(p.Export))+".meta.json") {
 			return true
 		}
@@ -85,8 +105,8 @@ func (p *migrationPlan) allows(path string) bool {
 			}
 		}
 	}
-	for _, dir := range []string{"content", "served", "legacy-builds"} {
-		if under(filepath.Join(p.data, "cache", dir), path) {
+	for _, dir := range []string{"content", "served", "legacy-builds", "migration-units", "migrated-saves"} {
+		if under(filepath.Join(p.data, "cache", dir), path) || ((dir == "legacy-builds" || dir == "migration-units") && samePath(path, filepath.Join(p.data, "cache", dir))) {
 			return true
 		}
 	}
@@ -219,6 +239,34 @@ func copyMigrationFile(src, dst string, before string) error {
 	})
 }
 
+func (p *migrationPlan) reportDeferred() {
+	switch len(p.Deferred) {
+	case 0:
+		return
+	case 1:
+		if p.skippedName != "" && p.skippedPins {
+			ui.Skip("Skipped %s. Restore its original mod files to migrate it.", p.skippedName)
+			return
+		}
+		if p.skippedName != "" {
+			ui.Skip("Skipped %s. Its earlier mod record could not be identified.", p.skippedName)
+			return
+		}
+		ui.Skip("Kept one earlier item whose original files could not be verified.")
+	default:
+		ui.Skip("Kept %d earlier items whose original files or mod records could not be verified.", len(p.Deferred))
+	}
+}
+
+func (p *migrationPlan) countDocument(stage string) {
+	switch stage {
+	case "Maps":
+		p.Maps++
+	case "Prefabs":
+		p.Prefabs++
+	}
+}
+
 func (p *migrationPlan) counts() map[string]int {
 	counts := map[string]int{}
 	for _, c := range p.Changes {
@@ -228,11 +276,16 @@ func (p *migrationPlan) counts() map[string]int {
 }
 
 func (p *migrationPlan) inspect(applied bool) error {
+	p.progress.step("Checking migration files")
 	for i, c := range p.Changes {
+		p.progress.position(i+1, len(p.Changes))
 		if !p.allows(c.Path) || !plainPath(c.Path) || (!pinHash(c.Before) && c.Before != "") ||
 			(!pinHash(c.After) && c.After != "") || c.Before == c.After ||
 			(c.Stage != "Mods" && c.Stage != "Maps" && c.Stage != "Prefabs") {
 			return fmt.Errorf("invalid migration item %d", i)
+		}
+		if p.Export != "" && !samePath(c.Path, p.Export) && strings.EqualFold(filepath.Ext(c.Path), ".zip") && (c.Before != "" || c.After == "") {
+			return fmt.Errorf("unsafe companion replacement %s", c.Path)
 		}
 		current, err := migrationFileHash(c.Path)
 		if err != nil {
@@ -299,6 +352,7 @@ func (p *migrationPlan) persist() error {
 	}
 	defer os.RemoveAll(temp)
 	for i, c := range p.Changes {
+		p.progress.position(i+1, len(p.Changes))
 		if c.After != "" && c.Move == "" {
 			leaf := fmt.Sprintf("new-%d", i)
 			if err := copyMigrationFile(filepath.Join(p.work, leaf), filepath.Join(temp, leaf), ""); err != nil {
@@ -333,13 +387,19 @@ func (p *migrationPlan) apply() error {
 	if err := p.inspect(true); err != nil {
 		return err
 	}
+	counts := p.counts()
 	for _, stage := range []string{"Mods", "Maps", "Prefabs"} {
-		ui.Section(stage)
-		changed := 0
+		if counts[stage] == 0 {
+			continue
+		}
+		p.progress.step("Updating " + strings.ToLower(stage))
+		processed := 0
 		for i, c := range p.Changes {
 			if c.Stage != stage {
 				continue
 			}
+			processed++
+			p.progress.position(processed, counts[stage])
 			current, err := migrationFileHash(c.Path)
 			if err != nil {
 				return err
@@ -362,14 +422,11 @@ func (p *migrationPlan) apply() error {
 			if err != nil {
 				return err
 			}
-			if stage == "Maps" && under(filepath.Join(p.data, "rawmaps", "Updated saves"), c.Path) {
-				ui.PathField("Open rawmap", c.Path)
-			}
-			changed++
 		}
-		ui.Field("Updated files", fmt.Sprint(changed))
 	}
-	for _, c := range p.Changes {
+	p.progress.step("Verifying migrated files")
+	for i, c := range p.Changes {
+		p.progress.position(i+1, len(p.Changes))
 		h, err := migrationFileHash(c.Path)
 		if err != nil || h != c.After {
 			return fmt.Errorf("could not verify %s", c.Path)
@@ -393,7 +450,12 @@ func (p *migrationPlan) apply() error {
 	if !samePath(p.work, migrationJournal(p.data)) {
 		return fmt.Errorf("unexpected transaction directory")
 	}
-	return p.finish()
+	p.progress.step("Finishing migration")
+	if err := p.finish(); err != nil {
+		return err
+	}
+	ui.OK("Migration complete.")
+	return nil
 }
 
 func (p *migrationPlan) finish() error {

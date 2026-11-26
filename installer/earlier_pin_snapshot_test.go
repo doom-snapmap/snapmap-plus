@@ -60,10 +60,13 @@ func TestEarlierFrozenSnapshotPin(t *testing.T) {
 			var z *zip.Reader
 			switch location {
 			case "archived":
-				for range 2 {
-					if err := upgradeModLayout(data); err != nil {
-						t.Fatal(err)
-					}
+				data = t.TempDir()
+				dest := filepath.Join(data, "cache", "legacy-builds", filepath.Base(src))
+				if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := copyEarlierPinTree(src, dest); err != nil {
+					t.Fatal(err)
 				}
 			case "zip":
 				var buf bytes.Buffer

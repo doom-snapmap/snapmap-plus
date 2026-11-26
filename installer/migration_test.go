@@ -126,7 +126,7 @@ func TestMixedMigrationKeepsVanillaAndCurrentBytesAndTimes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for id, body := range map[string]string{"a": stock, "b": earlier} {
-		file := filepath.Join(root, "profile", "SNAPMAPS"+id, "map.decl")
+		file := filepath.Join(root, "701", "SNAPMAPS0000000000000000000"+id, "map.decl")
 		slotBody(t, file, body)
 		keep(file)
 		writeF(t, file+".verify", "native record")
@@ -141,6 +141,9 @@ func TestMixedMigrationKeepsVanillaAndCurrentBytesAndTimes(t *testing.T) {
 		defer done()
 		if err != nil {
 			t.Fatal(err)
+		}
+		if tries == 0 && (plan.Maps != 2 || plan.Prefabs != 1) {
+			t.Fatalf("planned %d maps and %d prefabs", plan.Maps, plan.Prefabs)
 		}
 		if (tries == 0) != plan.ready() {
 			t.Fatalf("attempt %d needs changes: %v", tries, plan.Changes)
@@ -174,7 +177,7 @@ func TestMixedMigrationKeepsVanillaAndCurrentBytesAndTimes(t *testing.T) {
 		}
 	}
 	copies, err := filepath.Glob(filepath.Join(r.data, "rawmaps", "Updated saves", "*.json"))
-	if err != nil || len(copies) != 2 {
+	if err != nil || len(copies) != 1 || filepath.Base(copies[0]) != "Map b.json" {
 		t.Fatalf("native exports %v: %v", copies, err)
 	}
 }
@@ -232,7 +235,7 @@ func TestMigrationConsentAndRecovery(t *testing.T) {
 	}
 }
 
-func TestMigrationRequiresCompletePriorRowsAndKeepsExternalPin(t *testing.T) {
+func TestMigrationRequiresCompletePriorRowsAndExactExternalSource(t *testing.T) {
 	data := t.TempDir()
 	original := tinyFixture(t, data)
 	file := filepath.Join(data, "rawmap.json")
@@ -257,8 +260,8 @@ func TestMigrationRequiresCompletePriorRowsAndKeepsExternalPin(t *testing.T) {
 	}
 	p := tinyResolver(t, data, nil)
 	out, err := p.row(tinyPin("mods/alex.tiny/a"))
-	if err != nil || out["objects"] == nil || out["whole"] != nil {
-		t.Fatalf("a later export cannot find the exact previous build: %s %v", pinJSON(out), err)
+	if err == nil || out != nil || !strings.Contains(err.Error(), tinyBuild) || exists(filepath.Join(data, "cache", "legacy-builds")) {
+		t.Fatalf("later export without its exact original was accepted: %s %v", pinJSON(out), err)
 	}
 }
 

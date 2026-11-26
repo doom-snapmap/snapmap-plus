@@ -109,15 +109,6 @@ func TestEarlierPinExactObjectAndFallback(t *testing.T) {
 	if err := copyEarlierPinTree("testdata/earlier-tiny", filepath.Join(builds, "alex.tiny@1.0.0+1")); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 2; i++ {
-		if err := upgradeModLayout(data); err != nil {
-			t.Fatal(err)
-		}
-	}
-	archives, err := filepath.Glob(filepath.Join(data, "cache", "legacy-builds", "*", "bundle.canonical.json"))
-	if err != nil || len(archives) != 1 || exists(builds) {
-		t.Fatalf("unexpected build archives: %v (%v)", archives, err)
-	}
 	p := tinyResolver(t, data, nil)
 	row, e := p.row(tinyPin("mods/alex.tiny/a"))
 	if e != nil {

@@ -45,10 +45,11 @@ type console struct {
 	stderr  func() io.Writer
 	colorOn func(io.Writer) bool
 
-	plain   bool   // --plain or NO_COLOR: never colour
-	started bool   // anything has been written
-	blank   bool   // the last line written was empty
-	pending string // a section title printed only once something is written under it
+	plain      bool // --plain or NO_COLOR: never colour
+	started    bool // anything has been written
+	blank      bool // the last line written was empty
+	activityOn bool
+	pending    string // a section title printed only once something is written under it
 }
 
 // colorFiles are the console streams whose virtual-terminal processing setupOutput enabled.
@@ -133,8 +134,37 @@ func (c *console) paint(w io.Writer, code, s string) string {
 	return code + s + ansiReset
 }
 
+// Progress replaces a single line on a terminal. Redirected and plain output use complete lines.
+func (c *console) activity(text string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	w := c.stdout()
+	c.flushPending(w)
+	if c.plain || !c.colorOn(w) {
+		c.writeLines(w, indent+text)
+		return
+	}
+	c.clearActivityLocked()
+	fmt.Fprint(w, indent+c.paint(w, ansiGrey, text))
+	c.activityOn = true
+}
+
+func (c *console) clearActivityLocked() {
+	if c.activityOn {
+		io.WriteString(c.stdout(), "\r\x1b[2K")
+		c.activityOn = false
+	}
+}
+
+func (c *console) clearActivity() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.clearActivityLocked()
+}
+
 // writeLines writes complete lines; the caller holds c.mu.
 func (c *console) writeLines(w io.Writer, lines ...string) {
+	c.clearActivityLocked()
 	for _, l := range lines {
 		io.WriteString(w, l+"\n")
 		c.started = true

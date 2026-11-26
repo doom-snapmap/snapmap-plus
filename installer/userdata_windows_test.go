@@ -45,6 +45,10 @@ func TestCopyMissingFileRefusesDirectoryJunction(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Remove(link)
+	plan := migrationPlan{work: t.TempDir(), data: dst}
+	if _, err := plan.companion(filepath.Join(link, "map.json"), []byte("{}"), "Maps"); err == nil {
+		t.Fatal("migration accepted a linked companion directory")
+	}
 	if err := copyMissingFile(filepath.Join(src, "linked", "file"), filepath.Join(dst, "linked", "file")); err == nil {
 		t.Fatal("migration followed a destination junction")
 	}

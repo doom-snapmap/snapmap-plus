@@ -14,10 +14,38 @@ import (
 )
 
 func preparePlayerMigration(doom, data, explicit string) (*migrationPlan, func(), error) {
+	ui.Section("Checking earlier content")
+	progress := startMigrationProgress()
+	defer progress.stop()
+	held := map[string]bool{}
+	for {
+		p, cleanup, err := planPlayerMigration(doom, data, explicit, held, progress)
+		if err != nil {
+			return p, cleanup, err
+		}
+		retry := false
+		for folder := range p.needed {
+			if p.converting[folder] && !held[folder] {
+				held[folder] = true
+				retry = true
+			}
+		}
+		if !retry {
+			p.reportDeferred()
+			if !p.ready() && len(p.Deferred) == 0 {
+				ui.OK("No earlier content needs migration.")
+			}
+			return p, cleanup, nil
+		}
+		cleanup()
+	}
+}
+
+func planPlayerMigration(doom, data, explicit string, held map[string]bool, progress *migrationProgress) (*migrationPlan, func(), error) {
 	if data == "" || !plainPath(data) {
 		return nil, func() {}, fmt.Errorf("unavailable Snapmap+ data directory")
 	}
-	p := &migrationPlan{data: data, destinations: map[string]int{}}
+	p := &migrationPlan{progress: progress, data: data, destinations: map[string]int{}, held: held, needed: map[string]bool{}, converting: map[string]bool{}}
 	for _, home := range p.legacyHomes() {
 		p.Roots = append(p.Roots, home)
 	}
@@ -61,6 +89,7 @@ func preparePlayerMigration(doom, data, explicit string) (*migrationPlan, func()
 	if explicit == "" {
 		pins.keepMissing = p.keepMissingPins
 	}
+	progress.step("Checking mod libraries and settings")
 	pins.placements, err = p.readPlacements()
 	if err != nil {
 		cleanup()
@@ -76,6 +105,7 @@ func preparePlayerMigration(doom, data, explicit string) (*migrationPlan, func()
 		}
 	}
 	if explicit != "" {
+		progress.step("Checking selected export")
 		if !plainPath(explicit) || !isRegular(explicit) {
 			err = fmt.Errorf("cannot read export %s", explicit)
 		} else if err = p.previewPlacementOwners(explicit); err == nil {
@@ -100,11 +130,17 @@ func preparePlayerMigration(doom, data, explicit string) (*migrationPlan, func()
 			err = p.pins.placements.save()
 		}
 		if err == nil {
+			progress.step("Checking maps, rawmaps and prefabs")
 			err = p.documents(pins)
 		}
 		if err == nil && doom != "" {
+			progress.step("Checking DOOM save slots")
 			err = p.native(pins)
 		}
+	}
+	if err == nil && explicit == "" {
+		progress.step("Checking earlier mod builds")
+		err = p.retireBuildHistory()
 	}
 	if err == nil && earlierPathExists(pins.output) {
 		err = p.transferTree(pins.output, data, "Mods", false)
@@ -165,37 +201,24 @@ func (p *migrationPlan) ready() bool {
 }
 
 func (p *migrationPlan) consent(yes bool) (bool, error) {
-	counts := p.counts()
-	ui.Section("Update earlier Snapmap+ content")
+	ui.Section("Migration summary")
 	if samePath(p.work, migrationJournal(p.data)) {
-		ui.Note("An earlier update was interrupted. Continue to finish the verified changes.")
-	}
-	for _, stage := range []string{"Mods", "Maps", "Prefabs"} {
-		label := "file changes"
-		if counts[stage] == 1 {
-			label = "file change"
-		}
-		ui.Field(stage, fmt.Sprintf("%d %s", counts[stage], label))
-	}
-	ui.Field("Snapmap+ data", p.data)
-	if p.Export != "" {
-		ui.Field("Selected export", p.Export)
-		ui.Note("To keep the earlier version, make a manual copy of the selected export and any matching prefab metadata file.")
+		ui.Note("Resume the interrupted migration.")
 	} else {
-		ui.Note("For a backup of your mods, maps, rawmaps, prefabs and settings, copy the listed data folders before continuing.")
-		for _, root := range p.Roots[1:] {
-			if earlierPathExists(root) {
-				ui.Field("Earlier data", root)
-			}
+		if p.counts()["Mods"] > 0 {
+			ui.Field("Mods and settings", "Update needed")
 		}
+		ui.Field("Maps and rawmaps", fmt.Sprint(p.Maps))
+		ui.Field("Prefabs", fmt.Sprint(p.Prefabs))
 	}
 	if yes {
+		ui.Note("Back up your data before migrating.")
 		return true, nil
 	}
 	if !isInteractive() {
-		return false, fmt.Errorf("earlier content needs your consent; run in a terminal or use --yes after reviewing the listed changes")
+		return false, fmt.Errorf("back up your data before migrating, then run in a terminal or pass --yes")
 	}
-	ui.Ask("Apply these changes?", "[y/N]")
+	ui.Ask("Back up your data before migrating. Continue?", "[y/N]")
 	answer, open := readLineEOF()
 	ui.Answered(!open)
 	return open && (strings.EqualFold(answer, "yes") || strings.EqualFold(answer, "y")), nil
@@ -210,6 +233,9 @@ func (p *migrationPlan) commit() error {
 		return err
 	}
 	defer unlock()
+	p.progress = startMigrationProgress()
+	defer p.progress.stop()
+	p.progress.step("Preparing migration")
 	if samePath(p.work, migrationJournal(p.data)) {
 		hash, err := migrationFileHash(filepath.Join(p.work, "plan.json"))
 		if err != nil || hash != p.journalHash {
@@ -225,10 +251,17 @@ func convertWithConsent(data, file string, yes bool) error {
 	plan, done, err := preparePlayerMigration(earlierInstallDir(data), data, file)
 	defer done()
 	if err != nil {
+		var missing *missingEarlierPins
+		var prototype unavailablePrototype
+		if errors.As(err, &missing) {
+			return fmt.Errorf("restore this export's original mod files and try again")
+		}
+		if errors.As(err, &prototype) {
+			return fmt.Errorf("this export uses an unrecognized earlier mod record")
+		}
 		return err
 	}
 	if !plan.ready() {
-		ui.OK("No earlier modded content needs updating.")
 		return nil
 	}
 	accepted, err := plan.consent(yes)
