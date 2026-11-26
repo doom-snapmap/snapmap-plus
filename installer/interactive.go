@@ -194,7 +194,7 @@ var isInteractive = func() bool {
 // confirm prints a yes/no prompt and returns true on yes (Enter / "y" / "yes"). Input that ends
 // before an answer counts as no.
 func confirm(prompt string) bool {
-	ui.Ask(prompt, "[Y/n]")
+	ui.Ask(prompt)
 	answer, open := readLineEOF()
 	ui.Answered(!open)
 	if !open {

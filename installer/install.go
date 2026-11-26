@@ -68,7 +68,7 @@ func cmdInstall(f flags) error {
 	earlier := describeEarlier(doom, build.build, prior, legacy, own)
 	ui.Section("Earlier install")
 	ui.Field("Found", earlier.found)
-	ui.Field("Action", earlier.plan)
+	ui.field("Action", earlier.plan, ansiCyan)
 
 	confirmMsg := fmt.Sprintf("About to install Snapmap+ %s for the %s DOOM build into\n  %s\nContinue?",
 		b.version, build.label, doom)

@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -189,6 +190,12 @@ func (p *migrationPlan) keepMissingPins(path string, err error) bool {
 	switch {
 	case errors.As(err, &absent):
 		reason = absent
+		p.skippedMods = nil
+		for _, pin := range absent.items {
+			p.skippedMods = append(p.skippedMods, pin.mod)
+		}
+		slices.Sort(p.skippedMods)
+		p.skippedMods = slices.Compact(p.skippedMods)
 		for _, source := range absent.sources {
 			p.needed[source] = true
 		}
@@ -200,7 +207,6 @@ func (p *migrationPlan) keepMissingPins(path string, err error) bool {
 	note := fmt.Sprintf("%s: %s", path, reason)
 	p.Deferred = append(p.Deferred, note)
 	p.skippedName = briefItem(filepath.Base(path))
-	p.skippedPins = absent != nil
 	return true
 }
 

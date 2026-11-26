@@ -295,12 +295,15 @@ func (p *migrationPlan) modLibrary(root, destination string, overrides bool) err
 			}
 			previous = recognized && (hasID || overrides)
 		}
+		start := len(p.Changes)
+		target := dir
 		if previous {
 			rel, err := filepath.Rel(root, dir)
 			if err != nil {
 				return err
 			}
-			if err = p.convertMod(dir, filepath.Join(destination, rel), pruned); err != nil {
+			target = filepath.Join(destination, rel)
+			if err = p.convertMod(dir, target, pruned); err != nil {
 				return fmt.Errorf("%s: %w", dir, err)
 			}
 		} else if descriptor == "mod.json" && !overrides && samePath(root, destination) {
@@ -308,6 +311,7 @@ func (p *migrationPlan) modLibrary(root, destination string, overrides bool) err
 				return err
 			}
 		}
+		p.noteModChanges(target, start)
 		return filepath.SkipDir
 	})
 }

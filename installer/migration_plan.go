@@ -32,10 +32,11 @@ type migrationPlan struct {
 	Changes                    []migrationChange
 	Empty                      []string
 	Maps, Prefabs              int `json:",omitempty"`
+	modFolders                 map[string]migrationMod
 	progress                   *migrationProgress
 	data, work                 string
 	skippedName                string
-	skippedPins                bool
+	skippedMods                []string
 	journalHash                string
 	pins                       *earlierPins
 	destinations               map[string]int
@@ -244,17 +245,17 @@ func (p *migrationPlan) reportDeferred() {
 	case 0:
 		return
 	case 1:
-		if p.skippedName != "" && p.skippedPins {
-			ui.Skip("Skipped %s. Restore its original mod files to migrate it.", p.skippedName)
+		if p.skippedName != "" && len(p.skippedMods) > 0 {
+			ui.Warn("Skipped %s. Its saved mod versions are unavailable.\nMissing versions: %s\nYou can continue. The original stays in place.", p.skippedName, strings.Join(p.skippedMods, ", "))
 			return
 		}
 		if p.skippedName != "" {
-			ui.Skip("Skipped %s. Its earlier mod record could not be identified.", p.skippedName)
+			ui.Warn("Skipped %s. Its earlier mod record could not be identified.", p.skippedName)
 			return
 		}
-		ui.Skip("Kept one earlier item whose original files could not be verified.")
+		ui.Warn("Kept one earlier item whose original files could not be verified.")
 	default:
-		ui.Skip("Kept %d earlier items whose original files or mod records could not be verified.", len(p.Deferred))
+		ui.Warn("Kept %d earlier items whose original files or mod records could not be verified.", len(p.Deferred))
 	}
 }
 

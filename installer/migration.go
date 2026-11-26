@@ -200,16 +200,33 @@ func (p *migrationPlan) ready() bool {
 	return len(p.Changes) > 0 || samePath(p.work, migrationJournal(p.data))
 }
 
+func showMigrationCount(label string, n int, names []string) {
+	color := ansiGrey
+	if n > 0 {
+		color = ansiCyan
+	}
+	value := fmt.Sprint(n)
+	if len(names) > 0 {
+		value += "\n" + strings.Join(names, "\n")
+	}
+	ui.field(label, value, color)
+}
+
 func (p *migrationPlan) consent(yes bool) (bool, error) {
 	ui.Section("Migration summary")
 	if samePath(p.work, migrationJournal(p.data)) {
 		ui.Note("Resume the interrupted migration.")
 	} else {
-		if p.counts()["Mods"] > 0 {
-			ui.Field("Mods and settings", "Update needed")
+		preview := p.modPreview()
+		showMigrationCount("Mods", len(preview.Names), preview.Names)
+		if preview.Settings {
+			ui.field("Settings", "Update config.json", ansiCyan)
 		}
-		ui.Field("Maps and rawmaps", fmt.Sprint(p.Maps))
-		ui.Field("Prefabs", fmt.Sprint(p.Prefabs))
+		if preview.Shared {
+			ui.field("Shared mod data", "Update", ansiCyan)
+		}
+		showMigrationCount("Maps and rawmaps", p.Maps, nil)
+		showMigrationCount("Prefabs", p.Prefabs, nil)
 	}
 	if yes {
 		ui.Note("Back up your data before migrating.")
@@ -218,7 +235,7 @@ func (p *migrationPlan) consent(yes bool) (bool, error) {
 	if !isInteractive() {
 		return false, fmt.Errorf("back up your data before migrating, then run in a terminal or pass --yes")
 	}
-	ui.Ask("Back up your data before migrating. Continue?", "[y/N]")
+	ui.Ask("Back up your data before migrating. Continue?")
 	answer, open := readLineEOF()
 	ui.Answered(!open)
 	return open && (strings.EqualFold(answer, "yes") || strings.EqualFold(answer, "y")), nil

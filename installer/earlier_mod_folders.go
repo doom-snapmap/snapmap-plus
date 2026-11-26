@@ -157,9 +157,11 @@ func (p *migrationPlan) previousTransactions() error {
 			}
 			continue
 		}
+		start := len(p.Changes)
 		if err = p.transferTree(stage, dest, "Mods", false); err != nil {
 			return err
 		}
+		p.noteModChanges(dest, start)
 	}
 	return nil
 }

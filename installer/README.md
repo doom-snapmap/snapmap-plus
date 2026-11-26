@@ -61,7 +61,7 @@ snapmap-plus help
 Any command also takes `--plain` (see [Output](#output)).
 
 With no arguments, the executable opens an interactive prompt. Installation,
-update and uninstall ask for confirmation after checks when standard input is a
+update and uninstall show a `[Y/N]` confirmation after checks when standard input is a
 terminal; `--yes` or `-y` skips that prompt, piped or redirected input never sees
 it, and input that ends before an answer counts as no. Both DOOM executables
 must be closed before changing installed DLLs: the check looks for any running
@@ -127,6 +127,11 @@ only when the stream is a console that accepts virtual-terminal processing;
 redirected output never carries escape codes. `--plain`, accepted with any command
 or on its own for the interactive prompt, and a non-empty `NO_COLOR` turn colour
 off. The changelog renderer stays colourless.
+
+Before confirmation, the migration summary lists each mod it will update once.
+Settings and shared mod data appear separately. Cyan marks planned changes and
+grey marks zero counts. A yellow warning names missing mod versions when a single
+item has to be skipped. You can continue with the other items and keep the original.
 
 ## Layout contract
 

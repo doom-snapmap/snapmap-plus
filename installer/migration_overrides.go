@@ -98,6 +98,7 @@ func loosePolicy(root, name string) (bool, error) {
 }
 
 func (p *migrationPlan) loose(home string) error {
+	start := len(p.Changes)
 	root := filepath.Join(home, "overrides")
 	var files, policies, candidates, wrapped []string
 	var inactive []string
@@ -370,5 +371,6 @@ func (p *migrationPlan) loose(home string) error {
 		}
 		p.empty(filepath.Dir(stringsFile))
 	}
+	p.noteModChanges(target, start)
 	return nil
 }

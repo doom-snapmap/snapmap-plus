@@ -133,10 +133,10 @@ func TestFileListsIndentAndCount(t *testing.T) {
 func TestAskIsSetApartWithASuffix(t *testing.T) {
 	c, b := testConsole(false)
 	c.Note("before")
-	c.Ask("About to install into\n  C:\\DOOM\nContinue?", "[Y/n]")
+	c.Ask("About to install into\n  C:\\DOOM\nContinue?")
 	c.Answered(false)
 	c.Section("Next")
-	want := "  before\n\n  About to install into\n    C:\\DOOM\n  Continue? [Y/n] \nNext\n----\n"
+	want := "  before\n\n  About to install into\n    C:\\DOOM\n  Continue? [Y/N] \nNext\n----\n"
 	// The answer's newline comes from the user's Enter, so the captured text has the section's gap line
 	// right after the prompt.
 	if b.String() != want {
@@ -179,7 +179,7 @@ func TestColourOffAndPlainEmitNoEscapes(t *testing.T) {
 		c.Skip("b")
 		c.Warn("c")
 		c.Fail("d")
-		c.Ask("Continue?", "[Y/n]")
+		c.Ask("Continue?")
 		c.Help("title\nUsage:\n  x", "Usage:")
 	}
 	off, b := testConsole(false)

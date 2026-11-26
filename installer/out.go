@@ -32,6 +32,7 @@ const (
 	ansiReset  = "\x1b[0m"
 	ansiBold   = "\x1b[1m"
 	ansiGreen  = "\x1b[32m"
+	ansiCyan   = "\x1b[36m"
 	ansiYellow = "\x1b[33m"
 	ansiRed    = "\x1b[31m"
 	ansiGrey   = "\x1b[90m"
@@ -128,7 +129,7 @@ func (c *console) setPlain(p bool) {
 }
 
 func (c *console) paint(w io.Writer, code, s string) string {
-	if c.plain || s == "" || !c.colorOn(w) {
+	if code == "" || c.plain || s == "" || !c.colorOn(w) {
 		return s
 	}
 	return code + s + ansiReset
@@ -241,17 +242,20 @@ func fieldLabel(label string) string {
 
 // Field prints a key and value line with the value in a fixed column.
 func (c *console) Field(label, value string) {
+	c.field(label, value, "")
+}
+
+func (c *console) field(label, value, color string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	prefix := fieldLabel(label)
-	c.emitLocked(false, prefix+strings.ReplaceAll(value, "\n", "\n"+strings.Repeat(" ", len(prefix))))
+	value = strings.ReplaceAll(value, "\n", "\n"+strings.Repeat(" ", len(prefix)))
+	c.emitLocked(false, prefix+c.paint(c.stdout(), color, value))
 }
 
 // PathField is Field for a value that is a path, muted when coloured.
 func (c *console) PathField(label, path string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.emitLocked(false, fieldLabel(label)+c.paint(c.stdout(), ansiGrey, path))
+	c.field(label, path, ansiGrey)
 }
 
 // Note prints section text; each embedded line keeps the section indent.
@@ -324,9 +328,8 @@ func (l *fileList) Close() {
 	c.emitLocked(false, markerIndent+c.paint(c.stdout(), ansiGrey, fmt.Sprintf("%d files", l.n)))
 }
 
-// Ask prints a question set apart by a blank line and leaves the cursor after it. Every line is indented
-// like section text; the last one is the question itself, followed by the answer suffix such as "[Y/n]".
-func (c *console) Ask(question, suffix string) { c.ask(question, suffix, indent) }
+// Ask prints a yes/no question and leaves the cursor ready for an answer.
+func (c *console) Ask(question string) { c.ask(question, "[Y/N]", indent) }
 
 // CommandPrompt prints the interactive mode's command prompt at the left margin.
 func (c *console) CommandPrompt(p string) { c.ask(p, "", "") }

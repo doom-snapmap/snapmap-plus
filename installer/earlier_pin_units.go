@@ -244,13 +244,25 @@ func (p *earlierPins) stage(b *earlierBundle, work string) (string, error) {
 	return b.id, nil
 }
 
+type missingEarlierPin struct {
+	mod, build, reason string
+}
+
 type missingEarlierPins struct {
-	items   []string
+	items   []missingEarlierPin
 	sources []string
 }
 
 func (e *missingEarlierPins) Error() string {
-	return "the original build files are unavailable: " + strings.Join(e.items, ", ")
+	items := make([]string, 0, len(e.items))
+	for _, pin := range e.items {
+		item := pin.mod + " @ " + pin.build
+		if pin.reason != "" {
+			item += " (" + pin.reason + ")"
+		}
+		items = append(items, item)
+	}
+	return "the original build files are unavailable: " + strings.Join(items, ", ")
 }
 
 func (p *earlierPins) candidatesForRow(row earlierObject) (string, []*earlierBundle, error) {
@@ -288,7 +300,7 @@ func (p *earlierPins) candidatesForRow(row earlierObject) (string, []*earlierBun
 		if len(p.candidates[hash]) != 0 {
 			return "", nil, fmt.Errorf("the pinned identity disagrees with the original build %s", hash)
 		}
-		return "", nil, &missingEarlierPins{items: []string{id + " @ " + hash}}
+		return "", nil, &missingEarlierPins{items: []missingEarlierPin{{mod: id, build: hash}}}
 	}
 	return id, found, nil
 }
@@ -296,7 +308,7 @@ func (p *earlierPins) candidatesForRow(row earlierObject) (string, []*earlierBun
 type earlierRowCheck func([]earlierObject) error
 
 func (p *earlierPins) checkRows(rows []earlierObject) error {
-	var missing []string
+	var missing []missingEarlierPin
 	for _, row := range rows {
 		mod := pinString(row, "mod")
 		salt, hash, salted := strings.Cut(mod, "@")
@@ -322,7 +334,12 @@ func (p *earlierPins) checkRows(rows []earlierObject) error {
 		missing = append(missing, absent.items...)
 	}
 	if len(missing) > 0 {
-		slices.Sort(missing)
+		slices.SortFunc(missing, func(a, b missingEarlierPin) int {
+			if a.mod != b.mod {
+				return strings.Compare(a.mod, b.mod)
+			}
+			return strings.Compare(a.build, b.build)
+		})
 		return &missingEarlierPins{items: slices.Compact(missing)}
 	}
 	return nil
@@ -423,7 +440,7 @@ func (p *earlierPins) row(row earlierObject) (earlierObject, error) {
 	if last == nil {
 		last = fmt.Errorf("the original build files are unavailable")
 	}
-	return nil, &missingEarlierPins{items: []string{fmt.Sprintf("%s @ %s (%s)", id, candidates[0].hash, last)}}
+	return nil, &missingEarlierPins{items: []missingEarlierPin{{mod: id, build: candidates[0].hash, reason: last.Error()}}}
 }
 
 // The caller has verified and translated this embedded package in a private folder.
