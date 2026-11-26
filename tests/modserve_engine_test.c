@@ -39,6 +39,16 @@ void sh_modhud_scene_play_begin(void) {}
 void sh_modscene_place_play_begin(void) {}
 int sh_modstock_exists(const char *request) { (void)request; return 0; }
 unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_len) { (void)name; if (out_len) *out_len = 0; return NULL; }
+static const char *fe_pending_default;
+int sh_overrides_repair_defaults(int (*visit)(void *, const char *), void *context, int *reads)
+{
+    if (!fe_pending_default) return 0;
+    if (visit(context, fe_pending_default)) {
+        fe_pending_default = NULL;
+        (*reads)++;
+    }
+    return 1;
+}
 void *sh_prepare_detour_sig(const sig_result *sig, void *detour, size_t stolen) { (void)sig; (void)detour; (void)stolen; return NULL; }
 sh_patch_status sh_commit_detour(void *tramp) { (void)tramp; return (sh_patch_status)0; }
 int sh_uninstall_detour(void *tramp) { (void)tramp; return 0; }
@@ -312,6 +322,19 @@ static void test_reparse_drops_type_info(void)
     CHECK(r.reparsed == 1 && def->loads == 1 && g_typeinfo_dropped == 1);
 }
 
+static void test_palette_repairs_early_default_without_mods(void)
+{
+    fe_res *unknown;
+    fe_reset();
+    CHECK(!sh_modserve_active());
+    unknown = fe_add("unknown/unknown", 4, 0);
+    fe_pending_default = "generated/decls/snapeditorentitydef/unknown/unknown.decl";
+    sh_modserve_palette_before_build();
+    CHECK(unknown->loads == 1 && unknown->lifetime == 4 && !fe_pending_default);
+    sh_modserve_palette_before_build();
+    CHECK(unknown->loads == 1);
+}
+
 /* A refresh item of type "model" (a .bmodel) is a static model; a walk holding one begins a static-model reload
  * pass, and one without does not. */
 static void test_static_model_kind(void)
@@ -397,6 +420,7 @@ int main(void)
     test_raw_names_grow();
     test_op_load_levels();
     test_reparse_drops_type_info();
+    test_palette_repairs_early_default_without_mods();
     test_keep_ref_map_heap();
     test_held_model_kept();
     test_static_model_kind();
