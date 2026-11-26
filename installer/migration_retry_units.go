@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-// Only a known, incomplete document needs a recovery entry. Keep the verified units of its available row.
+// If a map or prefab is missing a mod, save the verified units it can still recover.
 type earlierRetry struct {
 	Original earlierObject
 	Row      earlierObject

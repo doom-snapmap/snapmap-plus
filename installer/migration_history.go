@@ -141,7 +141,7 @@ func (p *migrationPlan) retireSnapshot(folder string, cached bool) error {
 	return nil
 }
 
-// An edited retry archive or an incomplete library scan may still contain the user's only copy.
+// Keep edited archives and any archive that a skipped map or prefab may still need.
 func (p *migrationPlan) retireRecovery() error {
 	dir := filepath.Join(p.data, "cache", "migration-units")
 	if !plainPath(dir) {

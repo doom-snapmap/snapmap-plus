@@ -27,7 +27,7 @@ func convertEarlierPinnedJSON(original, side []byte, pins *earlierPins) ([]byte,
 	if pins == nil || pins.placements == nil || !under(pins.placements.plan.work, pins.output) {
 		return convertPinnedDocument(original, side, pins)
 	}
-	// Discard the units of a refused document without disturbing any successful sibling's content.
+	// Stage each document separately so a failed conversion can discard its files.
 	stage, err := os.MkdirTemp(pins.placements.plan.work, "document-*")
 	if err != nil {
 		return nil, false, err

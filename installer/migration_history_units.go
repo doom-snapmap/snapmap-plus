@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-// A map outside the game's kept-map list needs the same portable content as an ordinary rawmap save.
+// Collect the unit manifests and files a map needs in its portable ZIP.
 func (p *earlierPins) unitFiles(rows []earlierObject) (map[string]string, error) {
 	files := map[string]string{}
 	var locate = func(rel string) (string, error) {

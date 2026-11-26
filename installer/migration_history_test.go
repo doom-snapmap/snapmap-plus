@@ -132,7 +132,7 @@ func TestHistoryPartialPeersRetryAfterOriginalRetires(t *testing.T) {
 	if len(contents) != 3 || !contents["pin.json"] || !contents["files/0e9e6000b10994ecc327e98e5bb149860c3e5823d420fef5935ef5c311bb9068"] {
 		t.Fatalf("retry stored unrelated content: %v", contents)
 	}
-	// Previous recovery is collectible when its only unresolved original is removed.
+	// Deleting the last map that needs this archive makes it safe to remove.
 	orphan := t.TempDir()
 	orphanFile := filepath.Join(orphan, "cache", "migration-units", keep[0].Name())
 	writeF(t, orphanFile, readF(t, filepath.Join(retryDir, keep[0].Name())))
