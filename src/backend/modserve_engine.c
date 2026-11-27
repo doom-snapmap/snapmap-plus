@@ -77,6 +77,7 @@ static type_fn g_type;
 static register_fn g_register;
 static source_fn g_source;
 static find_decl_fn g_decl;
+static source_fn g_pure_decl;
 static generic_load_fn g_generic_load;
 static materialize_fn g_materialize;   /* ResourceMaterialize: find-or-load in one resource list */
 static sh_process_heap_api g_heap;
@@ -416,45 +417,60 @@ static int op_decl_found(void *context, const char *type, const char *name)
     return found;
 }
 
-/* Whether the engine holds a resource of this name, by a walk of the type's own list (DeclTypeByName answers the
- * list: entries +0x20, count +0x28; each resource's owning list +0x10, name +0x08). Unlike DeclFind it creates
- * and loads nothing. */
 #define ME_LIST_ENTRIES 0x20
 #define ME_LIST_COUNT   0x28
 #define ME_RES_NAME     0x08
 #define ME_RES_LIST     0x10
-static int op_held(void *context, const char *type, const char *name, unsigned *out_state, unsigned *out_lifetime)
+
+/* DeclPureFind neither creates a missing name nor loads an existing unparsed one. */
+static int me_decl_held(const char *type, const char *name, int folded, void **out, unsigned *state,
+                        unsigned *lifetime)
 {
-    int held = -1;
-    const unsigned char *m = NULL;
+    unsigned char *m = NULL, *obj = NULL;
     CRITICAL_SECTION *cs;
-    (void)context;
-    *out_state = *out_lifetime = 0;
-    __try { m = (const unsigned char *)me_manager(type); } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    int held = 0;
+    unsigned s = 0, l = 0;
+    if (out) *out = NULL;
+    if (state) *state = 0;
+    if (lifetime) *lifetime = 0;
+    if (!type || !name || !g_bound) return -1;
+    __try { m = (unsigned char *)me_manager(type); } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
     if (!m) return -1;
     cs = me_lock();
     __try {
-        {
+        if (g_pure_decl && !folded) {
+            obj = (unsigned char *)g_pure_decl(m, name);
+        } else {
             unsigned char *const *entries = *(unsigned char *const *const *)(m + ME_LIST_ENTRIES);
-            int count = *(const int *)(m + ME_LIST_COUNT), i;
-            if (count < 0 || count > (1 << 22) || (count && !entries)) count = -1;
-            held = count < 0 ? -1 : 0;
-            for (i = 0; i < count; ++i) {
-                const unsigned char *r = entries[i];
+            int count = *(const int *)(m + ME_LIST_COUNT);
+            if (count < 0 || count > (1 << 22) || (count && !entries)) held = -1;
+            else for (int i = 0; i < count; ++i) {
+                unsigned char *r = entries[i];
                 const char *n;
                 if (!r || *(const unsigned char *const *)(r + ME_RES_LIST) != m) continue;
                 n = *(const char *const *)(r + ME_RES_NAME);
-                if (n && !strcmp(n, name)) {
-                    *out_state = r[RES_STATE_OFF];
-                    *out_lifetime = *(const unsigned *)(r + RES_LIFETIME_OFF);
-                    held = 1;
-                    break;
-                }
+                if (n && (folded ? me_name_eq(n, name) : !strcmp(n, name))) { obj = r; break; }
             }
+        }
+        if (obj) {
+            s = obj[RES_STATE_OFF];
+            l = *(const unsigned *)(obj + RES_LIFETIME_OFF);
+            held = 1;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { held = -1; }
     me_unlock(cs);
+    if (held == 1) {
+        if (out) *out = obj;
+        if (state) *state = s;
+        if (lifetime) *lifetime = l;
+    }
     return held;
+}
+
+static int op_held(void *context, const char *type, const char *name, unsigned *state, unsigned *lifetime)
+{
+    (void)context;
+    return me_decl_held(type, name, 0, NULL, state, lifetime);
 }
 
 int sh_modserve_engine_on_main(void)
@@ -478,42 +494,7 @@ void *sh_modserve_engine_decl(const char *type, const char *name)
 int sh_modserve_engine_decl_held(const char *type, const char *name, void **out, unsigned *state,
                                  unsigned *lifetime)
 {
-    int held = -1;
-    const unsigned char *m = NULL;
-    CRITICAL_SECTION *cs;
-    unsigned s = 0, l = 0;
-    void *obj = NULL;
-    if (out) *out = NULL;
-    if (state) *state = 0;
-    if (lifetime) *lifetime = 0;
-    if (!type || !name || !g_bound) return -1;
-    __try { m = (const unsigned char *)me_manager(type); } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
-    if (!m) return -1;
-    cs = me_lock();
-    __try {
-        unsigned char *const *entries = *(unsigned char *const *const *)(m + ME_LIST_ENTRIES);
-        int count = *(const int *)(m + ME_LIST_COUNT), i;
-        if (count < 0 || count > (1 << 22) || (count && !entries)) count = -1;
-        held = count < 0 ? -1 : 0;
-        for (i = 0; i < count; ++i) {
-            unsigned char *r = entries[i];
-            if (!r || *(const unsigned char *const *)(r + ME_RES_LIST) != m) continue;
-            if (me_name_eq(*(const char *const *)(r + ME_RES_NAME), name)) {
-                s = r[RES_STATE_OFF];
-                l = *(const unsigned *)(r + RES_LIFETIME_OFF);
-                obj = r;
-                held = 1;
-                break;
-            }
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { held = -1; }
-    me_unlock(cs);
-    if (held == 1) {
-        if (out) *out = obj;
-        if (state) *state = s;
-        if (lifetime) *lifetime = l;
-    }
-    return held;
+    return me_decl_held(type, name, 1, out, state, lifetime);
 }
 
 /* Every resource of every list (decl_resource_head; list +0x08 type, +0x10
@@ -774,7 +755,7 @@ static void me_closure_begin(me_closure *c)
     c->counted = 1;
 }
 
-static void me_closure_end(me_closure *c, const char *phase, const char *what);
+static void me_close_watermark(me_closure *c, const char *phase, const char *what);
 static int me_in_play(void);
 
 /* Loads the render models kept decls hold while their files serve (sh_modserve_held_models): a model not held yet
@@ -782,6 +763,7 @@ static int me_in_play(void);
  * in place. All inside process heap 0 and a keeper of its own, then held at level 4; a load that still ends in a
  * default stays at the engine's level and is named. */
 typedef struct me_held_load {
+    me_closure keeper;
     int loaded, reloaded, failed, faulted, skipped;
     char first[400], bad[300];
 } me_held_load;
@@ -795,16 +777,17 @@ static void me_held_note(char *buf, size_t cap, const char *name)
 static int me_held_one(void *context, const char *name, void *resource)
 {
     me_held_load *r = (me_held_load *)context;
+    void *list = NULL;
     char before[ERROR_TEXT_MAX];
     me_error_text(before, sizeof before);
     __try {
         unsigned char *d = (unsigned char *)resource;
         if (!d) {
-            /* Not held: the engine's own find-or-load (the model manager's
-             * FindModel runs it on this list), quiet, with a default made on
-             * failure as the spawn would. */
-            void *list = sh_modserve_resource_list(g_res_head, SH_MODSERVE_HELD_MODEL_TYPE);
+            list = sh_modserve_resource_list(g_res_head, SH_MODSERVE_HELD_MODEL_TYPE);
             if (!list || !g_materialize) { r->skipped++; return 1; }
+        }
+        if (!g_mark_depth) me_closure_begin(&r->keeper);
+        if (!d) {
             d = (unsigned char *)g_materialize(list, name, 1, 1);
             if (!d) { r->failed++; me_held_note(r->bad, sizeof r->bad, name); return 1; }
         } else {
@@ -834,29 +817,36 @@ static int me_held_one(void *context, const char *name, void *resource)
     return 1;
 }
 
-static void me_hold_models(const char *phase)
+static void me_report_holds(const char *phase, const sh_modserve_holds *h)
+{
+    if (h->raised)
+        me_log("%s: %u resource(s) kept decls hold kept for the session with them (%u kept decl(s), %u name(s) they "
+               "need): %s%s", phase, h->raised, h->roots, h->names, h->first,
+               strlen(h->first) + 40 >= sizeof h->first ? ", ..." : "");
+}
+
+static int me_hold_models(const char *phase, int *raised)
 {
     static int busy;
     me_held_load r;
     sh_modserve_holds h;
     sh_process_heap_scope heap = { 0 };
-    me_closure keeper;
-    int n = -1, own;
+    int n = -1, standalone, named = 0;
+    *raised = -1;
     if (busy || !g_bound || !g_res_head || !g_generic_load || !sh_modserve_active() || me_on_main() != 1 ||
         me_in_play() == 1)
-        return;
+        return 0;
     busy = 1;
     memset(&r, 0, sizeof r);
     if (!sh_process_heap_enter(&g_heap, &heap)) {
         me_log("%s: models kept decls hold not loaded (process heap scope unavailable)", phase);
         busy = 0;
-        return;
+        return 0;
     }
-    own = sh_modserve_inplace_keeper(g_mark_depth, 1);
-    if (own) me_closure_begin(&keeper);
-    __try { n = sh_modserve_held_models(g_res_head, me_held_one, &r, &h); }
+    standalone = !g_mark_depth;
+    __try { n = sh_modserve_maintain_models(g_res_head, me_held_one, &r, &h, &named); }
     __finally {
-        if (own) me_closure_end(&keeper, phase, "held model load");
+        if (r.keeper.counted) me_close_watermark(&r.keeper, phase, "held model load");
         if (!sh_process_heap_leave(&heap)) me_log("%s: held model load heap scope did not balance", phase);
     }
     if (n < 0) me_log("%s: resource lists could not be walked; models kept decls hold were not loaded", phase);
@@ -869,35 +859,36 @@ static void me_hold_models(const char *phase)
                r.loaded + r.reloaded, r.loaded, r.reloaded, r.failed, r.faulted, r.first[0] ? ": " : "", r.first,
                strlen(r.first) + 40 >= sizeof r.first ? ", ..." : "", r.bad[0] ? "; still a default: " : "", r.bad);
     busy = 0;
+    if (named) {
+        me_report_holds(phase, &h);
+        *raised = h.raised != 0;
+    }
+    return standalone;
 }
 
-/* Keep what the kept decls hold (sh_modserve_holds_raise): after every
- * serving pass, and before the Play level load purges level 1. */
-static void me_keep_holds(const char *phase)
+/* A newly promoted declaration can supply roots for the next pass. */
+static int me_raise_holds(const char *phase)
 {
     sh_modserve_holds h;
-    if (!g_res_head) return;
-    me_hold_models(phase);
+    if (!g_res_head) return 0;
     if (!sh_modserve_holds_raise(g_res_head, &h)) {
         me_log("%s: resource lists could not be walked; what kept decls hold was not checked", phase);
-        return;
+        return 1;
     }
-    if (h.raised)
-        me_log("%s: %u resource(s) kept decls hold kept for the session with them (%u kept decl(s), %u name(s) they "
-               "need): %s%s", phase, h.raised, h.roots, h.names, h.first,
-               strlen(h.first) + 40 >= sizeof h.first ? ", ..." : "");
+    me_report_holds(phase, &h);
+    return h.raised != 0;
 }
 
 /* Keep what kept objects loaded or looked up (sh_modserve_attrib_close):
  * after every keep by pass or by name, and before the Play level load's
  * purge, which `forget` marks. */
-static void me_keep_attrib(const char *phase, int forget)
+static int me_keep_attrib(const char *phase, int forget)
 {
     sh_modserve_attrib a;
-    if (!g_res_head || !g_load_orig) return;
+    if (!g_res_head || !g_load_orig) return 0;
     if (!sh_modserve_attrib_close(g_res_head, forget, &a)) {
         me_log("%s: resource lists could not be walked; what kept objects load was not checked", phase);
-        return;
+        return 1;
     }
     if (!g_attrib_checked) {
         g_attrib_checked = 1;
@@ -922,9 +913,24 @@ static void me_keep_attrib(const char *phase, int forget)
                "loaded; %u followed from %u recorded pair(s), %u kept)%s%s%s", phase, a.raised + a.raised_at_load,
                a.raised_at_load, a.followed, a.pairs, a.kept, a.first[0] ? ": " : "", a.first,
                strlen(a.first) + 40 >= sizeof a.first ? ", ..." : "");
+    return a.raised || a.overflow;
 }
 
-static void me_closure_end(me_closure *c, const char *phase, const char *what)
+static void me_keep_resources(const char *phase, int forget)
+{
+    int raised, standalone = me_hold_models(phase, &raised);
+    if (raised < 0) raised = me_raise_holds(phase);
+    if (g_mark_depth && !forget) return;
+    if (standalone) {
+        int attributed = me_keep_attrib(phase, 0);
+        if (!raised && !attributed && !forget) return;
+        /* Promoted declarations can now keep named resources of their own. */
+        if (raised || attributed) (void)me_raise_holds(phase);
+    }
+    (void)me_keep_attrib(phase, forget);
+}
+
+static void me_close_watermark(me_closure *c, const char *phase, const char *what)
 {
     if (c->counted) g_mark_depth--;
     if (c->mark.ok) {
@@ -935,11 +941,13 @@ static void me_closure_end(me_closure *c, const char *phase, const char *what)
         else if (!raised.lists) me_log("%s: resource lists could not be walked after the %s; not kept", phase, what);
     }
     sh_modserve_watermark_free(&c->mark);
-    if (!g_mark_depth) {
-        me_lookups_close(phase, what);
-        me_keep_holds(phase);
-        me_keep_attrib(phase, 0);
-    }
+    if (!g_mark_depth) me_lookups_close(phase, what);
+}
+
+static void me_closure_end(me_closure *c, const char *phase, const char *what)
+{
+    me_close_watermark(c, phase, what);
+    if (!g_mark_depth) me_keep_resources(phase, 0);
 }
 
 static void me_reparse_early(const char *phase, int in_heap);
@@ -1038,12 +1046,11 @@ void sh_modserve_play_begin(void)
     if (on_main == 1) sh_attach_tags_play_begin();
     /* The sync clock: a mod demon's syncs on the player's animation clock in a Play that serves mods (sync_clock.h). */
     if (on_main == 1) sh_sync_clock_play_begin();
-    /* What the editor's spawns created for a kept decl since the last pass
-     * is still level 1: kept before the level load's purge frees it. */
-    if (on_main == 1 && g_bound && sh_modserve_active()) me_keep_holds("play");
-    /* What kept objects loaded since then is kept the same way; the pairs
-     * are forgotten, since the purge frees the level-1 parents they name. */
-    if (on_main == 1 && g_bound) me_keep_attrib("play", 1);
+    /* Keep editor dependencies and forget edges to resources this level load will purge. */
+    if (on_main == 1 && g_bound) {
+        if (sh_modserve_active()) me_keep_resources("play", 1);
+        else (void)me_keep_attrib("play", 1);
+    }
     if (!sh_modserve_requirements_held()) return;
     if (on_main != 1) {
         me_log("play: requirements not re-checked (%s)", on_main ? "the main thread is unknown" : "not on the main thread");
@@ -1253,6 +1260,7 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
     g_register = (register_fn)me_clean(results, count, "DeclRegisterFile");
     g_source = (source_fn)me_clean(results, count, "DeclSourceFind");
     g_decl = (find_decl_fn)me_clean(results, count, "DeclFind");
+    g_pure_decl = (source_fn)me_clean(results, count, "DeclPureFind");
     g_generic_load = (generic_load_fn)me_clean(results, count, "ResourceGenericLoad");
     /* Optional: without it the held models are loaded only when the engine has created them. */
     g_materialize = (materialize_fn)me_clean(results, count, "ResourceMaterialize");
@@ -1348,16 +1356,17 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
     if (request && sh_modserve_is_surface(request)) { r->surfaces++; return 1; }
     me_error_text(before, sizeof before);
     __try {
-        void *m = me_manager(type), *decl = m ? g_decl(m, name, 0) : NULL;
-        unsigned char *d = (unsigned char *)decl, state;
+        void *decl = NULL;
+        unsigned char *d;
+        unsigned state, lifetime;
         char *model = NULL, *why = NULL;
-        if (!d) return 0;
-        state = d[RES_STATE_OFF];
+        if (me_decl_held(type, name, 0, &decl, &state, &lifetime) != 1) return 0;
+        d = (unsigned char *)decl;
         if (state & 2) { r->pending++; return 0; }   /* not parsed yet: the provider will serve it */
         /* A permanent decl served the game's own bytes: a re-parse would only
          * rebind it to decls a pass may have created at level 1, which the
          * next map unload frees under it (the menu collectibles' unlockModels). */
-        if (*(unsigned *)(d + RES_LIFETIME_OFF) == 4 && sh_modserve_is_restore(request) == 1) {
+        if (lifetime == 4 && sh_modserve_is_restore(request) == 1) {
             me_log("reparse: %s '%s' (%s) left as the game parsed it: permanent, and its bundle serves the game's own "
                    "bytes", type, name, bundle_id);
             return 1;
@@ -1464,6 +1473,7 @@ static void me_reparse_early(const char *phase, int in_heap)
 typedef struct me_raw_name { const char *name, *request; int kind, hit, done; } me_raw_name;
 typedef struct me_raw {
     me_raw_name *names; int n, cap;
+    double load_ms;
     int reloaded, models, images, anims, failed, faulted;
     int smodels;          /* static models reloaded: the list's reload counter is moved once after the walk */
     int refused;          /* anims whose served bytes the engine's Load would refuse: the held one is kept */
@@ -1548,16 +1558,28 @@ static void me_raw_smodel_begin(const me_raw *r)
         if (r->names[i].kind == ME_RAW_SMODEL) { sh_static_model_reload_begin(); return; }
 }
 
+static int me_raw_list_kind(const char *list_class)
+{
+    static const char *const classes[] = {"idMD6Model", "idImage", "idMD6Anim", "idStaticModel"};
+    for (int i = 0; list_class && i < (int)(sizeof classes / sizeof classes[0]); i++)
+        if (!_stricmp(list_class, classes[i])) return i;
+    return -1;
+}
+
+static int me_raw_list_needed(const char *list_class, void *context)
+{
+    const me_raw *r = (const me_raw *)context;
+    int kind = me_raw_list_kind(list_class);
+    if (kind < 0) return 0;
+    for (int i = 0; i < r->n; i++) if (r->names[i].kind == kind) return 1;
+    return 0;
+}
+
 static void me_raw_one(void *context, const char *list_class, void *resource, const char *name)
 {
     me_raw *r = (me_raw *)context;
-    int i, kind;
-    if (!list_class) return;
-    if (!_stricmp(list_class, "idImage")) kind = ME_RAW_IMAGE;
-    else if (!_stricmp(list_class, "idMD6Model")) kind = ME_RAW_MODEL;
-    else if (!_stricmp(list_class, "idMD6Anim")) kind = ME_RAW_ANIM;
-    else if (!_stricmp(list_class, "idStaticModel")) kind = ME_RAW_SMODEL;
-    else return;
+    int i, kind = me_raw_list_kind(list_class);
+    if (kind < 0) return;
     for (i = 0; i < r->n; ++i) {
         unsigned char *d;
         if (r->names[i].hit || r->names[i].kind != kind) continue;
@@ -1570,7 +1592,9 @@ static void me_raw_one(void *context, const char *list_class, void *resource, co
         __try {
             if (d[RES_STATE_OFF] & 2) return;   /* not loaded: its next load sees the live gates and bytes */
             if (kind == ME_RAW_ANIM && !me_anim_ready(r, d, &r->names[i])) return;
-            me_load_in_place(d, "reload", list_class, name);
+            double start = me_now_ms();
+            __try { me_load_in_place(d, "reload", list_class, name); }
+            __finally { r->load_ms += me_now_ms() - start; }
             if (d[RES_STATE_OFF] & 1) r->failed++;
             r->reloaded++;
             r->names[i].done = 1;
@@ -1668,14 +1692,15 @@ static void me_reload_ungated(const char *phase, int in_heap)
     own = sh_modserve_inplace_keeper(g_mark_depth, r.n);
     if (own) me_closure_begin(&keeper);
     me_raw_smodel_begin(&r);
-    __try { (void)sh_modserve_resource_each(g_res_head, me_raw_one, &r); }
+    __try { (void)sh_modserve_resource_each(g_res_head, me_raw_list_needed, me_raw_one, &r); }
     __finally {
         if (own) me_closure_end(&keeper, phase, "gated reload");
         if (!in_heap && !sh_process_heap_leave(&heap)) me_log("%s: gated reload heap scope did not balance", phase);
     }
     (void)sh_modserve_each_ungated_raw(me_raw_settle, NULL);
     me_log("%s: reloaded %d model(s) and %d image(s) loaded before their bundles' requirements were live in %.1f ms "
-           "(%d failed, %d faulted; %d of %d not held)%s%s%s", phase, r.models, r.images, me_now_ms() - t0, r.failed,
+           "(%.1f ms in native loads; %d failed, %d faulted; %d of %d not held)%s%s%s", phase, r.models, r.images,
+           me_now_ms() - t0, r.load_ms, r.failed,
            r.faulted, r.n - r.reloaded - r.faulted, r.n, r.first[0] ? ": " : "", r.first,
            r.reloaded > 0 && strlen(r.first) + 40 >= sizeof r.first ? ", ..." : "");
     free(r.names);
@@ -1755,11 +1780,10 @@ static int me_refresh_visit(void *context, const sh_modserve_refresh_item *it)
     return 0;
 }
 
-static int me_refresh_count(void *context, const sh_modserve_refresh_item *it)
+static int me_refresh_pending(void *context, const sh_modserve_refresh_item *it)
 {
-    (void)it;
-    (*(int *)context)++;
-    return 0;   /* counted only: nothing is settled */
+    (void)context; (void)it;
+    return 0;
 }
 
 static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_refresh *out, int part)
@@ -1768,24 +1792,23 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
     sh_process_heap_scope heap = { 0 };
     me_closure keeper;
     double t0 = me_now_ms(), t1;
-    int i, items = 0, own;
+    int i, own;
     if (!g_bound || me_on_main() != 1) return;
     (void)sh_modserve_refresh_expand();
+    /* An enclosing watermark already protects this pass. Otherwise open one only for actual changes. */
+    own = !g_mark_depth;
+    if (own && !sh_modserve_each_refresh_part(me_refresh_pending, NULL, part)) return;
     memset(&c, 0, sizeof c);
     if (!in_heap && !sh_process_heap_enter(&g_heap, &heap)) {
         me_rlog("refresh: changes not applied at the %s (process heap scope unavailable)", phase);
         free(c.raw.names);
         return;
     }
-    /* A re-parse or reload of a held resource binds it to what it resolves; outside a watermark (the rest of a
-     * refresh, a scope change) a keeper of its own keeps that, only when there is something to apply. */
-    (void)sh_modserve_each_refresh_part(me_refresh_count, &items, part);
-    own = sh_modserve_inplace_keeper(g_mark_depth, items);
     if (own) me_closure_begin(&keeper);
     __try {
         if (sh_modserve_each_refresh_part(me_refresh_visit, &c, part) && c.raw.n && g_res_head) {
             me_raw_smodel_begin(&c.raw);
-            (void)sh_modserve_resource_each(g_res_head, me_raw_one, &c.raw);
+            (void)sh_modserve_resource_each(g_res_head, me_raw_list_needed, me_raw_one, &c.raw);
             c.dependents = me_anim_dependents(&c.raw, &c.decls);
         }
     } __finally {
@@ -2247,7 +2270,7 @@ static void me_ledger_sweep(const char *phase);
 static int me_editor_rows(const char *phase, int first, int *todo)
 {
     sh_modserve_plan plan;
-    sh_modserve_watermark mark = { NULL, 0, 0 };
+    sh_modserve_watermark mark = { 0 };
     double t0;
     int ready, i, rows_ok = 0, rows_failed = 0, count, editor = !strcmp(phase, "editor");
     if (todo) *todo = 0;
@@ -2299,8 +2322,7 @@ static int me_editor_rows(const char *phase, int first, int *todo)
     }
     sh_modserve_watermark_free(&mark);
     if (!g_mark_depth) me_lookups_close(phase, "rows' closure");
-    me_keep_holds(phase);
-    if (!g_mark_depth) me_keep_attrib(phase, 0);
+    me_keep_resources(phase, 0);
     for (i = 0; i < plan.count; ++i) {
         if (plan.steps[i].rank != SH_MODSERVE_RANK_SEDEF) continue;
         if (plan.steps[i].ready == 1) rows_ok++;

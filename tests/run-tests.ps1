@@ -51,6 +51,7 @@ $null = Import-MsvcEnv $env:SNAPMAPPLUS_VCVARS_VER
 
 # name | sources (relative to tests\) | runtime arg
 $tests = @(
+    @{ name = "raw_deflate_test"; src = 'raw_deflate_test.c ..\src\backend\raw_deflate.c'; arg = "" }
     @{ name = "editor_sheets_test"; src = 'editor_sheets_test.c ..\src\backend\editor_sheets.c ..\src\backend\decl_tree.c ..\src\backend\strkeys.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "editor_settings_test"; src = 'editor_settings_test.c ..\src\backend\editor_settings.c ..\src\backend\strkeys.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "serialized_entities_guard_test"; src = 'serialized_entities_guard_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }

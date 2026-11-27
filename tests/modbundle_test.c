@@ -77,6 +77,10 @@ static void test_sha(void)
         memset(block, 'a', sizeof block);
         sh_mb_sha256_hex(block, 56, hex);   /* padding crosses a block */
         CHECK(!strcmp(hex, "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a"));
+        sh_mb_sha256_hex(block, 64, hex);
+        CHECK(!strcmp(hex, "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"));
+        sh_mb_sha256_hex(block, sizeof block, hex);
+        CHECK(!strcmp(hex, "c2a908d98f5df987ade41b5fce213067efbcc21ef2240212a41e54b5e7c28ae5"));
     }
 }
 

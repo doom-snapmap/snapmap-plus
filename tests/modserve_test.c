@@ -2566,7 +2566,8 @@ static void test_kept_holds(void)
           "[{\"type\":\"baseModel\",\"name\":\"md6/mods/khmod000/body.md6mesh\"},"
           "{\"type\":\"skeleton\",\"name\":\"md6/stock/body.md6skl\"},"
           "{\"type\":\"anim\",\"name\":\"md6/stock/body_idle.md6anim\"},"
-          "{\"type\":\"anim\",\"name\":\"md6/stock/body.md6skl/_default.md6anim\"}]", '2' },
+          "{\"type\":\"anim\",\"name\":\"md6/stock/body.md6skl/_default.md6anim\"},"
+          "{\"type\":\"md6Def\",\"name\":\"mods/khmod000/s/body.md6\"}]", '2' },
         { KH_MESH, "MESH", -1, "baseModel", "md6/mods/khmod000/body.md6mesh", NULL, '3' },
         { KH_LOOSE, "animWeb loose {}", -1, "animWeb", "mods/khmod000/s/loose",
           "[{\"type\":\"anim\",\"name\":\"md6/stock/loose.md6anim\"}]", '4' },
@@ -2593,7 +2594,7 @@ static void test_kept_holds(void)
     ld.type = "md6Def"; ld.cls = "idDeclMD6"; ld.next = &lm; ld.entries = md6s;
     lm.type = "baseModel"; lm.cls = "idMD6Model"; lm.next = &ls; lm.entries = meshes;
     ls.type = "skeleton"; ls.cls = "idMD6Skel"; ls.next = &la; ls.entries = skels;
-    la.type = "anim"; la.cls = "idMD6Anim"; la.next = &li; la.entries = anims;
+    la.type = "ANIM"; la.cls = "idMD6Anim"; la.next = &li; la.entries = anims;
     li.type = "image"; li.cls = "idImage"; li.next = NULL; li.entries = images;
     /* After the map pass: the web and the md6Def kept (4), what the engine's
      * own load created for them at 1, a web no pass kept and its clip at 1. */
@@ -2624,10 +2625,10 @@ static void test_kept_holds(void)
 
     /* The web's clip, created after the keep (the editor's spawn, say), at 1,
      * spelled as the engine folds it: the next run raises it. */
-    clip.name = "MD6/Stock/pickups_melee/chainsaw_pre_idle.md6anim"; clip.level = 1;
+    clip.name = "MD6\\Stock/pickups_melee/chainsaw_pre_idle.md6anim"; clip.level = 1;
     anims[4] = &clip; la.count = 5;
     CHECK(sh_modserve_holds_raise(&head, &h) == 1 && h.raised == 1 && clip.level == 4 &&
-          !strcmp(h.first, "MD6/Stock/pickups_melee/chainsaw_pre_idle.md6anim"));
+          !strcmp(h.first, clip.name));
     CHECK(wrong_type.level == 1 && other.level == 1);
     /* Nothing more to raise: a second run changes nothing. */
     CHECK(sh_modserve_holds_raise(&head, &h) == 1 && h.raised == 0 && h.first[0] == 0);
@@ -2688,7 +2689,7 @@ static void test_held_models(void)
     char top[MAX_PATH], root[MAX_PATH], *slash;
     sh_modserve_holds h;
     hm_seen seen;
-    int kept = 0, depth;
+    int kept = 0, depth, named;
     printf("-- held models: the models a kept decl needs are loaded for the session while their files serve\n");
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
@@ -2710,7 +2711,7 @@ static void test_held_models(void)
     /* The editor rows registered the decl; nothing has loaded its models:
      * both of its own are loaded, the stock one and the unkept decl's are not. */
     memset(&seen, 0, sizeof seen);
-    CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 2);
+    CHECK(sh_modserve_maintain_models(&head, hm_visit, &seen, &h, &named) == 2 && !named);
     CHECK(!strcmp(seen.order, "mods/hmmod000/models/rock.lwo(new);mods/hmmod000/models/spire.lwo(new);"));
     CHECK(h.roots == 1);
 
@@ -2722,7 +2723,8 @@ static void test_held_models(void)
         rock_model.name = "mods/hmmod000/models/rock.lwo"; rock_model.level = 4; rock_model.state = 0x70;
         models[1] = &rock_model; models[2] = &spire; lm.count = 3;
         memset(&seen, 0, sizeof seen);
-        CHECK(sh_modserve_held_models(&head, hm_visit, &seen, &h) == 0 && seen.order[0] == 0);
+        CHECK(sh_modserve_maintain_models(&head, hm_visit, &seen, &h, &named) == 0 && named && !seen.order[0]);
+        CHECK(h.raised == 1 && stock.level == 4);
 
         /* The engine's default box (bit 2), at level 1: loaded again in place. */
         rock_model.level = 1; rock_model.state = 0x64;
@@ -5528,6 +5530,10 @@ static void ad_lock_cb(void *context, const char *list_class, void *resource, co
     g_cb_calls++;
     if (g_fake_cs.RecursionCount > 0 && (DWORD)(uintptr_t)g_fake_cs.OwningThread == GetCurrentThreadId()) g_held_in_cb++;
 }
+static int ad_list_named(const char *name, void *context)
+{
+    return name && !strcmp(name, (const char *)context);
+}
 static DWORD WINAPI ad_lock_holder(LPVOID p)
 {
     (void)p;
@@ -5555,7 +5561,17 @@ static void test_resource_lock(void)
     la.name = "anim"; la.next = NULL; la.entries = ents; la.count = 2;
     sh_modserve_set_resource_lock(&g_fake_lock_slot);
     g_cb_calls = g_held_in_cb = 0;
-    CHECK(sh_modserve_resource_each(&head, ad_lock_cb, NULL) == 1 && g_cb_calls == 2 && g_held_in_cb == 0);
+    CHECK(sh_modserve_resource_each(&head, NULL, ad_lock_cb, NULL) == 1 && g_cb_calls == 2 && g_held_in_cb == 0);
+    {
+        fake_list other = la;
+        other.name = "image";
+        other.count = 1;
+        la.next = &other;
+        g_cb_calls = 0;
+        CHECK(sh_modserve_resource_each(&head, ad_list_named, ad_lock_cb, "image") == 1);
+        CHECK(g_cb_calls == 1 && g_held_in_cb == 0);
+        la.next = NULL;
+    }
     CHECK(g_fake_cs.RecursionCount == 0);
     /* Another thread holds the lock (a list add in flight): the walk waits for it. */
     g_lock_taken = CreateEventA(NULL, TRUE, FALSE, NULL);
@@ -7229,6 +7245,41 @@ static void test_load_attribution(void)
     sh_modserve_attrib_reset();
 }
 
+static void test_sparse_attribution(void)
+{
+    const char *names[] = {"root", "left", "right", "late", "child", "old", "forgotten"};
+    for (int sparse = 0; sparse <= 1; ++sparse) {
+        kh_res res[16] = {0}, *entries[16];
+        kh_list list = {0}, *head = &list;
+        sh_modserve_attrib out;
+        int roots = 1;
+        list.type = "material"; list.cls = "idMaterial"; list.entries = entries; list.count = 16;
+        sh_modserve_attrib_reset();
+        for (int i = 0; i < list.count; ++i) {
+            entries[i] = &res[i]; res[i].list = &list; res[i].level = 1;
+            res[i].name = i < 7 ? names[i] : "unrelated";
+        }
+        sh_modserve_attrib_note(&res[0], &res[1]);
+        sh_modserve_attrib_note(&res[0], &res[2]);
+        sh_modserve_attrib_note(&res[1], &res[2]);
+        sh_modserve_attrib_note(&res[2], &res[1]);
+        sh_modserve_attrib_note(&res[3], &res[4]);
+        sh_modserve_attrib_note(&res[5], &res[6]);
+        CHECK(sh_modserve_keep(&res[0]));
+        if (sparse) for (int i = 7; i < list.count; ++i) roots += sh_modserve_keep(&res[i]);
+        CHECK(sh_modserve_attrib_close(&head, 0, &out));
+        CHECK(out.pairs == 6 && out.followed == 2 && out.raised == 2 && out.kept == roots + 2);
+        CHECK(!out.overflow && out.lists == 1 && !strcmp(out.first, "left, right"));
+        CHECK(res[1].level == 4 && res[2].level == 4 && res[3].level == 1);
+        CHECK(sh_modserve_keep(&res[3]));
+        CHECK(sh_modserve_attrib_close(&head, 1, &out) && out.pairs == 2 && out.followed == 1);
+        CHECK(out.raised == 1 && !strcmp(out.first, "child") && res[4].level == 4);
+        CHECK(sh_modserve_keep(&res[5]));
+        CHECK(sh_modserve_attrib_close(&head, 0, &out) && out.pairs == 0 && out.raised == 0 && res[6].level == 1);
+        sh_modserve_attrib_reset();
+    }
+}
+
 static void test_decal_atlas_lifetime(void)
 {
     kh_list atlas = {0}, images = {0};
@@ -7301,6 +7352,7 @@ int main(void)
     test_held_models();
     test_pass_lookups();
     test_load_attribution();
+    test_sparse_attribution();
     test_decal_atlas_lifetime();
     test_editor_closure();
     test_renderparm_first();

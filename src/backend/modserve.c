@@ -50,6 +50,7 @@
 typedef struct ms_need {
     const char *type, *name;
     int file;   /* the served provider, or -1 */
+    int hold_rank;
     char *blocked;
 } ms_need;
 
@@ -212,6 +213,8 @@ typedef struct ms_index {
     ms_bundle *bundles; int nbundles, cbundles;
     ms_file *files; int nfiles, cfiles;
     ms_need *needs; int nneeds, cneeds;
+    struct ms_hold *hold_roots;
+    size_t nhold_roots;
     ms_caption *captions; int ncaptions, ccaptions;
     ms_slot *slots; uint32_t mask; int nkeys;
     ms_slot *pslots; uint32_t pmask;
@@ -219,6 +222,7 @@ typedef struct ms_index {
     int *alts; int nalts, calts;          /* shadow paths' other providers (ms_file.alt_first) */
     int admitted, served_files, conflicts, composed, shadows;
     unsigned refusals, refusal_revision;
+    unsigned scope_revision;
     int has_actor_standins;
     uint64_t refused_entities;
     double build_ms;
@@ -240,6 +244,8 @@ typedef struct ms_index {
     const char **grown;                   /* the installed mods' single-demon encounters the pickers offer (index arena) */
     int ngrown;
 } ms_index;
+
+static int ms_prepare_holds(ms_index *x);
 
 static ms_index *volatile g_index;
 /* What holds a table besides the main thread's own calls
@@ -3909,6 +3915,7 @@ static int ms_scope_compute(ms_index *x, int mark)
     int play = open && InterlockedCompareExchange(&g_scope_play, 0, 0) != 0, next = 0, av_built = 0;
     ms_avail av = { NULL, 0 };
     if (!x) return 0;
+    x->scope_revision++;
     for (i = 0; i < x->nbundles; ++i) x->bundles[i].inert = 0;
     /* The declared bundles, by hash, in row order (ms_bundle_by_hash picks the root's folder, else the
      * composition); a later row naming another build of a salt already declared is not one. */
@@ -5228,7 +5235,8 @@ int sh_modserve_index_build(const char *mods_root)
     ms_respelled(x);
     ms_bank_stems(x);
     ms_mark_edits(x);
-    if (!names_ready || !ms_resolve(x) || !ms_registry_files(x) || !ml_build(x) || !ms_build_tables(x)) {
+    if (!names_ready || !ms_resolve(x) || !ms_registry_files(x) || !ml_build(x) || !ms_build_tables(x) ||
+        !ms_prepare_holds(x)) {
         ReleaseSRWLockExclusive(&g_build_lock);
         ms_log("index refused: out of memory; the previous table stays");
         ms_index_free(x);
@@ -6861,12 +6869,6 @@ int sh_modserve_error_names_decl(const char *text, const char *type, const char 
 #define MS_RL_MAX_LISTS   4096
 #define MS_RL_MAX_ENTRIES (1 << 22)
 
-static int ms_uptr_cmp(const void *a, const void *b)
-{
-    uintptr_t x = *(const uintptr_t *)a, y = *(const uintptr_t *)b;
-    return x < y ? -1 : x > y;
-}
-
 /* Visit every resource: fn(context, list, resource). 1 when the walk completed. */
 typedef void (*ms_res_fn)(void *context, const unsigned char *list, unsigned char *res);
 /* The engine's resource lock: list add, remove and find run
@@ -6887,7 +6889,8 @@ static CRITICAL_SECTION *ms_res_lock(void)
     return cs;
 }
 
-static int ms_res_walk(const void *head_slot, ms_res_fn fn, void *context, unsigned *lists)
+static int ms_res_walk_filtered(const void *head_slot, ms_res_fn fn, void *context, unsigned *lists,
+                                sh_modserve_list_filter include, void *filter_context)
 {
     int ok = 0;
     unsigned nl = 0;
@@ -6905,6 +6908,7 @@ static int ms_res_walk(const void *head_slot, ms_res_fn fn, void *context, unsig
             if (count < 0 || count > MS_RL_MAX_ENTRIES || (count && !entries)) break;
             total += (size_t)count;
             if (total > MS_RL_MAX_ENTRIES) break;
+            if (include && !include(*(const char *const *)(l + MS_RL_NAME), filter_context)) continue;
             for (i = 0; i < count; ++i) if (entries[i]) fn(context, l, entries[i]);
         }
         ok = !l;
@@ -6912,6 +6916,11 @@ static int ms_res_walk(const void *head_slot, ms_res_fn fn, void *context, unsig
     if (cs) LeaveCriticalSection(cs);
     if (lists) *lists = nl;
     return ok;
+}
+
+static int ms_res_walk(const void *head_slot, ms_res_fn fn, void *context, unsigned *lists)
+{
+    return ms_res_walk_filtered(head_slot, fn, context, lists, NULL, NULL);
 }
 
 #define MS_KEPT_MAX  (1u << 20)
@@ -7046,32 +7055,23 @@ unsigned sh_modserve_left_to_map(char *names, size_t cap)
     return n;
 }
 
-typedef struct ms_take { sh_modserve_watermark *w; size_t cap; int oom; } ms_take;
+typedef struct ms_take { ms_aset seen; int oom; } ms_take;
 static void ms_take_one(void *context, const unsigned char *list, unsigned char *res)
 {
     ms_take *t = (ms_take *)context;
     (void)list;
-    if (t->oom) return;
-    if (t->w->n == t->cap) {
-        size_t cap = t->cap ? t->cap * 2 : 65536;
-        uintptr_t *g = (uintptr_t *)realloc(t->w->res, cap * sizeof(uintptr_t));
-        if (!g) { t->oom = 1; return; }
-        t->w->res = g;
-        t->cap = cap;
-    }
-    t->w->res[t->w->n++] = (uintptr_t)res;
+    if (!t->oom && ms_aset_add(&t->seen, (uintptr_t)res, MS_RL_MAX_ENTRIES) < 0) t->oom = 1;
 }
 
 int sh_modserve_watermark_take(const void *head_slot, sh_modserve_watermark *w)
 {
-    ms_take t;
+    ms_take t = {0};
     if (!w) return 0;
     memset(w, 0, sizeof *w);
-    t.w = w;
-    t.cap = 0;
-    t.oom = 0;
     w->ok = ms_res_walk(head_slot, ms_take_one, &t, NULL) && !t.oom;
-    if (w->ok && w->n > 1) qsort(w->res, w->n, sizeof(uintptr_t), ms_uptr_cmp);
+    w->res = t.seen.slot;
+    w->n = t.seen.n;
+    w->capacity = t.seen.cap;
     return w->ok;
 }
 
@@ -7080,9 +7080,8 @@ typedef struct ms_raise { const sh_modserve_watermark *w; sh_modserve_raised *ou
 static void ms_raise_one(void *context, const unsigned char *list, unsigned char *res)
 {
     ms_raise *r = (ms_raise *)context;
-    uintptr_t key = (uintptr_t)res;
     int c;
-    if (r->w->n && bsearch(&key, r->w->res, r->w->n, sizeof(uintptr_t), ms_uptr_cmp)) return;
+    if (sh_modserve_watermark_has(r->w, res)) return;
     r->out->created++;
     if (*(unsigned *)(res + MS_RES_LEVEL) == 4) sh_modserve_kept_add(res);
     if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !sh_modserve_keep(res)) return;
@@ -7145,14 +7144,14 @@ static void ms_each_res_one(void *context, const unsigned char *list, unsigned c
     c->n++;
 }
 
-int sh_modserve_resource_each(const void *head_slot, sh_modserve_resource_fn fn, void *context)
+int sh_modserve_resource_each(const void *head_slot, sh_modserve_list_filter include, sh_modserve_resource_fn fn, void *context)
 {
     ms_res_items c;
     size_t i;
     int ok;
     if (!fn) return 0;
     memset(&c, 0, sizeof c);
-    ok = ms_res_walk(head_slot, ms_each_res_one, &c, NULL) && !c.oom;
+    ok = ms_res_walk_filtered(head_slot, ms_each_res_one, &c, NULL, include, context) && !c.oom;
     __try {
         for (i = 0; i < c.n; ++i) fn(context, c.v[i].list, c.v[i].res, c.v[i].name);
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
@@ -7163,7 +7162,7 @@ int sh_modserve_resource_each(const void *head_slot, sh_modserve_resource_fn fn,
 int sh_modserve_watermark_has(const sh_modserve_watermark *w, const void *resource)
 {
     uintptr_t key = (uintptr_t)resource;
-    return w && w->ok && w->n && bsearch(&key, w->res, w->n, sizeof(uintptr_t), ms_uptr_cmp) != NULL;
+    return key && w && w->ok && w->capacity && w->res[ms_aset_at(w->res, w->capacity, key)] == key;
 }
 
 void sh_modserve_watermark_free(sh_modserve_watermark *w)
@@ -7672,8 +7671,7 @@ int sh_modserve_attrib_close(const void *head_slot, int forget, sh_modserve_attr
     ms_aset_free(&g_mapheap);
     g_mapheap = kept;
     memset(&kept, 0, sizeof kept);
-    /* The pairs whose ends are both listed, sorted by parent; then breadth
-     * first from every kept resource. */
+    /* Walk the live pairs from the kept parents. */
     if (g_pairs_n) {
         edges = (ms_pair *)malloc(g_pairs_n * sizeof *edges);
         if (!edges) { ok = 0; goto done; }
@@ -7683,10 +7681,16 @@ int sh_modserve_attrib_close(const void *head_slot, int forget, sh_modserve_attr
         qsort(edges, ne, sizeof *edges, ms_pair_parent_cmp);
     }
     if (ne && g_kept.n) {
-        qcap = g_kept.n + 64;
+        qcap = (ne < g_kept.n ? ne : g_kept.n) + 64;
         queue = (uintptr_t *)malloc(qcap * sizeof *queue);
         if (!queue) { ok = 0; goto done; }
-        for (i = 0; i < g_kept.cap; ++i) if (g_kept.slot[i]) queue[nq++] = g_kept.slot[i];
+        if (ne < g_kept.n) {
+            for (i = 0; i < ne; ++i)
+                if ((!i || edges[i].parent != edges[i - 1].parent) && ms_aset_has(&g_kept, edges[i].parent))
+                    queue[nq++] = edges[i].parent;
+        } else {
+            for (i = 0; i < g_kept.cap; ++i) if (g_kept.slot[i]) queue[nq++] = g_kept.slot[i];
+        }
         while (nq) {
             uintptr_t parent = queue[--nq];
             size_t lo = 0, hi = ne;
@@ -7736,6 +7740,7 @@ typedef struct ms_hold {
     const char *type, *name;
     int file;              /* the file that describes it for the open map, or -1 */
     int live;              /* that file serves its path in the open map's scope */
+    int rank;
 } ms_hold;
 
 static char ms_hold_fold(char c)
@@ -7744,12 +7749,8 @@ static char ms_hold_fold(char c)
     return ms_fold(c);
 }
 
-static int ms_hold_cmp(const void *pa, const void *pb)
+static int ms_hold_name_cmp(const char *s, const char *t)
 {
-    const ms_hold *a = (const ms_hold *)pa, *b = (const ms_hold *)pb;
-    const char *s = a->name, *t = b->name;
-    int c = _stricmp(a->type, b->type);
-    if (c) return c;
     for (; *s && *t; ++s, ++t) {
         char x = ms_hold_fold(*s), y = ms_hold_fold(*t);
         if (x != y) return (unsigned char)x < (unsigned char)y ? -1 : 1;
@@ -7757,20 +7758,102 @@ static int ms_hold_cmp(const void *pa, const void *pb)
     return *s ? 1 : *t ? -1 : 0;
 }
 
+static int ms_hold_cmp(const void *pa, const void *pb)
+{
+    const ms_hold *a = (const ms_hold *)pa, *b = (const ms_hold *)pb;
+    int c = _stricmp(a->type, b->type);
+    return c ? c : ms_hold_name_cmp(a->name, b->name);
+}
+
+/* Type/name order is fixed for an index. The active file for each name is picked on every walk. */
+static int ms_prepare_holds(ms_index *x)
+{
+    ms_hold *needs;
+    size_t count = 0;
+    int rank = 0;
+    if (x->nfiles) {
+        x->hold_roots = (ms_hold *)ms_alloc(x, (size_t)x->nfiles * sizeof *x->hold_roots);
+        if (!x->hold_roots) return 0;
+    }
+    for (int i = 0; i < x->nfiles; ++i) {
+        const ms_file *f = &x->files[i];
+        if (!f->is_decl || !f->served || ms_surface(f) || !f->ptype || !f->pname || !x->bundles[f->bundle].admitted) continue;
+        ms_hold *root = &x->hold_roots[x->nhold_roots++];
+        root->type = f->ptype;
+        root->name = f->pname;
+        root->file = i;
+    }
+    if (x->nhold_roots > 1) qsort(x->hold_roots, x->nhold_roots, sizeof *x->hold_roots, ms_hold_cmp);
+    if (!x->nneeds) return 1;
+    needs = (ms_hold *)malloc((size_t)x->nneeds * sizeof *needs);
+    if (!needs) return 0;
+    for (int i = 0; i < x->nneeds; ++i) {
+        const ms_need *nd = &x->needs[i];
+        if (!nd->type || !nd->name) continue;
+        needs[count].type = nd->type;
+        needs[count].name = nd->name;
+        needs[count++].file = i;
+    }
+    qsort(needs, count, sizeof *needs, ms_hold_cmp);
+    for (size_t i = 0; i < count; ++i) {
+        if (i && ms_hold_cmp(&needs[i - 1], &needs[i])) ++rank;
+        x->needs[needs[i].file].hold_rank = rank;
+    }
+    free(needs);
+    return 1;
+}
+
+static int ms_hold_rank_cmp(const void *left, const void *right)
+{
+    return ((const ms_hold *)left)->rank - ((const ms_hold *)right)->rank;
+}
+
 typedef struct ms_holds_walk {
     const ms_hold *set; size_t n;
+    const unsigned char *list;
+    const ms_hold *first, *end;
+    const char *name;
+    const int *providers;
     unsigned char *root;                  /* pass 1: per index file, held at level 4 */
     sh_modserve_holds *out;               /* pass 2: raised */
 } ms_holds_walk;
 
-static const ms_hold *ms_holds_find(const ms_holds_walk *w, const unsigned char *list, const unsigned char *res)
+static size_t ms_hold_type_bound(const ms_hold *set, size_t lo, size_t hi, const char *type, int after)
 {
-    ms_hold key;
-    key.type = *(const char *const *)(list + MS_RL_TYPE);
-    key.name = *(const char *const *)(res + MS_RES_NAME);
-    key.file = -1;
-    if (!key.type || !key.name || !w->n) return NULL;
-    return (const ms_hold *)bsearch(&key, w->set, w->n, sizeof *w->set, ms_hold_cmp);
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int c = _stricmp(set[mid].type, type);
+        if (c < 0 || (after && !c)) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+static int ms_hold_in_list_cmp(const void *key, const void *entry)
+{
+    const ms_holds_walk *w = (const ms_holds_walk *)key;
+    const ms_hold *h = (const ms_hold *)entry;
+    if (h < w->first) return 1;
+    if (h >= w->end) return -1;
+    return ms_hold_name_cmp(w->name, h->name);
+}
+
+static const ms_hold *ms_holds_find(ms_holds_walk *w, const unsigned char *list, const unsigned char *res)
+{
+    if (!w->n) return NULL;
+    if (list != w->list) {
+        const char *type = *(const char *const *)(list + MS_RL_TYPE);
+        size_t first = type ? ms_hold_type_bound(w->set, 0, w->n, type, 0) : w->n;
+        size_t end = first < w->n ? ms_hold_type_bound(w->set, first, w->n, type, 1) : first;
+        w->first = w->set + first;
+        w->end = w->set + end;
+        w->list = list;
+    }
+    if (w->first == w->end) return NULL;
+    w->name = *(const char *const *)(res + MS_RES_NAME);
+    if (!w->name) return NULL;
+    /* Search the full sorted set so equivalent root names select the same provider. */
+    return (const ms_hold *)bsearch(w, w->set, w->n, sizeof *w->set, ms_hold_in_list_cmp);
 }
 
 static void ms_holds_roots_one(void *context, const unsigned char *list, unsigned char *res)
@@ -7779,7 +7862,10 @@ static void ms_holds_roots_one(void *context, const unsigned char *list, unsigne
     const ms_hold *h;
     if (*(const unsigned *)(res + MS_RES_LEVEL) != 4) return;
     h = ms_holds_find(w, list, res);
-    if (h) { w->root[h->file] = 1; sh_modserve_kept_add(res); }
+    if (h) {
+        w->root[w->providers[h - w->set]] = 1;
+        sh_modserve_kept_add(res);
+    }
 }
 
 static void ms_holds_raise_one(void *context, const unsigned char *list, unsigned char *res)
@@ -7799,34 +7885,39 @@ static void ms_holds_raise_one(void *context, const unsigned char *list, unsigne
  * sh_modserve_holds_raise): `*set_out` the distinct (type, name) needs, sorted
  * by ms_hold_cmp, each with the index file that provides it (-1: none). */
 static int ms_holds_closure(const ms_index *x, const void *head_slot, ms_hold **set_out, size_t *ns_out,
-                            sh_modserve_holds *out)
+                            sh_modserve_holds *out, ms_holds_walk *verify)
 {
     ms_holds_walk w;
-    ms_hold *cands = NULL, *set = NULL;
+    ms_hold *set = NULL;
     int *queue = NULL, nq = 0, qh = 0, i, k, ok = 0;
-    size_t nc = 0, ns = 0, cs = 0;
+    int *providers = NULL;
+    size_t ns = 0, cs = 0;
     *set_out = NULL;
     *ns_out = 0;
     memset(&w, 0, sizeof w);
-    cands = (ms_hold *)malloc(sizeof *cands * (size_t)x->nfiles);
     w.root = (unsigned char *)calloc((size_t)x->nfiles, 1);
     queue = (int *)malloc(sizeof *queue * (size_t)x->nfiles);
-    if (!cands || !w.root || !queue) goto done;
-    /* The roots: decls of admitted bundles the product serves (a surface is the game's own decl), each
-     * described by the build that serves its path for the open map (ms_serving_file). */
-    for (i = 0; i < x->nfiles; ++i) {
-        const ms_file *f = &x->files[i];
-        if (!f->is_decl || !f->served || ms_surface(f) || !f->ptype || !f->pname || !x->bundles[f->bundle].admitted) continue;
-        cands[nc].type = f->ptype;
-        cands[nc].name = f->pname;
-        cands[nc].file = (int)(ms_serving_file(x, i) - x->files);
-        cands[nc].live = 1;
-        nc++;
+    if (!w.root || !queue) goto done;
+    if (x->nhold_roots) {
+        providers = (int *)malloc(x->nhold_roots * sizeof *providers);
+        if (!providers) goto done;
+        for (size_t j = 0; j < x->nhold_roots; ++j)
+            providers[j] = (int)(ms_serving_file(x, x->hold_roots[j].file) - x->files);
     }
-    if (nc > 1) qsort(cands, nc, sizeof *cands, ms_hold_cmp);
-    w.set = cands;
-    w.n = nc;
+    w.providers = providers;
+    w.set = x->hold_roots;
+    w.n = x->nhold_roots;
     if (!ms_res_walk(head_slot, ms_holds_roots_one, &w, &out->lists)) goto done;
+    if (verify) {
+        verify->root = (unsigned char *)malloc((size_t)x->nfiles);
+        if (verify->root) {
+            memcpy(verify->root, w.root, (size_t)x->nfiles);
+            verify->set = w.set;
+            verify->n = w.n;
+            verify->providers = providers;
+            providers = NULL;
+        }
+    }
     for (i = 0; i < x->nfiles; ++i) if (w.root[i]) { queue[nq++] = i; out->roots++; }
     /* Their needs, closed through the files that provide them. */
     while (qh < nq) {
@@ -7843,6 +7934,7 @@ static int ms_holds_closure(const ms_index *x, const void *head_slot, ms_hold **
             }
             set[ns].type = nd->type;
             set[ns].name = nd->name;
+            set[ns].rank = nd->hold_rank;
             set[ns].file = -1;
             set[ns].live = 0;
             if (nd->file >= 0 && nd->file < x->nfiles) {
@@ -7857,9 +7949,9 @@ static int ms_holds_closure(const ms_index *x, const void *head_slot, ms_hold **
             ns++;
         }
     }
-    if (ns > 1) qsort(set, ns, sizeof *set, ms_hold_cmp);
+    if (ns > 1) qsort(set, ns, sizeof *set, ms_hold_rank_cmp);
     for (i = 0, k = 0; (size_t)i < ns; ++i)
-        if (!k || ms_hold_cmp(&set[k - 1], &set[i])) set[k++] = set[i];
+        if (!k || set[k - 1].rank != set[i].rank) set[k++] = set[i];
     ns = (size_t)k;
     out->names = (unsigned)ns;
     *set_out = set;
@@ -7867,7 +7959,7 @@ static int ms_holds_closure(const ms_index *x, const void *head_slot, ms_hold **
     set = NULL;
     ok = 1;
 done:
-    free(cands);
+    free(providers);
     free(set);
     free(queue);
     free(w.root);
@@ -7878,23 +7970,27 @@ done:
  * through every need another file of the index provides, that file's needs, at any depth. A decl the pass keeps
  * may predate its watermark, so the watermark alone cannot keep what it holds. Each named resource found at
  * level 1 is raised to 4; one not held yet is raised by the first pass after it is created. */
+static int ms_raise_names(const void *head_slot, const ms_hold *set, size_t ns, sh_modserve_holds *out)
+{
+    ms_holds_walk w = {0};
+    w.set = set;
+    w.n = ns;
+    w.out = out;
+    return !ns || ms_res_walk(head_slot, ms_holds_raise_one, &w, &out->lists);
+}
+
 int sh_modserve_holds_raise(const void *head_slot, sh_modserve_holds *out)
 {
     const ms_index *x = g_index;
     sh_modserve_holds local;
-    ms_holds_walk w;
     ms_hold *set = NULL;
     size_t ns = 0;
     int ok;
     if (!out) out = &local;
     memset(out, 0, sizeof *out);
     if (!x || !head_slot || !x->nfiles) return 0;
-    if (!ms_holds_closure(x, head_slot, &set, &ns, out)) return 0;
-    memset(&w, 0, sizeof w);
-    w.set = set;
-    w.n = ns;
-    w.out = out;
-    ok = ns ? ms_res_walk(head_slot, ms_holds_raise_one, &w, &out->lists) : 1;
+    if (!ms_holds_closure(x, head_slot, &set, &ns, out, NULL)) return 0;
+    ok = ms_raise_names(head_slot, set, ns, out);
     free(set);
     return ok;
 }
@@ -7921,7 +8017,7 @@ void *sh_modserve_resource_list(const void *head_slot, const char *type)
 
 /* The render models kept decls hold (sh_modserve_held_models). */
 typedef struct ms_held_model_walk {
-    const ms_hold *set; size_t n;
+    ms_holds_walk lookup;
     void **res;                 /* per entry: the resource the lists hold, or NULL */
     unsigned char *load;        /* per entry: 1 when it is to be loaded */
 } ms_held_model_walk;
@@ -7929,17 +8025,11 @@ typedef struct ms_held_model_walk {
 static void ms_held_model_one(void *context, const unsigned char *list, unsigned char *res)
 {
     ms_held_model_walk *w = (ms_held_model_walk *)context;
-    ms_hold key;
-    const ms_hold *h;
+    const ms_hold *h = ms_holds_find(&w->lookup, list, res);
     size_t i;
     unsigned state;
-    key.type = *(const char *const *)(list + MS_RL_TYPE);
-    key.name = *(const char *const *)(res + MS_RES_NAME);
-    key.file = -1;
-    if (!key.type || !key.name || _stricmp(key.type, SH_MODSERVE_HELD_MODEL_TYPE)) return;
-    h = (const ms_hold *)bsearch(&key, w->set, w->n, sizeof *w->set, ms_hold_cmp);
     if (!h) return;
-    i = (size_t)(h - w->set);
+    i = (size_t)(h - w->lookup.set);
     w->res[i] = res;
     state = *(const unsigned char *)(res + MS_RES_STATE);
     /* Held whole or at level 1 in process heap 0 (the holds raise keeps it): nothing to do. The default box
@@ -7950,20 +8040,33 @@ static void ms_held_model_one(void *context, const unsigned char *list, unsigned
     else w->load[i] = ms_aset_has(&g_mapheap, (uintptr_t)res) ? 1 : 0;
 }
 
-int sh_modserve_held_models(const void *head_slot, sh_modserve_held_model_fn fn, void *context,
-                            sh_modserve_holds *out)
+/* Scope can change on a native map read. A writer in progress leaves the next stage to its ordinary fresh walk. */
+static int ms_hold_scope(const ms_index *x, unsigned *revision)
 {
-    const ms_index *x = g_index;
+    if (!TryAcquireSRWLockShared(&g_build_lock)) return 0;
+    int current = g_index == x;
+    if (current) *revision = x->scope_revision;
+    ReleaseSRWLockShared(&g_build_lock);
+    return current;
+}
+
+static int ms_maintain_models(const ms_index *x, const void *head_slot, sh_modserve_held_model_fn fn,
+                              void *context, sh_modserve_holds *out, int *named)
+{
     sh_modserve_holds local;
     ms_held_model_walk w;
     ms_hold *set = NULL, *models = NULL;
     size_t ns = 0, nm = 0, i;
     int visited = -1;
+    ms_holds_walk verify = {0};
+    unsigned revision = 0, current = 0;
+    if (named) *named = 0;
     if (!out) out = &local;
     memset(out, 0, sizeof *out);
     memset(&w, 0, sizeof w);
     if (!x || !head_slot || !x->nfiles || !fn) return -1;
-    if (!ms_holds_closure(x, head_slot, &set, &ns, out)) return -1;
+    if (!ms_holds_closure(x, head_slot, &set, &ns, out,
+                          named && ms_hold_scope(x, &revision) ? &verify : NULL)) goto done;
     /* Only render models whose own file the index serves in this scope: one
      * loaded where its file is not served comes out as the default box, and
      * a stock model (no provider) is the game's bytes in every scope. */
@@ -7975,8 +8078,8 @@ int sh_modserve_held_models(const void *head_slot, sh_modserve_held_model_fn fn,
             models[nm++] = set[i];
     visited = 0;
     if (!nm) goto done;
-    w.set = models;
-    w.n = nm;
+    w.lookup.set = models;
+    w.lookup.n = nm;
     w.res = (void **)calloc(nm, sizeof *w.res);
     w.load = (unsigned char *)malloc(nm);
     if (!w.res || !w.load) { visited = -1; goto done; }
@@ -7989,11 +8092,37 @@ int sh_modserve_held_models(const void *head_slot, sh_modserve_held_model_fn fn,
         if (!fn(context, models[i].name, w.res[i])) break;
     }
 done:
+    if (!visited && verify.root && ms_hold_scope(x, &current) && current == revision) {
+        unsigned char *expected = verify.root;
+        verify.root = (unsigned char *)calloc((size_t)x->nfiles, 1);
+        if (verify.root && ms_res_walk(head_slot, ms_holds_roots_one, &verify, NULL) &&
+            !memcmp(expected, verify.root, (size_t)x->nfiles) && ms_hold_scope(x, &current) && current == revision)
+            *named = ms_raise_names(head_slot, set, ns, out);
+        free(expected);
+    }
+    free(verify.root);
+    free((void *)verify.providers);
     free(w.res);
     free(w.load);
     free(models);
     free(set);
     return visited;
+}
+
+int sh_modserve_maintain_models(const void *head_slot, sh_modserve_held_model_fn fn, void *context,
+                                sh_modserve_holds *out, int *named)
+{
+    int visited;
+    InterlockedIncrement(&g_readers);
+    __try { visited = ms_maintain_models(g_index, head_slot, fn, context, out, named); }
+    __finally { InterlockedDecrement(&g_readers); }
+    return visited;
+}
+
+int sh_modserve_held_models(const void *head_slot, sh_modserve_held_model_fn fn, void *context,
+                            sh_modserve_holds *out)
+{
+    return sh_modserve_maintain_models(head_slot, fn, context, out, NULL);
 }
 
 unsigned sh_modserve_load_keep_lifetime(void *resource, void (*load)(void *), unsigned *was)
@@ -9934,6 +10063,13 @@ int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int 
     const ms_index *x = g_index;
     int pass, i, visited = 0;
     if (!x || !fn) return 0;
+    for (i = 0; i < x->nfiles; ++i)
+        if (x->files[i].refresh && ms_in_part(&x->files[i], part)) break;
+    if (i == x->nfiles) {
+        if (part == SH_MODSERVE_PART_EDITOR) return 0;
+        for (i = 0; i < x->ngone; ++i) if (x->gone[i].pending) break;
+        if (i == x->ngone) return 0;
+    }
     /* Changed decls in plan rank order (passes 0 to SH_MODSERVE_RANK_MAX, a
      * renderParm first), then gone shadows, then the decls that inherit from
      * them by generation and rank, then models and images. */
@@ -9960,9 +10096,8 @@ int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int 
                 for (rank = 0; rank <= SH_MODSERVE_RANK_MAX; ++rank)
                     for (i = 0; i < x->nfiles; ++i) {
                         ms_file *f = (ms_file *)&x->files[i];
-                        if (!InterlockedCompareExchange(&f->refresh, 0, 0) || !ms_live(x, f) || f->withdrawn ||
-                            !f->ptype || !f->pname || !f->is_decl ||
-                            f->refresh_gen != gen || f->rank != rank || !ms_in_part(f, part))
+                        if (!f->is_decl || f->rank != rank || f->refresh_gen != gen || !f->refresh ||
+                            !ms_live(x, f) || f->withdrawn || !f->ptype || !f->pname || !ms_in_part(f, part))
                             continue;
                         visited += ms_refresh_one(x, f, SH_MODSERVE_RF_DECL, fn, context);
                     }
@@ -9970,10 +10105,11 @@ int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int 
         }
         for (i = 0; i < x->nfiles; ++i) {
             ms_file *f = (ms_file *)&x->files[i];
-            int kind = ms_kind(f);
-            if (!InterlockedCompareExchange(&f->refresh, 0, 0) || !ms_live(x, f) || f->withdrawn ||
+            int kind;
+            if (!f->refresh || !ms_live(x, f) || f->withdrawn ||
                 !f->ptype || !f->pname || !ms_in_part(f, part))
                 continue;
+            kind = ms_kind(f);
             if (pass <= SH_MODSERVE_RANK_MAX ? (kind != SH_MODSERVE_RF_DECL || f->rank != pass || f->refresh_gen)
                                              : kind == SH_MODSERVE_RF_DECL)
                 continue;

@@ -1,6 +1,9 @@
 /* modbundle.c -- see modbundle.h. Mod descriptor, tree walk, hashes, logical
  * names, decl needs, validation and the canonical bundle manifest. */
 #include <windows.h>
+#include <bcrypt.h>
+#pragma comment(lib, "bcrypt.lib")
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +46,23 @@
 void sh_mb_sha256_hex(const void *data, size_t len, char out[SH_MB_HASH_HEX + 1])
 {
     sh_sha256 s;
+    BCRYPT_HASH_HANDLE hash = NULL;
+    if (len >= 64 && len <= ULONG_MAX &&
+        BCryptCreateHash(BCRYPT_SHA256_ALG_HANDLE, &hash, NULL, 0, NULL, 0, 0) >= 0) {
+        unsigned char digest[32];
+        int ok = BCryptHashData(hash, (PUCHAR)data, (ULONG)len, 0) >= 0 &&
+                 BCryptFinishHash(hash, digest, sizeof digest, 0) >= 0;
+        BCryptDestroyHash(hash);
+        if (ok) {
+            static const char hex[] = "0123456789abcdef";
+            for (size_t i = 0; i < sizeof digest; i++) {
+                out[2 * i] = hex[digest[i] >> 4];
+                out[2 * i + 1] = hex[digest[i] & 15];
+            }
+            out[SH_MB_HASH_HEX] = 0;
+            return;
+        }
+    }
     sh_sha256_init(&s);
     sh_sha256_update(&s, data, len);
     sh_sha256_hex(&s, out, SH_MB_HASH_HEX);

@@ -36,10 +36,9 @@ static unsigned inf_bits(inf_t *s, unsigned n)
  */
 static int inf_align_zero(inf_t *s)
 {
-    unsigned mask;
-    if (!s || s->bitcnt > 7u) return 0;
-    mask = s->bitcnt ? ((1u << s->bitcnt) - 1u) : 0u;
+    unsigned mask = (1u << (s->bitcnt & 7u)) - 1u;
     if (s->bitbuf & mask) return 0;
+    s->pos -= s->bitcnt / 8u;   /* stored data starts at the first untouched byte */
     s->bitbuf = 0;
     s->bitcnt = 0;
     return 1;
@@ -63,8 +62,12 @@ typedef enum {
     HUFF_FIXED_DISTANCE
 } huff_kind;
 
+#define HUFF_PREFIX_BITS 9u
+#define HUFF_PREFIX_SIZE (1u << HUFF_PREFIX_BITS)
+
 typedef struct {
     unsigned short count[16], symbol[288];
+    unsigned short prefix[HUFF_PREFIX_SIZE];
     int empty;
 } huff_t;
 
@@ -112,6 +115,17 @@ static int huff_build(huff_t *h, const unsigned char *lens, unsigned n,
     offs[0] = 0;
     for (i = 1; i < 16; ++i) offs[i] = offs[i - 1] + h->count[i - 1];
     for (i = 0; i < n; ++i) if (lens[i]) h->symbol[offs[lens[i]]++] = (unsigned short)i;
+    /* The next input bit occupies bit zero. Reverse the canonical code for the table index. */
+    unsigned code = 0, symbol = 0;
+    for (unsigned len = 1; len <= HUFF_PREFIX_BITS; ++len) {
+        code = (code + h->count[len - 1]) << 1;
+        for (unsigned j = 0; j < h->count[len]; ++j) {
+            unsigned bits = code + j, reversed = 0;
+            for (unsigned k = 0; k < len; ++k, bits >>= 1) reversed = (reversed << 1) | (bits & 1);
+            unsigned short entry = (unsigned short)((h->symbol[symbol++] << 4) | len);
+            for (unsigned k = reversed; k < HUFF_PREFIX_SIZE; k += 1u << len) h->prefix[k] = entry;
+        }
+    }
     return 1;
 }
 
@@ -119,12 +133,35 @@ static int huff_decode(inf_t *s, const huff_t *h)
 {
     int code = 0, first = 0, index = 0, len;
     if (!h || h->empty) return -1;
-    for (len = 1; len < 16; ++len) {
+    /* Buffer enough for the longest code when possible. Only the matching code consumes bits. */
+    if (s->bitcnt < 15u) {
+        if (s->len - s->pos >= 2) {
+            unsigned pair = s->src[s->pos] | ((unsigned)s->src[s->pos + 1] << 8);
+            s->bitbuf |= pair << s->bitcnt;
+            s->bitcnt += 16;
+            s->pos += 2;
+        } else if (s->pos < s->len) {
+            s->bitbuf |= (unsigned)s->src[s->pos++] << s->bitcnt;
+            s->bitcnt += 8;
+        }
+    }
+    unsigned entry = h->prefix[s->bitbuf & (HUFF_PREFIX_SIZE - 1)], bits = entry & 15u;
+    if (bits && bits <= s->bitcnt) {
+        s->bitbuf >>= bits;
+        s->bitcnt -= bits;
+        return (int)(entry >> 4);
+    }
+    unsigned input = s->bitbuf;
+    for (len = 1; len < 16 && (unsigned)len <= s->bitcnt; ++len) {
         int count;
-        code |= (int)inf_bits(s, 1);
-        if (s->exhausted) return -1;
+        code |= (int)(input & 1u);
+        input >>= 1;
         count = h->count[len];
-        if (code - count < first) return h->symbol[index + (code - first)];
+        if (code - count < first) {
+            s->bitbuf = input;
+            s->bitcnt -= len;
+            return h->symbol[index + (code - first)];
+        }
         index += count;
         first += count;
         first <<= 1;

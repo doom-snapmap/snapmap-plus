@@ -819,6 +819,13 @@ These backend files share the work:
   the engine's own level 1, and rebuilds the live palette inside process heap 0.
   It applies a refresh in place (re-parse, reload, the anims of a map pass) and
   arms the companions detour at its main-thread gates.
+  An in-place refresh checks for an existing, parsed resource with the
+  engine's find-only lookup. A missing resource can read the current provider
+  on first use. The serving index prepares the ordering of dependency names
+  once. Each lifetime check still reads the current map's providers and the
+  engine's current resources. The check for models held by permanent
+  declarations opens a lifetime snapshot on its first required load,
+  unless an enclosing snapshot already covers it.
 - `modtypeinfo.c` serves the default property trees of the entity types the
   editor's type-info cache (`idSnapTypeInfoCache`) lacks. The game builds
   that cache once per process, one default property tree per

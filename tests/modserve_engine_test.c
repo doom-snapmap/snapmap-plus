@@ -1,6 +1,39 @@
 /* modserve_engine_test.c -- checks modserve_engine.c against a faked engine table (decl registry, DeclFind,
  * generic load, heap stack and resources are plain memory), so resource levels and the kept set need no game. */
+#include "../src/backend/modserve.h"
+
+static int fe_marks, fe_named_passes, fe_shared_passes, fe_attrib_passes;
+static int fe_watermark_take(const void *head, sh_modserve_watermark *w)
+{
+    fe_marks++;
+    return sh_modserve_watermark_take(head, w);
+}
+static int fe_holds_raise(const void *head, sh_modserve_holds *out)
+{
+    fe_named_passes++;
+    return sh_modserve_holds_raise(head, out);
+}
+static int fe_attrib_close(const void *head, int forget, sh_modserve_attrib *out)
+{
+    fe_attrib_passes++;
+    return sh_modserve_attrib_close(head, forget, out);
+}
+static int fe_maintain_models(const void *head, sh_modserve_held_model_fn fn, void *context,
+                              sh_modserve_holds *out, int *named)
+{
+    int n = sh_modserve_maintain_models(head, fn, context, out, named);
+    if (*named) ++fe_shared_passes;
+    return n;
+}
+#define sh_modserve_watermark_take fe_watermark_take
+#define sh_modserve_holds_raise fe_holds_raise
+#define sh_modserve_maintain_models fe_maintain_models
+#define sh_modserve_attrib_close fe_attrib_close
 #include "../src/backend/modserve_engine.c"
+#undef sh_modserve_watermark_take
+#undef sh_modserve_holds_raise
+#undef sh_modserve_maintain_models
+#undef sh_modserve_attrib_close
 #include "mod_test_util.h"
 
 static int g_failed;
@@ -134,7 +167,9 @@ typedef struct fe_res {
 
 #define FE_MAX 16
 static fe_res g_res[FE_MAX];
+static fe_res *fe_entries[FE_MAX];
 static int g_nres;
+static const char *fe_demand_name;
 static unsigned char g_manager[64];        /* one manager answers every type */
 static void *g_vtable[16];
 static void *g_registry_obj[1];
@@ -161,13 +196,25 @@ static fe_res *fe_add(const char *name, unsigned lifetime, unsigned char state)
     r->list = g_manager;
     r->lifetime = lifetime;
     r->state = state;
+    fe_entries[g_nres - 1] = r;
+    *(fe_res ***)(g_manager + ME_LIST_ENTRIES) = fe_entries;
+    *(int *)(g_manager + ME_LIST_COUNT) = g_nres;
     return r;
+}
+
+static void *fe_pure_decl(void *manager, const char *name)
+{
+    return manager == g_manager ? fe_find(name) : NULL;
 }
 
 static void *fe_decl(void *manager, const char *name, unsigned char create)
 {
     fe_res *r = fe_find(name);
     (void)manager;
+    if (!r && fe_demand_name && !strcmp(name, fe_demand_name)) {
+        r = fe_add(name, 1, 2);
+        g_generic_load(r);
+    }
     if (!r && create) r = fe_add(name, 1, 2);
     return r;
 }
@@ -199,6 +246,8 @@ static void fe_reset(void)
 {
     int32_t disp;
     memset(g_res, 0, sizeof g_res);
+    memset(g_manager, 0, sizeof g_manager);
+    fe_demand_name = NULL;
     g_nres = 0;
     memset(g_memlocal, 0, sizeof g_memlocal);
     sh_modserve_attrib_reset();
@@ -219,6 +268,7 @@ static void fe_reset(void)
     g_register = (register_fn)fe_register;
     g_type = (type_fn)fe_type;
     g_decl = (find_decl_fn)fe_decl;
+    g_pure_decl = fe_pure_decl;
     g_generic_load = (generic_load_fn)fe_load_entry;
     g_load_orig = (generic_load_fn)fe_load_body;
     g_main_id = GetCurrentThreadId();
@@ -293,15 +343,93 @@ static void test_keep_ref_map_heap(void)
 /* A held render model loaded in process heap 0 is kept through the rule. */
 static void test_held_model_kept(void)
 {
-    fe_res *m;
+    fe_res *m, *second;
+    void *head = NULL;
     me_held_load r;
+    me_closure outer;
     fe_reset();
+    g_res_head = &head;
+    fe_marks = 0;
     m = fe_add("models/mods/abcdefgh/rock.lwo", 1, 4);
+    second = fe_add("models/mods/abcdefgh/second.lwo", 1, 4);
     memset(&r, 0, sizeof r);
     fe_heap_push(g_memlocal, 0);
+    CHECK(me_held_one(&r, "missing", NULL) == 1 && r.skipped == 1 && !fe_marks);
     CHECK(me_held_one(&r, m->name, m) == 1);
-    fe_heap_pop(g_memlocal);
     CHECK(m->loads == 1 && m->lifetime == 4 && sh_modserve_kept_has(m) && r.reloaded == 1 && !r.failed);
+    CHECK(me_held_one(&r, second->name, second) == 1 && second->loads == 1 && second->lifetime == 4);
+    CHECK(fe_marks == 1 && r.keeper.counted && g_mark_depth == 1);
+    me_close_watermark(&r.keeper, "test", "held models");
+    memset(&r, 0, sizeof r);
+    me_closure_begin(&outer);
+    CHECK(me_held_one(&r, m->name, m) == 1 && !r.keeper.counted && g_mark_depth == 1 && fe_marks == 2);
+    me_close_watermark(&outer, "test", "enclosing pass");
+    fe_heap_pop(g_memlocal);
+    CHECK(g_mark_depth == 0);
+    g_res_head = NULL;
+}
+
+static void test_placement_lifetimes(void)
+{
+    struct fe_list {
+        void *unused;
+        const char *type, *cls;
+        struct fe_list *next;
+        fe_res **entries;
+        int count;
+    };
+    char root[MAX_PATH], mod[MAX_PATH], *why = NULL;
+    sh_mb_bundle bundle;
+    const char *hash;
+    fe_res *row, *entity, *anchor;
+    fe_res *row_entries[1], *other_entries[4];
+    struct fe_list entities = { NULL, "entityDef", "idDeclEntityDef", NULL, other_entries, 2 };
+    struct fe_list rows = { NULL, "snapEditorEntityDef", "idDeclSnapEditorEntityDef", &entities, row_entries, 1 };
+    struct fe_list *head = &rows;
+    fe_reset();
+    CHECK(mt_temp_dir("keepers", root, sizeof root));
+    snprintf(mod, sizeof mod, "%s\\pack", root);
+    mt_write(mod, "mod.json", "{\"name\":\"Test\",\"snapmap-plus\":{\"format\":2,\"salt\":\"abcdefgh\"}}");
+    mt_write(mod, "entities\\placed.decl", "{ edit = { } }");
+    mt_write(mod, "decls\\snapeditorentitydef\\placed.decl", "{ edit = { entityDef = \"entities/placed\"; } }");
+    CHECK(sh_mb_build(mod, NULL, NULL, &bundle));
+    CHECK(sh_mb_write(&bundle, mod, &why));
+    CHECK(sh_modserve_index_build(root) == 1);
+    hash = bundle.hash;
+    sh_modserve_scope_enable(1);
+    sh_modserve_scope_set(&hash, 1, 1);
+    g_res_head = &head;
+    row_entries[0] = row = fe_add("mods/abcdefgh/placed", 1, 0);
+    other_entries[0] = entity = fe_add("mods/abcdefgh/placed", 1, 0);
+    other_entries[1] = anchor = fe_add("anchor", 4, 0);
+
+    fe_marks = fe_named_passes = fe_shared_passes = fe_attrib_passes = 0;
+    me_keep_resources("test", 0);
+    CHECK(fe_marks == 0 && fe_shared_passes == 1 && fe_named_passes == 0 && fe_attrib_passes == 1);
+    CHECK(row->lifetime == 1 && entity->lifetime == 1);
+
+    /* An attributed child becomes a new root for a named dependency. */
+    sh_modserve_kept_add(anchor);
+    CHECK(sh_modserve_attrib_note(anchor, row) == 1);
+    fe_named_passes = fe_shared_passes = fe_attrib_passes = 0;
+    me_keep_resources("test", 0);
+    CHECK(fe_marks == 0 && fe_shared_passes == 1 && fe_named_passes == 1 && fe_attrib_passes == 2);
+    CHECK(row->lifetime == 4 && entity->lifetime == 4);
+
+    other_entries[2] = fe_add("map_parent", 1, 0);
+    other_entries[3] = fe_add("map_child", 1, 0);
+    entities.count = 4;
+    CHECK(!sh_modserve_attrib_note(other_entries[2], other_entries[3]));
+    me_keep_resources("play", 1);
+    sh_modserve_kept_add(other_entries[2]);
+    me_keep_resources("after purge", 0);
+    CHECK(other_entries[3]->lifetime == 1);
+    g_res_head = NULL;
+    sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(0);
+    sh_mb_free(&bundle);
+    free(why);
+    mt_remove_tree(root);
 }
 
 /* Every re-parse of a decl drops its default type-info tree, whichever path
@@ -320,6 +448,31 @@ static void test_reparse_drops_type_info(void)
                          "abcdefgh") == 1);
     fe_heap_pop(g_memlocal);
     CHECK(r.reparsed == 1 && def->loads == 1 && g_typeinfo_dropped == 1);
+}
+
+static void test_refresh_looks_up_only_held_decls(void)
+{
+    const char *request = "generated/decls/entitydef/props/test.decl";
+    for (int native = 0; native < 2; ++native) {
+        me_refresh c = {0};
+        sh_modserve_refresh_item change = {"entityDef", "props/test", request, "pack", SH_MODSERVE_RF_DECL, 0, 1, 1};
+        fe_reset();
+        if (!native) g_pure_decl = NULL;
+        fe_demand_name = change.name;
+        fe_heap_push(g_memlocal, 0);
+        CHECK(me_reparse_one(&c.decls, change.type, change.name, request, "pack") == 0);
+        CHECK(me_refresh_visit(&c, &change) == 1 && c.not_held == 1 && g_nres == 0);
+        fe_res *obj = g_decl(g_manager, change.name, 0);
+        CHECK(obj && g_nres == 1 && obj->loads == 1);
+        obj->state = 2;
+        CHECK(me_reparse_one(&c.decls, change.type, change.name, request, "pack") == 0);
+        CHECK(c.decls.pending == 1 && obj->loads == 1 && obj->state == 2);
+        obj->state = 0;
+        CHECK(me_refresh_visit(&c, &change) == 1 && obj->loads == 2);
+        change.gone = 1;
+        CHECK(me_refresh_visit(&c, &change) == 1 && obj->loads == 3 && obj->lifetime == 1);
+        fe_heap_pop(g_memlocal);
+    }
 }
 
 static void test_palette_repairs_early_default_without_mods(void)
@@ -420,9 +573,11 @@ int main(void)
     test_raw_names_grow();
     test_op_load_levels();
     test_reparse_drops_type_info();
+    test_refresh_looks_up_only_held_decls();
     test_palette_repairs_early_default_without_mods();
     test_keep_ref_map_heap();
     test_held_model_kept();
+    test_placement_lifetimes();
     test_static_model_kind();
     test_prefab_adds_a_row_to_the_open_palette();
     if (g_failed) {

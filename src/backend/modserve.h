@@ -296,8 +296,8 @@ int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn,
  * its entries at +0x20 and their count (int) at +0x28; each resource holds its level at +0x28. Reads are bounded
  * and fault-protected; main thread only. */
 typedef struct sh_modserve_watermark {
-    uintptr_t *res;   /* sorted resource addresses (malloc) */
-    size_t n;
+    uintptr_t *res;   /* addresses present before the pass */
+    size_t n, capacity;
     int ok;           /* 1 when the walk completed */
 } sh_modserve_watermark;
 
@@ -338,6 +338,9 @@ int  sh_modserve_holds_raise(const void *head_slot, sh_modserve_holds *out);
 typedef int (*sh_modserve_held_model_fn)(void *context, const char *name, void *resource);
 int  sh_modserve_held_models(const void *head_slot, sh_modserve_held_model_fn fn, void *context,
                              sh_modserve_holds *out);
+/* Also raise named resources when no model required a callback and the same roots still serve. */
+int sh_modserve_maintain_models(const void *head_slot, sh_modserve_held_model_fn fn, void *context,
+                                sh_modserve_holds *out, int *named);
 /* The resource list whose type name (+0x08) is `type`, or NULL. */
 void *sh_modserve_resource_list(const void *head_slot, const char *type);
 
@@ -919,7 +922,8 @@ typedef struct sh_modserve_refresh {
  * Entries are collected under the engine's resource lock (sh_modserve_set_resource_lock) and `fn` runs after it is
  * released. 1 when the walk completed. */
 typedef void (*sh_modserve_resource_fn)(void *context, const char *list_class, void *resource, const char *name);
-int sh_modserve_resource_each(const void *head_slot, sh_modserve_resource_fn fn, void *context);
+typedef int (*sh_modserve_list_filter)(const char *list_class, void *context);
+int sh_modserve_resource_each(const void *head_slot, sh_modserve_list_filter include, sh_modserve_resource_fn fn, void *context);
 
 /* The engine's resource lock: `lock` is the address of the static struct whose first qword is the CRITICAL_SECTION
  * pointer every list add, remove and find takes (13954591: VK RVA 0x5D79238, GL 0x467E8B8). Every walk of the lists
