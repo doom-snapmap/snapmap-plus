@@ -8,6 +8,7 @@
 #include "../../common/text.h"
 #ifndef SH_SCRIPT_PURE
 #include "../modserve.h"
+#include "../editor_panel_schema.h"
 #include "../modbundle.h"
 #include "../backend_log.h"
 #endif
@@ -40,6 +41,10 @@ typedef struct src_mod {
     char salt[SH_SCRIPT_SALT_CAP];
     char *name;                  /* malloc'd, any length */
     src_file *f;
+#ifndef SH_SCRIPT_PURE
+    char hash[SH_MODSERVE_HASH_HEX + 1];
+    sh_json_object defaults;
+#endif
     int n, cap;
 } src_mod;
 
@@ -59,6 +64,9 @@ static void mod_free(src_mod *m)
     int i;
     for (i = 0; i < m->n; i++) { free(m->f[i].text); free(m->f[i].rel); }
     free(m->f);
+#ifndef SH_SCRIPT_PURE
+    sh_json_object_free(&m->defaults);
+#endif
     free(m->name);
     memset(m, 0, sizeof *m);
 }
@@ -298,7 +306,7 @@ static void keep_script(void *context, const char *relpath, const char *request,
     unsigned char *bytes = NULL;
     size_t len = 0;
     char *text = NULL, actual[SH_MB_HASH_HEX + 1];
-    (void)bundle_hash;
+    if (!m->hash[0] && bundle_hash) strncpy_s(m->hash, sizeof m->hash, bundle_hash, _TRUNCATE);
     if (sh_modserve_open_disk(request, &bytes, &len) == 1) {
         sh_mb_sha256_hex(bytes, len, actual);
         if (len == size && sha256 && !_stricmp(actual, sha256) && (text = (char *)malloc(len + 1)) != NULL) {
@@ -310,11 +318,51 @@ static void keep_script(void *context, const char *relpath, const char *request,
     file_add(m, relpath, text, len);
 }
 
-/* Read the scripts of the map's mods into g_src. Returns the count of mods
- * with scripts, -1 when unreadable; *seed is derived from the builds. */
+/* Capture defaults from the same build as the scripts, including a map's downloaded composition. */
+static void setting_defaults(void *context, const char *salt, const char *hash, int place, const char *extra)
+{
+    int i;
+    sh_json_object root = {0}, editor = {0}, settings = {0};
+    size_t j;
+    src_mod *m = NULL;
+    (void)context;
+    for (i = 0; i < g_nsrc; ++i) {
+        if (!strcmp(g_src[i].salt, salt) && !strcmp(g_src[i].hash, hash)) { m = &g_src[i]; break; }
+    }
+    if (!m || !ep_object(extra, &root)) goto done;
+    if (place) {
+        const char *raw = sh_json_object_get(&root, "mapSettingDefaults");
+        if (raw && !m->defaults.count) ep_object(raw, &m->defaults);
+    } else if (ep_object(sh_json_object_get(&root, "editor"), &editor) &&
+               ep_object(sh_json_object_get(&editor, "settings"), &settings)) {
+        for (j = 0; j < settings.count; ++j) {
+            sh_json_object decl = {0};
+            const char *scope, *def;
+            if (!ep_object(settings.members[j].value_json, &decl)) continue;
+            scope = sh_json_object_get(&decl, "scope");
+            def = sh_json_object_get(&decl, "default");
+            if (scope && !strcmp(scope, "\"map\""))
+                sh_json_object_set(&m->defaults, settings.members[j].key, def ? def : "false", 1);
+            sh_json_object_free(&decl);
+        }
+    }
+done:
+    sh_json_object_free(&root);
+    sh_json_object_free(&editor);
+    sh_json_object_free(&settings);
+}
+
+int sh_script_source_setting_default(const char *salt, const char *key)
+{
+    const src_mod *m = find_src(salt);
+    const char *value = m ? sh_json_object_get(&m->defaults, key) : NULL;
+    return value && !strcmp(value, "true");
+}
+
 static int (*g_foreign_allowed)(void);
 static int g_foreign_said;
 
+/* Read the map's admitted scripts and derive the session seed from their build hashes. */
 static int collect(uint64_t *seed)
 {
     char (*hashes)[SH_MODSERVE_HASH_HEX + 1] = NULL;
@@ -354,6 +402,7 @@ static int collect(uint64_t *seed)
         sh_modserve_script_files(m->salt, keep_script, m);
     }
     free(hashes);
+    if (g_nsrc) sh_modserve_each_bundle_extra(setting_defaults, NULL);
     if (seed) *seed = fnv;
     return g_nsrc;
 }

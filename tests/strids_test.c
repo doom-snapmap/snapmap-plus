@@ -573,6 +573,29 @@ static void test_localized_strings(void)
     CHECK(rearm_strings() && !count_key("blue0000_tab") && count_key(key) == 1);
 }
 
+static void test_shared_tab_labels(void)
+{
+    const char *tag = "smp_tab_644c69c9ee6421f27968e627d0106b11e7457f6c06cb6d7b0a9c5016347daa92";
+    const fake_bundle packs[] = {
+        {"amber000", "", 0, 1, "{\"editor\":{\"tabs\":{\"shared/campaign-interactables\":{\"title\":\"caption\"}}},"
+         "\"strings\":{\"en\":{\"amber000_caption\":\"Interactables\"},\"it\":{\"amber000_caption\":\"Interattivi\"}}}"},
+        {"blue0000", "", 0, 1, "{\"editor\":{\"tabs\":{\"shared/campaign-interactables\":{\"title\":\"name\"}}},"
+         "\"strings\":{\"en\":{\"blue0000_name\":\"Campaign\"}}}"},
+        {"cached00", "", 1, 1, "{\"editor\":{\"tabs\":{\"shared/campaign-interactables\":{\"title\":\"name\"}}},"
+         "\"strings\":{\"en\":{\"cached00_name\":\"Remote\"}}}"}
+    };
+    test_language = "italian";
+    sh_strids_set_language_reader(read_language);
+    set_bundles(packs, 3);
+    CHECK(rearm_strings() && count_key(tag) == 1 && !strcmp(value_for(tag), "Interattivi"));
+    set_bundles(packs + 1, 2);
+    CHECK(rearm_strings() && count_key(tag) == 1 && !strcmp(value_for(tag), "Campaign"));
+    set_bundles(packs + 2, 1);
+    CHECK(rearm_strings() && count_key(tag) == 0);
+    set_bundles(NULL, 0);
+    sh_strids_set_language_reader(NULL);
+}
+
 static void test_scope_check_many_bundles(void)
 {
     static fake_bundle many[600];
@@ -989,6 +1012,7 @@ static int synthetic_main(void)
     test_namespaced_keys();
     test_string_edits();
     test_localized_strings();
+    test_shared_tab_labels();
     test_scope_check_many_bundles();
     test_own_strings_follow_the_build();
     test_plain_map();

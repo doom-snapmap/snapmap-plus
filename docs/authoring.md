@@ -24,7 +24,8 @@ its identity and keeps its names apart from the game's and from every other mod'
 | `map-modules/` | SnapMap modules and the files the game opens beside them | snapModule |
 | `virtual-textures/` | a private virtual-texture family (`vt-baker.md`) | |
 | `atlases/decals/`, `atlases/lights/`, `atlases/transparency/` | atlas images a converter writes | |
-| `decls/<kind>/` | every other kind of decl, in a folder named as the game names the kind: `decls/damage/`, `decls/snapeditorentitydef/` (Toybox rows), `decls/breakable/` | |
+| `editor/` | Toybox tiles and tabs, property sheets, settings and translated labels | SnapMap editor |
+| `decls/<kind>/` | other declarations in a folder named for their type, such as `decls/damage/` or `decls/breakable/` | |
 | `native/` | DOOM's own files your mod changes, at DOOM's own path: `native/generated/decls/entitydef/ai/conductor.decl` | |
 
 Snapmap+ keeps the permanent ID in `mod.json` and writes build information to `.build/manifest.json`.
@@ -40,7 +41,9 @@ snapmap-plus/
 │       ├── mod.json
 │       ├── entities/
 │       ├── effects/
-│       ├── decls/
+│       ├── editor/
+│       │   ├── toybox.json
+│       │   └── strings/en.json
 │       ├── scripts/
 │       └── .build/
 │           └── manifest.json
@@ -74,10 +77,9 @@ Two installed mods can edit different fields of the same stock Toybox row or edi
 changes apply. If both set the same field differently, the mod whose salt sorts first supplies the value.
 Removing that mod reveals the remaining mod's value.
 
-To make a Toybox tab called Equipment, add `"strings": {"en": {"equipment": "Equipment"}}` to
-`mod.json`. Set `categoryNameTag = "#str_equipment";` on each Toybox row that belongs in the tab.
-The caption appears as Equipment in every game language unless you supply a translation. Other mods
-can use the same key or caption for their own tabs.
+Put your editor changes in `editor/`. Snapmap+ discovers each JSON file directly in that folder.
+You can keep everything in `editor/toybox.json` or group tiles, sheets and settings into separate files.
+The [editor authoring guide](editor.md) covers moving existing items, sharing a tab across mods and arranging property sheets.
 
 A file that is not in a folder of the mod gets one of two sentences, depending on whether DOOM holds a file at that
 path:
@@ -102,10 +104,9 @@ its kind>.`
   the game writes them.
 - The game keeps a few names that begin like one of your folders (452 under `effects/`, one under `particles/`). To
   name one of those, write `native:` before it: `native:effects/explosion`.
-- Strings: a key in `mod.json`'s `strings` is yours, and a decl names it `#str_<key>`. Reusing a key from DOOM or Snapmap+ changes the text of that existing item where your mod applies.
-  For example, `sh_category_1` names the built-in `*Custom` tab. Give a separate tab a key of its own. Put English text in `strings.en`. You can translate individual
-  keys under `it`, `fr`, `de`, `es`, `es-419`, `pt`, `pl`, `ru`, `ja` or `zh-Hant` in the same object. Keys without a
-  translation use your English text. Give the rows in one Toybox tab the same `categoryNameTag`.
+- Put English labels in `editor/strings/en.json` and translate individual keys in the corresponding language file.
+  An engine declaration refers to a key as `#str_<key>`. Reusing an existing game or Snapmap+ string key edits its caption.
+  A translation missing in the active language falls back to the English entry.
 - In a script a call that takes one of your mod's things takes its name without the folder (`play_effect("sparks",
   pos)` plays `effects/sparks.decl`, `spawn("crate", pos)` places `entities/crate.decl`); `native("...")` names
   DOOM's.
@@ -132,7 +133,8 @@ so the mod carries no binary file.
      mod.json
      entities\crate.decl
      effects\crate_sparks.decl
-     decls\snapeditorentitydef\crate.decl
+     editor\toybox.json
+     editor\strings\en.json
      scripts\crate.lua
    ```
 
@@ -142,14 +144,7 @@ so the mod carries no binary file.
    {
      "name": "Spark crate",
      "description": "A crate that throws sparks when it is hit.",
-     "author": "you",
-     "strings": {
-       "en": {
-         "crate_name": "Spark crate",
-         "crate_desc": "Throws sparks and glows when it is hit.",
-         "crate_category": "Spark crate"
-       }
-     }
+     "author": "you"
    }
    ```
 
@@ -182,22 +177,35 @@ so the mod carries no binary file.
    }
    ```
 
-5. `decls/snapeditorentitydef/crate.decl`, the crate's Toybox row (its own name and category, the game's icon):
+5. `editor/toybox.json` gives the crate a tile and a tab.
 
-   ```
+   ```json
    {
-   	inherit = "prop/prop_base";
-   	edit = {
-   		previewImage = "textures/guis/snapmaps/entity_icons/prop/crate01";
-   		categoryNameTag = "#str_crate_category";
-   		displayNameTag = "#str_crate_name";
-   		displayDescriptionTag = "#str_crate_desc";
-   		entityDef = "entities/crate";
-   	}
+     "tabs": { "crates": { "title": "crate_category" } },
+     "tiles": {
+       "crate": {
+         "entity": "entities/crate",
+         "base": "prop/prop_base",
+         "title": "crate_name",
+         "description": "crate_desc",
+         "icon": "textures/guis/snapmaps/entity_icons/prop/crate01",
+         "tab": "crates"
+       }
+     }
    }
    ```
 
-6. `scripts/crate.lua`:
+6. `editor/strings/en.json` supplies the labels.
+
+   ```json
+   {
+     "crate_name": "Spark crate",
+     "crate_desc": "Throws sparks and glows when it is hit.",
+     "crate_category": "Spark crate"
+   }
+   ```
+
+7. `scripts/crate.lua` runs the effect when the crate takes damage.
 
    ```lua
    api = 1
@@ -208,7 +216,7 @@ so the mod carries no binary file.
    end)
    ```
 
-7. Press **Refresh** in the Mods tab. The build reads every file as the game will and says in one sentence what to
+8. Press **Refresh** in the Mods tab. The build reads every file as the game will and says in one sentence what to
    change if something is wrong. Open SnapMap; the crate is in the Toybox under **Spark crate**.
 
 What the game is handed is the same files under the mod's identity: `entities/crate.decl` is served as

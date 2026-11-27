@@ -76,6 +76,40 @@ static int dt_add_kid(sh_dt *t, sh_dt_node *parent, sh_dt_node *kid)
     return 1;
 }
 
+sh_dt_node *sh_dt_member(sh_dt *t, const char *key, int block)
+{
+    sh_dt_node *n = dt_node(t);
+    if (!n) return NULL;
+    n->key_n = strlen(key);
+    n->key = dt_copy(t, key, n->key_n);
+    n->block = block;
+    n->eq = 1;
+    n->semi = !block;
+    return n->key ? n : NULL;
+}
+
+int sh_dt_append(sh_dt *t, sh_dt_node *parent, sh_dt_node *child)
+{
+    return parent && child && parent->block && dt_add_kid(t, parent, child);
+}
+
+int sh_dt_copy_child(sh_dt *t, sh_dt_node *parent, const sh_dt_node *child)
+{
+    int i;
+    sh_dt_node *n = dt_node(t);
+    if (!n) return 0;
+    *n = *child;
+    n->kids = NULL;
+    n->nkids = n->ckids = 0;
+    n->key = dt_copy(t, child->key, child->key_n);
+    if (child->name) n->name = dt_copy(t, child->name, child->name_n);
+    if (child->val) n->val = dt_copy(t, child->val, child->val_n);
+    if (t->failed) return 0;
+    for (i = 0; i < child->nkids; ++i)
+        if (!sh_dt_copy_child(t, n, child->kids[i])) return 0;
+    return dt_add_kid(t, parent, n);
+}
+
 void sh_dt_remove_child(sh_dt_node *parent, int i)
 {
     if (i < 0 || i >= parent->nkids) return;
@@ -1218,6 +1252,30 @@ int sh_dt_set_value(sh_dt *t, sh_dt_node *n, const char *val, size_t len)
     n->val = v;
     n->val_n = len;
     return 1;
+}
+
+static sh_dt_node *dt_ensure_member(sh_dt *t, sh_dt_node *parent, const char *key, int block)
+{
+    int i;
+    sh_dt_node *n;
+    if (!parent || !parent->block) return NULL;
+    n = sh_dt_child(parent, key);
+    if (n) return n->block == block ? n : NULL;
+    for (i = 0; i < parent->nkids; ++i)
+        if (dt_key_is(parent->kids[i], key)) return NULL;
+    n = sh_dt_member(t, key, block);
+    return sh_dt_append(t, parent, n) ? n : NULL;
+}
+
+sh_dt_node *sh_dt_ensure_block(sh_dt *t, sh_dt_node *parent, const char *key)
+{
+    return dt_ensure_member(t, parent, key, 1);
+}
+
+int sh_dt_assign_scalar(sh_dt *t, sh_dt_node *parent, const char *key, const char *token)
+{
+    sh_dt_node *n = dt_ensure_member(t, parent, key, 0);
+    return n && sh_dt_set_value(t, n, token, strlen(token));
 }
 
 enum { OP_SET, OP_REMOVE, OP_LIST, OP_UNLIST, OP_KEYED, OP_UNKEY, OP_BAG, OP_UNBAG, OP_BAD };

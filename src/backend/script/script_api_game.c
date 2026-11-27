@@ -538,6 +538,14 @@ static int l_entities(lua_State *L)
     return 1;
 }
 
+static int l_map_setting(lua_State *L)
+{
+    const char *key = sh_script_api_check_text(L, 1, "map_setting", "the setting ID", SH_SCRIPT_TEXT_ANY);
+    if (lua_gettop(L) != 1) return sh_script_refuse(L, "map_setting takes one setting ID");
+    lua_pushboolean(L, OP(map_setting) && g_ops.map_setting(sh_script_salt(L), key));
+    return 1;
+}
+
 void sh_script_api_game_register(void)
 {
     static int done;
@@ -548,6 +556,7 @@ void sh_script_api_game_register(void)
     sh_script_api_add(SH_SCRIPT_API_METHOD, "signal", l_signal);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "event_arguments", l_event_args);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "console_variable", l_cvar);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "map_setting", l_map_setting);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "decl", l_decl);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "entities", l_entities);
     sh_script_api_add_opener(open_decl);
@@ -562,6 +571,8 @@ void sh_script_api_game_register(void)
 #include "../engine_globals.h"
 #include "../engine_build.h"
 #include "../engine_cvar_read.h"
+#include "../map_settings.h"
+#include "script_source.h"
 #include "../typeinfo.h"
 #include "script_walk.h"
 #include <shlobj.h>
@@ -801,11 +812,16 @@ void sh_script_game_cvar_recover_poll(void)
     DeleteFileW(path);
 }
 
+static int g_map_setting(const char *salt, const char *key)
+{
+    return sh_map_settings_bool(salt, key, sh_script_source_setting_default(salt, key));
+}
+
 int sh_script_api_game_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     static const sh_script_game_ops ops = {
         g_decl_name, g_signal_number, g_signal_fire, g_cvar_get, g_cvar_set_text, sh_script_combat_decl, g_decl_class,
-        g_cvar_archived, g_cvar_journal
+        g_cvar_archived, g_cvar_journal, g_map_setting
     };
     sh_script_api_game_register();
     sh_script_api_game_set(&ops);

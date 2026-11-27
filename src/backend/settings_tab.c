@@ -35,10 +35,13 @@ int sh_settings_tab_check_clear(uintptr_t call,uintptr_t clear)
 
 #ifndef SH_SETTINGS_TAB_PURE
 #include "grid_room_editor.h"
+#include "editor_settings.h"
 #include "hook.h"
 #include "patch.h"
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 
 void backend_log(const char *message);
@@ -92,7 +95,7 @@ static void *g_editor,*g_map,*g_panel,*g_manager;
 static int g_session,g_count=2,g_inject;
 
 typedef struct group_slot {sh_settings_group desc;int active;} group_slot;
-static group_slot g_groups[SH_SETTINGS_TAB_MAX_GROUPS];
+static group_slot *g_groups;
 static int g_group_count;
 
 typedef struct row_slot {
@@ -100,13 +103,17 @@ typedef struct row_slot {
     int group;
     void *widget;
 } row_slot;
-static row_slot g_rows[SH_SETTINGS_TAB_MAX_ROWS];
-static int g_row_count;
+static row_slot *g_rows;
+static int g_row_count, g_row_capacity;
 struct sh_settings_rows {void *panel;int group;};
 
 int sh_settings_tab_register_group(const sh_settings_group *group)
 {
-    if(!group||!group->populate||g_group_count>=SH_SETTINGS_TAB_MAX_GROUPS)return 0;
+    group_slot *groups;
+    if (!group || !group->populate || g_session || g_group_count == INT_MAX) return 0;
+    groups = (group_slot *)realloc(g_groups, (1u + (size_t)g_group_count) * sizeof *groups);
+    if (!groups) return 0;
+    g_groups = groups;
     g_groups[g_group_count].desc=*group;g_groups[g_group_count].active=0;g_group_count++;
     return 1;
 }
@@ -146,7 +153,16 @@ int sh_settings_tab_add_bool(sh_settings_rows *rows,const sh_settings_bool *row,
     if(!rows||!row||!draft||!base||!g_toggle||!g_hash)return 0;
     for(i=0;i<g_row_count;i++)if(g_rows[i].draft==draft)break;
     if(i==g_row_count) {
-        if(g_row_count>=SH_SETTINGS_TAB_MAX_ROWS)return 0;
+        if (g_row_count == g_row_capacity) {
+            int cap;
+            row_slot *next;
+            if (g_row_capacity > INT_MAX / 2) return 0;
+            cap = g_row_capacity ? g_row_capacity * 2 : 32;
+            next = (row_slot *)realloc(g_rows, (size_t)cap * sizeof *next);
+            if (!next) return 0;
+            g_rows = next;
+            g_row_capacity = cap;
+        }
         g_row_count++;
     }
     memset(&g_rows[i],0,sizeof g_rows[i]);
@@ -256,6 +272,7 @@ static void leave(void *state,void *editor)
     for(i=0;i<g_group_count;i++)g_groups[i].active=0;
     g_session=0;g_panel=NULL;g_map=NULL;g_row_count=0;g_count=2;
     g_exit(state,editor);
+    sh_editor_settings_after_close();
 }
 
 static int changed(void *panel,void *widget,int action)
@@ -263,7 +280,7 @@ static int changed(void *panel,void *widget,int action)
     unsigned id;int handled=0;(void)action;
     __try {
         id=*(unsigned*)((unsigned char*)widget+0x40);
-        if(id<ROW_ID_BASE||id>=ROW_ID_BASE+SH_SETTINGS_TAB_MAX_ROWS)return 0;
+        if (id < ROW_ID_BASE || id - ROW_ID_BASE >= (unsigned)g_row_count) return 0;
         handled=1;id-=ROW_ID_BASE;
         if(active()&&panel==g_panel&&(int)id<g_row_count&&widget==g_rows[id].widget) {
             row_slot *r=&g_rows[id];

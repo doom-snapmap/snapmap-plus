@@ -60,28 +60,43 @@ static unsigned char tl_category_matches(const unsigned char *row)
     return tl_category_tag(row) == g_category_tag;
 }
 
-unsigned char *sh_tl_category_end(unsigned char *first, unsigned char *end, sh_tl_partition partition)
+static unsigned char *tl_group_tag(unsigned char *first, unsigned char *end, uint32_t tag, sh_tl_partition partition)
 {
     static const unsigned char keep = 1;
     const sh_tl_predicate predicate = { &keep, tl_category_matches };
     unsigned char *row, *boundary;
-    uint32_t tag, saved;
-    if (first == end) return end;
-    tag = tl_category_tag(first);
-    for (row = first + SH_TL_PALETTE_STRIDE; row < end; row += SH_TL_PALETTE_STRIDE) {
-        uint32_t next = tl_category_tag(row);
-        if (next < tag) tag = next;
-    }
+    uint32_t saved;
     for (boundary = first; boundary < end && tl_category_tag(boundary) == tag; boundary += SH_TL_PALETTE_STRIDE) {}
     for (row = boundary; row < end; row += SH_TL_PALETTE_STRIDE)
         if (tl_category_tag(row) == tag) {
+            if (!partition) return NULL;
             saved = g_category_tag;
             g_category_tag = tag;
             __try { boundary = partition(boundary, end, &predicate); }
             __finally { g_category_tag = saved; }
             break;
         }
+    return boundary;
+}
+
+unsigned char *sh_tl_category_end(unsigned char *first, unsigned char *end, sh_tl_partition partition)
+{
+    unsigned char *row, *boundary;
+    uint32_t tag;
+    if (first == end) return end;
+    tag = tl_category_tag(first);
+    for (row = first + SH_TL_PALETTE_STRIDE; row < end; row += SH_TL_PALETTE_STRIDE) {
+        uint32_t next = tl_category_tag(row);
+        if (next < tag) tag = next;
+    }
+    boundary = tl_group_tag(first, end, tag, partition);
     return boundary ? boundary : end;
+}
+
+unsigned char *sh_tl_first_custom(unsigned char *first, unsigned char *end, sh_tl_partition partition)
+{
+    /* DOOM's string ID for #str_sh_category_1 is identical in every language. */
+    return tl_group_tag(first, end, 0x6c261296u, partition);
 }
 
 #include <windows.h>
@@ -361,8 +376,16 @@ static unsigned char *tl_partition_category(unsigned char *first, unsigned char 
 
 static unsigned char *tl_category_bound(unsigned char *first, unsigned char *end, const void *key)
 {
-    unsigned char *bound = g_category_orig(first, end, key);
-    return sh_tl_category_end(first, bound, tl_partition_category);
+    static __declspec(thread) unsigned char *expected_next, *range_end;
+    unsigned char *bound = NULL;
+    /* The native heading loop advances to our last boundary. Move Custom once per visible range. */
+    if (first != expected_next || end != range_end)
+        bound = sh_tl_first_custom(first, end, tl_partition_category);
+    if (!bound || bound == first)
+        bound = sh_tl_category_end(first, g_category_orig(first, end, key), tl_partition_category);
+    expected_next = bound == end ? NULL : bound;
+    range_end = end;
+    return bound;
 }
 static volatile LONG g_sorts, g_sorts_unscoped;
 

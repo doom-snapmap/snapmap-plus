@@ -7,6 +7,13 @@
 #include "../src/backend/script/script_hooks.c"
 #include "../src/backend/script/script_source.c"
 
+int sh_modserve_each_bundle_extra(sh_modserve_extra_fn callback, void *context)
+{
+    (void)callback;
+    (void)context;
+    return 0;
+}
+
 static int g_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
 

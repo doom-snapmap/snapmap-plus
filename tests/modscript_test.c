@@ -6,6 +6,7 @@
  *
  *   modscript_test.exe <tests\fixtures\scripts> */
 #include "cache_paths.h"
+#include "../src/backend/config_json.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -751,6 +752,9 @@ static void test_scripts_setting_at_open(void)
     _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\src\\comp-door", g_tmp);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\storeForeign", g_tmp);
     mt_write(src, "mod.json", MOD_JSON);
+    mt_write(src, "editor\\settings.json", "{\"settings\":{"
+        "\"ownDefault\":{\"title\":\"#str_snapproperty_variable_name\",\"scope\":\"map\",\"default\":true},"
+        "\"privatePref\":{\"title\":\"#str_snapproperty_variable_name\",\"scope\":\"editor\",\"default\":true}}}");
     mt_write(src, DEF, "{\r\n}");
     mt_write(src, ENTRY, GOOD_ENTRY);
     mt_write(src, LIB, "return { name = \"door_input\" }\n");
@@ -763,7 +767,17 @@ static void test_scripts_setting_at_open(void)
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", root, name);
     json = (char *)sh_mb_read_file(path, 1u << 20, &len);
     CHECK(json != NULL);
-    if (json) mt_write(comp, "mod.json", json);
+    if (json) {
+        sh_json_object desc = {0};
+        char *with_defaults = NULL;
+        CHECK(sh_json_parse_object(json, len, 64, &desc));
+        CHECK(sh_json_object_set(&desc, "mapSettingDefaults", "{\"pinnedDefault\":true}", 4));
+        with_defaults = sh_json_serialize_object(&desc, 0, NULL);
+        CHECK(with_defaults != NULL);
+        if (with_defaults) mt_write(comp, "mod.json", with_defaults);
+        free(with_defaults);
+        sh_json_object_free(&desc);
+    }
     free(json);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\" SH_MB_BUILD_MANIFEST, root, name);
     json = (char *)sh_mb_read_file(path, 1u << 20, &len);
@@ -785,11 +799,14 @@ static void test_scripts_setting_at_open(void)
     hashes[0] = b.hash;                       /* the player's own folder */
     CHECK(sh_modserve_scope_set(hashes, 1, 1) >= 0);
     CHECK(sh_script_source_map_mods(mods, 4) == 1 && !strcmp(mods[0].salt, SALT));
+    CHECK(sh_script_source_setting_default(SALT, "ownDefault") && !sh_script_source_setting_default(SALT, "privatePref"));
+    CHECK(!sh_script_source_setting_default(SALT, "pinnedDefault"));
     g_foreign_on = 1;
     hashes[0] = COMP;
     CHECK(sh_modserve_scope_set(hashes, 1, 1) >= 0);
     CHECK(sh_script_source_map_mods(mods, 4) == 1);
 
+    CHECK(sh_script_source_setting_default(SALT, "pinnedDefault") && !sh_script_source_setting_default(SALT, "ownDefault"));
     sh_script_source_set_policy(NULL);
     (void)sh_modserve_scope_set(NULL, 0, 0);
     sh_modserve_scope_enable(0);

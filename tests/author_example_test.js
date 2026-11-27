@@ -9,7 +9,7 @@ const section = guide.match(/^## A small mod from an empty folder\n([\s\S]*?)(?=
 const files = [...section.matchAll(/^\d+\. `([\w./-]+)`[^\n]*(?:\n(?!\d+\. |   ```)[^\n]*)*?\n   ```[^\n]*\n([\s\S]*?)^   ```/gm)];
 assert.deepEqual(files.map(file => file[1]), [
   'mod.json', 'entities/crate.decl', 'effects/crate_sparks.decl',
-  'decls/snapeditorentitydef/crate.decl', 'scripts/crate.lua',
+  'editor/toybox.json', 'editor/strings/en.json', 'scripts/crate.lua',
 ]);
 
 const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'smp-author-example-'));

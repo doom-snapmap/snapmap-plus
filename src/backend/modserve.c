@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 #include "modserve.h"
 #include "mod_paths.h"
 #include "composition_path.h"
@@ -23,6 +25,9 @@
 #include "modstore.h"
 #include "modregistry.h"
 #include "decl_tree.h"
+#include "editor_ids.h"
+#include "editor_sheets.h"
+#include "overrides_baked.h"
 #include "direct_actor.h"
 #include "config_json.h"
 #include "backend_log.h"
@@ -90,6 +95,8 @@ typedef struct ms_file {
     /* Registries (modregistry.h, ms_registry_files): a synthetic file per registry path, of the product's
      * pseudo-bundle, never "served"; reached from its path's winner, or the path's key with no other file. */
     int registry;                         /* a registry's synthetic file: 1 + its position among them, else 0 */
+    struct ms_layout_row *layout;
+    int layout_anchor;                    /* an installed layout editing a stock row with no mod provider */
     int registry_keyed;                   /* that file is the key of its path */
     int registry_of;                      /* a winner at a registry's path: 1 + that registry's file, else 0 */
     /* A decl at a game name with other bytes: an edited copy whose derived edits the product block records
@@ -191,6 +198,8 @@ typedef struct ms_index {
     char *root;                           /* the mods folder read (malloc'd) */
     char *cache;                          /* the profile cache beside the mods folder */
     ms_chunk *arena;
+    struct ms_layout_row *layouts; int nlayouts, installed_layouts;
+    struct ml_stock_entry *layout_stock[127];
     ms_bundle *bundles; int nbundles, cbundles;
     ms_file *files; int nfiles, cfiles;
     ms_need *needs; int nneeds, cneeds;
@@ -356,7 +365,7 @@ static void ms_index_free(ms_index *x)
 
 /* A surface: a stock pointer at the game's own path (modbundle.h sh_mb_stock_restore). Only the gated reload
  * touches one, loading a surface model or image again when the game loaded it before its requirements were live. */
-static int ms_surface(const ms_file *f) { return f->is_restore != 0; }
+static int ms_surface(const ms_file *f) { return f->is_restore && !f->layout; }
 
 static __inline char ms_fold(char c)
 {
@@ -819,7 +828,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         }
     }
     {
-        char *disk = sh_textf("%s\\%s", b->dir, path), *p;
+        char *disk = b->place ? sh_textf("%s\\%s", b->dir, path) : sh_mb_payload_path(b->dir, path), *p;
         for (p = disk; p && *p; ++p) if (*p == '/') *p = '\\';
         f->disk = disk ? ms_strdup(x, disk) : NULL;
         free(disk);
@@ -975,13 +984,16 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     double format = -1, manifest_format = -1, built = 0;
     ms_text extra = { NULL, 0, 0, 0 };
     if (!(path = sh_textf("%s\\mod.json", b->dir))) { ms_fail(b, "out of memory"); return; }
-    text = sh_mb_read_file(path, MS_ANY_SIZE, &len);
+    text = b->place ? sh_mb_read_file(path, MS_ANY_SIZE, &len) : (unsigned char *)sh_mb_read_editor_source(b->dir, &len);
     if (!text) {
         char *pkg = sh_textf("%s\\package.json", b->dir);
-        if (ms_file_size(path) >= 0)
-            ms_fail(b, "mod.json could not be read (it may be open in another program). Close it and press Refresh.");
+        char *cause = !b->place && g_build_cause ? g_build_cause(b->dir) : NULL;
+        if (cause) ms_fail(b, "%s", cause);
+        else if (ms_file_size(path) >= 0)
+            ms_fail(b, "The mod's author files could not be read. Check mod.json and editor/, then press Refresh.");
         else if (pkg && ms_file_size(pkg) >= 0) ms_fail(b, SH_MB_EARLIER);
         else ms_fail(b, "This folder has no mod.json. Add one (New mod writes an example) and press Refresh.");
+        free(cause);
         free(pkg);
         free(path);
         return;
@@ -2120,6 +2132,13 @@ static char *ms_compose(const unsigned char *const *texts, const size_t *lens, i
 
 static int ms_static_before(const ms_index *x, int a, int b);
 
+static const ov_baked_decl_t *ms_baked_tile(const char *request)
+{
+    for (size_t i = 0; i < sizeof g_ov_baked_decls / sizeof *g_ov_baked_decls; i++)
+        if (!strcmp(request, g_ov_baked_decls[i].name)) return &g_ov_baked_decls[i];
+    return NULL;
+}
+
 /* Stock editor declarations are whole author copies. A field a mod left at its stock value claims nothing. */
 static char *ms_compose_editor(const ms_index *x, const int *files, int n, size_t *len)
 {
@@ -2131,8 +2150,11 @@ static char *ms_compose_editor(const ms_index *x, const int *files, int n, size_
     sh_dt_source *src = NULL;
     int *order = NULL, used = 0;
     sh_dt *tree;
-    if (sh_mb_stock_identify(request, sha, &size) != SH_MB_STOCK_OK ||
-        sh_mb_stock_read(request, sha, &stock, &slen, request, NULL) != SH_MB_STOCK_OK) return NULL;
+    const ov_baked_decl_t *baked = ms_baked_tile(request);
+    if (!baked && (sh_mb_stock_identify(request, sha, &size) != SH_MB_STOCK_OK ||
+        sh_mb_stock_read(request, sha, &stock, &slen, request, NULL) != SH_MB_STOCK_OK)) return NULL;
+    const char *base = baked ? baked->text : (const char *)stock;
+    if (baked) slen = baked->len;
     src = (sh_dt_source *)calloc((size_t)n, sizeof *src);
     order = (int *)malloc((size_t)n * sizeof *order);
     if (!src || !order) goto done;
@@ -2153,7 +2175,7 @@ static char *ms_compose_editor(const ms_index *x, const int *files, int n, size_
         if (used && !strcmp(b->id, src[used-1].key)) continue;
         raw = ms_file_raw(f, &rlen);
         if (!raw) goto done;
-        one = sh_dt_diff(request, (const char *)stock, slen, (const char *)raw, rlen, NULL, cause, sizeof cause);
+        one = sh_dt_diff(request, base, slen, (const char *)raw, rlen, NULL, cause, sizeof cause);
         HeapFree(GetProcessHeap(), 0, raw);
         if (!one) goto done;
         el = strlen(one);
@@ -2165,13 +2187,13 @@ static char *ms_compose_editor(const ms_index *x, const int *files, int n, size_
         src[used].edits = array;
         src[used++].edits_len = el + 2;
     }
-    tree = sh_dt_apply(request, (const char *)stock, slen, src, used, NULL, 0, NULL);
+    tree = sh_dt_apply(request, base, slen, src, used, NULL, 0, NULL);
     if (tree) { text = sh_dt_text(tree, len); sh_dt_free(tree); }
 done:
     for (int i = 0; i < used; i++) free((void *)src[i].edits);
     free(order);
     free(src);
-    HeapFree(GetProcessHeap(), 0, stock);
+    if (stock) HeapFree(GetProcessHeap(), 0, stock);
     return text;
 }
 
@@ -2681,7 +2703,7 @@ static void ms_mark_editor_closure(ms_index *x)
  * game's bytes answer; with map scope off the static winner serves. Read lock-free. */
 static int ms_scoped(const ms_index *x, int f)
 {
-    if (!InterlockedCompareExchange((volatile LONG *)&g_scope_on, 0, 0)) return f;
+    if (!x->files[f].layout && !InterlockedCompareExchange((volatile LONG *)&g_scope_on, 0, 0)) return f;
     return (int)InterlockedCompareExchange((volatile LONG *)&x->files[f].scope_alt, 0, 0);
 }
 
@@ -2698,10 +2720,13 @@ static const ms_file *ms_serving_file(const ms_index *x, int f)
  * static composition from every provider with it off. */
 static const unsigned char *ms_original_body(const ms_file *f, size_t *len)
 {
-    if (InterlockedCompareExchange((volatile LONG *)&g_scope_on, 0, 0)) {
+    int scoped = InterlockedCompareExchange((volatile LONG *)&g_scope_on, 0, 0) != 0;
+    if (scoped || f->layout) {
         const ms_body *b = (const ms_body *)InterlockedCompareExchangePointer((PVOID volatile *)&f->scope_body, NULL, NULL);
-        *len = b ? b->len : 0;
-        return b ? b->p : NULL;
+        if (scoped || b) {
+            *len = b ? b->len : 0;
+            return b ? b->p : NULL;
+        }
     }
     *len = f->body_len;
     return f->body;
@@ -2935,9 +2960,9 @@ static void ms_diff(ms_index *x, const ms_index *old)
     for (i = 0; i < x->nfiles; ++i) {
         ms_file *f = &x->files[i];
         int o, kind;
-        if (!f->served || !x->bundles[f->bundle].admitted) continue;
+        if (!(f->layout_anchor && f->registry_keyed) && (!f->served || !x->bundles[f->bundle].admitted)) continue;
         o = old->nkeys ? ms_find(old->slots, old->mask, f->request) : -1;
-        if (o >= 0 && !old->files[o].served) o = -1;
+        if (o >= 0 && !old->files[o].served && !old->files[o].layout_anchor) o = -1;
         if (o < 0) {
             d->added++;
             if (f->ptype && !strcmp(f->ptype, "script")) d->changed_scripts++;
@@ -2983,9 +3008,9 @@ static void ms_diff(ms_index *x, const ms_index *old)
     for (i = 0; i < old->nfiles; ++i) {
         const ms_file *of = &old->files[i];
         int n;
-        if (!of->served || !old->bundles[of->bundle].admitted) continue;
+        if (!(of->layout_anchor && of->registry_keyed) && (!of->served || !old->bundles[of->bundle].admitted)) continue;
         n = x->nkeys ? ms_find(x->slots, x->mask, of->request) : -1;
-        if (n >= 0 && x->files[n].served) continue;
+        if (n >= 0 && (x->files[n].served || x->files[n].layout_anchor)) continue;
         d->gone++;
         /* A shadow the map scope had withdrawn: the engine holds the game's bytes already. */
         if (of->is_shadow && !of->is_restore && ms_scoped(old, i) < 0) continue;
@@ -3026,7 +3051,7 @@ static void ms_diff(ms_index *x, const ms_index *old)
         int n;
         if (!InterlockedCompareExchange((volatile LONG *)&g->pending, 0, 0)) continue;
         n = x->nkeys ? ms_find(x->slots, x->mask, g->request) : -1;
-        if (n >= 0 && x->files[n].served) continue;
+        if (n >= 0 && (x->files[n].served || x->files[n].layout_anchor)) continue;
         (void)ms_add_gone(x, &cap, g->type, g->name, g->request, g->bundle_id, g->is_shadow, 1);
     }
 }
@@ -3834,6 +3859,8 @@ static ms_body *ms_reg_body(const ms_index *x, int file)
     return m && k >= 0 && k < x->reg_count ? m->body[k] : NULL;
 }
 
+#include "editor_layout.inc"
+
 /* An encounter or score decl served with the assigned spawn-type bits, or NULL. */
 static ms_body *ms_reg_rewrite(const ms_index *x, int file)
 {
@@ -4051,6 +4078,12 @@ static int ms_scope_compute(ms_index *x, int mark)
             ms_body *rw = ms_reg_rewrite(x, best);
             if (rw) body = rw;
         }
+        if (f->layout) {
+            f->layout->source = best;
+            f->layout->source_body = body;
+            f->scope_why = why;
+            continue;
+        }
         was = InterlockedCompareExchange(&f->scope_alt, 0, 0);
         was_body = was >= 0 && was < x->nfiles ?
             (ms_body *)InterlockedCompareExchangePointer((PVOID volatile *)&x->files[was].scope_body, NULL, NULL) : NULL;
@@ -4085,14 +4118,19 @@ static int ms_scope_compute(ms_index *x, int mark)
     }
     if (h_cand != s_cand) { free(h_cand); free(h_ok); }
     /* A registry path no bundle carries: its synthetic file is the key. */
-    for (i = x->reg_first; x->reg_count && i < x->reg_first + x->reg_count; ++i) {
+    for (i = x->reg_first; i < x->nfiles; ++i) {
         ms_file *f = &x->files[i];
         ms_body *body, *was_body;
         LONG was;
         int best;
         if (!f->registry_keyed) continue;
-        body = on ? ms_reg_body(x, i) : NULL;
+        body = on && f->registry ? ms_reg_body(x, i) : NULL;
         best = body ? i : -1;
+        if (f->layout) {
+            f->layout->source = best;
+            f->layout->source_body = body;
+            continue;
+        }
         was = InterlockedCompareExchange(&f->scope_alt, 0, 0);
         was_body = was >= 0 ? (ms_body *)InterlockedCompareExchangePointer((PVOID volatile *)&f->scope_body, NULL, NULL) : NULL;
         (void)InterlockedExchangePointer((PVOID volatile *)&f->scope_body, body);
@@ -4104,10 +4142,34 @@ static int ms_scope_compute(ms_index *x, int mark)
         InterlockedExchange(&f->refresh, 1);
         marked++;
     }
+    for (i = 0; i < x->nlayouts; i++) marked += ml_select_row(x, &x->layouts[i], on, play, mark);
     if (av_built) free(av.keys);
     if (marked) InterlockedExchange(&x->expanded, 0);
     /* A new selection can break or restore a dependency. Recompose any affected registry entries. */
     if (ms_update_refusals(x)) changed += ms_scope_compute(x, mark);
+    return changed;
+}
+
+int sh_modserve_editor_preferences_changed(void)
+{
+    int changed = 0;
+    AcquireSRWLockExclusive(&g_build_lock);
+    AcquireSRWLockExclusive(&g_scope_lock);
+    ms_index *x = g_index;
+    for (int i = 0; x && i < x->nlayouts; i++) {
+        ms_layout_row *row = &x->layouts[i];
+        if (!row->nsheets) continue;
+        uint64_t key = sh_editor_sheets_preferences_key(row->sheets, row->nsheets);
+        if (key == row->preferences) continue;
+        row->preferences = key;
+        changed += ml_select_row(x, row, g_scope_on != 0, g_scope_open && g_scope_play, 1);
+    }
+    if (changed) {
+        if (x->diff.changed_rows < changed) x->diff.changed_rows = changed;
+        InterlockedExchange(&x->expanded, 0);
+    }
+    ReleaseSRWLockExclusive(&g_scope_lock);
+    ReleaseSRWLockExclusive(&g_build_lock);
     return changed;
 }
 
@@ -5052,7 +5114,7 @@ int sh_modserve_index_build(const char *mods_root)
     ms_respelled(x);
     ms_bank_stems(x);
     ms_mark_edits(x);
-    if (!ms_resolve(x) || !ms_registry_files(x) || !ms_build_tables(x)) {
+    if (!ms_resolve(x) || !ms_registry_files(x) || !ml_build(x) || !ms_build_tables(x)) {
         ReleaseSRWLockExclusive(&g_build_lock);
         ms_log("index refused: out of memory; the previous table stays");
         ms_index_free(x);
@@ -5204,7 +5266,7 @@ int sh_modserve_index_rescan(void)
 int sh_modserve_active(void)
 {
     const ms_index *x = g_index;
-    return x && x->served_files > 0;   /* a registry's synthetic file is not a mod's */
+    return x && (x->served_files > 0 || x->installed_layouts > 0);   /* a registry's synthetic file is not a mod's */
 }
 
 /* ------------------------------------------------------------------ serve */
@@ -5218,7 +5280,8 @@ static const ms_file *ms_lookup_file_ex(const ms_index **out_index, const char *
     __except (EXCEPTION_EXECUTE_HANDLER) { f = -1; }
     if (f < 0) return NULL;
     /* A registry's synthetic file has bytes only for a listing. */
-    if (x->files[f].registry && (!scoped || !InterlockedCompareExchange(&g_scope_on, 0, 0))) return NULL;
+    if (x->files[f].layout_anchor && !scoped) return NULL;
+    if (x->files[f].registry && (!scoped || (!x->files[f].layout && !InterlockedCompareExchange(&g_scope_on, 0, 0)))) return NULL;
     /* Map scope: a shadow path whose providers the current map does not list
      * is withdrawn; one it lists serves when the winner's bundle is not. */
     if (scoped && (f = ms_scoped(x, f)) < 0) return NULL;
@@ -9343,7 +9406,7 @@ static int ms_extra_order(const void *a, const void *b)
     return c;
 }
 
-int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context)
+static int ms_each_extra(sh_modserve_extra_fn fn, void *context, int local)
 {
     static SRWLOCK order_lock = SRWLOCK_INIT;
     const ms_index *x = g_index;
@@ -9352,7 +9415,7 @@ int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context)
     order = (int *)malloc(sizeof(int) * (size_t)(x->nbundles ? x->nbundles : 1));
     if (!order) return -1;
     for (i = 0; i < x->nbundles; ++i)
-        if (x->bundles[i].admitted && x->bundles[i].extra) order[n++] = i;
+        if (x->bundles[i].admitted && x->bundles[i].extra && (!local || !x->bundles[i].place)) order[n++] = i;
     /* qsort has no context argument; the lock keeps the comparator's index
      * pointer to one caller at a time. */
     AcquireSRWLockExclusive(&order_lock);
@@ -9366,6 +9429,16 @@ int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context)
     }
     free(order);
     return n;
+}
+
+int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context)
+{
+    return ms_each_extra(fn, context, 0);
+}
+
+int sh_modserve_each_local_editor(sh_modserve_extra_fn fn, void *context)
+{
+    return ms_each_extra(fn, context, 1);
 }
 
 int sh_modserve_each_bundle_registries(sh_modserve_registries_fn fn, void *context)
@@ -9463,8 +9536,8 @@ int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context)
         for (i = 0; i < x->nfiles; ++i) {
             ms_file *f = (ms_file *)&x->files[i], *ef;
             int eff;
-            if (f->rank != rank || !f->is_decl || f->is_restore || !f->served || f->withdrawn ||
-                !x->bundles[f->bundle].admitted || !f->ptype || !f->pname || (eff = ms_scoped(x, i)) < 0)
+            if (f->rank != rank || !f->is_decl || ms_surface(f) || ((!f->layout_anchor && !f->served) || !ms_live(x, f)) || f->withdrawn ||
+                !f->ptype || !f->pname || (eff = ms_scoped(x, i)) < 0)
                 continue;
             ef = (ms_file *)&x->files[eff];   /* the provider that serves the path for the open map */
             /* A mod's own decl (not a shadow) is offered only when it was read before its requirements were live and

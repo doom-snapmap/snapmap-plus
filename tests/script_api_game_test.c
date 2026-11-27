@@ -189,8 +189,13 @@ static void *g_decl(const char *type, const char *name)
     return !strcmp(name, g_enc.name) ? &g_enc : !strcmp(name, g_enc2.name) ? &g_enc2 : NULL;
 }
 static const char *g_decl_class(const char *type) { return !strcmp(type, "snapAIEncounter") ? "idDeclSnapAIEncounter" : NULL; }
+static int g_map_setting(const char *salt, const char *key)
+{
+    CHECK(!strcmp(salt, SALT));
+    return !strcmp(key, "other");
+}
 static const sh_script_game_ops k_gops = { g_decl_name_of, g_signal_number, g_signal_fire, g_cvar_get, g_cvar_set, g_decl,
-                                           g_decl_class, g_cvar_archived, g_cvar_journal };
+                                           g_decl_class, g_cvar_archived, g_cvar_journal, g_map_setting };
 
 static int t_ent(lua_State *L)
 {
@@ -385,6 +390,8 @@ static void require_value(const char *name, const char *value)
 
 static void test_cvars(void)
 {
+    run("api = 1\nprint('map values', map_setting('night'), map_setting('other'), map_setting('unset'))\n");
+    CHECK(has(log_now(), "map values\tfalse\ttrue\tfalse"));
     run("api = 1\n"
         "print('read', console_variable('g_gravity'), console_variable('ai_name'), console_variable('g_scale'), math.type(console_variable('g_gravity')))\n"
         "print('set', console_variable('g_gravity', 400), console_variable('ai_name', 'tyrant'), console_variable('g_scale', true))\n"

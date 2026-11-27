@@ -77,6 +77,8 @@ int sh_native_json_parse_object(const char *json, size_t length, unsigned max_de
                                 sh_json_object *out);
 int sh_native_json_decode_string(const char *json, size_t length,
                                  char *out, size_t out_capacity, size_t *out_length);
+struct sh_text_buf;
+void sh_json_append_quoted(struct sh_text_buf *out, const char *bytes, size_t length);
 char *sh_json_serialize_object(const sh_json_object *object,
                                unsigned base_indent, size_t *out_length);
 void sh_json_object_free(sh_json_object *object);

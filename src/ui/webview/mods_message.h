@@ -23,6 +23,7 @@ inline const wchar_t *action_name(int action)
     case SH_MODS_ACT_CHOOSE:             return L"chooseRegistry";
     case SH_MODS_ACT_FILES:              return L"modFiles";
     case SH_MODS_ACT_FILE_TEXT:          return L"modFileText";
+    case SH_MODS_ACT_EDITOR_IDS:         return L"editorIds";
     case SH_MODS_ACT_NEW_MOD:            return L"newMod";
     case SH_MODS_ACT_ADD_MINE:           return L"addToMine";
     case SH_MODS_ACT_CONTENT:            return L"content";
@@ -39,7 +40,7 @@ inline int action_code(const std::wstring &name)
                                  SH_MODS_ACT_UNINSTALL_PREVIEW, SH_MODS_ACT_MAP_REMOVE, SH_MODS_ACT_MAP_REMOVE_PREVIEW,
                                  SH_MODS_ACT_MAP_ADD, SH_MODS_ACT_CHOOSE, SH_MODS_ACT_FILES, SH_MODS_ACT_FILE_TEXT,
                                  SH_MODS_ACT_NEW_MOD, SH_MODS_ACT_ADD_MINE, SH_MODS_ACT_CONTENT, SH_MODS_ACT_MAP_UPDATE,
-                                 SH_MODS_ACT_KEY };
+                                 SH_MODS_ACT_KEY, SH_MODS_ACT_EDITOR_IDS };
     for (int code : codes)
         if (!name.empty() && name == action_name(code)) return code;
     return 0;

@@ -37,6 +37,7 @@ typedef struct sh_tl_predicate {
 typedef unsigned char *(*sh_tl_partition)(unsigned char *first, unsigned char *end, const sh_tl_predicate *predicate);
 /* Split a native equal-caption span by its category tag while preserving the item order within each heading. */
 unsigned char *sh_tl_category_end(unsigned char *first, unsigned char *end, sh_tl_partition partition);
+unsigned char *sh_tl_first_custom(unsigned char *first, unsigned char *end, sh_tl_partition partition);
 
 /* Generated actor rows resolve map references but have no Add Object tile. */
 int sh_tl_picker_offers(int placeable, const char *row);

@@ -171,6 +171,69 @@ static void test_keys(void)
     CHECK(!sh_unit_enumerated_type("entityDef"));
 }
 
+static void test_editor_source(const char *top)
+{
+    char folder[MAX_PATH * 2], old_hash[65] = "", *source, *cause = NULL, *physical;
+    size_t len;
+    sh_mb_bundle b, loaded;
+    sh_unit u;
+    const char *logical = "decls/snapeditorentitydef/frame.decl";
+    const char *layout = "{\"tiles\":{\"frame\":{\"entity\":\"entities/crate\",\"title\":\"tile\","
+        "\"template\":\"editor/templates/frame.decl\",\"tab\":\"shared/tools\"}}}";
+    const char *native = "{ edit = { entityDef = \"entities/crate\"; displayNameTag = \"#str_tile\"; "
+        " inputs = { num = 1; item[0] = \"action/utils/show\"; } } }\n";
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\editor", top);
+    mt_write(folder, "mod.json", "{\"name\":\"Crates\"}");
+    mt_write(folder, "entities\\crate.decl", "{ inherit = \"snapmaps/props/crate\"; edit = { } }");
+    mt_write(folder, "editor\\templates\\frame.decl", native);
+    mt_write(folder, "editor\\strings\\en.json", "{\"tile\":\"Frame\",\"tab\":\"Tools\",\"other\":\"Hidden\"}");
+    mt_write(folder, "editor\\strings\\it.json", "{\"tile\":\"Cornice\"}");
+    mt_write(folder, "editor\\tiles.json", layout);
+    mt_write(folder, "editor\\groups.json", "{\"tabs\":{\"shared/tools\":{\"title\":\"tab\"}},"
+             "\"tiles\":{\"unknown/unknown\":{\"tab\":\"shared/tools\",\"order\":-4}}}");
+    mt_write(folder, "editor\\native\\generated\\decls\\snapeditorentitydef\\unknown\\unknown.decl",
+             "{ edit = { entityDef = \"entities/crate\"; } }");
+    if (!build(folder, &b)) { sh_mb_free(&b); return; }
+    CHECK(sh_mb_write(&b, folder, &cause));
+    CHECK(b.extra && strstr(b.extra, SALT "_tile") && strstr(b.extra, "\"unknown/unknown\""));
+    physical = sh_mb_payload_path(folder, logical);
+    source = physical ? (char *)sh_mb_read_file(physical, (size_t)-1, &len) : NULL;
+    CHECK(physical && strstr(physical, ".build\\tile-") && source && !strcmp(source, native));
+    free(source); free(physical);
+    CHECK(sh_mb_load_folder(folder, &loaded) && loaded.validated && !strcmp(b.hash, loaded.hash));
+    sh_mb_free(&loaded);
+    CHECK(unit(&b, folder, "mods/" SALT "/frame", &u));
+    if (u.manifest) {
+        CHECK(kept(&b, &u, "native/generated/decls/snapeditorentitydef/unknown/unknown.decl") == 0);
+        CHECK(kept(&b, &u, logical) == 1 && kept(&b, &u, "entities/crate.decl") == 1);
+        CHECK(strstr(u.manifest, "Frame") && strstr(u.manifest, "Cornice") && !strstr(u.manifest, "Hidden") &&
+              !strstr(u.manifest, "shared/tools") && !strstr(u.manifest, "unknown/unknown") && !strstr(u.manifest, "editor/"));
+        memcpy(old_hash, u.hash, sizeof old_hash);
+    }
+    sh_unit_free(&u); sh_mb_free(&b);
+    mt_write(folder, "editor\\groups.json", "{\"tiles\":{\"unknown/unknown\":{\"tab\":\"snapmap-plus/custom\"}}}");
+    if (build(folder, &b)) {
+        CHECK(unit(&b, folder, "mods/" SALT "/frame", &u));
+        CHECK(*old_hash && !strcmp(u.hash, old_hash));
+        sh_unit_free(&u);
+    }
+    sh_mb_free(&b);
+    mt_write(folder, "editor\\duplicate.json", layout);
+    CHECK(!sh_mb_build(folder, SALT, &g_game, &b) && sh_mb_first_cause(&b) && strstr(sh_mb_first_cause(&b), "frame"));
+    sh_mb_free(&b);
+    physical = sh_mb_payload_path(folder, logical);
+    mt_delete(folder, "editor\\duplicate.json"); mt_delete(folder, "editor\\tiles.json");
+    if (build(folder, &b)) {
+        CHECK(sh_mb_write(&b, folder, &cause));
+        CHECK(physical && (source = (char *)sh_mb_read_file(physical, (size_t)-1, &len)) == NULL);
+    }
+    free(physical);
+    sh_mb_free(&b);
+    mt_write(folder, "mod.json", "{\"name\":\"Mixed\",\"strings\":{\"en\":{\"other_key\":\"Inline\"}}}");
+    CHECK(!sh_mb_build(folder, SALT, &g_game, &b) && strstr(sh_mb_first_cause(&b), "mod.json strings"));
+    sh_mb_free(&b); free(cause);
+}
+
 static void test_closure(const char *top)
 {
     char folder[MAX_PATH * 2], hex[SH_MB_HASH_HEX + 1];
@@ -483,12 +546,17 @@ static void test_boards(const char *top)
 
 static void test_scripts(const char *top)
 {
-    char folder[MAX_PATH * 2];
+    char folder[MAX_PATH * 2], script_hash[65] = "";
     sh_mb_bundle b;
     sh_unit u;
 
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\scripts", top);
     write_pack(folder);
+    mt_write(folder, "mod.json", "{\"name\":\"Crates and barrels\"}");
+    mt_write(folder, "editor\\strings\\en.json", "{\"crate_name\":\"Crate\",\"barrel_name\":\"Barrel\"}");
+    mt_write(folder, "editor\\settings.json", "{\"settings\":{"
+             "\"night\":{\"scope\":\"map\",\"title\":\"night_title\",\"default\":true},"
+             "\"personal\":{\"scope\":\"editor\",\"title\":\"mine\"}}}");
     mt_write(folder, "scripts\\crate.lua", "api = 1\nlocal crate_lib = require(\"crate_lib\")\nlocal spec = { attacks = \"crate_attacks\", graph = \"crate-graph\" }\nlocal attacks = require(spec.attacks)\nlocal graph = require(spec.graph)\n-- \"crate_notes\" is named only in this comment\nlocal def = \"entities/crate\"\n");
     mt_write(folder, "scripts\\lib\\crate_lib.lua", "local extra = \"materials/crate_extra\"\nreturn extra\n");
     /* a module the script requires by a name it passes on, with any character require takes (a name of
@@ -499,6 +567,9 @@ static void test_scripts(const char *top)
     mt_write(folder, "materials\\crate_extra.decl", "{\n}\n");
     if (!build(folder, &b)) return;
     if (unit(&b, folder, "mods/" SALT "/crate", &u)) {
+        CHECK(strstr(u.manifest, "\"mapSettingDefaults\":{\"night\":true}") && !strstr(u.manifest, "personal") &&
+              !strstr(u.manifest, "night_title"));
+        memcpy(script_hash, u.hash, sizeof script_hash);
         CHECK(kept(&b, &u, "scripts/crate.lua") == 1);
         CHECK(kept(&b, &u, "scripts/lib/crate_lib.lua") == 1);
         CHECK(kept(&b, &u, "materials/crate_extra.decl") == 1);
@@ -508,10 +579,24 @@ static void test_scripts(const char *top)
         sh_unit_free(&u);
     }
     if (unit(&b, folder, "mods/" SALT "/barrel", &u)) {
+        CHECK(!strstr(u.manifest, "mapSettingDefaults"));
         CHECK(kept(&b, &u, "scripts/crate.lua") == 0);
         CHECK(kept(&b, &u, "scripts/lib/crate_lib.lua") == 0);
         CHECK(kept(&b, &u, "scripts/lib/crate_attacks.lua") == 0);
         CHECK(kept(&b, &u, "materials/crate_extra.decl") == 0);
+        sh_unit_free(&u);
+    }
+    sh_mb_free(&b);
+    mt_write(folder, "editor\\settings.json", "{\"settings\":{\"night\":{\"scope\":\"map\",\"title\":\"night_title\",\"default\":true},"
+             "\"personal\":{\"scope\":\"editor\",\"title\":\"another_title\",\"default\":true}}}");
+    if (build(folder, &b)) {
+        CHECK(unit(&b, folder, "mods/" SALT "/crate", &u) && !strcmp(script_hash, u.hash));
+        sh_unit_free(&u);
+    }
+    sh_mb_free(&b);
+    mt_write(folder, "editor\\settings.json", "{\"settings\":{\"night\":{\"scope\":\"map\",\"title\":\"night_title\",\"default\":false}}}");
+    if (build(folder, &b)) {
+        CHECK(unit(&b, folder, "mods/" SALT "/crate", &u) && strcmp(script_hash, u.hash));
         sh_unit_free(&u);
     }
     sh_mb_free(&b);
@@ -733,6 +818,7 @@ int main(void)
     if (!mt_temp_dir("modunit", top, sizeof top)) { fprintf(stderr, "no temp folder\n"); return 1; }
     sh_mb_set_script_check(script_ok);
     test_keys();
+    test_editor_source(top);
     test_closure(top);
     test_identity(top);
     test_proof(top);

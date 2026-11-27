@@ -163,7 +163,7 @@ static int uw_is(const sh_mb_file *f, const char *type) { return f->ptype && !_s
 
 static void uw_reach(uw *w, size_t i)
 {
-    if (i >= w->b->file_count || w->keep[i]) return;
+    if (i >= w->b->file_count || w->keep[i] || w->b->files[i].cls == SH_MB_CLASS_EDITOR) return;
     /* A DOOM file the mod changes (the conductor's list, a registry) names every object of the mod; what it names
      * is reached from that object's own root, never from the registry. */
     if (w->registry && !w->b->files[i].stock && uw_is(&w->b->files[i], "entityDef")) return;
@@ -279,7 +279,7 @@ static void uw_list_free(uw_list *l)
 
 static unsigned char *uw_read(const uw *w, const sh_mb_file *f, size_t *len)
 {
-    char *path = sh_textf("%s\\%s", w->folder, f->path), *p;
+    char *path = sh_mb_payload_path(w->folder, f->path), *p;
     unsigned char *bytes;
     if (!path) return NULL;
     for (p = path; *p; p++) if (*p == '/') *p = '\\';
@@ -1242,6 +1242,34 @@ static int uw_names_kept(const uw *w, const char *body)
     return hit;
 }
 
+static void uw_setting_defaults(uw *w, mpj *share, const mpj *root)
+{
+    const mpj *settings = mpj_get(mpj_get(root, "editor"), "settings");
+    const mpj *pinned = mpj_get(root, "mapSettingDefaults");
+    mpj *map;
+    size_t i;
+    if (!settings && !pinned) return;
+    for (i = 0; i < w->b->file_count; i++)
+        if (w->keep[i] && sh_mb_script_request(w->b->files[i].request, NULL, NULL) > 0) break;
+    if (i == w->b->file_count) return;
+    map = mpj_new(MPJ_OBJ);
+    if (!map) { w->oom = 1; return; }
+    const mpj *source = settings ? settings : pinned;
+    for (int k = 0; source->type == MPJ_OBJ && k < source->n; k++) {
+        const mpj *item = source->items[k], *value = item;
+        if (settings) {
+            if (!mpj_str_is(mpj_get(item, "scope"), "map")) continue;
+            value = mpj_get(item, "default");
+        }
+        if (value && value->type != MPJ_BOOL) continue;
+        mpj *flag = mpj_new(MPJ_BOOL);
+        if (flag) flag->b = value && value->b;
+        if (!flag || !mpj_set(map, source->keys[k], flag)) w->oom = 1;
+    }
+    if (map->n) { if (!mpj_set(share, "mapSettingDefaults", map)) w->oom = 1; }
+    else mpj_free(map);
+}
+
 /* The unit's share of the author's mod.json (modunit.h): only the keys the player's build and serving read
  * (requirements, strings, hud, companions, scenes, animation_events, attachment_tags), cut to the kept files where
  * entries name defs. Any other key changes nothing served, so it is left out and never moves the unit's hash. */
@@ -1258,6 +1286,7 @@ static void uw_mod_share(uw *w, ub *o)
     free(text);
     if (!root || root->type != MPJ_OBJ) { mpj_free(root); uw_fail(w, "mod.json is not a JSON object", NULL); return; }
     share = mpj_new(MPJ_OBJ);
+    if (share) uw_setting_defaults(w, share, root);
     for (i = 0; share && i < root->n; i++) {
         const char *key = root->keys[i];
         mpj *v = root->items[i], *kept = NULL;

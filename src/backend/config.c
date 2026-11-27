@@ -31,6 +31,7 @@ typedef struct config_descriptor {
     unsigned int access;
     config_validator validate;
     config_normalizer normalize;
+    int optional;  /* Stored only after a preference is changed. */
 } config_descriptor;
 
 typedef struct config_document {
@@ -164,6 +165,7 @@ static const config_descriptor g_registry[] = {
         NULL,
         normalize_bool
     },
+    { "editor.settings", SH_JSON_OBJECT, "{}", SH_CONFIG_BACKEND_READ | SH_CONFIG_BACKEND_WRITE, NULL, NULL, 1 },
     /* The folder each file dialog opens in: the last one the player used for
      * that dialog, "" until then (the WebView host picks the default). */
     { "dialogs.prefab_export", SH_JSON_STRING, "\"\"", SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE, NULL, NULL },
@@ -899,6 +901,7 @@ static int document_defaults(config_document *document)
                             SH_CONFIG_JSON_DEPTH))
         goto fail;
     for (i = 0; i < CONFIG_COUNT; i++) {
+        if (g_registry[i].optional) continue;
         if (!sh_json_object_set(&document->settings, g_registry[i].key,
                                 g_registry[i].default_json,
                                 SH_CONFIG_JSON_DEPTH))
@@ -954,6 +957,7 @@ static config_parse_result document_parse(const char *bytes, size_t length,
             sh_json_object_get(&document->settings, g_registry[i].key);
         const char *normalized =
             normalize_registered_value(&g_registry[i], value_json);
+        if (!value_json && g_registry[i].optional) continue;
         if (!normalized) {
             if (!sh_json_object_set(&document->settings, g_registry[i].key,
                                     g_registry[i].default_json,
@@ -985,6 +989,7 @@ static char *document_serialize(config_document *document, size_t *out_length)
     for (i = 0; i < CONFIG_COUNT; i++) {
         const char *value =
             sh_json_object_get(&document->settings, g_registry[i].key);
+        if (!value && g_registry[i].optional) continue;
         if (!value ||
             !sh_json_object_set(&ordered, g_registry[i].key, value,
                                 SH_CONFIG_JSON_DEPTH))
@@ -1024,6 +1029,7 @@ static int install_document_values_locked(const config_document *document)
     for (i = 0; i < CONFIG_COUNT; i++) {
         const char *value =
             sh_json_object_get(&document->settings, g_registry[i].key);
+        if (!value && g_registry[i].optional) value = g_registry[i].default_json;
         if (!value) goto fail;
         values[i] = copy_string(value);
         if (!values[i]) goto fail;
@@ -1318,7 +1324,7 @@ int sh_config_get_bool(const char *key, int *out_value,
 }
 
 static int set_json_for_access(const char *key, const char *value_json,
-                               unsigned int access)
+                               unsigned int access, const sh_json_object *changes)
 {
     HANDLE mutex = NULL;
     config_document document;
@@ -1372,9 +1378,23 @@ static int set_json_for_access(const char *key, const char *value_json,
         goto volatile_value;
     }
 
-    if (!sh_json_object_set(&document.settings, key, normalized,
-                            SH_CONFIG_JSON_DEPTH))
-        goto volatile_value;
+    if (changes) {
+        const char *previous = sh_json_object_get(&document.settings, key);
+        sh_json_object prefs = {0};
+        char *merged = NULL;
+        size_t i;
+        if (previous && !sh_json_parse_object(previous, strlen(previous), SH_CONFIG_JSON_DEPTH, &prefs)) goto done;
+        for (i = 0; i < changes->count; ++i) {
+            const sh_json_member *m = &changes->members[i];
+            if (!sh_json_object_set_n(&prefs, m->key, m->key_length, m->value_json, SH_CONFIG_JSON_DEPTH)) break;
+        }
+        if (i == changes->count) merged = sh_json_serialize_object(&prefs, 0, NULL);
+        sh_json_object_free(&prefs);
+        if (!merged) goto done;
+        i = sh_json_object_set(&document.settings, key, merged, SH_CONFIG_JSON_DEPTH);
+        free(merged);
+        if (!i) goto done;
+    } else if (!sh_json_object_set(&document.settings, key, normalized, SH_CONFIG_JSON_DEPTH)) goto volatile_value;
     serialized = document_serialize(&document, &serialized_length);
     if (!serialized) goto volatile_value;
 
@@ -1399,6 +1419,7 @@ static int set_json_for_access(const char *key, const char *value_json,
     goto done;
 
 volatile_value:
+    if (changes) goto done;
     if (replace_value_locked((size_t)index, normalized)) {
         g_status_flags |= SH_CONFIG_STATUS_VOLATILE;
         result = SH_CONFIG_SET_VOLATILE;
@@ -1412,10 +1433,15 @@ done:
     return result;
 }
 
+int sh_config_apply_editor_settings(const sh_json_object *changes)
+{
+    return set_json_for_access("editor.settings", "{}", SH_CONFIG_BACKEND_WRITE, changes) == SH_CONFIG_SET_PERSISTED;
+}
+
 #ifdef SH_CONFIG_TESTING
 int sh_config_set_json(const char *key, const char *value_json)
 {
-    return set_json_for_access(key, value_json, SH_CONFIG_BACKEND_WRITE);
+    return set_json_for_access(key, value_json, SH_CONFIG_BACKEND_WRITE, NULL);
 }
 #endif
 
@@ -1461,7 +1487,7 @@ static int iface_config_set_json(sh_iface *self, const char *key,
                                  const char *value_json)
 {
     (void)self;
-    return set_json_for_access(key, value_json, SH_CONFIG_UI_WRITE);
+    return set_json_for_access(key, value_json, SH_CONFIG_UI_WRITE, NULL);
 }
 
 void sh_config_bind_iface_slots(void)

@@ -31,6 +31,11 @@ const sh_script_source *sh_script_source_files(void);
  * files. The text is valid until the next read of the map's scripts. Main thread. */
 const char *sh_script_source_stale(const char *salt, int *count);
 
+#ifndef SH_SCRIPT_PURE
+/* The default from the exact build that supplies the open map's scripts. */
+int sh_script_source_setting_default(const char *salt, const char *key);
+#endif
+
 /* Forget every mod's scripts. */
 void sh_script_source_clear(void);
 

@@ -570,7 +570,8 @@ name ending `.md6mesh` or `.md6skl` become `md6/mods/<salt>/<rest>`, `collision/
 `mods/<salt>/<rest>`. Every other name is the game's and is left as written; `native:<name>` is written `<name>` (the
 installed archives hold 452 names under `effects/` and one under `particles/`, and none under the other prefixes),
 and so is the quoted name of `native("...")`, the Graphics SDK's other spelling of a DOOM name (`ma_in_native_call`).
-`#str_<key>` of one of the mod's own strings keys becomes `#str_<salt>_<key>`; in `mod.json` a key of a `strings`
+`#str_<key>` of one of the mod's own strings keys becomes `#str_<salt>_<key>`. The builder loads
+`editor/strings/<locale>.json` into its internal descriptor. A key of a `strings`
 language object that is not one of the game's (`sh_strkey_is_edit`) becomes `<salt>_<key>` (`sh_ma_json`; the
 builder's own part is never rewritten, and `sh_ma_json_author_keys` turns a manifest's keys back for a received
 build's `mod.json`). Scripts are not rewritten: a script's names are resolved by its calls (`sh_script_check_name`).
@@ -1082,7 +1083,7 @@ upgrade action and there are no aliases.
 New mod (`sh_ms_new_mod_example`): a folder `mods\<the name as a folder
 name>` (` (2)` when taken; never `maps`) with a new salt in its block, an
 example crate at `entities/example_crate.decl` and its Toybox row, and the row's
-strings in `mod.json` keyed `category`, `example_crate_name` and
+strings in `editor/strings/en.json` keyed `category`, `example_crate_name` and
 `example_crate_desc` (referenced `#str_category`, ...; the engine is handed
 them with the salt); the scan that follows builds it.
 

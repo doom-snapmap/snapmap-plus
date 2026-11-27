@@ -39,6 +39,13 @@ sh_dt_node *sh_dt_child(sh_dt_node *n, const char *key);
 typedef int (*sh_dt_enemy_read)(void *context, const char *type, const char *name, sh_dt **body);
 char *sh_dt_enemy_behavior(const char *salt, const char *entitydef, sh_dt_enemy_read read, void *context);
 void sh_dt_remove_child(sh_dt_node *parent, int index);
+/* Allocate a detached block or scalar, then attach it to its containing tree. */
+sh_dt_node *sh_dt_member(sh_dt *t, const char *key, int block);
+int sh_dt_append(sh_dt *t, sh_dt_node *parent, sh_dt_node *child);
+sh_dt_node *sh_dt_ensure_block(sh_dt *t, sh_dt_node *parent, const char *key);
+int sh_dt_assign_scalar(sh_dt *t, sh_dt_node *parent, const char *key, const char *token);
+/* Deep-copy one member into another tree. */
+int sh_dt_copy_child(sh_dt *t, sh_dt_node *parent, const sh_dt_node *child);
 /* Replace a scalar's value token (copied into the tree's arena). 1 on success. */
 int    sh_dt_set_value(sh_dt *t, sh_dt_node *n, const char *val, size_t len);
 

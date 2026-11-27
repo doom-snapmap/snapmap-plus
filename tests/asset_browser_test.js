@@ -253,5 +253,18 @@ check(sent.length === 2 && sent[0].cmd === 'requestPreview' &&
 check(sent[1].name === 'materials/overlap' && sent[1].assetKind === 0,
   'a Material selection did not preserve the material kind');
 
+const editorIds = new Function('mount', 'response',
+  "var abIdsPending = {mount:mount,tile:'volume/blocking'}; function abRenderInsp() {}\n" +
+  grab(/function abEsc\(s\)/, '\n') +
+  grab(/function abEditorIdsResult\(msg\)/, '\n  }') + '\n' +
+  grab(/function abEditorBindings\(m, path\)/, '\n  }') +
+  '\nabEditorIdsResult(response); return abEditorBindings(mount, mount.sel);');
+const editorReply = {data:{tile:'volume/blocking',sheets:[{id:'native/displayName',properties:['blockPlayers','blockDemons']}]}};
+const bindingButtons = editorIds({sel:'volume/blocking'}, editorReply);
+check(bindingButtons.includes('data-copy="native/displayName"') && bindingButtons.includes('data-copy="blockPlayers"'),
+  'the asset browser must expose the stable sheet and property IDs');
+check(!editorIds({sel:'weapons/chainsaw_mp_base'}, editorReply).includes('blockDemons'),
+  'a late property lookup must not replace the selected tile');
+
 if (failures) process.exit(1);
 console.log('asset browser tests passed');

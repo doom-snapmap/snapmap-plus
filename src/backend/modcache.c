@@ -418,7 +418,7 @@ static void mc_local_build_locked(void)
                     memset(&g_local[g_nlocal], 0, sizeof g_local[g_nlocal]);
                     strcpy_s(g_local[g_nlocal].sha, sizeof g_local[g_nlocal].sha, f->blob);
                     g_local[g_nlocal].size = f->size;
-                    g_local[g_nlocal].path = sh_textf("%s\\%s", folder, f->path);
+                    g_local[g_nlocal].path = sh_mb_payload_path(folder, f->path);
                     mc_slashes(g_local[g_nlocal].path);
                     if (g_local[g_nlocal].path) g_nlocal++;
                 }

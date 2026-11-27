@@ -369,6 +369,7 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 #define SH_MODS_ACT_ADD_MINE           24    /* arg: a content line's row: Add to my mods from a map's units, a new mod of your own (any thread) */
 #define SH_MODS_ACT_MAP_UPDATE         26    /* arg: a salt: move the open map's row of that mod to the installed version */
 #define SH_MODS_ACT_KEY                27    /* arg: the publishing key's Settings request (modclaim.h modclaim_key_action; any thread, no list follows) */
+#define SH_MODS_ACT_EDITOR_IDS         28    /* arg: native Toybox tile ID */
 #define SH_MODS_ACT_CONTENT            25    /* arg: "" map content on disk; "removePlayed": Remove content of maps you only played, then it (any thread) */
 typedef struct sh_mods_call {
     int          op;

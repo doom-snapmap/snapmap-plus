@@ -2,6 +2,8 @@
  * folder: admission and failure isolation, shadow conflicts, builds of one salt, compositions, lookups, provider
  * precedence, the registration plan and its runs through fake engine operations, bundle closure and rescan. */
 #define WIN32_LEAN_AND_MEAN
+#include "../src/backend/overrides_baked.h"
+#include "../src/backend/editor_sheets.h"
 #include "map_cvars.h"
 #include "heap_out.h"
 #include "cache_paths.h"
@@ -5634,8 +5636,9 @@ static void test_composition_serves_its_map(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\compmap\\mods", top);
     _snprintf_s(served, sizeof served, _TRUNCATE, "%s\\content\\served", mt_cache_dir(root));
     mkdirs(served);
-    g_bundle_extra = NULL;
+    g_bundle_extra = "\"editor\":{\"tiles\":{\"unknown/unknown\":{\"order\":-99}}},";
     make_bundle(served, CHASH, "dcompos1", 'd', NULL, comp, 1, NULL);
+    g_bundle_extra = NULL;
     {
         char work[128];
         snprintf(work, sizeof work, "%s.staging-123-456789", CHASH);
@@ -5652,6 +5655,7 @@ static void test_composition_serves_its_map(void)
     }
     list[0] = CHASH;
     (void)sh_modserve_scope_set(list, 1, 1);
+    CHECK(open_text("generated/decls/snapeditorentitydef/unknown/unknown.decl", text, sizeof text) == 0);
     CHECK(open_text("generated/decls/entitydef/mods/dcompos1/x.decl", text, sizeof text) && !strcmp(text, "COMPOSED"));
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0);
     CHECK(open_text("generated/decls/entitydef/mods/dcompos1/x.decl", text, sizeof text) && !strcmp(text, "COMPOSED"));
@@ -6468,6 +6472,143 @@ static void test_index_retire(void)
 #define MX_SET  "generated/decls/snapeditorsettings/mixed.decl"
 #define MX_NEW  "generated/decls/entitydef/mods/xmixed00/thing.decl"
 #define PU_NEW  "generated/decls/entitydef/mods/ypure000/thing.decl"
+static void layout_doc(const char *root, const char *folder, const char *json)
+{
+    char dir[MAX_PATH], path[MAX_PATH];
+    snprintf(dir, sizeof dir, "%s\\%s\\editor", root, folder);
+    mkdirs(dir);
+    snprintf(path, sizeof path, "%s\\toybox.json", dir);
+    write_file(path, json, strlen(json));
+}
+
+static const char *layout_prefs;
+static char *read_layout_prefs(void) { return _strdup(layout_prefs); }
+
+static void test_editor_layout(void)
+{
+    char root[MAX_PATH], text[8192], path[MAX_PATH], parked[MAX_PATH], ha[65], hb[65];
+    char *slash;
+    const char *unknown = "generated/decls/snapeditorentitydef/unknown/unknown.decl";
+    const char *timeline = "generated/decls/snapeditorentitydef/custom/timeline.decl";
+    const char *absent = "generated/decls/snapeditorentitydef/absent/row.decl";
+    strcpy_s(root, sizeof root, g_root);
+    slash = strrchr(root, '\\');
+    if (slash) *slash = 0;
+    strcat_s(root, sizeof root, "\\layout\\mods");
+    mkdirs(root);
+    fx_file owned = {"generated/decls/snapeditorentitydef/mods/amber000/inherited.decl",
+        "{ inherit = \"unknown/unknown\"; edit = { entityDef = \"snapmaps/unknown\"; } }",
+        -1, "snapEditorEntityDef", "mods/amber000/inherited", NULL, '3'};
+    make_bundle(root, "z-folder", "amber000", '1', "", &owned, 1, NULL);
+    make_bundle(root, "a-folder", "blue0000", '2', "", NULL, 0, NULL);
+    layout_doc(root, "z-folder",
+        "{\"tiles\":{\"unknown/unknown\":{\"tab\":\"shared/ci\",\"order\":-7},\"absent/row\":{\"tab\":\"snapmap-plus/custom\"}}}");
+    layout_doc(root, "a-folder",
+        "{\"tiles\":{\"unknown/unknown\":{\"tab\":\"other\",\"title\":\"caption\"},"
+        "\"custom/timeline\":{\"description\":\"clock\"},\"mods/amber000/inherited\":{\"icon\":\"materials/icons/widget\"}}}");
+    layout_prefs = "{}";
+    sh_editor_sheets_set_preferences(read_layout_prefs);
+    {
+        const char *json = "{\"settings\":{\"details\":{\"scope\":\"editor\",\"title\":\"title\",\"default\":false}},"
+            "\"sheets\":{\"unknown/unknown\":{\"extra\":{\"title\":\"extrasheet\",\"properties\":{\"displayName\":{}},"
+            "\"when\":{\"details\":true}}}}}";
+        snprintf(path, sizeof path, "%s\\a-folder\\editor\\panels.json", root);
+        write_file(path, json, strlen(json));
+    }
+    hash64('1', ha); hash64('2', hb);
+    sh_modserve_scope_enable(1);
+    sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR);
+    CHECK(sh_modserve_index_build(root) == 2);
+    {
+        size_t len = 0;
+        char *base = sh_modserve_editor_row_native("unknown/unknown", &len);
+        CHECK(base && len == strlen(base) && strstr(base, "displayName") && strstr(base, "#str_sh_category_1") &&
+              !strstr(base, "#str_blue0000_caption"));
+        free(base);
+        base = sh_modserve_editor_row_native("mods/amber000/inherited", &len);
+        CHECK(base && strstr(base, "propertySheets") && strstr(base, "clipModelInfo.size") && !strstr(base, "widget"));
+        free(base);
+        CHECK(open_text(owned.path, text, sizeof text) && strstr(text, "mods/blue0000/icons/widget"));
+        CHECK(!sh_modserve_editor_row_native("absent/row", &len) && !len);
+    }
+    for (int i = 0; i < 3; i++) {
+        const char *list[] = {i == 1 ? ha : hb, i == 1 ? hb : ha};
+        sh_modserve_scope_set(list, i ? 2 : 0, i != 0);
+        CHECK(open_text(unknown, text, sizeof text) == 1 && strstr(text, "#str_smp_tab_") &&
+              strstr(text, "#str_blue0000_caption") && strstr(text, "sortPriority = -7;") && strstr(text, "snapmaps/unknown"));
+        CHECK(open_text(timeline, text, sizeof text) == 1 && strstr(text, "#str_blue0000_clock"));
+        CHECK(open_text(absent, text, sizeof text) == 0);
+    }
+    CHECK(open_text(unknown, text, sizeof text) == 1 && !strstr(text, "extrasheet"));
+    layout_prefs = "{\"blue0000/details\":true}";
+    CHECK(sh_modserve_editor_preferences_changed() == 1);
+    CHECK(open_text(unknown, text, sizeof text) == 1 && strstr(text, "extrasheet"));
+    CHECK(sh_modserve_editor_preferences_changed() == 0);
+    layout_prefs = "{}";
+    CHECK(sh_modserve_editor_preferences_changed() == 1);
+    CHECK(open_text(unknown, text, sizeof text) == 1 && !strstr(text, "extrasheet"));
+    sh_editor_sheets_set_preferences(NULL);
+    sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY);
+    CHECK(open_text(unknown, text, sizeof text) == 0);
+    sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR);
+    snprintf(path, sizeof path, "%s\\z-folder", root);
+    snprintf(parked, sizeof parked, "%s\\.removed", root);
+    CHECK(MoveFileA(path, parked));
+    CHECK(sh_modserve_index_build(root) == 1 && open_text(unknown, text, sizeof text) == 1 &&
+          strstr(text, "#str_blue0000_tab_") && strstr(text, "sortPriority = 1;"));
+    sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_build(g_root) >= 0);
+}
+
+static char *replace_baked_field(const ov_baked_decl_t *row, const char *field, const char *value)
+{
+    const char *p = strstr(row->text, field);
+    p = p ? strchr(p, '"') : NULL;
+    const char *q = p ? strchr(p + 1, '"') : NULL;
+    if (!q) return NULL;
+    char *copy = malloc(row->len + strlen(value) + 2);
+    if (!copy) return NULL;
+    size_t prefix = (size_t)(p + 1 - row->text);
+    memcpy(copy, row->text, prefix);
+    strcpy(copy + prefix, value);
+    size_t suffix = row->len - (size_t)(q - row->text);
+    memcpy(copy + prefix + strlen(value), q, suffix);
+    copy[prefix + strlen(value) + suffix] = 0;
+    return copy;
+}
+
+static void test_all_baked_tile_merges(void)
+{
+    enum { count = sizeof g_ov_baked_decls / sizeof *g_ov_baked_decls };
+    char root[MAX_PATH], paths[count][256], shadows[2048] = "", text[8192];
+    fx_file a[count], b[count];
+    snprintf(root, sizeof root, "%s\\..\\baked-merge\\mods", g_root);
+    mkdirs(root);
+    for (int i = 0; i < count; i++) {
+        const ov_baked_decl_t *row = &g_ov_baked_decls[i];
+        const char *p = strstr(row->name, "snapeditorentitydef/") + strlen("snapeditorentitydef/");
+        snprintf(paths[i], sizeof paths[i], "%.*s", (int)strlen(p) - 5, p);
+        fx_file file = {row->name, NULL, -1, "snapEditorEntityDef", paths[i], NULL, 'a'};
+        a[i] = b[i] = file;
+        a[i].body = replace_baked_field(row, "displayNameTag", "#str_sh_unknown");
+        b[i].body = replace_baked_field(row, "categoryNameTag", "#str_snapentity_category_demons");
+        b[i].blob = 'b';
+        CHECK(a[i].body && b[i].body);
+        snprintf(shadows + strlen(shadows), sizeof shadows - strlen(shadows), "%s\"%s\"", i ? "," : "", row->name);
+    }
+    make_bundle(root, "zzz", "amber000", '1', shadows, a, count, NULL);
+    make_bundle(root, "aaa", "blue0000", '2', shadows, b, count, NULL);
+    CHECK(sh_modserve_index_build(root) == 2);
+    for (int i = 0; i < count; i++) {
+        CHECK(open_text(a[i].path, text, sizeof text) == 1 && strstr(text, "categoryNameTag = \"#str_snapentity_category_demons\"") &&
+              strstr(text, "displayNameTag = \"#str_sh_unknown\"") && strstr(text, "entityDef = "));
+        free((void *)a[i].body);
+        free((void *)b[i].body);
+    }
+    CHECK(sh_modserve_index_build(g_root) >= 0);
+}
+
 static void test_editor_tweak_composition(void)
 {
     char root[MAX_PATH], alpha[MAX_PATH], parked[MAX_PATH], text[4096], a[512], b[512], *slash;
@@ -7024,6 +7165,8 @@ int main(void)
     test_scope();
     test_mixed_editor_bundle();
     test_editor_tweak_composition();
+    test_editor_layout();
+    test_all_baked_tile_merges();
     test_scope_providers();
     test_additive_determinism();
     test_additive_same_key();

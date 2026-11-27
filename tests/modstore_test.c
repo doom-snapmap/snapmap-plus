@@ -855,13 +855,15 @@ static void test_new_mod(const char *tmp)
     if (cause[0]) fprintf(stderr, "  new mod: %s\n", cause);
     fl = strlen(folder);
     CHECK(sh_salt_valid(salt, strlen(salt)) && fl > 11 && !strcmp(folder + fl - 12, "\\Hell Guards"));
-    CHECK(!strcmp(example, "decls/snapeditorentitydef/example_crate.decl"));
+    CHECK(!strcmp(example, "editor/toybox.json"));
     t = slurp(folder, "mod.json", NULL);
-    CHECK(t && strstr(t, "\"category\": \"Hell Guards\"") && strstr(t, "\"example_crate_name\"") && strstr(t, "\"format\": 2") &&
-          strstr(t, salt));
+    CHECK(t && !strstr(t, "\"strings\"") && strstr(t, "\"format\": 2") && strstr(t, salt));
+    free(t);
+    t = slurp(folder, "editor/strings/en.json", NULL);
+    CHECK(t && strstr(t, "\"category\": \"Hell Guards\"") && strstr(t, "\"example_crate_name\""));
     free(t);
     t = slurp(folder, example, NULL);
-    CHECK(t && strstr(t, "categoryNameTag = \"#str_category\"") && strstr(t, "entityDef = \"entities/example_crate\""));
+    CHECK(t && strstr(t, "\"entity\": \"entities/example_crate\"") && strstr(t, "editor/templates/example_crate.decl"));
     free(t);
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_BUILT);
     CHECK(HO2(folder, cause, sh_ms_new_mod("Hell Guards", s2, HO_P(0), HO_P(1))) && strstr(folder, "Hell Guards (2)") && strcmp(s2, salt));
@@ -873,6 +875,18 @@ static void test_new_mod(const char *tmp)
     CHECK(sh_ms_sync(&GAME, &ss) && ss.salted == 0);
     if (ss.failed) log_dump("new mod");
     CHECK(entry_of("Hell Guards", s2, NULL, &usable) && !strcmp(s2, salt) && usable);
+    {
+        char second[MAX_PATH * 2], src[MAX_PATH * 2], dest[MAX_PATH * 2], imported[MAX_PATH];
+        sh_ms_install_stats st;
+        _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\Hell Guards", root);
+        _snprintf_s(second, sizeof second, _TRUNCATE, "%s\\newmod-import\\mods", tmp);
+        CHECK(sh_ms_set_root(second));
+        CHECK(HO2(imported, cause, sh_ms_install_from_folder(src, &GAME, HO_P(0), &st, NULL, HO_P(1))));
+        _snprintf_s(dest, sizeof dest, _TRUNCATE, "%s\\%s", second, imported);
+        CHECK(mt_has(dest, "editor\\toybox.json") && mt_has(dest, "editor\\strings\\en.json") &&
+              !mt_has(dest, "decls\\snapeditorentitydef\\example_crate.decl"));
+        CHECK(sh_ms_sync(&GAME, &ss) && !ss.failed);
+    }
 }
 
 typedef struct lock_job {

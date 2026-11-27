@@ -9,7 +9,7 @@
 /* The builder's rules number, written into the block as "rules"; a folder whose block carries another number is
  * built again once, so a product update reclassifies every own folder. Raise it when a build's classification,
  * edits or manifest change. */
-#define SH_MB_RULES           18
+#define SH_MB_RULES           19
 
 #define SH_MB_EARLIER "Run the Snapmap+ installer to update this mod from an earlier version."
 #define SH_MB_ID_MAX          64u
@@ -75,6 +75,7 @@ typedef struct sh_mb_bundle {
     char *updated_source;  /* complete mod.json awaiting a successful write */
     int legacy_cvars;      /* a pre-rule-17 descriptor omitted settings included in its build hash */
     char cvar_source_hash[SH_MB_HASH_HEX + 1]; /* guard against overwriting edits made during the build */
+    char *unit_source;     /* author-spelled descriptor assembled from editor files for slicing */
     char *extra;           /* canonical JSON object of preserved author keys, or NULL */
     char **shadows;        /* sorted, unique, lower-cased request paths */
     size_t shadow_count;
@@ -228,6 +229,12 @@ int  sh_mb_set_state(const char *folder, int validated, const char *cause, char 
  * block into `author_text` (a mod.json text, its own block ignored) or, when
  * author_text is NULL, into a synthesized author part. */
 char *sh_mb_modjson_text(const sh_mb_bundle *bundle, const char *author_text, size_t author_len, size_t *out_len);
+
+/* Effective local descriptor, including installed editor definitions and catalogs. */
+char *sh_mb_read_editor_source(const char *folder, size_t *len);
+/* A logical file's source path, including editor tiles compiled in .build. */
+char *sh_mb_payload_path(const char *folder, const char *rel);
+wchar_t *sh_mb_payload_wpath(const wchar_t *folder, const char *rel);
 
 /* Read the source descriptor for a unit, including pending edits from an in-memory build. */
 char *sh_mb_read_unit_source(const sh_mb_bundle *bundle, const char *folder, size_t *len);

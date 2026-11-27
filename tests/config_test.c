@@ -7,6 +7,7 @@
 #include <wchar.h>
 
 #include "config.h"
+#include "config_json.h"
 
 static int read_string(const char *key, char *out, int capacity)
 {
@@ -1323,6 +1324,35 @@ static void test_shared_interface_uses_registered_config_service(void)
     cleanup_temp_root(root);
 }
 
+static void test_editor_preferences(void)
+{
+    wchar_t root[MAX_PATH];
+    sh_json_object edits = {0}, got = {0};
+    char json[512];
+    int n;
+    CHECK(make_temp_root(root, MAX_PATH));
+    sh_config_test_reset();
+    sh_config_test_set_local_appdata(root);
+    CHECK(sh_config_init());
+    CHECK(sh_config_get_json("editor.settings", json, sizeof json, NULL) == 2 && !strcmp(json, "{}"));
+    CHECK(sh_json_object_set(&edits, "aaaaaaaa/guides", "true", 2));
+    CHECK(sh_config_apply_editor_settings(&edits));
+    sh_json_object_free(&edits);
+    CHECK(sh_json_object_set(&edits, "bbbbbbbb/guides", "false", 2));
+    CHECK(sh_config_apply_editor_settings(&edits));
+    sh_json_object_free(&edits);
+    sh_config_test_reset();
+    sh_config_test_set_local_appdata(root);
+    CHECK(sh_config_init());
+    n = sh_config_get_json("editor.settings", json, sizeof json, NULL);
+    CHECK(n > 0 && sh_json_parse_object(json, n, 8, &got));
+    CHECK(got.count == 2 && !strcmp(sh_json_object_get(&got, "aaaaaaaa/guides"), "true"));
+    CHECK(!strcmp(sh_json_object_get(&got, "bbbbbbbb/guides"), "false"));
+    sh_json_object_free(&got);
+    sh_config_test_reset();
+    cleanup_temp_root(root);
+}
+
 int wmain(int argc, wchar_t **argv)
 {
     if (argc == 5 && wcscmp(argv[1], L"--child-set") == 0) {
@@ -1344,6 +1374,7 @@ int wmain(int argc, wchar_t **argv)
         sh_config_test_reset();
         return 0;
     }
+    test_editor_preferences();
     test_first_run_creates_defaults_and_getter_contract();
     test_loads_existing_theme_without_rewriting();
     test_sets_valid_theme_and_preserves_unknown_values();

@@ -38,6 +38,10 @@ void sh_map_settings_loaded(int ok);
 void sh_map_settings_current(sh_map_settings *out);
 void sh_map_settings_set_render(const sh_map_render *render);
 void sh_map_settings_set_bounds(const sh_map_bounds *bounds);
+/* Authored values are read under the calling mod's salt. An untouched toggle uses its declared default. */
+int sh_map_settings_bool(const char *salt, const char *key, int default_value);
+struct sh_json_object;
+int sh_map_settings_apply_bools(const struct sh_json_object *changes);
 /* Back to both off (no map is open). */
 void sh_map_settings_reset(void);
 /* Restores the editor map's settings after a refused launch replaced them. Returns 1 restored, 0 nothing to restore. */

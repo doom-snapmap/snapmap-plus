@@ -209,6 +209,8 @@ static wchar_t *ms_wjoin_utf8(const wchar_t *dir, const char *rel)
     return out;
 }
 
+
+
 static wchar_t *ms_wroot(void)
 {
     const char *root = sh_ms_root();
@@ -930,7 +932,7 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *r
         wchar_t *p;
         int present;
         if (e->bundle.files[i].stock) continue;   /* installed content: checked at install and verify */
-        p = ms_wjoin_utf8(folder, e->bundle.files[i].path);
+        p = sh_mb_payload_wpath(folder, e->bundle.files[i].path);
         present = p && ms_file_size(p, &size);
         free(p);
         if (!present || size != e->bundle.files[i].size) {
@@ -2118,15 +2120,7 @@ static int ms_author_folder(const wchar_t *name)
     free(u);
     return r;
 }
-/* New mod's example: a crate that places and plays untouched. Its entityDef is the game's SnapMap crate01 under
- * the mod's salt and its Toybox row the game's crate01 row (snapeditorentitydef prop/new/crate01) pointing at it,
- * with mod.json strings for the name, description and a category named after the mod; nothing binary. The row
- * names no renderInfo.renderModelName (only rows whose entity has no model of its own carry one) and the
- * entityDef keeps its editorVars, or the editor logs "modelMatrix invert failed on model" every frame. */
-#define MS_EXAMPLE_DECL "example_crate"
-#define MS_EXAMPLE_DEF_DIR "entities\\"
-#define MS_EXAMPLE_ROW_DIR "decls\\snapeditorentitydef\\"
-
+/* The starter crate keeps stock event and render fields in its native template. */
 static const char MS_EXAMPLE_DEF[] =
     "{\r\n"
     "\tclass = \"idProp_Coop\";\r\n"
@@ -2155,15 +2149,10 @@ static const char MS_EXAMPLE_DEF[] =
     "}\r\n";
 
 /* Written in the mod's own names (modauthor.h): no salt. */
-static const char MS_EXAMPLE_ROW[] =
+static const char MS_EXAMPLE_TEMPLATE[] =
     "{\r\n"
-    "\tinherit = \"prop/prop_base\";\r\n"
     "\tedit = {\r\n"
-    "\t\tpreviewImage = \"textures/guis/snapmaps/entity_icons/prop/crate01\";\r\n"
     "\t\tcategoryNameTag = \"#str_category\";\r\n"
-    "\t\tdisplayNameTag = \"#str_" MS_EXAMPLE_DECL "_name\";\r\n"
-    "\t\tdisplayDescriptionTag = \"#str_" MS_EXAMPLE_DECL "_desc\";\r\n"
-    "\t\tentityDef = \"entities/" MS_EXAMPLE_DECL "\";\r\n"
     "\t\trenderInfo = {\r\n"
     "\t\t\tsize = {\r\n"
     "\t\t\t\tx = 54.3767967224;\r\n"
@@ -2187,31 +2176,33 @@ static const char MS_EXAMPLE_ROW[] =
     "\t}\r\n"
     "}\r\n";
 
-static int ms_write_example(const wchar_t *dir, const char *salt, char **rel_out)
+static int ms_example_file(const wchar_t *dir, const char *rel, const char *text)
 {
-    char *rel, *text;
-    wchar_t *path;
-    int ok;
-    (void)salt;
-    if (!(rel = sh_textf(MS_EXAMPLE_DEF_DIR MS_EXAMPLE_DECL ".decl"))) return 0;
-    path = ms_wjoin_utf8(dir, rel);
-    free(rel);
-    ok = path && ms_mkdirs_parent(path) && ms_write_text(path, MS_EXAMPLE_DEF, sizeof MS_EXAMPLE_DEF - 1);
+    wchar_t *path = ms_wjoin_utf8(dir, rel);
+    int ok = path && ms_mkdirs_parent(path) && ms_write_text(path, text, strlen(text));
     free(path);
-    if (!ok) return 0;
-    text = sh_text(MS_EXAMPLE_ROW);
-    rel = sh_textf(MS_EXAMPLE_ROW_DIR MS_EXAMPLE_DECL ".decl");
-    path = rel ? ms_wjoin_utf8(dir, rel) : NULL;
-    ok = text && path && ms_mkdirs_parent(path) && ms_write_text(path, text, strlen(text));
-    free(path);
-    free(text);
-    if (ok && rel_out) {
-        char *c;
-        for (c = rel; *c; c++) if (*c == '\\') *c = '/';
-        *rel_out = rel;
-        rel = NULL;
-    }
-    free(rel);
+    return ok;
+}
+
+static int ms_write_example(const wchar_t *dir, const char *escaped_name, char **rel_out)
+{
+    static const char layout[] =
+        "{\r\n  \"tabs\": { \"props\": { \"title\": \"category\" } },\r\n"
+        "  \"tiles\": {\r\n    \"example_crate\": {\r\n"
+        "      \"entity\": \"entities/example_crate\",\r\n"
+        "      \"base\": \"prop/prop_base\",\r\n"
+        "      \"template\": \"editor/templates/example_crate.decl\",\r\n"
+        "      \"title\": \"example_crate_name\",\r\n      \"description\": \"example_crate_desc\",\r\n"
+        "      \"icon\": \"textures/guis/snapmaps/entity_icons/prop/crate01\",\r\n"
+        "      \"tab\": \"props\"\r\n    }\r\n  }\r\n}\r\n";
+    char *strings = sh_textf("{\r\n  \"category\": \"%s\",\r\n"
+                             "  \"example_crate_name\": \"Example crate\",\r\n"
+                             "  \"example_crate_desc\": \"A crate your new mod adds. Change it in the mod's files.\"\r\n}\r\n", escaped_name);
+    int ok = strings && ms_example_file(dir, "entities/example_crate.decl", MS_EXAMPLE_DEF) &&
+        ms_example_file(dir, "editor/templates/example_crate.decl", MS_EXAMPLE_TEMPLATE) &&
+        ms_example_file(dir, "editor/strings/en.json", strings) && ms_example_file(dir, "editor/toybox.json", layout);
+    free(strings);
+    if (ok && rel_out) ok = (*rel_out = sh_text("editor/toybox.json")) != NULL;
     return ok;
 }
 
@@ -2234,7 +2225,7 @@ static char *ms_json_body(const char *s)
 static int ms_new_mod(const char *name, int example, char salt_out[SH_MB_ID_MAX + 1], char **folder_out,
                       char **example_out, char **cause)
 {
-    char salt[SH_SALT_LEN + 1], *esc = NULL, *seg = NULL, *leaf = NULL, *u, *text = NULL, *strings = NULL;
+    char salt[SH_SALT_LEN + 1], *esc = NULL, *seg = NULL, *leaf = NULL, *u, *text = NULL;
     wchar_t *root = NULL, *dir = NULL, *assets = NULL, *desc = NULL;
     size_t n;
     int round, ok = 0;
@@ -2272,22 +2263,12 @@ static int ms_new_mod(const char *name, int example, char salt_out[SH_MB_ID_MAX 
         ms_cause(cause, "cannot create the folder %s in your mods folder: %s", leaf, ms_why(GetLastError(), leaf, 1, 0));
         goto done;
     }
-    /* The author's part holds what the files cannot say; the block the salt,
-     * which never changes afterwards. The example's Toybox text is author
-     * text: its strings, keyed by plain names the product gives the salt (no '/' in a string key). */
-    if (example)
-        strings = sh_textf("  \"strings\": {\r\n    \"en\": {\r\n"
-                           "      \"category\": \"%s\",\r\n"
-                           "      \"" MS_EXAMPLE_DECL "_name\": \"Example crate\",\r\n"
-                           "      \"" MS_EXAMPLE_DECL "_desc\": \"A crate your new mod adds. Change it in the mod's files.\"\r\n"
-                           "    }\r\n  },\r\n", esc);
-    else strings = _strdup("");
-    text = strings ? sh_textf("{\r\n  \"name\": \"%s\",\r\n  \"description\": \"\",\r\n  \"author\": \"\",\r\n%s"
-                              "\r\n  \"" SH_MB_BLOCK_KEY "\": {\r\n    \"format\": %d,\r\n    \"salt\": \"%s\"\r\n  }\r\n}\r\n",
-                              esc, strings, SH_MB_FORMAT, salt) : NULL;
+    text = sh_textf("{\r\n  \"name\": \"%s\",\r\n  \"description\": \"\",\r\n  \"author\": \"\",\r\n"
+                    "\r\n  \"" SH_MB_BLOCK_KEY "\": {\r\n    \"format\": %d,\r\n    \"salt\": \"%s\"\r\n  }\r\n}\r\n",
+                    esc, SH_MB_FORMAT, salt);
     if (!text) { ms_cause(cause, "out of memory"); goto done; }
     if (!ms_write_text(desc, text, strlen(text))) { ms_cause(cause, "cannot write the mod.json of %s", leaf); goto done; }
-    if (example && !ms_write_example(dir, salt, example_out)) {
+    if (example && !ms_write_example(dir, esc, example_out)) {
         ms_cause(cause, "cannot write the example files of %s: %s", leaf, ms_why(GetLastError(), leaf, 1, 0));
         goto done;
     }
@@ -2307,7 +2288,6 @@ done:
     free(seg);
     free(leaf);
     free(text);
-    free(strings);
     return ok;
 }
 
@@ -2409,7 +2389,7 @@ static int ms_verify_folder(const wchar_t *folder, const sh_mb_bundle *b, sh_ms_
             else if (st) { st->files++; st->pointers++; }
             continue;
         }
-        p = ms_wjoin_utf8(folder, f->path);
+        p = sh_mb_payload_wpath(folder, f->path);
         if (!p) { ok = 0; ms_cause(&first, "out of memory"); }
         else if (!ms_hash_wfile(p, &size, hex)) {
             ok = 0;
@@ -2833,12 +2813,18 @@ static int ms_install_locked(const char *folder, int to_root,
     if (!final || !ms_work_names(final, &staging, &old)) { ms_cause(cause, "out of memory"); goto done; }
     if (ms_exists(staging)) ms_rmtree(staging, root);
     if (!ms_mkdirs(staging)) { ms_cause(cause, "cannot create the folder %s in your mods folder: %s", name, ms_why(GetLastError(), name, 1, 0)); goto done; }
+    {
+        wchar_t *editor = ms_wjoin(src, L"editor"), *dest = ms_wjoin(staging, L"editor");
+        int copied = editor && dest && (!ms_exists(editor) || ms_copy_tree(editor, dest, cause));
+        free(editor); free(dest);
+        if (!copied) { ms_rmtree(staging, root); goto done; }
+    }
     for (i = 0; i < b.file_count; i++) {
         wchar_t *from, *to;
         int copied;
         if (b.files[i].stock && b.files[i].absent) continue;
-        from = ms_wjoin_utf8(src, b.files[i].path);
-        to = ms_wjoin_utf8(staging, b.files[i].path);
+        from = sh_mb_payload_wpath(src, b.files[i].path);
+        to = from && !wcsncmp(from, src, wcslen(src)) ? ms_wjoin(staging, from + wcslen(src) + 1) : NULL;
         copied = from && to && sh_ms_copy_file(from, to);
         free(from);
         free(to);

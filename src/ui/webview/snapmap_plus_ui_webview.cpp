@@ -2940,7 +2940,7 @@ static const wchar_t *ui_mods_action_name(int action) { return sh_mods_message::
 static bool ui_mods_read_only(int action)
 {
     return action == SH_MODS_ACT_FILES || action == SH_MODS_ACT_FILE_TEXT || action == SH_MODS_ACT_CONTENT ||
-           action == SH_MODS_ACT_KEY;
+           action == SH_MODS_ACT_KEY || action == SH_MODS_ACT_EDITOR_IDS;
 }
 
 static int ui_mods_action_code(const std::wstring &name) { return sh_mods_message::action_code(name); }

@@ -49,6 +49,7 @@
 #include "budget_table.h"
 #include "map_render.h"
 #include "settings_tab.h"
+#include "editor_settings.h"
 #include "map_bounds.h"
 #include "editor_zoom.h"
 #include "world_area_cell.h"
@@ -241,6 +242,7 @@ static void install_features(const sig_result *results, size_t db)
     sh_sdk_runtime_install();                         /* the script calls that play them */
     /* A new serving table may change a module's shipped navigation. */
     sh_modserve_set_index_listener(sh_nav_bake_invalidate_sources);
+    sh_editor_settings_prepare();
     (void)sh_modserve_index_boot();
     /* Folders not built yet are built off this thread as a rescan builds
      * them, then indexed, once this install has released the store
@@ -358,6 +360,8 @@ static void install_features(const sig_result *results, size_t db)
     if (need(sh_map_bounds_install(results, db, g_doom_base), "the editor bounds cannot be changed",
              SH_FEATURE_MAP_BOUNDS, NULL, NULL))
         (void)sh_map_bounds_settings_register();
+    need(sh_editor_settings_register(), "authored settings could not join the settings screen",
+         SH_FEATURE_SETTINGS_TAB, NULL, NULL);
     need(sh_editor_zoom_install(results, db, g_doom_base), "the Blueprint camera limits cannot be changed",
          SH_FEATURE_ZOOM, NULL, NULL);
     /* After the Grid Room install: the cell choice counts its module bounds. */

@@ -2229,6 +2229,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // ---- messages from native ----
   function onMessage(d) {
     if (typeof keyUi !== 'undefined' && keyUi.onMessage(d)) return;
+    if (d.kind === 'modsActionResult' && d.action === 'editorIds') { abEditorIdsResult(d); return; }
     if (typeof modsUi !== 'undefined' && modsUi.onMessage(d)) return;
     if (d.kind === 'installMismatch') {
       document.getElementById('installMismatch').hidden = false;
@@ -4892,6 +4893,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     m.el('insp').addEventListener('click', function(e){
       var cp = e.target.closest ? e.target.closest('[data-copy]') : null;
       if (cp) { abCopy(cp.getAttribute('data-copy')); return; }
+      if (e.target.closest && e.target.closest('[data-editor-ids]')) {
+        if (abIdsPending) return;
+        abIdsPending = {mount:m, tile:m.sel};
+        m.editorIds = null;
+        abRenderInsp(m);
+        post({cmd:'modsAction', action:'editorIds', arg:m.sel});
+        return;
+      }
       var ap = e.target.closest ? e.target.closest('[data-ab-apply]') : null;
       if (ap && !ap.disabled) { abApply(m); return; }
       var ne = e.target.closest ? e.target.closest('[data-ab-new]') : null;
@@ -5318,6 +5327,33 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
          + '</div></div>';
   }
 
+  var abIdsPending = null;
+  function abEditorIdsResult(msg) {
+    var pending = abIdsPending, data = msg.data || {};
+    if (!pending || (data.tile && data.tile !== pending.tile)) return;
+    abIdsPending = null;
+    if (pending.mount.sel !== pending.tile) return;
+    pending.mount.editorIds = {tile:pending.tile, pages:data.sheets || [],
+      message:data.message || msg.message || ''};
+    abRenderInsp(pending.mount);
+  }
+  function abEditorBindings(m, path) {
+    var result = m.editorIds;
+    if (abIdsPending && abIdsPending.mount === m && abIdsPending.tile === path)
+      return '<div class="ab-sect">Reading property IDs&hellip;</div>';
+    if (!result || result.tile !== path)
+      return '<div class="ab-sect"><button class="btn" data-editor-ids="1">Show property IDs</button></div>';
+    if (!result.pages.length)
+      return '<div class="ab-sect">' + abEsc(result.message || 'This tile has no property sheets.')
+        + (result.message ? ' <button class="btn" data-editor-ids="1">Retry</button>' : '') + '</div>';
+    function copy(id) {
+      return '<button class="btn" data-copy="' + abEsc(id) + '" title="Copy ID">' + abEsc(id) + '</button>';
+    }
+    return result.pages.map(function(page) {
+      return '<div class="ab-sect"><div class="panel-title">' + copy(page.id) + '</div>'
+        + page.properties.map(copy).join(' ') + '</div>';
+    }).join('');
+  }
   function abRenderInsp(m) {
     var body = m.el('insp');
     if (!m.sel) { body.innerHTML = '<div class="placeholder"><div>' + EMPTY_ASSETS + '</div></div>'; return; }
@@ -5344,7 +5380,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     }
     h += '<div><b>' + abEsc(leaf) + '</b></div>'
           + '<div class="ab-pathrow"><input type="text" readonly value="' + abEsc(path) + '">'
-          +   '<button class="btn" data-copy="' + abEsc(path) + '" title="Copy the full path">Copy</button></div>'
+          +   (abSelType(m) === 'snapDef'
+                ? '<button class="btn" data-copy="' + abEsc(path) + '" title="Use this ID in editor layout files">Copy editor ID</button>'
+                : '<button class="btn" data-copy="' + abEsc(path) + '" title="Copy the full path">Copy</button>') + '</div>'
+          + (abSelType(m) === 'snapDef' ? abEditorBindings(m, path) : '')
           + '<dl class="ab-meta"><dt>Folder</dt><dd title="' + abEsc(folder) + '">' + abEsc(folder) + '</dd>'
           +   '<dt>Preview</dt><dd data-ab="dims">' + (audible ? 'audio' : '-') + '</dd></dl>'
           + '<div class="ab-sect"><div class="panel-title">Apply to selection as</div>';
@@ -5462,6 +5501,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
   function abSelect(m, path) {
     abForgetPreview(m);
+    m.editorIds = null;
     m.sel = path;
     abActive = m;
     if (m.mode === 'modal') {

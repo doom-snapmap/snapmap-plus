@@ -1691,6 +1691,12 @@ int main(int argc, char **argv)
         free(doc);
     }
 
+    doc = run_doc(SH_MODS_ACT_EDITOR_IDS, "unknown/unknown");
+    CHECK(has(doc, "\"action\":\"editorIds\"") && has(doc, "\"tile\":\"unknown/unknown\"") && has(doc, "\"sheets\":["));
+    free(doc);
+    doc = run_doc(SH_MODS_ACT_EDITOR_IDS, "../missing");
+    CHECK(has(doc, "\"ok\":false") && has(doc, "\"sheets\":[]"));
+    free(doc);
     printf("-- New mod: a folder named after it, built at once, and Refresh named as the way to pick up edits\n");
     {
         char want[600];
@@ -1699,7 +1705,7 @@ int main(int argc, char **argv)
         CHECK(has(doc, "\"ok\":true,\"message\":\"Created Crate Pack in your mods folder, as Crate Pack. Its Example crate is in the "
                        "Toybox. After you change its files, press Refresh to see the change.\""));
         CHECK(has(doc, "\"key\":\"Crate Pack\""));
-        CHECK(has(doc, "\"file\":\"decls/snapeditorentitydef/example_crate.decl\""));
+        CHECK(has(doc, "\"file\":\"editor/toybox.json\""));
         CHECK(doc_prose_ok(doc));
         free(doc);
         doc = list_doc();

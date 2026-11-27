@@ -7,8 +7,7 @@
 #include "signatures.h"
 
 #define SH_SETTINGS_TAB_TITLE     "SNAPMAP+ MOD SETTINGS"
-#define SH_SETTINGS_TAB_MAX_ROWS  32
-#define SH_SETTINGS_TAB_MAX_GROUPS 8
+
 
 typedef enum sh_settings_tab_mode {
     SH_SETTINGS_TAB_OFF = 0,     /* panel hooks unavailable */

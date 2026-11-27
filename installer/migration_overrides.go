@@ -234,6 +234,9 @@ func (p *migrationPlan) loose(home string) error {
 	if _, err = p.translateLocalAuthor(input, converted, target, nil, nil, nil); err != nil {
 		return err
 	}
+	if err = stageEditorTiles(converted); err != nil {
+		return err
+	}
 	for _, file := range append(inactive, policies...) {
 		rel, _ := filepath.Rel(root, file)
 		dst := filepath.Join(converted, rel)
@@ -245,9 +248,9 @@ func (p *migrationPlan) loose(home string) error {
 		}
 	}
 	descriptor := filepath.Join(target, "mod.json")
-	source := descriptor
-	if idx, ok := p.destinations[strings.ToLower(descriptor)]; ok && p.Changes[idx].After != "" {
-		source = filepath.Join(p.work, fmt.Sprintf("new-%d", idx))
+	source, err := p.plannedAuthorFile(descriptor)
+	if err != nil {
+		return err
 	}
 	if !isRegular(source) {
 		if entries, e := os.ReadDir(target); e == nil && len(entries) > 0 {
@@ -335,16 +338,7 @@ func (p *migrationPlan) loose(home string) error {
 				}
 			}
 			if !bytes.Equal(newRaw, old) {
-				if !samePath(source, descriptor) {
-					idx := p.destinations[strings.ToLower(descriptor)]
-					if err = writeAtomicFile(source, newRaw); err != nil {
-						return err
-					}
-					p.Changes[idx].After, err = fileSHA256(source)
-					if err != nil {
-						return err
-					}
-				} else if err = p.putBytes(descriptor, newRaw, "Mods", true); err != nil {
+				if err = p.updateAuthorFile(descriptor, source, newRaw); err != nil {
 					return err
 				}
 			}
@@ -372,5 +366,6 @@ func (p *migrationPlan) loose(home string) error {
 		p.empty(filepath.Dir(stringsFile))
 	}
 	p.noteModChanges(target, start)
+	p.editorAuthors = append(p.editorAuthors, target)
 	return nil
 }

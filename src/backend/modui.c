@@ -21,6 +21,8 @@
 #include "modmanifest.h"
 #include "modregistry.h"
 #include "decl_tree.h"
+#include "editor_sheets.h"
+#include "editor_ids.h"
 #include "backend_log.h"
 #include "config_json.h"
 #include "modmap.h"
@@ -774,7 +776,7 @@ static void mu_entry_rows(mu_model *m, size_t i)
         const sh_mb_file *f = &e->bundle.files[k];
         char *path, *text = NULL, *tag = NULL, *def = NULL, *name = NULL, *c;
         if (!f->ptype || _stricmp(f->ptype, "snapEditorEntityDef") || f->cls == SH_MB_CLASS_EDITOR) continue;
-        if (!f->stock && (path = sh_textf("%s\\%s", e->folder, f->path)) != NULL) {
+        if (!f->stock && (path = sh_mb_payload_path(e->folder, f->path)) != NULL) {
             for (c = path; *c; c++) if (*c == '/') *c = '\\';
             text = (char *)sh_mb_read_file(path, (size_t)-1, NULL);
             free(path);
@@ -2387,6 +2389,7 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_CHOOSE: return "chooseRegistry";
     case SH_MODS_ACT_FILES: return "modFiles";
     case SH_MODS_ACT_FILE_TEXT: return "modFileText";
+    case SH_MODS_ACT_EDITOR_IDS: return "editorIds";
     case SH_MODS_ACT_NEW_MOD: return "newMod";
     case SH_MODS_ACT_ADD_MINE: return "addToMine";
     case SH_MODS_ACT_CONTENT: return "content";
@@ -2409,6 +2412,24 @@ static int mu_result_tail(mu_buf *b)
     mu_knum(b, "gen", (unsigned)g_gen, 0);
     mu_putn(b, "}", 1);
     return mu_publish(b);
+}
+
+static int mu_editor_ids(const char *id)
+{
+    size_t size = 0;
+    char *native = sh_editor_id_valid(id) ? sh_modserve_editor_row_native(id, &size) : NULL;
+    sh_dt *tree = native ? sh_dt_parse(native, size, NULL, 0) : NULL;
+    char *pages = tree ? sh_editor_sheet_ids(tree) : NULL;
+    mu_buf result = {0};
+    mu_result_head(&result, SH_MODS_ACT_EDITOR_IDS, pages != NULL,
+                   pages ? "" : "Could not read the property sheets for this editor definition.");
+    mu_kstr(&result, "tile", id ? id : "", 0);
+    mu_key(&result, "sheets", 0);
+    mu_putn(&result, pages ? pages : "[]", pages ? strlen(pages) : 2);
+    free(pages);
+    sh_dt_free(tree);
+    free(native);
+    return mu_result_tail(&result);
 }
 
 void sh_modui_set_key(char *(*action)(const char *arg), char *(*status)(void))
@@ -4770,7 +4791,8 @@ static int mu_files(const char *key)
     for (i = 0; i < d.n; i++) {
         const sh_mb_file *f = NULL;
         for (k = 0; e->loaded && k < e->bundle.file_count && !f; k++)
-            if (!_stricmp(e->bundle.files[k].path, d.v[i].path)) { f = &e->bundle.files[k]; if (seen) seen[k] = 1; }
+            if (!_stricmp(e->bundle.files[k].path, d.v[i].path) || (!_strnicmp(d.v[i].path, "editor/native/", 14) &&
+                !_stricmp(e->bundle.files[k].path, d.v[i].path + 7))) { f = &e->bundle.files[k]; if (seen) seen[k] = 1; }
         mu_put_file(&b, first, d.v[i].path, d.v[i].size, 1, f, mu_file_cause(cause, d.v[i].path)[0] && plain ? plain : "");
         first = 0;
     }
@@ -4778,6 +4800,12 @@ static int mu_files(const char *key)
     for (k = 0; e->loaded && k < e->bundle.file_count; k++) {
         const sh_mb_file *f = &e->bundle.files[k];
         if (seen && seen[k]) continue;
+        if (!f->stock && !_strnicmp(f->path, "decls/snapeditorentitydef/", 26)) {
+            char *path = sh_mb_payload_path(e->folder, f->path);
+            int compiled = path && strstr(path, "\\.build\\tile-");
+            free(path);
+            if (compiled) continue;
+        }
         mu_put_file(&b, first, f->path, f->size, 0, f, mu_file_cause(cause, f->path)[0] && plain ? plain : "");
         first = 0;
     }
@@ -5341,6 +5369,8 @@ int sh_modui_run(int action, const char *arg)
         return mu_files(arg);
     case SH_MODS_ACT_FILE_TEXT:
         return mu_file_text(arg);
+    case SH_MODS_ACT_EDITOR_IDS:
+        return mu_editor_ids(arg);
     case SH_MODS_ACT_NEW_MOD:
         return mu_new_mod(arg);
     case SH_MODS_ACT_ADD_MINE:

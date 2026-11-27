@@ -34,6 +34,7 @@ type migrationPlan struct {
 	Maps, Prefabs              int      `json:",omitempty"`
 	VanillaMaps                []string `json:",omitempty"`
 	modFolders                 map[string]migrationMod
+	editorAuthors              []string
 	progress                   *migrationProgress
 	data, work                 string
 	skippedName                string

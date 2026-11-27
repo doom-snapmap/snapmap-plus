@@ -8,6 +8,7 @@
 #include "../src/backend/map_shards.h"
 
 #include "map_carrier.h"
+#include "config_json.h"
 
 static void prepare_map_settings(const char *json, size_t len)
 {
@@ -200,6 +201,37 @@ int main(void)
         sh_map_settings_current(&cur);
         assert(!sh_map_render_unlocked(&cur.render) && !sh_map_bounds_overrides(&cur.bounds));
         assert(!sh_map_settings_restore_previous());
+    }
+    {
+        const char bare[] = MAP("0", ""), incoming[] = MAPM("0","",SET("\"values\":{\"aaaaaaaa/night\":false}"));
+        sh_json_object changes = {0};
+        size_t len, n;
+        char *saved;
+        prepare_map_settings(incoming, strlen(incoming));
+        sh_map_settings_loaded(1);
+        assert(!sh_map_settings_bool("aaaaaaaa", "night", 1));
+        assert(sh_map_settings_bool("bbbbbbbb", "night", 1));
+        assert(sh_json_object_set(&changes, "bbbbbbbb/other", "true", 2));
+        assert(sh_map_settings_apply_bools(&changes));
+        sh_json_object_free(&changes);
+        saved = sh_map_settings_on_save(bare, strlen(bare), &len);
+        assert(saved && valid(saved) && len == strlen(saved));
+        assert(strstr(saved, "aaaaaaaa/night") && strstr(saved, "bbbbbbbb/other") && !strstr(saved, "\"mods\""));
+        prepare_map_settings(bare, strlen(bare));
+        sh_map_settings_loaded(0);
+        assert(sh_map_settings_bool("bbbbbbbb","other", 0));
+        sh_map_settings_loaded(1);
+        assert(!sh_map_settings_bool("bbbbbbbb", "other", 0));
+        assert(sh_map_settings_restore_previous() && sh_map_settings_bool("bbbbbbbb","other",0));
+        sh_map_settings_reset();
+        assert(!sh_map_settings_bool("bbbbbbbb", "other", 0));
+        prepare_map_settings(saved, len);
+        sh_map_settings_loaded(1);
+        assert(sh_map_settings_bool("bbbbbbbb","other",0) && !sh_map_settings_bool("aaaaaaaa","night",1));
+        b = sh_map_settings_put(saved, len, &on, &n, &r);
+        assert(b && strstr(b, "bbbbbbbb/other") && strstr(b, "\"render\""));
+        HeapFree(GetProcessHeap(), 0, b);
+        HeapFree(GetProcessHeap(), 0, saved);
     }
     puts("map_settings_test: passed");
     return 0;

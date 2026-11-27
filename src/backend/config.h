@@ -21,6 +21,8 @@ extern "C" {
 #define SH_CONFIG_UI_READ       0x04u
 #define SH_CONFIG_UI_WRITE      0x08u
 
+struct sh_json_object;
+int sh_config_apply_editor_settings(const struct sh_json_object *changes);
 int sh_config_init(void);
 int sh_config_get_json(const char *key, char *out_json, int out_capacity,
                        unsigned int *out_flags);

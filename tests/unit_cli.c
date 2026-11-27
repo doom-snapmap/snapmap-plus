@@ -95,12 +95,7 @@ typedef struct src_ctx { const char *folder; } src_ctx;
 static char *source_of(void *ctx, const char *path)
 {
     const src_ctx *s = (const src_ctx *)ctx;
-    size_t n = strlen(s->folder) + strlen(path) + 2;
-    char *out = (char *)malloc(n), *p;
-    if (!out) return NULL;
-    _snprintf_s(out, n, _TRUNCATE, "%s\\%s", s->folder, path);
-    for (p = out; *p; p++) if (*p == '/') *p = '\\';
-    return out;
+    return sh_mb_payload_path(s->folder, path);
 }
 
 static int make_directory(const char *path)

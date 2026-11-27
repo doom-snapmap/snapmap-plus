@@ -696,7 +696,7 @@ static void builder_indent(sh_text_buf *b, unsigned count)
     while (count--) builder_char(b, ' ');
 }
 
-static void builder_quoted(sh_text_buf *b, const char *bytes, size_t length)
+void sh_json_append_quoted(sh_text_buf *b, const char *bytes, size_t length)
 {
     static const char hex[] = "0123456789abcdef";
     size_t i;
@@ -737,7 +737,7 @@ char *sh_json_serialize_object(const sh_json_object *object,
     for (i = 0; i < object->count; i++) {
         const sh_json_member *member = &object->members[i];
         builder_indent(&b, base_indent + 2);
-        builder_quoted(&b, member->key, member->key_length);
+        sh_json_append_quoted(&b, member->key, member->key_length);
         sh_text_append(&b, ": ", 2);
         sh_text_append(&b, member->value_json, strlen(member->value_json));
         if (i + 1 < object->count) builder_char(&b, ',');

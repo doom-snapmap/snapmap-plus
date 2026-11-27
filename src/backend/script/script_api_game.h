@@ -49,6 +49,7 @@ typedef struct sh_script_game_ops {
     /* Keep the outstanding cvar restores where the next start finds them,
      * or forget them (NULL: none outstanding). */
     int (*cvar_journal)(const char *json);
+    int (*map_setting)(const char *salt, const char *key);
 } sh_script_game_ops;
 
 /* The engine's operations, or a test's (NULL turns the calls off). */

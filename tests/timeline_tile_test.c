@@ -201,6 +201,20 @@ static void test_equal_category_captions(void)
     CHECK(rows[5][32] == 5 && sh_tl_category_end(end, end, NULL) == end);
 }
 
+static void test_custom_category_first(void)
+{
+    unsigned char rows[6][SH_TL_PALETTE_STRIDE] = {0}, sedefs[6][0xa0] = {0};
+    for (int i = 0; i < 6; i++) {
+        *(uint32_t *)(sedefs[i] + 0x94) = i == 2 || i == 4 ? 0x6c261296u : (unsigned)i;
+        *(unsigned char **)rows[i] = sedefs[i];
+        rows[i][32] = (unsigned char)i;
+    }
+    CHECK(sh_tl_first_custom(rows[0], rows[5], partition_test) == rows[2]);
+    CHECK(rows[0][32] == 2 && rows[1][32] == 4 && rows[2][32] == 0 && rows[3][32] == 1 && rows[4][32] == 3);
+    CHECK(sh_tl_first_custom(rows[0], rows[5], NULL) == rows[2]);
+    CHECK(sh_tl_first_custom(rows[2], rows[5], NULL) == rows[2] && rows[5][32] == 5);
+}
+
 static int synthetic_main(void)
 {
     test_table();
@@ -210,6 +224,7 @@ static int synthetic_main(void)
     test_stock_row_first();
     test_actor_picker();
     test_equal_category_captions();
+    test_custom_category_first();
     if (g_fail) { printf("timeline_tile_test: FAILED\n"); return 1; }
     printf("timeline_tile_test: all passed\n");
     return 0;

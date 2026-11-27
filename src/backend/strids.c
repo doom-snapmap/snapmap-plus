@@ -14,6 +14,7 @@
 #include "hook.h"
 #include "backend_log.h"
 #include "config_json.h"
+#include "editor_ids.h"
 #include "modserve.h"   /* sh_modserve_each_bundle_extra: the bundle string layer */
 #include "strkeys.h"    /* string edits: keys the game or the product defines */
 #include "process_heap_scope.h"   /* a runtime pass grows the table in the process heap */
@@ -118,6 +119,31 @@ static int strids_table(unsigned char **array, uint32_t *count)
     *count = *(uint32_t *)((unsigned char *)g_table_desc + 8);
     capacity = *(uint32_t *)((unsigned char *)g_table_desc + 12);
     return *count <= capacity && capacity <= INT_MAX && (!*count || *array);
+}
+
+char *sh_strids_label(const char *tag)
+{
+    unsigned char *base;
+    uint32_t hash, count, lo = 0, hi;
+    char *text = NULL;
+    if (!tag || !g_table_desc || !g_hash) return NULL;
+    __try {
+        if (!strids_table(&base, &count)) return NULL;
+        hash = g_hash(tag);
+        hi = count;
+        while (lo < hi) {
+            uint32_t mid = lo + (hi - lo) / 2;
+            if (*(uint32_t *)(base + (size_t)mid * 32) < hash) lo = mid + 1;
+            else hi = mid;
+        }
+        for (; lo < count; ++lo) {
+            const unsigned char *row = base + (size_t)lo * 32;
+            const char *key = *(const char *const *)(row + 8), *value = *(const char *const *)(row + 16);
+            if (*(const uint32_t *)row != hash) break;
+            if (key && value && !_stricmp(key, tag)) { text = _strdup(value); break; }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+    return text;
 }
 
 static int strids_index_compare(const void *a, const void *b)
@@ -582,7 +608,7 @@ void sh_strids_set_language_reader(char *(*read_language)(void))
     sh_strids_request_refresh();
 }
 
-static const char *strids_locale(void)
+const char *sh_strids_locale(void)
 {
     static const struct { const char *table, *locale; } languages[] = {
         { "english", "en" }, { "french", "fr" }, { "german", "de" }, { "italian", "it" },
@@ -618,6 +644,37 @@ static int strids_own_live(const char *hash)
     return hash && sh_modserve_bundle_scope(hash, &si) && si.names_live;
 }
 
+static void strids_tab_labels(const char *salt, const sh_json_object *root, const sh_json_object *english,
+                              const sh_json_object *translated, int owner)
+{
+    sh_json_object editor = {0}, tabs = {0};
+    const char *doc = sh_json_object_get(root, "editor");
+    if (!doc || !sh_json_parse_object(doc, strlen(doc), STRIDS_BUNDLE_JSON_DEPTH, &editor)) goto done;
+    const char *definitions = sh_json_object_get(&editor, "tabs");
+    if (!definitions || !sh_json_parse_object(definitions, strlen(definitions), STRIDS_BUNDLE_JSON_DEPTH, &tabs)) goto done;
+    for (size_t i = 0; i < tabs.count; i++) {
+        const sh_json_member *m = &tabs.members[i];
+        sh_json_object entry = {0};
+        if (!sh_json_parse_object(m->value_json, strlen(m->value_json), STRIDS_BUNDLE_JSON_DEPTH, &entry)) continue;
+        const char *title = sh_json_object_get(&entry, "title");
+        if (title) {
+            size_t n = strlen(title) + strlen(salt) + strlen(m->key) + 96;
+            char *buf = malloc(n), *tag = malloc(n), *key = malloc(n);
+            if (buf && tag && key && sh_json_decode_string(title, strlen(title), buf, n, NULL) &&
+                sh_editor_tab_tag(salt, m->key, tag, n) && sh_editor_string_tag(salt, buf, key, n)) {
+                const char *label = sh_json_object_get(translated, key + 5);
+                if (!label) label = sh_json_object_get(english, key + 5);
+                if (label) want_row(tag + 5, label, strlen(label), owner, STRIDS_LAYER_BUNDLE);
+            }
+            free(buf); free(tag); free(key);
+        }
+        sh_json_object_free(&entry);
+    }
+done:
+    sh_json_object_free(&tabs);
+    sh_json_object_free(&editor);
+}
+
 /* Each key keeps its identity across languages. Missing translations use that mod's English text. */
 static void inject_bundle(void *context, const char *id, const char *hash, int place, const char *extra)
 {
@@ -627,7 +684,6 @@ static void inject_bundle(void *context, const char *id, const char *hash, int p
     size_t before, name_cap, i;
     char *name;
     int owner, edits = 0, live = 1, own;
-    (void)place;   /* the order already places maps' places after the root */
     if (!id) id = "";
     if (!extra || !sh_json_parse_object(extra, strlen(extra), STRIDS_BUNDLE_JSON_DEPTH, &root)) goto done;
     strings = sh_json_object_get(&root, "strings");
@@ -653,6 +709,7 @@ static void inject_bundle(void *context, const char *id, const char *hash, int p
     owner = (int)g_bundle_names_n;
     g_bundle_names[g_bundle_names_n++] = name;
     before = g_layer_rows[STRIDS_LAYER_BUNDLE];
+    if (!place) strids_tab_labels(id, &root, &pairs, &translated, owner);
     /* A key the game or the product defines is an edit of that string and applies where the mod's other edits
      * do (an editor-tweak mod's in every map, any other mod's in maps that declare it). */
     for (i = 0; i < pairs.count; i++) edits |= sh_strkey_is_edit(pairs.members[i].key, pairs.members[i].key_length);
@@ -710,7 +767,7 @@ static void inject_bundles(void)
 {
     strids_bundle_pass pass;
     pass.debug = strids_debug();
-    pass.locale = strids_locale();
+    pass.locale = sh_strids_locale();
     if (sh_modserve_each_bundle_extra(inject_bundle, &pass) < 0) {
         g_pass_failed = 1;
         backend_log("STRINGS: REFUSED: the bundle string layer could not be read (out of memory)");

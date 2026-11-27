@@ -25,6 +25,9 @@ struct sh_process_heap_api;
 void sh_strids_set_process_heap(const struct sh_process_heap_api *api);
 /* The serving engine supplies the current sys_lang on each dictionary build. */
 void sh_strids_set_language_reader(char *(*read_language)(void));
+const char *sh_strids_locale(void);
+/* An owned copy of a current native UI label, or NULL when the dictionary has no matching tag. */
+char *sh_strids_label(const char *tag);
 
 /* Any thread: a serving index was published, so the bundle layer may have changed. Only marks the refresh pending. */
 void sh_strids_request_refresh(void);

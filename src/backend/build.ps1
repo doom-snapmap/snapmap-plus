@@ -30,7 +30,7 @@ param(
                            "../fault_shield/load_screen_stop.c", "../fault_shield/saved_map_guard.c",
                            "../fault_shield/shield_module.c", "../fault_shield/fault_shield.c",
                            # Map bounds, Blueprint zoom and the Snapmap+ settings tab.
-                           "settings_tab.c", "map_bounds.c", "map_settings.c", "editor_zoom.c",
+                           "settings_tab.c", "editor_settings.c", "editor_sheets.c", "map_bounds.c", "map_settings.c", "editor_zoom.c",
                            # Boot preload pacing (load-screen video lock, read poll).
                            "boot_pacing.c", "saved_views.c",
                            "ribbonmotion.c", "ribbonmotion_math.c",

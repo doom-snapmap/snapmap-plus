@@ -141,6 +141,9 @@ func (p *migrationPlan) convertMod(src, dst string, pruned prunedStock) error {
 	if err = earlierExtraFiles(src, target, consumed); err != nil {
 		return err
 	}
+	if err = stageEditorTiles(target); err != nil {
+		return err
+	}
 	if err = p.transferTree(target, dst, "Mods", samePath(src, dst)); err != nil {
 		return err
 	}
@@ -197,6 +200,14 @@ func (p *migrationPlan) splitAuthor(dir string) error {
 }
 
 func (p *migrationPlan) authored(dir string) error {
+	if err := editorTiles(dir, func(path string, data []byte) error {
+		return p.putBytes(path, data, "Mods", false)
+	}, func(path string) error {
+		p.empty(filepath.Dir(path))
+		return p.remove(path, "Mods")
+	}); err != nil {
+		return err
+	}
 	materialRoot := filepath.Join(dir, "materials")
 	invalidated := false
 	if err := walkLibrary(materialRoot, func(path string, e fs.DirEntry, _ error) error {
@@ -310,6 +321,9 @@ func (p *migrationPlan) modLibrary(root, destination string, overrides bool) err
 			if err = p.authored(dir); err != nil {
 				return err
 			}
+		}
+		if previous && !p.held[dir] || descriptor == "mod.json" && !overrides && samePath(root, destination) {
+			p.editorAuthors = append(p.editorAuthors, target)
 		}
 		p.noteModChanges(target, start)
 		return filepath.SkipDir
@@ -440,6 +454,13 @@ func (p *migrationPlan) mods() error {
 				return err
 			}
 		}
+	}
+	for _, dir := range p.editorAuthors {
+		start := len(p.Changes)
+		if err := p.editorCatalogs(dir); err != nil {
+			return fmt.Errorf("%s: %w", dir, err)
+		}
+		p.noteModChanges(dir, start)
 	}
 	for _, name := range []string{"served", "content"} {
 		if err := p.moveCache(filepath.Join(mods, "."+name), filepath.Join(p.data, "cache", name)); err != nil {

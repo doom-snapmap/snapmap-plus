@@ -1602,9 +1602,15 @@ int sh_mb_editor_time(const char *request)
 int sh_mb_editor_only(const sh_mb_bundle *bundle)
 {
     size_t i;
-    if (!bundle || !bundle->file_count || bundle->requirements) return 0;
+    if (!bundle || bundle->requirements) return 0;
+    if (!bundle->file_count) {
+        mbj *extra = bundle->extra ? mbj_parse(bundle->extra, strlen(bundle->extra), NULL) : NULL;
+        int layout = mbj_get(extra, "editor") != NULL;
+        mbj_free(extra);
+        return layout;
+    }
     for (i = 0; i < bundle->file_count; i++)
-        if (!sh_mb_editor_time(bundle->files[i].request)) return 0;
+        if (!sh_mb_editor_time(bundle->files[i].request) || strstr(bundle->files[i].request, "/mods/")) return 0;
     return 1;
 }
 
@@ -2240,6 +2246,7 @@ void sh_mb_free(sh_mb_bundle *b)
     free(b->homepage);
     free(b->requirements);
     free(b->campaign_cvars);
+    free(b->unit_source);
     free(b->updated_source);
     free(b->extra);
     free(b->canonical);
@@ -3070,6 +3077,7 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
 
 typedef struct mb_walk {
     sh_mb_bundle *b;
+    int editor_native;
     wchar_t *root;          /* the mod folder, long form */
     const char *folder;     /* its name, as the author named it (UTF-8) */
     int stock;              /* a stock reader is registered: defer type and size refusals */
@@ -3112,7 +3120,10 @@ static void mb_walk_file(mb_walk *w, const char *child, unsigned long long size)
         free(path_lower);
         return;
     }
-    if (!sh_mb_check_request(req_lower, &cause)) {
+    if (w->editor_native && (!mb_starts(req_lower, "generated/decls/") || !mb_ends(req_lower, ".decl") ||
+        !sh_mb_editor_time(req_lower) || strstr(req_lower, "/mods/"))) {
+        mb_error(w->b, "editor/%s must be an editor declaration outside a mod namespace", child);
+    } else if (!sh_mb_check_request(req_lower, &cause)) {
         mb_error(w->b, "%s: %s", child, cause);
     } else if (mb_rp_forbidden(req_lower)) {
         mb_error(w->b, "%s may not ship: %s", child, mb_rp_forbidden(req_lower));
@@ -3227,7 +3238,7 @@ static void mb_walk_top(mb_walk *w)
         if (!name) { mb_error(w->b, "out of memory"); continue; }
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
             mb_error(w->b, "%s is a link to another folder; make it a real folder and press Refresh", name);
-        } else {
+        } else if (_stricmp(name, "editor")) {
             wchar_t *sub = mb_wjoin(w->root, fd.cFileName);
             char *rel = sh_text(name);
             if (rel) mb_lower(rel);
@@ -3877,7 +3888,7 @@ static void mb_text_pointer(sh_mb_bundle *b, sh_mb_file *f, const wchar_t *root)
     wchar_t *full;
     if (sh_mb_stock_identify(f->request, sha, &size) != SH_MB_STOCK_OK) return;
     if (sh_mb_stock_read(f->request, sha, &game, &glen, f->path, NULL) != SH_MB_STOCK_OK) return;
-    full = mb_file_wpath(root, f->path);
+    full = sh_mb_payload_wpath(root, f->path);
     copy = full ? mb_read_wfile(full, MB_ANY_SIZE, &clen) : NULL;
     free(full);
     copy = mb_engine_text(b, copy, &clen);
@@ -4103,7 +4114,7 @@ static int mb_ce_text(void *context, const char *name, char **text, size_t *len)
         unsigned char *data;
         if (!f->ptype || !f->pname || _stricmp(f->ptype, "md6Def") != 0 || !mb_ce_name_same(f->pname, name)) continue;
         if (f->absent || !c->root) return 0;
-        path = mb_file_wpath(c->root, f->path);
+        path = sh_mb_payload_wpath(c->root, f->path);
         data = path ? mb_read_wfile(path, MB_ANY_SIZE, len) : NULL;
         free(path);
         data = mb_engine_text(c->b, data, len);
@@ -4309,6 +4320,58 @@ static wchar_t *mb_file_wpath(const wchar_t *root, const char *path)
     return full;
 }
 
+static wchar_t *mb_manifest_path(const wchar_t *folder, int create);
+
+/* Compiled rows use a stable file per author ID across rebuilds. */
+static wchar_t *mb_compiled_path(const wchar_t *root, const char *rel, int create)
+{
+    wchar_t *manifest, *leaf, *path;
+    char digest[65];
+    DWORD attrs;
+    if (strncmp(rel, "decls/snapeditorentitydef/", 26) || !mb_ends(rel, ".decl")) return NULL;
+    manifest = mb_manifest_path(root, create);
+    if (!manifest) return NULL;
+    leaf = wcsrchr(manifest, L'\\');
+    *leaf = 0;
+    sh_mb_sha256_hex(rel, strlen(rel), digest);
+    path = sh_wtextf(L"%s\\tile-%hs.decl", manifest, digest);
+    free(manifest);
+    attrs = path ? GetFileAttributesW(path) : INVALID_FILE_ATTRIBUTES;
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))) {
+        free(path); return NULL;
+    }
+    return path;
+}
+
+wchar_t *sh_mb_payload_wpath(const wchar_t *root, const char *rel)
+{
+    wchar_t *plain = mb_file_wpath(root, rel), *compiled;
+    int alias = mb_starts(rel, "native/") && sh_mb_editor_time(rel + 7);
+    int tile = mb_starts(rel, "decls/snapeditorentitydef/");
+    if (plain && (tile || alias) && GetFileAttributesW(plain) == INVALID_FILE_ATTRIBUTES) {
+        if (alias) {
+            char *aliased = sh_textf("editor/%s", rel);
+            compiled = aliased ? mb_file_wpath(root, aliased) : NULL;
+            free(aliased);
+        } else compiled = mb_compiled_path(root, rel, 0);
+        DWORD attr = compiled ? GetFileAttributesW(compiled) : INVALID_FILE_ATTRIBUTES;
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))) {
+            free(plain); return compiled;
+        }
+        free(compiled);
+    }
+    return plain;
+}
+
+char *sh_mb_payload_path(const char *folder, const char *rel)
+{
+    wchar_t *root = folder ? sh_mb_wpath(folder) : NULL;
+    wchar_t *path = root && rel ? sh_mb_payload_wpath(root, rel) : NULL;
+    char *utf8 = sh_mb_utf8(path);
+    free(root); free(path);
+    return utf8;
+}
+
 /* Derived edits: every decl the mod carries at a game name with other bytes is an edited copy. Its
  * structural diff against the game's text of the same decl is recorded (b->edits); the product applies it
  * per map and never serves the copy. A copy or a game text outside the decl grammar is refused. */
@@ -4404,7 +4467,7 @@ static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root, const mb_names
             continue;
         }
         if (!f->shadowed || !f->is_decl || f->stock || f->is_module || sh_mb_editor_time(f->request)) continue;
-        full = mb_file_wpath(root, f->path);
+        full = sh_mb_payload_wpath(root, f->path);
         copy = full ? mb_read_wfile(full, MB_ANY_SIZE, &clen) : NULL;
         free(full);
         copy = mb_engine_text(b, copy, &clen);
@@ -5771,8 +5834,8 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
 
     for (i = 0; i < b->file_count; i++) {
         sh_mb_file *f = &b->files[i];
-        char type[SH_MB_TYPE_CAP], *name = NULL, *rel;
-        wchar_t *wrel, *full;
+        char type[SH_MB_TYPE_CAP], *name = NULL;
+        wchar_t *full;
         unsigned long long got = 0;
         const char *forbidden = mb_rp_forbidden(f->request);
 
@@ -5792,18 +5855,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         f->shadowed = mb_is_shadow(b, f->request);
         if (!f->ptype || !f->pname) { mb_error(b, "out of memory"); continue; }
 
-        rel = mb_strdup(f->path);
-        if (!rel) { mb_error(b, "out of memory"); continue; }
-        for (char *p = rel; *p; p++) if (*p == '/') *p = '\\';
-        wrel = NULL;
-        {
-            int wn = MultiByteToWideChar(CP_UTF8, 0, rel, -1, NULL, 0);
-            if (wn > 0 && (wrel = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)wn)) != NULL)
-                MultiByteToWideChar(CP_UTF8, 0, rel, -1, wrel, wn);
-        }
-        free(rel);
-        full = wrel ? mb_wjoin(root, wrel) : NULL;
-        free(wrel);
+        full = sh_mb_payload_wpath(root, f->path);
         if (!full) { mb_error(b, "out of memory"); continue; }
 
         if (f->is_decl || f->is_module) {
@@ -6477,6 +6529,11 @@ char *sh_mb_read_manifest_file(const char *folder, size_t *len)
     return text;
 }
 
+#include "editor_ids.h"
+#include "editor_panel_schema.h"
+#include "modbundle_editor.inc"
+#include "modbundle_tiles.inc"
+
 static mbj *mb_read_manifest(const wchar_t *root, const char *salt)
 {
     size_t len = 0;
@@ -6695,12 +6752,21 @@ int sh_mb_load(const char *path, sh_mb_bundle *out)
     size_t len = 0;
     wchar_t *full = path ? sh_mb_wpath(path) : NULL, *leaf = full ? wcsrchr(full, L'\\') : NULL;
     char *text = full ? (char *)mb_read_wfile(full, MB_ANY_SIZE, &len) : NULL;
-    int source = leaf && !_wcsicmp(leaf + 1, L"mod.json"), ok;
+    int source = leaf && !_wcsicmp(leaf + 1, L"mod.json"), assembled = 0, ok;
     if (source) {
         if (leaf > full && leaf[-1] == L':') leaf[1] = 0;
         else *leaf = 0;
     }
+    if (source && text) {
+        char *reason = NULL, *effective = mb_editor_source(full, text, len, &len, &reason);
+        if (reason) {
+            if (out) { memset(out, 0, sizeof *out); mb_error(out, "%s", reason); }
+            free(reason); free(text); free(full); return 0;
+        }
+        if (effective) { free(text); text = effective; assembled = 1; }
+    }
     ok = mb_load_modjson(text, len, out, source ? full : NULL);
+    if (ok && assembled) { out->unit_source = text; text = NULL; }
     free(text);
     free(full);
     return ok;
@@ -7583,6 +7649,10 @@ char *sh_mb_modjson_text(const sh_mb_bundle *b, const char *author_text, size_t 
 
 char *sh_mb_read_unit_source(const sh_mb_bundle *b, const char *folder, size_t *size)
 {
+    if (b->unit_source && !b->cvar_source_hash[0]) {
+        *size = strlen(b->unit_source);
+        return mb_strdup(b->unit_source);
+    }
     char *path = sh_textf("%s\\mod.json", folder);
     char *source = path ? (char *)sh_mb_read_file(path, MB_ANY_SIZE, size) : NULL;
     free(path);
@@ -7590,6 +7660,11 @@ char *sh_mb_read_unit_source(const sh_mb_bundle *b, const char *folder, size_t *
         char *completed;
         int ok = mb_source_update(b, source, *size, &completed, size, NULL);
         if (!ok || completed) { free(source); source = completed; }
+    }
+    if (source && b->unit_source) {
+        free(source);
+        source = mb_strdup(b->unit_source);
+        *size = source ? strlen(source) : 0;
     }
     return source;
 }
@@ -7632,6 +7707,7 @@ static int mb_write_manifest(const sh_mb_bundle *b, const char *folder, const ch
     }
     manifest = mb_manifest_path(root, 1);
     ok = manifest && mb_write_wfile(manifest, block, strlen(block));
+    if (ok && b->validated) mb_editor_prune(root, b);
     if (!ok) mb_cause(cause, "cannot save the mod's build: %s", sh_reason_win32(GetLastError(), ".build", strlen(block)));
 done:
     mbj_free(doc);
@@ -7744,7 +7820,8 @@ static int mb_build(const char *folder, const char *salt, const sh_mb_resolver *
     DWORD attr;
     int has_mod, has_pkg;
     unsigned char *text = NULL;
-    size_t len = 0;
+    char *effective = NULL;
+    size_t len = 0, effective_len = 0;
     long long prev_built = 0;
     mbj *rootj = NULL;
     mb_walk w;
@@ -7778,8 +7855,12 @@ static int mb_build(const char *folder, const char *salt, const sh_mb_resolver *
         char *cause = NULL;
         text = mb_read_wfile(desc_mod, MB_ANY_SIZE, &len);
         if (!text) mb_error(out, "cannot read mod.json (missing or unreadable)");
-        else if (!(rootj = mbj_parse((const char *)text, len, &cause)))
+        else if (!from_unit && (effective = mb_editor_source(root, (const char *)text, len, &effective_len, &cause)) == NULL && cause)
+            mb_error(out, "%s", cause);
+        else if (!(rootj = mbj_parse(effective ? effective : (const char *)text, effective ? effective_len : len, &cause)))
             mb_error(out, "mod.json: %s", cause ? cause : "out of memory");
+        else if (!from_unit && !effective && mbj_get(rootj, "editor"))
+            mb_error(out, "move mod.json editor definitions into editor/*.json");
         else {
             const mbj *block = mbj_get(rootj, SH_MB_BLOCK_KEY), *fmt = NULL, *bs = NULL, *pt;
             if (block && block->t == MBJ_OBJ) {
@@ -7804,9 +7885,11 @@ static int mb_build(const char *folder, const char *salt, const sh_mb_resolver *
                     mb_error(out, "mod.json has invalid campaign CVar ownership");
                 /* The author's part read as the engine names it (modauthor.h): the mod's names under its salt and
                  * its strings keys <salt>_<key>. The file itself keeps the author's text. */
-                if (!sh_ma_string_keys((const char *)text, len, sh_strkey_is_edit, &out->own_keys, &out->own_key_count))
+                const char *author = effective ? effective : (const char *)text;
+                size_t author_len = effective ? effective_len : len;
+                if (!sh_ma_string_keys(author, author_len, sh_strkey_is_edit, &out->own_keys, &out->own_key_count))
                     mb_error(out, "out of memory");
-                engine = sh_ma_json(out->id, (const char *)text, len, sh_strkey_is_edit, &en);
+                engine = sh_ma_json(out->id, author, author_len, sh_strkey_is_edit, &en);
                 if (engine) {
                     mbj *again = mbj_parse(engine, en, NULL);
                     if (again) {
@@ -7846,7 +7929,19 @@ static int mb_build(const char *folder, const char *salt, const sh_mb_resolver *
     w.stock = mb_stock() != NULL && mb_stock()->match != NULL;
     w.r = resolver;
     w.outside = 0;
+    w.editor_native = 0;
     mb_walk_top(&w);
+    if (!from_unit && effective && !out->errors) {
+        wchar_t *native = mb_file_wpath(root, "editor/native");
+        DWORD attr = native ? GetFileAttributesW(native) : INVALID_FILE_ATTRIBUTES;
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) && !(attr & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            w.editor_native = 1;
+            mb_walk_dir(&w, native, "native");
+            w.editor_native = 0;
+        }
+        free(native);
+    }
+    if (!out->errors && effective) mb_editor_build(&w, effective, effective_len);
     free((void *)w.folder);
     if (!out->errors) {
         /* Identity: the folder's files live under mods/<its salt>/. */
@@ -7893,8 +7988,17 @@ static int mb_build(const char *folder, const char *salt, const sh_mb_resolver *
     }
     mb_finish(out);
     out->validated = out->errors == 0;
+    if (out->validated && effective) {
+        if (out->updated_source) {
+            char *cause = NULL;
+            out->unit_source = mb_editor_source(root, out->updated_source, strlen(out->updated_source), &effective_len, &cause);
+            if (!out->unit_source) { mb_error(out, "%s", cause ? cause : "could not read editor files after building"); out->validated = 0; }
+            free(cause);
+        } else { out->unit_source = effective; effective = NULL; }
+    }
     if (out->validated && out->built <= 0) out->built = mb_now();
 finish:
+    free(effective);
     free(text);
     free(root);
     return out->errors == 0;

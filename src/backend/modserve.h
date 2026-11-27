@@ -761,6 +761,12 @@ char *sh_modserve_bundle_name(const char *bundle_hash);
  * composition; `extra` is JSON text valid while its table lives. Returns the number visited, or -1 on no memory. */
 typedef void (*sh_modserve_extra_fn)(void *context, const char *id, const char *hash, int place, const char *extra);
 int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context);
+/* Installed editor documents in permanent salt order. */
+int sh_modserve_each_local_editor(sh_modserve_extra_fn fn, void *context);
+/* Reproject conditional property sheets after a local setting changes. */
+int sh_modserve_editor_preferences_changed(void);
+/* Native row with inherited property sheets before layout, for authoring IDs. The caller frees the text. */
+char *sh_modserve_editor_row_native(const char *row, size_t *len);
 
 /* Visit every admitted bundle in index order with its salt, hash and its product block's "registries" object (JSON
  * text, NULL when none, valid while its table lives). Returns the number visited. Used by modsound.c for the stock
