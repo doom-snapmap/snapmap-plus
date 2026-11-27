@@ -1690,6 +1690,39 @@ int sh_mb_need_requests(const char *type, const char *name, char *out[], int max
     return 0;
 }
 
+void sh_mb_row_strings(const char *extra, sh_json_object *english)
+{
+    sh_json_object root = {0}, strings = {0};
+    memset(english, 0, sizeof *english);
+    if (extra && sh_json_parse_object(extra, strlen(extra), MB_JSON_DEPTH, &root)) {
+        const char *all = sh_json_object_get(&root, "strings");
+        if (all && sh_json_parse_object(all, strlen(all), MB_JSON_DEPTH, &strings)) {
+            const char *en = sh_json_object_get(&strings, "en");
+            if (en) (void)sh_json_parse_object(en, strlen(en), MB_JSON_DEPTH, english);
+        }
+    }
+    sh_json_object_free(&strings);
+    sh_json_object_free(&root);
+}
+
+char *sh_mb_row_title(const sh_json_object *english, const char *salt, const char *tag)
+{
+    if (!tag || !english->count) return NULL;
+    if (!_strnicmp(tag, "#str_", 5)) tag += 5;
+    size_t prefix = strlen(salt);
+    for (size_t i = 0; i < english->count; i++) {
+        const sh_json_member *m = &english->members[i];
+        const char *k = m->key;
+        if (_stricmp(k, tag) && (!prefix || _strnicmp(k, salt, prefix) || k[prefix] != '_' ||
+            _stricmp(k + prefix + 1, tag))) continue;
+        size_t len = strlen(m->value_json);
+        char *title = malloc(len + 1);
+        if (title && sh_json_decode_string(m->value_json, len, title, len + 1, NULL)) return title;
+        free(title);
+    }
+    return NULL;
+}
+
 char *sh_mb_strip_key(const char *in)
 {
     size_t n, i;

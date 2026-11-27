@@ -166,6 +166,7 @@ static const char *g_bundle_name;
 /* A files[] path written as a stock pointer to the game's own bytes under the
  * same name (modbundle.h sh_mb_stock_restore), or NULL. */
 static const char *g_fx_restore;
+static const char *g_fx_stock_source; /* an alias may name a different game resource */
 static const char *g_fx_restore2;   /* a second one, or NULL */
 static const char *const *g_fx_restores;   /* more, NULL-terminated, or NULL */
 static int fx_is_restore(const char *path)
@@ -215,7 +216,8 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
             at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
                               "      {\"path\": \"%s\", \"stock\": {\"source\": \"%s\", \"sha256\": \"%s\"}, "
                               "\"provides\": {\"type\": \"%s\", \"name\": \"%s\"}, \"needs\": %s}%s\n",
-                              ap, f->path, hash64(f->blob, b), f->ptype, f->pname, f->needs ? f->needs : "[]",
+                              ap, g_fx_stock_source ? g_fx_stock_source : f->path, hash64(f->blob, b),
+                              f->ptype, f->pname, f->needs ? f->needs : "[]",
                               i + 1 < n ? "," : "");
         else
         at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
@@ -708,6 +710,12 @@ static void test_plan(void)
     CHECK(p.steps[bsedef].blocked && strstr(p.steps[bsedef].blocked, "mods/bobskins/missing.md6"));
     CHECK(!p.steps[bthing].blocked && !p.steps[sedef].blocked);
     CHECK(p.blocked == 1);
+    {
+        sh_modserve_plan again;
+        CHECK(sh_modserve_plan_editor(&again) == p.count);
+        CHECK(again.count == p.count && again.steps[bsedef].blocked == p.steps[bsedef].blocked);
+        sh_modserve_plan_free(&again);
+    }
     sh_modserve_plan_free(&p);
 
     hashes[0] = g_hash_a;
@@ -724,6 +732,77 @@ static void test_plan(void)
     for (i = 0; i < p.count; ++i) CHECK(p.steps[i].persist == 2);
     CHECK(p.steps[step_index(&p, "entityDef", "mods/alexpink/fireball")].persist == 2);
     sh_modserve_plan_free(&p);
+}
+
+static void test_placed_captions(void)
+{
+    char root[MAX_PATH], offline[MAX_PATH];
+    const char *names[] = {"mods/titlemod/shape", "mods/titlemod/foreign", "mods/titlemod/plain", "stock/shape"};
+    char *titles[4] = {0};
+#define CAPTION_TILE(id, entity, tag) {"generated/decls/snapeditorentitydef/mods/titlemod/" id ".decl", \
+    "{ edit = { entityDef = \"entities/" entity "\"; displayNameTag = \"#str_" tag "\"; } }", \
+    -1, "snapEditorEntityDef", "mods/titlemod/" id, NULL, 'a'}
+    static const fx_file rows[] = {
+        CAPTION_TILE("a", "shape", "tile"), CAPTION_TILE("b", "shape", "other"),
+        CAPTION_TILE("c", "foreign", "snapentity_demon_imp"), CAPTION_TILE("d", "plain", "missing")
+    };
+#undef CAPTION_TILE
+    static const fx_file other[] = {{"generated/decls/entitydef/mods/titlealt/x.decl", "{}",
+        -1, "entityDef", "mods/titlealt/x", NULL, 'b'}};
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s-titles", g_root);
+    _snprintf_s(offline, sizeof offline, _TRUNCATE, "%s-away", root);
+    g_bundle_extra = "\"strings\":{\"en\":{\"tile\":\"First title\",\"other\":\"Other title\"}},";
+    make_bundle(root, "rows", "titlemod", 'a', NULL, rows, 4, NULL);
+    g_bundle_extra = "\"strings\":{\"en\":{\"snapentity_demon_imp\":\"Cross-mod title\"}},";
+    make_bundle(root, "other", "titlealt", 'b', NULL, other, 1, NULL);
+    g_bundle_extra = NULL;
+    CHECK(sh_modserve_index_build(root) == 2);
+    CHECK(MoveFileA(root, offline));
+    sh_modserve_placed_labels(names, 4, titles);
+    CHECK(titles[0] && !strcmp(titles[0], "First title"));
+    CHECK(titles[1] && !strcmp(titles[1], "Cross-mod title"));
+    CHECK(titles[2] && !strcmp(titles[2], "d"));
+    CHECK(!titles[3]);
+    for (int i = 0; i < 4; i++) { free(titles[i]); titles[i] = NULL; }
+    CHECK(MoveFileA(offline, root));
+    g_bundle_extra = "\"strings\":{\"en\":{\"tile\":\"Revised title\"}},";
+    make_bundle(root, "rows", "titlemod", 'c', NULL, rows, 4, NULL);
+    g_bundle_extra = NULL;
+    CHECK(sh_modserve_index_build(root) == 2);
+    sh_modserve_placed_labels(names, 1, titles);
+    CHECK(titles[0] && !strcmp(titles[0], "Revised title"));
+    free(titles[0]);
+}
+
+static void test_plan_cycle(void)
+{
+    char root[MAX_PATH], hash[65];
+    const char *one[] = { hash64('8', hash) };
+    sh_modserve_plan p;
+    int i;
+#define ORDER_NEED(id) "{\"type\":\"entityDef\",\"name\":\"mods/ordertst/" id "\"}"
+#define ORDER_FILE(id, needs) { "generated/decls/entitydef/mods/ordertst/" id ".decl", "{}", -1, "entityDef", "mods/ordertst/" id, needs, 'a' }
+    static const fx_file files[] = {
+        ORDER_FILE("a", "[" ORDER_NEED("b") "," ORDER_NEED("b") "]"),
+        ORDER_FILE("b", "[" ORDER_NEED("a") "]"),
+        ORDER_FILE("dependent", "[" ORDER_NEED("a") "," ORDER_NEED("dependent") "]"),
+        ORDER_FILE("free1", NULL), ORDER_FILE("free2", NULL),
+        ORDER_FILE("missing", "[" ORDER_NEED("absent") "]"),
+        ORDER_FILE("blocked", "[" ORDER_NEED("missing") "]")
+    };
+#undef ORDER_NEED
+#undef ORDER_FILE
+    static const char *expected[] = { "free1", "free2", "missing", "blocked", "a", "b", "dependent" };
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s-order", g_root);
+    make_bundle(root, "order", "ordertst", '8', "", files, 7, NULL);
+    CHECK(sh_modserve_index_build(root) == 1);
+    CHECK(sh_modserve_plan_bundles(one, 1, &p, NULL) == 7);
+    if (p.count == 7) {
+        for (i = 0; i < p.count; ++i) CHECK(!strcmp(strrchr(p.steps[i].name, '/') + 1, expected[i]));
+        CHECK(p.blocked == 2 && p.steps[3].blocked && strstr(p.steps[3].blocked, "'mods/ordertst/missing', which is blocked"));
+    }
+    sh_modserve_plan_free(&p);
+    CHECK(sh_modserve_index_build(g_root) >= 1);
 }
 
 static void test_plan_run(void)
@@ -6221,6 +6300,77 @@ static void test_enemy_behavior(void)
     CHECK(sh_modserve_index_build(g_root) >= 6);
 }
 
+static void test_shared_stock_dependencies(void)
+{
+#define SHARED_MESH "cooked/model/models/props/card.bmodel"
+    static const fx_file key[] = {
+        {"generated/decls/entitydef/mods/keypack1/key.decl", "{}", -1, "entityDef", "mods/keypack1/key",
+         "[{\"type\":\"model\",\"name\":\"" SHARED_MESH "\"}]", '1'},
+        {SHARED_MESH, NULL, 0, "model", SHARED_MESH, NULL, '5'},
+        {"generated/decls/entitydef/mods/keypack1/linked.decl", "{}", -1, "entityDef", "mods/keypack1/linked",
+         "[{\"type\":\"entityDef\",\"name\":\"mods/aliasmod/stock\"}]", '3'}
+    };
+    static const fx_file alias = {"generated/decls/entitydef/mods/aliasmod/stock.decl", NULL, 0, "entityDef",
+                                  "mods/aliasmod/stock", NULL, '4'};
+    static const fx_file changed = {SHARED_MESH, "CHANGED", -1, "model", SHARED_MESH, NULL, '7'};
+    const char *object[] = {"mods/keypack1/key"}, *linked[] = {"mods/keypack1/linked"};
+    char owner[65], sibling[65], other_alias[65], replacement[65], bytes[40];
+    char out[3][SH_MODSERVE_HASH_HEX + 1], root[MAX_PATH];
+    const char *pins[] = {replacement, owner};
+    int local_winners = 0;
+    hash64('a', owner); hash64('b', sibling); hash64('c', other_alias); hash64('d', replacement);
+    for (int round = 0; round < 2; ++round) {
+        const char *other = round ? "aaacopy1" : "zzzcopy1";
+        dep_seen seen = {0};
+        sh_modserve_hit hit;
+        fx_file different = key[1];
+        int local;
+        _snprintf_s(root, sizeof root, _TRUNCATE, "%s-stock-%d", g_root, round);
+        g_fx_restore = SHARED_MESH;
+        if (round) make_bundle(root, other, other, 'b', NULL, &key[1], 1, NULL);
+        make_bundle(root, "keypack1", "keypack1", 'a', NULL, key, _countof(key), NULL);
+        if (!round) make_bundle(root, other, other, 'b', NULL, &key[1], 1, NULL);
+        g_fx_restore = alias.path;
+        g_fx_stock_source = "generated/decls/entitydef/stock/source.decl";
+        make_bundle(root, "aliasmod", "aliasmod", 'c', NULL, &alias, 1, NULL);
+        g_fx_restore = g_fx_stock_source = NULL;
+        CHECK(sh_modserve_index_build(root) == 3);
+        local = sh_modserve_lookup_indexed(SHARED_MESH, &hit);
+        CHECK(local);
+        local = local && !strcmp(hit.bundle_id, "keypack1");
+        local_winners += local;
+        CHECK(modserve_bundles_for_names(object, 1, out, 3) == 1 && !strcmp(out[0], owner));
+        CHECK(modserve_bundles_for_names_visit(object, 1, dep_visit, &seen) == 1);
+        CHECK(strstr(seen.names, object[0]) && seen.bundles == 0);
+        CHECK(modserve_bundles_for_names(linked, 1, out, 3) == 2 &&
+              !strcmp(out[0], owner) && !strcmp(out[1], other_alias));
+
+        /* Different fingerprints for the same stock path keep the selected provider. */
+        different.blob = '8';
+        g_fx_restore = SHARED_MESH;
+        make_bundle(root, other, other, 'b', NULL, &different, 1, NULL);
+        g_fx_restore = NULL;
+        CHECK(sh_modserve_index_rescan() == 3);
+        if (!local)
+            CHECK(modserve_bundles_for_names(object, 1, out, 3) == 2 &&
+                  !strcmp(out[0], owner) && !strcmp(out[1], sibling));
+
+        /* A map's explicitly attached edit still supplies its replacement bytes. */
+        make_bundle(root, "replace1", "replace1", 'd', "\"" SHARED_MESH "\"", &changed, 1, NULL);
+        CHECK(sh_modserve_index_rescan() == 4);
+        sh_modserve_scope_enable(1);
+        sh_modserve_scope_set(pins, 2, 1);
+        CHECK(open_text(SHARED_MESH, bytes, sizeof bytes) == 1 && !strcmp(bytes, "CHANGED"));
+        CHECK(modserve_bundles_for_names(object, 1, out, 3) == 1 && !strcmp(out[0], owner));
+        CHECK(open_text(SHARED_MESH, bytes, sizeof bytes) == 1 && !strcmp(bytes, "CHANGED"));
+        sh_modserve_scope_set(NULL, 0, 0);
+        sh_modserve_scope_enable(0);
+    }
+    CHECK(local_winners == 1);
+    CHECK(sh_modserve_index_build(g_root) >= 6);
+#undef SHARED_MESH
+}
+
 static void test_dependency_names(void)
 {
     char top[MAX_PATH], root[MAX_PATH], out[4][SH_MODSERVE_HASH_HEX + 1], ha[65], hc[65];
@@ -7191,7 +7341,10 @@ int main(void)
     test_bank_stems();
     test_namespace_maps();
     test_index_retire();
+    test_shared_stock_dependencies();
     test_store_root_utf8();
+    test_placed_captions();
+    test_plan_cycle();
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) { *slash = 0; remove_tree(top); }

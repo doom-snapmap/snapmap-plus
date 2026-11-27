@@ -1202,6 +1202,27 @@ static char *dt_decl_value(const sh_dt_node *field)
     return sh_textn(field->val + 1, field->val_n - 2);
 }
 
+void sh_dt_tile_fields(const char *text, size_t len, char **entity, char **tag)
+{
+    dt_lex lex = {text, len, 0};
+    dt_tok key;
+    *entity = *tag = NULL;
+    while ((!*entity || !*tag) && (key = dt_next(&lex)).kind != DT_END && key.kind != DT_BAD) {
+        char **out;
+        if (key.kind != DT_WORD) continue;
+        if (dt_ieq(key.p, key.n, "entityDef", 9)) out = entity;
+        else if (dt_ieq(key.p, key.n, "displayNameTag", 14)) out = tag;
+        else continue;
+        dt_lex field = lex;
+        if (*out || dt_next(&field).kind != DT_EQ) continue;
+        dt_tok value = dt_next(&field);
+        if (value.kind == DT_STR && value.n > 2) {
+            *out = sh_textn(value.p + 1, value.n - 2);
+            lex = field;
+        }
+    }
+}
+
 char *sh_dt_enemy_behavior(const char *salt, const char *entitydef, sh_dt_enemy_read read, void *context)
 {
     char *parent = NULL, *behavior = NULL;

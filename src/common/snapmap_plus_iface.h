@@ -350,6 +350,7 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
  * sh_modui_scripts). Returns 1, or 0 on failure. */
 #define SH_MODS_SCRIPTS 7
 #define SH_MODS_GENERATION 8   /* any thread: 1 with generation set, nothing else */
+#define SH_MODS_LIST_VIEW 9    /* worker: build the document in out; capture the open map on the game thread */
 /* SH_MODS_SCRIPTS answers a log's tail; an arg of this prefix and the salt asks for the whole log (Copy log). */
 #define SH_MODS_SCRIPTS_FULL "full:"
 /* Op 5 and actions 2, 5 to 9, 14, 15, 17 and 19 are unassigned; the slot answers them "Unknown action.". */
@@ -371,6 +372,13 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 #define SH_MODS_ACT_KEY                27    /* arg: the publishing key's Settings request (modclaim.h modclaim_key_action; any thread, no list follows) */
 #define SH_MODS_ACT_EDITOR_IDS         28    /* arg: native Toybox tile ID */
 #define SH_MODS_ACT_CONTENT            25    /* arg: "" map content on disk; "removePlayed": Remove content of maps you only played, then it (any thread) */
+static inline int sh_mods_worker_action(int action)
+{
+    return action == SH_MODS_ACT_INSTALL || action == SH_MODS_ACT_NEW_MOD || action == SH_MODS_ACT_RESCAN ||
+           action == SH_MODS_ACT_ADD_MINE || action == SH_MODS_ACT_KEY || action == SH_MODS_ACT_FILES ||
+           action == SH_MODS_ACT_FILE_TEXT || action == SH_MODS_ACT_CONTENT;
+}
+
 typedef struct sh_mods_call {
     int          op;
     int          action;       /* RUN */
@@ -378,6 +386,7 @@ typedef struct sh_mods_call {
     char        *out;          /* out, owned (NULL in): FETCH, ROOT, SCRIPTS */
     int          busy;         /* out: STORE */
     unsigned int generation;   /* out */
+    int (*capture)(sh_main_call_fn fn, void *context);  /* LIST_VIEW: 1 when the game ran fn */
 } sh_mods_call;
 typedef int (*sh_mods_fn)(struct sh_iface *self, sh_mods_call *call); /* +0x378 (ext 34) */
 

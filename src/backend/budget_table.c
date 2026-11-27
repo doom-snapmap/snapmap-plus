@@ -97,6 +97,21 @@ void sh_bt_leaf(const char *decl_name, char *out, size_t cap)
     out[n] = 0;
 }
 
+typedef struct bt_sedef {
+    struct bt_sedef *next;
+    const char *name, *inherit;
+    int limits[SH_BT_FIELDS], automation, network_static;
+} bt_sedef;
+
+typedef struct bt_module {
+    struct bt_module *next;
+    const char *name, *alias;
+    int own[SH_BT_FIELDS], templ[SH_BT_FIELDS], view[SH_BT_FIELDS];
+    unsigned mask;
+    int nparts;
+    sh_bt_part parts[];
+} bt_module;
+
 void sh_bt_table_init(sh_bt_table *t)
 {
     memset(t, 0, sizeof *t);
@@ -106,23 +121,30 @@ void sh_bt_table_free(sh_bt_table *t)
 {
     size_t i;
     if (!t) return;
-    sh_bt_buf_free(&t->sedefs); sh_bt_buf_free(&t->inherits);
-    sh_bt_buf_free(&t->modules); sh_bt_buf_free(&t->aliases);
+    while (t->rows) {
+        bt_sedef *next = t->rows->next;
+        free(t->rows);
+        t->rows = next;
+    }
+    while (t->modules) {
+        bt_module *next = t->modules->next;
+        free(t->modules);
+        t->modules = next;
+    }
     for (i = 0; i < t->seen_cap; ++i) free(t->seen[i]);
     free(t->seen);
     memset(t, 0, sizeof *t);
 }
 
-/* Inserts key (with a one-letter namespace) into the set. Returns 1 when it is added, 0 when already present or
- * out of memory. */
-static int bt_seen_insert(sh_bt_table *t, char ns, const char *key)
+/* The set owns each unique name until the snapshot is freed. */
+static const char *bt_seen_insert(sh_bt_table *t, char ns, const char *key)
 {
     size_t len = strlen(key), i, h;
     char *k;
     if (!t->seen || (size_t)(t->nsedef + t->nmodule + t->nalias + t->ninherit + 1) * 2 > t->seen_cap) {
         size_t cap = t->seen_cap ? t->seen_cap * 2 : 1024, j;
         char **n = (char **)calloc(cap, sizeof *n);
-        if (!n) return 0;
+        if (!n) { t->oom = 1; return NULL; }
         for (j = 0; j < t->seen_cap; ++j) {
             if (!t->seen[j]) continue;
             h = sh_text_hash(t->seen[j], strlen(t->seen[j])) & (cap - 1);
@@ -133,7 +155,7 @@ static int bt_seen_insert(sh_bt_table *t, char ns, const char *key)
         t->seen = n; t->seen_cap = cap;
     }
     k = (char *)malloc(len + 2);
-    if (!k) return 0;
+    if (!k) { t->oom = 1; return NULL; }
     k[0] = ns; memcpy(k + 1, key, len + 1);
     h = sh_text_hash(k, strlen(k)) & (t->seen_cap - 1);
     for (i = 0; i < t->seen_cap && t->seen[h]; ++i, h = (h + 1) & (t->seen_cap - 1)) {
@@ -141,31 +163,29 @@ static int bt_seen_insert(sh_bt_table *t, char ns, const char *key)
     }
     if (t->seen[h]) { free(k); return 0; }
     t->seen[h] = k;
-    return 1;
+    return k + 1;
 }
 
 int sh_bt_table_add_sedef(sh_bt_table *t, const char *name, const char *inherit,
                           const int limits[SH_BT_FIELDS], int automation, int network_static)
 {
-    if (!t || !name || !*name) return 0;
-    if (!bt_seen_insert(t, 's', name)) return 0;   /* a row name is keyed once */
-    sh_bt_puts(&t->sedefs, t->nsedef++ ? "," : "");
-    sh_bt_put_str(&t->sedefs, name);
-    sh_bt_puts(&t->sedefs, ":{\"l\":");
-    sh_bt_put_block(&t->sedefs, limits);
-    sh_bt_puts(&t->sedefs, ",\"auto\":");
-    sh_bt_put_int(&t->sedefs, automation);
-    sh_bt_puts(&t->sedefs, ",\"ns\":");
-    sh_bt_put_int(&t->sedefs, network_static ? 1 : 0);
-    sh_bt_puts(&t->sedefs, "}");
-    if (inherit && *inherit && bt_seen_insert(t, 'i', inherit)) {
-        sh_bt_puts(&t->inherits, t->ninherit++ ? "," : "");
-        sh_bt_put_str(&t->inherits, inherit);
-        sh_bt_puts(&t->inherits, ":");
-        sh_bt_put_str(&t->inherits, name);
-        return 1;
-    }
-    return 0;
+    bt_sedef *row;
+    if (!t || !name || !*name || t->oom) return 0;
+    name = bt_seen_insert(t, 's', name);
+    if (!name) return 0;
+    row = (bt_sedef *)calloc(1, sizeof *row);
+    if (!row) { t->oom = 1; return 0; }
+    row->name = name;
+    row->inherit = inherit && *inherit ? bt_seen_insert(t, 'i', inherit) : NULL;
+    row->automation = automation;
+    row->network_static = network_static != 0;
+    memcpy(row->limits, limits, sizeof row->limits);
+    if (t->last_row) t->last_row->next = row;
+    else t->rows = row;
+    t->last_row = row;
+    t->nsedef++;
+    if (row->inherit) t->ninherit++;
+    return row->inherit != NULL;
 }
 
 void sh_bt_parts_add(sh_bt_parts *ps, unsigned mask, int kind, const int block[SH_BT_FIELDS])
@@ -186,47 +206,66 @@ void sh_bt_table_add_module(sh_bt_table *t, const char *decl_name, const int own
                             const sh_bt_parts *parts)
 {
     char leaf[260];
-    if (!t || !decl_name || !*decl_name) return;
-    if (!bt_seen_insert(t, 'm', decl_name)) return;
-    sh_bt_puts(&t->modules, t->nmodule++ ? "," : "");
-    sh_bt_put_str(&t->modules, decl_name);
-    sh_bt_puts(&t->modules, ":{\"own\":");
-    sh_bt_put_block(&t->modules, own);
-    sh_bt_puts(&t->modules, ",\"templ\":");
-    sh_bt_put_block(&t->modules, templ);
-    sh_bt_puts(&t->modules, ",\"view\":");
-    sh_bt_put_block(&t->modules, view);
-    sh_bt_puts(&t->modules, ",\"mask\":");
-    sh_bt_put_int(&t->modules, (long long)mask);
-    if (parts && !parts->overflow) {
-        int i;
-        sh_bt_puts(&t->modules, ",\"parts\":[");
-        for (i = 0; i < parts->count; ++i) {
-            sh_bt_puts(&t->modules, i ? ",[" : "[");
-            sh_bt_put_int(&t->modules, (long long)parts->part[i].mask);
-            sh_bt_puts(&t->modules, ",");
-            sh_bt_put_int(&t->modules, parts->part[i].kind);
-            sh_bt_puts(&t->modules, ",");
-            sh_bt_put_block(&t->modules, parts->part[i].block);
-            sh_bt_puts(&t->modules, "]");
-        }
-        sh_bt_puts(&t->modules, "]");
-    }
-    sh_bt_puts(&t->modules, "}");
+    bt_module *m;
+    int n = parts && !parts->overflow ? parts->count : -1;
+    if (!t || !decl_name || !*decl_name || t->oom) return;
+    if (n < -1 || n > SH_BT_MAX_PARTS) { t->oom = 1; return; }
+    decl_name = bt_seen_insert(t, 'm', decl_name);
+    if (!decl_name) return;
+    m = (bt_module *)calloc(1, sizeof *m + (n > 0 ? n * sizeof *m->parts : 0));
+    if (!m) { t->oom = 1; return; }
+    m->name = decl_name;
+    m->mask = mask;
+    m->nparts = n;
+    memcpy(m->own, own, sizeof m->own);
+    memcpy(m->templ, templ, sizeof m->templ);
+    memcpy(m->view, view, sizeof m->view);
+    if (n > 0) memcpy(m->parts, parts->part, n * sizeof *m->parts);
     sh_bt_leaf(decl_name, leaf, sizeof leaf);
-    if (leaf[0] && bt_seen_insert(t, 'a', leaf)) {
-        sh_bt_puts(&t->aliases, t->nalias++ ? "," : "");
-        sh_bt_put_str(&t->aliases, leaf);
-        sh_bt_puts(&t->aliases, ":");
-        sh_bt_put_str(&t->aliases, decl_name);
+    if (leaf[0]) m->alias = bt_seen_insert(t, 'a', leaf);
+    if (t->last_module) t->last_module->next = m;
+    else t->modules = m;
+    t->last_module = m;
+    t->nmodule++;
+    if (m->alias) t->nalias++;
+}
+
+static void bt_put_module(sh_bt_buf *out, const bt_module *m)
+{
+    sh_bt_put_str(out, m->name);
+    sh_bt_puts(out, ":{\"own\":");
+    sh_bt_put_block(out, m->own);
+    sh_bt_puts(out, ",\"templ\":");
+    sh_bt_put_block(out, m->templ);
+    sh_bt_puts(out, ",\"view\":");
+    sh_bt_put_block(out, m->view);
+    sh_bt_puts(out, ",\"mask\":");
+    sh_bt_put_int(out, (long long)m->mask);
+    if (m->nparts >= 0) {
+        int i;
+        sh_bt_puts(out, ",\"parts\":[");
+        for (i = 0; i < m->nparts; ++i) {
+            sh_bt_puts(out, i ? ",[" : "[");
+            sh_bt_put_int(out, (long long)m->parts[i].mask);
+            sh_bt_puts(out, ",");
+            sh_bt_put_int(out, m->parts[i].kind);
+            sh_bt_puts(out, ",");
+            sh_bt_put_block(out, m->parts[i].block);
+            sh_bt_puts(out, "]");
+        }
+        sh_bt_puts(out, "]");
     }
+    sh_bt_puts(out, "}");
 }
 
 char *sh_bt_table_finish(sh_bt_table *t, const sh_bt_head *head)
 {
     sh_bt_buf out = {0};
     static const int zero[SH_BT_FIELDS];
-    if (!t || !head) return NULL;
+    const bt_sedef *row;
+    const bt_module *m;
+    int written = 0;
+    if (!t || !head || t->oom) return NULL;
     sh_bt_puts(&out, "{\"gen\":");
     sh_bt_put_int(&out, head->generation);
     sh_bt_puts(&out, ",\"limits\":");
@@ -242,15 +281,39 @@ char *sh_bt_table_finish(sh_bt_table *t, const sh_bt_head *head)
     sh_bt_puts(&out, ",\"source\":");
     sh_bt_put_str(&out, head->layers_source ? head->layers_source : "fallback");
     sh_bt_puts(&out, "},\"sedefs\":{");
-    if (t->sedefs.p) sh_bt_puts(&out, t->sedefs.p);
+    for (row = t->rows; row; row = row->next) {
+        if (row != t->rows) sh_bt_puts(&out, ",");
+        sh_bt_put_str(&out, row->name);
+        sh_bt_puts(&out, ":{\"l\":");
+        sh_bt_put_block(&out, row->limits);
+        sh_bt_puts(&out, ",\"auto\":");
+        sh_bt_put_int(&out, row->automation);
+        sh_bt_puts(&out, ",\"ns\":");
+        sh_bt_put_int(&out, row->network_static);
+        sh_bt_puts(&out, "}");
+    }
     sh_bt_puts(&out, "},\"inherits\":{");
-    if (t->inherits.p) sh_bt_puts(&out, t->inherits.p);
+    for (row = t->rows; row; row = row->next) if (row->inherit) {
+        if (written++) sh_bt_puts(&out, ",");
+        sh_bt_put_str(&out, row->inherit);
+        sh_bt_puts(&out, ":");
+        sh_bt_put_str(&out, row->name);
+    }
     sh_bt_puts(&out, "},\"modules\":{");
-    if (t->modules.p) sh_bt_puts(&out, t->modules.p);
+    for (m = t->modules; m; m = m->next) {
+        if (m != t->modules) sh_bt_puts(&out, ",");
+        bt_put_module(&out, m);
+    }
     sh_bt_puts(&out, "},\"aliases\":{");
-    if (t->aliases.p) sh_bt_puts(&out, t->aliases.p);
+    written = 0;
+    for (m = t->modules; m; m = m->next) if (m->alias) {
+        if (written++) sh_bt_puts(&out, ",");
+        sh_bt_put_str(&out, m->alias);
+        sh_bt_puts(&out, ":");
+        sh_bt_put_str(&out, m->name);
+    }
     sh_bt_puts(&out, "}}");
-    if (out.oom || t->sedefs.oom || t->inherits.oom || t->modules.oom || t->aliases.oom) {
+    if (out.oom) {
         sh_bt_buf_free(&out);
         return NULL;
     }
@@ -349,8 +412,17 @@ static find_decl_fn g_decl;
 static void *g_register_fn;
 
 static SRWLOCK g_lock = SRWLOCK_INIT;
-static char *g_table;                   /* under g_lock */
-static size_t g_table_len;
+typedef struct bt_snapshot {
+    LONG refs;
+    SRWLOCK render_lock;
+    sh_bt_table table;
+    sh_bt_head head;
+    int limits[SH_BT_FIELDS], usage[SH_BT_FIELDS];
+    const char *error;
+    char *json;
+    size_t json_len;
+} bt_snapshot;
+static bt_snapshot *g_snapshot;          /* under g_lock */
 static unsigned g_generation;           /* under g_lock */
 static int g_limits[SH_BT_FIELDS], g_usage[SH_BT_FIELDS], g_reached, g_usage_ok;
 
@@ -369,6 +441,30 @@ static const void *g_built_entries, *g_built_pool;
 static int g_built_count = -1, g_built_pool_count = -1;
 static int g_logged;
 
+static void bt_snapshot_release(bt_snapshot *s)
+{
+    if (!s || InterlockedDecrement(&s->refs)) return;
+    sh_bt_table_free(&s->table);
+    free(s->json);
+    free(s);
+}
+
+/* A reader holds this palette's snapshot while the game can publish its next generation. */
+static char *bt_snapshot_json(bt_snapshot *s)
+{
+    char *copy;
+    AcquireSRWLockExclusive(&s->render_lock);
+    if (!s->json) {
+        s->json = s->error ? sh_bt_error_json(s->error, s->head.generation) : sh_bt_table_finish(&s->table, &s->head);
+        if (s->json) {
+            s->json_len = strlen(s->json);
+            sh_bt_table_free(&s->table);
+        }
+    }
+    copy = s->json ? sh_iface_textn(s->json, s->json_len) : NULL;
+    ReleaseSRWLockExclusive(&s->render_lock);
+    return copy;
+}
 
 static int rd_block(const void *p, int out[SH_BT_FIELDS])
 {
@@ -634,40 +730,37 @@ void sh_budget_table_tick(void *editor)
     __try { if (ed[ED_INIT_OFF] != 1) return; } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
     if (!InterlockedCompareExchange(&g_dirty, 0, 0) && ed == g_built_editor && !bt_palette_moved(ed)) return;
     {
-        sh_bt_table t;
-        sh_bt_head head;
+        bt_snapshot *snapshot = (bt_snapshot *)calloc(1, sizeof *snapshot), *old;
         bt_row_models rows;
-        const char *error = NULL;
-        char *json;
         unsigned gen;
+        if (!snapshot) return;
+        snapshot->refs = 1;
         InterlockedExchange(&g_dirty, 0);
         g_built_editor = ed;
-        sh_bt_table_init(&t);
-        memset(&head, 0, sizeof head);
         memset(&rows, 0, sizeof rows);
         AcquireSRWLockShared(&g_lock);
         gen = g_generation + 1;
         ReleaseSRWLockShared(&g_lock);
         if (!gen) gen = 1;
-        head.generation = gen;
-        __try { bt_build(ed, &t, &head, limits, usage, &error, &rows); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { error = "the palette walk faulted"; }
-        head.limits = limits; head.usage = usage;
-        json = error ? sh_bt_error_json(error, gen) : sh_bt_table_finish(&t, &head);
-        sh_bt_table_free(&t);
-        if (error) {
+        snapshot->head.generation = gen;
+        snapshot->head.limits = snapshot->limits;
+        snapshot->head.usage = snapshot->usage;
+        __try { bt_build(ed, &snapshot->table, &snapshot->head, snapshot->limits,
+                         snapshot->usage, &snapshot->error, &rows); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { snapshot->error = "the palette walk faulted"; }
+        if (snapshot->table.oom) snapshot->error = "the budget table ran out of memory";
+        if (snapshot->error) {
             char line[160];
-            _snprintf_s(line, sizeof line, _TRUNCATE, "BUDGET: table unavailable: %s", error);
+            _snprintf_s(line, sizeof line, _TRUNCATE, "BUDGET: table unavailable: %s", snapshot->error);
             backend_log(line);
         }
-        if (!json) { bt_rows_free(&rows); return; }
         AcquireSRWLockExclusive(&g_lock);
-        free(g_table);
-        g_table = json;
-        g_table_len = strlen(json);
+        old = g_snapshot;
+        g_snapshot = snapshot;
         g_generation = gen;
-        if (!error) { bt_row_models old = g_rows; g_rows = rows; rows = old; }
+        if (!snapshot->error) { bt_row_models prior = g_rows; g_rows = rows; rows = prior; }
         ReleaseSRWLockExclusive(&g_lock);
+        bt_snapshot_release(old);
         bt_rows_free(&rows);
     }
 }
@@ -698,7 +791,9 @@ int sh_budget_table_row_model(const char *inherit, char *sedef, size_t sedef_cap
 
 int sh_budget_table_slot(struct sh_iface *self, sh_budget_call *call)
 {
-    int r = 0, fresh;
+    int r = 0, fresh, usage_ready = 0;
+    int limits[SH_BT_FIELDS], usage[SH_BT_FIELDS];
+    bt_snapshot *snapshot = NULL;
     (void)self;
     if (!call) return 0;
     call->out = NULL;
@@ -708,16 +803,25 @@ int sh_budget_table_slot(struct sh_iface *self, sh_budget_call *call)
     call->reached = fresh ? g_reached : 0;
     if (call->op == SH_BUDGET_GENERATION) {
         r = 1;
-    } else if (call->op == SH_BUDGET_TABLE && g_table) {
-        r = (call->out = sh_iface_textn(g_table, g_table_len)) != NULL;
+    } else if (call->op == SH_BUDGET_TABLE && g_snapshot) {
+        snapshot = g_snapshot;
+        InterlockedIncrement(&snapshot->refs);
     } else if (call->op == SH_BUDGET_USAGE && g_usage_ok && fresh) {
-        int n = sh_bt_usage_json(NULL, 0, g_limits, g_usage, g_reached, g_generation);
+        memcpy(limits, g_limits, sizeof limits);
+        memcpy(usage, g_usage, sizeof usage);
+        usage_ready = 1;
+    }
+    ReleaseSRWLockShared(&g_lock);
+    if (snapshot) {
+        r = (call->out = bt_snapshot_json(snapshot)) != NULL;
+        bt_snapshot_release(snapshot);
+    } else if (usage_ready) {
+        int n = sh_bt_usage_json(NULL, 0, limits, usage, call->reached, call->generation);
         if (n >= 0 && (call->out = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)n + 1)) != NULL &&
-            sh_bt_usage_json(call->out, (size_t)n + 1, g_limits, g_usage, g_reached, g_generation) >= 0)
+            sh_bt_usage_json(call->out, (size_t)n + 1, limits, usage, call->reached, call->generation) >= 0)
             r = 1;
         else { sh_iface_text_free(call->out); call->out = NULL; }
     }
-    ReleaseSRWLockShared(&g_lock);
     return r;
 }
 #endif

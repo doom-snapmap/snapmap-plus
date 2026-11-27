@@ -32,6 +32,9 @@ int sh_modserve_index_rescan(void);
  * published and this runs; a consumer that keeps one longer copies it. Main thread, at the start of a registration
  * pass; returns the tables freed. */
 int sh_modserve_index_retire(void);
+/* Keep tables alive across a worker's related serving-index queries. */
+void sh_modserve_read_begin(void);
+void sh_modserve_read_end(void);
 
 /* Remove the served copies (renamed banks, rewritten texts) the published table does not use, and any temporary
  * a crashed write left. Run once at boot; skipped while another game instance on this account uses the folder.
@@ -707,6 +710,9 @@ int modserve_bundles_for_names(const char *const *names, int n_names,
 /* 1 when the root folder's build of `salt` (the local mod) provides the placed name `name` (whether a map's placed
  * object of that mod is in the installed version), 0 when it does not, -1 without an index. */
 int sh_modserve_root_carries(const char *salt, const char *name);
+
+/* Copy the published index's English captions for placed entities. Missing rows keep the map's saved label. */
+void sh_modserve_placed_labels(const char *const *names, size_t count, char **titles);
 
 /* The save-time closure in the form the map manifest consumes: `names` are the logical names a map places, matched
  * case-insensitively. `visit` is called once per (bundle, placed name) match, then once with name NULL for each

@@ -63,6 +63,7 @@ $tests = @(
     @{ name = "fly_to_test"; src = 'fly_to_test.c'; arg = "" }
     @{ name = "typeinfo_cache_test"; src = 'typeinfo_cache_test.c ..\src\backend\modtypeinfo.c'; defs = '/DSH_MODTYPEINFO_PURE'; arg = "" }
     @{ name = "budget_table_test"; src = 'budget_table_test.c ..\src\backend\budget_table.c'; defs = '/DSH_BUDGET_TABLE_PURE'; arg = "" }
+    @{ name = "budget_snapshot_test"; src = 'budget_snapshot_test.c ..\src\common\snapmap_plus_iface.c'; defs = '/Gy'; arg = "" }
     @{ name = "sha256_test"; src = 'sha256_test.c ..\src\backend\sha256.c ..\src\backend\map_shards.c'; arg = "" }
     @{ name = "map_carrier_test"; src = 'map_carrier_test.c ..\src\backend\map_carrier.c ..\src\backend\config_json.c ..\src\backend\map_shards.c ..\src\backend\sha256.c'; arg = "" }
     @{ name = "map_settings_test"; src = 'map_settings_test.c ..\src\backend\map_settings.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\config_json.c ..\src\backend\map_render.c ..\src\backend\map_bounds.c ..\src\backend\sha256.c'; defs = '/DSH_MAP_BOUNDS_PURE'; arg = "" }

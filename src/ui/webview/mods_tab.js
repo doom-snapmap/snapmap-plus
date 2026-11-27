@@ -753,6 +753,7 @@ var modsTab = (function () {
   function create(env) {
     var doc = env.document, byId = env.byId;
     var model = normalize(null), loaded = false, waiting = false, busy = '', quiet = false, selectedKey = '';
+    var windowVisible = true, related = false, watching = false, needsPaint = false;
     var view = [], filter = '', attnOnly = false, lastError = '', rowNodes = {}, closedGroups = {};
     /* The Files modal: the mod it shows, the last modFiles answer, the selected file and its text,
        the filter, the folders opened or closed by hand, and the file and hint a new mod opens on. */
@@ -761,7 +762,7 @@ var modsTab = (function () {
               titleNode: null, stateNode: null, selNode: null};
     /* Map content on disk: the backend's content answer (the storage line and one line per map), and
        whether the next answer is the result of the Remove button. */
-    var content = {storage: '', rows: [], known: false}, contentSweep = false, contentDue = false;
+    var content = {storage: '', rows: [], known: false}, contentSweep = false, contentDue = false, contentLoading = false;
     var reveal = '';   /* a mod the last action made or installed: its organizing folder opens */
     /* The map modal: open, which page ('list' or 'confirm'), the dry run the confirmation shows,
        what opened the confirmation ('map' or 'uninstall') and the element focus returns to. */
@@ -992,14 +993,19 @@ var modsTab = (function () {
       f.appendChild(body);
       return f;
     }
-    function renderContent() { if (loaded && content.known) renderList(); }
+    function renderContent() {
+      if (!loaded || !content.known) return;
+      if (windowVisible && sl.visible) renderList();
+      else needsPaint = true;
+    }
     function askContent() {
       contentDue = false;
-      if (!busy) read('content');
+      if (!busy && !contentLoading) { contentLoading = true; read('content'); }
     }
     function onContentResult(ok, message, data) {
       var swept = contentSweep;
       contentSweep = false;
+      contentLoading = false;
       if (ok) {
         content = normContent(data);
       }
@@ -1338,13 +1344,13 @@ var modsTab = (function () {
       if (sl.copy) sl.copy.disabled = !lines || !lines.length;
     }
     function selectedScriptSalt() { var b = selectedMod(); return b && b.scripts ? b.salt : ''; }
-    function askScripts() { if (sl.visible) env.post({cmd: 'modsScripts', salt: selectedScriptSalt()}); }
+    function askScripts() { if (windowVisible && sl.visible) env.post({cmd: 'modsScripts', salt: selectedScriptSalt()}); }
     /* The page's timer (env.every / env.cancel): the one repeating request the tab makes. */
     function every(ms, fn) { return env.every ? env.every(fn, ms) : null; }
     function stopEvery(t) { if (env.cancel) env.cancel(t); }
     /* Ask while the tab shows a mod with scripts; stop when it hides or none is left. */
     function syncScriptPoll() {
-      var want = sl.visible && model.mods.some(function (b) { return !!b.scripts; });
+      var want = windowVisible && sl.visible && model.mods.some(function (b) { return !!b.scripts; });
       if (want && sl.timer === null) sl.timer = every(SCRIPT_POLL_MS, askScripts);
       else if (!want && sl.timer !== null) { stopEvery(sl.timer); sl.timer = null; }
     }
@@ -1404,6 +1410,7 @@ var modsTab = (function () {
     /* keep: open on the page already set (a confirmation from the details pane). */
     function openMap(opener, keep) {
       modal.open = true;
+      syncWatch();
       if (!keep) { modal.page = 'list'; modal.preview = null; modal.from = 'map'; }
       if (opener !== undefined) modal.opener = opener;
       showOverlay(true);
@@ -1413,6 +1420,7 @@ var modsTab = (function () {
     function closeMap() {
       if (!modal.open) return;
       modal.open = false;
+      syncWatch();
       modal.page = 'list';
       modal.preview = null;
       showOverlay(false);
@@ -2014,16 +2022,16 @@ var modsTab = (function () {
       env.post(m);
       return true;
     }
-    /* The editor's limits moved (an object or module placed, deleted or undone): ask for the document again, at
-       most every 400 ms, while the tab or the This map window shows; this covers what the backend's poll cannot read. */
-    var mapChangeTimer = null;
-    function mapChanged() {
-      if (!loaded || waiting || mapChangeTimer !== null || !(sl.visible || modal.open)) return false;
-      mapChangeTimer = env.after ? env.after(function () {
-        mapChangeTimer = null;
-        if (!busy && !waiting) { waiting = true; env.post({cmd: 'modsList'}); }
-      }, 400) : null;
-      if (!env.after && !busy) { waiting = true; env.post({cmd: 'modsList'}); }
+    function syncWatch() {
+      var want = windowVisible && (sl.visible || modal.open || related);
+      if (watching === want) return;
+      watching = want;
+      if (env.watch) env.watch(want);
+    }
+    function ensureLoaded() {
+      if (loaded || waiting || busy || !windowVisible) return false;
+      waiting = true;
+      env.post({cmd: 'modsList'});
       return true;
     }
     /* Refresh, the one rescan: every changed folder is built again and the host follows with a fresh document. Quiet:
@@ -2050,9 +2058,10 @@ var modsTab = (function () {
         model = normalize(d.data);
         lastError = model.ok ? model.error : 'The mods list is unavailable.';
       }
-      renderAll();
+      needsPaint = !windowVisible || !(sl.visible || modal.open || fm.open);
+      if (!needsPaint) renderAll();
       syncScriptPoll();
-      if (contentDue) askContent();
+      if (contentDue && windowVisible && sl.visible) askContent();
       /* The page's other parts that read the mods (the Entities tab's script labels). */
       if (env.changed) env.changed();
     }
@@ -2168,22 +2177,36 @@ var modsTab = (function () {
 
     return {
       bind: bind,
-      /* The tab became visible: reread the folder (explicit demand, never a timer; there is no
-         watcher). While it shows, the script log of a mod with scripts is asked for each second. */
-      show: function () { sl.visible = true; refresh(); syncScriptPoll(); },
-      hide: function () { sl.visible = false; syncScriptPoll(); },
+      show: function () {
+        if (sl.visible) return;
+        sl.visible = true;
+        syncWatch();
+        if (needsPaint) { renderAll(); needsPaint = false; }
+        if (!content.known) contentDue = true;
+        if (lastError && !model.ok) loaded = false;
+        if (ensureLoaded() && !loaded) renderList();
+        if (contentDue && !waiting && !busy) askContent();
+        syncScriptPoll();
+      },
+      hide: function () { sl.visible = false; syncWatch(); syncScriptPoll(); },
+      setWindowVisible: function (on) {
+        windowVisible = on;
+        syncWatch();
+        syncScriptPoll();
+        if (on && sl.visible && needsPaint) { renderAll(); needsPaint = false; }
+        if (on && (sl.visible || modal.open || related)) ensureLoaded();
+      },
+      setRelated: function (on) {
+        related = on;
+        syncWatch();
+        if (on) ensureLoaded();
+      },
       setScriptedMaps: setScriptedMaps,
       /* The Entities tab: what a placed entity is to its mod's scripts (scriptEntityInfo), from the
          last document; ensureLoaded asks for one (no rescan) when none came yet. */
       scriptInfo: function (inherit, name) { return scriptEntityInfo(model.mods, inherit, name); },
-      ensureLoaded: function () {
-        if (loaded || waiting) return false;
-        waiting = true;
-        env.post({cmd: 'modsList'});
-        return true;
-      },
+      ensureLoaded: ensureLoaded,
       refresh: refresh,
-      mapChanged: mapChanged,
       /* The Prefabs tab: a mod's state in the open map, by its namespace (mapState). */
       mapStateOf: function (salt) {
         var b = null, i;

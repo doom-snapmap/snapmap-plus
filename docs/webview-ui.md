@@ -80,7 +80,7 @@ The header defines the complete ABI. These are the main entry points:
 | Prefabs tab watch | `prefab_watch` at `+0x380` (ext 35): the modules selected in Blueprint, whether a Load / Place is held in the 3D view (`SH_PREFAB_HELD_OBJECTS` while EntityMode `+0x1AC` reads 4 after a queued paste, `SH_PREFAB_HELD_MODULES` from a module placement's install to Space or Esc) and the last paste decision. Guarded reads from the host's thread, nothing waits for the game. |
 | Timeline Save | `apply_sync` at `+0x290`, kind 0, with the target entity ID. |
 | Timeline tile | `timeline_tile` at `+0x368` reports the toybox tile's palette row, its prototype record class and the rebind counts. The page does not call it; the `+0x298` normaliser is retired. |
-| Mods tab | `mods` at `+0x378`: LIST and RUN build a document on the game thread (call them inside `run_on_main`), except the file work of Install, New mod and Refresh, which the window runs on its own worker with no time limit before APPLY brings the change into the game; FETCH copies it on any thread, ROOT returns the store folder, STORE says whether a store write holds the store lock. Install's picker is the host's: one Open dialog for mod ZIPs and a mod folder's `mod.json`, which stands for its folder (`rawmap_picker.h` `kModInstall`, `install_target`). See [Mods tab](#mods-tab). |
+| Mods tab | `mods` at `+0x378`: LIST_VIEW builds the current document on the worker, with one game-thread callback to capture the open map. RUN applies a requested action. File reads, install and builds run on the worker. The game applies engine changes on its main thread. FETCH returns the last action result, ROOT returns the store folder and STORE reports a store write. Install's picker is the host's: one Open dialog for mod ZIPs and a mod folder's `mod.json`, which stands for its folder (`rawmap_picker.h` `kModInstall`, `install_target`). See [Mods tab](#mods-tab). |
 | Prefab limits | `budget` at `+0x370`: TABLE copies the budget table the backend built after the last palette build, USAGE the map's limits, usage and reached byte from the last editor frame. |
 | Persistent settings | `config_get_json` at `+0x2B0` and `config_set_json` at `+0x2B8`. |
 | Prefab geometry | Model lookup and request/completion slots at `+0x308` through `+0x320`. `resolve_prefab_defaults` (`+0x320`) also reports a palette-row model (`SH_PREFAB_DEFAULT_EDITOR`) and, given six floats, that row's `renderInfo.size` (`SH_PREFAB_DEFAULT_SIZE`); see [Prefabs 3D preview](#prefabs-3d-preview). |
@@ -280,7 +280,7 @@ Prefab Details shows "Content ready", "Missing content" or "Content incomplete".
 When a map is open, a ready row shows "In this map" or "Not in this map" using
 the Mods tab's map state for that salt. A missing row keeps its warning even
 when the map names that mod. If content is missing, the details direct the
-player to **Prefabs → Import** to open the author's prefab ZIP, then **Load / Place**
+player to **Prefabs â†’ Import** to open the author's prefab ZIP, then **Load / Place**
 on the imported prefab. The module warning and Blueprint placement check still
 apply. A mod without a recorded name appears as "an unnamed mod".
 
@@ -320,13 +320,7 @@ browser. A player who only plays maps never sees the tab: a map's mod content co
 with no question.
 
 `mods_tab.js` renders the tab from the document `backend/modui.c` builds behind the `mods` slot.
-Showing the tab and the Refresh button send `modsAction {action: "rescan"}`: Refresh is the one
-action that reads the folder again and builds what changed (there is no Rebuild and no folder
-watcher). Every action is answered with `modsActionResult` and then a fresh `mods` document (the
-Files view's two reads, `modFiles` and `modFileText`, with the result alone), one job at a time.
-When the backend's generation moves without the page asking (a console verb, a map opened or left
-in the editor, an owed row drop or undo clear), the host pushes a fresh document; the page never
-polls the document (the one repeating request is the script log's, below). An author's edit shows after the next Refresh, which the empty state, How mods work ("A map
+Showing the tab subscribes with `modsWatch` and reads the first document through `modsList`. A later visit reuses the current document and catches up if its generation changed while hidden. The Refresh button sends `modsAction {action: "rescan"}` to build changed files. Each mutation receives its result followed by the updated document. Read-only requests keep their own results. An author's edit shows after the next Refresh, which the empty state, How mods work ("A map
 carries the mods it uses: the pieces of the objects you place, or the whole of a mod used in the whole
 map. A player who opens the map gets them with it.") and New mod's result say ("After you change a mod's files, press Refresh to see the change.").
 The page renders only from the last document and the last dry run, never from its own
@@ -452,12 +446,7 @@ object, a mod reached through needs, Use in this map, deleting the last object, 
 a downloaded map's content beside the installed folder of its mod, Remove from map, a published map's content, Update, the D6b entry, no map), and
 `tests/mods_inmap_test.js` runs the page's rule over the same steps.
 
-**When it moves.** The backend's editor poll reads the set of the open map's placed names under a mod's
-namespace once a second while a mod is installed and moves the document's generation when it changes
-(an object placed, deleted, undone, or picked in an inspector); the host then pushes a fresh document. A
-module placed in Blueprint moves the editor's limits, not an entity's names, so while the Mods tab or
-the This map window shows, a changed `budgetUsage` makes the page ask for the document again
-(`modsUi.mapChanged`, at most every 400 ms; the tab asks for the usage when it opens). Every action
+**When it moves.** The backend checks the committed editor snapshot for changes in placed mod references. Adding or deleting another copy of the same mod object updates the visible count. The mod's scope changes only when its set of names changes. The native budget includes a temporary Toybox preview. Budget updates feed the Limits view independently of the Mods document. Every action
 (Use in this map, Remove from map, Update, Uninstall) answers with a fresh document.
 
 **The states, word for word.**
@@ -557,12 +546,7 @@ you restore it from the Recycle Bin." (`install.savedMaps` above 0), or, when an
 mod stays installed (`install.keptBuild`: the player's own, or the copy a map brought), "Another
 folder of this mod, <folder>, stays installed; maps that use the mod open with it."
 
-A pushed document: once the page has asked for the document, the host reads the backend's
-generation every 500 ms and, when it has moved past the last document's while no job of its own
-runs, posts `{"kind": "mods", "pushed": true, "data": ...}`, so a console verb (`sh_mods map add`,
-`sh_mods uninstall`, `sh_mods choose`, a build or rescan) and a change of what the open map places of
-mods (the editor poll, [A mod and the open map](#a-mod-and-the-open-map)) reach an open tab. The page renders it
-as any document and keeps its status line.
+The page sends `modsWatch {active: 1}` when the Mods tab, its map window, a modded entity's script details, or a prefab with mod information needs updates. While the window is visible and subscribed, the host compares generations every 500 ms and posts `{"kind":"mods","pushed":true,"data":...}` after a change. It catches up after a hidden interval. Each document carries the generation at the start of its read, so changes during capture trigger another update. A pushed document preserves the status line.
 
 In the browser preview, `preview_standin.js` answers the document and Refresh with
 `tests/fixtures/mods_tab_payload_v4.json` (`PREVIEW_MODS` must equal it), the content answer with two

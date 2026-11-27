@@ -278,6 +278,10 @@ int  sh_ms_remove_folder(const char *folder);
  * `cause`; else 0 with the first cause. */
 int  sh_ms_delete_mod_folder(const char *folder, char **cause);
 
+#ifdef SH_MODUI_TESTING
+int sh_ms_test_enumerations(void);
+#endif
+
 #if defined(SH_MODSTORE_TESTING) || defined(SH_MODUI_TESTING)
 /* Test seam: nonzero makes every removal take the outright-delete fallback,
  * as when the shell refuses. */

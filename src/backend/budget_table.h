@@ -1,7 +1,7 @@
 /* budget_table.h -- the editor budget table for the Prefabs tab's Limits section. The editor sums one 12-int
  * block (snapLimitAdjustments_t: editorModels, entities, renderModels, lights, network, thinks, worldAreas,
  * decals, renderKB, collisionKB, generalKB, numAI) per counted thing; this module reads every palette row and
- * resident module wrapper once per palette build on the game thread and keeps the result as JSON for the frontend.
+ * resident module wrapper once per palette build. The frontend formats the owned snapshot when it needs the table.
  * Engine offsets (build 13954591, same on both renderers) are the named constants in budget_table.c; every engine
  * read is SEH-guarded, and a fault leaves an `error` table. */
 #ifndef SH_BUDGET_TABLE_H
@@ -41,7 +41,9 @@ void sh_bt_leaf(const char *decl_name, char *out, size_t cap);
 
 /* The table under construction. */
 typedef struct sh_bt_table {
-    sh_bt_buf sedefs, inherits, modules, aliases;
+    struct bt_sedef *rows, *last_row;
+    struct bt_module *modules, *last_module;
+    int oom;
     int nsedef, ninherit, nmodule, nalias;
     char **seen;                /* open-addressing set of inherits and leaves already keyed */
     size_t seen_cap;

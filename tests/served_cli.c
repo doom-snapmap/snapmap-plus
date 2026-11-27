@@ -4,6 +4,7 @@
  * The list has one sorted line per request, "<request>\t<sha256 of the served bytes>\t<size>" (a sound bank under the
  * stem the index serves it as), and "!<folder>\t<cause>" per folder that does not build; two lists compare the engine's
  * view of two folders. Exit 0, 1 when a folder failed or a request did not open; nothing outside the root is written. */
+/* served_cli owners=<built mods root> <object> prints the builds that placing the object adds to a map. */
 #define WIN32_LEAN_AND_MEAN
 #include "heap_out.h"
 #include <windows.h>
@@ -87,6 +88,12 @@ static int stock_exists(void *ctx, const char *request)
 }
 static sh_mb_resolver g_resolver = { NULL, NULL, stock_exists, NULL };
 
+static void report_owner(void *context, const char *salt, const char *hash, unsigned long long size, const char *object)
+{
+    (void)context; (void)size;
+    printf("%s\t%s\t%s\n", salt, hash, object ? object : "(dependency)");
+}
+
 typedef struct line { char *text; } line;
 static line *g_lines;
 static size_t g_n, g_cap;
@@ -114,6 +121,37 @@ static char *dupf(const char *fmt, const char *a, const char *b, const char *c)
     return o;
 }
 
+/* Profile the existing build manifests without rebuilding the author's folders. */
+static int time_editor_plans(const char *root)
+{
+    LARGE_INTEGER frequency, start, end;
+    sh_modserve_stats stats;
+    int run;
+    if (sh_modserve_index_build(root) < 0) return 1;
+    sh_modserve_scope_enable(1);
+    (void)sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_get_stats(&stats);
+    QueryPerformanceFrequency(&frequency);
+    for (run = 0; run < 11; ++run) {
+        sh_modserve_plan plan;
+        uint64_t digest = 14695981039346656037ULL;
+        int i, count;
+        QueryPerformanceCounter(&start);
+        count = sh_modserve_plan_editor(&plan);
+        QueryPerformanceCounter(&end);
+        if (count < 0) return 1;
+        for (i = 0; i < count; ++i) {
+            digest ^= (unsigned)plan.steps[i].file;
+            digest *= 1099511628211ULL;
+        }
+        printf("%s %.3f ms, %d indexed files, %d steps, %d blocked, order %016llx\n",
+               run ? "warm" : "cold", (end.QuadPart - start.QuadPart) * 1000.0 / frequency.QuadPart,
+               stats.files, count, plan.blocked, (unsigned long long)digest);
+        sh_modserve_plan_free(&plan);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *root = NULL, *out = NULL, *doom = NULL;
@@ -123,12 +161,24 @@ int main(int argc, char **argv)
     HANDLE h;
     FILE *f;
     int bad = 0, k;
+    if (argc == 2 && !strncmp(argv[1], "plan=", 5)) return time_editor_plans(argv[1] + 5);
     for (k = 1; k < argc; k++) {
         if (!strncmp(argv[k], "root=", 5)) root = argv[k] + 5;
         else if (!strncmp(argv[k], "out=", 4)) out = argv[k] + 4;
         else if (!strncmp(argv[k], "doom=", 5)) doom = argv[k] + 5;
+        else if (argc == 3 && k == 1 && !strncmp(argv[k], "owners=", 7)) {
+            const char *object = argv[2];
+            if (sh_modserve_index_build(argv[k] + 7) < 0) return 1;
+            sh_modserve_scope_enable(1);
+            (void)sh_modserve_scope_set(NULL, 0, 0);
+            return modserve_bundles_for_names_visit(&object, 1, report_owner, NULL) ? 0 : 1;
+        }
     }
-    if (!root || !out) { fprintf(stderr, "usage: served_cli root=<mods root> out=<list> [doom=<install root>]\n"); return 2; }
+    if (!root || !out) {
+        fprintf(stderr, "usage: served_cli root=<mods root> out=<list> [doom=<install root>]\n"
+                        "       served_cli plan=<built mods root>\n");
+        return 2;
+    }
     if (doom) { sh_modstock_set_install(doom); sh_modstock_register(); g_doom_registered = 1; }
     sh_mb_set_script_check(sh_script_compile_check);
     sh_mb_set_look_compiler(sh_look_compile_notes);

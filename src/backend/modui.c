@@ -188,7 +188,6 @@ static int mu_row_served_by(const sh_modmanifest_row *row, char *out, size_t cap
 static int mu_scope_listed(char (*out)[SH_MODMANIFEST_HASH_CAP], int cap);
 static void mu_mark_modified(const char *label);
 
-static void mu_labeler(const char *const *placed, size_t n, char **labels);
 void sh_modui_bind(const sh_modui_engine *engine)
 {
     mu_defaults(&g_engine);
@@ -225,7 +224,7 @@ void sh_modui_bind(const sh_modui_engine *engine)
     sh_modmanifest_set_scope(mu_scope_hook, mu_scope_armed);
     sh_modmanifest_set_resolver(mu_resolve_row);
     sh_modmanifest_set_listed(mu_scope_listed);
-    sh_modmanifest_set_labeler(mu_labeler);
+    sh_modmanifest_set_labeler(sh_modserve_placed_labels);
     sh_modserve_set_scope_source(mu_scope_source);
 }
 
@@ -526,6 +525,7 @@ typedef struct mu_entry {
     char **row_names;            /* its editor rows' display names (strings resolved, else the decl name) */
     char **row_defs;             /* each row's entityDef: what a placed entity of that row inherits */
     int row_count;
+    sh_json_object english;
 } mu_entry;
 
 typedef struct mu_model {
@@ -700,59 +700,6 @@ static char *mu_folder_name(const sh_ms_entry *e)
     return out;
 }
 
-/* The text of a "#str_" key in a bundle's strings.en (keys omit the prefix,
- * matched case-insensitively), malloc'd, or NULL. */
-static char *mu_bundle_text(const sh_mb_bundle *b, const char *tag)
-{
-    mpj *x;
-    const mpj *s, *en;
-    char *out = NULL, *own;
-    int i;
-    if (!b->extra || !tag) return NULL;
-    if (!_strnicmp(tag, "#str_", 5)) tag += 5;
-    /* the bundle holds a key of the mod's own as the engine names it (<salt>_<key>, modauthor.h); a decl in the
-     * folder writes it as the author does */
-    own = b->id[0] ? sh_textf("%s_%s", b->id, tag) : NULL;
-    x = mpj_parse(b->extra, strlen(b->extra));
-    s = x ? mpj_get(x, "strings") : NULL;
-    en = s && s->type == MPJ_OBJ ? mpj_get(s, "en") : NULL;
-    for (i = 0; en && en->type == MPJ_OBJ && i < en->n && !out; i++)
-        if ((!_stricmp(en->keys[i], tag) || (own && !_stricmp(en->keys[i], own))) && en->items[i] &&
-            en->items[i]->type == MPJ_STR)
-            out = sh_mm_decode(en->items[i]->text);
-    mpj_free(x);
-    free(own);
-    return out;
-}
-
-/* The first `field = "value"` of a decl text, malloc'd, or NULL. */
-static char *mu_decl_field(const char *text, const char *field)
-{
-    size_t fl = strlen(field);
-    const char *p = text;
-    while (p && (p = strstr(p, field)) != NULL) {
-        const char *q = p + fl, *end;
-        int word = p == text || !((p[-1] >= 'a' && p[-1] <= 'z') || (p[-1] >= 'A' && p[-1] <= 'Z') || p[-1] == '_');
-        p = q;
-        if (!word) continue;
-        while (*q == ' ' || *q == '\t') q++;
-        if (*q != '=') continue;
-        q++;
-        while (*q == ' ' || *q == '\t') q++;
-        if (*q != '"') continue;
-        end = strchr(++q, '"');
-        if (!end) return NULL;
-        {
-            char *out = (char *)malloc((size_t)(end - q) + 1);
-            if (!out) return NULL;
-            memcpy(out, q, (size_t)(end - q));
-            out[end - q] = 0;
-            return out;
-        }
-    }
-    return NULL;
-}
-
 static char *mu_strdup(const char *s)
 {
     size_t n = strlen(s ? s : "");
@@ -781,13 +728,10 @@ static void mu_entry_rows(mu_model *m, size_t i)
             text = (char *)sh_mb_read_file(path, (size_t)-1, NULL);
             free(path);
         }
-        if (text) {
-            tag = mu_decl_field(text, "displayNameTag");
-            def = mu_decl_field(text, "entityDef");
-        }
-        if (tag) name = mu_bundle_text(&e->bundle, tag);
+        if (text) sh_dt_tile_fields(text, strlen(text), &def, &tag);
+        if (tag) name = sh_mb_row_title(&u->english, e->salt, tag);
         for (q = 0; tag && !name && q < m->list.count; q++)
-            if (q != i && m->list.items[q].loaded) name = mu_bundle_text(&m->list.items[q].bundle, tag);
+            if (q != i && m->list.items[q].loaded) name = sh_mb_row_title(&m->entries[q].english, m->list.items[q].salt, tag);
         if (!name) {
             /* The decl's own name, without the mod's namespace (no salt in a sentence). */
             const char *own = f->pname ? f->pname : f->request;
@@ -818,21 +762,6 @@ static const char *mu_row_name_for(const mu_model *m, const char *inherit)
         for (k = 0; k < m->entries[i].row_count; k++)
             if (m->entries[i].row_defs[k] && !_stricmp(m->entries[i].row_defs[k], inherit)) return m->entries[i].row_names[k];
     return NULL;
-}
-
-/* The save's labels (modmanifest.h sh_modmanifest_set_labeler): each placed name's Toybox row name, as the Mods tab
- * shows it, from the installed mods. */
-static int mu_model_build(mu_model *m);
-static void mu_labeler(const char *const *placed, size_t n, char **labels)
-{
-    mu_model m;
-    size_t k;
-    if (!n || !mu_model_build(&m)) { if (n) mu_model_free(&m); return; }
-    for (k = 0; k < n; k++) {
-        const char *name = mu_row_name_for(&m, placed[k]);
-        if (name && name[0]) labels[k] = mu_strdup(name);
-    }
-    mu_model_free(&m);
 }
 
 /* The carried files' hashes of a loaded entry, sorted (the same-files hint). */
@@ -893,19 +822,24 @@ static int mu_model_build(mu_model *m)
     for (i = 0; i < m->list.count; i++) {
         const sh_ms_entry *e = &m->list.items[i];
         mu_entry *u = &m->entries[i];
-        char *why = NULL;
-        int st;
         u->e = e;
         u->same_as = -1;
-        if (e->loaded)
-            for (k = 0; k < e->bundle.file_count; k++) {
-                const sh_mb_file *f = &e->bundle.files[k];
-                /* A Toybox row the mod adds; an editor tweak of a stock row is not one. */
-                if (f->ptype && !_stricmp(f->ptype, "snapEditorEntityDef") && f->cls != SH_MB_CLASS_EDITOR) u->editor_rows++;
-                /* An edited copy is counted under edits and an editor tweak under
-                 * editor, never as a replaced game file. */
-                if (f->shadowed && !f->edited && f->cls != SH_MB_CLASS_EDITOR) u->shadows++;
-            }
+        if (!e->loaded) continue;
+        sh_mb_row_strings(e->bundle.extra, &u->english);
+        for (k = 0; k < e->bundle.file_count; k++) {
+            const sh_mb_file *f = &e->bundle.files[k];
+            /* An editor tweak of a stock row is counted under edits. */
+            if (f->ptype && !_stricmp(f->ptype, "snapEditorEntityDef") && f->cls != SH_MB_CLASS_EDITOR) u->editor_rows++;
+            if (f->shadowed && !f->edited && f->cls != SH_MB_CLASS_EDITOR) u->shadows++;
+        }
+    }
+    for (i = 0; i < m->list.count; i++) mu_entry_rows(m, i);
+    for (i = 0; i < m->list.count; i++) sh_json_object_free(&m->entries[i].english);
+    for (i = 0; i < m->list.count; i++) {
+        const sh_ms_entry *e = &m->list.items[i];
+        mu_entry *u = &m->entries[i];
+        char *why = NULL;
+        int st;
         if (!e->loaded || e->refused) {
             u->state = "skipped";
             u->cause = mu_plain_cause(e, e->cause[0] ? e->cause : "its mod.json cannot be read");
@@ -932,7 +866,6 @@ static int mu_model_build(mu_model *m)
         u->admitted = 1;
         u->state = "active";
     }
-    for (i = 0; i < m->list.count; i++) mu_entry_rows(m, i);
     mu_same_files(m);
     return 1;
 }
@@ -1742,43 +1675,74 @@ static int mu_saved_details(const char *local_id, char **name, long long *saved)
     return 1;
 }
 
-static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
+typedef int (*mu_capture_fn)(sh_main_call_fn fn, void *context);
+
+typedef struct mu_map_input {
+    mu_map *map;
+    char *json;
+    size_t len;
+    mu_names fallback;
+    int serialized, read;
+} mu_map_input;
+
+static int mu_capture_names(void *context)
 {
+    mu_map_input *in = (mu_map_input *)context;
     const sh_modui_engine *e = mu_engine();
+    if (!mu_on_main()) return 0;
+    in->read = e->placed_names ? e->placed_names(mu_names_add, &in->fallback) : -2;
+    return 1;
+}
+
+static int mu_capture_map(void *context)
+{
+    mu_map_input *in = (mu_map_input *)context;
+    const sh_modui_engine *e = mu_engine();
+    if (!mu_on_main()) return 0;
+    sh_modmanifest_current(&in->map->rows);
+    in->serialized = e->map_json ? e->map_json(&in->json, &in->len) : -1;
+    if (in->serialized == 0) return 1;
+    in->map->have_info = e->map_info && e->map_info(&in->map->info) == 1;
+    return (in->serialized > 0 && in->json) || mu_capture_names(in);
+}
+
+static int mu_capture_here(sh_main_call_fn fn, void *context) { return fn(context); }
+
+static int mu_map_read(mu_map *mp, const mu_model *m, const mu_record *rec, mu_capture_fn capture)
+{
+    mu_map_input input = {0};
     mu_visit visit;
     char **names = NULL;
     size_t count = 0;
     memset(mp, 0, sizeof *mp);
-    sh_modmanifest_current(&mp->rows);
-    mp->entities = -2;
+    input.map = mp;
+    if (!capture(mu_capture_map, &input)) return 0;
+    mp->entities = input.serialized == 0 ? -1 : -2;
     visit.closure = &mp->closure;
     visit.mp = mp;
-    if (e->map_json) {
-        char *json = NULL, err[160];
-        size_t len = 0;
-        int r = e->map_json(&json, &len);
-        if (r == 0) mp->entities = -1;
-        else if (r > 0 && json) {
-            int failed = 0;
-            if (sh_mm_parse(json, len, &mp->mm, err, sizeof err)) {
-                mp->have_mm = 1;
-                mp->entities = (int)mp->mm.ent_count;
-                count = sh_modmanifest_placed_names(json, len, &names, &failed);
-                if (failed) { count = 0; names = NULL; }
-            } else mu_log("map: the open map's JSON could not be read (%s)", err);
+    if (input.json) {
+        int failed = 0;
+        char err[160];
+        if (input.serialized > 0 && sh_mm_parse(input.json, input.len, &mp->mm, err, sizeof err)) {
+            mp->have_mm = 1;
+            mp->entities = (int)mp->mm.ent_count;
+            count = sh_modmanifest_placed_names(input.json, input.len, &names, &failed);
+            if (failed) { count = 0; names = NULL; }
+        } else if (input.serialized > 0) {
+            mu_log("map: the open map's JSON could not be read (%s)", err);
+            if (!capture(mu_capture_names, &input)) { HeapFree(GetProcessHeap(), 0, input.json); return 0; }
         }
-        if (json) HeapFree(GetProcessHeap(), 0, json);
+        HeapFree(GetProcessHeap(), 0, input.json);
     }
-    if (!mp->have_mm && mp->entities != -1 && e->placed_names) {
-        mu_names nm;
-        memset(&nm, 0, sizeof nm);
-        mp->entities = e->placed_names(mu_names_add, &nm);
-        mp->names = nm.count;
-        if (mp->entities >= 0 && nm.count && sh_modserve_active())
-            modserve_bundles_for_names_visit((const char *const *)nm.items, nm.count, mu_map_visit, &visit);
-        if (mp->entities >= 0 && !nm.oom)
-            mp->have_save = sh_modmanifest_rows_for((const char *const *)nm.items, nm.count, &mp->save) >= 0;
-        mu_names_free(&nm);
+    if (!mp->have_mm && mp->entities != -1) {
+        mu_names *nm = &input.fallback;
+        mp->entities = input.read;
+        mp->names = nm->count;
+        if (mp->entities >= 0 && nm->count && sh_modserve_active())
+            modserve_bundles_for_names_visit((const char *const *)nm->items, nm->count, mu_map_visit, &visit);
+        if (mp->entities >= 0 && !nm->oom)
+            mp->have_save = sh_modmanifest_rows_for((const char *const *)nm->items, nm->count, &mp->save) >= 0;
+        mu_names_free(nm);
     } else if (mp->have_mm) {
         mp->names = count;
         if (count && sh_modserve_active()) modserve_bundles_for_names_visit((const char *const *)names, count, mu_map_visit, &visit);
@@ -1847,8 +1811,7 @@ static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
             memmove(x, x + 1, (mp->mod_count - i - 1) * sizeof *x);
             mp->mod_count--;
         }
-        if (e->map_info && e->map_info(&mp->info) == 1) {
-            mp->have_info = 1;
+        if (mp->have_info) {
             /* A rawmap opened as a new map: the ids are the borrowed saved
              * map's until the first save names it. */
             if (mp->info.opened_from[0]) mp->info.local_id[0] = mp->info.cloud_id[0] = 0;
@@ -1862,6 +1825,13 @@ static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
                 if (!strcmp(rec->claims[i].ref, mp->link->item)) mp->claim = &rec->claims[i];
         }
     }
+    if (mp->entities < 0) mp->have_info = 0;
+    return 1;
+}
+
+static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
+{
+    (void)mu_map_read(mp, m, rec, mu_capture_here);
 }
 
 static void mu_map_free(mu_map *mp)
@@ -2333,31 +2303,34 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
 
 /* ------------------------------------------------------------------ the document */
 
-int sh_modui_list(void)
+typedef struct mu_list_view {
+    mu_model model;
+    mu_map map;
+    mu_record record;
+} mu_list_view;
+
+static int mu_list_document(sh_mods_call *call)
 {
-    mu_model m;
-    mu_map mp;
-    mu_record rec;
-    mu_buf b;
+    mu_list_view v = {0};
+    mu_buf b = {0};
+    unsigned gen = sh_modui_generation();
     size_t i;
-    int n;
-    if (!mu_on_main()) return -1;
-    memset(&b, 0, sizeof b);
-    if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
-    mu_record_load(&m, &rec);
-    mu_map_build(&mp, &m, &rec);
+    int n = -1;
+    if (!mu_model_build(&v.model)) goto done;
+    mu_record_load(&v.model, &v.record);
+    if (!mu_map_read(&v.map, &v.model, &v.record, call ? call->capture : mu_capture_here)) { n = -2; goto done; }
     mu_putn(&b, "{", 1);
     mu_knum(&b, "v", 4, 1);
-    mu_knum(&b, "gen", (unsigned)g_gen, 0);
-    mu_kstr(&b, "root", m.root_ok ? m.root : "", 0);
-    mu_kbool(&b, "storeReadable", m.listed, 0);
+    mu_knum(&b, "gen", gen, 0);
+    mu_kstr(&b, "root", v.model.root_ok ? v.model.root : "", 0);
+    mu_kbool(&b, "storeReadable", v.model.listed, 0);
     mu_puts(&b, ",\"mods\":[");
-    for (i = 0; i < m.list.count; i++) {
+    for (i = 0; i < v.model.list.count; i++) {
         if (i) mu_putn(&b, ",", 1);
-        mu_put_row(&b, &m, &rec, &m.entries[i]);
+        mu_put_row(&b, &v.model, &v.record, &v.model.entries[i]);
     }
     mu_putn(&b, "]", 1);
-    mu_put_map(&b, &m, &mp);
+    mu_put_map(&b, &v.model, &v.map);
     if (g_key_status) {
         /* the publishing key's state: the backup offer after the first publish shows from it (SPEC 4.2) */
         char *k = g_key_status();
@@ -2365,11 +2338,21 @@ int sh_modui_list(void)
         free(k);
     }
     mu_putn(&b, "}", 1);
-    mu_map_free(&mp);
-    mu_record_free(&rec);
-    mu_model_free(&m);
-    n = mu_publish(&b);
+    if (call) {
+        call->generation = gen;
+        if (!b.oom && (call->out = sh_iface_textn(b.p, b.len)) != NULL) n = (int)b.len;
+        free(b.p);
+    } else n = mu_publish(&b);
+done:
+    mu_map_free(&v.map);
+    mu_record_free(&v.record);
+    mu_model_free(&v.model);
     return n;
+}
+
+int sh_modui_list(void)
+{
+    return mu_on_main() ? mu_list_document(NULL) : -1;
 }
 
 /* ------------------------------------------------------------------ actions */
@@ -2588,11 +2571,6 @@ static int  g_owed_ok;
 static char *g_owed_msg;     /* malloc'd, or NULL */
 static char *g_owed_extra;
 
-static int mu_file_action(int action)
-{
-    return action == SH_MODS_ACT_INSTALL || action == SH_MODS_ACT_NEW_MOD || action == SH_MODS_ACT_RESCAN ||
-           action == SH_MODS_ACT_ADD_MINE;
-}
 
 /* The finished result: the action's message, then the sentence a change
  * still needs (or why the game could not take it), its own members and what
@@ -3271,6 +3249,27 @@ static char (*g_drop_builds)[SH_MODMANIFEST_HASH_CAP];   /* malloc'd: every row 
 static int g_drop_n, g_drop_tag;
 static void mu_drop_tick(void);
 
+typedef struct mu_placements {
+    mu_names names;
+    unsigned long long unique, references;
+} mu_placements;
+
+static void mu_placement_name(void *context, const char *name)
+{
+    mu_placements *p = (mu_placements *)context;
+    const char *s;
+    size_t before = p->names.count;
+    mu_names_add(&p->names, name);
+    if (name)
+        for (s = name; *s; s++)
+            if (!_strnicmp(s, "mods/", 5)) {
+                unsigned long long key = (unsigned long long)mu_hash_ci(name) * 2654435761ull + 1;
+                p->references += key;
+                if (p->names.count != before) p->unique += key;
+                break;
+            }
+}
+
 /* Clear now. 1 cleared, 0 no editor map (nothing to clear), -1 failed. */
 static int mu_undo_clear_now(const char *key)
 {
@@ -3766,42 +3765,34 @@ int sh_modui_poll_main(void *context)
         static ULONGLONG next;
         static const void *last_snapshot;
         static unsigned long last_revision;
-        static unsigned long long last;
+        static unsigned long long last, last_references;
         static int known;
         ULONGLONG now = GetTickCount64();
         if (InterlockedExchange(&g_placed_reset, 0)) { known = 0; next = 0; }
         if (e->placed_names && sh_modserve_active() && now >= next) {
-            mu_names nm;
+            mu_placements placed = {0};
+            mu_names *nm = &placed.names;
             int r;
             unsigned long revision = 0;
             const void *snapshot = e->placement_revision ? e->placement_revision(&revision) : NULL;
             next = now + 1000;
             if (known && snapshot && snapshot == last_snapshot && revision == last_revision) return 1;
-            memset(&nm, 0, sizeof nm);
-            r = e->placed_names(mu_names_add, &nm);
-            if (r >= 0 && !nm.oom) {
-                unsigned long long sig = 0, n = 0;
-                size_t i;
-                for (i = 0; i < nm.count; i++) {
-                    const char *p;
-                    for (p = nm.items[i]; *p && _strnicmp(p, "mods/", 5); p++) {}
-                    if (!*p) continue;
-                    sig += (unsigned long long)mu_hash_ci(nm.items[i]) * 2654435761ull + 1;
-                    n++;
-                }
-                sig ^= n << 48;
-                if (known ? sig != last : n > 0) {
-                    int changed = sh_modserve_scope_enabled() ? mu_listing_placed(&nm) : 0;
-                    if (changed < 0) { mu_names_free(&nm); return 1; }
+            r = e->placed_names(mu_placement_name, &placed);
+            if (r >= 0 && !nm->oom) {
+                if (placed.unique != (known ? last : 0)) {
+                    int changed = sh_modserve_scope_enabled() ? mu_listing_placed(nm) : 0;
+                    if (changed < 0) { mu_names_free(nm); return 1; }
                     if (changed > 0) mu_scope_activate("editor placement");
-                    InterlockedIncrement(&g_gen);
                 }
+                if (placed.references != (known ? last_references : 0) || placed.unique != (known ? last : 0))
+                    InterlockedIncrement(&g_gen);
+                last_references = placed.references;
                 last_snapshot = snapshot;
                 last_revision = revision;
-                last = sig;
+                last = placed.unique;
                 known = 1;
             }
-            mu_names_free(&nm);
+            mu_names_free(nm);
         }
     }
     return 1;
@@ -5318,9 +5309,9 @@ int sh_modui_run(int action, const char *arg)
 {
     const sh_modui_engine *e = mu_engine();
     char note[160];
-    /* Off the main thread only the file actions run, and only their file part; the key's requests touch no engine. */
+    /* File actions run on the worker. Changes that need the game are finished by APPLY. */
     if (action == SH_MODS_ACT_KEY) return mu_key_request(arg);
-    if (!mu_on_main() && !mu_file_action(action)) return -1;
+    if (!mu_on_main() && !sh_mods_worker_action(action)) return -1;
     /* Reading a mod's files needs no engine hook; every other action does. */
     if (action != SH_MODS_ACT_FILES && action != SH_MODS_ACT_FILE_TEXT &&
         sh_feature_refusal(SH_FEATURE_MODS, note, sizeof note))
@@ -5422,6 +5413,12 @@ int sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call)
     call->out = NULL;
     call->generation = (unsigned)g_gen;
     switch (call->op) {
+    case SH_MODS_LIST_VIEW:
+        if (!call->capture) return 0;
+        sh_modserve_read_begin();
+        n = mu_list_document(call);
+        sh_modserve_read_end();
+        return n == -2 ? -1 : n >= 0;
     case SH_MODS_LIST:
         n = sh_modui_list();
         call->generation = (unsigned)g_gen;

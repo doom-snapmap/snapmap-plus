@@ -106,16 +106,19 @@ check(src.indexOf("d.kind === 'prefabFileResult'") !== -1, 'Export and Import an
 /* Deliver real list messages twice to the page, keeping a same-named prefab in another folder missing. */
 const listStart = src.indexOf("d.kind === 'prefabs') {") + "d.kind === 'prefabs') {".length;
 const listEnd = src.indexOf("} else if (d.kind === 'prefabFileResult')", listStart);
-const deliver = new Function('d', 'pfModsParse', 'selectedPrefabName', 'selectedPrefabFolder', 'pfShowMods',
+const deliver = new Function('d', 'pfModsParse', 'selectedPrefabName', 'selectedPrefabFolder', 'pfShowMods', 'syncModsInterest',
   'var prefabTags, prefabKinds, prefabMods, pfListLast, pfModsShown; function renderPrefabList() {}' +
   src.slice(listStart, listEnd) + '\nreturn prefabTags;');
 const observed = [];
 const listMods = {Door: {mods: [ghost]}, 'Hangar/Door': {mods: [ghost]}};
-const refresh = () => deliver({mods: listMods}, api.parse, 'Door', 'Hangar', st => observed.push(api.detail(st)));
+let interestUpdates = 0;
+const refresh = () => deliver({mods: listMods}, api.parse, 'Door', 'Hangar', st => observed.push(api.detail(st)),
+  () => { interestUpdates++; });
 let tags = refresh();
 check(tags['Hangar/Door'].includes('needs mods') && observed[0].note === importHelp, 'selected prefab starts missing');
 listMods['Hangar/Door'] = {mods: [door]};
 tags = refresh();
+check(interestUpdates === 2, 'each delivered prefab list updates the map subscription');
 check(observed.length === 2 && observed[1].rows[0].state === 'Content ready' && tags.Door.includes('needs mods') &&
       !tags['Hangar/Door'].includes('needs mods'), 'reimport updates the selected folder and the missing-content filter');
 check(/if \(kind == 3 && r >= 0\) ui_send_prefabs\(\);/.test(host),

@@ -93,17 +93,18 @@ static void test_table(void)
     sh_bt_table_add_module(&t, "maps/modules/ind_connections/c_ind_90.decl", own, templ, view, 0x420001u, &parts);
     sh_bt_table_add_module(&t, "maps/modules/other/c_ind_90.decl", own, templ, view, 1u, NULL);  /* leaf already aliased */
     CHECK(t.nmodule == 2 && t.nalias == 1);
-    CHECK(strstr(t.modules.p, "\"maps/modules/other/c_ind_90.decl\":{\"own\"") != NULL);
-    CHECK(strstr(strstr(t.modules.p, "other/c_ind_90"), "parts") == NULL);   /* NULL parts are not emitted */
+    memset(&parts, 0, sizeof parts);   /* the snapshot owns the values it captured */
     memset(&head, 0, sizeof head);
     head.generation = 7; head.limits = limits; head.usage = usage; head.reached = 0;
     head.auto_view_mask = 0x20000; head.sound_mask = 0x400000; head.layers_source = "decl";
     json = sh_bt_table_finish(&t, &head);
     CHECK(json != NULL);
     if (json) {
-        CHECK(!strncmp(json, "{\"gen\":7,\"limits\":[768,14284,10384,2038,672,1000,8192,8192,0,0,500000,64],"
+        CHECK(strstr(json, "{\"gen\":7,\"limits\":[768,14284,10384,2038,672,1000,8192,8192,0,0,500000,64],"
                              "\"usage\":[32,67,91,1,30,0,1,0,1552,12,2545,0],\"reached\":0,"
-                             "\"layers\":{\"autoView\":131072,\"sound\":4194304,\"source\":\"decl\"},\"sedefs\":{", 0));
+                           "\"layers\":{\"autoView\":131072,\"sound\":4194304,\"source\":\"decl\"},\"sedefs\":{") == json);
+        const char *other = strstr(json, "\"maps/modules/other/c_ind_90.decl\":{\"own\"");
+        CHECK(other && strstr(other, "\"parts\"") == NULL);
         CHECK(strstr(json, "\"volume/blocking\":{\"l\":[0,1,1,0,1,0,0,0,0,0,10,0],\"auto\":0,\"ns\":1}") != NULL);
         CHECK(strstr(json, "\"custom/timeline\":{\"l\":[0,1,2,0,1,0,0,0,0,0,50,0],\"auto\":1,\"ns\":0}") != NULL);
         CHECK(strstr(json, "\"odd\\\"name\":") != NULL);

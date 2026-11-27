@@ -2024,7 +2024,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     editor.style.display = 'none';
     // Wrap placeholder content so the flex container keeps its lines together.
     var el = document.getElementById('selInfo'); el.style.display = 'flex'; el.innerHTML = '<div>' + html + '</div>';
-    loaded = null; loadedEid = -1; updateDirty();
+    loaded = null; loadedEid = -1; updateDirty(); syncModsInterest();
   }
   function hideEditor() { showPlaceholder(EMPTY_ENTITIES); }
   // Close entity editing and clear selection after Play/reload. IDs can be reused, so
@@ -2335,7 +2335,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             entities:allEntities.length, matched:entityPerf.matched, mounted:entityPerf.mounted,
             renderMs:Math.round(entityPerf.ms * 1000) / 1000,
             handlerMs:Math.round((uiPerfNow() - listStarted) * 1000) / 1000});
+    } else if (d.kind === 'editorHidden') {
+      modsUi.setWindowVisible(false);
     } else if (d.kind === 'editorReopened') {
+      modsUi.setWindowVisible(true);
       // Editor reopen invalidates cached entity and timeline snapshots. Close both panels;
       // prefabs are file-based, and camera controls use their separate live bridge.
       tlCloseEditor();
@@ -2465,6 +2468,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         prefabTags[mk2] = (prefabTags[mk2] || []).concat(mst.missing ? ['mods', 'needs mods'] : ['mods']);
       }
       pfListLast = {root: d.root || [], folders: d.folders || []};
+      syncModsInterest();
       renderPrefabList(pfListLast.root, pfListLast.folders);
       if (selectedPrefabName) {
         var selectedKey = (selectedPrefabFolder ? selectedPrefabFolder + '/' : '') + selectedPrefabName;
@@ -2496,12 +2500,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       pfBudgetTable = d.data && typeof d.data === 'object' ? d.data : null;
       pfRenderLimits();
     } else if (d.kind === 'budgetUsage') {
-      var usageKey = d.data && typeof d.data === 'object' ? JSON.stringify(d.data.usage || null) : '';
       pfBudgetLive = d.data && typeof d.data === 'object' ? d.data : null;
       pfBudgetHeld = d.held && typeof d.held === 'object' ? d.held : null;
       pfRenderLimits();
-      // What the map places moved: the Mods tab asks for the open map's mods again.
-      if (usageKey !== pfUsageKey) { if (pfUsageKey !== null) modsUi.mapChanged(); pfUsageKey = usageKey; }
     } else if (d.kind === 'prefabModelResolved') {
       prefabViewport.modelResolved(d);
     } else if (d.kind === 'prefabMeshUnavailable') {
@@ -3042,7 +3043,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // Only the selected prefab is summed, memoized by folder/name, file signature and table generation.
   var pfBudgetTable = null, pfBudgetLive = null, pfBudgetAsked = false, pfBudgetSel = null;
   var pfBudgetHeld = null;   // {name, folder, kind} of the prefab held in the 3D view, from budgetUsage
-  var pfUsageKey = null;     // the last usage the host sent; a change asks the Mods tab for the map's mods again
   // The open map's mods changed: the selected prefab's Mods section and the list's pills say so.
   function pfModsMapChanged() {
     if (pfModsShown) pfShowMods(pfModsShown);
@@ -3883,7 +3883,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     // The script log is asked for each second while the tab shows a mod with scripts.
     every: function(fn, ms){ return window.setInterval(fn, ms); },
     cancel: function(t){ window.clearInterval(t); },
-    after: function(fn, ms){ return window.setTimeout(fn, ms); },
+    watch: function(on){ post({cmd:'modsWatch', active:on ? 1 : 0}); },
     // A fresh mods document: the Entities tab's script label and the Prefabs tab's mods follow it.
     changed: function(){ scriptNoteRefresh(); pfModsMapChanged(); }
   });
@@ -3902,6 +3902,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // script its name runs, offers the names its mod's scripts handle and fire as the Displayname's
   // choices, and says so when no script uses its name; an object a script drives says that.
   function scriptNoteRefresh() {
+    syncModsInterest();
     var note = document.getElementById('fScriptNote'), list = document.getElementById('fScriptNames');
     if (!note || !list) return;
     var inherit = document.getElementById('fInherit').value, name = document.getElementById('fDisplayname').value;
@@ -3911,8 +3912,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (!info) {
       note.hidden = true;
       note.textContent = '';
-      // The mods list has not come yet: ask for it once, then this runs again.
-      if (own) modsUi.ensureLoaded();
       return;
     }
     info.choices.forEach(function(c){
@@ -3926,6 +3925,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     note.hidden = false;
   }
   document.getElementById('fDisplayname').addEventListener('input', scriptNoteRefresh);
+
+  function syncModsInterest() {
+    if (!modsUi) return;
+    var entities = document.getElementById('panel-entities').style.display !== 'none';
+    var prefabs = document.getElementById('panel-prefabs').style.display !== 'none';
+    var inherit = document.getElementById('fInherit').value;
+    modsUi.setRelated((entities && primaryEid >= 0 && loadedEid === primaryEid && /^mods\//i.test(inherit)) ||
+                      (prefabs && Object.keys(prefabMods).length > 0));
+  }
 
   // top-level tab switching (Entities / Prefabs / Timelines / Assets / Mods)
   var tabButtons = Array.prototype.slice.call(document.querySelectorAll('.tabstrip .tab'));
@@ -3957,8 +3965,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         post({cmd:'budgetUsage'});
       }
       if (which === 'timelines') tlMaybeAutoRefresh();
-      if (which === 'mods') { modsUi.show(); post({cmd:'budgetUsage'}); }   // rescan on demand (tab open, Refresh, each action); the map's limits report map changes
-      else modsUi.hide();                     // the script log is asked for only while the tab shows
+      if (which === 'mods') modsUi.show();
+      else modsUi.hide();
+      syncModsInterest();
       // The selected catalog is cached after its first fetch, so later visits do not cross the bridge.
       if (which === 'assets') { abActive = abTabMount; abOpenCatalog(abTabMount); }
       else if (typeof abTabMount !== 'undefined') {

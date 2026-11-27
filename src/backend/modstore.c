@@ -1069,8 +1069,16 @@ int sh_ms_walk(sh_ms_walk_fn fn, void *ctx)
     return 1;
 }
 
+#ifdef SH_MODUI_TESTING
+static LONG g_test_enumerations;
+int sh_ms_test_enumerations(void) { return InterlockedCompareExchange(&g_test_enumerations, 0, 0); }
+#endif
+
 int sh_ms_enumerate(sh_ms_list *out)
 {
+#ifdef SH_MODUI_TESTING
+    InterlockedIncrement(&g_test_enumerations);
+#endif
     wchar_t *root;
     ms_found_list found;
     size_t i;

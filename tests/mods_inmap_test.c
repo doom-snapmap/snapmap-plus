@@ -583,10 +583,10 @@ int main(int argc, char **argv)
     g_ents[2] = (fake_ent){ 66, "mods/cratebox/crate", 1 };
     g_ent_n = 3;
     edit_revision++;
-    CHECK(!poll_moved() && g_scope_changes == i);
+    CHECK(poll_moved() && g_scope_changes == i);
     g_ents[1].alive = 0;
     edit_revision++;
-    CHECK(!poll_moved() && g_image == 0 && g_resource == 0);
+    CHECK(poll_moved() && g_scope_changes == i && g_image == 0 && g_resource == 0);
     {
         size_t len, written;
         char *map = map_text(&len);

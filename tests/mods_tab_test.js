@@ -159,6 +159,7 @@ function standIn(initial, folders, kept) {
     docu.map.entities = Math.max(0, num(docu.map.entities) - num(r.placedCount));
   }
   return function handle(o) {
+    if (o && o.cmd === 'modsList') return [{kind: 'mods', data: clone()}];
     var a = str(o && o.action), key = str(o && o.arg), ok = true, msg = '', data = {action: a};
     if (a === 'openFolder') return [];
     if (a === 'content') {
@@ -323,12 +324,12 @@ function harness(opts) {
   let ui = null;
   ui = modsTab.create({
     document: doc, byId: id => byId(id), saveCollapsed: list => saved.push(list),
-    post: m => { sent.push(m); if (opts.store && m.cmd === 'modsAction') opts.store(m).forEach(r => ui.onMessage(r)); },
+    post: m => { sent.push(m); if (opts.store && (m.cmd === 'modsAction' || m.cmd === 'modsList')) opts.store(m).forEach(r => ui.onMessage(r)); },
     toast: (t, k) => toasts.push({text: t, kind: k}),
     /* the tab uses no menu of its own any more; one that is passed in and called shows in menus */
     tokens: opts.tokens, menu: (x, y, items) => menus.push({x, y, items}), copy: opts.copy,
     every: opts.every, cancel: opts.cancel, saveSetting: opts.saveSetting, changed: opts.changed,
-    after: opts.after
+    watch: opts.watch
   });
   ui.bind();
   return {ui, nodes, sent, toasts, saved, menus, doc};
@@ -506,17 +507,21 @@ test('the vocabulary holds in every state of a mod and the open map, in the list
 });
 
 /* ---- the list --------------------------------------------------------------------------------- */
-test('show rescans once; the list waits for the answer', () => {
+test('opening reads the list once; Refresh alone scans local folders', () => {
   const h = harness();
   assert.equal(h.sent.length, 0, 'nothing is requested until the tab is shown');
   h.ui.show();
   h.ui.show();
-  assert.deepEqual(h.sent, [{cmd: 'modsAction', action: 'rescan'}], 'a second show while waiting does not ask again');
+  assert.deepEqual(h.sent, [{cmd: 'modsList'}], 'a second show while waiting does not ask again');
   assert.match(h.nodes.modsList.textContent, /Reading your mods/);
-  answer(h, v4);
-  assert.equal(h.toasts.length, 0, 'a successful rescan on show says nothing');
+  h.ui.onMessage({kind: 'mods', data: v4});
+  assert.equal(h.toasts.length, 0);
+  h.ui.hide();
   h.ui.show();
-  assert.equal(h.sent.filter(m => m.action === 'rescan').length, 2, 'showing the tab again rereads the folder');
+  assert.equal(h.sent.filter(m => m.cmd === 'modsList').length, 1);
+  assert.equal(h.sent.filter(m => m.action === 'rescan').length, 0);
+  h.nodes.modsRefreshBtn.click();
+  assert.equal(h.sent.filter(m => m.action === 'rescan').length, 1);
   assert.equal(h.sent.filter(m => m.action === 'content').length, 1, 'and the map content is read once the first list arrived');
   assert.equal(h.ui.onMessage({kind: 'other'}), false);
 });
@@ -1652,8 +1657,6 @@ test('page contract', () => {
   assert.match(html, /<button type="button" id="menuScriptedMaps" role="menuitemcheckbox" aria-checked="true" aria-describedby="menuScriptedMapsNote"><span id="menuScriptedMapsLabel">Play Maps Whose Mods Include Scripts<\/span><\/button>/);
   assert.match(html, /<div class="menu-note" id="menuScriptedMapsNote"><\/div>/);
   assert.ok(!/modsScripted/.test(html + standin), 'the old checkbox is gone from the page');
-  assert.ok(html.includes('after: function(fn, ms){ return window.setTimeout(fn, ms); }'), 'the page gives the tab its one-shot timer');
-  assert.ok(html.includes('modsUi.mapChanged()'), 'a change of what the map places asks the tab for a fresh document');
   assert.match(panel, /id="modsRefreshBtn" title="Refresh: after you change a mod's files, build them again and bring the change into the game"/);
   const detailHead = panel.slice(panel.indexOf('<span class="panel-title">Mod Details</span>'), panel.indexOf('id="modsDetail"'));
   assert.deepEqual((detailHead.match(/<button [^>]*id="(\w+)"/g) || []).map(t => t.match(/id="(\w+)"/)[1]),
@@ -1661,7 +1664,6 @@ test('page contract', () => {
   assert.ok(!/migrat|verify/i.test(panel), 'no Migrate and no Verify in the tab');
   assert.match(html, /id="modsList" role="listbox" tabindex="0"/);
   assert.equal(html.split('<script src="mods_tab.js"></script>').length, 2, 'one module tag');
-  assert.match(html, /if \(which === 'mods'\) \{ modsUi\.show\(\); post\(\{cmd:'budgetUsage'\}\); \}/, 'showing the tab rescans and reads the map\'s limits');
   /* the browser preview's data is the v4 fixture; the release page carries no stand-in */
   const m = standin.match(/\nvar PREVIEW_MODS = (\{.*\});\r?\n/);
   assert.ok(m, 'PREVIEW_MODS is one JSON line');
@@ -1776,9 +1778,13 @@ test('Maps on this computer: the last group of the list, one row per kept map\'s
   assert.equal(none.nodes.modsList.all('mods-content').length, 0);
   /* the group follows the content answer that arrives after the list, and shows after the first answer only */
   const late = harness();
+  late.ui.show();
   late.ui.onMessage({kind: 'mods', data: v4});
   assert.equal(late.nodes.modsList.children.length, 1, 'nothing before the first answer');
+  late.ui.hide();
   late.ui.onMessage({kind: 'modsActionResult', action: 'content', ok: true, data: {storage: 'S', lines: ['A'], rows: ['t']}});
+  assert.equal(late.nodes.modsList.children.length, 1, 'a late response leaves the hidden tree alone');
+  late.ui.show();
   assert.equal(late.nodes.modsList.children.length, 2);
   late.ui.onMessage({kind: 'modsActionResult', action: 'content', ok: false, message: 'No.', data: {}});
   assert.equal(late.nodes.modsList.children.length, 2, 'a failed read leaves what was known');
@@ -1788,6 +1794,7 @@ test('a player with no author mods can keep content from a played map', () => {
   const content = {kind: 'modsActionResult', action: 'content', ok: true, data: KEPT};
   for (const messages of [[list, content], [content, list]]) {
     const h = harness();
+    h.ui.show();
     messages.forEach(m => h.ui.onMessage(m));
     assert.equal(h.nodes.modsList.all('mods-empty').length, 1);
     const rows = h.nodes.modsList.all('mods-content-line');
@@ -1849,103 +1856,38 @@ test('Maps on this computer: the removal of what was only played reads the answe
   assert.equal(h.sent.filter(m => m.action === 'content').length, 3);
   assert.equal(h.toasts.length, 1, 'a plain read of the content says nothing');
 });
-/* ---- the open map changed: a fresh document, at most once per 400 ms, while the tab or the window shows - */
-function clock() {
-  const c = {timers: [], after: (fn, ms) => { const t = {fn, ms, fired: false}; c.timers.push(t); return t; },
-             fire: () => { const t = c.timers.filter(x => !x.fired); t.forEach(x => { x.fired = true; x.fn(); }); return t.length; },
-             pending: () => c.timers.filter(x => !x.fired).length};
-  return c;
-}
-const asks = h => h.sent.filter(m => m.cmd === 'modsList');
-test('mapChanged: asks for a fresh document through the page\'s one-shot timer, at most once per 400 ms', () => {
-  const c = clock();
-  const h = harness({after: c.after});
-  /* not loaded: nothing to refresh yet */
-  assert.equal(h.ui.mapChanged(), false);
+test('Toybox previews update Limits without requesting a mod document', () => {
+  const handler = html.split("} else if (d.kind === 'budgetUsage') {")[1].split("} else if (")[0];
+  const h = harness({store: standIn(v4)});
   h.ui.show();
-  assert.equal(h.ui.mapChanged(), false, 'a document is already on its way (the rescan)');
-  answer(h, v4);
-  assert.equal(c.timers.length, 0);
-  assert.equal(h.ui.mapChanged(), true);
-  assert.equal(c.timers.length, 1);
-  assert.equal(c.timers[0].ms, 400);
-  assert.equal(asks(h).length, 0, 'nothing is asked until the timer fires');
-  /* a burst of changes: one request */
-  for (let i = 0; i < 5; i++) assert.equal(h.ui.mapChanged(), false, 'one is already pending');
-  assert.equal(c.timers.length, 1);
-  assert.equal(c.fire(), 1);
-  assert.deepEqual(asks(h), [{cmd: 'modsList'}]);
-  assert.equal(h.ui.state().waiting, true);
-  assert.equal(h.ui.state().busy, '', 'a quiet read never holds the page');
-  assert.equal(h.ui.mapChanged(), false, 'not while the answer is awaited');
-  assert.equal(c.timers.length, 1);
-  /* the answer comes; the next change schedules again */
-  h.ui.onMessage({kind: 'mods', data: v4});
-  assert.equal(h.ui.state().waiting, false);
-  assert.equal(h.ui.mapChanged(), true);
-  assert.equal(c.timers.length, 2);
-  assert.equal(c.fire(), 1);
-  assert.equal(asks(h).length, 2);
-  /* the document that follows moves the glyphs: an object placed in the editor */
-  const placed = clone(v4);
-  placed.map.mods.push(mapRow({key: 'Arena Gates', salt: 'gatesk2m', name: 'Arena Gates', objects: ['Gate'], placedCount: 1, viaNeeds: false}));
-  assert.equal(iconOf(rowOf(h, 'Arena Gates')), 'ok');
-  h.ui.onMessage({kind: 'mods', data: placed});
-  assert.equal(iconOf(rowOf(h, 'Arena Gates')), 'map');
-  /* while another action runs, the timer fires and asks nothing: that action ends with a fresh document */
-  assert.equal(h.ui.mapChanged(), true);
-  h.ui.act('uninstallPreview', 'Arena Gates');
-  assert.equal(h.ui.state().busy, 'uninstallPreview');
-  const before = asks(h).length;
-  assert.equal(c.fire(), 1);
-  assert.equal(asks(h).length, before);
-  assert.equal(h.ui.state().waiting, false);
+  const before = h.sent.length;
+  for (let i = 0; i < 16; i++) {
+    let limits = 0;
+    const context = {d: {data: {usage: {entities: 65 + (i % 2)}}}, modsUi: h.ui,
+                     pfRenderLimits: () => { limits++; }};
+    require('vm').runInNewContext(handler, context);
+    assert.equal(limits, 1);
+    assert.equal(context.pfBudgetLive.usage.entities, 65 + (i % 2));
+  }
+  assert.equal(h.sent.length, before);
 });
-test('mapChanged: only while the tab is shown or the This map window is open', () => {
-  const c = clock();
-  const h = harness({after: c.after});
-  h.ui.onMessage({kind: 'mods', data: v4});   /* a document, but the tab was never shown */
-  assert.equal(h.ui.state().loaded, true);
-  assert.equal(h.ui.mapChanged(), false, 'the tab is not shown');
-  assert.equal(c.timers.length, 0);
-  assert.deepEqual(asks(h), []);
-  /* the window open over a hidden tab */
-  h.nodes.modsMapBtn.click();
-  assert.equal(h.ui.mapChanged(), true);
-  assert.equal(c.fire(), 1);
-  assert.equal(asks(h).length, 1);
-  h.ui.onMessage({kind: 'mods', data: v4});
-  h.ui.closeMap();
-  assert.equal(h.ui.mapChanged(), false, 'the window closed again');
-  /* the tab shown, then hidden */
-  answer(h, v4);
+test('only visible mod information subscribes to external changes', () => {
+  const watched = [], t = timers();
+  const h = harness({store: standIn(v4), watch: on => watched.push(on), every: t.every, cancel: t.cancel});
   h.ui.show();
-  answer(h, v4);
-  assert.equal(h.ui.mapChanged(), true);
-  c.fire();
-  h.ui.onMessage({kind: 'mods', data: v4});
+  h.ui.show();
+  assert.equal(h.sent.filter(m => m.action === 'rescan').length, 0);
   h.ui.hide();
-  assert.equal(h.ui.mapChanged(), false, 'the tab is hidden');
-  assert.equal(c.pending(), 0);
-  /* a fresh document with the window open follows the map: the window's rows are the document's */
-  const w = harness({after: c.after});
-  w.ui.onMessage({kind: 'mods', data: v4});
-  w.nodes.modsMapBtn.click();
-  assert.equal(w.nodes.modsMapHost.all('mods-map-row').length, 4);
-  const fewer = clone(v4);
-  fewer.map.mods = fewer.map.mods.slice(0, 2);
-  w.ui.onMessage({kind: 'mods', data: fewer});
-  assert.equal(w.nodes.modsMapHost.all('mods-map-row').length, 2, 'the window follows the document');
+  h.ui.setRelated(true);
+  h.ui.setWindowVisible(false);
+  assert.equal(t.live.length, 0);
+  h.ui.setWindowVisible(true);
+  h.ui.setRelated(false);
+  h.ui.openMap();
+  h.ui.closeMap();
+  assert.deepEqual(watched, [true, false, true, false, true, false, true, false]);
 });
-test('mapChanged: a page without a timer asks at once, and never while an answer is awaited', () => {
-  const h = harness();
-  h.ui.show();
-  answer(h, v4);
-  assert.equal(h.ui.mapChanged(), true);
-  assert.deepEqual(asks(h), [{cmd: 'modsList'}]);
-  assert.equal(h.ui.mapChanged(), false, 'waiting for the answer');
-  assert.equal(asks(h).length, 1);
-});
+
 test('host and interface contract', () => {
   assert.ok(host.includes('} else if (cmd == L"modsAction") {'));
   assert.ok(host.includes('SH_IFACE_HAS_SLOT(g_iface, mods)'), 'an older backend is never called past its table');

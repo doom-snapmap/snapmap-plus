@@ -537,6 +537,14 @@ static void editor_substitution(void)
     g_installed_count = 0;
 }
 
+static int label_requests;
+
+static void count_labels(const char *const *names, size_t count, char **labels)
+{
+    (void)names; (void)count; (void)labels;
+    label_requests++;
+}
+
 static void save_closure(void)
 {
     char *out;
@@ -548,7 +556,15 @@ static void save_closure(void)
 
     /* The imp is placed (inherit and an edit value); the room module is not. */
     sh_modmanifest_reset();
+    {
+        const char stock[] = "{\"entities\":[{\"entityDef\":{\"inherit\":\"stock/player_start\"}}]}";
+        sh_modmanifest_set_labeler(count_labels);
+        CHECK(sh_modmanifest_on_save(stock, sizeof stock - 1, &n) == NULL && label_requests == 0);
+        g_lookup_calls = 0;
+    }
     out = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &n);
+    CHECK(label_requests == 1);
+    sh_modmanifest_set_labeler(NULL);
     CHECK(out != NULL && g_lookup_calls == 1);
     /* The open map's record follows the save (a map loaded with no rows, from a rawmap). */
     {

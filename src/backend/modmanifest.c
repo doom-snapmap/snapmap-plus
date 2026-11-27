@@ -2386,10 +2386,16 @@ static void mm_save_labels(mm_save_ctx *ctx, char **names, size_t count)
 {
     sh_modmanifest_labeler_fn labeler = g_labeler;
     sh_modmanifest_list cur;
-    char **labels = count ? (char **)calloc(count, sizeof *labels) : NULL;
+    char **labels = NULL;
     size_t i, k, j;
-    if (count && !labels) return;
-    if (labeler && count) labeler((const char *const *)names, count, labels);
+    if (!ctx->list.count) return;
+    for (k = 0; labeler && k < count; k++) {
+        if (!names[k] || _strnicmp(names[k], "mods/", 5)) continue;
+        labels = (char **)calloc(count, sizeof *labels);
+        if (!labels) return;
+        labeler((const char *const *)names, count, labels);
+        break;
+    }
     memset(&cur, 0, sizeof cur);
     (void)sh_modmanifest_current(&cur);
     for (i = 0; i < ctx->list.count; i++) {
@@ -2410,7 +2416,7 @@ static void mm_save_labels(mm_save_ctx *ctx, char **names, size_t count)
             char *label = NULL;
             if (!names[k] || _strnicmp(names[k], "mods/", 5) || _strnicmp(names[k] + 5, r->salt, sl) || names[k][5 + sl] != '/')
                 continue;
-            if (labels[k] && labels[k][0]) label = sh_text(labels[k]);
+            if (labels && labels[k] && labels[k][0]) label = sh_text(labels[k]);
             for (j = 0; !label && j < cur.count; j++)
                 if (!strcmp(cur.rows[j].salt, r->salt)) label = sh_modmanifest_row_label(&cur.rows[j], names[k]);
             if (label && label[0] && !strpbrk(label, "\t\n")) (void)mm_choice_add(&kept, names[k], label);

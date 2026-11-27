@@ -31,6 +31,8 @@ its identity and keeps its names apart from the game's and from every other mod'
 Snapmap+ keeps the permanent ID in `mod.json` and writes build information to `.build/manifest.json`.
 You can leave `.build/` out of source control and ZIPs. Refresh recreates it from the mod’s files.
 
+After editing a mod's files, press **Refresh** to build your changes. Opening the Mods tab displays the current library. Placing or removing a modded object updates **This map** automatically. You can browse Toybox previews without asking Snapmap+ to rebuild anything.
+
 Building the example crate produces this layout in the data folder.
 
 ```text

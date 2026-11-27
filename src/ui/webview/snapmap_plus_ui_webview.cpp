@@ -2663,11 +2663,7 @@ static void ui_budget_poll()
         ui_send_budget_table();
 }
 
-/* The Mods tab (mods_tab.js; backend/modui.c behind the `mods` slot). Each job runs on a short-lived worker
- * thread that touches no page state: it reports its phase through g_mods_phase (posted as modsProgress) and
- * hands its documents back through g_mods_done (ui_mods_finish), as the rawmap picker does. Install, New mod
- * and Refresh do their file work (minutes at most) on the worker with no time limit; their game part (APPLY)
- * and every other operation run on DOOM's main thread through run_on_main. Each job ends with a fresh document. */
+/* Mods jobs run on the worker. Only native map capture and actions that change the game use run_on_main. */
 #define UI_MODS_START_MS   8000   /* how long a job waits for the game to start a main-thread call */
 
 struct UiModsJob {
@@ -2687,11 +2683,9 @@ static volatile LONG g_mods_done = 0;
 /* The running job's phase for the page: 0 none, 1 the file work, 2 the game's part. */
 static volatile LONG g_mods_phase = 0;
 static LONG          g_mods_phase_posted = 0;
-/* The pushed refresh: once the page has asked for anything, a change the window did not make (a console verb,
- * `sh_mods map add` or `uninstall`) moves the backend's generation past the last posted document's and the
- * think loop posts a fresh one. FETCH's size query (any thread, no main-thread call) reads it every UI_MODS_PUSH_MS. */
+/* Refresh a visible subscriber when its document generation changes. */
 #define UI_MODS_PUSH_MS 500
-static bool          g_mods_page_seen = false;
+static bool          g_mods_watched = false;
 static unsigned      g_mods_doc_gen = 0;
 static ULONGLONG     g_mods_push_next = 0;
 
@@ -2718,19 +2712,19 @@ static int ui_mods_slot(sh_mods_call *call, std::string *out = nullptr)
 static int ui_mods_main_call(void *ctx)
 {
     UiModsMain *m = (UiModsMain *)ctx;
-    m->rc = ui_mods_slot_seh(&m->call);   /* LIST and RUN hand no text over */
-    return m->rc;
+    m->rc = ui_mods_slot_seh(&m->call);
+    return 1;
 }
 
 /* run_on_main holds one call at a time and refuses another at once, so retry until the game has
  * started this one or the start budget is spent. Once started, run_on_main waits it out. */
-static bool ui_mods_on_main(UiModsMain *m)
+static int ui_mods_on_main(sh_main_call_fn fn, void *ctx)
 {
     ULONGLONG until = GetTickCount64() + UI_MODS_START_MS;
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->run_on_main) return false;
     for (;;) {
         int r = 0;
-        if (g_iface->vtbl->run_on_main(g_iface, ui_mods_main_call, m, 1000, &r) == 1) return true;
+        if (g_iface->vtbl->run_on_main(g_iface, fn, ctx, 1000, &r) == 1) return r;
         if (GetTickCount64() >= until) return false;
         Sleep(40);
     }
@@ -2863,13 +2857,6 @@ static bool ui_pick_key_file(bool save, std::wstring &out)
     return ok;
 }
 
-/* The actions whose file work runs on the worker itself (modui.h): never through run_on_main. */
-static bool ui_mods_file_action(int action)
-{
-    return action == SH_MODS_ACT_INSTALL || action == SH_MODS_ACT_NEW_MOD || action == SH_MODS_ACT_RESCAN ||
-           action == SH_MODS_ACT_ADD_MINE || action == SH_MODS_ACT_KEY;
-}
-
 static DWORD WINAPI ui_mods_thread(LPVOID)
 {
     UiModsJob &job = g_mods_job;
@@ -2893,7 +2880,7 @@ static DWORD WINAPI ui_mods_thread(LPVOID)
         });
         if (r == -3) job.run_rc = -3;
     }
-    if (job.action && job.run_rc != -3 && ui_mods_file_action(job.action)) {
+    if (job.action && job.run_rc != -3 && sh_mods_worker_action(job.action)) {
         sh_mods_call call;
         memset(&call, 0, sizeof call);
         call.op = SH_MODS_RUN;
@@ -2910,7 +2897,7 @@ static DWORD WINAPI ui_mods_thread(LPVOID)
             m.call.op = SH_MODS_RUN;
             m.call.action = SH_MODS_ACT_APPLY;
             InterlockedExchange(&g_mods_phase, 2);
-            if (ui_mods_on_main(&m) && m.rc == 1 && ui_mods_fetch(done)) job.run_doc = done;
+            if (ui_mods_on_main(ui_mods_main_call, &m) && m.rc == 1 && ui_mods_fetch(done)) job.run_doc = done;
             else job.apply_pending = true;
         }
     } else if (job.action && job.run_rc != -3) {
@@ -2919,16 +2906,15 @@ static DWORD WINAPI ui_mods_thread(LPVOID)
         m.call.op = SH_MODS_RUN;
         m.call.action = job.action;
         m.call.arg = job.arg.c_str();
-        if (!ui_mods_on_main(&m)) job.run_rc = -1;
+        if (!ui_mods_on_main(ui_mods_main_call, &m)) job.run_rc = -1;
         else job.run_rc = (m.rc == 1 && ui_mods_fetch(job.run_doc)) ? 1 : 0;
     }
     if (!ui_mods_read_only(job.action)) {
-        UiModsMain m;
-        memset(&m, 0, sizeof m);
-        m.call.op = SH_MODS_LIST;
-        if (!ui_mods_on_main(&m)) job.list_rc = -1;
-        else job.list_rc = (m.rc == 1 && ui_mods_fetch(job.list_doc)) ? 1 : 0;
-        job.list_gen = m.call.generation;
+        sh_mods_call call = {};
+        call.op = SH_MODS_LIST_VIEW;
+        call.capture = ui_mods_on_main;
+        job.list_rc = ui_mods_slot(&call, &job.list_doc);
+        job.list_gen = call.generation;
     }
     InterlockedExchange(&g_mods_done, 1);   /* last: publishes the job above */
     return 0;
@@ -3144,7 +3130,7 @@ static void ui_watch_start()
 static void ui_mods_push_tick()
 {
     ULONGLONG now = GetTickCount64();
-    if (!g_mods_page_seen || !g_mods_doc_gen || now < g_mods_push_next) return;
+    if (!g_mods_watched || !g_mods_doc_gen || now < g_mods_push_next || !IsWindowVisible(g_hwnd) || IsIconic(g_hwnd)) return;
     g_mods_push_next = now + UI_MODS_PUSH_MS;
     if (InterlockedCompareExchange(&g_mods_busy, 0, 0) != 0) return;
     sh_mods_call call;
@@ -3742,8 +3728,12 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 sh_prefab_watch watch;
                 ui_prefab_watch(&watch);
                 ui_send_budget_usage(watch, true);
+            } else if (cmd == L"modsWatch") {
+                int active = 0;
+                sh_webview_json::get_int(json, L"active", &active);
+                g_mods_watched = active != 0;
+                if (g_mods_watched) g_mods_push_next = 0;
             } else if (cmd == L"modsList") {
-                g_mods_page_seen = true;
                 ui_mods_begin(0, false, std::string());
             } else if (cmd == L"modsScripts") {
                 std::wstring salt;
@@ -3753,7 +3743,6 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 ui_mods_send_scripts((full ? std::string(SH_MODS_SCRIPTS_FULL) : std::string()) +
                                      sh_webview_json::to_utf8(salt));
             } else if (cmd == L"modsAction") {
-                g_mods_page_seen = true;   /* the page's open and Refresh are a rescan: arm the push */
                 /* Install always asks for its ZIPs or mod folders here, in the native picker: the
                  * page never names a path to install. */
                 std::wstring act, arg;
@@ -4575,6 +4564,7 @@ static void ui_think_loop()
             else if (!ready && was_visible) {
                 ui_perf_flush_collect("editor-hidden");
                 ui_log("perf lifecycle: editor-hidden");
+                ui_post_json(L"{\"kind\":\"editorHidden\"}");
                 /* The editor has let go of its map: the mode poll stops while the window is
                  * hidden, so tell the page now (the Mods tab drops its "In this map" pills) and
                  * make the next visible poll post the real state again. */

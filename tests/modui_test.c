@@ -163,6 +163,18 @@ static int fake_palette(void) { g_palette_calls++; return g_palette_result; }
 
 static int g_main = 1;
 static int fake_on_main(void) { return g_main; }
+static int captures;
+static int capture_map(sh_main_call_fn fn, void *context)
+{
+    int r;
+    CHECK(!g_main);
+    g_main = 1;
+    captures++;
+    sh_modui_note_changed();
+    r = fn(context);
+    g_main = 0;
+    return r;
+}
 
 static const char *g_placed[8];
 static int g_placed_count = -1;   /* -1: no editor map */
@@ -985,6 +997,15 @@ int main(int argc, char **argv)
         call.out = NULL;
         call.op = SH_MODS_GENERATION;
         CHECK(sh_modui_slot(NULL, &call) == 1 && call.generation != 0 && !call.out);
+        {
+            unsigned gen = call.generation;
+            call.op = SH_MODS_LIST_VIEW;
+            call.capture = capture_map;
+            CHECK(sh_modui_slot(NULL, &call) == 1 && captures == 1 && !g_main);
+            CHECK(call.out && has(call.out, "\"mods\":[") && has(call.out, "\"map\":{"));
+            CHECK(call.generation == gen && sh_modui_generation() != gen);
+            sh_iface_text_free(call.out);
+        }
         call.op = 5;                                                   /* the WAIT op is unknown */
         CHECK(sh_modui_slot(NULL, &call) == 0);
     }
@@ -1073,6 +1094,25 @@ int main(int argc, char **argv)
     CHECK(!has(doc, "\"bundle\"") && !has(doc, "\"id\":") && doc_prose_ok(doc));
     CHECK(g_rescans == 1);
     free(doc);
+    {
+        static const char stock[] = "{\"entities\":[],\"variables\":{}}";
+        sh_modmanifest_list rows = {0};
+        size_t len = 0;
+        char *saved, *label;
+        CHECK(sh_modserve_index_build(g_root) == 1);
+        int scans = sh_ms_test_enumerations();
+        saved = sh_modmanifest_on_save(stock, strlen(stock), &len);
+        CHECK(!saved && sh_ms_test_enumerations() == scans);
+        if (saved) HeapFree(GetProcessHeap(), 0, saved);
+        saved = sh_modmanifest_on_save(MAP, strlen(MAP), &len);
+        CHECK(saved && sh_modmanifest_read(saved, len, &rows, NULL) == 1);
+        label = rows.count ? sh_modmanifest_row_label(&rows.rows[0], "mods/alexrimp/imp_copy") : NULL;
+        CHECK(label && !strcmp(label, "imp_copy") && sh_ms_test_enumerations() == scans);
+        free(label);
+        if (saved) HeapFree(GetProcessHeap(), 0, saved);
+        sh_modmanifest_list_free(&rows);
+        printf("  first stock and modded saves after reindex: %d library enumerations\n", sh_ms_test_enumerations() - scans);
+    }
     doc = list_doc();
     row_salt(doc, "alex.r2-imp", salt1, sizeof salt1);
     CHECK(!strcmp(salt1, "alexrimp"));

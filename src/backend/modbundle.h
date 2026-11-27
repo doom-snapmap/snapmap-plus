@@ -556,6 +556,11 @@ void sh_mb_requests_free(char *out[], int count);
  * (lower-cased, malloc'd), NULL when no segment was removed. */
 char *sh_mb_strip_key(const char *in);
 
+/* English captions stored in a map. Free the catalog with sh_json_object_free and each title with free. */
+struct sh_json_object;
+void sh_mb_row_strings(const char *extra, struct sh_json_object *english);
+char *sh_mb_row_title(const struct sh_json_object *english, const char *salt, const char *tag);
+
 /* Tolerant decl reference scan (see modbundle.c for the keys). The callback
  * receives each reference; name is not NUL-terminated. */
 typedef void (*sh_mb_need_fn)(void *context, const char *type,

@@ -47,7 +47,11 @@
 
 /* ------------------------------------------------------------------ types */
 
-typedef struct ms_need { const char *type, *name; int file; } ms_need;   /* file: the served provider, or -1 */
+typedef struct ms_need {
+    const char *type, *name;
+    int file;   /* the served provider, or -1 */
+    char *blocked;
+} ms_need;
 
 typedef struct ms_file {
     int bundle;
@@ -194,6 +198,11 @@ typedef struct ms_gone {
     volatile LONG pending;
 } ms_gone;
 
+typedef struct ms_caption {
+    const char *entity, *title, *folder;
+    int file;
+} ms_caption;
+
 typedef struct ms_index {
     char *root;                           /* the mods folder read (malloc'd) */
     char *cache;                          /* the profile cache beside the mods folder */
@@ -203,6 +212,7 @@ typedef struct ms_index {
     ms_bundle *bundles; int nbundles, cbundles;
     ms_file *files; int nfiles, cfiles;
     ms_need *needs; int nneeds, cneeds;
+    ms_caption *captions; int ncaptions, ccaptions;
     ms_slot *slots; uint32_t mask; int nkeys;
     ms_slot *pslots; uint32_t pmask;
     ms_conflict *conflict_list; int nconflict_list, cconflict_list;   /* sorted by request */
@@ -351,9 +361,11 @@ static void ms_index_free(ms_index *x)
     int i;
     for (c = x->arena; c; c = n) { n = c->next; free(c); }
     for (i = 0; x->files && i < x->nfiles; i++) free(x->files[i].look);
+    for (i = 0; i < x->nneeds; ++i) free(x->needs[i].blocked);
     for (i = 0; x->bundles && i < x->nbundles + (x->reg_made ? 1 : 0); i++) {
         free(x->bundles[i].cause);
     }
+    free(x->captions);
     free(x->root);
     free(x->cache);
     free(x->bundles); free(x->files); free(x->needs); free(x->slots); free(x->pslots); free(x->conflict_list);
@@ -720,6 +732,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
                 x->needs[x->nneeds].type = nt;
                 x->needs[x->nneeds].name = nn;
                 x->needs[x->nneeds].file = -1;
+                x->needs[x->nneeds].blocked = NULL;
                 x->nneeds++;
                 need_count++;
             }
@@ -1354,6 +1367,7 @@ static int ms_add_generated(ms_index *x, ms_bundle *b, const char *request, cons
         x->needs[x->nneeds].type = need_type;
         x->needs[x->nneeds].name = nn;
         x->needs[x->nneeds].file = -1;
+        x->needs[x->nneeds].blocked = NULL;
         x->nneeds++;
         f->need_count = 1;
     }
@@ -4917,17 +4931,104 @@ static int ms_own_keys(const ms_bundle *b, sh_ma_keys *out)
     return 1;
 }
 
+typedef struct ms_caption_catalog { sh_json_object en; int read; } ms_caption_catalog;
+
+static char *ms_caption_text(const ms_index *x, ms_caption_catalog *catalogs, int bundle, const char *tag)
+{
+    ms_caption_catalog *c = &catalogs[bundle];
+    if (!c->read) {
+        sh_mb_row_strings(x->bundles[bundle].extra, &c->en);
+        c->read = 1;
+    }
+    return sh_mb_row_title(&c->en, x->bundles[bundle].id, tag);
+}
+
+static int ms_folder_order(const char *a, const char *b)
+{
+    int c = _stricmp(a, b);
+    return c ? c : strcmp(a, b);
+}
+
+static int ms_capture_caption(ms_index *x, const ms_file *f, ms_caption_catalog *catalogs, const char *bytes, size_t len)
+{
+    const ms_bundle *b = &x->bundles[f->bundle];
+    char *entity = NULL, *tag = NULL, *title = NULL;
+    sh_dt_tile_fields(bytes, len, &entity, &tag);
+    if (entity) {
+        char *engine = sh_ma_engine_name(b->id, entity, strlen(entity));
+        if (engine) { free(entity); entity = engine; }
+    }
+    if (!entity || _strnicmp(entity, "mods/", 5)) { free(entity); free(tag); return 1; }
+    if (tag) {
+        title = ms_caption_text(x, catalogs, f->bundle, tag);
+        if (!title) {
+            const char *selected = NULL;
+            for (int i = 0; i < x->nbundles; i++) {
+                const ms_bundle *other = &x->bundles[i];
+                if (i == f->bundle || !other->admitted || other->place ||
+                    (selected && ms_folder_order(other->folder, selected) >= 0)) continue;
+                char *candidate = ms_caption_text(x, catalogs, i, tag);
+                if (candidate) { free(title); title = candidate; selected = other->folder; }
+            }
+        }
+    }
+    if (!title) title = sh_mb_strip_key(f->pname);
+    int ok = ms_grow((void **)&x->captions, &x->ccaptions, x->ncaptions + 1, sizeof *x->captions);
+    if (ok) {
+        ms_caption *c = &x->captions[x->ncaptions++];
+        c->entity = ms_strdup(x, entity);
+        c->title = ms_strdup(x, title ? title : f->pname);
+        c->folder = b->folder;
+        c->file = (int)(f - x->files);
+        ok = c->entity && c->title;
+    }
+    free(entity);
+    free(tag);
+    free(title);
+    return ok;
+}
+
+/* If several tiles place one entity, keep the first folder and then the first row in its manifest. */
+static int ms_caption_order(const void *a, const void *b)
+{
+    const ms_caption *l = a, *r = b;
+    int c = _stricmp(l->entity, r->entity);
+    if (!c) c = ms_folder_order(l->folder, r->folder);
+    return c ? c : (l->file > r->file) - (l->file < r->file);
+}
+
+static int ms_caption_key(const void *name, const void *row)
+{
+    return _stricmp((const char *)name, ((const ms_caption *)row)->entity);
+}
+
+void sh_modserve_placed_labels(const char *const *names, size_t count, char **titles)
+{
+    sh_modserve_read_begin();
+    const ms_index *x = g_index;
+    for (size_t i = 0; x && x->ncaptions && i < count; i++) {
+        if (!names[i] || _strnicmp(names[i], "mods/", 5)) continue;
+        const ms_caption *c = bsearch(names[i], x->captions, x->ncaptions, sizeof *c, ms_caption_key);
+        if (c) titles[i] = sh_text(c->title);
+    }
+    sh_modserve_read_end();
+}
+
 /* Every decl a mod carries (its own and its edits of the game's), served as the engine names its names
  * (modauthor.h): the rewritten bytes go under cache\served\files\ by their hash, as a renamed bank's decls do, so
  * every open, the ledger and the bank rename after this see the engine's text. A stock pointer is the game's own. */
-static void ms_engine_names(ms_index *x)
+static int ms_engine_names(ms_index *x)
 {
-    int bi, i;
+    ms_caption_catalog *catalogs = calloc(x->nbundles ? x->nbundles : 1, sizeof *catalogs);
+    int bi, i, ok = 1;
+    if (!catalogs) return 0;
     for (bi = 0; bi < x->nbundles; ++bi) {
         ms_bundle *b = &x->bundles[bi];
         sh_ma_keys keys;
         int changed = 0;
+        char ns[5 + SH_SALT_LEN + 2];
         if (!b->admitted || !b->id || !sh_salt_valid(b->id, strlen(b->id)) || b->file_count <= 0) continue;
+        _snprintf_s(ns, sizeof ns, _TRUNCATE, "mods/%s/", b->id);
         if (!ms_own_keys(b, &keys)) { ms_log("bundle '%s': out of memory; its names are served as written", b->id); continue; }
         for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
             ms_file *f = &x->files[i];
@@ -4937,6 +5038,8 @@ static void ms_engine_names(ms_index *x)
             if (f->stock || !f->disk || (!f->is_decl && _strnicmp(f->request, "maps/modules/", 13))) continue;
             bytes = ms_read_whole(f->disk, MS_ANY_SIZE, &len);
             if (!bytes) continue;
+            if (!b->place && f->is_sedef && !strncmp(f->pname, ns, sizeof ns - 1) &&
+                !ms_capture_caption(x, f, catalogs, (const char *)bytes, len)) ok = 0;
             text = sh_ma_text(b->id, (const char *)bytes, len, sh_ma_keys_has, &keys, &tl);
             HeapFree(GetProcessHeap(), 0, bytes);
             if (!text) continue;
@@ -4947,6 +5050,17 @@ static void ms_engine_names(ms_index *x)
         if (changed) ms_log("bundle '%s': %d decl(s) served with the mod's names as the engine names them", b->id, changed);
         sh_ma_keys_free(keys.keys, keys.count);
     }
+    for (bi = 0; bi < x->nbundles; bi++) sh_json_object_free(&catalogs[bi].en);
+    free(catalogs);
+    if (ok && x->ncaptions > 1) {
+        qsort(x->captions, x->ncaptions, sizeof *x->captions, ms_caption_order);
+        int kept = 1;
+        for (i = 1; i < x->ncaptions; i++)
+            if (_stricmp(x->captions[kept - 1].entity, x->captions[i].entity))
+                x->captions[kept++] = x->captions[i];
+        x->ncaptions = kept;
+    }
+    return ok;
 }
 
 size_t sh_modserve_respell(unsigned char *bytes, size_t len, const char *from, const char *to)
@@ -5110,11 +5224,11 @@ int sh_modserve_index_build(const char *mods_root)
     }
     ms_scan_folder(x, mods_root);
     ms_one_per_area(x);
-    ms_engine_names(x);
+    int names_ready = ms_engine_names(x);
     ms_respelled(x);
     ms_bank_stems(x);
     ms_mark_edits(x);
-    if (!ms_resolve(x) || !ms_registry_files(x) || !ml_build(x) || !ms_build_tables(x)) {
+    if (!names_ready || !ms_resolve(x) || !ms_registry_files(x) || !ml_build(x) || !ms_build_tables(x)) {
         ReleaseSRWLockExclusive(&g_build_lock);
         ms_log("index refused: out of memory; the previous table stays");
         ms_index_free(x);
@@ -6119,6 +6233,9 @@ int sh_modserve_probe_claims(const char *path)
     return 1;
 }
 
+void sh_modserve_read_begin(void) { InterlockedIncrement(&g_readers); }
+void sh_modserve_read_end(void) { InterlockedDecrement(&g_readers); }
+
 /* Free the tables two or more generations behind the published one (modserve.h). Later questions need nothing
  * from them (ms_carry_forward, the gone list), so only a reader still inside one (a provider call, a plan)
  * blocks the free; the table just before the published one stays for callers holding a pointer. */
@@ -6220,21 +6337,116 @@ static int ms_campaign_parent(const ms_file *child, const ms_file *candidate, ch
            !strcmp(container, "gameresources");
 }
 
+/* A plan and its split parts can borrow this reason until the serving index retires. */
+static const char *ms_need_reason(ms_need *need)
+{
+    PVOID volatile *slot = (PVOID volatile *)&need->blocked;
+    char *prior = (char *)InterlockedCompareExchangePointer(slot, NULL, NULL);
+    const char *format = need->file < 0 ? "needs %s '%s', which no installed mod provides" : "needs %s '%s', which is blocked";
+    char *text;
+    if (prior) return prior;
+    text = sh_textf(format, need->type, need->name);
+    if (!text) return need->file < 0 ? "needs a file no installed mod provides" : "needs a blocked decl";
+    prior = (char *)InterlockedCompareExchangePointer(slot, text, NULL);
+    if (!prior) return text;
+    free(text);
+    return prior;
+}
+
+static void ms_ready_add(uint64_t *heap, int *count, const ms_file *files, int index)
+{
+    uint64_t key = (uint64_t)(unsigned)files[index].rank << 32 | (unsigned)index;
+    int pos = (*count)++;
+    while (pos > 0 && key < heap[(pos - 1) / 2]) {
+        heap[pos] = heap[(pos - 1) / 2];
+        pos = (pos - 1) / 2;
+    }
+    heap[pos] = key;
+}
+
+static int ms_ready_take(uint64_t *heap, int *count)
+{
+    int first = (int)(uint32_t)heap[0], pos = 0;
+    uint64_t last = heap[--*count];
+    while (pos < *count / 2) {
+        int child = 2 * pos + 1;
+        if (child + 1 < *count && heap[child + 1] < heap[child]) ++child;
+        if (heap[child] >= last) break;
+        heap[pos] = heap[child];
+        pos = child;
+    }
+    heap[pos] = last;
+    return first;
+}
+
+typedef struct ms_plan_node {
+    const ms_file *source;
+    const char *blocked;
+    size_t first;
+    int pending, state;
+} ms_plan_node;
+typedef struct ms_plan_edge { size_t next; int dependent; } ms_plan_edge;
+
+/* Release only the dependents of each chosen step. Equal ranks keep manifest order, including cycle breaks. */
+static int ms_order_plan(const ms_index *x, ms_plan_node *nodes, int *queue, int count, int *order)
+{
+    uint64_t *ready = (uint64_t *)calloc((size_t)count + 1, sizeof *ready);
+    ms_plan_edge *edges;
+    size_t capacity = 0, used = 0;
+    int i, nready = 0, fallback = 0, rank, n = 0;
+    for (i = 0; i < count; ++i) capacity += (size_t)nodes[queue[i]].source->need_count;
+    edges = (ms_plan_edge *)calloc(capacity + 1, sizeof *edges);
+    if (!ready || !edges) { free(ready); free(edges); return -1; }
+    for (i = 0; i < count; ++i) {
+        int index = queue[i], k;
+        const ms_file *file = nodes[index].source;
+        for (k = 0; k < file->need_count; ++k) {
+            int parent = x->needs[file->need_first + k].file;
+            if (parent < 0 || parent == index || !nodes[parent].state) continue;
+            ++nodes[index].pending;
+            edges[++used].dependent = index;
+            edges[used].next = nodes[parent].first;
+            nodes[parent].first = used;
+        }
+        if (!nodes[index].pending) ms_ready_add(ready, &nready, x->files, index);
+    }
+    for (rank = 0; rank <= SH_MODSERVE_RANK_MAX; ++rank)
+        for (i = 0; i < x->nfiles; ++i)
+            if (nodes[i].state && x->files[i].rank == rank) queue[n++] = i;
+    for (i = 0; i < count; ++i) {
+        int best;
+        size_t edge;
+        if (nready) best = ms_ready_take(ready, &nready);
+        else {
+            while (nodes[queue[fallback]].state == 2) ++fallback;
+            best = queue[fallback++];
+        }
+        nodes[best].state = 2;
+        order[i] = best;
+        for (edge = nodes[best].first; edge; edge = edges[edge].next) {
+            int dep = edges[edge].dependent;
+            if (nodes[dep].state == 1 && --nodes[dep].pending == 0)
+                ms_ready_add(ready, &nready, x->files, dep);
+        }
+    }
+    free(edges); free(ready);
+    return count;
+}
+
 /* Collect `roots` and the closure of bundle-provided decls they need into an
  * ordered plan. */
 static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int persist_sedefs,
                         sh_modserve_plan *out)
 {
-    int *in_plan = NULL, *queue = NULL, *order = NULL, *indeg = NULL, *step_of = NULL;
-    const char **cause = NULL;
+    ms_plan_node *nodes = NULL;
+    int *queue = NULL, *order = NULL;
     int nq = 0, qh = 0, i, k, changed, n = 0, nf = x->nfiles;
     memset(out, 0, sizeof *out);
-    in_plan = (int *)calloc((size_t)nf + 1, sizeof(int));
+    nodes = (ms_plan_node *)calloc((size_t)nf + 1, sizeof *nodes);
     queue = (int *)malloc(sizeof(int) * ((size_t)nf + 1));
-    cause = (const char **)calloc((size_t)nf + 1, sizeof(char *));
-    if (!in_plan || !queue || !cause) goto oom;
+    if (!nodes || !queue) goto oom;
     for (i = 0; i < nf; ++i)
-        if (root_mark[i]) { in_plan[i] = 1; queue[nq++] = i; }
+        if (root_mark[i]) { nodes[i].state = 1; queue[nq++] = i; }
     /* Every step's needs are those of the build that serves its path for the
      * open map (ms_serving_file); a step is still named by the path's winner. */
     while (qh < nq) {
@@ -6242,21 +6454,17 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
         const ms_file *f = ms_serving_file(x, at);
         char *parent = NULL;
         int read = 0;
+        nodes[at].source = f;
         for (k = 0; k < f->need_count; ++k) {
-            const ms_need *nd = &x->needs[f->need_first + k];
+            ms_need *nd = &x->needs[f->need_first + k];
             int p = nd->file;
             if (p < 0) {
-                if (ms_need_blocks(nd->name) && !cause[at]) {
-                    char *buf = sh_textf("needs %s '%s', which no installed mod provides", nd->type, nd->name);
-                    cause[at] = buf ? ms_strdup((ms_index *)x, buf) : NULL;
-                    free(buf);
-                    if (!cause[at]) cause[at] = "needs a file no installed mod provides";
-                }
+                if (ms_need_blocks(nd->name) && !nodes[at].blocked) nodes[at].blocked = ms_need_reason(nd);
                 continue;
             }
-            if (!in_plan[p] && (ms_plannable(x, &x->files[p]) ||
+            if (!nodes[p].state && (ms_plannable(x, &x->files[p]) ||
                 ms_campaign_parent(f, ms_serving_file(x, p), &parent, &read))) {
-                in_plan[p] = 1;
+                nodes[p].state = 1;
                 queue[nq++] = p;
             }
         }
@@ -6266,16 +6474,13 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
     do {
         changed = 0;
         for (i = 0; i < nf; ++i) {
-            const ms_file *f = ms_serving_file(x, i);
-            if (!in_plan[i] || cause[i]) continue;
+            const ms_file *f = nodes[i].source;
+            if (!f || nodes[i].blocked) continue;
             for (k = 0; k < f->need_count; ++k) {
-                const ms_need *nd = &x->needs[f->need_first + k];
+                ms_need *nd = &x->needs[f->need_first + k];
                 int p = nd->file;
-                if (p >= 0 && in_plan[p] && cause[p]) {
-                    char *buf = sh_textf("needs %s '%s', which is blocked", nd->type, nd->name);
-                    cause[i] = buf ? ms_strdup((ms_index *)x, buf) : NULL;
-                    free(buf);
-                    if (!cause[i]) cause[i] = "needs a blocked decl";
+                if (p >= 0 && nodes[p].blocked) {
+                    nodes[i].blocked = ms_need_reason(nd);
                     changed = 1;
                     break;
                 }
@@ -6283,40 +6488,8 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
         }
     } while (changed);
     /* Order: dependencies first, then rank, then manifest order. */
-    order = (int *)malloc(sizeof(int) * ((size_t)nf + 1));
-    indeg = (int *)calloc((size_t)nf + 1, sizeof(int));
-    step_of = (int *)malloc(sizeof(int) * ((size_t)nf + 1));
-    if (!order || !indeg || !step_of) goto oom;
-    for (i = 0; i < nf; ++i) {
-        const ms_file *f;
-        if (!in_plan[i]) continue;
-        f = ms_serving_file(x, i);
-        for (k = 0; k < f->need_count; ++k) {
-            int p = x->needs[f->need_first + k].file;
-            if (p >= 0 && p != i && in_plan[p]) indeg[i]++;
-        }
-    }
-    for (;;) {
-        int best = -1, best_cycle = -1;
-        for (i = 0; i < nf; ++i) {
-            if (in_plan[i] != 1) continue;
-            if (best_cycle < 0 || x->files[i].rank < x->files[best_cycle].rank) best_cycle = i;
-            if (indeg[i] == 0 && (best < 0 || x->files[i].rank < x->files[best].rank)) best = i;
-        }
-        if (best < 0) best = best_cycle;   /* a need cycle: fall back to rank order */
-        if (best < 0) break;
-        in_plan[best] = 2;
-        order[n++] = best;
-        /* Release the steps that needed this one. */
-        for (i = 0; i < nf; ++i) {
-            const ms_file *f = ms_serving_file(x, i);
-            if (in_plan[i] != 1) continue;
-            for (k = 0; k < f->need_count; ++k) {
-                int p = x->needs[f->need_first + k].file;
-                if (p == best) indeg[i]--;
-            }
-        }
-    }
+    order = (int *)calloc((size_t)nq + 1, sizeof *order);
+    if (!order || (n = ms_order_plan(x, nodes, queue, nq, order)) < 0) goto oom;
     out->steps = ms_steps_alloc(n);
     if (!out->steps) goto oom;
     for (i = 0; i < n; ++i) {
@@ -6331,15 +6504,15 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
          * the purges around Play; a decl an editor row needs is kept by whichever pass registers it first. */
         s->persist = persist_sedefs ? 1 : f->editor_closure ? 2 : 0;
         s->shadow = f->is_shadow;
-        s->blocked = cause[order[i]];
+        s->blocked = nodes[order[i]].blocked;
         s->file = order[i];
         if (s->blocked) out->blocked++;
     }
     out->count = n;
-    free(in_plan); free(queue); free(order); free(indeg); free(step_of); free((void *)cause);
+    free(nodes); free(queue); free(order);
     return n;
 oom:
-    free(in_plan); free(queue); free(order); free(indeg); free(step_of); free((void *)cause);
+    free(nodes); free(queue); free(order);
     memset(out, 0, sizeof *out);
     return -1;
 }
@@ -9222,41 +9395,22 @@ static int ms_scoped_or(const ms_index *x, int f)
     return g >= 0 ? g : f;
 }
 
-int modserve_bundles_for_names(const char *const *names, int n_names,
-                               char (*out_hashes)[SH_MODSERVE_HASH_HEX + 1], int cap)
+/* Identical stock pointers can share a serving path. Follow this build's own copy when recording its dependencies. */
+static int ms_placed_need(const ms_index *x, int provider, int bundle)
 {
-    const ms_index *x = g_index;
-    unsigned char *seen_file, *seen_bundle;
-    int *queue, nq = 0, qh = 0, i, k, found = 0;
-    if (!x || !names || n_names <= 0) return 0;
-    seen_file = (unsigned char *)calloc((size_t)x->nfiles + 1, 1);
-    seen_bundle = (unsigned char *)calloc((size_t)x->nbundles + 1, 1);
-    queue = (int *)malloc(sizeof(int) * ((size_t)x->nfiles + 1));
-    if (!seen_file || !seen_bundle || !queue) { free(seen_file); free(seen_bundle); free(queue); return -1; }
-    for (i = 0; i < n_names; ++i) {
-        char *lower;
-        int f;
-        if (!names[i] || !(lower = _strdup(names[i]))) continue;
-        ms_lower(lower);
-        f = ms_scoped_or(x, ms_name_file(x, lower));
-        free(lower);
-        if (f >= 0 && ms_doom_shadow(&x->files[f])) continue;
-        if (f >= 0 && !seen_file[f]) { seen_file[f] = 1; queue[nq++] = f; }
+    int selected = ms_scoped_or(x, provider), k;
+    const ms_file *active, *winner;
+    if (selected < 0) return selected;
+    active = &x->files[selected];
+    if (active->bundle == bundle || !ms_surface(active) || !active->blob) return selected;
+    winner = &x->files[provider];
+    for (k = -1; k < winner->alt_count; ++k) {
+        int at = k < 0 ? provider : x->alts[winner->alt_first + k];
+        const ms_file *own = &x->files[at];
+        if (own->bundle == bundle && ms_surface(own) && own->blob &&
+            !strcmp(own->blob, active->blob) && !_stricmp(own->stock, active->stock)) return at;
     }
-    while (qh < nq) {
-        const ms_file *f = &x->files[queue[qh++]];
-        if (!seen_bundle[f->bundle]) {
-            seen_bundle[f->bundle] = 1;
-            if (found < cap && out_hashes) strcpy_s(out_hashes[found], SH_MODSERVE_HASH_HEX + 1, x->bundles[f->bundle].hash);
-            found++;
-        }
-        for (k = 0; k < f->need_count; ++k) {
-            int p = ms_scoped_or(x, x->needs[f->need_first + k].file);
-            if (p >= 0 && !seen_file[p] && !ms_doom_shadow(&x->files[p])) { seen_file[p] = 1; queue[nq++] = p; }
-        }
-    }
-    free(seen_file); free(seen_bundle); free(queue);
-    return found;
+    return selected;
 }
 
 int sh_modserve_root_carries(const char *salt, const char *name)
@@ -9278,18 +9432,18 @@ int sh_modserve_root_carries(const char *salt, const char *name)
     return hit;
 }
 
-size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
-                                        sh_modserve_closure_fn visit, void *context)
+static int ms_placed_bundles(const char *const *names, size_t count, sh_modserve_closure_fn visit, void *context,
+                             char (*hashes)[SH_MODSERVE_HASH_HEX + 1], int cap)
 {
     const ms_index *x = g_index;
     unsigned char *seen_file, *seen_bundle;
-    int *queue, nq = 0, qh = 0, k;
-    size_t i, found = 0;
-    if (!x || !names || !count || !visit) return 0;
+    int *queue, nq = 0, qh = 0, roots, k, found = 0;
+    size_t i;
+    if (!x || !names || !count) return 0;
     seen_file = (unsigned char *)calloc((size_t)x->nfiles + 1, 1);
     seen_bundle = (unsigned char *)calloc((size_t)x->nbundles + 1, 1);
     queue = (int *)malloc(sizeof(int) * ((size_t)x->nfiles + 1));
-    if (!seen_file || !seen_bundle || !queue) { free(seen_file); free(seen_bundle); free(queue); return 0; }
+    if (!seen_file || !seen_bundle || !queue) { free(seen_file); free(seen_bundle); free(queue); return -1; }
     /* The placed names, each reported with the bundle that provides it. */
     for (i = 0; i < count; ++i) {
         char *lower;
@@ -9301,26 +9455,40 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
         free(lower);
         if (f < 0 || ms_doom_shadow(&x->files[f])) continue;
         b = &x->bundles[x->files[f].bundle];
-        visit(context, b->id, b->hash, (unsigned long long)b->total, names[i]);
-        if (!seen_bundle[x->files[f].bundle]) { seen_bundle[x->files[f].bundle] = 1; found++; }
+        if (visit) visit(context, b->id, b->hash, (unsigned long long)b->total, names[i]);
         if (!seen_file[f]) { seen_file[f] = 1; queue[nq++] = f; }
     }
     /* Bundles the closure of their needs reaches, reported without a name. */
+    roots = nq;
     while (qh < nq) {
         const ms_file *f = &x->files[queue[qh++]];
         if (!seen_bundle[f->bundle]) {
             const ms_bundle *b = &x->bundles[f->bundle];
             seen_bundle[f->bundle] = 1;
+            if (hashes && found < cap) strcpy_s(hashes[found], SH_MODSERVE_HASH_HEX + 1, b->hash);
+            if (visit && qh > roots) visit(context, b->id, b->hash, (unsigned long long)b->total, NULL);
             found++;
-            visit(context, b->id, b->hash, (unsigned long long)b->total, NULL);
         }
         for (k = 0; k < f->need_count; ++k) {
-            int p = ms_scoped_or(x, x->needs[f->need_first + k].file);
+            int p = ms_placed_need(x, x->needs[f->need_first + k].file, f->bundle);
             if (p >= 0 && !seen_file[p] && !ms_doom_shadow(&x->files[p])) { seen_file[p] = 1; queue[nq++] = p; }
         }
     }
     free(seen_file); free(seen_bundle); free(queue);
     return found;
+}
+
+int modserve_bundles_for_names(const char *const *names, int count,
+                              char (*hashes)[SH_MODSERVE_HASH_HEX + 1], int cap)
+{
+    return count > 0 ? ms_placed_bundles(names, (size_t)count, NULL, NULL, hashes, cap) : 0;
+}
+
+size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
+                                       sh_modserve_closure_fn visit, void *context)
+{
+    int n = visit ? ms_placed_bundles(names, count, visit, context, NULL, 0) : 0;
+    return n > 0 ? (size_t)n : 0;
 }
 
 void sh_modserve_get_stats(sh_modserve_stats *out)
