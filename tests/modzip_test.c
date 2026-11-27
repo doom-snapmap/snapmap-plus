@@ -4,6 +4,7 @@
 #include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
+#include <share.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -31,11 +32,11 @@ static char g_path[MAX_PATH];
 
 static int spit(const unsigned char *data, size_t len)
 {
-    FILE *f = NULL;
-    if (fopen_s(&f, g_path, "wb") || !f) return 0;
+    /* Read-only observers can hold the temporary ZIP between test cases. */
+    FILE *f = _fsopen(g_path, "wb", _SH_DENYWR);
+    if (!f) return 0;
     if (len && fwrite(data, 1, len, f) != len) { fclose(f); return 0; }
-    fclose(f);
-    return 1;
+    return fclose(f) == 0;
 }
 
 static unsigned char *slurp(const char *path, size_t *len)
