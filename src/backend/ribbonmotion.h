@@ -8,6 +8,8 @@
 #define SH_RIBBON_NOISE (-84001.0f)
 #define SH_RIBBON_NOISE_AT_BIRTH (-84002.0f)
 #define SH_RIBBON_WIDTH_ENVELOPE (-84003.0f)
+#define SH_RIBBON_TIMED_KNOTS (-84004.0f)
+#define SH_RIBBON_DISTANCE_KNOTS (-84005.0f)
 
 typedef struct {
     float frequency, marker, velocity;

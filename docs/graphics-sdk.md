@@ -375,6 +375,11 @@ and `edit.startOff` to `false` so the engine initializes its renderer at spawn. 
 `entities/effects/trail.decl` with `spawn("effects/trail", points[1])`. Pass 2 to 128 world positions in path order. The optional colour has four
 channels from 0 to 1. Update the path while the effect plays and remove the emitter when it ends.
 
+Doomforge can also build a moving trail directly from an imported effect. For a timed knot reveal, Snapmap+
+samples the moving attachment at the specified times and draws the requested smooth subdivisions. For a
+distance-triggered world trail, it places knots as the attachment moves and uses the distance to the nearest
+active camera when the source specifies near and far spacing. Both follow the effect's own start and stop.
+
 A material with `type ribbon` draws with the game's ribbon program. Set `lengthfade { 0.1, 0.2 }` to fade in
 across the first tenth of the trail and fade out across its last fifth. The ribbon declaration supplies the
 length coordinate with `textureTangentStretch = true;`. Its main texture can tile and scroll independently.
