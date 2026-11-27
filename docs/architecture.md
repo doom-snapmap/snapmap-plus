@@ -4366,6 +4366,11 @@ at:
   editor map is open without one;
 - the Mods tab's and the console's map add and Remove from map, at once.
 
+If placement, deletion or undo changes which builds the open map uses, the
+editor applies their requirements and refreshes affected live resources together
+on the main thread. Placing the first object from a mod can therefore change an
+asset another object already uses before the next save.
+
 With no map (at boot, and at the hub after the editor) no undeclared shadow
 serves. A published or My Maps launch from the hub declares exactly the
 launched map's rows and runs in PLAY mode: the launch boundary
