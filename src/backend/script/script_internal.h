@@ -82,6 +82,7 @@ typedef struct shs_mod {
     int       nents, cents;
     shs_bind *binds;         /* guarded by the runtime's lock */
     int       nbinds, cbinds;
+    int       wants_hits;
     shs_timer *timers;
     int       ntimers, ctimers, next_timer;
 

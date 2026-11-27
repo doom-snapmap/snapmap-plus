@@ -45,7 +45,8 @@ void sh_feature_off(const char *feature, const char *why) { (void)feature; (void
 
 /* ---- the rest of the engine side the gates never reach -------------------- */
 
-void *sh_entity_gamemgr(void) { return NULL; }
+static uint8_t *g_test_game;
+void *sh_entity_gamemgr(void) { return g_test_game; }
 int sh_companions_def_chain(void *entity, const char **names, int cap) { (void)entity; (void)names; (void)cap; return 0; }
 const char *sh_script_ai_behavior(void *entity) { (void)entity; return NULL; }
 char *sh_modserve_enemy_behavior(const char *salt, const char *entitydef) { (void)salt; (void)entitydef; return NULL; }
@@ -63,8 +64,8 @@ sh_script_handle sh_script_combat_launch(uint32_t projectile_spawn_id, sh_script
 { (void)projectile_spawn_id; (void)owner; (void)mod; return 0; }
 int sh_script_combat_launch_from(sh_script_handle owner, float origin[3], float axis[9])
 { (void)owner; (void)origin; (void)axis; return 0; }
-void sh_script_combat_note_hit(sh_script_handle victim, const char *decl, sh_script_handle attacker)
-{ (void)victim; (void)decl; (void)attacker; }
+void sh_script_combat_note_hit(sh_script_handle victim, const char *decl, sh_script_handle attacker, float damage)
+{ (void)victim; (void)decl; (void)attacker; (void)damage; }
 int sh_script_combat_last_hit(sh_script_handle victim, char **decl, sh_script_handle *attacker)
 { (void)victim; if (decl) *decl = NULL; if (attacker) *attacker = 0; return 0; }
 int sh_script_combat_first_death(sh_script_handle victim) { (void)victim; return 0; }
@@ -73,12 +74,38 @@ void sh_script_combat_reset(void) { g_combat_resets++; }
 static int g_destructible_resets;
 void sh_ai_destructible_reset(void) { g_destructible_resets++; }
 
+static int health_part_size(void *ctx, const char *name, uint32_t *size)
+{
+    (void)ctx;
+    if (strcmp(name, "Part")) return 0;
+    *size = 16;
+    return 1;
+}
+const sh_rf_host *sh_script_reflect_host(void)
+{
+    static const sh_rf_host host = {NULL, health_part_size};
+    return &host;
+}
+int sh_rf_find_field(const sh_rf_host *h, const char *cls, const char *name, sh_rf_field *out)
+{
+    static const sh_rf_field fields[] = {
+        {"Health", "", "playerHealth", 24, 40}, {"Part", "[2]", "components", 0, 32}, {"float", "", "cur", 8, 4}
+    };
+    const char *const owners[] = {"idPlayer", "Health", "Part"};
+    (void)h;
+    for (int i = 0; i < 3; i++) {
+        if (!strcmp(cls, owners[i]) && !strcmp(name, fields[i].name)) { *out = fields[i]; return 1; }
+    }
+    return 0;
+}
+
 /* ---- the serving index: one map's mods ------------------------------------ */
 
 #define SALT "gatemod1"
 #define HASH "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 #define PIN "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-static const char k_script[] = "api = 1\non.think(\"gate/thing\", function(self, dt) end)\n";
+static const char k_script[] = "api = 1\non.think(\"gate/thing\", function(self, dt) end)\n"
+                              "on.enemy('gate/thing').hit('gate/thing', function() end)\n";
 static int g_map_mods;      /* rows of the open map: 0 or 1 */
 static int g_map_scripts;   /* the mod's scripts: 0 or 1 */
 static int g_pinned;
@@ -156,6 +183,69 @@ static void map(int mods, int scripts)
     g_logbuf[0] = 0;
 }
 
+static void native_damage_notice(void *player, uint32_t attacker, float amount)
+{
+    (void)player; (void)attacker; (void)amount;
+}
+
+static void native_player_hit(void *player, void *inflictor, void *attacker, void *parms, float scale,
+                              const float *dir, void *hit)
+{
+    uint8_t *p = player;
+    (void)inflictor; (void)parms; (void)dir; (void)hit;
+    if (scale == 0) return;
+    *(float *)(p + g_player_armor) -= 10;
+    if (scale == 2) *(float *)(p + g_player_health) -= 80;
+    on_damage_detour(player, spawn_id_of(attacker), 100);
+}
+
+static void test_player_hit(void)
+{
+    uint8_t player[64] = {0}, actor[64] = {0}, projectile[64] = {0};
+    uint8_t parms[SH_COMBAT_PARMS_DECL + sizeof(void *)] = {0}, decl[32] = {0};
+    float direction[] = {1,0,0};
+    const char *chain[] = {"mods/" SALT "/gate/thing"};
+    int slot = sh_script_hooks_mod_find(SALT);
+    sh_script_handle owner;
+    sh_script_event ev;
+    g_test_game = calloc(1, SH_SCRIPT_GAME_SPAWN_IDS + 3 * sizeof(uint32_t));
+    CHECK(g_test_game != NULL);
+    if (!g_test_game) return;
+    *(uint32_t *)(g_test_game + SH_SCRIPT_GAME_SPAWN_IDS) = 300;
+    *(uint32_t *)(g_test_game + SH_SCRIPT_GAME_SPAWN_IDS + 4) = 301;
+    *(uint32_t *)(g_test_game + SH_SCRIPT_GAME_SPAWN_IDS + 8) = 302;
+    *(int *)(actor + SH_SCRIPT_ENT_NUMBER) = 1;
+    *(int *)(projectile + SH_SCRIPT_ENT_NUMBER) = 2;
+    *(const char **)(decl + SH_COMBAT_DECL_NAME) = "mods/" SALT "/fireball";
+    *(void **)(parms + SH_COMBAT_PARMS_DECL) = decl;
+    CHECK(player_vitals_layout() && g_player_health == 32 && g_player_armor == 48);
+    *(float *)(player + g_player_health) = 50;
+    *(float *)(player + g_player_armor) = 30;
+    sh_script_tick(1, .1);
+    owner = sh_script_hooks_record(301, chain, 1, NULL);
+    CHECK(slot >= 0 && owner);
+    g_ch[CH_PLAYER_DAMAGE].tramp = native_player_hit;
+    g_ch[CH_ON_DAMAGE].tramp = native_damage_notice;
+    player_damage_detour(player, projectile, actor, parms, 0, direction, NULL);
+    CHECK(sh_script_queue_drain(slot, &ev, 1) == 0);
+    player_damage_detour(player, projectile, actor, parms, 1, direction, NULL);
+    if (sh_script_queue_drain(slot, &ev, 1) == 1) {
+        CHECK(ev.kind == SH_SCRIPT_EV_HIT && ev.self == owner && ev.amount == 10);
+        CHECK(ev.other == handle_for(player) && ev.third == handle_for(projectile));
+        CHECK(!strcmp(ev.text, "fireball") && (ev.flags & SH_SCRIPT_EVF_VEC) && ev.vec[0] == 1);
+        sh_script_event_release(&ev);
+    } else CHECK(0);
+    player_damage_detour(player, projectile, actor, parms, 2, direction, NULL);
+    if (sh_script_queue_drain(slot, &ev, 1) == 1) {
+        CHECK(ev.amount == 60); /* 50 health and 10 armor */
+        sh_script_event_release(&ev);
+    } else CHECK(0);
+    player_damage_detour(player, projectile, projectile, parms, 1, direction, NULL);
+    CHECK(sh_script_queue_drain(slot, &ev, 1) == 0);
+    free(g_test_game);
+    g_test_game = NULL;
+}
+
 int main(void)
 {
     fake_install();
@@ -189,6 +279,7 @@ int main(void)
     CHECK(!sh_script_hooks_open() && !g_prepared);
     CHECK(gate(SH_SCRIPT_GATE_PLAY));
     CHECK(sh_script_hooks_open() && g_prepared == 1 && g_committed == 1 && g_routing);
+    test_player_hit();
     CHECK(log_has("SCRIPTS: 1 mod(s) with scripts prepared at the Play build"));
     CHECK(gate(SH_SCRIPT_GATE_PLAY));        /* a second Play reuses the hook */
     CHECK(sh_script_hooks_open() && g_prepared == 1);

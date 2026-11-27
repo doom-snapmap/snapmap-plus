@@ -101,6 +101,10 @@ int main(void)
     CHECK(m.attract_at[0] == 22.0f && m.attract_at[2] == 24.0f);
     CHECK(m.wind_drag == 25.0f && m.emitter_drag0 == 26.0f && m.emitter_drag1 == 27.0f && m.emitter_drag_radius == 28.0f);
     CHECK(m.launch == 29.0f && m.launch_lo == 30.0f && m.launch_hi == 31.0f);
+    CHECK(!m.uniform_volume);
+    put(stage, SH_MOTION_FIELD_STRENGTH, 1.0f / 3.0f);
+    sh_motion_read(stage, &m);
+    CHECK(m.uniform_volume);
 
     printf("-- the launch ball: a velocity in a random direction, up to its size, the same for the same seed\n");
     {
@@ -108,14 +112,67 @@ int main(void)
         static const float WANT[3] = { -97.3907f, 24.3933f, 9.6262f };       /* particle_motion.launch_velocity */
         sh_motion ball;
         memset(&ball, 0, sizeof ball);
-        sh_motion_launch(&ball, 12345u, a);
+        sh_motion_launch(&ball, 12345u, a, NULL);
         CHECK(a[0] == 1.0f && a[1] == 2.0f && a[2] == 3.0f);                  /* no ball: untouched */
         ball.launch = 157.48f;
-        sh_motion_launch(&ball, 12345u, a);
-        sh_motion_launch(&ball, 12345u, b);
-        sh_motion_launch(&ball, 54321u, c);
+        sh_motion_launch(&ball, 12345u, a, NULL);
+        sh_motion_launch(&ball, 12345u, b, NULL);
+        sh_motion_launch(&ball, 54321u, c, NULL);
         CHECK(near3(a, b, 0.0f) && !near3(a, c, 1e-3f) && near3(a, WANT, 1e-4f));
         CHECK(sqrtf((a[0] - 1) * (a[0] - 1) + (a[1] - 2) * (a[1] - 2) + (a[2] - 3) * (a[2] - 3)) <= 157.48f);
+        {
+            float old[3] = {0}, volume[3] = {0};
+            float old_r, volume_r;
+            sh_motion_launch(&ball, 12345u, old, NULL);
+            ball.uniform_volume = 1;
+            sh_motion_launch(&ball, 12345u, volume, NULL);
+            old_r = sqrtf(old[0]*old[0] + old[1]*old[1] + old[2]*old[2]) / ball.launch;
+            volume_r = sqrtf(volume[0]*volume[0] + volume[1]*volume[1] + volume[2]*volume[2]) / ball.launch;
+            CHECK(fabsf(old_r*old_r - volume_r*volume_r*volume_r) < 1e-5f);
+        }
+    }
+
+    {
+        sh_motion cone = {0};
+        float vertical[3] = { 1, 2, 3 }, plane[3] = {0}, legacy[3] = {0};
+        cone.cone_speeds[0] = cone.cone_speeds[1] = 12.0f;
+        sh_motion_launch(&cone, 123u, legacy, NULL);
+        CHECK(legacy[0] == 0.0f && legacy[1] == 0.0f && legacy[2] == 0.0f);
+        cone.uniform_volume = 1;
+        sh_motion_launch(&cone, 123u, vertical, NULL);
+        CHECK(vertical[0] == 1.0f && vertical[1] == 2.0f && fabsf(vertical[2] - 15.0f) < 1e-5f);
+        cone.cone_angles[0] = cone.cone_angles[1] = 1.570796327f;
+        sh_motion_launch(&cone, 123u, plane, NULL);
+        CHECK(fabsf(plane[2]) < 1e-4f && fabsf(hypotf(plane[0], plane[1]) - 12.0f) < 1e-4f);
+    }
+
+    {
+        uint8_t raw[0x700] = {0};
+        sh_motion cone;
+        const sh_motion_frame turned = {{0}, {0,1,0}, {-1,0,0}, {0,0,1}};
+        const float expected[3] = {110.48965f, 96.73720f, -52.20278f};
+        float initial[3] = {1,2,3};
+        put(raw, SH_MOTION_FIELD_STRENGTH, 1.0f/3.0f);
+        put(raw, SH_MOTION_VELOCITY_SCALE + 8, -1.0f);
+        put(raw, SH_MOTION_FIELD_SCALE + 4, -.70710678f);
+        put(raw, SH_MOTION_DISTRIBUTION_SCALE + 8, .70710678f);
+        put(raw, SH_MOTION_GEOMETRY_FINAL, -173.22835f);
+        put(raw, SH_MOTION_GEOMETRY_FINAL + 4, -141.73228f);
+        for (int j = 0; j < 2; ++j) {
+            put(raw, SH_MOTION_GEOMETRY_INITIAL + 4*j, .73303829f);
+            put(raw, SH_MOTION_DISTRIBUTION_SCALE + 4*j, .62831853f);
+        }
+        sh_motion_read(raw, &cone);
+        CHECK(cone.oriented_cone && cone.uniform_volume);
+        sh_motion_launch(&cone, 123u, initial, &turned);
+        CHECK(near3(initial, expected, .00001f));
+        put(raw, SH_MOTION_VELOCITY_SCALE + 8, 1.0f);
+        sh_motion_read(raw, &cone);
+        CHECK(!cone.oriented_cone && cone.uniform_volume);
+        put(raw, SH_MOTION_FIELD_STRENGTH, 0);
+        put(raw, SH_MOTION_VELOCITY_SCALE + 8, -1.0f);
+        sh_motion_read(raw, &cone);
+        CHECK(!cone.oriented_cone && !cone.uniform_volume);
     }
 
     printf("-- the launch speed factor: one number per particle between its two ends, before the ball\n");
@@ -125,11 +182,11 @@ int main(void)
         sh_motion f;
         memset(&f, 0, sizeof f);
         f.launch_lo = -0.8f; f.launch_hi = 2.4f;
-        sh_motion_launch(&f, 12345u, a);
+        sh_motion_launch(&f, 12345u, a, NULL);
         CHECK(near3(a, WANT, 1e-4f));
         CHECK(fabsf(a[1] / a[0] - 2.0f) < 1e-4f && fabsf(a[2] / a[0] - 3.0f) < 1e-4f);   /* the direction is kept */
         f.launch_lo = f.launch_hi = 0.5f;
-        sh_motion_launch(&f, 777u, b);
+        sh_motion_launch(&f, 777u, b, NULL);
         CHECK(b[0] == 0.5f && b[1] == 1.0f && b[2] == 1.5f);
     }
 

@@ -9,6 +9,7 @@ static const char *const ml_native[ML_FIELDS] = {
 
 typedef struct ms_layout_part {
     const char *request, *salt, *field[ML_FIELDS], *sheets, *settings;
+    int owned;
 } ms_layout_part;
 
 /* A scope can switch a parent's build while the child continues to serve the same file. */
@@ -39,7 +40,9 @@ static int ml_compare(const void *left, const void *right)
 {
     const ms_layout_part *a = left, *b = right;
     int c = strcmp(a->request, b->request);
-    return c ? c : strcmp(a->salt, b->salt);
+    if (c) return c;
+    if (a->owned != b->owned) return a->owned - b->owned;
+    return strcmp(a->salt, b->salt);
 }
 
 static char *ml_text(ms_index *x, const sh_json_object *obj, const char *key)
@@ -93,20 +96,24 @@ static int ml_collect(ms_index *x, const ms_bundle *b, ms_layout_part **parts, i
         for (size_t i = 0; i < rows.count; i++) {
             const sh_json_member *m = &rows.members[i];
             if (!sh_editor_id_valid(m->key) || !sh_json_parse_object(m->value_json, strlen(m->value_json), 32, &entry)) continue;
-            /* New tiles already carry their owner's intrinsic data, so any installed patch can override it. */
-            if (sheets || !sh_json_object_get(&entry, "entity")) {
+            int owned = !sheets && sh_json_object_get(&entry, "entity") != NULL;
+            /* New tile bodies carry their intrinsic fields. Tab and order belong to the installed layout. */
+            if (!owned || sh_json_object_get(&entry, "tab") || sh_json_object_get(&entry, "order")) {
                 if (!ms_grow((void **)parts, cap, *count + 1, sizeof **parts)) { ok = 0; goto done; }
                 ms_layout_part *p = &(*parts)[(*count)++];
                 memset(p, 0, sizeof *p);
-                char *r = sh_textf(MS_TILE_PREFIX "%s.decl", m->key);
+                char *r = owned ? sh_textf(MS_TILE_PREFIX "mods/%s/%s.decl", b->id, m->key) :
+                                  sh_textf(MS_TILE_PREFIX "%s.decl", m->key);
                 p->request = r ? ms_strdup(x, r) : NULL;
                 free(r);
                 if (!p->request) { ok = 0; goto done; }
                 ms_lower((char *)p->request);
                 p->salt = b->id;
+                p->owned = owned;
                 p->settings = settings;
                 if (sheets) p->sheets = ms_strdup(x, m->value_json);
-                else for (int j = 0; j < ML_FIELDS; j++) p->field[j] = ml_token(x, b->id, j, &entry);
+                else for (int j = 0; j < ML_FIELDS; j++)
+                    if (!owned || j == ML_TAB || j == ML_ORDER) p->field[j] = ml_token(x, b->id, j, &entry);
             }
             sh_json_object_free(&entry);
         }
@@ -185,7 +192,7 @@ static int ml_build(ms_index *x)
             for (int k = 0; k < ML_FIELDS; k++) {
                 if (!p->field[k]) continue;
                 if (!row->field[k]) { row->field[k] = p->field[k]; owner[k] = p->salt; }
-                else if (strcmp(row->field[k], p->field[k]))
+                else if (!p->owned && strcmp(row->field[k], p->field[k]))
                     ms_log("editor: %s %s uses %s's value; %s supplied a different value", row->request, ml_field[k], owner[k], p->salt);
             }
         }

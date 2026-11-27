@@ -78,7 +78,12 @@ static void check_image(const char *path)
     IMAGE_NT_HEADERS *nt;
     uint64_t image_base;
     int vk, i, n;
-    static const size_t windows[] = { SH_COMBAT_DAMAGE_APPLY_STOLEN, SH_COMBAT_SET_PAIN_STOLEN, SH_COMBAT_LAUNCH_STOLEN };
+    static const struct { int target; size_t length; } windows[] = {
+        {SH_COMBAT_SIG_DAMAGE_APPLY, SH_COMBAT_DAMAGE_APPLY_STOLEN},
+        {SH_COMBAT_SIG_SET_PAIN, SH_COMBAT_SET_PAIN_STOLEN},
+        {SH_COMBAT_SIG_PROJECTILE_LAUNCH, SH_COMBAT_LAUNCH_STOLEN},
+        {SH_COMBAT_SIG_PLAYER_DAMAGE, SH_COMBAT_PLAYER_DAMAGE_STOLEN}
+    };
     if (!base) { printf("FAIL cannot map %s\n", path); g_fail = 1; return; }
     MultiByteToWideChar(CP_ACP, 0, path, -1, wide, MAX_PATH);
     identity = sh_host_test_bind_image(base, wide);
@@ -104,10 +109,11 @@ static void check_image(const char *path)
     CHECK(n == SH_COMBAT_SIG_COUNT);
 
     /* detour windows */
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < (int)(sizeof windows / sizeof *windows); i++) {
         unsigned flags = 0;
-        if (!rva[i]) continue;
-        CHECK(sh_x64_stolen_boundary(base + rva[i], 64, 14, 48, &flags) == windows[i]);
+        uint32_t address = rva[windows[i].target];
+        if (!address) continue;
+        CHECK(sh_x64_stolen_boundary(base + address, 64, 14, 48, &flags) == windows[i].length);
         CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
     }
 

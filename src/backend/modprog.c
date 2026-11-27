@@ -35,7 +35,7 @@ typedef struct mp_base { const char *name; int family; } mp_base;
 static const mp_base MP_BASES[] = {
     { "skinvmtr", 0 }, { "skinvmtrwounds", 0 }, { "uberparticles", 1 },
     { "hairprez", 2 }, { "hairshadow", 2 }, { "hairblending", 2 }, { "uberparticles", 3 }, { "ribbonblend", 4 },
-    { "skinvmtr_custom", 5 },
+    { "skinvmtr_custom", 5 }, { "uberparticles", 6 },
 };
 #define MP_NBASES (sizeof MP_BASES / sizeof MP_BASES[0])
 
@@ -1383,6 +1383,9 @@ static const mp_family MP_FAMILIES[] = {
       rb_decl, rb_glsl, rb_splice, "its ribbon vertex does not expose colour and mask coordinates", 1 },
     { "snapmapplus/recolourable/", "recolourable version", NULL, &ML_NBLOCK_PARMS, RC_TEXTURES, &RC_TEXTURE_COUNT,
       rc_decl, rc_glsl, rc_splice, "its material has no customization mask input" },
+    { SH_MODPROG_EP_EROSION_PREFIX, "particle erosion version", EP_BLOCK_PARMS, &EP_BIN_PARM_COUNT, SH_MODPROG_EP_TEXTURES,
+      &SH_MODPROG_EP_TEXTURE_COUNT, ep_erosion_patch_decl, ep_erosion_patch_glsl, ep_erosion_splice,
+      "its fragment stage has no particle shading input" },
 };
 #define MP_NFAMILIES (sizeof MP_FAMILIES / sizeof MP_FAMILIES[0])
 

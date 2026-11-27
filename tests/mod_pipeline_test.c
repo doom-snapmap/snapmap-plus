@@ -134,6 +134,7 @@ static int gate_set(void *c, const char *cvar, const char *value)
 static const sh_modserve_gate_ops GATES = { NULL, gate_read, gate_set, NULL };
 
 static int g_pal_built, g_pal_count, g_rebuilds, g_rebuild_result = 1;
+static const char *g_pal_reject;
 static char g_pal_rows[MAX_REC][160];
 static sh_modserve_rows_sync g_last_sync;
 static int g_last_sync_r;
@@ -161,10 +162,12 @@ static int pal_rebuild(void *c, int *before, int *after)
         sh_modserve_plan_run_gated(&plan, &OPS, &GATES, "editor", NULL);
         for (i = 0; i < plan.count; i++)
             if (plan.steps[i].rank == SH_MODSERVE_RANK_SEDEF && plan.steps[i].ready == 1 && !pal_has(NULL, plan.steps[i].name) &&
+                (!g_pal_reject || strcmp(g_pal_reject, plan.steps[i].name)) &&
                 g_pal_count < MAX_REC)
                 strncpy_s(g_pal_rows[g_pal_count++], 160, plan.steps[i].name, _TRUNCATE);
         sh_modserve_plan_free(&plan);
     }
+    sh_modserve_palette_rebuilt();
     *after = 1000 + g_pal_count;
     return 1;
 }
@@ -328,7 +331,13 @@ static void fresh_mod(const char *fixture, const char *root)
         CHECK(g_last_sync_r == 1 && g_rebuilds == 2);
         g_rebuild_result = 1;
 
-        /* Released: the same load registers them through one rebuild. */
+        /* A hub launch registered both declarations after the native palette was built. */
+        CHECK(sh_modserve_plan_editor(&plan) > 0);
+        CHECK(sh_modserve_plan_run_gated(&plan, &OPS, &GATES, "launch", NULL) == plan.count);
+        sh_modserve_plan_free(&plan);
+        CHECK(registered_as("snapEditorEntityDef", "mods/alexrimp/imp_copy") && g_pal_count == 0);
+
+        /* Released: the same load admits the already-registered rows through one rebuild. */
         printf("-- a map naming a bundle whose editor rows the built palette lacks registers them by one rebuild\n");
         g_activations = 0;
         g_rebuilds = 0;
@@ -346,6 +355,17 @@ static void fresh_mod(const char *fixture, const char *root)
         g_rebuilds = 0;
         sh_modmanifest_prepare_load(saved, saved_len);
         CHECK(g_last_sync_r == 0 && g_last_sync.missing == 0 && g_rebuilds == 0);
+
+        /* A new native palette omitted both rows; one now fails the native admission rule.
+         * The next load repairs the eligible row and leaves the rejection settled. */
+        g_pal_count = 0;
+        g_pal_reject = "mods/alexrimp/imp_copy_b";
+        sh_modserve_palette_rebuilt();
+        sh_modmanifest_prepare_load(saved, saved_len);
+        CHECK(g_rebuilds == 1 && g_last_sync.missing == 2 && g_last_sync.admitted == 1);
+        sh_modmanifest_prepare_load(saved, saved_len);
+        CHECK(g_rebuilds == 1 && g_last_sync_r == 0);
+        g_pal_reject = NULL;
 
         HeapFree(GetProcessHeap(), 0, saved);
     }

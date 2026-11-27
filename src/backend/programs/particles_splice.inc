@@ -214,3 +214,20 @@ static uint32_t *ep_base_splice(const uint32_t *stock, size_t stock_words, unsig
 {
     return ep_splice(stock, stock_words, tex_end, shift, out_words, why, SH_MODPROG_EP_BASE_SPIRV, SH_MODPROG_EP_BASE_SPIRV_WORDS);
 }
+
+static char *ep_erosion_patch_decl(const char *text, size_t len, size_t *out_len)
+{
+    return ep_patch_decl(text, len, out_len, SH_MODPROG_EP_EROSION_HEADER);
+}
+
+static char *ep_erosion_patch_glsl(const char *text, size_t len, unsigned tex_end, unsigned shift, size_t *out_len)
+{
+    return ep_patch_glsl(text, len, tex_end, shift, out_len, SH_MODPROG_EP_EROSION_GLSL);
+}
+
+static uint32_t *ep_erosion_splice(const uint32_t *stock, size_t stock_words, unsigned tex_end, unsigned shift,
+                                   size_t *out_words, const char **why)
+{
+    return ep_splice(stock, stock_words, tex_end, shift, out_words, why,
+                     SH_MODPROG_EP_EROSION_SPIRV, SH_MODPROG_EP_EROSION_SPIRV_WORDS);
+}

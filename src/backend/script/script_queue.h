@@ -21,6 +21,7 @@ typedef enum sh_script_event_kind {
     SH_SCRIPT_EV_PAIN,      /* self's pain started; other = last attacker, text = reaction, text2 = hit decl */
     SH_SCRIPT_EV_PROJECTILE,/* self launched projectile other; text = decl, vec = origin then direction */
     SH_SCRIPT_EV_SIGNAL,    /* self fired the SnapMap event `text` (lower case, without SNAP_EVENT_); other = activator */
+    SH_SCRIPT_EV_HIT,       /* self dealt damage to other; the remaining fields have the damage record's meaning */
     SH_SCRIPT_EV_KINDS
 } sh_script_event_kind;
 

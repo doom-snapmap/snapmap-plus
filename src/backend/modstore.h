@@ -189,13 +189,11 @@ int  sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *stats);
  * differ (file sizes and times: no file is read) or whose last build failed. -1 when the store cannot be read. */
 int  sh_ms_sync_pending(void);
 
-/* The boot scan: when root folders are pending (a folder dropped in while the game was closed, an edit), runs
- * sh_ms_sync and then `rescan` (the serving index; its listeners pass the new table to the game). background 1
- * does this on a thread of its own and returns 1 when it started; background 0 runs it here and returns the
- * folders that were pending (0: nothing built, no rescan). -1 when the store cannot be read or the thread
- * cannot start. The resolver is copied. */
-typedef int (*sh_ms_rescan_fn)(void);
-int  sh_ms_boot_sync(const sh_mb_resolver *resolver, sh_ms_rescan_fn rescan, int background);
+/* Called once after the boot check. When folders were rebuilt, publish their index and return its bundle count. */
+typedef int (*sh_ms_boot_finish_fn)(int rebuilt);
+/* Build new or changed folders, then notify the editor. Background mode returns 1 when the worker starts.
+ * Synchronous mode returns the number of pending folders, or -1 if the store cannot be read. */
+int  sh_ms_boot_sync(const sh_mb_resolver *resolver, sh_ms_boot_finish_fn finish, int background);
 
 /* Removes the work folders ("<name>.staging-<pid>", "<name>.old-<pid>" beside their target) left by a process
  * that is no longer running; a ".old-" folder whose target is missing (a crash between the two renames) is put

@@ -5,9 +5,7 @@
 #include "modsound.h"
 #include "modmanifest.h"
 #include "modserve.h"
-#include "modcache.h"
 #include "modpin.h"
-#include "mp_json.h"
 
 static SRWLOCK g_lock = SRWLOCK_INIT;
 static sh_modmanifest_list g_rows;
@@ -53,36 +51,30 @@ int sh_modsound_note_rows(const sh_modmanifest_list *rows)
 
 /* A published composition already contains exactly the row's files. For an installed author's placed
  * objects use the same object units as export, including the whole-mod fallback for dynamic dependencies. */
-static int select_unit(sh_modsound_table *t, const char *build, const char *unit)
+typedef struct bank_selection {
+    sh_modsound_table *table;
+    const char *build;
+} bank_selection;
+
+static void select_path(void *context, const char *path)
 {
-    size_t len = 0;
-    char *text = sh_cache_manifest(unit, &len);
-    mpj *doc = text ? mpj_parse(text, len) : NULL;
-    mpj *files = doc ? mpj_get(doc, "files") : NULL;
-    int i, j, ok = files && files->type == MPJ_ARR;
-    for (i = 0; ok && i < files->n; i++) {
-        const mpj *path = mpj_get(files->items[i], "path");
-        if (!path || path->type != MPJ_STR) { ok = 0; break; }
-        for (j = 0; j < t->count; j++) {
-            sh_modsound_bank *b = &t->banks[j];
-            if (b->author_path && !strcmp(b->build, build) && mpj_str_is(path, b->author_path)) b->wanted = 1;
-        }
+    bank_selection *s = (bank_selection *)context;
+    for (int i = 0; i < s->table->count; ++i) {
+        sh_modsound_bank *b = &s->table->banks[i];
+        if (b->author_path && !strcmp(s->build, b->build) && !strcmp(path, b->author_path)) b->wanted = 1;
     }
-    mpj_free(doc);
-    free(text);
-    return ok;
 }
 
 static void select_row(sh_modsound_table *t, sh_modmanifest_row *r)
 {
     sh_modserve_bundle_ref ref;
+    bank_selection s;
     int i, whole;
-    size_t k;
     for (i = 0; i < t->count; i++) if (!strcmp(t->banks[i].bundle, r->salt)) break;
     if (i == t->count || !sh_modserve_row_build(r, &ref)) return;
     whole = r->pinned || r->attached || !r->name_count;
-    if (!whole && sh_modpin_row(r, NULL, 0, NULL, NULL) != SH_MODPIN_PINNED) whole = 1;
-    for (k = 0; !whole && k < r->unit_count; k++) if (!select_unit(t, ref.hash, r->units[k])) whole = 1;
+    s.table = t; s.build = ref.hash;
+    if (!whole && !sh_modpin_object_banks(r, ref.hash, select_path, &s)) whole = 1;
     if (whole) for (i = 0; i < t->count; i++) if (!strcmp(t->banks[i].build, ref.hash)) t->banks[i].wanted = 1;
     sh_modserve_bundle_ref_free(&ref);
 }
@@ -90,15 +82,18 @@ static void select_row(sh_modsound_table *t, sh_modmanifest_row *r)
 void sh_modsound_select_banks(sh_modsound_table *t)
 {
     static const sh_modsound_table *last;
-    static LONG last_revision;
+    static LONG last_revision, last_asked;
     static int last_open;
     sh_modmanifest_list copy = {0};
     int open = sh_modserve_scope_map_open(), ok;
     size_t i;
-    LONG revision;
+    LONG revision, asked = sh_modpin_asked_revision();
     AcquireSRWLockShared(&g_lock);
     revision = g_revision;
-    if (t == last && revision == last_revision && open == last_open) { ReleaseSRWLockShared(&g_lock); return; }
+    if (t == last && revision == last_revision && asked == last_asked && open == last_open) {
+        ReleaseSRWLockShared(&g_lock);
+        return;
+    }
     ok = !open || copy_rows(&copy, &g_rows);
     ReleaseSRWLockShared(&g_lock);
     if (ok) {
@@ -106,6 +101,7 @@ void sh_modsound_select_banks(sh_modsound_table *t)
         for (i = 0; i < copy.count; i++) select_row(t, &copy.rows[i]);
         last = t;
         last_revision = revision;
+        last_asked = asked;
         last_open = open;
     }
     sh_modmanifest_list_free(&copy);

@@ -274,6 +274,17 @@ static void test_scan(void)
     CHECK(!strcmp(got, "image=mods/a/d.tga;image=mods/a/n.tga;renderProg=skinvmtr;image=mods/a/m.tga;"));
     if (strcmp(got, "image=mods/a/d.tga;image=mods/a/n.tga;renderProg=skinvmtr;image=mods/a/m.tga;"))
         fprintf(stderr, "  material scan gave %s\n", got);
+    {
+        const char *light = "{ lightprojectmap \"borderClamp uncompressed mods/a/project.tga\"\n"
+                            "lightfalloffmap mods/a/depth.tga\n lightsatlasmap _lightimageatlas }";
+        char *file = NULL;
+        got[0] = 0;
+        sh_mb_scan_needs("material", (const unsigned char *)light, strlen(light), collect, got);
+        CHECK(!strcmp(got, "lightatlas=mods/a/project.tga;lightatlas=mods/a/depth.tga;"));
+        CHECK(sh_mb_need_requests("lightatlas", "mods/a/project.tga", &file, 1) == 1 &&
+              file && !strcmp(file, "generated/lightatlas/mods/a/project.bimage"));
+        free(file);
+    }
     /* a material writing layerparms unquoted is a need all the same */
     {
         const char *old = "{ layerparms mods/a/p.tga\n diffusemap \"mods/a/d.tga\" }";
@@ -2036,7 +2047,40 @@ static void test_bare_hyphen(const char *fixture, const char *tmp)
     sh_mb_free(&b);
 }
 
-/* Registries: the conductor's encounter decls. */
+static void m_rumble(const char *folder)
+{
+    const char *tables[] = {"low", "high", "left", "right"};
+    char path[128];
+    size_t i;
+    for (i = 0; i < sizeof tables / sizeof *tables; i++) {
+        _snprintf_s(path, sizeof path, _TRUNCATE, "decls\\table\\%s.decl", tables[i]);
+        mt_write(folder, path, "{ clamp { 0, 1 } }");
+    }
+    mt_write(folder, "decls\\rumble\\hit.decl",
+        "{ edit = { rumbleLow = \"decls/table/low\"; rumbleHigh = \"decls/table/high\"; "
+        "rumbleLeftTrigger = \"decls/table/left\"; rumbleRightTrigger = \"decls/table/right\"; } }");
+    mt_write(folder, "mod.json", "{\"name\":\"Impact\",\"animation_events\":[\"meshes/impact.md6\"],"
+        "\"snapmap-plus\":{\"format\":2,\"salt\":\"alexrimp\"}}");
+    mt_write(folder, "meshes\\impact.md6.decl", "{\n init {\n inherit \"player/mp/tp_body_mp.md6\"\n }\n"
+        " events {\n anim \"animations/imp_copy/motion/idle.md6anim\" {\n"
+        " event \"ae_setControllerRumble\" {\n frame 3\n rumble \"decls/rumble/hit\"\n }\n }\n }\n}");
+}
+
+static void test_rumble(const char *fixture, const char *tmp)
+{
+    sh_mb_bundle b;
+    const sh_mb_file *model, *rumble;
+    accepted(fixture, tmp, m_rumble, &b);
+    model = find_file(&b, "generated/decls/md6def/mods/alexrimp/impact.md6.decl");
+    rumble = find_file(&b, "generated/decls/rumble/mods/alexrimp/hit.decl");
+    CHECK(!b.errors && model && has_need(model, "rumble", "mods/alexrimp/hit"));
+    CHECK(b.registries && strstr(b.registries, "\"clipEvents\"") &&
+          strstr(b.registries, "md6/mods/alexrimp/imp_copy/motion/idle.md6anim"));
+    CHECK(rumble && has_need(rumble, "table", "mods/alexrimp/low") && has_need(rumble, "table", "mods/alexrimp/high") &&
+          has_need(rumble, "table", "mods/alexrimp/left") && has_need(rumble, "table", "mods/alexrimp/right"));
+    sh_mb_free(&b);
+}
+
 static void m_registries(const char *f)
 {
     mt_write(f, "mod.json", DESC(""));
@@ -2077,6 +2121,7 @@ int main(int argc, char **argv)
     test_native_and_spelled(tmp);
     test_rekey();
     test_registries(full, tmp);
+    test_rumble(full, tmp);
     test_bare_hyphen(full, tmp);
     test_renderprogs(tmp);
     mt_remove_tree(tmp);

@@ -461,6 +461,8 @@ static void ms_view_drop(ms_view *v)
 static void ms_view_callback(uint32_t id, const void *bytes, int32_t result, int32_t pool, void *cookie)
 {
     ms_view_result *c = cookie;
+    if (result != 1)
+        ms_log("sound bank %s (id %u) finished loading with Wwise result %d", c->bank->leaf, (unsigned)id, (int)result);
     g_engine_cb(id, bytes, result, pool, c->native);
     SetEvent(c->bank->ready);
     ms_view_drop(c->bank);

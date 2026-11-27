@@ -2075,6 +2075,21 @@ static int nav_line(const sh_script_ai_engine *e, void *ai, const float at[3], c
     return 1;
 }
 
+/* Test the same world line as an animation, up to a world point or actor's feet. */
+static int l_clear_walk_line(lua_State *L)
+{
+    float from[3], to[3];
+    void *ai;
+    check_target(L, 2, "clear_walk_line");
+    ai = self_ai(L, "clear_walk_line", NULL);
+    if (!ai || !g_engine->origin(ai, from) || !target_point(L, 2, "clear_walk_line", to, NULL)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushboolean(L, nav_line(g_engine, ai, from, to));
+    return 1;
+}
+
 int sh_ai_anim_key(int key_base, const char *node, int index)
 {
     unsigned h = 2166136261u;                                   /* FNV-1a of the node's name */
@@ -2856,6 +2871,25 @@ static void force_via_step(void)
 
 /* ai:force_animation_via(dest, via, [blend]): plays `via` now whatever the web is doing (blending `blend`
  * seconds), then goes to `dest`; animation_event reports VIA_BLEND_IN_START, VIA_BLEND_OUT_START, DEST_REACHED. */
+static int l_on_ground(lua_State *L)
+{
+    void *ai = self_ai(L, "on_ground", NULL);
+    int value = ai && g_engine->on_ground ? g_engine->on_ground(ai) : -1;
+    if (value < 0) lua_pushnil(L);
+    else lua_pushboolean(L, value);
+    return 1;
+}
+
+static int l_reset_motion_correction(lua_State *L)
+{
+    void *ai = self_ai(L, "reset_motion_correction", NULL);
+    if (!ai) { lua_pushboolean(L, 0); return 1; }
+    if (!g_engine->reset_motion_correction)
+        return sh_script_refuse(L, "The game's animation correction reset is unavailable in this session");
+    lua_pushboolean(L, g_engine->reset_motion_correction(ai));
+    return 1;
+}
+
 static int l_anim_force_via(lua_State *L)
 {
     sh_script_handle h = 0;
@@ -2905,21 +2939,21 @@ static void push_points(lua_State *L, float (*p)[3], int n)
     for (i = 0; i < n; i++) { push_vec(L, p[i]); lua_rawseti(L, -2, i + 1); }
 }
 
-/* ai:path_points(pos) -> the points of the navigation path, nil, "searching" while the engine finds it, nil,
- * "no path" when there is none */
+/* ai:path_points(pos[, with_length]) -> the navigation path and optionally its measured length,
+ * nil, "searching" while the engine finds it, nil, "no path" when there is none. */
 static int l_path_points(lua_State *L)
 {
     sh_script_handle h = 0;
-    float goal[3], (*pts)[3] = NULL, (*held)[3];
+    float goal[3], length = 0, (*pts)[3] = NULL, (*held)[3];
     void *ai;
     ai_rec *r;
-    int st, n = 0;
+    int st, n = 0, with_length = lua_toboolean(L, 3);
     check_target(L, 2, "path_points");
     NEED_OP(L, path_points, "path_points");
     ai = self_ai(L, "path_points", &h);
     if (!ai || !(r = rec_of(h))) { lua_pushnil(L); return 1; }
     if (!target_point(L, 2, "path_points", goal, NULL)) { lua_pushnil(L); lua_pushstring(L, "no path"); return 2; }
-    st = g_engine->path_points(ai, goal, 0x50000000 | ((rec_index(r) & 0xFFF) << 14), &pts, &n);
+    st = g_engine->path_points(ai, goal, 0x50000000 | ((rec_index(r) & 0xFFF) << 14), &pts, &n, &length);
     if (st == 0) {
         /* every point of the path, held by the collector while they are pushed */
         held = (float (*)[3])lua_newuserdatauv(L, (size_t)(n > 0 ? n : 1) * sizeof *held, 0);
@@ -2927,6 +2961,7 @@ static int l_path_points(lua_State *L)
         free(pts);
         if (n <= 0) { memcpy(held[0], goal, sizeof held[0]); n = 1; }   /* already there: the goal alone */
         push_points(L, held, n);
+        if (with_length) { lua_pushnumber(L, length); return 2; }
         return 1;
     }
     free(pts);
@@ -3696,6 +3731,7 @@ static int release_body(void *ai, sh_script_handle h)
         ai_rec *r = g_recs[i];
         if (r->handle != h) continue;
         anim_wait_drop(r);
+        r->walk = 0;
         r->facing = 0;
         r->has_dest = 0;
         r->move.state = SH_AI_MOVE_ARRIVED;
@@ -3833,6 +3869,9 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "aim_point", l_aim_point },       { "animation_fits", l_anim_valid },
     { "force_animation_via", l_anim_force_via }, { "firing_position", l_firing_position },
     { "path_points", l_path_points },   { "spline_clear", l_spline_clear },
+    { "clear_walk_line", l_clear_walk_line },
+    { "reset_motion_correction", l_reset_motion_correction },
+    { "on_ground", l_on_ground },
     { "monster_type", l_monster_type }, { "pain_string", l_pain_string },
     { "block_pain", l_block_pain }, { "request_pain", l_request_pain },
     { "fire_mode", l_fire_mode },       { "pull_trigger", l_pull_trigger },
@@ -4242,6 +4281,30 @@ static int e_focus_state(void *ai, sh_ai_focus_state *out)
 /* The engine's muzzle test (ai, weights, weapon) -> its bool in al. */
 static uint64_t (*g_muzzle)(void *ai, int mode, void *weapon);
 static void (*g_clear_move)(void *anim_fsm, int result_code);
+static void (*g_reset_motion_correction)(void *anim_fsm);
+
+static int e_on_ground(void *ai)
+{
+    __try {
+        const uint8_t *physics = *(const uint8_t *const *)((const uint8_t *)ai + SH_AI_OFF_PHYSICS);
+        if (physics == (const uint8_t *)ai + SH_AI_PHYSICS_OBJECT)
+            return physics[SH_AI_PHYSICS_ON_GROUND] != 0;
+    } __except (av_only(GetExceptionCode())) {}
+    return -1;
+}
+
+static int e_reset_motion_correction(void *ai)
+{
+    int ok = 0;
+    __try {
+        void *fsm = *(void *const *)((const uint8_t *)ai + SH_AI_OFF_MOVE_FSM);
+        if (fsm && *(void *const *)fsm == ai) {
+            g_reset_motion_correction(fsm);
+            ok = 1;
+        }
+    } __except (av_only(GetExceptionCode())) { ok = 0; }
+    return ok;
+}
 
 static int e_muzzle_test(void *ai, int hand, int mode)
 {
@@ -5343,9 +5406,8 @@ static int commit_hook(void *target, void *detour, const uint8_t *want, size_t s
     return 1;
 }
 
-static int e_path_points(void *ai, const float goal[3], int key, float (**out)[3], int *n)
+static int e_path_points(void *ai, const float goal[3], int key, float (**out)[3], int *n, float *length)
 {
-    float len = 0;
     int st;
     *n = 0;
     *out = NULL;
@@ -5355,7 +5417,7 @@ static int e_path_points(void *ai, const float goal[3], int key, float (**out)[3
     g_capture.out = NULL;
     g_capture.n = 0;
     g_capture.thread = GetCurrentThreadId();
-    st = e_path(ai, goal, key, &len);
+    st = e_path(ai, goal, key, length);
     g_capture.thread = 0;
     if (st == 0) { *out = g_capture.out; *n = g_capture.n; }
     else free(g_capture.out);
@@ -6272,7 +6334,7 @@ static const sh_script_ai_engine k_engine = {
     e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose,
     e_interrupt_blend, e_destructible, e_weapon_use, e_wound_damage_counts, e_snapmap_order,
     e_release, e_anim_variable, e_relations, e_off_limits, e_world_clear, e_world_ground, e_request_pain, e_wound_effect,
-    e_native_body_busy
+    e_native_body_busy, e_reset_motion_correction, e_on_ground
 };
 /* The table the calls use: k_engine less the calls whose game parts this executable lacks (they then refuse). */
 static sh_script_ai_engine g_live;
@@ -6322,6 +6384,8 @@ int sh_script_ai_install(const uint8_t *module_base)
         }
     }
     g_move_target = (ai_move_fn)r[SH_AI_SIG_MOVE_TRANSITION].addr;
+    g_reset_motion_correction = (void (*)(void *))r[SH_AI_SIG_RESET_CORRECTION].addr;
+    if (!g_reset_motion_correction) g_live.reset_motion_correction = NULL;
     if (r[SH_AI_SIG_RECOIL_PLAY].addr) g_recoil_site = (uint8_t *)r[SH_AI_SIG_RECOIL_PLAY].addr;
     else g_live.set_recoil = NULL;
     if (!r[SH_AI_SIG_WEAPON_USE].addr) g_live.weapon_use = NULL;   /* its offsets are the signature's own bytes */

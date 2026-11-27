@@ -114,7 +114,15 @@ typedef struct rec_map {
 } rec_map;
 
 typedef struct launch_val { int mod; sh_script_handle owner; } launch_val;
-typedef struct hit_val { sh_script_handle attacker; char *decl; } hit_val;   /* decl malloc'd, whole */
+typedef struct twitch_row { const char *decl; float limit, scale; } twitch_row;
+typedef struct twitch_profile {
+    void *owner;
+    float *weight;
+    float base;
+    size_t count;
+    twitch_row rows[];
+} twitch_profile;
+typedef struct hit_val { sh_script_handle attacker; char *decl; twitch_profile *twitch; } hit_val;
 
 static SRWLOCK g_rec_lock = SRWLOCK_INIT;
 static rec_map g_launch = { NULL, NULL, sizeof(launch_val), 0, 0 };
@@ -216,14 +224,20 @@ static void rec_free(rec_map *m)
 static void hit_forget(sh_script_handle h)
 {
     hit_val *v = (hit_val *)rec_get(&g_hits, h);
-    if (v) free(v->decl);
+    if (v) { free(v->decl); free(v->twitch); }
     rec_del(&g_hits, h);
 }
 
 static void hits_free(void)
 {
     uint32_t i;
-    for (i = 0; i < g_hits.cap; i++) if (g_hits.keys[i]) free(((hit_val *)(g_hits.vals + (size_t)i * g_hits.vsize))->decl);
+    for (i = 0; i < g_hits.cap; i++) if (g_hits.keys[i]) {
+        hit_val *v = (hit_val *)(g_hits.vals + (size_t)i * g_hits.vsize);
+        if (v->twitch && sh_script_handle_entity(g_hits.keys[i] - 1) == v->twitch->owner)
+            *v->twitch->weight = v->twitch->base;
+        free(v->twitch);
+        free(v->decl);
+    }
     rec_free(&g_hits);
 }
 
@@ -342,7 +356,24 @@ static uint32_t fire_end(int *started_there)
     return id;
 }
 
-void sh_script_combat_note_hit(sh_script_handle victim, const char *decl, sh_script_handle attacker)
+static float twitch_scale(const twitch_profile *p, const char *decl, float damage)
+{
+    size_t i;
+    float scale = 1;
+    int matched = 0;
+    for (i = 0; i < p->count; i++) {
+        const twitch_row *r = p->rows + i;
+        if (r->decl) {
+            if (decl && !_stricmp(decl, r->decl)) return r->scale;
+        } else if (!matched && damage <= r->limit) {
+            scale = r->scale;
+            matched = 1;
+        }
+    }
+    return scale;
+}
+
+void sh_script_combat_note_hit(sh_script_handle victim, const char *decl, sh_script_handle attacker, float damage)
 {
     hit_val *v;
     char *copy;
@@ -351,6 +382,7 @@ void sh_script_combat_note_hit(sh_script_handle victim, const char *decl, sh_scr
     AcquireSRWLockExclusive(&g_rec_lock);
     v = (hit_val *)rec_put(&g_hits, victim);
     if (v) {
+        if (v->twitch) *v->twitch->weight = v->twitch->base * twitch_scale(v->twitch, decl, damage);
         v->attacker = attacker;
         free(v->decl);
         v->decl = copy;
@@ -369,7 +401,7 @@ int sh_script_combat_last_hit(sh_script_handle victim, char **decl, sh_script_ha
     if (!victim) return 0;
     AcquireSRWLockShared(&g_rec_lock);
     v = (const hit_val *)rec_get(&g_hits, victim);
-    if (v) {
+    if (v && v->decl) {
         if (decl) *decl = _strdup(v->decl ? v->decl : "");
         if (attacker) *attacker = v->attacker;
         found = 1;
@@ -937,6 +969,108 @@ static int l_tag(lua_State *L)
     return 2;
 }
 
+/* The entity must belong to this mod. Its ribbon declaration supplies width and material. */
+static int l_draw_ribbon(lua_State *L)
+{
+    const sh_script_engine *engine = eng();
+    void *emitter = sh_script_api_owned(L, 1, "draw_ribbon", "draw with", NULL);
+    float points[128][3], rgba[4] = {1, 1, 1, 1};
+    size_t i, n;
+    int now;
+    luaL_checktype(L, 2, LUA_TTABLE);
+    n = lua_rawlen(L, 2);
+    if (n < 2 || n > 128) return sh_script_refuse(L, "draw_ribbon needs between 2 and 128 points");
+    for (i = 0; i < n; i++) {
+        lua_rawgeti(L, 2, (lua_Integer)(i + 1));
+        sh_script_api_check_vec(L, -1, "draw_ribbon", "a point on the ribbon", points[i]);
+        lua_pop(L, 1);
+        if (!isfinite(points[i][0]) || !isfinite(points[i][1]) || !isfinite(points[i][2]))
+            return sh_script_refuse(L, "draw_ribbon needs finite point coordinates");
+    }
+    if (!lua_isnoneornil(L, 3)) {
+        luaL_checktype(L, 3, LUA_TTABLE);
+        for (i = 0; i < 4; i++) {
+            lua_rawgeti(L, 3, (lua_Integer)(i + 1));
+            rgba[i] = (float)luaL_checknumber(L, -1);
+            lua_pop(L, 1);
+            if (!isfinite(rgba[i]) || rgba[i] < 0 || rgba[i] > 1)
+                return sh_script_refuse(L, "draw_ribbon needs four colour channels between zero and one");
+        }
+    }
+    lua_pushboolean(L, emitter && CE(draw_ribbon) && engine && engine->game_time_ms && engine->game_time_ms(&now)
+                    && g_ce.draw_ribbon(emitter, now, points, n, rgba));
+    return 1;
+}
+
+/* Install an owned demon's damage bands and named overrides once at spawn. */
+static int l_twitch_response(lua_State *L)
+{
+    sh_script_handle h = 0;
+    void *ai = sh_script_api_owned(L, 1, "twitch_response", "set hit reactions on", &h);
+    size_t n, i, names = 0, bytes;
+    float last = -1, *weight;
+    twitch_row *rows;
+    twitch_profile *p = NULL;
+    hit_val *v;
+    char *name;
+    if (ai && sh_script_api_kind(ai) != SH_SCRIPT_KIND_AI)
+        return sh_script_refuse(L, "twitch_response needs a demon");
+    luaL_checktype(L, 2, LUA_TTABLE);
+    n = lua_rawlen(L, 2);
+    if (n > (SIZE_MAX - sizeof *p) / sizeof *rows) return luaL_error(L, "twitch response is too large");
+    rows = (twitch_row *)lua_newuserdatauv(L, n * sizeof *rows, 0);
+    for (i = 0; i < n; i++) {
+        size_t len;
+        lua_rawgeti(L, 2, (lua_Integer)i + 1);
+        luaL_checktype(L, -1, LUA_TTABLE);
+        lua_rawgeti(L, -1, 1);
+        rows[i].decl = NULL;
+        if (lua_type(L, -1) == LUA_TSTRING) {
+            rows[i].decl = lua_tolstring(L, -1, &len);
+            if (!len || strlen(rows[i].decl) != len || names > SIZE_MAX - len - 1)
+                return sh_script_refuse(L, "twitch_response needs a damage name");
+            names += len + 1;
+        } else {
+            rows[i].limit = (float)sh_script_api_check_number(L, -1, "twitch_response", "the upper damage limit");
+            if (rows[i].limit < 0 || rows[i].limit <= last)
+                return sh_script_refuse(L, "twitch_response damage limits must increase from zero or above");
+            last = rows[i].limit;
+        }
+        lua_pop(L, 1);
+        lua_rawgeti(L, -1, 2);
+        rows[i].scale = (float)sh_script_api_check_number(L, -1, "twitch_response", "the animation weight multiplier");
+        if (rows[i].scale < 0) return sh_script_refuse(L, "twitch_response needs a nonnegative weight multiplier");
+        lua_pop(L, 2);
+    }
+    if (!ai || !CE(twitch_weight) || !(weight = g_ce.twitch_weight(ai))) return bool1(L, 0);
+    if (n) {
+        bytes = sizeof *p + n * sizeof *rows;
+        if (names > SIZE_MAX - bytes || !(p = (twitch_profile *)malloc(bytes + names))) return luaL_error(L, "out of memory");
+        p->owner = ai;
+        p->weight = weight;
+        p->count = n;
+        memcpy(p->rows, rows, n * sizeof *rows);
+        name = (char *)(p->rows + n);
+        for (i = 0; i < n; i++) if (rows[i].decl) {
+            size_t len = strlen(rows[i].decl) + 1;
+            p->rows[i].decl = name;
+            memcpy(name, rows[i].decl, len);
+            name += len;
+        }
+    }
+    AcquireSRWLockExclusive(&g_rec_lock);
+    v = (hit_val *)(n ? rec_put(&g_hits, h) : rec_get(&g_hits, h));
+    if (v) {
+        if (v->twitch) *weight = v->twitch->base;
+        if (p) p->base = *weight;
+        free(v->twitch);
+        v->twitch = p;
+    }
+    ReleaseSRWLockExclusive(&g_rec_lock);
+    if (!v && n) { free(p); return luaL_error(L, "out of memory"); }
+    return bool1(L, 1);
+}
+
 /* e:pain() -> the pain reaction playing, or nil */
 static int l_pain(lua_State *L)
 {
@@ -1064,11 +1198,19 @@ typedef struct launch_aim {
     const float *velocity;  /* launch: the projectile's exact velocity, units per second */
 } launch_aim;
 
+static const char *launch_origin(lua_State *L, const char *call, float pos[3])
+{
+    if (lua_type(L, 3) != LUA_TTABLE)
+        return sh_script_api_check_text(L, 3, call, "the tag or joint to launch from", SH_SCRIPT_TEXT_ANY);
+    sh_script_api_check_vec(L, 3, call, "the launch position", pos);
+    return NULL;
+}
+
 /* The launch ai:fire and ai:launch share. The engine's launch event fires from a joint and takes any other name
  * for the demon's origin (VK 0x14076E780), so for a tag the launch hook hands idProjectile::Launch the tag's place
  * and axis and the projectile and its trail start on the tag. Pushes the projectile, or nil. */
 static int launch_from(lua_State *L, const char *call, void *self, sh_script_handle self_h, void *decl,
-                       const char *joint, const launch_aim *how)
+                       const char *joint, const float origin[3], const launch_aim *how)
 {
     const sh_script_engine *e = eng();
     sh_script_earg a[5];
@@ -1079,16 +1221,17 @@ static int launch_from(lua_State *L, const char *call, void *self, sh_script_han
     if (!self || !decl || !CE(entity_name) || (!how->point && !how->velocity && !how->target)) return nil1(L);
     sh_script_api_check_room(L, call);
     if (!g_ce.entity_name(how->target ? how->target : self, name, sizeof name) || !name[0]) return nil1(L);
-    if (e && e->tag && e->tag(self, joint, tag_pos, NULL) == 1) {
+    if (!joint) memcpy(tag_pos, origin, sizeof tag_pos);
+    if (!joint || (e && e->tag && e->tag(self, joint, tag_pos, NULL) == 1)) {
         if (how->velocity) { aim[0] = tag_pos[0] + how->velocity[0]; aim[1] = tag_pos[1] + how->velocity[1]; aim[2] = tag_pos[2] + how->velocity[2]; }
         else if (how->point) memcpy(aim, how->point, sizeof aim);
-        else origin_of(how->target, aim);
+        else if (!e || !e->bounds_center || !e->bounds_center(how->target, aim)) return nil1(L);
         from_tag = aim_axis(tag_pos, aim, tag_axis);
     }
     (void)sh_script_ai_park(self, self_h);   /* a demon a script fires from is the script's, as one it moves */
     a[0] = sh_script_earg_no_anim();
     memset(&a[1], 0, sizeof a[1]); a[1].type = 'd'; a[1].p = decl;
-    memset(&a[2], 0, sizeof a[2]); a[2].type = '2'; a[2].s = joint;
+    memset(&a[2], 0, sizeof a[2]); a[2].type = '2'; a[2].s = joint ? joint : "origin";
     a[3] = sh_script_earg_text('s', name);
     a[4] = sh_script_earg_int(0);
     fire_begin(self_h, from_tag ? tag_pos : NULL, from_tag ? tag_axis : NULL);
@@ -1116,11 +1259,11 @@ static int launch_from(lua_State *L, const char *call, void *self, sh_script_han
 static int l_fire(lua_State *L)
 {
     sh_script_handle self_h = 0;
-    float point[3];
+    float point[3], origin[3];
     launch_aim how = { NULL, NULL, NULL };
     void *self = sh_script_api_owned(L, 1, "fire", "fire from", &self_h);
     void *decl = check_decl(L, 2, "fire", "projectile", "the projectile");
-    const char *joint = sh_script_api_check_text(L, 3, "fire", "the tag or joint to fire from", SH_SCRIPT_TEXT_ANY);
+    const char *joint = launch_origin(L, "fire", origin);
     if (luaL_testudata(L, 4, "entity")) {
         how.target = sh_script_api_entity(L, 4, "fire", NULL);
     } else {
@@ -1132,7 +1275,7 @@ static int l_fire(lua_State *L)
     }
     if (self && sh_script_api_kind(self) != SH_SCRIPT_KIND_AI)
         sh_script_refuse(L, "\"fire\" works on demons; this entity is not one");
-    return launch_from(L, "fire", self, self_h, decl, joint, &how);
+    return launch_from(L, "fire", self, self_h, decl, joint, origin, &how);
 }
 
 /* ai:launch(projectile, tag or joint, velocity) -> p: the projectile leaves
@@ -1141,11 +1284,11 @@ static int l_fire(lua_State *L)
 static int l_launch(lua_State *L)
 {
     sh_script_handle self_h = 0;
-    float vel[3];
+    float vel[3], origin[3];
     launch_aim how = { NULL, NULL, NULL };
     void *self = sh_script_api_owned(L, 1, "launch", "launch from", &self_h);
     void *decl = check_decl(L, 2, "launch", "projectile", "the projectile");
-    const char *joint = sh_script_api_check_text(L, 3, "launch", "the tag or joint to launch from", SH_SCRIPT_TEXT_ANY);
+    const char *joint = launch_origin(L, "launch", origin);
     if (lua_type(L, 4) != LUA_TTABLE)
         sh_script_refuse(L, "\"launch\" needs the velocity (x, y and z in units per second), got %s",
                          lua_isnoneornil(L, 4) ? "nothing" : luaL_typename(L, 4));
@@ -1154,7 +1297,7 @@ static int l_launch(lua_State *L)
     if (self && sh_script_api_kind(self) != SH_SCRIPT_KIND_AI)
         sh_script_refuse(L, "\"launch\" works on demons; this entity is not one");
     how.velocity = vel;
-    return launch_from(L, "launch", self, self_h, decl, joint, &how);
+    return launch_from(L, "launch", self, self_h, decl, joint, origin, &how);
 }
 
 typedef struct incoming_hit { void *p; double seconds; } incoming_hit;
@@ -1274,7 +1417,9 @@ void sh_script_combat_register(void)
         { SH_SCRIPT_API_GLOBAL, "sound", l_sound },
         { SH_SCRIPT_API_METHOD, "damage", l_damage },
         { SH_SCRIPT_API_METHOD, "tag", l_tag },
+        { SH_SCRIPT_API_METHOD, "draw_ribbon", l_draw_ribbon },
         { SH_SCRIPT_API_METHOD, "pain", l_pain },
+        { SH_SCRIPT_API_METHOD, "twitch_response", l_twitch_response },
         { SH_SCRIPT_API_METHOD, "can_see_from", l_can_see_from },
         { SH_SCRIPT_API_METHOD, "fire", l_fire },
         { SH_SCRIPT_API_METHOD, "launch", l_launch },
@@ -1471,12 +1616,54 @@ static int c_is_projectile(void *ent)
     return cls && sh_script_reflect_is_a(cls, "idProjectile");
 }
 
+static int c_draw_ribbon(void *ent, int time_ms, const float (*points)[3], size_t count, const float rgba[4])
+{
+    typedef void (*release_fn)(void *);
+    typedef void (*begin_fn)(void *, int, const float *);
+    typedef void (*add_fn)(void *, int, const float *, const float *, const float *, const float *);
+    typedef void (*build_fn)(void *, int, const float *);
+    static const float identity[9] = {1,0,0, 0,1,0, 0,0,1}, zero[3] = {0,0,0};
+    const char *cls = sh_script_reflect_class_of(ent);
+    uint32_t release = SH_RVA(0x1717c30, 0x1718690);
+    uint32_t begin = SH_RVA(0x1717bd0, 0x1718630);
+    uint32_t add = SH_RVA(0x1717c70, 0x17186d0);
+    uint32_t build = SH_RVA(0x1717c40, 0x17186a0);
+    unsigned char *manager;
+    size_t i;
+    if (!g_base || !release || !begin || !add || !build || !cls || strcmp(cls, "idRibbonEmitter")) return 0;
+    manager = (unsigned char *)ent + 0x1140;
+    if (!read_ptr(manager, 8) || !read_ptr(manager, 16) || !read_ptr(manager, 24)) return 0;
+    /* The stock laser rebuilds its current centre line this way on both supported renderers. */
+    ((release_fn)(g_base + release))(manager);
+    ((begin_fn)(g_base + begin))(manager, time_ms, points[0]);
+    if (!read_ptr(manager, 0)) return 0;
+    for (i = 0; i < count; i++)
+        ((add_fn)(g_base + add))(manager, time_ms, points[i], identity, zero, rgba);
+    ((build_fn)(g_base + build))(manager, time_ms, identity);
+    return 1;
+}
+
 static int c_pain_reaction(void *ai)
 {
     int r = -1;
     if (!ai || !g_vt_ai || (uintptr_t)read_ptr(ai, 0) != g_vt_ai) return -1;
     __try { r = *(const int *)((const uint8_t *)ai + SH_COMBAT_AI_PAIN); } __except (av_only(GetExceptionCode())) { r = -1; }
     return r;
+}
+
+static float *c_twitch_weight(void *ai)
+{
+    const sh_rf_host *host = sh_script_reflect_host();
+    sh_rf_loc slot = {0};
+    char err[128];
+    float *weight = NULL;
+    if (!ai || !g_vt_ai || (uintptr_t)read_ptr(ai, 0) != g_vt_ai || !host) return NULL;
+    if (sh_rf_resolve(host, ai, "idAI2", "aiVolatile.animation.painAnimator", &slot, err, sizeof err)) {
+        /* The native pain animator copies its maximum weight into the new blend when a twitch starts. */
+        if (slot.size == 248) weight = (float *)(slot.addr + 0x98);
+        sh_rf_loc_free(&slot);
+    }
+    return weight;
 }
 
 static int c_entity_name(void *ent, char *out, size_t cap)
@@ -1674,7 +1861,7 @@ int sh_script_combat_install(const sig_result *results, size_t count, const uint
 {
     static const sh_script_combat_engine engine = {
         c_decl, c_radius_damage, c_explode, c_pain_reaction, c_entity_name, c_fx_condition, c_world,
-        c_start_fx, c_stop_fx, c_actor_damage, c_fx_hard_stops, c_is_projectile
+        c_start_fx, c_stop_fx, c_actor_damage, c_fx_hard_stops, c_is_projectile, c_draw_ribbon, c_twitch_weight
     };
     const IMAGE_NT_HEADERS64 *nt;
     const IMAGE_SECTION_HEADER *sec;

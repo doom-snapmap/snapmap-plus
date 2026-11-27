@@ -30,69 +30,152 @@ static void *g_game_ctx;
 /* The units already computed, by build and placed name: a publish computes them before its save (modpublish.c) and
  * the save pins from here at once. Process-wide, under its lock; an entry stays valid while its build does (a build is
  * named by its hash). The asked requests change a unit, so a new set of them empties it. */
-typedef struct mpn_memo { char build[SH_MB_HASH_HEX + 1]; char *name; char unit[SH_MB_HASH_HEX + 1]; char *root; } mpn_memo;
+typedef struct mpn_memo {
+    char build[SH_MB_HASH_HEX + 1], unit[SH_MB_HASH_HEX + 1];
+    char *name, *root, *banks; /* consecutive NUL-terminated author paths followed by an empty string */
+} mpn_memo;
 static mpn_memo *g_memo;
 static size_t g_nmemo, g_cmemo;
 static SRWLOCK g_memo_lock = SRWLOCK_INIT;
-static sh_unit_asked *g_asked;
-static size_t g_nasked;
+typedef struct mpn_observations {
+    volatile LONG refs;
+    size_t count;
+    sh_unit_asked rows[];
+} mpn_observations;
+static mpn_observations *g_asked;
+static volatile LONG g_asked_revision;
+
+static mpn_memo *mpn_find(const char *build, const char *name)
+{
+    size_t i;
+    for (i = 0; i < g_nmemo; ++i)
+        if (!strcmp(g_memo[i].build, build) && !_stricmp(g_memo[i].name, name)) return &g_memo[i];
+    return NULL;
+}
 
 static int mpn_memo_find(const char *build, const char *name, char unit[SH_MB_HASH_HEX + 1], char **root)
 {
-    size_t i;
+    mpn_memo *m;
     int hit = 0;
     AcquireSRWLockShared(&g_memo_lock);
-    for (i = 0; i < g_nmemo && !hit; i++)
-        if (!strcmp(g_memo[i].build, build) && !_stricmp(g_memo[i].name, name)) {
-            strcpy_s(unit, SH_MB_HASH_HEX + 1, g_memo[i].unit);
-            *root = sh_text(g_memo[i].root);
-            hit = *root != NULL;
-        }
+    m = mpn_find(build, name);
+    if (m) {
+        strcpy_s(unit, SH_MB_HASH_HEX + 1, m->unit);
+        *root = sh_text(m->root);
+        hit = *root != NULL;
+    }
     ReleaseSRWLockShared(&g_memo_lock);
     return hit;
 }
 
-static void mpn_memo_put(const char *build, const char *name, const char *unit, const char *root)
+static char *mpn_bank_paths(const sh_mb_bundle *b, const sh_unit *u)
 {
-    AcquireSRWLockExclusive(&g_memo_lock);
-    if (g_nmemo == g_cmemo) {
-        size_t c = g_cmemo ? g_cmemo * 2 : 64;
-        mpn_memo *g = (mpn_memo *)realloc(g_memo, c * sizeof *g);
-        if (g) { g_memo = g; g_cmemo = c; }
+    size_t used = 0, i;
+    char *paths = (char *)calloc(1, 1);
+    for (i = 0; paths && i < b->file_count; ++i) {
+        const sh_mb_file *f = &b->files[i];
+        if (u->keep[i] && !f->stock && !f->absent && sh_mb_bank_stem(f->request, NULL, 0)) {
+            size_t n = strlen(f->path) + 1;
+            char *more = (char *)realloc(paths, used + n + 1);
+            if (!more) { free(paths); return NULL; }
+            paths = more;
+            memcpy(paths + used, f->path, n);
+            used += n;
+            paths[used] = 0;
+        }
     }
-    if (g_nmemo < g_cmemo && (g_memo[g_nmemo].name = sh_text(name)) != NULL) {
-        if ((g_memo[g_nmemo].root = sh_text(root)) != NULL) {
-            strcpy_s(g_memo[g_nmemo].build, sizeof g_memo[g_nmemo].build, build);
-            strcpy_s(g_memo[g_nmemo].unit, sizeof g_memo[g_nmemo].unit, unit);
-            g_nmemo++;
-        } else free(g_memo[g_nmemo].name);
+    return paths;
+}
+
+static void mpn_memo_put(const sh_mb_bundle *b, const char *name, const sh_unit *u, LONG revision)
+{
+    mpn_memo m = {0};
+    m.name = sh_text(name);
+    m.root = sh_text(u->root);
+    m.banks = mpn_bank_paths(b, u);
+    if (!m.name || !m.root || !m.banks) goto done;
+    strcpy_s(m.build, sizeof m.build, b->hash);
+    strcpy_s(m.unit, sizeof m.unit, u->hash);
+    AcquireSRWLockExclusive(&g_memo_lock);
+    if (revision == g_asked_revision && !mpn_find(b->hash, name)) {
+        if (g_nmemo == g_cmemo) {
+            size_t c = g_cmemo ? g_cmemo * 2 : 64;
+            mpn_memo *g = (mpn_memo *)realloc(g_memo, c * sizeof *g);
+            if (g) { g_memo = g; g_cmemo = c; }
+        }
+        if (g_nmemo < g_cmemo) {
+            g_memo[g_nmemo++] = m;
+            memset(&m, 0, sizeof m);
+        }
     }
     ReleaseSRWLockExclusive(&g_memo_lock);
+done:
+    free(m.name); free(m.root); free(m.banks);
+}
+
+static void mpn_release(mpn_observations *a)
+{
+    if (a && !InterlockedDecrement(&a->refs)) {
+        for (size_t i = 0; i < a->count; ++i) {
+            free((void *)a->rows[i].request);
+            free((void *)a->rows[i].by);
+        }
+        free(a);
+    }
 }
 
 void sh_modpin_set_asked(const sh_unit_asked *asked, size_t n)
 {
-    size_t i;
-    AcquireSRWLockExclusive(&g_memo_lock);
-    for (i = 0; i < g_nasked; i++) { free((void *)g_asked[i].request); free((void *)g_asked[i].by); }
-    free(g_asked);
-    g_asked = NULL;
-    g_nasked = 0;
-    if (n && (g_asked = (sh_unit_asked *)calloc(n, sizeof *g_asked)) != NULL) {
-        for (i = 0; i < n; i++) {
-            g_asked[i].request = asked[i].request ? sh_text(asked[i].request) : NULL;
-            g_asked[i].by = asked[i].by ? sh_text(asked[i].by) : NULL;
+    mpn_observations *next = NULL, *old;
+    if (n) {
+        if (!asked || n > (SIZE_MAX - sizeof *next) / sizeof *asked) return;
+        next = (mpn_observations *)calloc(1, sizeof *next + n * sizeof *asked);
+        if (!next) return;
+        next->refs = 1;
+        next->count = n;
+        for (size_t i = 0; i < n; ++i) {
+            if ((asked[i].request && !(next->rows[i].request = sh_text(asked[i].request))) ||
+                (asked[i].by && !(next->rows[i].by = sh_text(asked[i].by)))) {
+                mpn_release(next);
+                return;
+            }
         }
-        g_nasked = n;
     }
-    for (i = 0; i < g_nmemo; i++) { free(g_memo[i].name); free(g_memo[i].root); }
+    AcquireSRWLockExclusive(&g_memo_lock);
+    old = g_asked;
+    g_asked = next;
+    for (size_t i = 0; i < g_nmemo; i++) { free(g_memo[i].name); free(g_memo[i].root); free(g_memo[i].banks); }
     g_nmemo = 0;
+    InterlockedIncrement(&g_asked_revision);
     ReleaseSRWLockExclusive(&g_memo_lock);
+    mpn_release(old);
+}
+
+long sh_modpin_asked_revision(void) { return InterlockedCompareExchange(&g_asked_revision, 0, 0); }
+
+static int mpn_compute(const sh_mb_bundle *b, const char *folder, const char *name, sh_unit *u, char **why)
+{
+    sh_unit_env env;
+    mpn_observations *a;
+    LONG revision;
+    int ok;
+    AcquireSRWLockShared(&g_memo_lock);
+    revision = g_asked_revision;
+    a = g_asked;
+    if (a) InterlockedIncrement(&a->refs);
+    ReleaseSRWLockShared(&g_memo_lock);
+    env.game = g_game; env.game_context = g_game_ctx;
+    env.asked = a ? a->rows : NULL;
+    env.asked_count = a ? a->count : 0;
+    ok = sh_unit_of(b, folder, name, &env, u, why);
+    mpn_release(a);
+    if (ok) mpn_memo_put(b, name, u, revision);
+    return ok;
 }
 
 /* The unit of `name`: from the memo, else walked (sh_unit_of) and remembered. A hit carries the manifest from the
  * content cache and no `keep`. */
-static int mpn_unit_of(const sh_mb_bundle *b, const char *folder, const char *name, const sh_unit_env *env, sh_unit *u,
+static int mpn_unit_of(const sh_mb_bundle *b, const char *folder, const char *name, sh_unit *u,
                        const char *content_root, char **why)
 {
     char unit[SH_MB_HASH_HEX + 1], *root = NULL;
@@ -114,9 +197,7 @@ static int mpn_unit_of(const sh_mb_bundle *b, const char *folder, const char *na
         }
         free(root);
     }
-    if (!sh_unit_of(b, folder, name, env, u, why)) return 0;
-    mpn_memo_put(b->hash, name, u->hash, u->root);
-    return 1;
+    return mpn_compute(b, folder, name, u, why);
 }
 
 void sh_modpin_set_folder(sh_modpin_folder_fn fn, void *context) { g_folder = fn; g_folder_ctx = context; }
@@ -196,6 +277,47 @@ static char *mpn_folder(const sh_modmanifest_row *row)
 #else
     return NULL;
 #endif
+}
+
+static int mpn_visit_banks(const char *build, const char *name, sh_modpin_bank_fn visit, void *context)
+{
+    const mpn_memo *m;
+    int found;
+    AcquireSRWLockShared(&g_memo_lock);
+    m = mpn_find(build, name);
+    found = m != NULL;
+    if (m) for (const char *p = m->banks; *p; p += strlen(p) + 1) visit(context, p);
+    ReleaseSRWLockShared(&g_memo_lock);
+    return found;
+}
+
+int sh_modpin_object_banks(const sh_modmanifest_row *row, const char *build, sh_modpin_bank_fn visit, void *context)
+{
+    sh_mb_bundle b = {0};
+    char *folder = NULL;
+    int ok = 1;
+    if (!row || !build || !visit || !row->names || !row->name_count) return 0;
+    for (size_t i = 0; i < row->name_count; ++i) {
+        const char *name = row->names[i];
+        sh_unit u = {0};
+        char *why = NULL;
+        if (!name || !name[0]) { ok = 0; break; }
+        if (mpn_visit_banks(build, name, visit, context)) continue;
+        if (!folder) {
+            folder = mpn_folder(row);
+            if (!folder || !sh_mb_load_folder(folder, &b) || !b.validated || strcmp(b.hash, build) || _stricmp(b.id, row->salt)) {
+                ok = 0;
+                break;
+            }
+        }
+        ok = mpn_compute(&b, folder, name, &u, &why) && mpn_visit_banks(build, name, visit, context);
+        sh_unit_free(&u);
+        free(why);
+        if (!ok) break;
+    }
+    free(folder);
+    sh_mb_free(&b);
+    return ok;
 }
 
 static char *mpn_read(void *context, const char *request, size_t *len)
@@ -279,7 +401,6 @@ static int mpn_pin_row(sh_modmanifest_row *row, const char *map_json, size_t len
                        sh_modpin_row_result *out, int publish)
 {
     sh_mb_bundle b;
-    sh_unit_env env;
     sh_unit *units = NULL;
     const char **roots = NULL, **hashes = NULL;
     char *folder = NULL, *why = NULL, *fail = NULL, *display = NULL;
@@ -304,11 +425,6 @@ static int mpn_pin_row(sh_modmanifest_row *row, const char *map_json, size_t len
         if (publish && !sh_modmanifest_freeze_local(row)) return -1;
         return SH_MODPIN_ABSENT;
     }
-    memset(&env, 0, sizeof env);
-    env.game = g_game;
-    env.game_context = g_game_ctx;
-    env.asked = g_asked;
-    env.asked_count = g_nasked;
     cap = row->name_count + 1;
     units = (sh_unit *)calloc(cap, sizeof *units);
     roots = (const char **)calloc(cap, sizeof *roots);
@@ -319,7 +435,7 @@ static int mpn_pin_row(sh_modmanifest_row *row, const char *map_json, size_t len
         size_t k;
         int dup = 0;
         if (!row->names[i] || !row->names[i][0]) continue;
-        if (!mpn_unit_of(&b, folder, row->names[i], &env, &units[n], content_root, &why)) {
+        if (!mpn_unit_of(&b, folder, row->names[i], &units[n], content_root, &why)) {
             if (publish && units[n].absent_root) {
                 if (!sh_modmanifest_row_add_missing(row, row->names[i])) goto done;
                 free(why);
@@ -339,7 +455,7 @@ static int mpn_pin_row(sh_modmanifest_row *row, const char *map_json, size_t len
         n++;
     }
     if (whole_only || row->attached || (!n && !row->unavailable)) {
-        if (!mpn_unit_of(&b, folder, SH_UNIT_WHOLE, &env, &units[n], content_root, &why)) {
+        if (!mpn_unit_of(&b, folder, SH_UNIT_WHOLE, &units[n], content_root, &why)) {
             mpn_logf("MODS: pin: %s could not be pinned as a whole (%s)", b.name ? b.name : row->salt, why ? why : "?");
             if (!publish || !n) {
                 if (publish && !sh_modmanifest_freeze_local(row)) goto done;
@@ -408,7 +524,6 @@ int sh_modpin_row_differs(const sh_modmanifest_row *row)
 {
     sh_modmanifest_row local;
     sh_mb_bundle b;
-    sh_unit_env env;
     char *folder;
     size_t k;
     int differs = 0;
@@ -425,17 +540,12 @@ int sh_modpin_row_differs(const sh_modmanifest_row *row)
         free(folder);
         return -1;
     }
-    memset(&env, 0, sizeof env);
-    env.game = g_game;
-    env.game_context = g_game_ctx;
-    env.asked = g_asked;
-    env.asked_count = g_nasked;
     if (row->unavailable && !row->missing_count) differs = 1;
     for (k = 0; k < row->missing_count && !differs; k++) {
         sh_unit u = {0};
         char *why = NULL;
         differs = !strcmp(row->missing[k], SH_UNIT_WHOLE) ||
-                  mpn_unit_of(&b, folder, row->missing[k], &env, &u, NULL, &why);
+                  mpn_unit_of(&b, folder, row->missing[k], &u, NULL, &why);
         sh_unit_free(&u);
         free(why);
     }
@@ -450,9 +560,8 @@ int sh_modpin_row_differs(const sh_modmanifest_row *row)
         {
             sh_unit u;
             memset(&u, 0, sizeof u);
-            if (!sh_unit_of(&b, folder, name, &env, &u, &why)) differs = 1;   /* the installed build lacks it */
+            if (!mpn_compute(&b, folder, name, &u, &why)) differs = 1;
             else {
-                mpn_memo_put(b.hash, name, u.hash, u.root);
                 differs = strcmp(u.hash, row->units[k]) != 0;
             }
             sh_unit_free(&u);

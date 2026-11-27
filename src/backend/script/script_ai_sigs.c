@@ -276,6 +276,10 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "48 89 5C 24 10 57 48 83 EC 20 48 8D 99 10 D2 49 00 48 8B FA 48 8B 03 48 8D 54 24 30 41 B8 01 00 00 00 "
       "48 8B CB FF 90 D0",
       0x38DE60u, 0x38D700u },
+    { "AiResetMotionCorrection",
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 50 48 8B 01 48 8D 54 24 20 F3 0F 10 05 ?? ?? ?? ?? "
+      "33 F6 80 64 24 4A FE 48 8B F9 F3 0F 11 44 24 20 48 8B 98 B0 3D 00 00 80 61 44 FC",
+      0x50C800u, 0x50B530u },
     { NULL, NULL, 0, 0 }
 };
 

@@ -46,6 +46,9 @@ int sh_tl_picker_offers(int placeable, const char *row);
  * placement 4, wire drag 7). Entities are not rebound during them. */
 int sh_tl_substate_blocks_rebind(int substate);
 
+/* The constructed singleton's populated entity palette, including a build predating the hook. */
+void *sh_tl_populated_palette(void *editor, const void *vtable);
+
 /* The palette sort reached through the E8 at call_site (SnapPaletteSortCall + 37) when its first 12 bytes are
  * the wrapper's prologue, else NULL. The install's own check. */
 #define SH_TIMELINE_SORT_CALL_OFF 37  /* the E8 to the sort inside SnapPaletteSortCall */
@@ -76,6 +79,7 @@ enum {
     SH_TL_REBUILD_HEAP_LEAVE = -5     /* the scope did not balance; later rebuilds refuse */
 };
 int sh_timeline_tile_rebuild_palette(int *rows_before, int *rows_after);
+int sh_timeline_tile_rebuild_busy(void);
 
 /* The editor palette (editor+0x20660) once the builder has completed at least
  * once this process, else NULL. */

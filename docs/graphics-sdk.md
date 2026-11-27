@@ -125,13 +125,13 @@ itself (its image, colours, fades, flipbook and motion) stays in the particle de
 | `nearfade` | `{ begin, end }` | none | fades the particle out between two distances from the viewer (units) |
 | `farfade` | `{ begin, end }` | none | fades the particle out from the first camera depth to the second, in game units |
 | `softdistance` | value | none | fades the particle where it meets a surface, over this many units |
+| `erosion` | `yes` or `no` | `no` | uses the texture's green channel as an erosion mask. Set the stage's generic parameter 1 from zero (gone) to one (full mask). |
 | `depthoffset` | value | 0 | pushes the soft edge into thin parts of the image |
 | `litscale` | value | 1 | scales the light a `lit` particle takes |
 
-A particle material that sets none of `glowmask`, `gradient`, `nearfade`, `softdistance` and `depthoffset`, that is not
-`explosion`, and (when `lit`) neither scales the light nor glows on its own (`litscale` other than 1, `glowmaskstrength`
-other than 0), is drawn with the game's own particle shading (lit or unlit), exactly as a stock particle material is;
-its `glow` is then the material's own brightness.
+Simple lit and unlit particles use the game's stock shading. Their `glow` sets the material's own brightness.
+Explosion shading, erosion, a glow mask, a gradient, either camera fade, soft distance and depth offset use the
+Snapmap+ particle program. Lit particles also use it when `litscale` differs from 1 or `glowmaskstrength` differs from 0.
 
 ## Effects
 
@@ -236,6 +236,9 @@ material when it names an `image`.
 
 The SDK calculates the visible bounds for the whole effect and for each stage. If you supply
 a native GPU particle in `particles/`, include `edit.bounds` around the full emission volume.
+
+Doomforge preserves an imported emitter's directional spray, including the variation in its horizontal
+and vertical opening angles. Turning the emitter turns its spray.
 
 ```
 particles {
@@ -366,6 +369,12 @@ Use `pattern` for a tiling image and `patterncolours { r, g, b, r, g, b }` for i
 
 ## Ribbon materials
 
+A script can draw a path through moving joints or positions with `emitter:draw_ribbon(points, rgba)`.
+Define an entity that inherits `func/ribbonemitter`. Set its `edit.declRibbon` to your ribbon declaration
+and `edit.startOff` to `false` so the engine initializes its renderer at spawn. For example, spawn
+`entities/effects/trail.decl` with `spawn("effects/trail", points[1])`. Pass 2 to 128 world positions in path order. The optional colour has four
+channels from 0 to 1. Update the path while the effect plays and remove the emitter when it ends.
+
 A material with `type ribbon` draws with the game's ribbon program. Set `lengthfade { 0.1, 0.2 }` to fade in
 across the first tenth of the trail and fade out across its last fifth. The ribbon declaration supplies the
 length coordinate with `textureTangentStretch = true;`. Its main texture can tile and scroll independently.
@@ -374,6 +383,9 @@ For a colour change over a node's life, give the material a `colour` and a `deat
 linear RGBA channels from 0 to 1. `lifefade { 0.1, 0.3 }` fades the first tenth and last three tenths of the
 node's life. Set the ribbon declaration's `fadeInFraction = 0;` and `fadeOutFraction = 1;` so the material
 receives the node's age. A white ribbon colour uses the material's colours in full.
+
+Doomforge also preserves animated emitter width on imported projectile trails. Width follows the time since
+launch, so a growing trail widens along its whole visible length. Each node still expires at its authored lifetime.
 
 ## Screen text
 

@@ -46,6 +46,18 @@ void sh_motion_read(const uint8_t *stage, sh_motion *m)
     m->launch = rd(stage, SH_MOTION_SYSTEM_BOUNDS);
     m->launch_lo = rd(stage, SH_MOTION_SYSTEM_BOUNDS + 4);
     m->launch_hi = rd(stage, SH_MOTION_SYSTEM_BOUNDS + 8);
+    m->uniform_volume = rd(stage, SH_MOTION_FIELD_STRENGTH) == (1.0f / 3.0f);
+    m->oriented_cone = m->uniform_volume && rd(stage, SH_MOTION_VELOCITY_SCALE + 8) == -1.0f;
+    if (m->oriented_cone) {
+        for (i = 0; i < 3; ++i) m->cone_rotation[i] = rd(stage, SH_MOTION_FIELD_SCALE + 4*i);
+        m->cone_rotation[3] = rd(stage, SH_MOTION_DISTRIBUTION_SCALE + 8);
+        for (i = 0; i < 2; ++i) m->cone_angle_span[i] = rd(stage, SH_MOTION_DISTRIBUTION_SCALE + 4*i);
+    }
+    for (i = 0; i < 2; i++) {
+        m->cone_angles[i] = m->uniform_volume ? rd(stage, SH_MOTION_GEOMETRY_INITIAL + 4*i) : 0.0f;
+        m->cone_speeds[i] = m->uniform_volume ? rd(stage, SH_MOTION_GEOMETRY_FINAL + 4*i) : 0.0f;
+        m->ball_scale[i] = m->uniform_volume ? rd(stage, SH_MOTION_VELOCITY_SCALE + 4*i) : 1.0f;
+    }
     m->collide_thickness = rd(stage, SH_MOTION_COLOR_FADE);
     m->collide_min_life = rd(stage, SH_MOTION_COLOR_FADE + 4);
     m->collide_penetration = rd(stage, SH_MOTION_COLOR_FADE + 8);
@@ -188,20 +200,49 @@ static float uniform(uint32_t seed, uint32_t step, uint32_t axis)
 
 static float fract(float x) { return x - floorf(x); }
 
-/* Applies the launch speed factor and adds the launch ball (Eternal's VEL_SPHERE, command 10): a direction even over
- * the sphere, the size the radius x sqrt(u). The numbers are drawn under a step index no integration step reaches. */
-void sh_motion_launch(const sh_motion *m, uint32_t seed, float v0[3])
+/* A uniform direction, with a radius drawn independently once at birth. */
+static void to_world(const sh_motion_frame *fr, const float local[3], float world[3]);
+
+void sh_motion_launch(const sh_motion *m, uint32_t seed, float v0[3], const sh_motion_frame *frame)
 {
     float a, z, k, s;
     if (m->launch_lo != 0.0f || m->launch_hi != 0.0f) {
         s = m->launch_lo + (m->launch_hi - m->launch_lo) * uniform(seed, 0x7FFFFFFEu, 0u);
         v0[0] *= s; v0[1] *= s; v0[2] *= s;
     }
+    if (m->uniform_volume && (m->cone_speeds[0] || m->cone_speeds[1])) {
+        float pitch = m->cone_angles[0], yaw = m->cone_angles[1];
+        if (m->oriented_cone) {
+            pitch += m->cone_angle_span[0] * uniform(seed, 0x7FFFFFFBu, 0);
+            yaw += m->cone_angle_span[1] * uniform(seed, 0x7FFFFFFBu, 1);
+        }
+        float theta = fmaxf(0.001f, 0.5f * (pitch + yaw));
+        float azimuth = 6.2831855f * uniform(seed, 0x7FFFFFFDu, 0);
+        float disc = sqrtf(uniform(seed, 0x7FFFFFFDu, 1)) * sinf(theta);
+        float x = disc * cosf(azimuth) * pitch, y = disc * sinf(azimuth) * yaw;
+        float up = theta * cosf(theta);
+        if (m->oriented_cone) {
+            const float *q = m->cone_rotation;
+            float u = 2.0f*(q[1]*up - q[2]*y), v = 2.0f*(q[2]*x - q[0]*up), w = 2.0f*(q[0]*y - q[1]*x);
+            float local[3] = {x+q[3]*u+q[1]*w-q[2]*v, y+q[3]*v+q[2]*u-q[0]*w, up+q[3]*w+q[0]*v-q[1]*u};
+            float world[3];
+            if (frame) { to_world(frame, local, world); x = world[0]; y = world[1]; up = world[2]; }
+            else { x = local[0]; y = local[1]; up = local[2]; }
+        }
+        float norm = sqrtf(x*x + y*y + up*up);
+        if (norm > 0) {
+            float speed = m->cone_speeds[0] + (m->cone_speeds[1] - m->cone_speeds[0]) * uniform(seed, 0x7FFFFFFDu, 2);
+            v0[0] += speed * x / norm; v0[1] += speed * y / norm; v0[2] += speed * up / norm;
+        }
+    }
     if (m->launch == 0.0f) return;
     a = 6.2831855f * uniform(seed, 0x7FFFFFFFu, 0u);
     z = 2.0f * uniform(seed, 0x7FFFFFFFu, 1u) - 1.0f;
     k = sqrtf(1.0f - z * z);
-    s = m->launch * sqrtf(uniform(seed, 0x7FFFFFFFu, 2u));
+    s = uniform(seed, 0x7FFFFFFFu, 2u);
+    s = m->launch * (m->uniform_volume ? cbrtf(s) : sqrtf(s));
+    if (m->uniform_volume && (m->ball_scale[0] || m->ball_scale[1]))
+        s *= m->ball_scale[0] + (m->ball_scale[1] - m->ball_scale[0]) * uniform(seed, 0x7FFFFFFCu, 0);
     v0[0] += k * cosf(a) * s;
     v0[1] += k * sinf(a) * s;
     v0[2] += z * s;

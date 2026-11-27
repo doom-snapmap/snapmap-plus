@@ -9,7 +9,7 @@
 /* The builder's rules number, written into the block as "rules"; a folder whose block carries another number is
  * built again once, so a product update reclassifies every own folder. Raise it when a build's classification,
  * edits or manifest change. */
-#define SH_MB_RULES           19
+#define SH_MB_RULES           20
 
 #define SH_MB_EARLIER "Run the Snapmap+ installer to update this mod from an earlier version."
 #define SH_MB_ID_MAX          64u
@@ -403,22 +403,6 @@ void sh_mb_set_script_check(sh_mb_script_check_fn fn);
  * fails the build; NULL (the default) checks nothing. */
 typedef int (*sh_mb_extra_check_fn)(const char *salt, const char *extra, size_t len, char **cause);
 void sh_mb_set_extra_check(sh_mb_extra_check_fn fn);
-
-/* The registries "clipEvents" of a build (clip_events.h sh_ce_build_registry), from the author's
- * "animation_events" names, the mod's salt and a reader of its md6Def texts by decl name (1 text malloc'd, 0
- * not one, -1 unreadable). Each entry or clip it leaves out is one warning through `warn`. Returns a JSON array
- * (malloc'd) or NULL (*oom on memory failure); NULL (the default) records nothing. */
-typedef int (*sh_mb_text_fn)(void *context, const char *name, char **text, size_t *len);
-typedef char *(*sh_mb_clip_events_fn)(const char *salt, const char *const *names, int n, sh_mb_text_fn text,
-                                      void *text_ctx, void (*warn)(void *context, const char *line), void *warn_ctx,
-                                      int *oom);
-void sh_mb_set_clip_events(sh_mb_clip_events_fn fn);
-
-/* The registries "attachmentTags" of a build (attach_tags.h, sh_at_build_registry): the same shape as
- * "clipEvents" above, from the author's "attachment_tags" names; props in place of clips. NULL (the default)
- * records nothing for "attachment_tags". */
-void sh_mb_set_attach_tags(sh_mb_clip_events_fn fn);
-
 
 /* The static registration pass over one script's text, without running it (Lua comments and strings skipped): a
  * literal call of on.<event>("<name>", ...) is BIND, on.input("<node>", ...) INPUT, node("<node>") OUTPUT and

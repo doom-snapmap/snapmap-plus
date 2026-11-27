@@ -55,7 +55,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
 static int stock_exists(void *ctx, const char *request)
 {
     (void)ctx;
-    return strstr(request, "mods/") ? 0 : 1;   /* every name outside a mod is DOOM's */
+    return !strstr(request, "mods/") && !strstr(request, "sound/soundbanks/pc/banktest_");
 }
 static sh_mb_resolver g_resolver = { NULL, NULL, stock_exists, NULL };
 static int fixture_game(void *ctx, const char *request, char sha[SH_MB_HASH_HEX + 1], char *source, size_t cap)
@@ -352,6 +352,49 @@ static int cache_empty(const char *root)
     return u == 0 && f == 0;
 }
 
+static void count_bank(void *context, const char *path)
+{
+    CHECK(!strcmp(path, "sounds/test.bnk"));
+    ++*(int *)context;
+}
+
+static void placed_banks(const char *root)
+{
+    const char *names[] = { "entities/box" };
+    sh_unit_asked asked = { "sound/soundbanks/pc/banktest_test.bnk", NULL };
+    unsigned char header[16] = { 'B', 'K', 'H', 'D', 8, 0, 0, 0, SH_MB_BANK_VERSION };
+    sh_modmanifest_row row;
+    sh_mb_bundle b = {0};
+    char folder[MAX_PATH * 2], path[MAX_PATH * 2];
+    int count = 0, slot = g_nserve;
+    FILE *file = NULL;
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\bank-test", root);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\sounds\\test.bnk", folder);
+    mt_mkdirs_for(path);
+    CHECK(!fopen_s(&file, path, "wb") && file);
+    if (!file) return;
+    fwrite(header, 1, sizeof header, file);
+    fclose(file);
+    mt_write(folder, "mod.json", "{\"name\":\"Bank test\"}");
+    mt_write(folder, "entities\\box.decl", "{ inherit = \"snapmaps/props/crate\"; }");
+    CHECK(build_mod(folder, "banktest") && sh_mb_load_folder(folder, &b) && b.validated);
+    g_serve[slot].salt = "banktest";
+    strcpy_s(g_serve[slot].folder, sizeof g_serve[slot].folder, folder);
+    g_nserve++;
+    local_row(&row, "banktest", "Bank test", names, 1);
+    CHECK(sh_modpin_object_banks(&row, b.hash, count_bank, &count) && count == 0);
+    sh_modpin_set_asked(&asked, 1);
+    CHECK(sh_modpin_object_banks(&row, b.hash, count_bank, &count) && count == 1);
+    g_nserve = slot;
+    CHECK(sh_modpin_object_banks(&row, b.hash, count_bank, &count) && count == 2);
+    CHECK(!sh_modpin_object_banks(&row, SH_MODMANIFEST_LOCAL_BUILD, count_bank, &count));
+    sh_modpin_set_asked(NULL, 0);
+    CHECK(!sh_modpin_object_banks(&row, b.hash, count_bank, &count) && count == 2);
+    CHECK(!row.pinned && cache_empty(root));
+    sh_modmanifest_row_free(&row);
+    sh_mb_free(&b);
+}
+
 /* The pinned rows of a map text (the export's own). */
 static size_t rows_of_text(const char *text, size_t len, sh_modmanifest_list *rows)
 {
@@ -484,6 +527,7 @@ int main(int argc, char **argv)
 
     CHECK(make_world(a_root));
     use_root(a_root);
+    placed_banks(a_root);
     local_row(&rows[0], SA, "Crates", crate_names, 2);
     local_row(&rows[1], SB, "Paints", red_names, 1);
     map = map_with(rows, 2, BASE_MAP);

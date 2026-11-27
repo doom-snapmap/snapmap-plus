@@ -144,6 +144,7 @@ static const site SITES[] = {
     { "level_templates.c",    "SnapshotTemplateWalk",       SITE_LEVEL, SH_LT_WALK_CALL, SH_LT_STOLEN, REPLAYS, 0 },
     { "sync_clock.c",         "AnimReanchor",               SITE_SYNC, 0, 15, RELOCATES_AT, 3 },
     { "ribbonmotion.c",       "RibbonNodeBirth",            SITE_SIG, 0, 21, REPLAYS, 0 },
+    { "ribbonmotion.c",       "RibbonDrawBeam",             SITE_SIG, 0, 17, REPLAYS, 0 },
     { "encounter_spawn.c",    "SnapEncounterSpawnMembers",  SITE_SIG, 0, 19, REPLAYS, 0 },
     { "encounter_spawn.c",    "SnapEncounterChooseActor",   SITE_SIG, 0, 21, REPLAYS, 0 },
     { "kill_score.c",         "SnapPlayerScoreByType",      SITE_KILL, 0, SH_KS_STOLEN, RELOCATES_AT, SH_KS_JCC_OFFSET },
@@ -463,7 +464,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "fault_shield\\load_screen_stop.c", 1 }, { "fault_shield\\saved_map_guard.c", 1 },
     { "backend\\parmslots.c", 1 }, { "backend\\clip_events.c", 1 },
     { "backend\\attach_tags.c", 1 }, { "backend\\sync_clock.c", 1 }, { "backend\\level_templates.c", 1 }, { "backend\\kill_score.c", 2 }, { "backend\\encounter_spawn.c", 2 },
-    { "backend\\particlemotion.c", 2 }, { "backend\\ribbonmotion.c", 1 }, { "backend\\cachewrites.c", 1 },
+    { "backend\\particlemotion.c", 2 }, { "backend\\ribbonmotion.c", 2 }, { "backend\\cachewrites.c", 1 },
 };
 
 static int count_calls(const char *text)

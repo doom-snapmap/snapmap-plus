@@ -343,6 +343,9 @@ static int f_muzzle_test(void *ai, int hand, int mode)
     return f->muzzle;
 }
 static int f_clear_move(void *ai) { ((fent *)ai)->clear_moves++; ev_cat("clear_move\n"); return 1; }
+static int f_reset_motion_correction(void *ai) { ev_cat("reset_correction\n"); return ai == &g_ent[1]; }
+static int ground_state;
+static int f_on_ground(void *ai) { return ai == &g_ent[1] ? ground_state : -1; }
 static int f_idle_turn_entry(void *ai, int turn) { return !(((fent *)ai)->no_turn_entry & (1u << turn)); }
 /* the laser targeter and the rear footsteps: the engine side is asked with the tag and the whole decl names */
 static int g_no_targeter, g_no_ribbon, g_no_table;
@@ -444,7 +447,7 @@ static int f_anim_valid(void *ai, const char *node, unsigned tests, int side, un
 {
     return sh_ai_anim_valid_run(&g_fake, ai, node, tests, side, seed, 100, index);
 }
-static int f_path_points(void *ai, const float goal[3], int key, float (**outp)[3], int *n)
+static int f_path_points(void *ai, const float goal[3], int key, float (**outp)[3], int *n, float *length)
 {
     fent *f = (fent *)ai;
     float (*out)[3];
@@ -453,6 +456,7 @@ static int f_path_points(void *ai, const float goal[3], int key, float (**outp)[
     *outp = NULL;
     if (f->path_none) return 2;
     if (++f->path_calls <= f->path_ready) return 1;
+    *length = (float)(fabs(goal[0] - f->origin[0]) + fabs(goal[1] - f->origin[1]));
     out = (float (*)[3])malloc((size_t)count * sizeof *out);   /* as the engine side: the whole path, malloc'd */
     if (!out) return -1;
     if (f->path_long) {
@@ -530,7 +534,7 @@ static const sh_script_ai_engine g_fake = {
     f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose,
     f_interrupt_blend, f_destructible, f_weapon_use, f_wound_damage_counts, f_snapmap_order,
     f_release, f_anim_variable, f_relations, f_off_limits, f_world_clear, f_world_ground, f_request_pain, f_wound_effect,
-    f_native_body_busy
+    f_native_body_busy, f_reset_motion_correction, f_on_ground
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -800,6 +804,14 @@ static void test_geometry(void)
 static void test_commands(void)
 {
     const char *log;
+    CHECK(start("api = 1\non.think('ai/brute',function(e) print(tostring(e:on_ground())) end)\n"));
+    for (ground_state = -1; ground_state <= 1; ground_state++) tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "nil\n") && strstr(log_of("aaaaaaaa"), "false\n") && strstr(log_of("aaaaaaaa"), "true\n"));
+    sh_script_map_end();
+    CHECK(start("api = 1\non.think('ai/brute',function(e) print(tostring(e:reset_motion_correction())) end)\n"));
+    tick();
+    CHECK(strstr(g_events, "reset_correction\n") && strstr(log_of("aaaaaaaa"), "true\n"));
+    sh_script_map_end();
     CHECK(start(
         "api = 1\n"
         "local step = 0\n"
@@ -907,6 +919,21 @@ static void test_move_done_and_follow(void)
 static void test_queries(void)
 {
     const char *log;
+    CHECK(start(
+        "api = 1\n"
+        "on.think('ai/brute', function(self)\n"
+        "  print(tostring(self:clear_walk_line(ent(2))) .. ' ' .. tostring(self:clear_walk_line({x=80,y=0,z=0})))\n"
+        "end)\n"));
+    g_actor_x = 12;
+    tick();
+    g_wall_x = 25;
+    tick();
+    g_wall_x = 0;
+    g_hole_x = 60;
+    tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "true true\nfalse false\nfalse false\n") != NULL);
+    g_actor_x = g_hole_x = 0;
+    sh_script_map_end();
     CHECK(start(
         "api = 1\n"
         "local step = 0\n"
@@ -1275,15 +1302,15 @@ static void test_brain_calls(void)
         "    print('valid2 ' .. tostring(self:animation_fits('evade/side')))\n"
         "    print('valid3 ' .. tostring(self:animation_fits('evade/still', 'VALIDATE_ANIM_DELTA')))\n"
         "    print('valid4 ' .. table.concat({tostring(select(1, self:animation_fits('evade/none'))), select(2, self:animation_fits('evade/none'))}, ' '))\n"
-        "    local p, why = self:path_points({x = 30, y = 40, z = 0})\n"
+        "    local p, why = self:path_points({x = 30, y = 40, z = 0}, true)\n"
         "    print('pts ' .. tostring(p) .. ' ' .. tostring(why))\n"
         "    print('mt ' .. tostring(ent(4):monster_type()) .. ' ' .. tostring(ent(3):monster_type()) .. ' ' .. tostring(self:monster_type()))\n"
         "    self:pain_string('combo')\n"
         "    self:block_pain('PAIN_PUSHBACK', 7)\n"
         "    print('pain ' .. tostring(self:request_pain('PAIN_FALTER', 800)) .. ' ' .. table.concat({tostring(select(1, self:request_pain('falter_light'))), select(2, self:request_pain('falter_light'))}, ' '))\n"
         "  else\n"
-        "    local p = self:path_points({x = 30, y = 40, z = 0})\n"
-        "    print('pts2 ' .. #p .. ' ' .. p[2].x .. ' ' .. p[3].y)\n"
+        "    local p, length = self:path_points({x = 30, y = 40, z = 0}, true)\n"
+        "    print('pts2 ' .. #p .. ' ' .. p[2].x .. ' ' .. p[3].y .. ' ' .. length)\n"
         "    local f, why = self:firing_position({ target = ent(2), kind = 'new', min = 50, max = 400, ideal = 200, visible = true, parms = {} })\n"
         "    print('fp ' .. tostring(f ~= nil) .. ' ' .. tostring(why))\n"
         "    local g = self:firing_position({ kind = 'superior', min = 50, max = 400, ideal = 141 })\n"
@@ -1326,7 +1353,7 @@ static void test_brain_calls(void)
     CHECK(g_ent[1].block_reaction == 7 && g_ent[1].block_ms == 7000);    /* PAIN_PUSHBACK */
     CHECK(g_ent[1].pain_asked == 3 && g_ent[1].pain_damage == 0.0f);   /* the last ask: PAIN_FALTER_LIGHT, no damage */
     CHECK(!strcmp(g_ent[1].pain, "(engine)"));                            /* combo, then nil */
-    CHECK(strstr(log, "pts2 3 30.0 40.0\n") != NULL);
+    CHECK(strstr(log, "pts2 3 30.0 40.0 70.0\n") != NULL);
     CHECK(strstr(log, "fp true nil\n") != NULL);
     CHECK(strstr(log, "fp2 nil none\n") != NULL);
     CHECK(strstr(log, "spline3 true 3 ") != NULL);   /* the knot at 0.5 is inside: three points */
@@ -2591,8 +2618,9 @@ static void test_stationary_enemy_native_path(void)
 {
     const char *brain =
         "api = 1\n"
-        "local n = 0\n"
+        "local n, handoffs = 0, 0\n"
         "require('enemy_sdk').bind('ai/brute', {\n"
+        " suspend=function() handoffs=handoffs+1; print('handoff '..handoffs) end,\n"
         " spawn=function() end, remove=function() end, projectile=function() end,\n"
         " damage=function() end, death=function() print('died') end,\n"
         " pain=function(e) e:stop(); print('felt pain') end, frame=function() print('frame') end,\n"
@@ -2622,6 +2650,7 @@ static void test_stationary_enemy_native_path(void)
     tick();
     log = log_of("aaaaaaaa");
     CHECK(strstr(log, "felt pain\n") && !strstr(log, "frame\n") && !strstr(log, "think 2\n"));
+    CHECK(strstr(log, "handoff 1\n") && !strstr(log, "handoff 2\n"));
     CHECK(!strstr(g_events, "park\n") && !strstr(g_events, "tempMemory_Remove"));
     g_native_body_busy = 0;
     g_order.kind = SH_AI_ORDER_ENTITY; g_order.spawn_id = 2;
@@ -2632,7 +2661,8 @@ static void test_stationary_enemy_native_path(void)
     sh_script_queue_post(mod, SH_SCRIPT_EV_DEATH, actor, 0, 0, 0, "", NULL);
     tick();
     log = log_of("aaaaaaaa");
-    CHECK(strstr(log, "died\nthink 3\n") && !strstr(stop_of("aaaaaaaa"), "stopped"));
+    CHECK(strstr(log, "handoff 2\ndied\nthink 3\n") && !strstr(log, "handoff 3\n"));
+    CHECK(!strstr(stop_of("aaaaaaaa"), "stopped"));
     sh_script_map_end();
     g_order.kind = SH_AI_ORDER_NONE;
     CHECK(start(brain));
@@ -2649,6 +2679,7 @@ static void test_stationary_enemy_native_path(void)
     tick();
     CHECK(g_order.kind == SH_AI_ORDER_NONE && strstr(log_of("aaaaaaaa"), "think 3\npath\n"));
     g_release_refused = 0;
+    CHECK(!strstr(log_of("aaaaaaaa"), "handoff "));
     {
         sh_script_ai_engine bare = g_fake;
         bare.frame = NULL;
@@ -2659,6 +2690,15 @@ static void test_stationary_enemy_native_path(void)
         CHECK(g_order_reads == 2 && strstr(log_of("aaaaaaaa"), "think 4\n"));
         sh_script_ai_set_engine(&g_fake);
     }
+    sh_script_map_end();
+    CHECK(start("api = 1\nrequire('enemy_sdk').bind('ai/brute', {spawn=function() end, "
+                "think=function() print('thinking') end})\n"));
+    g_order.kind = SH_AI_ORDER_PATH;
+    tick();
+    CHECK(!strstr(log_of("aaaaaaaa"), "thinking"));
+    g_order.kind = SH_AI_ORDER_NONE;
+    tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "thinking") && sh_script_status("aaaaaaaa") == SH_SCRIPT_RUNNING);
     sh_script_map_end();
 }
 
@@ -2688,7 +2728,7 @@ static void test_release_and_anim_variable(void)
         "local n = 0\n"
         "on.think('ai/brute', function(self)\n"
         "  n = n + 1\n"
-        "  if n == 1 then self:force_animation_via('idle/idle', 'evade/side') end\n"
+        "  if n == 1 then self:move_to({ x = 8, y = 0, z = 0 }); self:force_animation_via('idle/idle', 'evade/side') end\n"
         "  if n == 2 then print('released ' .. tostring(self:release())) end\n"
         "  if n == 5 then self:move_to({ x = 5, y = 0, z = 0 }) end\n"
         "  if n == 6 then\n"
@@ -2712,7 +2752,8 @@ static void test_release_and_anim_variable(void)
     CHECK(!strcmp(g_ent[1].anim_var, "hangoutIndex") && g_ent[1].anim_val == 3.0f);
     {
         const char *rel = strstr(g_events, "release\n");
-        CHECK(rel != NULL && strstr(rel, "park\n") != NULL);   /* parked, released, parked again */
+        CHECK(rel != NULL && strstr(rel, "park\n") != NULL);
+        CHECK(rel != NULL && strstr(rel, "ssaction_SetWalkState") != NULL);
     }
     if (g_fail) printf("release log:\n%s\nevents:\n%s", log, g_events);
     sh_script_map_end();
@@ -2904,7 +2945,7 @@ int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 61);
+    CHECK(sh_script_ai_register() == 64);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();

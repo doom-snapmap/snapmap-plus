@@ -248,13 +248,14 @@ static const lk_field LK_L[L_COUNT] = {
 
 /* Particle. */
 enum { P_LIGHTING, P_GLOW, P_GLOWMASK, P_GLOWMASKCOLOUR, P_GLOWMASKSTRENGTH, P_GRADIENT, P_NEARFADE, P_SOFTDISTANCE,
-       P_DEPTHOFFSET, P_LITSCALE, P_FARFADE, P_GLOWMASKCOLOUR2, P_COUNT };
+       P_DEPTHOFFSET, P_LITSCALE, P_FARFADE, P_GLOWMASKCOLOUR2, P_EROSION, P_COUNT };
 static const lk_field LK_P[P_COUNT] = {
     { "lighting", T_LIGHT, "lit" }, { "glow", T_NUM, "4" }, { "glowmask", T_IMG, "mods/abcdefgh/fx/embers_mask.tga" },
     { "glowmaskcolour", T_V3, "{ 1, 0.4, 0.1 }" }, { "glowmaskstrength", T_NUM, "1" },
     { "gradient", T_V6, "{ 1, 0.5, 0, 1, 0.1, 0 }" }, { "nearfade", T_V2, "{ 40, 8 }" }, { "softdistance", T_NUM, "5" },
     { "depthoffset", T_NUM, "1" }, { "litscale", T_NUM, "1" },
     { "farfade", T_V2, "{ 128, 256 }" }, { "glowmaskcolour2", T_V3, "{ 1, 0.8, 0.3 }" },
+    { "erosion", T_YESNO, "yes" },
 };
 
 /* Both looks' own field names, for telling a field of the other look. */
@@ -744,7 +745,7 @@ static int lk_particle(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *o
     static const char *const drop[] = { "stageprogram", "particleuberparms1", "particleuberparms2", "particleuberparms3",
                                         "emissive", "smokebrightness", "particleemissivemap" };
     char word[16];
-    int mode = 0, platform;
+    int mode = 0, platform, erosion = 0;
     float glow = 1.0f, strength = 0.0f, lit = 1.0f, depth = 0.0f, soft = 0.0f, begin = 0.0f, end = 0.0f;
     float colour[3] = { 1, 1, 1 }, grad[6] = { 1, 1, 1, 1, 1, 1 };
     char *res;
@@ -755,6 +756,10 @@ static int lk_particle(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *o
         mode = lk_ieq(word, strlen(word), "lit") ? 1 : lk_ieq(word, strlen(word), "explosion") ? 4 : 0;
     }
     if (p[P_GLOW].has) glow = p[P_GLOW].v.v[0];
+    if (p[P_EROSION].has) {
+        lk_word(&d->l[p[P_EROSION].line], word, sizeof word);
+        erosion = lk_ieq(word, strlen(word), "yes");
+    }
     if (p[P_GLOWMASKSTRENGTH].has) strength = p[P_GLOWMASKSTRENGTH].v.v[0];
     if (p[P_LITSCALE].has) lit = p[P_LITSCALE].v.v[0];
     if (p[P_DEPTHOFFSET].has) depth = p[P_DEPTHOFFSET].v.v[0];
@@ -762,7 +767,7 @@ static int lk_particle(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *o
     if (p[P_NEARFADE].has) { begin = p[P_NEARFADE].v.v[0]; end = p[P_NEARFADE].v.v[1]; }
     if (p[P_GLOWMASKCOLOUR].has) memcpy(colour, p[P_GLOWMASKCOLOUR].v.v, sizeof colour);
     if (p[P_GRADIENT].has) memcpy(grad, p[P_GRADIENT].v.v, sizeof grad);
-    platform = mode == 4 || p[P_GLOWMASK].has || p[P_GRADIENT].has || p[P_NEARFADE].has || p[P_SOFTDISTANCE].has ||
+    platform = erosion || mode == 4 || p[P_GLOWMASK].has || p[P_GRADIENT].has || p[P_NEARFADE].has || p[P_SOFTDISTANCE].has ||
                p[P_DEPTHOFFSET].has || p[P_FARFADE].has || (mode == 1 && (strength != 0.0f || lit != 1.0f));
     if (!platform) {
         /* the game's own shading: its program, and the brightness in the material's own key */
@@ -804,8 +809,10 @@ static int lk_particle(lk_ctx *c, lk_doc *d, size_t first, char **out, size_t *o
             sb[1] = p[P_FARFADE].v.v[0];
             sb[2] = p[P_FARFADE].v.v[1];
         }
-        lk_key(&gen, eol, "stageprogram", (p[P_FARFADE].has || sb[3] != 0)
-               ? "\"" SH_MODPROG_EP_EXT_PREFIX "uberparticles\"" : "\"" SH_MODPROG_EP_PREFIX "uberparticles\"");
+        const char *program = "\"" SH_MODPROG_EP_PREFIX "uberparticles\"";
+        if (p[P_FARFADE].has || sb[3] != 0) program = "\"" SH_MODPROG_EP_EXT_PREFIX "uberparticles\"";
+        if (erosion) program = "\"" SH_MODPROG_EP_EROSION_PREFIX "uberparticles\"";
+        lk_key(&gen, eol, "stageprogram", program);
         lk_key_vec(&gen, eol, "particleuberparms1", u1);
         lk_key_vec(&gen, eol, "particleuberparms2", u2);
         lk_key_vec(&gen, eol, "particleuberparms3", u3);

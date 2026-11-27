@@ -1888,7 +1888,9 @@ the carrier, that inherits the model the clip plays on
 (`init { inherit "player/mp/tp_body_mp.md6" }`) and lists the rows in its
 `events { anim "<clip>" { event ... } }` blocks, and names it in the author
 key `"animation_events": ["meshes/.../rows.md6"]` (the carrier's name in the mod folder, `meshes/.../rows.md6.decl`). The engine parses
-the carrier with its own md6Def parser, so every event type is available with
+the carrier with its own md6Def parser. A placed object's slice includes the
+rumble declarations its animation events reference and the tables driving
+their low, high and trigger motors. Every event type is available with
 its own argument types; the product never builds an event.
 
 The build (`sh_ce_build_registry`, registered with the builder through
@@ -2872,6 +2874,11 @@ is touched, and a removed demon answers nil.
   `Shared_SocialRelationAvailable`'s `filterOutOffLimits` drops; the call
   checks the getter it finds in the vtable is that instruction before it reads
   the byte, and answers nil for anything that is no actor.
+  `twitch_response(rows)` scales an owned demon's additive hit reaction on the existing
+  native damage callback. A row is `{damageLimit, multiplier}` or `{damageName, multiplier}`.
+  A matching name wins, followed by the first inclusive damage limit, then the original
+  weight. The pain animator samples its per-actor weight when it accepts a twitch.
+  Empty rows restore the original weight. The engine selects the clip and runs its blend.
   `wound_damage_counts(on)` gives a demon DOOM Eternal's wound counter. The
   game opens a living demon's wound from `idGoreComponent::DamageActivatesWound`
   (VK 0x1408FC8E0, GL 0x1408FB910), asked per queued hit record, per damage
@@ -2973,6 +2980,10 @@ is touched, and a removed demon answers nil.
   when exactly one bound enemy in the mod supplies it. The behavior must belong
   to the same mod. Actors with a namespaced entityDef keep their named dispatch,
   and ordinary `on.spawn` and other entityDef callbacks keep their original scope.
+  A brain can implement `suspend(self, reason)` to discard pending actions and
+  cached facing when native Follow Path takes control (`reason == "path"`).
+  The SDK calls it once per handoff. When the path ends, the next `think`
+  samples a fresh position and keeps the encounter's defend position.
 - **The Enemy SDK's target rule.** `enemy_target` is DOOM 2016's
   `Shared_SocialRelationAvailable` on `relations()`: the condition's respect,
   emotion and awareness bands (by name; its constructor's defaults, VK
@@ -3065,7 +3076,16 @@ is touched, and a removed demon answers nil.
   that players and demons do not stop (the asking demon first among them); `force_animation_via(dest, via, [blend])` forces
   `via` (`ssaction_ForceAnimState`) and, when the observer sees the web leave
   it, asks for `dest` (`ssaction_ChangeAnimState`) from the per-frame step;
-  `path_points(pos)` is the path query's computed path, read by a detour of
+  `clear_walk_line(target)` checks the same ground and world line to a point or
+  an actor's feet. Other actors along the segment do not obstruct it.
+  `ai:reset_motion_correction()` clears accumulated animation translation and
+  rotation correction using the demon's current native pose. It returns false
+  if the demon or its animation controller is gone.
+  `ai:on_ground()` reads ground contact from the demon's current AI physics. It returns
+  true on support, false in the air, and nil while a different body controls the entity.
+  `path_points(pos, true)` returns the waypoints and measured length together when the
+  pending navigation query completes. `path_points(pos)` returns the waypoints alone.
+  The computed path is read by a detour of
   the path length the query calls with it (VK 0x14050EA60 / GL 0x14050D790,
   14-byte window, segments at +0x90), every point of it (the engine's segment
   count, copied whole); `firing_position(parms)` (kinds any, new,
@@ -3299,8 +3319,11 @@ damage comes from the world entity, as a trigger's does.
   projectile, caught by the launch hook; a position target is reached by
   steering; the event takes a joint and launches from the demon's origin for
   any other name (VK 0x14076E780), so for a tag the launch hook gives
-  `idProjectile::Launch` the tag's place and the axis toward the target: the
+  `idProjectile::Launch` the tag's place and the axis toward the entity's
+  world-space bounds center, the game's body aim point, or the supplied position. The
   projectile, its launch effects and its trail start on the tag);
+  Both calls can also take a world position for the launch origin. A spawn
+  effect and its projectile then start at that position together.
   `ai:launch(projectile, tag or joint, velocity)` (the same launch, its axis
   along the velocity, then `setLinearVelocity` with exactly that velocity in
   units per second: a script that solved an arc throws along it);
@@ -3323,6 +3346,13 @@ damage comes from the world entity, as a trigger's does.
   `p:position` answer nil and `p:alive` false, as every call on a removed entity
   does, and the mod runs on. `ai:fire` parks the demon first
   (`sh_script_ai_park`), as a move does.
+- **Credited hits.** Register `on.hit(name, fn(self, victim, hit))` or the Enemy SDK's
+  `brain.hit(self, victim, hit)` to hear damage the engine credits to this actor,
+  including against a stock player or another mod's actor. The callback receives
+  the applied damage amount and the same available details as the victim's damage
+  callback. Player hits use the health and armor actually lost in that damage
+  call and carry its inflictor, damage declaration, and direction when supplied.
+  The actor is `hit.attacker`. A victim reference retains its normal ownership.
 - **Events.** `on.damage(name, fn(self, hit))` with `hit.amount` (what the
   engine applied), `hit.attacker`, `hit.inflictor`, `hit.damage` (the decl),
   `hit.location` (the damage zone of the first hit) and `hit.direction`;

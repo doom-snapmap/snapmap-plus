@@ -14,6 +14,73 @@ static int close3(const float a[3], const float b[3])
     return fabsf(a[0]-b[0]) < .0015f && fabsf(a[1]-b[1]) < .0015f && fabsf(a[2]-b[2]) < .0015f;
 }
 
+static __declspec(align(8)) char model[0xeb0], beams[2 * 0x3a28], nodes[2 * 0x74];
+static int produce;
+
+static void draw(void *instance, int time, void *target, const float *a, const float *b)
+{
+    render_list *list = (render_list *)(model + 0xe90);
+    render_list *fresh = (render_list *)(beams + 0x3a28);
+    (void)instance; (void)time; (void)a; (void)b;
+    CHECK(target == model);
+    if (!produce) return;
+    ++list->count;
+    fresh->data = nodes;
+    fresh->count = fresh->capacity = 2;
+    *(float *)(nodes + 0x4c) = 4;
+    *(float *)(nodes + 0x74 + 0x4c) = 8;
+}
+
+static void widths(void)
+{
+    __declspec(align(8)) char decl[0x120] = {0}, instance[0x50] = {0};
+    __declspec(align(8)) char earlier_node[0x74] = {0};
+    const char *name = "mods/gxrib005/width";
+    render_list *list = (render_list *)(model + 0xe90);
+    sh_ribbon_noise *p = (sh_ribbon_noise *)(decl + 0xf4);
+    *(const char **)(decl + 8) = name;
+    *(void **)(instance + 0x48) = decl;
+    *(int *)(instance + 0x10) = 4000;
+    p->marker = SH_RIBBON_WIDTH_ENVELOPE;
+    p->magic[1] = 1000;
+    p->magic[3] = 1.5f;
+    original_draw = draw;
+    produce = 1;
+    list->data = beams;
+    list->capacity = 2;
+    render_list *earlier = (render_list *)beams;
+    earlier->data = earlier_node;
+    earlier->count = earlier->capacity = 1;
+    *(float *)(earlier_node + 0x4c) = 3;
+    const int times[] = {4000, 4250, 4500, 5000, 6000};
+    const float factors[] = {0, .375f, .75f, 1.5f, 1.5f};
+    for (int i = 0; i < 5; ++i) {
+        list->count = 1;
+        ribbon_draw(instance, times[i], model, NULL, NULL);
+        CHECK(*(float *)(nodes + 0x4c) == 4 * factors[i]);
+        CHECK(*(float *)(nodes + 0x74 + 0x4c) == 8 * factors[i]);
+        CHECK(*(float *)(earlier_node + 0x4c) == 3);
+    }
+    produce = 0;
+    list->count = 1;
+    ribbon_draw(instance, 4000, model, NULL, NULL);
+    CHECK(*(float *)(nodes + 0x4c) == 6);
+    produce = 1;
+    *(const char **)(decl + 8) = "ribbon/stock";
+    ribbon_draw(instance, 4000, model, NULL, NULL);
+    CHECK(*(float *)(nodes + 0x4c) == 4);
+    list->count = 1;
+    *(const char **)(decl + 8) = name;
+    p->marker = 0;
+    ribbon_draw(instance, 4000, model, NULL, NULL);
+    CHECK(*(float *)(nodes + 0x4c) == 4);
+    list->count = 1;
+    p->marker = SH_RIBBON_WIDTH_ENVELOPE;
+    p->magic[3] = NAN;
+    ribbon_draw(instance, 4000, model, NULL, NULL);
+    CHECK(*(float *)(nodes + 0x4c) == 4);
+}
+
 static void observed(void *ribbon, int time, const float *a, const float *b, const float *axis,
                      const float *speed, const float *colour)
 {
@@ -88,6 +155,7 @@ int main(void)
     memcpy(decl + 0xf4, &m, sizeof m);
     ribbon_birth(instance, 375, centre, centre, NULL, moving, NULL);
     CHECK(called == 5 && original_args);
+    widths();
     puts(failures ? "ribbonmotion_test: FAIL" : "ribbonmotion_test: PASS");
     return failures != 0;
 }

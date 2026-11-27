@@ -1407,6 +1407,7 @@ static void test_real(const char *doom)
     test_real_recolourable();
     test_real_ep(SH_MODPROG_EP_PREFIX);
     test_real_ep(SH_MODPROG_EP_EXT_PREFIX);
+    test_real_ep(SH_MODPROG_EP_EROSION_PREFIX);
     s.files = 0;
     sh_modstock_list("generated/renderprogs/permutations/" SH_MODPROG_EP_PREFIX, count, &s);
     CHECK(s.files == 2);

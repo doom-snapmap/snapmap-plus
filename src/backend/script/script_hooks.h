@@ -176,6 +176,17 @@ void sh_script_hooks_test_play(int on);
 /* Game frames the tick has run scripts in this map. */
 uint32_t sh_script_hooks_frame(void);
 
+/* Send one captured damage notification to the victim's and credited attacker's respective owners. */
+void sh_script_hooks_queue_damage(int victim_mod, int source_mod, const sh_script_event *damage, const char *decl);
+
+/* A nested hit on the same player accounts for its own health and armor loss. */
+typedef struct sh_script_player_hit {
+    void *player;
+    float before, nested;
+    struct sh_script_player_hit *outer;
+} sh_script_player_hit;
+float sh_script_player_hit_loss(const sh_script_player_hit *hit, float after);
+
 #ifdef __cplusplus
 }
 #endif

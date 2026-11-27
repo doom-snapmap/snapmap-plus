@@ -1461,24 +1461,24 @@ static void standin_pins(void)
     standin_pins_pinned();
 }
 
-static int sound_open = 1, pin_calls;
+static int sound_open = 1, bank_queries;
+static long observed_revision;
 int sh_modserve_scope_map_open(void) { return sound_open; }
 
 static const char sound_a[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 static const char sound_b[] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-char *sh_cache_manifest(const char *hash, size_t *len)
+long sh_modpin_asked_revision(void) { return observed_revision; }
+int sh_modpin_object_banks(const sh_modmanifest_row *r, const char *build, sh_modpin_bank_fn visit, void *context)
 {
-    const char *json = !strcmp(hash, sound_a) ? "{\"files\":[{\"path\":\"sounds/a.bnk\"},{\"path\":\"sounds/common.bnk\"}]}" :
-                                               "{\"files\":[{\"path\":\"sounds/b.bnk\"},{\"path\":\"sounds/common.bnk\"}]}";
-    *len = strlen(json);
-    return _strdup(json);
-}
-int sh_modpin_row(sh_modmanifest_row *r, const char *json, size_t len, const char *dir, sh_modpin_row_result *why)
-{
-    const char *hashes[] = {sound_a, sound_b};
-    (void)json; (void)len; (void)dir; (void)why;
-    pin_calls++;
-    return sh_modmanifest_row_pin(r, (const char *const *)r->names, hashes, r->name_count) ? SH_MODPIN_PINNED : -1;
+    bank_queries++;
+    if (strcmp(build, sound_a)) return 0;
+    for (size_t i = 0; i < r->name_count; ++i) {
+        if (!strcmp(r->names[i], "entities/a")) visit(context, "sounds/a.bnk");
+        else if (!strcmp(r->names[i], "entities/b")) visit(context, "sounds/b.bnk");
+        else return 0;
+        visit(context, "sounds/common.bnk");
+    }
+    return 1;
 }
 
 static void sound_scope(void)
@@ -1508,19 +1508,25 @@ static void sound_scope(void)
     CHECK(!banks[0].wanted && !banks[1].wanted);
     CHECK(sh_modsound_note_rows(&wanted));
     sh_modsound_select_banks(&t);
-    CHECK(banks[0].wanted && banks[1].wanted && !banks[2].wanted && !banks[3].wanted && pin_calls == 1);
+    CHECK(banks[0].wanted && banks[1].wanted && !banks[2].wanted && !banks[3].wanted && bank_queries == 1);
     CHECK(!sh_modsound_note_rows(&wanted));
     sh_modsound_select_banks(&t);
-    CHECK(pin_calls == 1);
+    CHECK(bank_queries == 1);
+    ++observed_revision;
+    sh_modsound_select_banks(&t);
+    CHECK(bank_queries == 2 && !banks[2].wanted);
     row.name_count = 2;
     CHECK(sh_modsound_note_rows(&wanted)); sh_modsound_select_banks(&t);
     CHECK(banks[0].wanted && banks[1].wanted && banks[2].wanted && !banks[3].wanted);
     row.attached = 1;
     CHECK(sh_modsound_note_rows(&wanted)); sh_modsound_select_banks(&t);
-    CHECK(banks[0].wanted && banks[1].wanted && banks[2].wanted && !banks[3].wanted && pin_calls == 2);
+    CHECK(banks[0].wanted && banks[1].wanted && banks[2].wanted && !banks[3].wanted && bank_queries == 3);
     row.attached = 0; row.pinned = 1;
     CHECK(sh_modsound_note_rows(&wanted)); sh_modsound_select_banks(&t);
-    CHECK(banks[0].wanted && banks[1].wanted && banks[2].wanted && !banks[3].wanted && pin_calls == 2);
+    CHECK(banks[0].wanted && banks[1].wanted && banks[2].wanted && !banks[3].wanted && bank_queries == 3);
+    row.pinned = 0; row.name_count = 1; names[0] = "entities/missing";
+    CHECK(sh_modsound_note_rows(&wanted)); sh_modsound_select_banks(&t);
+    CHECK(banks[0].wanted && banks[1].wanted && banks[2].wanted && !banks[3].wanted && bank_queries == 4);
     sound_open = 0; sh_modsound_select_banks(&t);
     CHECK(!banks[0].wanted && !banks[1].wanted && !banks[2].wanted && !banks[3].wanted);
     sh_modsound_note_rows(NULL);

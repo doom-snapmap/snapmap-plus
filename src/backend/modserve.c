@@ -60,6 +60,7 @@ typedef struct ms_file {
     const char *path;                     /* its path in the mod folder, as the author names it (modauthor.h) */
     uint64_t size;
     const char *ptype, *pname, *reg;
+    char *volatile disk_parent;           /* NULL until read, an empty string for no parent */
     int is_decl, is_shadow, is_sedef, rank;
     int is_restore;                       /* a stock pointer restoring installed content under its own name */
     int product;                          /* such a pointer to a decl the product derives (ms_product_request) */
@@ -70,6 +71,7 @@ typedef struct ms_file {
     const char *stock;                    /* a stock pointer's installed source (blob is its SHA-256), or NULL */
     volatile LONG opens, fail_logged, shadow_logged;
     volatile LONG reg_state;              /* 0 none, 1 ready, -1 failed (main thread) */
+    LONG palette_checked;                 /* last native palette in which this row was checked */
     volatile LONG plan_seen;              /* a plan run settled it ready (registered, or left to the game) */
     volatile LONG withdrawn;              /* 1 unavailable, 2 stock, 3 a placed encounter's stand-in */
     int encounter_need;                   /* one plus the encounter or single demon this file uses */
@@ -248,6 +250,8 @@ typedef struct ms_index {
 static int ms_prepare_holds(ms_index *x);
 
 static ms_index *volatile g_index;
+static volatile LONG g_row_revision;
+static LONG g_palette_pass = 1;
 /* What holds a table besides the main thread's own calls
  * (sh_modserve_index_retire): provider calls in flight on any thread, and
  * plans, whose steps name a table's strings. */
@@ -360,13 +364,18 @@ static char *ms_strndup(ms_index *x, const char *s, size_t n)
 
 static char *ms_strdup(ms_index *x, const char *s) { return ms_strndup(x, s, strlen(s)); }
 
+static char ms_no_parent[] = "";
+
 static void ms_index_free(ms_index *x)
 {
     ms_chunk *c, *n;
     if (!x) return;
     int i;
     for (c = x->arena; c; c = n) { n = c->next; free(c); }
-    for (i = 0; x->files && i < x->nfiles; i++) free(x->files[i].look);
+    for (i = 0; x->files && i < x->nfiles; i++) {
+        free(x->files[i].look);
+        if (x->files[i].disk_parent != ms_no_parent) free(x->files[i].disk_parent);
+    }
     for (i = 0; i < x->nneeds; ++i) free(x->needs[i].blocked);
     for (i = 0; x->bundles && i < x->nbundles + (x->reg_made ? 1 : 0); i++) {
         free(x->bundles[i].cause);
@@ -998,6 +1007,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     ms_json c;
     const char *v, *ve, *files_v = NULL, *files_e = NULL, *stock_v = NULL, *stock_e = NULL, *req_v = NULL, *req_e = NULL;
     const char *block_v = NULL, *block_e = NULL, *shadows_v = NULL, *shadows_e = NULL, *retired = NULL;
+    const char *editor_member = NULL, *editor_end = NULL;
     char **shadows = NULL, *salt = NULL, *name = NULL, *state_cause = NULL;
     int nshadows = 0, cshadows = 0, i, k, members = 0, block_object = 0, script_node = 0;
     double format = -1, manifest_format = -1, built = 0;
@@ -1041,6 +1051,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         else if (!strcmp(key, "requirements")) { req_v = v; req_e = ve; }
         else if (!strcmp(key, SH_MB_BLOCK_KEY)) { block_v = v; block_e = ve; }
         else if (!strcmp(key, "author") || !strcmp(key, "homepage")) continue;
+        else if (!strcmp(key, "editor")) { editor_member = ks; editor_end = ve; }
         else {
             /* Everything else is the author's, kept for the readers of
              * "extra" (strids.c, modhud.c, companions, scenes). */
@@ -1116,19 +1127,29 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     }
     if (manifest && (!manifest_salt || !salt || strcmp(salt, manifest_salt) || manifest_format != SH_MB_FORMAT))
         ms_fail(b, "The mod's build data does not match this mod. Press Refresh to build it again.");
+    salt = ms_trim(salt);
+    b->id = salt;
+    if (members && !extra.oom && salt && sh_salt_valid(salt, strlen(salt))) {
+        size_t en = 0;
+        ms_text_put(&extra, "}", 1);
+        if (!extra.oom) {
+            char *engine = sh_ma_json(salt, extra.p, extra.n, sh_strkey_is_edit, &en);
+            if (engine) { free(extra.p); extra.p = engine; extra.n = en; extra.cap = en + 1; }
+            else if (en == (size_t)-1) extra.oom = 1;
+            extra.n--;
+        }
+    }
+    /* Editor IDs are literal even when they begin with an asset folder such as "materials/". */
+    if (editor_member) {
+        ms_text_put(&extra, members++ ? "," : "{", 1);
+        ms_text_put(&extra, editor_member, (size_t)(editor_end - editor_member));
+    }
     if (members) {
         ms_text_put(&extra, "}", 1);
         if (!extra.oom) b->extra = ms_strndup(x, extra.p, extra.n);
+        if (!b->extra) ms_fail(b, "out of memory");
     }
     free(extra.p);
-    salt = ms_trim(salt);
-    b->id = salt;
-    if (b->extra && salt && sh_salt_valid(salt, strlen(salt))) {
-        /* the author's part as the engine names it (modauthor.h), as the build read it */
-        size_t en = 0;
-        char *engine = sh_ma_json(salt, b->extra, strlen(b->extra), sh_strkey_is_edit, &en);
-        if (engine) { b->extra = ms_strndup(x, engine, en); free(engine); }
-    }
     b->name = ms_trim(name);
     b->installed_at = built;
     /* The shape check follows the order of the builder's sh_mb_descriptor_state_why; an unsupported shape gets
@@ -4702,16 +4723,19 @@ next:   ;
     return out;
 }
 
-int sh_modserve_bank_patch_id(unsigned char *bytes, size_t len, const char *stem)
+/* A v113 Play action ends with its bank ID after two property lists and the fade curve. */
+static unsigned char *ms_play_action_bank(unsigned char *obj, uint32_t len)
 {
-    uint32_t id;
-    if (!bytes || len < 16 || memcmp(bytes, "BKHD", 4) || !stem) return 0;
-    id = sh_mb_fnv1_lower(stem, strlen(stem));
-    memcpy(bytes + 12, &id, 4);
-    return 1;
+    size_t at;
+    if (len < 18 || obj[5] != 4) return NULL;
+    at = 12 + (size_t)obj[11] * 5;
+    if (at >= len) return NULL;
+    at += 1 + (size_t)obj[at] * 9;
+    return at + 5 == len ? obj + at + 1 : NULL;
 }
 
-int sh_modserve_bank_events(unsigned char *bytes, size_t len, const uint32_t *from, const uint32_t *to, size_t count)
+static int ms_bank_ids(unsigned char *bytes, size_t len, int actions,
+                       const uint32_t *from, const uint32_t *to, size_t count)
 {
     size_t at = 0;
     int changed = 0;
@@ -4727,13 +4751,16 @@ int sh_modserve_bank_events(unsigned char *bytes, size_t len, const uint32_t *fr
             memcpy(&n, bytes + at + 8, 4);
             for (i = 0; i < n && o + 5 <= end; ++i) {
                 uint32_t body, id;
+                unsigned char *field = NULL;
                 size_t k;
                 memcpy(&body, bytes + o + 1, 4);
                 if (body > end - o - 5) break;
-                if (bytes[o] == 4 && body >= 4) {      /* an Event: its id is the FNV-1 of its name */
-                    memcpy(&id, bytes + o + 5, 4);
+                if (actions && bytes[o] == 3) field = ms_play_action_bank(bytes + o + 5, body);
+                if (!actions && bytes[o] == 4 && body >= 4) field = bytes + o + 5;
+                if (field) {
+                    memcpy(&id, field, 4);
                     for (k = 0; k < count; ++k)
-                        if (from[k] == id) { memcpy(bytes + o + 5, &to[k], 4); changed++; break; }
+                        if (from[k] == id) { memcpy(field, &to[k], 4); changed++; break; }
                 }
                 o += 5 + (size_t)body;
             }
@@ -4741,6 +4768,23 @@ int sh_modserve_bank_events(unsigned char *bytes, size_t len, const uint32_t *fr
         at += 8 + (size_t)size;
     }
     return changed;
+}
+
+int sh_modserve_bank_patch_id(unsigned char *bytes, size_t len, const char *stem)
+{
+    uint32_t old, id, version;
+    if (!bytes || len < 16 || memcmp(bytes, "BKHD", 4) || !stem) return 0;
+    memcpy(&version, bytes + 8, 4);
+    memcpy(&old, bytes + 12, 4);
+    id = sh_mb_fnv1_lower(stem, strlen(stem));
+    if (version == 113 && old && old != id) ms_bank_ids(bytes, len, 1, &old, &id, 1);
+    memcpy(bytes + 12, &id, 4);
+    return 1;
+}
+
+int sh_modserve_bank_events(unsigned char *bytes, size_t len, const uint32_t *from, const uint32_t *to, size_t count)
+{
+    return ms_bank_ids(bytes, len, 0, from, to, count);
 }
 
 /* The bank event ids of bundle `b`'s own sound decls, as the author's bank holds them and as the engine posts them:
@@ -4899,6 +4943,17 @@ int sh_modserve_served_prune(void)
  * hash (ONE-SHAPE rule 4: no folder is named by a build): a bank as
  * banks\<renamed stem>.bnk (its stem already carries the bank's hash), any
  * other file as files\<sha16>.<extension>. Size and blob follow. */
+static char *ms_top_inherit(const unsigned char *text, size_t length);
+
+static void ms_record_parent(ms_file *f, const unsigned char *bytes, size_t len)
+{
+    char *parent;
+    if (!f->is_decl) return;
+    parent = ms_top_inherit(bytes, len);
+    if (f->disk_parent != ms_no_parent) free(f->disk_parent);
+    f->disk_parent = parent ? parent : ms_no_parent;
+}
+
 static int ms_serve_rewritten(ms_index *x, ms_file *f, const unsigned char *bytes, size_t len, const char *bank_stem)
 {
     char *path, blob[SH_MB_HASH_HEX + 1], *p;
@@ -4913,6 +4968,7 @@ static int ms_serve_rewritten(ms_index *x, ms_file *f, const unsigned char *byte
     free(path);
     f->blob = ms_strdup(x, blob);
     f->size = (uint64_t)len;
+    ms_record_parent(f, bytes, len);
     return f->disk && f->blob;
 }
 
@@ -5048,6 +5104,7 @@ static int ms_engine_names(ms_index *x)
             if (!b->place && f->is_sedef && !strncmp(f->pname, ns, sizeof ns - 1) &&
                 !ms_capture_caption(x, f, catalogs, (const char *)bytes, len)) ok = 0;
             text = sh_ma_text(b->id, (const char *)bytes, len, sh_ma_keys_has, &keys, &tl);
+            ms_record_parent(f, bytes, len);
             HeapFree(GetProcessHeap(), 0, bytes);
             if (!text) continue;
             if (ms_serve_rewritten(x, f, (const unsigned char *)text, tl, NULL)) changed++;
@@ -5323,6 +5380,8 @@ int sh_modserve_index_build(const char *mods_root)
     /* Publish the complete table; the old one stays while a reader may hold
      * it, and sh_modserve_index_retire frees it two tables later. */
     InterlockedExchangePointer((void *volatile *)&g_index, x);
+    if (!old || x->diff.added_rows || x->diff.changed_rows || x->diff.gone_rows)
+        InterlockedIncrement(&g_row_revision);
     ReleaseSRWLockExclusive(&g_build_lock);
     ms_log("index built in %.1f ms (%d bundles, %d files)%s%s", x->build_ms, x->admitted, x->served_files,
            x->nbundles > x->admitted ? "; skipped bundles are listed above" : "",
@@ -6322,8 +6381,33 @@ static int ms_plannable(const ms_index *x, const ms_file *f)
     return f->is_decl && !f->edit && (!ms_surface(f) || ms_product_planned(f)) && !f->is_shadow;
 }
 
-static char *ms_top_inherit(const unsigned char *text, size_t length);
 static unsigned char *ms_file_bytes(const ms_file *f, size_t *len);
+#ifdef SH_MODSERVE_TESTING
+static unsigned g_parent_reads;
+unsigned sh_modserve_test_parent_reads(void) { return g_parent_reads; }
+#endif
+
+/* A composition owns its inheritance. Ordinary files already had their engine spelling read by the index. */
+static const char *ms_decl_parent(const ms_file *f, char **temporary)
+{
+    size_t len = 0;
+    const unsigned char *served = ms_body_of(f, &len);
+    if (served) return *temporary = ms_top_inherit(served, len);
+    PVOID volatile *slot = (PVOID volatile *)&f->disk_parent;
+    char *parent = InterlockedCompareExchangePointer(slot, NULL, NULL);
+    if (parent) return *parent ? parent : NULL;
+#ifdef SH_MODSERVE_TESTING
+    ++g_parent_reads;
+#endif
+    unsigned char *text = ms_file_raw(f, &len);
+    if (!text) return NULL;
+    char *read = ms_top_inherit(text, len);
+    HeapFree(GetProcessHeap(), 0, text);
+    parent = InterlockedCompareExchangePointer(slot, read ? read : ms_no_parent, NULL);
+    if (!parent) return read;
+    free(read);
+    return *parent ? parent : NULL;
+}
 
 /* Register a supplied campaign parent before the engine parses its child. */
 static int ms_campaign_parent(const ms_file *child, const ms_file *candidate, char **parent, int *read)
@@ -6332,13 +6416,10 @@ static int ms_campaign_parent(const ms_file *child, const ms_file *candidate, ch
     if (!candidate->is_restore || !candidate->is_decl || candidate->is_shadow || candidate->edit ||
         !child->ptype || !candidate->ptype || !candidate->pname || _stricmp(child->ptype, candidate->ptype)) return 0;
     if (!*read) {
-        size_t length;
-        unsigned char *text = ms_file_bytes(child, &length);
+        char *temporary = NULL;
+        const char *name = ms_decl_parent(child, &temporary);
         *read = 1;
-        if (text) {
-            *parent = ms_top_inherit(text, length);
-            HeapFree(GetProcessHeap(), 0, text);
-        }
+        *parent = temporary ? temporary : name ? _strdup(name) : NULL;
     }
     return *parent && !_stricmp(*parent, candidate->pname) &&
            sh_mb_stock_container(candidate->stock, NULL, container, sizeof container) &&
@@ -6610,23 +6691,34 @@ int sh_modserve_plan_bundles(const char *const *bundle_hashes, int n, sh_modserv
     return r;
 }
 
-/* The editor rows of the bundles a map names, checked against the built palette at load. A row is missing when
- * the palette lacks it and no editor pass has visited it (reg_state 0): a registered row still absent was
- * rejected by the builder's admission. Bundles are selected as in sh_modserve_plan_bundles. */
+LONG sh_modserve_row_revision(void)
+{
+    return InterlockedCompareExchange(&g_row_revision, 0, 0);
+}
+
+void sh_modserve_palette_rebuilt(void)
+{
+    ++g_palette_pass;
+}
+
+/* The map validator uses the built palette. A launch can register a declaration without adding its row. */
 int sh_modserve_map_rows_sync(const char *const *bundle_hashes, int n, const sh_modserve_palette_ops *ops,
                               sh_modserve_rows_sync *out)
 {
-    const ms_index *x = g_index;
-    unsigned char *cand;
+    const ms_index *x;
+    unsigned char *cand = NULL;
     int i, k, r = 0;
     sh_modserve_rows_sync res;
     memset(&res, 0, sizeof res);
     res.rows_before = res.rows_after = -1;
     if (out) *out = res;
-    if (n <= 0 || !bundle_hashes || !x || !x->nfiles) return 0;
+    if (n <= 0 || !bundle_hashes) return 0;
     if (!ops || !ops->palette_ready || !ops->in_palette || !ops->rebuild) return -1;
+    InterlockedIncrement(&g_readers);
+    x = g_index;
+    if (!x || !x->nfiles) goto done;
     cand = (unsigned char *)calloc((size_t)x->nfiles + 1, 1);
-    if (!cand) return -1;
+    if (!cand) { r = -1; goto done; }
     for (i = 0; i < n; ++i) {
         int b = ms_bundle_by_hash(x, bundle_hashes[i], 1);
         if (b < 0) continue;
@@ -6646,7 +6738,13 @@ int sh_modserve_map_rows_sync(const char *const *bundle_hashes, int n, const sh_
     if (!res.rows || ops->palette_ready(ops->context) != 1) goto done;
     for (i = 0; i < x->nfiles; ++i) {
         if (!cand[i]) continue;
-        if (x->files[i].reg_state != 0 || ops->in_palette(ops->context, x->files[i].pname) == 1) { cand[i] = 0; continue; }
+        ms_file *f = &x->files[i];
+        if (f->reg_state < 0 || f->palette_checked == g_palette_pass) { cand[i] = 0; continue; }
+        if (ops->in_palette(ops->context, f->pname) == 1) {
+            f->palette_checked = g_palette_pass;
+            cand[i] = 0;
+            continue;
+        }
         cand[i] = 2;
         res.missing++;
     }
@@ -6658,11 +6756,15 @@ int sh_modserve_map_rows_sync(const char *const *bundle_hashes, int n, const sh_
     if (res.rebuild == 1)
         for (i = 0; i < x->nfiles; ++i) {
             if (cand[i] != 2) continue;
-            if (x->files[i].reg_state == 1) res.registered++;
+            if (x->files[i].reg_state == 1) {
+                res.registered++;
+                x->files[i].palette_checked = g_palette_pass;
+            }
             if (ops->in_palette(ops->context, x->files[i].pname) == 1) res.admitted++;
         }
 done:
     free(cand);
+    InterlockedDecrement(&g_readers);
     if (out) *out = res;
     return r;
 }
@@ -6889,8 +6991,9 @@ static CRITICAL_SECTION *ms_res_lock(void)
     return cs;
 }
 
-static int ms_res_walk_filtered(const void *head_slot, ms_res_fn fn, void *context, unsigned *lists,
-                                sh_modserve_list_filter include, void *filter_context)
+typedef int (*ms_list_fn)(void *context, const unsigned char *list, unsigned char *const *entries, size_t count);
+
+static int ms_list_walk(const void *head_slot, ms_list_fn fn, void *context, unsigned *lists)
 {
     int ok = 0;
     unsigned nl = 0;
@@ -6904,12 +7007,11 @@ static int ms_res_walk_filtered(const void *head_slot, ms_res_fn fn, void *conte
         size_t total = 0;
         for (; l && nl < MS_RL_MAX_LISTS; l = *(const unsigned char *const *)(l + MS_RL_NEXT), nl++) {
             unsigned char *const *entries = *(unsigned char *const *const *)(l + MS_RL_ENTRIES);
-            int count = *(const int *)(l + MS_RL_COUNT), i;
+            int count = *(const int *)(l + MS_RL_COUNT);
             if (count < 0 || count > MS_RL_MAX_ENTRIES || (count && !entries)) break;
             total += (size_t)count;
             if (total > MS_RL_MAX_ENTRIES) break;
-            if (include && !include(*(const char *const *)(l + MS_RL_NAME), filter_context)) continue;
-            for (i = 0; i < count; ++i) if (entries[i]) fn(context, l, entries[i]);
+            if (!fn(context, l, entries, (size_t)count)) break;
         }
         ok = !l;
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
@@ -6918,9 +7020,32 @@ static int ms_res_walk_filtered(const void *head_slot, ms_res_fn fn, void *conte
     return ok;
 }
 
+typedef struct ms_res_visit {
+    ms_res_fn fn;
+    void *context;
+    sh_modserve_list_filter include;
+    void *filter_context;
+    unsigned name_offset;
+} ms_res_visit;
+
+static int ms_visit_entries(void *context, const unsigned char *list, unsigned char *const *entries, size_t n)
+{
+    const ms_res_visit *v = context;
+    if (v->include && !v->include(*(const char *const *)(list + v->name_offset), v->filter_context)) return 1;
+    for (size_t i = 0; i < n; ++i) if (entries[i]) v->fn(v->context, list, entries[i]);
+    return 1;
+}
+
+static int ms_res_walk_filtered(const void *head_slot, ms_res_fn fn, void *context, unsigned *lists,
+                                sh_modserve_list_filter include, void *filter_context, unsigned name_offset)
+{
+    ms_res_visit visit = { fn, context, include, filter_context, name_offset };
+    return ms_list_walk(head_slot, ms_visit_entries, &visit, lists);
+}
+
 static int ms_res_walk(const void *head_slot, ms_res_fn fn, void *context, unsigned *lists)
 {
-    return ms_res_walk_filtered(head_slot, fn, context, lists, NULL, NULL);
+    return ms_res_walk_filtered(head_slot, fn, context, lists, NULL, NULL, MS_RL_NAME);
 }
 
 #define MS_KEPT_MAX  (1u << 20)
@@ -7055,31 +7180,53 @@ unsigned sh_modserve_left_to_map(char *names, size_t cap)
     return n;
 }
 
-typedef struct ms_take { ms_aset seen; int oom; } ms_take;
-static void ms_take_one(void *context, const unsigned char *list, unsigned char *res)
+typedef struct ms_mark_list { const unsigned char *list; size_t at, count; } ms_mark_list;
+typedef struct ms_mark {
+    ms_mark_list *lists;
+    size_t count, capacity, used;
+    ms_aset members;
+} ms_mark;
+
+static int ms_snapshot_list(void *context, const unsigned char *list, unsigned char *const *entries, size_t count)
 {
-    ms_take *t = (ms_take *)context;
-    (void)list;
-    if (!t->oom && ms_aset_add(&t->seen, (uintptr_t)res, MS_RL_MAX_ENTRIES) < 0) t->oom = 1;
+    sh_modserve_watermark *w = context;
+    ms_mark *m = w->snapshot;
+    if (!count) return 1;
+    if (m->count == m->capacity) {
+        size_t cap = m->capacity ? m->capacity * 2 : 32;
+        ms_mark_list *p = realloc(m->lists, cap * sizeof *p);
+        if (!p) return 0;
+        m->lists = p;
+        m->capacity = cap;
+    }
+    if (m->used + count > w->capacity) {
+        size_t cap = w->capacity * 2;
+        if (cap < m->used + count) cap = m->used + count;
+        uintptr_t *p = realloc(w->res, cap * sizeof *p);
+        if (!p) return 0;
+        w->res = p;
+        w->capacity = cap;
+    }
+    m->lists[m->count++] = (ms_mark_list){ list, m->used, count };
+    memcpy(w->res + m->used, entries, count * sizeof *entries);
+    m->used += count;
+    for (size_t i = 0; i < count; ++i) w->n += entries[i] != NULL;
+    return 1;
 }
 
 int sh_modserve_watermark_take(const void *head_slot, sh_modserve_watermark *w)
 {
-    ms_take t = {0};
     if (!w) return 0;
     memset(w, 0, sizeof *w);
-    w->ok = ms_res_walk(head_slot, ms_take_one, &t, NULL) && !t.oom;
-    w->res = t.seen.slot;
-    w->n = t.seen.n;
-    w->capacity = t.seen.cap;
+    w->snapshot = calloc(1, sizeof *w->snapshot);
+    w->ok = w->snapshot && ms_list_walk(head_slot, ms_snapshot_list, w, NULL);
     return w->ok;
 }
 
 typedef struct ms_raise_cls { const unsigned char *list; unsigned n; } ms_raise_cls;
-typedef struct ms_raise { const sh_modserve_watermark *w; sh_modserve_raised *out; ms_raise_cls cls[64]; int ncls; } ms_raise;
-static void ms_raise_one(void *context, const unsigned char *list, unsigned char *res)
+typedef struct ms_raise { const sh_modserve_watermark *w; sh_modserve_raised *out; ms_raise_cls cls[64]; int ncls; size_t next; } ms_raise;
+static void ms_raise_one(ms_raise *r, const unsigned char *list, unsigned char *res)
 {
-    ms_raise *r = (ms_raise *)context;
     int c;
     if (sh_modserve_watermark_has(r->w, res)) return;
     r->out->created++;
@@ -7089,6 +7236,29 @@ static void ms_raise_one(void *context, const unsigned char *list, unsigned char
     for (c = 0; c < r->ncls && r->cls[c].list != list; ++c) {}
     if (c == r->ncls && r->ncls < 64) { r->cls[c].list = list; r->cls[c].n = 0; r->ncls++; }
     if (c < r->ncls) r->cls[c].n++;
+}
+
+/* Unchanged slots prove the resource already existed. A changed slot still checks every list's original membership. */
+static int ms_raise_list(void *context, const unsigned char *list, unsigned char *const *entries, size_t count)
+{
+    ms_raise *r = context;
+    const ms_mark *m = r->w->snapshot;
+    const uintptr_t *before = NULL;
+    size_t common = 0, at = r->next;
+    if (!count) return 1;
+    if (at >= m->count || m->lists[at].list != list)
+        for (at = 0; at < m->count && m->lists[at].list != list; ++at) {}
+    if (at < m->count) {
+        const ms_mark_list *old = &m->lists[at];
+        r->next = at + 1;
+        before = r->w->res + old->at;
+        common = old->count < count ? old->count : count;
+        if (memcmp(entries, before, common * sizeof *entries))
+            for (size_t i = 0; i < common; ++i)
+                if (entries[i] && (uintptr_t)entries[i] != before[i]) ms_raise_one(r, list, entries[i]);
+    }
+    for (size_t i = common; i < count; ++i) if (entries[i]) ms_raise_one(r, list, entries[i]);
+    return 1;
 }
 
 int sh_modserve_watermark_raise(const void *head_slot, const sh_modserve_watermark *w, sh_modserve_raised *out)
@@ -7103,7 +7273,7 @@ int sh_modserve_watermark_raise(const void *head_slot, const sh_modserve_waterma
     memset(&r, 0, sizeof r);
     r.w = w;
     r.out = out;
-    ok = ms_res_walk(head_slot, ms_raise_one, &r, &out->lists);
+    ok = ms_list_walk(head_slot, ms_raise_list, &r, &out->lists);
     /* The classes, largest first, for the log. */
     for (i = 0; i < r.ncls; ++i)
         for (j = i + 1; j < r.ncls; ++j)
@@ -7151,7 +7321,7 @@ int sh_modserve_resource_each(const void *head_slot, sh_modserve_list_filter inc
     int ok;
     if (!fn) return 0;
     memset(&c, 0, sizeof c);
-    ok = ms_res_walk_filtered(head_slot, ms_each_res_one, &c, NULL, include, context) && !c.oom;
+    ok = ms_res_walk_filtered(head_slot, ms_each_res_one, &c, NULL, include, context, MS_RL_NAME) && !c.oom;
     __try {
         for (i = 0; i < c.n; ++i) fn(context, c.v[i].list, c.v[i].res, c.v[i].name);
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
@@ -7162,12 +7332,32 @@ int sh_modserve_resource_each(const void *head_slot, sh_modserve_list_filter inc
 int sh_modserve_watermark_has(const sh_modserve_watermark *w, const void *resource)
 {
     uintptr_t key = (uintptr_t)resource;
-    return key && w && w->ok && w->capacity && w->res[ms_aset_at(w->res, w->capacity, key)] == key;
+    if (!key || !w || !w->ok || !w->n) return 0;
+    ms_mark *m = w->snapshot;
+    if (!m->members.cap) {
+        size_t cap = 2;
+        while (cap < w->n * 2) cap *= 2;
+        uintptr_t *p = calloc(cap, sizeof *p);
+        if (!p) {
+            for (size_t i = 0; i < m->used; ++i) if (w->res[i] == key) return 1;
+            return 0;
+        }
+        for (size_t i = 0; i < m->used; ++i)
+            if (w->res[i]) p[ms_aset_at(p, cap, w->res[i])] = w->res[i];
+        m->members.slot = p;
+        m->members.cap = cap;
+    }
+    return ms_aset_has(&m->members, key);
 }
 
 void sh_modserve_watermark_free(sh_modserve_watermark *w)
 {
     if (!w) return;
+    if (w->snapshot) {
+        ms_aset_free(&w->snapshot->members);
+        free(w->snapshot->lists);
+        free(w->snapshot);
+    }
     free(w->res);
     memset(w, 0, sizeof *w);
 }
@@ -7612,15 +7802,50 @@ static int ms_pair_parent_cmp(const void *a, const void *b)
     return x < y ? -1 : x > y;
 }
 
-typedef struct ms_attrib_walk { ms_aset live, permanent; int oom; sh_modserve_attrib *out; } ms_attrib_walk;
+typedef struct ms_attrib_walk {
+    ms_aset tracked;
+    unsigned char *state;          /* per slot: absent, live, or live at level 4 */
+    sh_modserve_attrib *out;
+} ms_attrib_walk;
+
+static unsigned ms_attrib_state(const ms_attrib_walk *w, uintptr_t address)
+{
+    if (!address || !w->tracked.cap) return 0;
+    size_t at = ms_aset_at(w->tracked.slot, w->tracked.cap, address);
+    return w->tracked.slot[at] ? w->state[at] : 0;
+}
+
 static void ms_attrib_live_one(void *context, const unsigned char *list, unsigned char *res)
 {
     ms_attrib_walk *w = (ms_attrib_walk *)context;
     (void)list;
-    if (w->oom) return;
-    if (ms_aset_add(&w->live, (uintptr_t)res, MS_RL_MAX_ENTRIES) < 0) w->oom = 1;
-    else if (*(const unsigned *)(res + MS_RES_LEVEL) == 4 && ms_aset_add(&w->permanent, (uintptr_t)res, MS_RL_MAX_ENTRIES) < 0)
-        w->oom = 1;
+    if (!w->tracked.cap) return;
+    size_t at = ms_aset_at(w->tracked.slot, w->tracked.cap, (uintptr_t)res);
+    if (w->tracked.slot[at]) w->state[at] = *(const unsigned *)(res + MS_RES_LEVEL) == 4 ? 2 : 1;
+}
+
+static int ms_attrib_track(ms_attrib_walk *w, const ms_aset *from)
+{
+    for (size_t i = 0; i < from->cap; ++i)
+        if (ms_aset_add(&w->tracked, from->slot[i], MS_RL_MAX_ENTRIES) < 0) return 0;
+    return 1;
+}
+
+static int ms_attrib_prune(ms_aset *set, const ms_attrib_walk *w)
+{
+    size_t i = 0;
+    ms_aset retained = {0};
+    while (i < set->cap && (!set->slot[i] || ms_attrib_state(w, set->slot[i]))) ++i;
+    if (i == set->cap) return 1;
+    for (i = 0; i < set->cap; ++i) {
+        if (ms_attrib_state(w, set->slot[i]) && ms_aset_add(&retained, set->slot[i], MS_KEPT_MAX) < 0) {
+            ms_aset_free(&retained);
+            return 0;
+        }
+    }
+    ms_aset_free(set);
+    *set = retained;
+    return 1;
 }
 
 static void ms_attrib_raise_one(void *context, const unsigned char *list, unsigned char *res)
@@ -7641,7 +7866,6 @@ int sh_modserve_attrib_close(const void *head_slot, int forget, sh_modserve_attr
 {
     sh_modserve_attrib local;
     ms_attrib_walk w;
-    ms_aset kept;
     ms_pair *edges = NULL;
     uintptr_t *queue = NULL;
     size_t ne = 0, nq = 0, qcap = 0, i;
@@ -7649,34 +7873,32 @@ int sh_modserve_attrib_close(const void *head_slot, int forget, sh_modserve_attr
     if (!out) out = &local;
     memset(out, 0, sizeof *out);
     memset(&w, 0, sizeof w);
-    memset(&kept, 0, sizeof kept);
     w.out = out;
     out->pairs = (unsigned)g_pairs_n;
     out->raised_at_load = g_attrib_raised_at_load;
     out->overflow = g_attrib_full;
     g_attrib_raised_at_load = 0;
-    ok = ms_res_walk(head_slot, ms_attrib_live_one, &w, &out->lists) && !w.oom;
+    /* Only recorded addresses can participate in the closure. Validate their membership on every pass. */
+    ok = ms_attrib_track(&w, &g_kept) && ms_attrib_track(&w, &g_mapheap);
+    for (i = 0; ok && i < g_pairs_cap; ++i) {
+        if (!g_pairs[i].parent) continue;
+        ok = ms_aset_add(&w.tracked, g_pairs[i].parent, MS_RL_MAX_ENTRIES) >= 0 &&
+             ms_aset_add(&w.tracked, g_pairs[i].child, MS_RL_MAX_ENTRIES) >= 0;
+    }
+    if (!ok) goto done;
+    w.state = calloc(w.tracked.cap ? w.tracked.cap : 1, sizeof *w.state);
+    ok = w.state && ms_res_walk(head_slot, ms_attrib_live_one, &w, &out->lists);
     if (!ok) goto done;
     /* Only what a list still holds stays kept: an address the engine frees
      * and reuses must not inherit the keep. */
-    for (i = 0; i < g_kept.cap; ++i)
-        if (g_kept.slot[i] && ms_aset_has(&w.live, g_kept.slot[i]) && ms_aset_add(&kept, g_kept.slot[i], MS_KEPT_MAX) < 0)
-            { ok = 0; goto done; }
-    ms_aset_free(&g_kept);
-    g_kept = kept;
-    memset(&kept, 0, sizeof kept);
-    for (i = 0; i < g_mapheap.cap; ++i)
-        if (g_mapheap.slot[i] && ms_aset_has(&w.live, g_mapheap.slot[i]) && ms_aset_add(&kept, g_mapheap.slot[i], MS_KEPT_MAX) < 0)
-            { ok = 0; goto done; }
-    ms_aset_free(&g_mapheap);
-    g_mapheap = kept;
-    memset(&kept, 0, sizeof kept);
+    ok = ms_attrib_prune(&g_kept, &w) && ms_attrib_prune(&g_mapheap, &w);
+    if (!ok) goto done;
     /* Walk the live pairs from the kept parents. */
     if (g_pairs_n) {
         edges = (ms_pair *)malloc(g_pairs_n * sizeof *edges);
         if (!edges) { ok = 0; goto done; }
         for (i = 0; i < g_pairs_cap; ++i)
-            if (g_pairs[i].parent && ms_aset_has(&w.live, g_pairs[i].parent) && ms_aset_has(&w.live, g_pairs[i].child))
+            if (g_pairs[i].parent && ms_attrib_state(&w, g_pairs[i].parent) && ms_attrib_state(&w, g_pairs[i].child))
                 edges[ne++] = g_pairs[i];
         qsort(edges, ne, sizeof *edges, ms_pair_parent_cmp);
     }
@@ -7719,16 +7941,15 @@ int sh_modserve_attrib_close(const void *head_slot, int forget, sh_modserve_attr
     g_attrib_full = 0;
     if (!forget)
         for (i = 0; i < ne; ++i) {
-            if (ms_aset_has(&g_kept, edges[i].parent) || ms_aset_has(&w.permanent, edges[i].parent)) continue;
+            if (ms_aset_has(&g_kept, edges[i].parent) || ms_attrib_state(&w, edges[i].parent) == 2) continue;
             if (ms_pair_add(edges[i].parent, edges[i].child) < 0) { g_attrib_full = 1; break; }
         }
 done:
     out->kept = (unsigned)g_kept.n;
     free(edges);
     free(queue);
-    ms_aset_free(&w.live);
-    ms_aset_free(&w.permanent);
-    ms_aset_free(&kept);
+    ms_aset_free(&w.tracked);
+    free(w.state);
     return ok;
 }
 
@@ -7741,6 +7962,8 @@ typedef struct ms_hold {
     int file;              /* the file that describes it for the open map, or -1 */
     int live;              /* that file serves its path in the open map's scope */
     int rank;
+    uint32_t hash;
+    int bucket, next;
 } ms_hold;
 
 static char ms_hold_fold(char c)
@@ -7765,6 +7988,29 @@ static int ms_hold_cmp(const void *pa, const void *pb)
     return c ? c : ms_hold_name_cmp(a->name, b->name);
 }
 
+static uint32_t ms_hold_hash(const char *name)
+{
+    uint32_t hash = 0;
+    for (; *name; ++name) hash = hash * 31u + (unsigned char)ms_hold_fold(*name);
+    return hash ^ (hash >> 16);
+}
+
+/* Reuse the sorted rows as the bucket array. Equivalent spellings select the same provider as the sorted lookup. */
+static void ms_hold_index(ms_hold *set, size_t n, int duplicates)
+{
+    for (size_t i = 0; i < n; ++i) set[i].bucket = 0;
+    for (size_t i = 0; i < n;) {
+        size_t end = i + 1;
+        while (duplicates && end < n && !ms_hold_cmp(&set[i], &set[end])) ++end;
+        ms_hold *h = end == i + 1 ? &set[i] : bsearch(&set[i], set, n, sizeof *set, ms_hold_cmp);
+        h->hash = ms_hold_hash(h->name);
+        int *bucket = &set[h->hash % n].bucket;
+        h->next = *bucket;
+        *bucket = (int)(h - set) + 1;
+        i = end;
+    }
+}
+
 /* Type/name order is fixed for an index. The active file for each name is picked on every walk. */
 static int ms_prepare_holds(ms_index *x)
 {
@@ -7784,6 +8030,7 @@ static int ms_prepare_holds(ms_index *x)
         root->file = i;
     }
     if (x->nhold_roots > 1) qsort(x->hold_roots, x->nhold_roots, sizeof *x->hold_roots, ms_hold_cmp);
+    ms_hold_index(x->hold_roots, x->nhold_roots, 1);
     if (!x->nneeds) return 1;
     needs = (ms_hold *)malloc((size_t)x->nneeds * sizeof *needs);
     if (!needs) return 0;
@@ -7810,8 +8057,8 @@ static int ms_hold_rank_cmp(const void *left, const void *right)
 
 typedef struct ms_holds_walk {
     const ms_hold *set; size_t n;
-    const unsigned char *list;
     const ms_hold *first, *end;
+    uint64_t prefixes[4];
     const char *name;
     const int *providers;
     unsigned char *root;                  /* pass 1: per index file, held at level 4 */
@@ -7829,31 +8076,42 @@ static size_t ms_hold_type_bound(const ms_hold *set, size_t lo, size_t hi, const
     return lo;
 }
 
-static int ms_hold_in_list_cmp(const void *key, const void *entry)
+static unsigned ms_hold_prefix(const char *name)
 {
-    const ms_holds_walk *w = (const ms_holds_walk *)key;
-    const ms_hold *h = (const ms_hold *)entry;
-    if (h < w->first) return 1;
-    if (h >= w->end) return -1;
-    return ms_hold_name_cmp(w->name, h->name);
+    unsigned key = 0;
+    for (int i = 0; i < 4 && name[i]; ++i)
+        key = key * 31u + (unsigned char)ms_hold_fold(name[i]);
+    return key & 255u;
 }
 
-static const ms_hold *ms_holds_find(ms_holds_walk *w, const unsigned char *list, const unsigned char *res)
+static int ms_holds_type(const char *type, void *context)
 {
-    if (!w->n) return NULL;
-    if (list != w->list) {
-        const char *type = *(const char *const *)(list + MS_RL_TYPE);
-        size_t first = type ? ms_hold_type_bound(w->set, 0, w->n, type, 0) : w->n;
-        size_t end = first < w->n ? ms_hold_type_bound(w->set, first, w->n, type, 1) : first;
-        w->first = w->set + first;
-        w->end = w->set + end;
-        w->list = list;
+    ms_holds_walk *w = context;
+    if (!w->n || !type) return 0;
+    size_t first = ms_hold_type_bound(w->set, 0, w->n, type, 0);
+    if (first == w->n || _stricmp(w->set[first].type, type)) return 0;
+    w->first = w->set + first;
+    w->end = w->set + ms_hold_type_bound(w->set, first, w->n, type, 1);
+    memset(w->prefixes, 0, sizeof w->prefixes);
+    for (const ms_hold *h = w->first; h < w->end; ++h) {
+        unsigned k = ms_hold_prefix(h->name);
+        w->prefixes[k >> 6] |= UINT64_C(1) << (k & 63);
     }
-    if (w->first == w->end) return NULL;
+    return 1;
+}
+
+static const ms_hold *ms_holds_find(ms_holds_walk *w, const unsigned char *res)
+{
     w->name = *(const char *const *)(res + MS_RES_NAME);
     if (!w->name) return NULL;
-    /* Search the full sorted set so equivalent root names select the same provider. */
-    return (const ms_hold *)bsearch(w, w->set, w->n, sizeof *w->set, ms_hold_in_list_cmp);
+    unsigned k = ms_hold_prefix(w->name);
+    if (!(w->prefixes[k >> 6] & (UINT64_C(1) << (k & 63)))) return NULL;
+    uint32_t hash = ms_hold_hash(w->name);
+    for (int next = w->set[hash % w->n].bucket; next; next = w->set[next - 1].next) {
+        const ms_hold *h = &w->set[next - 1];
+        if (h >= w->first && h < w->end && h->hash == hash && !ms_hold_name_cmp(w->name, h->name)) return h;
+    }
+    return NULL;
 }
 
 static void ms_holds_roots_one(void *context, const unsigned char *list, unsigned char *res)
@@ -7861,7 +8119,8 @@ static void ms_holds_roots_one(void *context, const unsigned char *list, unsigne
     ms_holds_walk *w = (ms_holds_walk *)context;
     const ms_hold *h;
     if (*(const unsigned *)(res + MS_RES_LEVEL) != 4) return;
-    h = ms_holds_find(w, list, res);
+    (void)list;
+    h = ms_holds_find(w, res);
     if (h) {
         w->root[w->providers[h - w->set]] = 1;
         sh_modserve_kept_add(res);
@@ -7873,7 +8132,8 @@ static void ms_holds_raise_one(void *context, const unsigned char *list, unsigne
     ms_holds_walk *w = (ms_holds_walk *)context;
     const char *name;
     size_t at;
-    if (*(const unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_holds_find(w, list, res) || !sh_modserve_keep(res)) return;
+    (void)list;
+    if (*(const unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_holds_find(w, res) || !sh_modserve_keep(res)) return;
     w->out->raised++;
     name = *(const char *const *)(res + MS_RES_NAME);
     at = strlen(w->out->first);
@@ -7907,7 +8167,7 @@ static int ms_holds_closure(const ms_index *x, const void *head_slot, ms_hold **
     w.providers = providers;
     w.set = x->hold_roots;
     w.n = x->nhold_roots;
-    if (!ms_res_walk(head_slot, ms_holds_roots_one, &w, &out->lists)) goto done;
+    if (!ms_res_walk_filtered(head_slot, ms_holds_roots_one, &w, &out->lists, ms_holds_type, &w, MS_RL_TYPE)) goto done;
     if (verify) {
         verify->root = (unsigned char *)malloc((size_t)x->nfiles);
         if (verify->root) {
@@ -7953,6 +8213,7 @@ static int ms_holds_closure(const ms_index *x, const void *head_slot, ms_hold **
     for (i = 0, k = 0; (size_t)i < ns; ++i)
         if (!k || set[k - 1].rank != set[i].rank) set[k++] = set[i];
     ns = (size_t)k;
+    ms_hold_index(set, ns, 0);
     out->names = (unsigned)ns;
     *set_out = set;
     *ns_out = ns;
@@ -7976,7 +8237,7 @@ static int ms_raise_names(const void *head_slot, const ms_hold *set, size_t ns, 
     w.set = set;
     w.n = ns;
     w.out = out;
-    return !ns || ms_res_walk(head_slot, ms_holds_raise_one, &w, &out->lists);
+    return !ns || ms_res_walk_filtered(head_slot, ms_holds_raise_one, &w, &out->lists, ms_holds_type, &w, MS_RL_TYPE);
 }
 
 int sh_modserve_holds_raise(const void *head_slot, sh_modserve_holds *out)
@@ -8025,7 +8286,8 @@ typedef struct ms_held_model_walk {
 static void ms_held_model_one(void *context, const unsigned char *list, unsigned char *res)
 {
     ms_held_model_walk *w = (ms_held_model_walk *)context;
-    const ms_hold *h = ms_holds_find(&w->lookup, list, res);
+    const ms_hold *h = ms_holds_find(&w->lookup, res);
+    (void)list;
     size_t i;
     unsigned state;
     if (!h) return;
@@ -8080,11 +8342,15 @@ static int ms_maintain_models(const ms_index *x, const void *head_slot, sh_modse
     if (!nm) goto done;
     w.lookup.set = models;
     w.lookup.n = nm;
+    ms_hold_index(models, nm, 0);
     w.res = (void **)calloc(nm, sizeof *w.res);
     w.load = (unsigned char *)malloc(nm);
     if (!w.res || !w.load) { visited = -1; goto done; }
     memset(w.load, 1, nm);   /* not held at all: loaded */
-    if (!ms_res_walk(head_slot, ms_held_model_one, &w, &out->lists)) { visited = -1; goto done; }
+    if (!ms_res_walk_filtered(head_slot, ms_held_model_one, &w, &out->lists, ms_holds_type, &w.lookup, MS_RL_TYPE)) {
+        visited = -1;
+        goto done;
+    }
     /* Outside the resource lock: the callback loads. */
     for (i = 0; i < nm; ++i) {
         if (!w.load[i]) continue;
@@ -8095,7 +8361,8 @@ done:
     if (!visited && verify.root && ms_hold_scope(x, &current) && current == revision) {
         unsigned char *expected = verify.root;
         verify.root = (unsigned char *)calloc((size_t)x->nfiles, 1);
-        if (verify.root && ms_res_walk(head_slot, ms_holds_roots_one, &verify, NULL) &&
+        if (verify.root && ms_res_walk_filtered(head_slot, ms_holds_roots_one, &verify, NULL,
+                                                ms_holds_type, &verify, MS_RL_TYPE) &&
             !memcmp(expected, verify.root, (size_t)x->nfiles) && ms_hold_scope(x, &current) && current == revision)
             *named = ms_raise_names(head_slot, set, ns, out);
         free(expected);
@@ -9914,85 +10181,80 @@ static char *ms_top_inherit(const unsigned char *t, size_t n)
     return NULL;
 }
 
-/* Mark every served decl that inherits, at any depth, from a decl whose served bytes changed or is gone: the
- * engine resolves a parent when the child is parsed, so a parent re-parsed alone leaves parsed children stale.
- * Main thread, once per table; returns the decls marked. */
+typedef struct ms_parent_key { const char *type, *name; } ms_parent_key;
+
+static int ms_parent_cmp(const void *va, const void *vb)
+{
+    const ms_parent_key *a = va, *b = vb;
+    const int by_type = _stricmp(a->type, b->type);
+    return by_type ? by_type : _stricmp(a->name, b->name);
+}
+
+static int ms_parent_type_cmp(const void *type, const void *key)
+{
+    return _stricmp((const char *)type, ((const ms_parent_key *)key)->type);
+}
+
+/* Each generation contains only changed parents. The engine caches inherited values on the child. */
 int sh_modserve_refresh_expand(void)
 {
     ms_index *x = (ms_index *)g_index;
-    char (*types)[64] = NULL;
-    char **parent = NULL;
-    int ntypes = 0, i, gen, marked = 0;
+    ms_parent_key *parents = NULL, *frontier = NULL;
+    char **temporary = NULL;
+    int count = 0, marked = 0, i;
     if (!x || InterlockedExchange(&x->expanded, 1)) return 0;
-    types = (char (*)[64])calloc(64, sizeof *types);
-    if (!types) return 0;
-    /* The types and names of the changed and gone decls (generation 0). */
-    for (i = 0; i < x->nfiles + x->ngone; ++i) {
-        const char *type, *name;
-        int t, seen = 0;
-        if (i < x->nfiles) {
-            const ms_file *f = &x->files[i];
-            if (!f->refresh || !f->is_decl) continue;
-            type = f->ptype; name = f->pname;
-        } else {
-            const ms_gone *g = &x->gone[i - x->nfiles];
-            if (!g->pending) continue;
-            type = g->type; name = g->name;
-        }
-        if (!type || !name) continue;
-        for (t = 0; t < ntypes; ++t) if (!_stricmp(types[t], type)) seen = 1;
-        if (!seen && ntypes < 64) strncpy_s(types[ntypes++], 64, type, _TRUNCATE);
-    }
-    if (!ntypes) { free(types); return 0; }
-    /* Each served decl of those types: its top-level parent. */
-    parent = (char **)calloc((size_t)x->nfiles, sizeof *parent);
-    if (!parent) { free(types); return 0; }
+    frontier = malloc(((size_t)x->nfiles + x->ngone + 1) * sizeof *frontier);
+    if (!frontier) goto retry;
     for (i = 0; i < x->nfiles; ++i) {
-        ms_file *f = &x->files[i];
-        unsigned char *b;
-        size_t len = 0;
-        char *name;
-        int t, ok = 0;
-        if (!f->is_decl || !f->served || f->withdrawn || !f->ptype || !f->pname || !x->bundles[f->bundle].admitted) continue;
-        for (t = 0; t < ntypes && !ok; ++t) ok = !_stricmp(types[t], f->ptype);
-        if (!ok) continue;
-        b = ms_file_bytes(f, &len);
-        if (!b) continue;
-        if ((name = ms_top_inherit(b, len)) != NULL) parent[i] = ms_strdup(x, name);
-        free(name);
-        HeapFree(GetProcessHeap(), 0, b);
+        const ms_file *f = &x->files[i];
+        if (f->refresh && !f->refresh_gen && f->is_decl && f->ptype && f->pname)
+            frontier[count++] = (ms_parent_key){ f->ptype, f->pname };
     }
-    /* Generations: a child of generation N-1 is marked N, up to 8 levels. */
-    for (gen = 1; gen <= 8; ++gen) {
-        int added = 0;
+    for (i = 0; i < x->ngone; ++i) {
+        const ms_gone *g = &x->gone[i];
+        if (g->pending && g->type && g->name) frontier[count++] = (ms_parent_key){ g->type, g->name };
+    }
+    if (!count) goto done;
+    qsort(frontier, count, sizeof *frontier, ms_parent_cmp);
+    parents = calloc((size_t)x->nfiles + 1, sizeof *parents);
+    temporary = calloc((size_t)x->nfiles + 1, sizeof *temporary);
+    if (!parents || !temporary) goto retry;
+    for (i = 0; i < x->nfiles; ++i) {
+        const ms_file *f = &x->files[i];
+        if (!f->is_decl || !f->served || f->withdrawn || !f->ptype || !f->pname || ms_surface(f) ||
+            !x->bundles[f->bundle].admitted || !bsearch(f->ptype, frontier, count, sizeof *frontier, ms_parent_type_cmp))
+            continue;
+        const ms_file *effective = ms_serving_file(x, i);
+        parents[i].type = f->ptype;
+        parents[i].name = ms_decl_parent(effective, &temporary[i]);
+    }
+    for (int gen = 1; count; ++gen) {
+        int prior = count;
         for (i = 0; i < x->nfiles; ++i) {
             ms_file *f = &x->files[i];
-            int j;
-            if (!parent[i] || f->refresh || ms_surface(f)) continue;
-            for (j = 0; j < x->nfiles + x->ngone; ++j) {
-                const char *ptype, *pname;
-                if (j < x->nfiles) {
-                    const ms_file *p = &x->files[j];
-                    if (!p->refresh || !p->is_decl || (int)p->refresh_gen != gen - 1) continue;
-                    ptype = p->ptype; pname = p->pname;
-                } else {
-                    const ms_gone *g = &x->gone[j - x->nfiles];
-                    if (gen != 1 || !g->pending) continue;
-                    ptype = g->type; pname = g->name;
-                }
-                if (!ptype || !pname || _stricmp(ptype, f->ptype) || _stricmp(pname, parent[i])) continue;
-                InterlockedExchange(&f->refresh_gen, gen);
-                InterlockedExchange(&f->refresh, 1);
-                x->diff.dependents++;
-                added++;
-                marked++;
-                break;
-            }
+            if (f->refresh || !parents[i].name ||
+                !bsearch(&parents[i], frontier, prior, sizeof *frontier, ms_parent_cmp)) continue;
+            InterlockedExchange(&f->refresh_gen, gen);
+            InterlockedExchange(&f->refresh, 1);
+            x->diff.dependents++;
+            marked++;
         }
-        if (!added) break;
+        count = 0;
+        for (i = 0; i < x->nfiles; ++i) {
+            const ms_file *f = &x->files[i];
+            if (f->refresh && f->refresh_gen == gen)
+                frontier[count++] = (ms_parent_key){ f->ptype, f->pname };
+        }
+        qsort(frontier, count, sizeof *frontier, ms_parent_cmp);
     }
-    free(parent);
-    free(types);
+    goto done;
+retry:
+    InterlockedExchange(&x->expanded, 0);
+done:
+    if (temporary) for (i = 0; i < x->nfiles; ++i) free(temporary[i]);
+    free(temporary);
+    free(parents);
+    free(frontier);
     return marked;
 }
 
@@ -10061,11 +10323,14 @@ int sh_modserve_each_refresh(sh_modserve_refresh_fn fn, void *context)
 int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int part)
 {
     const ms_index *x = g_index;
-    int pass, i, visited = 0;
+    int pass, i, visited = 0, pending = 0, depth = 0;
     if (!x || !fn) return 0;
     for (i = 0; i < x->nfiles; ++i)
-        if (x->files[i].refresh && ms_in_part(&x->files[i], part)) break;
-    if (i == x->nfiles) {
+        if (x->files[i].refresh && ms_in_part(&x->files[i], part)) {
+            pending = 1;
+            if (x->files[i].refresh_gen > depth) depth = x->files[i].refresh_gen;
+        }
+    if (!pending) {
         if (part == SH_MODSERVE_PART_EDITOR) return 0;
         for (i = 0; i < x->ngone; ++i) if (x->gone[i].pending) break;
         if (i == x->ngone) return 0;
@@ -10092,7 +10357,7 @@ int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int 
         }
         if (pass == SH_MODSERVE_RANK_MAX + 2) {
             int gen, rank;
-            for (gen = 1; gen <= 8; ++gen)
+            for (gen = 1; gen <= depth; ++gen)
                 for (rank = 0; rank <= SH_MODSERVE_RANK_MAX; ++rank)
                     for (i = 0; i < x->nfiles; ++i) {
                         ms_file *f = (ms_file *)&x->files[i];
@@ -10261,11 +10526,13 @@ void sh_modserve_plan_mark_registered(sh_modserve_plan *plan)
 
 void sh_modserve_last_diff(sh_modserve_diff *out)
 {
-    const ms_index *x = g_index;
+    const ms_index *x;
     int i;
     if (!out) return;
     memset(out, 0, sizeof *out);
-    if (!x) return;
+    InterlockedIncrement(&g_readers);
+    x = g_index;
+    if (!x) { InterlockedDecrement(&g_readers); return; }
     *out = x->diff;
     out->pending = 0;
     /* What the refresh walks visit: a served file, or a registry's synthetic
@@ -10277,6 +10544,7 @@ void sh_modserve_last_diff(sh_modserve_diff *out)
             out->pending++;
     for (i = 0; i < x->ngone; ++i)
         if (InterlockedCompareExchange((volatile LONG *)&x->gone[i].pending, 0, 0)) out->pending++;
+    InterlockedDecrement(&g_readers);
 }
 
 int sh_modserve_is_restore(const char *request)

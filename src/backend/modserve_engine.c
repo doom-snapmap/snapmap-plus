@@ -1330,6 +1330,7 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
  * load reads the bundle's bytes; an unparsed one is left for the provider. Main thread, inside process heap 0. */
 typedef struct me_reparse {
     sh_modledger_tally tally;   /* per type, for the log (copies the type: dependents pass a stack buffer) */
+    double parse_ms;
     int reparsed, through_provider, failed, faulted, pending, skipped, restored;
     int surfaces;               /* surfaces offered and left alone (sh_modserve_is_surface) */
 } me_reparse;
@@ -1388,7 +1389,9 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
             int refused;
             /* Its default tree follows the bytes it is parsed from: the build the open map serves. */
             sh_modtypeinfo_decl_changed(type, name);
+            double started = me_now_ms();
             me_load_in_place(d, "reparse", type, name);
+            r->parse_ms += me_now_ms() - started;
             state = d[RES_STATE_OFF];
             refused = me_refused(before, type, name);
             r->reparsed++;
@@ -1791,10 +1794,11 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
     me_refresh c;
     sh_process_heap_scope heap = { 0 };
     me_closure keeper;
-    double t0 = me_now_ms(), t1;
+    double t0 = me_now_ms(), t1, expanded, keep_ms = 0.0;
     int i, own;
     if (!g_bound || me_on_main() != 1) return;
     (void)sh_modserve_refresh_expand();
+    expanded = me_now_ms();
     /* An enclosing watermark already protects this pass. Otherwise open one only for actual changes. */
     own = !g_mark_depth;
     if (own && !sh_modserve_each_refresh_part(me_refresh_pending, NULL, part)) return;
@@ -1812,7 +1816,11 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
             c.dependents = me_anim_dependents(&c.raw, &c.decls);
         }
     } __finally {
-        if (own) me_closure_end(&keeper, phase, "refresh");
+        if (own) {
+            double started = me_now_ms();
+            me_closure_end(&keeper, phase, "refresh");
+            keep_ms = me_now_ms() - started;
+        }
         if (!in_heap && !sh_process_heap_leave(&heap)) me_rlog("refresh: heap scope did not balance at the %s", phase);
     }
     t1 = me_now_ms();
@@ -1823,8 +1831,8 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
             me_rlog("refresh: re-parsed %d %s decl(s) whose served bytes or parent changed (%s%s)",
                    c.decls.tally.types[i].count, c.decls.tally.types[i].type, c.decls.tally.types[i].names,
                    sh_modledger_tally_truncated(&c.decls.tally.types[i]) ? ", ..." : "");
-        me_rlog("refresh: decls: %d re-parsed at the %s in %.1f ms (%d read through the provider, %d failed, %d faulted; "
-               "%d not held, read at their next parse%s)", c.decls.reparsed, phase, t1 - t0, c.decls.through_provider,
+        me_rlog("refresh: decls: %d re-parsed at the %s in %.1f ms (native parse %.1f, inheritance %.1f, keep %.1f ms; %d read through the provider, %d failed, %d faulted; "
+               "%d not held, read at their next parse%s)", c.decls.reparsed, phase, t1 - t0, c.decls.parse_ms, expanded - t0, keep_ms, c.decls.through_provider,
                c.decls.failed, c.decls.faulted, c.not_held, c.dependents ? "; includes the md6Def and animWeb decls "
                "naming a reloaded anim" : "");
     }
@@ -1900,6 +1908,14 @@ static volatile LONG g_refresh_watch;
  * map's activation would, and changed editor rows rebuild the live palette (the 'sh_mods palette rebuild' path).
  * With no palette yet, the first editor entry builds it with every row. */
 static volatile LONG g_palette_wanted;
+static volatile LONG g_palette_revision;
+static __declspec(thread) LONG g_building_revision;
+
+static int me_palette_pending(void)
+{
+    return InterlockedCompareExchange(&g_palette_wanted, 0, 0) ||
+           InterlockedCompareExchange(&g_palette_revision, 0, 0) != sh_modserve_row_revision();
+}
 
 static void me_keep_rows(const char *phase);
 
@@ -1915,21 +1931,20 @@ static void me_refresh_editor(const char *phase, sh_modserve_refresh *r)
                 ready < 0 ? 0 : ready, plan.count, phase, me_now_ms() - t0, plan.blocked);
     }
     sh_modserve_plan_free(&plan);
-    if (!InterlockedCompareExchange(&g_palette_wanted, 0, 0)) return;
+    if (!me_palette_pending()) return;
+    if (!sh_timeline_tile_palette()) {
+        me_rlog("refresh: the first editor entry will build the palette with the available rows");
+        return;
+    }
     /* The rows' references before anything else creates them: the editor
      * redraws a placed entity of a changed row from its new references, and
      * an object the editor creates for it would be map-scoped. */
     me_keep_rows(phase);
-    if (!sh_timeline_tile_palette()) {
-        InterlockedExchange(&g_palette_wanted, 0);
-        me_rlog("refresh: editor rows changed; no editor palette yet, the first editor entry builds it with them");
-        return;
-    }
     if (modserve_palette_rebuild_requested()) {
-        InterlockedExchange(&g_palette_wanted, 0);
         r->palette = 1;
         me_rlog("refresh: editor rows changed; palette rebuilt at the %s (see the palette line above)", phase);
     } else {
+        InterlockedExchange(&g_palette_wanted, 1);
         r->palette = -1;
         me_rlog("refresh: editor rows changed; palette rebuild refused at the %s (see the line above); "
                 "'sh_mods palette rebuild' retries it", phase);
@@ -1941,7 +1956,7 @@ static int me_refresh_main(void *context)
     sh_modserve_refresh r;
     sh_modserve_diff d;
     (void)context;
-    if (me_in_play() == 1 || me_on_main() != 1) return 0;
+    if (me_on_main() != 1 || me_in_play() == 1 || sh_timeline_tile_rebuild_busy()) return 0;
     (void)sh_companions_ensure("return to the editor");
     sh_modserve_last_diff(&d);
     memset(&r, 0, sizeof r);
@@ -1963,23 +1978,26 @@ static DWORD WINAPI me_refresh_watcher(LPVOID unused)
     sh_apply_engine_get_run_on_main(&run);
     /* Polls up to an hour; any registration pass in between applies the same marks. A palette rebuild the editor
      * refuses (a held entity or wire, or a native edit still committing) is retried when it is free, 40 times. */
-    for (i = 0, tries = 0; run && i < 7200 && tries < 40; ++i) {
-        sh_modserve_diff d;
-        Sleep(500);
-        sh_modserve_last_diff(&d);
-        if (!d.pending && !InterlockedCompareExchange(&g_palette_wanted, 0, 0)) break;
-        if (me_in_play() == 1 || sh_editor_delete_native_pending()) continue;
-        tries++;
-        if (run(NULL, me_refresh_main, NULL, 1000, &result) == 1 && result == 1) break;
-    }
-    InterlockedExchange(&g_refresh_watch, 0);
+    do {
+        /* A publication arriving while this pass returns requests another check. */
+        InterlockedExchange(&g_refresh_watch, 1);
+        for (i = 0, tries = 0; run && i < 7200 && tries < 40; ++i) {
+            sh_modserve_diff d;
+            Sleep(500);
+            sh_modserve_last_diff(&d);
+            if (!d.pending && !me_palette_pending()) break;
+            if (me_in_play() == 1 || sh_editor_delete_native_pending()) continue;
+            tries++;
+            if (run(NULL, me_refresh_main, NULL, 1000, &result) == 1 && result == 1) break;
+        }
+    } while (InterlockedCompareExchange(&g_refresh_watch, 0, 1) != 1);
     return 0;
 }
 
 static void me_refresh_watch(void)
 {
     HANDLE h;
-    if (InterlockedCompareExchange(&g_refresh_watch, 1, 0)) return;
+    if (InterlockedExchange(&g_refresh_watch, 2)) return;
     h = CreateThread(NULL, 0, me_refresh_watcher, NULL, 0, NULL);
     if (h) CloseHandle(h);
     else InterlockedExchange(&g_refresh_watch, 0);
@@ -1987,6 +2005,14 @@ static void me_refresh_watch(void)
 
 static int me_refresh_direct_actors(void);
 static void me_rebuild_actor_rows(int changed);
+
+int sh_modserve_boot_finished(int rebuilt)
+{
+    int admitted = rebuilt ? sh_modserve_index_rescan() : 0;
+    if (rebuilt && admitted >= 0) (void)sh_modserve_refresh_after_rescan(NULL);
+    if (g_bound && me_palette_pending() && sh_timeline_tile_palette()) me_refresh_watch();
+    return admitted;
+}
 
 int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
 {
@@ -2009,7 +2035,6 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
     if (main == 1 && me_in_play() != 1 && (d.changed || d.gone || d.added_decls) && me_refresh_direct_actors())
         InterlockedExchange(&g_palette_wanted, 1);
     later = d.added_decls - d.added_rows - d.added_active;   /* new names of mods no map has used yet */
-    if (rows) InterlockedExchange(&g_palette_wanted, 1);
     if (!d.changed && !d.gone && !d.added_decls && !d.pending && !d.changed_scripts) {
         strncpy_s(r.note, sizeof r.note, "nothing changed", _TRUNCATE);
         me_rlog("refresh: no served file changed");
@@ -2025,7 +2050,7 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
         me_refresh_editor("rescan", &r);
         sh_modserve_last_diff(&d);
     }
-    r.pending = d.pending + (why ? d.added_active : 0) + (InterlockedCompareExchange(&g_palette_wanted, 0, 0) && why ? 1 : 0);
+    r.pending = d.pending + (why ? d.added_active : 0) + (why && me_palette_pending() ? 1 : 0);
     r.needs_map_reload = d.changed_map + d.changed_anims + (r.palette < 0 ? rows : 0);
     /* A removed decl name stays registered (the engine cannot unregister a
      * name) but nothing serves it: said as such, not as a needed restart. */
@@ -2037,7 +2062,7 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
         me_refresh_note(&r, "the Toybox updates when you let go of the object you are holding");
     }
     if (why && r.pending) {
-        if (play == 1 && g_bound) me_refresh_watch();
+        if (g_bound) me_refresh_watch();
         me_rlog("refresh: deferred: %d change(s) wait for the return to the editor or the next map load (%s)", r.pending,
                 why);
         if (!g_bound) me_refresh_note(&r, "Snapmap+ cannot load mod changes on this copy of DOOM");
@@ -2354,6 +2379,8 @@ static void me_pass_prelude(const char *phase)
 void sh_modserve_palette_before_build(void)
 {
     int first = !InterlockedExchange(&g_editor_pass_done, 1), todo = 0;
+    g_building_revision = g_bound ? sh_modserve_row_revision() : 0;
+    InterlockedExchange(&g_palette_wanted, 0);
     me_pass_prelude("editor");
     if (!g_bound) return;
     if (!sh_modserve_active()) { me_reparse_early("editor", 0); return; }
@@ -2364,7 +2391,7 @@ void sh_modserve_palette_before_build(void)
     if (sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_PLAY && me_in_play() != 1 && me_on_main() == 1 &&
         sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0)
         (void)sh_modserve_scope_apply("editor");
-    (void)me_editor_rows("editor", first, &todo);
+    if (me_editor_rows("editor", first, &todo) < 0) g_building_revision = 0;
     (void)me_refresh_direct_actors();
 }
 
@@ -2569,6 +2596,8 @@ static void me_palette_check(void)
 void sh_modserve_palette_after_build(void *palette)
 {
     int rows, mods;
+    sh_modserve_palette_rebuilt();
+    InterlockedExchange(&g_palette_revision, g_building_revision);
     if (!sh_modserve_active() && !sh_modserve_has_actor_rows()) return;
     mods = me_count_mod_rows(palette, &rows);
     me_log("palette built: %d rows, %d from installed bundles", rows, mods);
@@ -2628,9 +2657,12 @@ static const char *me_rebuild_reason(int r)
 
 static int pal_ready(void *context)
 {
-    int rows = -1;
+    const unsigned char *palette = sh_timeline_tile_palette();
+    int rows;
+    void *entries;
     (void)context;
-    return me_count_mod_rows(sh_timeline_tile_palette(), &rows) >= 0 && rows > 0;
+    return palette && sh_read_ptr(palette + PAL_ENTRIES_OFF, &entries) && entries &&
+           sh_read_i32(palette + PAL_COUNT_OFF, &rows) && rows > 0 && rows <= PAL_MAX;
 }
 
 /* Linear over the rows (about 1,300 on 13954591): the array is sorted by the

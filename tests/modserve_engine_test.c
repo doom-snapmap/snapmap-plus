@@ -102,23 +102,27 @@ void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *modu
 static unsigned char fe_palette[32], fe_palette_rows[2 * PAL_STRIDE];
 static unsigned char fe_new_sedef[SEDEF_NAME_OFF + sizeof(void *)];
 static unsigned char fe_record[0x58 + sizeof(void *)];
-static int fe_has_palette, fe_rebuilds;
+static int fe_has_palette, fe_rebuilds, fe_native_palette_callbacks, fe_holding;
 
 int sh_timeline_actor_filter_ready(void) { return fe_has_palette; }
+int sh_timeline_tile_rebuild_busy(void) { return fe_holding; }
 int sh_timeline_tile_rebuild_palette(int *before, int *after)
 {
     if (!fe_has_palette) return 0;
+    if (fe_native_palette_callbacks) sh_modserve_palette_before_build();
     *before = *(int *)(fe_palette + PAL_COUNT_OFF);
     *(void **)(fe_palette_rows + PAL_STRIDE) = fe_new_sedef;
     *(void **)(fe_palette_rows + PAL_STRIDE + 0x150) = fe_record;
     *after = *(int *)(fe_palette + PAL_COUNT_OFF) = 2;
     fe_rebuilds++;
+    if (fe_native_palette_callbacks) sh_modserve_palette_after_build(fe_palette);
     return SH_TL_REBUILD_OK;
 }
 void *sh_timeline_tile_palette(void) { return fe_has_palette ? fe_palette : NULL; }
 void sh_timeline_tile_sorts(int *sorts, int *unscoped, int *guarded) { (void)sorts; (void)unscoped; (void)guarded; }
 const char *sh_apply_engine_block_heap_name(const void *p) { (void)p; return ""; }
-void sh_apply_engine_get_run_on_main(sh_run_on_main_fn *run_on_main) { if (run_on_main) *run_on_main = NULL; }
+static sh_run_on_main_fn fe_dispatch;
+void sh_apply_engine_get_run_on_main(sh_run_on_main_fn *run_on_main) { if (run_on_main) *run_on_main = fe_dispatch; }
 void sh_modvt_before_pass(const char *phase) { (void)phase; }
 void sh_modvt_print_status(void) {}
 void sh_modsound_before_pass(const char *phase) { (void)phase; }
@@ -565,6 +569,61 @@ static void test_prefab_adds_a_row_to_the_open_palette(void)
     mt_remove_tree(root);
 }
 
+static HANDLE fe_posted;
+static sh_main_call_fn fe_posted_call;
+static int fe_post_main(struct sh_iface *self, sh_main_call_fn fn, void *ctx, int timeout, int *result)
+{
+    (void)self; (void)ctx; (void)timeout;
+    fe_posted_call = fn;
+    *result = 1;
+    SetEvent(fe_posted);
+    return 1;
+}
+
+static void test_boot_refreshes_an_existing_palette(void)
+{
+    char root[MAX_PATH], mod[MAX_PATH], *why = NULL;
+    sh_mb_bundle bundle;
+    int previous = fe_rebuilds;
+    fe_reset();
+    CHECK(mt_temp_dir("bootpalette", root, sizeof root));
+    CHECK(sh_modserve_index_build(root) == 0);
+    fe_has_palette = fe_native_palette_callbacks = 1;
+    *(void **)(fe_palette + PAL_ENTRIES_OFF) = fe_palette_rows;
+    *(int *)(fe_palette + PAL_COUNT_OFF) = 1;
+    *(const char **)(fe_new_sedef + SEDEF_NAME_OFF) = "mods/abcdefgh/placed";
+    g_source = fe_source;
+    /* The background publication finishes during an older native palette build. */
+    sh_modserve_palette_before_build();
+    snprintf(mod, sizeof mod, "%s\\pack", root);
+    mt_write(mod, "mod.json", "{\"name\":\"Test\",\"snapmap-plus\":{\"format\":2,\"salt\":\"abcdefgh\"}}");
+    mt_write(mod, "entities\\placed.decl", "{ edit = { } }");
+    mt_write(mod, "decls\\snapeditorentitydef\\placed.decl", "{ edit = { entityDef = \"entities/placed\"; } }");
+    CHECK(sh_mb_build(mod, NULL, NULL, &bundle) && sh_mb_write(&bundle, mod, &why));
+    CHECK(sh_modserve_index_build(root) == 1);
+    sh_modserve_palette_after_build(fe_palette);
+    CHECK(me_palette_pending() && !pal_has(NULL, "mods/abcdefgh/placed"));
+    fe_posted = CreateEventW(NULL, FALSE, FALSE, NULL);
+    fe_dispatch = fe_post_main;
+    CHECK(sh_modserve_boot_finished(0) == 0);
+    CHECK(WaitForSingleObject(fe_posted, 3000) == WAIT_OBJECT_0 && fe_posted_call);
+    CHECK(fe_rebuilds == previous);
+    fe_holding = 1;
+    if (fe_posted_call) CHECK(fe_posted_call(NULL) == 0 && fe_rebuilds == previous);
+    fe_holding = 0;
+    if (fe_posted_call) CHECK(fe_posted_call(NULL) == 1);
+    CHECK(fe_rebuilds == previous + 1 && pal_has(NULL, "mods/abcdefgh/placed") && !me_palette_pending());
+    /* An unchanged publication and the next editor entry require no second rebuild. */
+    CHECK(sh_modserve_index_build(root) == 1 && !me_palette_pending());
+    CHECK(me_refresh_main(NULL) == 1 && fe_rebuilds == previous + 1);
+    fe_dispatch = NULL;
+    CloseHandle(fe_posted);
+    fe_has_palette = fe_native_palette_callbacks = 0;
+    sh_mb_free(&bundle);
+    free(why);
+    mt_remove_tree(root);
+}
+
 int main(void)
 {
     fe_reset();
@@ -580,6 +639,7 @@ int main(void)
     test_placement_lifetimes();
     test_static_model_kind();
     test_prefab_adds_a_row_to_the_open_palette();
+    test_boot_refreshes_an_existing_palette();
     if (g_failed) {
         fprintf(stderr, "modserve_engine_test: %d check(s) failed\n--- log ---\n%s", g_failed, g_log);
         return 1;

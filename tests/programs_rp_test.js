@@ -4,6 +4,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -36,6 +37,22 @@ function glslangPresent() {
   const r = spawnSync(process.env.GLSLANG_VALIDATOR || 'glslangValidator', ['--version'], { encoding: 'utf8' });
   return !r.error;
 }
+
+test('existing particle shader routes preserve the bytes pinned by published units', () => {
+  const file = fs.readFileSync(path.join(root, 'src/backend/programs/programs_particles.c'), 'utf8');
+  const routes = [
+    [progs.particles, 'a20cef918210afbd6236c754774eb81266f1d584d7d3b356d4d2857b750ae4d0'],
+    [progs.particlesBase, 'f74675726b5e8f878ba9081036176b50da9987969acf254f88e2f89187c1e896'],
+  ];
+  for (const [p, pinned] of routes) {
+    const values = new RegExp(`SH_MODPROG_${p.name}_SPIRV\\[\\] = \\{([^}]+)`).exec(file)[1].match(/0x[0-9a-f]+/g);
+    const bytes = Buffer.alloc(values.length * 4);
+    values.forEach((value, i) => bytes.writeUInt32LE(Number(value), i * 4));
+    const hash = createHash('sha256').update([p.header, p.glsl, p.call, ''].join('\0')).update(bytes);
+    assert.equal(hash.digest('hex'), pinned);
+  }
+  assert.match(progs.particlesErosion.header, /mask \+ gp1 - 1.0/);
+});
 
 test('each .rp header translates and compiles (glslangValidator)', (t) => {
   for (const [name, p] of Object.entries(progs)) {

@@ -25,6 +25,11 @@ typedef struct sh_motion {
     float emitter_drag0, emitter_drag1, emitter_drag_radius;   /* geometryGPU.sizeVariation; massVariation */
     float launch;                    /* systemPropertiesGPU.boundsExpansion.x: random launch ball, units / s */
     float launch_lo, launch_hi;      /* boundsExpansion y z: launch speed factor range (both 0: as launched) */
+    int uniform_volume;              /* vectorFieldGPU.strength = 1/3: choose a point uniformly inside the ball */
+    float cone_angles[2], cone_speeds[2]; /* geometryGPU.sizeInitial/sizeFinal: half angles (radians), units/s */
+    int oriented_cone;               /* velocityGPU.scale.z = -1: use the emitter frame */
+    float cone_rotation[4], cone_angle_span[2]; /* unit quaternion XYZW and angle variation, radians */
+    float ball_scale[2];             /* velocityGPU.scale.x/y: independent radius multipliers */
     float collide_thickness, collide_min_life, collide_penetration, collide_speed;   /* colorGPU.fadeColor x y z w */
     float collide_elasticity, collide_restitution, collide_offset;   /* physicsGPU.elasticity, .restitution; timeOffset */
 } sh_motion;
@@ -54,6 +59,11 @@ typedef struct sh_motion_frame {
 #define SH_MOTION_STAGE_ORIENTATION  0x12C    /* prtOrientationType_t; 3 = POR_AIMED */
 #define SH_MOTION_SYSTEM_BOUNDS      0x59C
 #define SH_MOTION_GEOMETRY_SIZEVAR   0x61C
+#define SH_MOTION_GEOMETRY_INITIAL   0x60C
+#define SH_MOTION_GEOMETRY_FINAL     0x614
+#define SH_MOTION_VELOCITY_SCALE     0x644
+#define SH_MOTION_DISTRIBUTION_SCALE 0x628
+#define SH_MOTION_FIELD_SCALE        0x688
 #define SH_MOTION_DISTRIBUTION_OFF   0x634
 #define SH_MOTION_VELOCITY_OFF       0x650
 #define SH_MOTION_ACCELERATION       0x65C
@@ -63,6 +73,7 @@ typedef struct sh_motion_frame {
 #define SH_MOTION_FIELD_ROTATIONVAR  0x6AC
 #define SH_MOTION_FIELD_SPEED        0x6B8
 #define SH_MOTION_FIELD_SPEEDVAR     0x6C4
+#define SH_MOTION_FIELD_STRENGTH     0x6D0
 #define SH_MOTION_FIELD_TIGHTNESS    0x6D4
 #define SH_MOTION_FIELD_REPEAT       0x6D8
 
@@ -74,7 +85,7 @@ void sh_motion_read(const uint8_t *stage, sh_motion *out);
 
 /* A particle's launch velocity by the stage: times its launch speed factor, plus its launch ball (the same for
  * the same seed). */
-void sh_motion_launch(const sh_motion *m, uint32_t seed, float v0[3]);
+void sh_motion_launch(const sh_motion *m, uint32_t seed, float v0[3], const sh_motion_frame *frame);
 
 /* The step a particle of this life is integrated with (seconds). */
 float sh_motion_step(float life);

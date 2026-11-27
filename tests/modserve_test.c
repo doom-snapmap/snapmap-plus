@@ -25,6 +25,7 @@
 
 void sh_modserve_test_cache(int enabled);
 size_t sh_modserve_test_cache_bytes(void);
+unsigned sh_modserve_test_parent_reads(void);
 void sh_modserve_test_reset_registration(void);
 void sh_modserve_test_reset_gates(void);
 unsigned sh_modserve_test_gates_owned(void);
@@ -2039,7 +2040,9 @@ static void test_refresh(void)
     }
     /* The decls that inherit from a changed or gone decl follow it, at any
      * depth; a commented or nested inherit is no parent. Once per table. */
+    unsigned parent_reads = sh_modserve_test_parent_reads();
     CHECK(sh_modserve_refresh_expand() == 3);
+    CHECK(sh_modserve_test_parent_reads() == parent_reads);
     CHECK(sh_modserve_refresh_expand() == 0);
     sh_modserve_last_diff(&d);
     CHECK(d.pending == 10 && d.dependents == 3);
@@ -2083,6 +2086,43 @@ static void test_refresh(void)
     /* Leave the table test_requirements left. */
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\plain\\mods", top);
     (void)sh_modserve_index_build(root);
+}
+
+static void test_deep_inheritance_refresh(void)
+{
+    enum { count = 12 };
+    fx_file files[count];
+    char root[MAX_PATH], names[count][64], paths[count][112], bodies[count][112];
+    rf_seen seen = {0};
+    snprintf(root, sizeof root, "%s\\..\\inheritance\\mods", g_root);
+    strcpy_s(names[0], sizeof names[0], "monster/test_parent");
+    strcpy_s(bodies[0], sizeof bodies[0], "{}");
+    for (int i = 0; i < count; ++i) {
+        if (i) {
+            snprintf(names[i], sizeof names[i], "mods/chain000/child%d", i);
+            snprintf(bodies[i], sizeof bodies[i], "{ inherit = \"%s\"; }", names[i - 1]);
+        }
+        snprintf(paths[i], sizeof paths[i], "generated/decls/entitydef/%s.decl", names[i]);
+        files[i] = (fx_file){ paths[i], bodies[i], -1, "entityDef", names[i], NULL, 'a' };
+    }
+    const char *shadow = "\"generated/decls/entitydef/monster/test_parent.decl\"";
+    make_bundle(root, "chain", "chain000", 'a', shadow, files, count, NULL);
+    CHECK(sh_modserve_index_build(root) == 1);
+    (void)sh_modserve_each_refresh(rf_visit, &seen);
+    files[0].body = "{ changed = true; }";
+    files[0].blob = 'b';
+    make_bundle(root, "chain", "chain000", 'b', shadow, files, count, NULL);
+    CHECK(sh_modserve_index_rescan() == 1);
+    unsigned reads = sh_modserve_test_parent_reads();
+    CHECK(sh_modserve_refresh_expand() == count - 1 && sh_modserve_test_parent_reads() == reads);
+    memset(&seen, 0, sizeof seen);
+    CHECK(sh_modserve_each_refresh(rf_visit, &seen) == count);
+    const char *previous = seen.order;
+    for (int i = 0; i < count; ++i) {
+        const char *at = strstr(previous, names[i]);
+        CHECK(at != NULL);
+        if (at) previous = at + strlen(names[i]);
+    }
 }
 
 /* A native/ replacement of a DOOM static model is reloaded in place when the open map's scope changes who serves
@@ -2530,6 +2570,15 @@ static void test_watermark(void)
     CHECK(sh_modserve_watermark_has(&w, &r[6]) && sh_modserve_watermark_has(&w, &r[0]) && !sh_modserve_watermark_has(&w, &r[7]));
     anims[5] = &r[7]; la.count = 6;
     CHECK(!sh_modserve_watermark_has(&w, &r[7]) && !sh_modserve_watermark_has(NULL, &r[0]));
+    /* The engine can swap-remove or move a resource while a pass is open. Only a genuinely new pointer is kept. */
+    anims[0] = &r[1];
+    anims[1] = NULL;
+    models[0] = &r[0];
+    r[0].level = r[1].level = r[7].level = 1;
+    la.next = NULL; lm.next = &la; head = &lm;
+    CHECK(sh_modserve_watermark_raise(&head, &w, &out) && out.created == 1 && out.raised == 1);
+    CHECK(r[0].level == 1 && r[1].level == 1 && r[7].level == 4);
+    lm.next = NULL; la.next = &lm;
     sh_modserve_watermark_free(&w);
     CHECK(!sh_modserve_watermark_has(&w, &r[0]));
     la.count = 5;
@@ -4947,7 +4996,7 @@ static void test_serving_build_needs(void)
     }
     ld.type = "md6Def"; ld.cls = "idDeclMD6"; ld.next = &ls; ld.entries = md6s; ld.count = 1;
     ls.type = "skeleton"; ls.cls = "idMD6Skel"; ls.next = NULL; ls.entries = skels; ls.count = 2;
-    body.name = "mods/c3mod000/body.md6"; md6s[0] = &body;
+    body.name = "MODS\\c3mod000/BODY.md6"; md6s[0] = &body;
     ska.name = "md6/stock/a.md6skl"; skb.name = "md6/stock/b.md6skl"; skels[0] = &ska; skels[1] = &skb;
     sh_modserve_attrib_reset();
     sh_modserve_scope_enable(1);
@@ -6454,6 +6503,21 @@ static void test_namespace_maps(void)
                                           "mods/oldsalt12/z";
     uint32_t from = sh_mb_fnv1_lower("play_hit", 8), to = sh_mb_fnv1_lower("play_bbank000_hit", 17), other = 0x1234;
     printf("-- the namespace of sound events and of spelled names\n");
+    {
+        unsigned char bank[] = {
+            'B','K','H','D', 8,0,0,0, 113,0,0,0, 100,0,0,0,
+            'H','I','R','C', 87,0,0,0, 3,0,0,0,
+            3, 23,0,0,0, 1,0,0,0, 3,4, 2,0,0,0, 0, 1,15,100,0,0,0, 0, 4, 100,0,0,0,
+            3, 27,0,0,0, 2,0,0,0, 3,4, 3,0,0,0, 0, 0, 1,15,0,0,0,0,100,0,0,0, 4, 150,0,0,0,
+            3, 18,0,0,0, 3,0,0,0, 3,1, 4,0,0,0, 0, 0, 0, 4, 100,0,0,0
+        };
+        unsigned char expected[sizeof bank];
+        uint32_t new_bank = sh_mb_fnv1_lower("test.bank", 9);
+        memcpy(expected, bank, sizeof bank);
+        memcpy(expected + 12, &new_bank, 4);
+        memcpy(expected + 28 + 5 + 23 - 4, &new_bank, 4);
+        CHECK(sh_modserve_bank_patch_id(bank, sizeof bank, "test.bank") && !memcmp(bank, expected, sizeof bank));
+    }
     ns_bank(a, 7, from);
     ns_bank(b2, 7, to);
     CHECK(sh_modserve_bank_events(a, sizeof a, &from, &to, 1) == 1 && !memcmp(a, b2, sizeof a));
@@ -6649,6 +6713,52 @@ static void layout_doc(const char *root, const char *folder, const char *json)
 
 static const char *layout_prefs;
 static char *read_layout_prefs(void) { return _strdup(layout_prefs); }
+
+static void test_owned_editor_layout(void)
+{
+    char root[MAX_PATH], text[8192];
+    snprintf(root, sizeof root, "%s\\..\\owned-layout\\mods", g_root);
+    mkdirs(root);
+    const char *intrinsic = "{ inherit = \"prop/prop_base\"; edit = { entityDef = \"snapmaps/unknown\"; } }";
+    fx_file rows[] = {
+        {"generated/decls/snapeditorentitydef/mods/amber000/materials/body.decl", intrinsic,
+         -1, "snapEditorEntityDef", "mods/amber000/materials/body", NULL, '3'},
+        {"generated/decls/snapeditorentitydef/mods/amber000/other.decl", intrinsic,
+         -1, "snapEditorEntityDef", "mods/amber000/other", NULL, '4'}
+    };
+    make_bundle(root, "owner", "amber000", '1', "", rows, 2, NULL);
+    layout_doc(root, "owner",
+        "{\"tiles\":{\"materials/body\":{\"entity\":\"entities/body\",\"tab\":\"snapmap-plus/custom\",\"order\":0},"
+        "\"other\":{\"entity\":\"entities/body\",\"tab\":\"shared/ci\",\"order\":-9}}}");
+    sh_modserve_scope_enable(1);
+    sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR);
+    CHECK(sh_modserve_index_build(root) == 1);
+    CHECK(open_text(rows[0].path, text, sizeof text) && strstr(text, "categoryNameTag = \"#str_sh_category_1\"") &&
+          strstr(text, "metaCategoryNameTag = \"#str_snapentity_metacategory_toybox\"") && strstr(text, "sortPriority = 0;"));
+    CHECK(open_text(rows[1].path, text, sizeof text) && strstr(text, "#str_smp_tab_") && strstr(text, "sortPriority = -9;"));
+    make_bundle(root, "patch", "blue0000", '2', "", NULL, 0, NULL);
+    layout_doc(root, "patch",
+        "{\"tiles\":{\"mods/amber000/materials/body\":{\"tab\":\"#str_snapentity_category_props\"},"
+        "\"mods/amber000/other\":{\"order\":17}}}");
+    CHECK(sh_modserve_index_build(root) == 2);
+    CHECK(open_text(rows[0].path, text, sizeof text) && strstr(text, "#str_snapentity_category_props") &&
+          !strstr(text, "#str_sh_category_1") && strstr(text, "sortPriority = 0;"));
+    CHECK(open_text(rows[1].path, text, sizeof text) && strstr(text, "#str_smp_tab_") && strstr(text, "sortPriority = 17;"));
+    char hash[65];
+    const char *active[] = {hash64('1', hash)};
+    sh_modserve_scope_set(active, 1, 1);
+    sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY);
+    CHECK(open_text(rows[0].path, text, sizeof text) && strstr(text, "snapmaps/unknown") &&
+          !strstr(text, "categoryNameTag") && !strstr(text, "sortPriority"));
+    sh_modserve_scope_set(NULL, 0, 0);
+    sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR);
+    layout_doc(root, "patch", "{}");
+    CHECK(sh_modserve_index_build(root) == 2);
+    CHECK(open_text(rows[0].path, text, sizeof text) && strstr(text, "#str_sh_category_1"));
+    CHECK(open_text(rows[1].path, text, sizeof text) && strstr(text, "sortPriority = -9;"));
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_build(g_root) >= 0);
+}
 
 static void test_editor_layout(void)
 {
@@ -7345,6 +7455,7 @@ int main(void)
     test_many_providers();
     test_many_composed();
     test_refresh();
+    test_deep_inheritance_refresh();
     test_conflicts();
     test_editor_refs();
     test_watermark();
@@ -7367,6 +7478,7 @@ int main(void)
     test_scope();
     test_mixed_editor_bundle();
     test_editor_tweak_composition();
+    test_owned_editor_layout();
     test_editor_layout();
     test_all_baked_tile_merges();
     test_scope_providers();

@@ -98,6 +98,9 @@ typedef struct sh_script_combat_engine {
     int   (*fx_hard_stops)(void);
     /* 1 when the entity is a projectile (its class descends from idProjectile) */
     int   (*is_projectile)(void *ent);
+    /* Replace the centre line drawn by the mod's ribbon emitter for this frame. */
+    int   (*draw_ribbon)(void *emitter, int time_ms, const float (*points)[3], size_t count, const float rgba[4]);
+    float *(*twitch_weight)(void *ai);
 } sh_script_combat_engine;
 
 void sh_script_combat_set_engine(const sh_script_combat_engine *engine);
@@ -158,7 +161,7 @@ int  sh_script_combat_launches(void);
 
 /* The last hit `victim` took: its damage decl and attacker (0 for none), as the pain hook reports them.
  * *decl gets a malloc'd copy of the whole name (the caller frees it). Any thread. */
-void sh_script_combat_note_hit(sh_script_handle victim, const char *decl, sh_script_handle attacker);
+void sh_script_combat_note_hit(sh_script_handle victim, const char *decl, sh_script_handle attacker, float damage);
 int  sh_script_combat_last_hit(sh_script_handle victim, char **decl, sh_script_handle *attacker);
 
 /* The owner effect route shared by play_effect and a native wound opening. */
@@ -199,6 +202,7 @@ extern const sig_entry SH_COMBAT_SIGNATURES[];
 
 /* Detour windows (whole, position-independent instructions; the test proves them). */
 #define SH_COMBAT_DAMAGE_APPLY_STOLEN 14
+#define SH_COMBAT_PLAYER_DAMAGE_STOLEN 15
 #define SH_COMBAT_SET_PAIN_STOLEN     15
 #define SH_COMBAT_LAUNCH_STOLEN       15
 /* The FX manager's stop of one action: six pushes and sub rsp (whole, position-independent). */

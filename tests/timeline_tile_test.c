@@ -140,6 +140,22 @@ static void test_rebind_decision(void)
     CHECK(!sh_tl_substate_blocks_rebind(1) && !sh_tl_substate_blocks_rebind(2) && !sh_tl_substate_blocks_rebind(0));
 }
 
+static void test_palette_built_before_install(void)
+{
+    static unsigned char editor[0x20660 + 0x60];
+    unsigned char *palette = editor + 0x20660;
+    int entries, type;
+    CHECK(!sh_tl_populated_palette(NULL, &type) && !sh_tl_populated_palette(editor, &type));
+    *(void **)palette = &type;
+    *(int *)(palette + 0x18) = 1480;
+    CHECK(!sh_tl_populated_palette(editor, &type));
+    *(void **)(palette + 0x10) = &entries;
+    CHECK(sh_tl_populated_palette(editor, &type) == palette);
+    CHECK(!sh_tl_populated_palette(editor, &entries));
+    *(int *)(palette + 0x18) = 0;
+    CHECK(!sh_tl_populated_palette(editor, &type));
+}
+
 /* A stock entity bound to a mod's row on the same entityDef goes to the stock row; an editor tweak (a stock
  * row's own name) and the stock row itself stay; nothing moves without a stock row. */
 static void test_stock_row_first(void)
@@ -221,6 +237,7 @@ static int synthetic_main(void)
     test_tile();
     test_record_json();
     test_rebind_decision();
+    test_palette_built_before_install();
     test_stock_row_first();
     test_actor_picker();
     test_equal_category_captions();

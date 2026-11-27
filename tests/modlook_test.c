@@ -440,6 +440,16 @@ static void test_ribbon_age(void)
 
 static void test_particle_fields(void)
 {
+    res plain = compile("plain.decl", "{\ntype particle\nerosion no\n}\n");
+    res eroded = compile("eroded.decl", "{\ntype particle\nerosion yes\n}\n");
+    res lit_mask = compile("lit.decl", "{\ntype particle\nlighting lit\nerosion yes\nglowmask mask.tga\n}\n");
+    CHECK(plain.out && !strstr(plain.out, "snapmapplus/particle"));
+    CHECK(eroded.out && !strcmp(unq(value(eroded.out, "stageprogram", 0)), "snapmapplus/particles-erosion/uberparticles"));
+    CHECK(lit_mask.out && !strcmp(unq(value(lit_mask.out, "stageprogram", 0)), "snapmapplus/particles-erosion/uberparticles"));
+    CHECK(lit_mask.out && vec_is(lit_mask.out, "particleuberparms1", 0, 0, 17, 0));
+    release(&plain);
+    release(&eroded);
+    release(&lit_mask);
     static const char T[] =
         "{\n\ttype\t\t\tparticle\n\ttransmap\t\tmods/abcdefgh/fx/embers.tga\n\tlighting\t\tlit\n\tglow\t\t\t4\n"
         "\tglowmask\t\tmods/abcdefgh/fx/embers_mask.tga\n\tglowmaskcolour\t{ 1, 0.4, 0.1 }\n\tglowmaskstrength\t2\n"

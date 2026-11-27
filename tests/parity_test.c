@@ -837,23 +837,25 @@ static size_t run_parity(const char *label, const char *author_root, const char 
             m = mpj_parse(manifest, ml);
             files = m ? (mpj *)mpj_get(m, "files") : NULL;
             for (f = 0; files && files->type == MPJ_ARR && f < files->n; f++) {
-                const mpj *sha = mpj_get(files->items[f], "sha256"), *size = mpj_get(files->items[f], "size");
+                const mpj *sha = mpj_get(files->items[f], "sha256");
                 size_t b;
                 for (b = 0; sha && sha->type == MPJ_STR && b < A.nb; b++) {
                     size_t fi;
                     for (fi = 0; fi < A.builds[b].file_count; fi++) {
                         const sh_mb_file *bf = &A.builds[b].files[fi];
-                        char from[MAX_PATH * 2], tmp[MAX_PATH * 2], *c;
+                        char tmp[MAX_PATH * 2];
+                        wchar_t *folder, *from, *to;
                         if (bf->stock || bf->absent || strcmp(bf->blob, sha->text)) continue;
-                        _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\%s", A.folders[b], bf->path);
-                        for (c = from; *c; c++) if (*c == '/') *c = '\\';
+                        folder = sh_mb_wpath(A.folders[b]);
+                        from = folder ? sh_mb_payload_wpath(folder, bf->path) : NULL;
                         _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s\\arrived.tmp", player_root);
-                        if (CopyFileA(from, tmp, FALSE)) (void)sh_cache_put_blob(tmp, bf->blob, bf->size);
+                        to = sh_mb_wpath(tmp);
+                        CHECK(from && to && CopyFileW(from, to, FALSE) && sh_cache_put_blob(tmp, bf->blob, bf->size));
+                        free(folder); free(from); free(to);
                         b = A.nb;
                         break;
                     }
                 }
-                (void)size;
             }
             mpj_free(m);
             free(manifest);
@@ -1219,7 +1221,10 @@ static void kinds_world(const char *author)
     /* interactable */
     write_mod(author, "panel", SI, "Panel");
     crate(author, "panel", SI, "panel", 21);
-    put_text(author, "panel", "decls\\snapeditorentitydef\\panel_row.decl",
+    put_text(author, "panel", "editor\\toybox.json",
+             "{\"tiles\":{\"panel_row\":{\"entity\":\"entities/panel\",\"template\":\"editor/templates/panel.decl\","
+             "\"tab\":\"#str_snapentity_category_demons\"}}}");
+    put_text(author, "panel", "editor\\templates\\panel.decl",
              "{\n\tinherit = \"action/door/open\";\n\tedit = {\n\t\tentityDef = \"entities/panel\";\n\t}\n}\n");
     put_text(author, "panel", "scripts\\panel.lua", "api = 1\nlocal def = \"entities/panel\"\nlocal snd = \"materials/panel_glow\"\n");
     put_text(author, "panel", "materials\\panel_glow.decl", "{\ndiffusemap\t\"images/panel_d.tga\"\n}\n");

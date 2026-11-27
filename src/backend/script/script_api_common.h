@@ -112,6 +112,7 @@ typedef struct sh_script_engine {
     /* The loaded decl `name` of decl type `type` ("renderParm", ...) by the game's own find, or NULL. */
     void    *(*decl)(const char *type, const char *name);
     int      (*hud_text)(void *player, const char *name, int slot, const char *text, const float rgba[4]);
+    int      (*bounds_center)(void *ent, float out[3]);  /* center used by ae_launchProjectileAtTarget */
 } sh_script_engine;
 
 /* The floor under pos from the world trace: straight down from SH_SCRIPT_GROUND_ABOVE above pos for

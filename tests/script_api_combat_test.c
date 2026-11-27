@@ -52,6 +52,7 @@ typedef struct fent {
     int      alive;
     float    pos[3], ax[9], vel[3];
     float    cur;
+    float    twitch;
     int      pain;
     char     def[128];
 } fent;
@@ -91,6 +92,7 @@ static fent *add_ent(int kind, const char *def, float x, float y, float z)
     e->kind = kind;
     e->alive = 1;
     e->cur = 100;
+    e->twitch = 2;
     e->pos[0] = x; e->pos[1] = y; e->pos[2] = z;
     yaw_axis(0, e->ax);
     strcpy_s(e->def, sizeof e->def, def);
@@ -121,6 +123,12 @@ static int f_slots(void) { return g_nents; }
 static uint32_t f_slot_spawn_id(int n) { return n >= 0 && n < g_nents && g_ents[n].alive ? g_ents[n].id : SH_SCRIPT_SPAWN_ID_NONE; }
 static int f_kind(void *ent) { return ent ? ((fent *)ent)->kind : SH_SCRIPT_KIND_GONE; }
 static int f_origin(void *ent, float out[3]) { memcpy(out, ((fent *)ent)->pos, 12); return 1; }
+static int f_bounds_center(void *ent, float out[3])
+{
+    f_origin(ent, out);
+    out[2] += 45.0f;
+    return 1;
+}
 static int f_axis(void *ent, float out[9]) { memcpy(out, ((fent *)ent)->ax, 36); return 1; }
 static int f_place(void *ent, const float *o, const float *a)
 {
@@ -248,7 +256,7 @@ static void *f_decl(const char *type, const char *name)
 }
 static const sh_script_engine k_engine = {
     f_resolve, f_spawn_id, f_slots, f_slot_spawn_id, f_kind, f_origin, f_axis, f_place, f_def_name, f_event,
-    NULL, NULL, NULL, NULL, f_spawn, f_trace, f_time, NULL, NULL, f_tag, NULL, NULL, NULL, f_decl
+    NULL, NULL, NULL, NULL, f_spawn, f_trace, f_time, NULL, NULL, f_tag, NULL, NULL, NULL, f_decl, NULL, f_bounds_center
 };
 
 /* the combat engine */
@@ -308,9 +316,18 @@ static int g_hard_hook = 1, g_hard_asked;
 static int c_fx_hard_stops(void) { g_hard_asked++; return g_hard_hook; }
 
 static int c_is_projectile(void *ent) { return ent && !strncmp(((fent *)ent)->def, "projectile/", 11); }
+static float *c_twitch_weight(void *ent) { return &((fent *)ent)->twitch; }
+
+static int c_draw_ribbon(void *ent, int ms, const float (*pts)[3], size_t n, const float rgba[4])
+{
+    CHECK(ent == &g_ents[E_AI] && ms == g_ms && n == 3);
+    CHECK(pts[1][1] == 5 && pts[2][2] == 9 && rgba[3] == .5f);
+    return 1;
+}
 
 static const sh_script_combat_engine k_combat = { c_decl, c_radius, c_explode, c_pain, c_name, c_fx, c_world,
-                                                 c_start_fx, c_stop_fx, NULL, c_fx_hard_stops, c_is_projectile };
+                                                 c_start_fx, c_stop_fx, NULL, c_fx_hard_stops, c_is_projectile, c_draw_ribbon,
+                                                 c_twitch_weight };
 
 static void *h_resolve(uint32_t id) { return by_id(id); }
 
@@ -454,6 +471,14 @@ static void test_damage(void)
     CHECK(has(g_events, "damage@player/sp(d:mods/" SALT "/damage/beam,a90 0 0,0,1,e:world,0);"));
     /* from (300, -100) up the y axis: yaw 90 */
     CHECK(has(g_events, "damage@ai/demon/imp(d:mods/" SALT "/damage/rock,a0 90 0,0,1,e:mods/" SALT "/ai/brute,0);"));
+}
+
+static void test_draw_ribbon(void)
+{
+    run("api = 1\non.spawn('ai/brute', function(e) print('drawn', e:draw_ribbon({{1,2,3},{x=4,y=5,z=6},{7,8,9}},{1,1,1,.5})) end)");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING && has(log_now(), "drawn\ttrue"));
+    refused("api = 1\non.spawn('ai/brute', function(e) e:draw_ribbon({{0,0,0}}) end)", "2", "2 and 128");
+    refused("api = 1\non.spawn('ai/brute', function(e) e:draw_ribbon({{0,0,0},{1,1,1}},{1,2,3,4}) end)", "2", "four colour channels");
 }
 
 /* The game's own Damage of an actor (script_api_combat.h actor_damage): the fake takes players and demons and logs
@@ -830,11 +855,20 @@ static void test_tags(void)
     CHECK(has(g_log, "joint\t10.0\t50.0\t100"));      /* the joint form still answers */
     CHECK(has(g_log, "prop\tnil"));                       /* a prop is no demon: no tags, no such joint */
     CHECK(has(g_log, "sight\ttrue"));
-    /* launched by the engine's event, then placed on the tag and sent to the player at (0, 200, 0) */
+    /* The player's feet are at z=0. The native projectile target is its world bounds center at z=45. */
     CHECK(has(g_events, "ae_launchProjectileAtTarget@mods/" SALT "/ai/brute(NULL,d:mods/" SALT "/rocket,'laser_source_1','ent2',0);"));
-    CHECK(has(g_log, "from tag\t20.0\t80.0\t555\t-222"));
+    CHECK(has(g_log, "from tag\t20.0\t80.0\t588\t-103"));
     CHECK(g_launch_from == 1);                              /* started on the tag, not moved there */
     CHECK(has(g_log, "faces\ttrue"));              /* and turned to where it flies */
+    run("api = 1\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  local p=self:fire('rocket', {x=13,y=7,z=89}, ent(2))\n"
+        "  local o=p:position(); print('world',o.x,o.y,o.z)\n"
+        "  local v=p:velocity(); print('world aim', math.floor(v.z/v.y*193+o.z+.5))\n"
+        "end)\n");
+    CHECK(has(log_now(), "world\t13.0\t7.0\t89.0"));
+    CHECK(has(g_log, "world aim\t45"));
+    CHECK(g_launch_from == 2);
 }
 
 static void test_fire(void)
@@ -1063,6 +1097,57 @@ static void test_hook_records(void)
     CHECK(has(g_log, "death\tdamage/rock\tplayer/sp"));
 }
 
+static int post_credited(lua_State *L)
+{
+    sh_script_event ev = {0};
+    int mod = sh_script_hit_recipient(g_ents[E_AI].id, &ev.other);
+    (void)L;
+    ev.self = sh_script_handles_ref(g_ents[E_PLAYER].id);
+    ev.flags = SH_SCRIPT_EVF_VEC; ev.vec[1] = 1; ev.amount = 1;
+    if (mod >= 0) sh_script_hooks_queue_damage(-1, mod, &ev, NULL);
+    return 0;
+}
+
+static void test_credited_hit(void)
+{
+    int mod, other_mod;
+    sh_script_event ev = {0}, foreign;
+    sh_script_handle attacker;
+    const char *line;
+    run("api = 1\n"
+        "on.hit('ai/brute', function(self, victim, hit)\n"
+        "  assert(hit.attacker==self and hit.direction.y==1 and not inside)\n"
+        "  print('credited',victim:definition(),hit.amount,hit.damage,hit.location)\n"
+        "  if hit.amount>1 then inside=true; post_credited(); inside=false end\n"
+        "end)\n"
+        "on.damage('ai/brute', function(self,hit) print('received',hit.amount) end)\n");
+    mod = sh_script_hooks_mod_find(SALT);
+    CHECK(sh_script_hit_recipient(g_ents[E_PLAYER].id, &attacker) == -1 && !attacker);
+    CHECK(sh_script_hit_recipient(g_ents[E_AI].id, &attacker) == mod && attacker == handle_of(E_AI));
+    ev.self = sh_script_handles_ref(g_ents[E_PLAYER].id);
+    ev.other = attacker;
+    ev.flags = SH_SCRIPT_EVF_VEC; ev.vec[1] = 1;
+    ev.amount = 12.75f; ev.text2 = "body";
+    other_mod = sh_script_hooks_mod_add("othermod", "Other Mod");
+    sh_script_hooks_queue_damage(other_mod, mod, &ev, "mods/" SALT "/rock");
+    CHECK(sh_script_queue_drain(other_mod, &foreign, 1) == 1);
+    CHECK(foreign.kind == SH_SCRIPT_EV_DAMAGE && foreign.self == ev.self && foreign.other == ev.other &&
+          !strcmp(foreign.text, "mods/" SALT "/rock") && foreign.amount == ev.amount);
+    sh_script_event_release(&foreign);
+    frame();
+    line = strstr(log_now(), "credited\tplayer/sp\t12.75\trock\tbody");
+    CHECK(line && strstr(line + 1, "credited\tplayer/sp\t12.75") == NULL);
+    line = strstr(g_log, "credited\tplayer/sp\t1.0");
+    CHECK(line && strstr(line + 1, "credited\tplayer/sp\t1.0") == NULL);
+    CHECK(strstr(g_log, "received") == NULL);
+    sh_script_hooks_queue_damage(-1, mod, &ev, "mods/" SALT "/gone");
+    g_ents[E_AI].alive = 0;
+    frame();
+    CHECK(strstr(log_now(), "gone") == NULL);
+    run("api = 1\non.damage('ai/brute', function() end)\n");
+    CHECK(sh_script_hit_recipient(g_ents[E_AI].id, &attacker) == -1 && !attacker);
+}
+
 /* A script holds its projectiles for as long as it likes. */
 static void test_projectiles_held(void)
 {
@@ -1126,6 +1211,30 @@ static void test_projectiles_held(void)
     CHECK(sh_script_combat_launches() == 5000);
 }
 
+static void test_twitch_response(void)
+{
+    sh_script_handle h;
+    run("api = 1\non.spawn('ai/brute',function(e) assert(e:twitch_response({{100,.2},{500,.6},{'damage/burn',.1}})) end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    h = handle_of(E_AI);
+    CHECK(!sh_script_combat_last_hit(h, NULL, NULL));
+    sh_script_combat_note_hit(h, "rifle", 0, 100);
+    CHECK(g_ents[E_AI].twitch == .4f);
+    sh_script_combat_note_hit(h, "rifle", 0, 101);
+    CHECK(g_ents[E_AI].twitch == 1.2f);
+    sh_script_combat_note_hit(h, "DAMAGE/burn", 0, 101);
+    CHECK(g_ents[E_AI].twitch == .2f);
+    sh_script_combat_note_hit(h, "rifle", 0, 501);
+    CHECK(g_ents[E_AI].twitch == 2);
+    sh_script_combat_note_hit(h, "rifle", 0, 17);
+    sh_script_combat_note_hit(handle_of(E_STOCK_AI), "rifle", 0, 17);
+    CHECK(g_ents[E_AI].twitch == .4f && g_ents[E_STOCK_AI].twitch == 2);
+    sh_script_combat_reset();
+    CHECK(g_ents[E_AI].twitch == 2);
+    refused("api = 1\non.spawn('ai/brute',function(e) e:twitch_response({{100,.2},{99,.5}}) end)\n",
+            "2", "limits must increase");
+}
+
 static void test_records(void)
 {
     char *decl = NULL, longdecl[600];
@@ -1133,14 +1242,14 @@ static void test_records(void)
     int mod = -1;
     sh_script_combat_reset();
     CHECK(!sh_script_combat_last_hit(7, &decl, &a) && decl == NULL);
-    sh_script_combat_note_hit(7, "damage/rock", 9);
-    sh_script_combat_note_hit(7, "damage/beam", 11);
+    sh_script_combat_note_hit(7, "damage/rock", 9, 5);
+    sh_script_combat_note_hit(7, "damage/beam", 11, 5);
     CHECK(sh_script_combat_last_hit(7, &decl, &a) && decl && !strcmp(decl, "damage/beam") && a == 11);
     free(decl);
     /* a decl name of any length is kept whole */
     memset(longdecl, 'd', sizeof longdecl - 1);
     longdecl[sizeof longdecl - 1] = 0;
-    sh_script_combat_note_hit(7, longdecl, 12);
+    sh_script_combat_note_hit(7, longdecl, 12, 5);
     CHECK(sh_script_combat_last_hit(7, &decl, &a) && decl && strlen(decl) == sizeof longdecl - 1 && a == 12);
     free(decl);
     CHECK(sh_script_combat_first_death(7) == 1);
@@ -1165,7 +1274,7 @@ static void test_records(void)
             fent *p = add_ent(SH_SCRIPT_KIND_OTHER, "projectile/stock_rocket", 0, 0, 0);
             sh_script_handle h = sh_script_combat_launch(p->id, 5, 0);
             CHECK(h != 0);
-            sh_script_combat_note_hit(h, "damage/rock", 9);
+            sh_script_combat_note_hit(h, "damage/rock", 9, 5);
             CHECK(sh_script_combat_first_death(h) == 1);
         }
         CHECK(sh_script_combat_launches() == 3000);
@@ -1181,6 +1290,7 @@ int main(void)
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "add_projectile", t_add_projectile);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "put", t_put);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "post_credited", post_credited);
     sh_script_api_set_engine(&k_engine);
     sh_script_api_install(NULL, 0, NULL);
     sh_script_combat_set_engine(&k_combat);
@@ -1195,6 +1305,8 @@ int main(void)
     test_effects_sound();
     test_sdk_calls();
     test_fx_hard_stops();
+    test_draw_ribbon();
+    test_twitch_response();
     test_tag_pain_sight();
     test_tags();
     test_fire();
@@ -1203,6 +1315,7 @@ int main(void)
     test_incoming();
     test_refusals();
     test_hook_records();
+    test_credited_hit();
     test_projectiles_held();
     test_records();
     sh_script_map_end();

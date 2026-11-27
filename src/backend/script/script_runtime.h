@@ -132,6 +132,9 @@ int sh_script_started(void);
 #define SH_SCRIPT_BIND_PROJECTILE 0x80u
 #define SH_SCRIPT_BIND_FRAME  0x100u
 #define SH_SCRIPT_BIND_SIGNAL 0x200u   /* bound as "signal:<event>" */
+#define SH_SCRIPT_BIND_HIT    0x400u
+/* Hook slot of a subscribed attacker, or -1. Only owned actors can receive outgoing hits. */
+int sh_script_hit_recipient(uint32_t spawn_id, sh_script_handle *attacker);
 int sh_script_binds(const char *full_name, char *salt_out, size_t cap, unsigned *kinds);
 
 /* Read a bound actor's own served AI behavior at map start. Scan existing actors after registration. */

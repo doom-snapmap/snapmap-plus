@@ -117,6 +117,14 @@ hlsl_fp_header {
 	    float gp0 = ( V[2].x - 1.0 ) / 10.0;
 	    float gp1 = ( V[4].z - 1.0 ) / 10.0;
 	    float gp3 = V[2].w;
+#ifdef PARTICLE_EROSION
+	    float mask = lerp( cur.g, nxt.g, fb );
+	    float alpha = saturate( ( mask + gp1 - 1.0 ) / max( gp1, 0.001 ) );
+	    clip( alpha - 0.005 );
+	    G = ep_lin( alpha );
+	    R = ep_lin( lerp( cur.r, nxt.r, fb ) );
+	    gp1 = 0.0;
+#endif
 	    float3 c = float3( ep_srgb( V[0].r ), ep_srgb( V[0].g ), ep_srgb( V[0].b ) );
 
 	    // near fade, on the distance from the view

@@ -521,6 +521,8 @@ static int ent_tostring(lua_State *L)
     return 1;
 }
 
+static volatile LONG g_hit_subscribers;
+
 /* The runtime mod whose hooks slot is `hook`, any status. */
 static shs_mod *mod_by_hook(int hook)
 {
@@ -528,6 +530,22 @@ static shs_mod *mod_by_hook(int hook)
     if (hook < 0) return NULL;
     for (i = 0; i < g_nmods; i++) if ((*g_modv[i]).in_map && (*g_modv[i]).hook == hook) return &(*g_modv[i]);
     return NULL;
+}
+
+int sh_script_hit_recipient(uint32_t spawn_id, sh_script_handle *attacker)
+{
+    int slot = -1;
+    shs_mod *m;
+    sh_script_handle h;
+    *attacker = 0;
+    if (!InterlockedCompareExchange(&g_hit_subscribers, 0, 0)) return -1;
+    h = sh_script_handles_find(spawn_id, &slot);
+    if (!h || slot < 0) return -1;
+    AcquireSRWLockShared(&g_lock);
+    m = mod_by_hook(slot);
+    if (m && m->wants_hits && m->status == SH_SCRIPT_RUNNING) *attacker = h;
+    ReleaseSRWLockShared(&g_lock);
+    return *attacker ? slot : -1;
 }
 
 /* Ownership is the handle table's: an entity recorded under the mod's slot
@@ -655,11 +673,11 @@ const char *sh_script_check_sound_name(lua_State *L, int arg, const char *call, 
 /* --------------------------------------------------------- registration */
 
 static const char *const k_kinds[] = { "spawn", "think", "remove", "damage", "death", "animation", "pain", "projectile",
-                                       "frame_event" };
+                                       "frame_event", "hit" };
 static const unsigned k_bits[] = { SH_SCRIPT_BIND_SPAWN, SH_SCRIPT_BIND_THINK, SH_SCRIPT_BIND_REMOVE,
                                    SH_SCRIPT_BIND_DAMAGE, SH_SCRIPT_BIND_DEATH, SH_SCRIPT_BIND_ANIM,
-                                   SH_SCRIPT_BIND_PAIN, SH_SCRIPT_BIND_PROJECTILE, SH_SCRIPT_BIND_FRAME };
-#define SHS_KINDS      9
+                                   SH_SCRIPT_BIND_PAIN, SH_SCRIPT_BIND_PROJECTILE, SH_SCRIPT_BIND_FRAME, SH_SCRIPT_BIND_HIT };
+#define SHS_KINDS      10
 #define SHS_KIND_ANIM  5
 #define SHS_KIND_FRAME 8
 /* The kinds whose second value names what in the animation they wait for. */
@@ -691,7 +709,13 @@ static int add_binding(shs_mod *m, const char *full, unsigned bit, char *behavio
             m->nbinds++;
         }
     }
-    if (ok) m->binds[i].kinds |= bit;
+    if (ok) {
+        m->binds[i].kinds |= bit;
+        if ((bit & SH_SCRIPT_BIND_HIT) && !m->wants_hits) {
+            m->wants_hits = 1;
+            InterlockedIncrement(&g_hit_subscribers);
+        }
+    }
     ReleaseSRWLockExclusive(&g_lock);
     free(behavior);
     return ok;
@@ -1353,6 +1377,10 @@ static void close_mod(shs_mod *m, int status)
     AcquireSRWLockExclusive(&g_lock);
     m->status = status;
     m->prepared = 0;
+    if (m->wants_hits) {
+        m->wants_hits = 0;
+        InterlockedDecrement(&g_hit_subscribers);
+    }
     {
         int k;
         for (k = 0; k < m->nbinds; k++) {
@@ -1717,10 +1745,10 @@ static void push_vec3(lua_State *L, const float *v)
     lua_pushnumber(L, v[2]); lua_setfield(L, -2, "z");
 }
 
-static void push_hit(lua_State *L, const sh_script_event *ev)
+static void push_hit(lua_State *L, const sh_script_event *ev, sh_script_handle attacker)
 {
     lua_createtable(L, 0, 6);
-    sh_script_push_entity(L, ev->other);
+    sh_script_push_entity(L, attacker);
     lua_setfield(L, -2, "attacker");
     sh_script_push_entity(L, ev->third);
     lua_setfield(L, -2, "inflictor");
@@ -1841,8 +1869,12 @@ static int job_event(lua_State *L)
         sh_script_push_entity(L, ev->self);
         at = lua_gettop(L);
         if (ev->kind == SH_SCRIPT_EV_DAMAGE || ev->kind == SH_SCRIPT_EV_DEATH) {
-            push_hit(L, ev);
+            push_hit(L, ev, ev->other);
             call_chain(L, ev->kind == SH_SCRIPT_EV_DAMAGE ? "damage" : "death", chain, at, 2);
+        } else if (ev->kind == SH_SCRIPT_EV_HIT) {
+            sh_script_push_entity(L, ev->other);
+            push_hit(L, ev, ev->self);
+            call_chain(L, "hit", chain, at, 3);
         } else if (ev->kind == SH_SCRIPT_EV_ANIM) {
             const char *notify = push_lower(L, ev->text), *colon;
             const char *command;

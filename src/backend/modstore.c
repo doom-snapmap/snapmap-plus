@@ -3147,7 +3147,7 @@ int sh_ms_sync_pending(void)
 }
 
 static sh_mb_resolver g_boot_resolver;
-static sh_ms_rescan_fn g_boot_rescan;
+static sh_ms_boot_finish_fn g_boot_finish;
 
 /* The startup install's release of the store (sh_ms_boot_release): a manual
  * reset event the boot build waits on before it touches the store. */
@@ -3192,11 +3192,18 @@ static void ms_boot_run(int pending, int yield)
     ULONGLONG t0 = GetTickCount64();
     int n = -1;
     if (pending < 0) pending = sh_ms_sync_pending();
-    if (pending <= 0) return;
+    if (pending <= 0) {
+        if (g_boot_finish) (void)g_boot_finish(0);
+        return;
+    }
     ms_log("MODS: store: boot: %d folder(s) not built yet (or changed since their build); building them, as a rescan "
            "would", pending);
-    if (!ms_sync(&g_boot_resolver, &st, yield)) { ms_log("MODS: store: boot: the store could not be read; nothing built"); return; }
-    if (st.rebuilt && g_boot_rescan) n = g_boot_rescan();
+    if (!ms_sync(&g_boot_resolver, &st, yield)) {
+        ms_log("MODS: store: boot: the store could not be read; nothing built");
+        if (g_boot_finish) (void)g_boot_finish(0);
+        return;
+    }
+    if (g_boot_finish) n = g_boot_finish(st.rebuilt != 0);
     ms_log("MODS: store: boot: %u of %u folder(s) built (%u refused) in %llu ms%s", st.rebuilt, st.folders, st.failed,
            (unsigned long long)(GetTickCount64() - t0),
            !st.rebuilt ? "" : n >= 0 ? "; the serving index was rebuilt with them" : "; the serving index could not be rebuilt");
@@ -3223,13 +3230,13 @@ static DWORD WINAPI ms_boot_thread(LPVOID unused)
     return 0;
 }
 
-int sh_ms_boot_sync(const sh_mb_resolver *resolver, sh_ms_rescan_fn rescan, int background)
+int sh_ms_boot_sync(const sh_mb_resolver *resolver, sh_ms_boot_finish_fn finish, int background)
 {
     int pending;
     HANDLE h;
     memset(&g_boot_resolver, 0, sizeof g_boot_resolver);
     if (resolver) g_boot_resolver = *resolver;
-    g_boot_rescan = rescan;
+    g_boot_finish = finish;
     if (background) {
         /* The check reads every folder's tree, so it runs on the thread too, once the startup install has
          * released the store (sh_ms_boot_release). */
@@ -3240,7 +3247,7 @@ int sh_ms_boot_sync(const sh_mb_resolver *resolver, sh_ms_rescan_fn rescan, int 
         return 1;
     }
     pending = sh_ms_sync_pending();
-    if (pending > 0) ms_boot_run(pending, 0);
+    ms_boot_run(pending, 0);
     return pending;
 }
 

@@ -108,6 +108,8 @@ Provide the two label keys in the English catalog. Each setting is a checkbox an
 
 Each installed mod contributes the fields it explicitly sets. One mod can move Unknown while another changes its icon or adds a sheet. If two mods change the same field, the mod with the alphabetically earlier salt wins. Removing it reveals the other contribution. A shared tab uses its stable ID in every language. The order of installation and the spelling of the on-screen label cannot change which object a rule targets.
 
+A new tile's own `tab` and `order` are its defaults. Another installed mod can override either field. Removing that mod restores the tile owner's choice.
+
 ## What a published map downloads
 
 A published map records the exact slices for its placed objects and any mods the author enabled map-wide. Play and Edit use the same slices. For example, placing the Crucible from Campaign Interactables includes its entity, interaction and animation dependencies, as well as its own Toybox icon and description. Someone who opens a copy to edit or remix can identify that same placed object. Files already in the player's cache can be reused.

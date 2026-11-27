@@ -102,7 +102,7 @@ typedef struct sh_modserve_hit {
  * case-insensitive) spelled with `renamed` instead of `stem`. Malloc'd, or
  * NULL when nothing changed. Pure. */
 char *sh_modserve_bank_rename_text(const char *text, size_t len, const char *stem, const char *renamed, size_t *out_len);
-/* Rewrite a bank's BKHD id to FNV-1 of `stem` in place. 1 done, 0 not a BKHD bank. Pure. */
+/* Rename the BKHD and its v113 Play actions that reference the same bank. */
 int  sh_modserve_bank_patch_id(unsigned char *bytes, size_t len, const char *stem);
 /* Rewrite every HIRC Event id of a bank that equals from[k] to to[k] in place (the namespace of a mod's sound
  * events: modserve.c ms_sound_events). The count rewritten. Pure. */
@@ -298,6 +298,7 @@ int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn,
 typedef struct sh_modserve_watermark {
     uintptr_t *res;   /* addresses present before the pass */
     size_t n, capacity;
+    struct ms_mark *snapshot;
     int ok;           /* 1 when the walk completed */
 } sh_modserve_watermark;
 
@@ -421,18 +422,20 @@ typedef struct sh_modserve_palette_ops {
 
 typedef struct sh_modserve_rows_sync {
     int rows;          /* editor rows the named bundles provide */
-    int missing;       /* of them, absent from the palette and never registered */
+    int missing;       /* of them, absent from the palette and eligible for admission */
     int rebuild;       /* 0 not requested, else what ops->rebuild returned */
     int registered;    /* missing rows registered by the rebuild's editor pass */
     int admitted;      /* missing rows in the palette after the rebuild */
     int rows_before, rows_after;   /* palette row counts around the rebuild (-1 unknown) */
 } sh_modserve_rows_sync;
 
-/* For exactly the named bundles (64-hex hashes): when the palette exists and lacks one of their rows that no editor
- * pass has visited, request one rebuild (nothing is asked of ops when no palette exists yet). Returns 1 when
- * requested, 0 when not, -1 on unusable ops or no memory. */
+/* Request one rebuild if a named bundle has an eligible row missing from this palette.
+ * Returns 1 when requested, 0 otherwise, or -1 on unusable ops or no memory. */
 int sh_modserve_map_rows_sync(const char *const *bundle_hashes, int n, const sh_modserve_palette_ops *ops,
                               sh_modserve_rows_sync *out);
+long sh_modserve_row_revision(void);
+void sh_modserve_palette_rebuilt(void);
+int sh_modserve_boot_finished(int rebuilt);
 
 /* A mod.json may carry {"requirements": {"cvars": {"<cvar>": <value>}, "commands": {"activate": ["<line>"],
  * "deactivate": [...]}}}, read through the builder's canonical form (modbundle.h sh_mb_requirements_canonical); a

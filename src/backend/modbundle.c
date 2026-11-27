@@ -16,6 +16,8 @@
 
 #include "../common/profile_dir.h"
 #include "modbundle.h"
+#include "clip_events.h"
+#include "attach_tags.h"
 #include "modprog.h"    /* SH_MODPROG_CONTAINER: the render programs the product derives */
 #include "modlook.h"    /* sh_look_compile: the Graphics SDK's looks, checked and scanned as the engine reads them */
 #include "modsalt.h"
@@ -1671,6 +1673,10 @@ int sh_mb_need_requests(const char *type, const char *name, char *out[], int max
         if (decal) mb_put_req(out, &k, max, mb_binary_name("generated", "decalatlas", name, "bimage"));
         return k;
     }
+    if (mb_ieq_n(type, tl, "lightatlas")) {
+        mb_put_req(out, &k, max, mb_binary_name("generated", "lightatlas", name, "bimage"));
+        return k;
+    }
     if (mb_ieq_n(type, tl, "model")) {
         if (mb_iends(name, nl, ".bmodel")) { mb_put_req(out, &k, max, mb_own_name(name)); return k; }
         /* cooked/model/ for authored models; the md6 collision models (md6/.../collision/<x>.lwo, named by
@@ -1893,6 +1899,7 @@ static const char *mb_asset_field(const mb_scan *sc, const char *key, size_t len
                             : mb_reflected_field(sc->decl_type, key, len, 0);
     if (type) return type;
     if (sc->is_md6 && mb_ieq_n(key, len, "sound")) return "sound";
+    if (sc->is_md6 && mb_ieq_n(key, len, "rumble")) return "rumble";
     if (sc->is_entitydef) {
         if (mb_ieq_n(key, len, "componentDecl") && mb_in_block(sc, "aiConstants") && mb_in_block(sc, "components") &&
             sc->depth > 0 && sc->depth <= MB_SCAN_DEPTH) {
@@ -1963,6 +1970,13 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
     }
     if (sc->is_material && mb_iends(k, kn, "program") && (quoted || val->kind == TK_WORD)) {
         sc->fn(sc->ctx, "renderProg", v, vn);
+        return;
+    }
+    if (sc->is_material && (quoted || val->kind == TK_WORD) &&
+        (mb_ieq_n(k, kn, "lightprojectmap") || mb_ieq_n(k, kn, "lightfalloffmap"))) {
+        size_t i = vn;
+        while (i && !isspace((unsigned char)v[i - 1])) --i;
+        if (i < vn && v[i] != '_') sc->fn(sc->ctx, "lightatlas", v + i, vn - i);
         return;
     }
     /* A material's register program names a table the Graphics SDK derived (sdkvalues.c: `temp5
@@ -4136,12 +4150,6 @@ static int mb_string_key_ok(const char *key, const char *salt)
     return 1;
 }
 
-static sh_mb_clip_events_fn volatile g_clip_events;
-void sh_mb_set_clip_events(sh_mb_clip_events_fn fn)
-{
-    InterlockedExchangePointer((void *volatile *)&g_clip_events, (void *)fn);
-}
-
 typedef struct mb_ce_ctx { sh_mb_bundle *b; const wchar_t *root; } mb_ce_ctx;
 
 static int mb_ce_name_same(const char *a, const char *b)
@@ -4200,14 +4208,13 @@ static void mb_ce_warn(void *context, const char *line)
  * not a list, or an entry that is not a name, is left out with a warning, never failing the build. */
 static void mb_registry_clip_events(sh_mb_bundle *b, const wchar_t *root, const mbj *extra, mb_buf *o, int *first)
 {
-    sh_mb_clip_events_fn fn = g_clip_events;
     const mbj *list = extra ? mbj_get(extra, "animation_events") : NULL;
     const char **names;
     char *json;
     size_t i;
     int n = 0, oom = 0;
     mb_ce_ctx c;
-    if (!list || !fn) return;
+    if (!list) return;
     if (list->t != MBJ_ARR) {
         mb_warn(b, "mod.json \"animation_events\" is not a list, so it was ignored. Write it as a list of this mod's md6Def "
                 "names, like \"animation_events\": [\"mods/<folder name>/<path>.md6\"].");
@@ -4227,7 +4234,7 @@ static void mb_registry_clip_events(sh_mb_bundle *b, const wchar_t *root, const 
     }
     c.b = b;
     c.root = root;
-    json = n ? fn(b->id, names, n, mb_ce_text, &c, mb_ce_warn, b, &oom) : NULL;
+    json = n ? sh_ce_build_registry(b->id, names, n, mb_ce_text, &c, mb_ce_warn, b, &oom) : NULL;
     free((void *)names);
     if (oom) { free(json); mb_error(b, "out of memory"); return; }
     if (!json) return;
@@ -4237,25 +4244,18 @@ static void mb_registry_clip_events(sh_mb_bundle *b, const wchar_t *root, const 
     free(json);
 }
 
-static sh_mb_clip_events_fn volatile g_attach_tags;
-void sh_mb_set_attach_tags(sh_mb_clip_events_fn fn)
-{
-    InterlockedExchangePointer((void *volatile *)&g_attach_tags, (void *)fn);
-}
-
 /* registries "attachmentTags": the author's "attachment_tags" checked and recorded (attach_tags.h), as the
  * "animation_events" are above: a value that is not a list, or an entry that is not a name, is left out with a
  * warning, never failing the build. */
 static void mb_registry_attach_tags(sh_mb_bundle *b, const wchar_t *root, const mbj *extra, mb_buf *o, int *first)
 {
-    sh_mb_clip_events_fn fn = g_attach_tags;
     const mbj *list = extra ? mbj_get(extra, "attachment_tags") : NULL;
     const char **names;
     char *json;
     size_t i;
     int n = 0, oom = 0;
     mb_ce_ctx c;
-    if (!list || !fn) return;
+    if (!list) return;
     if (list->t != MBJ_ARR) {
         mb_warn(b, "mod.json \"attachment_tags\" is not a list, so it was ignored. Write it as a list of this mod's "
                 "md6Def names, like \"attachment_tags\": [\"mods/<folder name>/<path>.md6\"].");
@@ -4275,7 +4275,7 @@ static void mb_registry_attach_tags(sh_mb_bundle *b, const wchar_t *root, const 
     }
     c.b = b;
     c.root = root;
-    json = n ? fn(b->id, names, n, mb_ce_text, &c, mb_ce_warn, b, &oom) : NULL;
+    json = n ? sh_at_build_registry(b->id, names, n, mb_ce_text, &c, mb_ce_warn, b, &oom) : NULL;
     free((void *)names);
     if (oom) { free(json); mb_error(b, "out of memory"); return; }
     if (!json) return;

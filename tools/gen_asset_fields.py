@@ -16,7 +16,7 @@ INLINE = {
     "goreGraph": "idDeclGoreNode",
     "weapon": "idDeclInventory",
 }
-DECLS = ("aiBehavior", "ammo", "weapon", "projectile", "projectileImpactEffect", "goreGraph")
+DECLS = ("aiBehavior", "ammo", "weapon", "projectile", "projectileImpactEffect", "goreGraph", "rumble")
 # The archive's public names for native types with different spelling.
 ALIASES = {
     "idMaterial": "material", "idSoundShader": "sound", "idEntityDefRef": "entityDef",

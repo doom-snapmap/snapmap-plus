@@ -12,6 +12,24 @@
 #include "timeline_tile.h"
 #include "direct_actor.h"
 
+#define ED_PALETTE_OFF      0x20660
+#define PAL_ENTRIES_OFF     0x10
+#define PAL_COUNT_OFF       0x18
+#define PAL_MAX             100000
+
+/* The editor may have finished its native build before our hook was installed. */
+void *sh_tl_populated_palette(void *editor, const void *vtable)
+{
+    unsigned char *palette;
+    void *type, *entries;
+    int rows;
+    if (!editor || !vtable) return NULL;
+    palette = (unsigned char *)editor + ED_PALETTE_OFF;
+    return sh_read_ptr(palette, &type) && type == vtable &&
+           sh_read_ptr(palette + PAL_ENTRIES_OFF, &entries) && entries &&
+           sh_read_i32(palette + PAL_COUNT_OFF, &rows) && rows > 0 && rows <= PAL_MAX ? palette : NULL;
+}
+
 const char sh_tl_record_json[] =
     "{\"customIcon\":{\"targetType\":\"idDeclSnapCustomIcon\",\"value\":null,\"~type\":\"|pointer\"},"
     "\"displayName\":\"\","
@@ -149,14 +167,10 @@ const unsigned char *sh_timeline_tile_admit_target(const unsigned char *build)
 #include "budget_table.h"
 #include "modserve.h"
 
-#define ED_PALETTE_OFF      0x20660
 #define ED_MAP_OFF          0x204c8
 #define ED_ENTITY_MODE_OFF  0x22330   /* inline EntityMode object */
 #define MODE_SUBSTATE_OFF   0x1ac
-#define PAL_ENTRIES_OFF     0x10
-#define PAL_COUNT_OFF       0x18
 #define PAL_STRIDE          SH_TL_PALETTE_STRIDE
-#define PAL_MAX             100000
 #define ENTRY_RECORD_OFF    0x150
 #define SEDEF_NAME_OFF      0x08
 #define SEDEF_LIFETIME_OFF  0x28
@@ -201,7 +215,8 @@ static volatile LONG g_faulted;
 static volatile LONG g_rebuild_disabled;  /* an unbalanced heap scope ends runtime rebuilds */
 static volatile LONG g_registered;    /* 1 registered, -1 refused for this process */
 static int g_register_tries;
-static void * volatile g_editor;      /* last editor seen by the frame tick */
+static void * volatile g_editor;      /* in-place singleton, also supplied by the editor frame */
+static const void *g_palette_vtable;
 static void * volatile g_built_palette; /* editor+0x20660 of the last completed build (its one call site) */
 
 /* Palette cache, revalidated each frame by entry pointer, count and sedef. */
@@ -669,6 +684,8 @@ int sh_timeline_tile_install(const sig_result *results, size_t count, const uint
     g_decl = (find_decl_fn)sig_pointer(results, count, "DeclFind");
     g_generic_load = (generic_load_fn)sig_pointer(results, count, "ResourceGenericLoad");
     g_heap_ok = sh_process_heap_bind(&g_heap, results, count, module_base);
+    g_editor = (void *)glb_resolve(module_base, "editor_singleton", NULL);
+    g_palette_vtable = (const void *)glb_resolve(module_base, "palette_vtable", NULL);
     g_last_error = (const char *)glb_resolve(module_base, "last_error_msg", NULL);
     if (!build || !g_ctor || !g_dtor || !g_anchor || !g_type || !g_register || !g_source || !g_decl ||
         !g_generic_load || !g_heap_ok) {
@@ -746,7 +763,15 @@ int sh_timeline_tile_install(const sig_result *results, size_t count, const uint
  * object), then the cache resets. The module palette (editor+0x206c0) is untouched; main thread only. */
 void *sh_timeline_tile_palette(void)
 {
-    return g_built_palette;
+    return g_built_palette ? g_built_palette : sh_tl_populated_palette(g_editor, g_palette_vtable);
+}
+
+int sh_timeline_tile_rebuild_busy(void)
+{
+    unsigned char *palette = sh_timeline_tile_palette();
+    int substate;
+    return palette && sh_read_i32(palette - ED_PALETTE_OFF + ED_ENTITY_MODE_OFF + MODE_SUBSTATE_OFF, &substate) &&
+           sh_tl_substate_blocks_rebind(substate);
 }
 
 int sh_timeline_tile_rebuild_palette(int *rows_before, int *rows_after)
@@ -754,17 +779,16 @@ int sh_timeline_tile_rebuild_palette(int *rows_before, int *rows_after)
     /* A map opened from the browser can parse before the editor's first frame
      * tick; the builder's only call site passes editor+0x20660, so the last
      * built palette names the editor too. */
-    unsigned char *ed = g_editor ? (unsigned char *)g_editor
-                      : g_built_palette ? (unsigned char *)g_built_palette - ED_PALETTE_OFF : NULL;
+    unsigned char *palette = sh_timeline_tile_palette();
+    unsigned char *ed = palette ? palette - ED_PALETTE_OFF : NULL;
     sh_process_heap_scope heap = {0};
-    int substate = 0, result = SH_TL_REBUILD_OK;
+    int result = SH_TL_REBUILD_OK;
     if (rows_before) *rows_before = -1;
     if (rows_after) *rows_after = -1;
     if (!ed || !g_build_orig || !g_heap_ok) return SH_TL_REBUILD_UNAVAILABLE;
     if (InterlockedCompareExchange(&g_rebuild_disabled, 0, 0)) return SH_TL_REBUILD_DISABLED;
     if (rows_before) (void)sh_read_i32(ed + ED_PALETTE_OFF + PAL_COUNT_OFF, rows_before);
-    if (sh_read_i32(ed + ED_ENTITY_MODE_OFF + MODE_SUBSTATE_OFF, &substate) && sh_tl_substate_blocks_rebind(substate))
-        return SH_TL_REBUILD_BUSY;
+    if (sh_timeline_tile_rebuild_busy()) return SH_TL_REBUILD_BUSY;
     if (!sh_process_heap_enter(&g_heap, &heap)) return SH_TL_REBUILD_HEAP;
     __try {
         __try { tl_palette_build(ed + ED_PALETTE_OFF, NULL); }

@@ -1,6 +1,4 @@
-/* Pins a map's local rows to units when the map leaves this machine (a publish, an export); a row already pinned and
- * the product's own entry are left as they are. No blob is copied and nothing here talks to the store; it is pure of
- * the engine and runs off the main thread (the publish and export workers). */
+/* Resolves placed-object units for publishing, export and editor sound selection. */
 #ifndef SNAPMAP_PLUS_MODPIN_H
 #define SNAPMAP_PLUS_MODPIN_H
 
@@ -25,6 +23,12 @@ void sh_modpin_set_game(sh_unit_game_fn fn, void *context);
 /* Seed the units computed afterwards with the requests players asked of them that they lacked (modunit.h
  * sh_unit_env.asked). Copied; forgets the units remembered so far. */
 void sh_modpin_set_asked(const sh_unit_asked *asked, size_t n);
+long sh_modpin_asked_revision(void);
+
+/* Visit the carried bank paths in the row's placed object units, without pinning or writing a manifest.
+ * Zero means an object could not be proved and the caller must use the whole build. */
+typedef void (*sh_modpin_bank_fn)(void *context, const char *path);
+int sh_modpin_object_banks(const struct sh_modmanifest_row *row, const char *build, sh_modpin_bank_fn visit, void *context);
 /* The default game reader, for tools that pin as the product does. */
 int  sh_modpin_game_installed(void *context, const char *request, char sha256[SH_MB_HASH_HEX + 1], char *source,
                               size_t cap);

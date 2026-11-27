@@ -14,6 +14,7 @@
 #define SH_MODPROG_PREFIX    "snapmapplus/layered/"
 #define SH_MODPROG_EP_PREFIX "snapmapplus/particles/"
 #define SH_MODPROG_EP_EXT_PREFIX "snapmapplus/particles-volume/"
+#define SH_MODPROG_EP_EROSION_PREFIX "snapmapplus/particles-erosion/"
 #define SH_MODPROG_HR_PREFIX "snapmapplus/hair/"
 
 #define SH_MODPROG_OLD_PREFIX "snapmapplus/multilayer/"
@@ -137,6 +138,10 @@ extern const unsigned SH_MODPROG_EP_BASE_SPIRV_WORDS;
 extern const unsigned SH_MODPROG_EP_BASE_SPIRV[];
 extern const char SH_MODPROG_EP_BASE_GLSL[];
 extern const char SH_MODPROG_EP_BASE_HEADER[];
+extern const unsigned SH_MODPROG_EP_EROSION_SPIRV_WORDS;
+extern const unsigned SH_MODPROG_EP_EROSION_SPIRV[];
+extern const char SH_MODPROG_EP_EROSION_GLSL[];
+extern const char SH_MODPROG_EP_EROSION_HEADER[];
 extern const char *const SH_MODPROG_EP_TEXTURES[];
 extern const unsigned SH_MODPROG_EP_TEXTURE_COUNT;
 

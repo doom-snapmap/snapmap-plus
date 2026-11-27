@@ -143,7 +143,7 @@ static int flight(void **context, const uint8_t *stage, const uint32_t *born, fl
      * (the displacement times the scale, the velocity not). */
     for (i = 0; i < 3; i++) v0[i] = (p1[i] - p0[i]) / (model ? span : span * scale);
     if (model) for (i = 0; i < 3; i++) p0[i] = fr.origin[i] + (p0[i] - fr.origin[i]) * scale;
-    sh_motion_launch(&m, born[5], v0);
+    sh_motion_launch(&m, born[5], v0, &fr);
     if (from) for (i = 0; i < 3; i++) p0[i] = from[i] + (p0[i] - fr.origin[i]);
     if (start) {
         memcpy(start->p0, p0, sizeof start->p0);

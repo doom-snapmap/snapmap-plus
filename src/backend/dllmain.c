@@ -222,11 +222,6 @@ static void install_features(const sig_result *results, size_t db)
     sh_mb_set_script_check(sh_script_compile_check);
     /* A mod's "scenes" and "hud" blocks are checked when it is built. */
     sh_mb_set_extra_check(sh_modcontent_check);
-    /* and its "animation_events" recorded, a bad entry left out with a warning (clip_events.h) */
-    sh_mb_set_clip_events(sh_ce_build_registry);
-    /* and its "attachment_tags" likewise (attach_tags.h) */
-    sh_mb_set_attach_tags(sh_at_build_registry);
-
     /* A folder a crash took away mid-replacement is put back first, so it serves on this boot, and
      * the work folders a crash left are removed. */
     (void)sh_ms_recover_work();
@@ -251,7 +246,7 @@ static void install_features(const sig_result *results, size_t db)
         sh_mb_resolver boot_r;
         memset(&boot_r, 0, sizeof boot_r);
         boot_r.stock = boot_stock_exists;
-        (void)sh_ms_boot_sync(&boot_r, sh_modserve_index_rescan, 1);
+        (void)sh_ms_boot_sync(&boot_r, sh_modserve_boot_finished, 1);
         /* The map content cache (modcache.h): compositions build as the store builds, the index admits them, and
          * every load composes its rows' units; at start the cache drops what no kept map names. */
         sh_cache_set_store_root(sh_ms_root);
@@ -463,7 +458,7 @@ static void install_features(const sig_result *results, size_t db)
     if (overrides_installed) {
         (void)sh_kill_score_install(g_doom_base);
         if (!sh_ribbon_motion_install(results, db))
-            backend_log("RIBBON: sampled node motion is unavailable");
+            backend_log("RIBBON: custom motion or width is unavailable");
         if (!sh_encounter_spawn_install(results, db))
             backend_log("MODS: exact selection of ported actors sharing a spawn class is unavailable");
     }

@@ -1049,8 +1049,13 @@ static void test_lock(const char *tmp)
     }
 }
 
-static volatile LONG g_boot_rescans;
-static int boot_rescan(void) { InterlockedIncrement(&g_boot_rescans); return 1; }
+static volatile LONG g_boot_rescans, g_boot_settled;
+static int boot_rescan(int rebuilt)
+{
+    if (rebuilt) InterlockedIncrement(&g_boot_rescans);
+    InterlockedIncrement(&g_boot_settled);
+    return 1;
+}
 
 static void test_boot_sync(const char *fixture, const char *tmp)
 {
@@ -1067,7 +1072,7 @@ static void test_boot_sync(const char *fixture, const char *tmp)
     CHECK(sh_ms_set_root(root));
     CHECK(sh_ms_sync_pending() == 0);
     g_boot_rescans = 0;
-    CHECK(sh_ms_boot_sync(&RESOLVER, boot_rescan, 0) == 0 && g_boot_rescans == 0);
+    CHECK(sh_ms_boot_sync(&RESOLVER, boot_rescan, 0) == 0 && g_boot_rescans == 0 && g_boot_settled == 1);
     /* A salted folder never built, and a new folder in an organizing folder. */
     _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\alex.r2-imp", root);
     CHECK(mt_copy_tree(fixture, a));
@@ -1080,7 +1085,7 @@ static void test_boot_sync(const char *fixture, const char *tmp)
     sh_ms_list_free(&list);
     CHECK(sh_ms_sync_pending() == 2);
     g_logged = 0;
-    CHECK(sh_ms_boot_sync(&RESOLVER, boot_rescan, 0) == 2 && g_boot_rescans == 1);
+    CHECK(sh_ms_boot_sync(&RESOLVER, boot_rescan, 0) == 2 && g_boot_rescans == 1 && g_boot_settled == 2);
     CHECK(log_has("MODS: store: boot: 2 folder(s) not built yet") && log_has("MODS: store: boot: 2 of 2 folder(s) built (0 refused)"));
     if (!log_has("2 of 2 folder(s) built")) log_dump("boot");
     mj = slurp(a, SH_MB_BUILD_MANIFEST, NULL);

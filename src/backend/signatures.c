@@ -1458,6 +1458,9 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "RibbonNodeBirth",
       "48 8B C4 55 53 56 41 54 41 56 48 8D 68 B8 48 81 EC 20 01 00 00 48 83 79 48 00 "
       "4D 8B E1 49 8B F0 44 8B F2 48 8B D9", 0x18144f0u, 0x18152c0u },
+    { "RibbonDrawBeam",
+      "4C 8B DC 4D 89 4B 20 89 54 24 10 55 57 41 54 41 56 49 8D AB 28 FF FF FF 48 81 EC B8 01 00 00 83 79 1C 02",
+      0x1815930u, 0x1816700u },
     { "SnapEncounterSpawnMembers",
       "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 48 FE FF FF 48 81 EC 90 02 00 00 "
       "48 C7 45 D0 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20", 0x73c670u, 0x73bed0u },

@@ -20,6 +20,15 @@ P.JUMP = 256            -- a move past this in one think is the engine's (a tele
 
 local records = setmetatable({}, { __mode = "k" })
 
+function P.finish_native_path(e)
+  local s = records[e]
+  if s then
+    -- The path replaced the previous order and may have crossed the room between script updates.
+    s.last = nil
+    s.order = nil
+  end
+end
+
 local function field(e, path)
   local ok, v = pcall(function() return e:get(path) end)
   if ok then return v end
@@ -81,9 +90,10 @@ end
 -- its state machines pick, and a scripted demon runs none of them). An enemy it has lost sight of is kept.
 function P.acquire(A, e)
   local t = A.enemy(e)
-  if target.holds(A, e, t, target.COMBAT) then return end
+  if target.holds(A, e, t, target.COMBAT) then return t end
   local _, pick = target.available(A, e, target.FIND)
   if pick ~= nil and pick ~= t then A.set_enemy(e, pick) end
+  return pick
 end
 
 --- pos, pulled back to within `radius` of `home` on the ground plane.
@@ -125,7 +135,7 @@ function P.think(A, e)
   end
   local goal = P.order_goal(A, e)
   if goal and pos and s.order.kind ~= "entity" and dist2d(pos, goal) <= P.ORDER_ARRIVE then s.order = nil end
-  P.acquire(A, e)
+  return P.acquire(A, e)
 end
 
 --- Make the adapter honour SnapMap: a Follow order's goal takes every move the brain asks for, a defending demon's

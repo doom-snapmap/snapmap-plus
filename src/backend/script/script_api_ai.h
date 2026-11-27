@@ -451,7 +451,7 @@ typedef struct sh_script_ai_engine {
     int      (*anim_valid)(void *ai, const char *node, unsigned tests, int side, unsigned seed, int *index);
     /* 0 found (*n points), 1 still searching, 2 no path, -1 unavailable */
     /* the computed path's points, whole: *out malloc'd (the caller frees it), *n its count */
-    int      (*path_points)(void *ai, const float goal[3], int key, float (**out)[3], int *n);
+    int      (*path_points)(void *ai, const float goal[3], int key, float (**out)[3], int *n, float *length);
     /* 0 found, 1 still searching, 2 none, -1 unavailable */
     int      (*firing_position)(void *ai, const sh_ai_position_query *q, float out[3]);
     /* 1 clear (*n points), 0 blocked, 2 still searching, -1 unavailable */
@@ -558,6 +558,8 @@ typedef struct sh_script_ai_engine {
     int (*wound_effect)(void *ent, const char *wound, const char *condition);
     /* Verify the path state before handoff. Then 1 while the native body is busy, 0 when free, -1 unavailable. */
     int (*native_body_busy)(void *ai, int check_path);
+    int (*reset_motion_correction)(void *ai);
+    int (*on_ground)(void *ai);  /* 1 grounded, 0 airborne, -1 when a different physics body is active */
 } sh_script_ai_engine;
 
 int sh_ai_set_wound_effect(void *owner, uint32_t id, void *wound, int condition);
@@ -827,6 +829,7 @@ enum sh_ai_sig {
     SH_AI_SIG_BEST_RELATION,       /* the engine's pick from relations (reads the rows) */
     SH_AI_SIG_FSM_MOVE,            /* the entrance move of an AI FSM into a named state (the pain and death park) */
     SH_AI_SIG_GAME_TIME,           /* the game's time record an FSM request is given */
+    SH_AI_SIG_RESET_CORRECTION,    /* reset the active animFSM's root-motion correction */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
@@ -1112,6 +1115,8 @@ static const uint8_t k_ai_move_prologue[SH_AI_MOVE_STOLEN] = {
 #define SH_AI_OFF_PERCEPTION      0x29A88u
 #define SH_AI_OFF_PATH_NAME       0x388u    /* the name the path key is built from */
 #define SH_AI_OFF_PHYSICS         0x808u    /* idEntity: physics; vtable +0x80 origin(0), +0x88 axis(0) */
+#define SH_AI_PHYSICS_OBJECT      0xC2B8u   /* idAI2.aiVolatile.physics.object */
+#define SH_AI_PHYSICS_ON_GROUND   0x1A72u   /* idPhysics_AI.current.onGround */
 #define SH_AI_VSLOT_ORIGIN        0x80u
 #define SH_AI_VSLOT_AXIS          0x88u
 #define SH_AI_TYPE_NUM            0x68u     /* idTypeInfo: type number, +0x6C last descendant */

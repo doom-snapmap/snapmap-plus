@@ -385,6 +385,21 @@ static void test_record(void)
     sh_script_hooks_test_reset();
 }
 
+static void test_nested_player_damage(void)
+{
+    int player1, player2;
+    sh_script_player_hit outer = {&player1, 150, 0, NULL};
+    sh_script_player_hit other = {&player2, 100, 0, &outer};
+    sh_script_player_hit inner = {&player1, 100, 0, &other};
+    CHECK(sh_script_player_hit_loss(&inner, 85) == 15);
+    CHECK(sh_script_player_hit_loss(&other, 30) == 70);
+    CHECK(sh_script_player_hit_loss(&outer, 85) == 50);
+    outer.nested = 0;
+    CHECK(sh_script_player_hit_loss(&outer, 150) == 0);
+    CHECK(sh_script_player_hit_loss(&outer, 160) == 0);
+    CHECK(sh_script_player_hit_loss(&outer, 0) == 150);
+}
+
 int main(void)
 {
     test_queue_bounds();
@@ -393,6 +408,7 @@ int main(void)
     test_mods();
     test_tick();
     test_record();
+    test_nested_player_damage();
     printf(g_fail ? "script_hooks_test: FAIL\n" : "script_hooks_test: PASS\n");
     return g_fail;
 }

@@ -7,6 +7,7 @@
 #include <string.h>
 #include "../../common/text.h"
 #include "script_hooks.h"
+#include "../diag_status.h"
 
 /* ---- the mods of this map ---------------------------------------------- */
 
@@ -110,6 +111,47 @@ const char *sh_script_hooks_mod_salt(int mod)
 {
     mod_slot *m = slot_at(mod);
     return m ? m->salt : NULL;
+}
+
+static const char *relative_name(int mod, const char *full)
+{
+    const char *salt = sh_script_hooks_mod_salt(mod);
+    size_t n = salt ? strlen(salt) : 0;
+    if (!full) return "";
+    if (n && !_strnicmp(full, "mods/", 5) && !_strnicmp(full + 5, salt, n) && full[5 + n] == '/' && full[6 + n])
+        full += 6 + n;
+    return full;
+}
+
+void sh_script_hooks_queue_damage(int victim_mod, int source_mod, const sh_script_event *damage, const char *decl)
+{
+    sh_script_event ev = *damage;
+    if (victim_mod >= 0) {
+        ev.kind = SH_SCRIPT_EV_DAMAGE;
+        ev.text = relative_name(victim_mod, decl);
+        sh_script_queue_push(victim_mod, &ev);
+    }
+    if (source_mod >= 0) {
+        ev.kind = SH_SCRIPT_EV_HIT;
+        ev.self = damage->other;
+        ev.other = damage->self;
+        ev.text = relative_name(source_mod, decl);
+        sh_script_queue_push(source_mod, &ev);
+    }
+}
+
+float sh_script_player_hit_loss(const sh_script_player_hit *hit, float after)
+{
+    float loss = hit->before - after;
+    sh_script_player_hit *p;
+    for (p = hit->outer; p; p = p->outer) {
+        if (p->player == hit->player) {
+            p->nested += loss;
+            break;
+        }
+    }
+    loss -= hit->nested;
+    return loss > 0 ? loss : 0;
 }
 
 const char *sh_script_hooks_mod_name(int mod)
@@ -462,6 +504,7 @@ static void map_close(int run_end_handlers)
     InterlockedExchange(&g_routing, 0);
     sh_script_map_close(run_end_handlers);
     mods_clear();
+    sh_script_combat_reset();
     sh_script_handles_reset();
     sh_ai_destructible_reset();     /* a map's scripts name their destructibles again */
     g_open = 0;
@@ -629,13 +672,13 @@ int sh_script_hooks_reload(void)
     InterlockedExchange(&g_routing, 0);
     sh_script_map_close(g_started);
     mods_clear();
+    sh_script_combat_reset();     /* restore live actors before releasing their handles */
     sh_script_handles_reset();
     sh_ai_destructible_reset();     /* a map's scripts name their destructibles again */
     g_open = 0;
     g_started = 0;
     g_time = 0;
     g_last_frame.QuadPart = 0;
-    sh_script_combat_reset();
     n = sh_script_map_open();
     if (n <= 0) {
         sh_script_map_close(0);
@@ -735,9 +778,10 @@ static void *own(const sig_result *r, int i)
  * Six detours, committed with the frame hook at the first Play with scripts and never unhooked. Each calls the
  * engine's own function, then posts one record to the queue of the mod whose entity it concerns (script_queue.h);
  * no Lua runs inside them, and they may run on AI prethink and animWeb job threads.
- *   OnDamage dispatcher  (entity, attacker spawn id, amount): damage taken by every entity class; for an idAI2
+ *   OnDamage dispatcher  (entity, attacker spawn id, amount): damage reported by SuperScript; for an idAI2
  *                        the Damage_Apply record (per-thread context) adds the decl, first-hit zone, direction.
  *   Damage_Apply         (ai, record): sets the context, calls through, clears it.
+ *   idPlayer::Damage     verifies health and armor loss from an attack on a player.
  *   idAI2::Killed        (ai, inflictor, attacker, parms, ...): the death, once per entity.
  *   SetPainReaction      (ai, reaction, ms): a pain reaction started, with the last hit's decl and attacker.
  *   OnAnimNotify         (entity, message): an md6 row ae_notify "<message>" ran.
@@ -761,23 +805,14 @@ typedef struct combat_hook {
     void       *tramp;
 } combat_hook;
 
-enum { CH_ON_DAMAGE, CH_DAMAGE_APPLY, CH_KILLED, CH_SET_PAIN, CH_ANIM_NOTIFY, CH_LAUNCH, CH_COUNT };
+enum { CH_ON_DAMAGE, CH_DAMAGE_APPLY, CH_PLAYER_DAMAGE, CH_KILLED, CH_SET_PAIN, CH_ANIM_NOTIFY, CH_LAUNCH, CH_COUNT };
 static combat_hook g_ch[CH_COUNT];
 static int         g_ch_committed;
 static DWORD       g_damage_tls = TLS_OUT_OF_INDEXES;
+static __declspec(thread) sh_script_player_hit *t_player_hit;
+static uint32_t g_player_health, g_player_armor;
 
 typedef struct damage_ctx { void *ai; const uint8_t *record; struct damage_ctx *outer; } damage_ctx;
-
-/* "mods/<salt>/x" of mod `mod` as "x" (a pointer into full); any other name as it is. */
-static const char *relative_name(int mod, const char *full)
-{
-    const char *salt = sh_script_hooks_mod_salt(mod);
-    size_t n = salt ? strlen(salt) : 0;
-    if (!full) return "";
-    if (n && !_strnicmp(full, "mods/", 5) && !_strnicmp(full + 5, salt, n) && full[5 + n] == '/' && full[6 + n])
-        full += 6 + n;
-    return full;
-}
 
 /* A whole copy of an engine string (malloc'd), or NULL when it is unreadable. */
 static char *engine_dup(const char *s)
@@ -817,15 +852,22 @@ static void on_damage_detour(void *entity, uint32_t attacker_id, float amount)
     sh_script_event ev;
     damage_ctx *ctx;
     char *decl = NULL, *zone = NULL;
-    int mod = -1;
-    sh_script_handle self;
+    int mod = -1, source;
+    sh_script_handle self, attacker;
     ((on_damage_fn)g_ch[CH_ON_DAMAGE].tramp)(entity, attacker_id, amount);
+    if (!g_routing) return;
+    if (t_player_hit && t_player_hit->player == entity) return;
+    source = sh_script_hit_recipient(attacker_id, &attacker);
     self = sh_script_hooks_handle_of(entity, &mod);
-    if (!self || mod < 0) return;
+    if (!self || mod < 0) {
+        if (source < 0) return;
+        self = handle_for(entity);
+        if (!self) return;
+    }
     memset(&ev, 0, sizeof ev);
     ev.kind = SH_SCRIPT_EV_DAMAGE;
     ev.self = self;
-    ev.other = handle_for_id(attacker_id);
+    ev.other = attacker ? attacker : handle_for_id(attacker_id);
     ev.amount = amount;
     ctx = g_damage_tls != TLS_OUT_OF_INDEXES ? (damage_ctx *)TlsGetValue(g_damage_tls) : NULL;
     if (ctx && ctx->ai == entity) {
@@ -851,11 +893,10 @@ static void on_damage_detour(void *entity, uint32_t attacker_id, float amount)
         }
         decl = decl_name(decl_at);
         zone = engine_dup(zone_at);
-        ev.text = relative_name(mod, decl);
         ev.text2 = zone;
     }
-    sh_script_combat_note_hit(self, ev.text, ev.other);
-    sh_script_queue_push(mod, &ev);
+    if (mod >= 0) sh_script_combat_note_hit(self, relative_name(mod, decl), ev.other, amount);
+    sh_script_hooks_queue_damage(mod, source, &ev, decl);
     free(decl);
     free(zone);
 }
@@ -870,6 +911,71 @@ static void damage_apply_detour(void *ai, void *record)
     if (tls) TlsSetValue(g_damage_tls, &ctx);
     ((damage_apply_fn)g_ch[CH_DAMAGE_APPLY].tramp)(ai, record);
     if (tls) TlsSetValue(g_damage_tls, ctx.outer);
+}
+
+static int player_vitals_layout(void)
+{
+    const sh_rf_host *h = sh_script_reflect_host();
+    sh_rf_field hp, components, cur;
+    uint32_t stride;
+    if (!h || !sh_rf_find_field(h, "idPlayer", "playerHealth", &hp) ||
+        !sh_rf_find_field(h, hp.type, "components", &components) ||
+        !h->class_size(h->ctx, components.type, &stride) || !stride ||
+        components.size / stride < 2 || !sh_rf_find_field(h, components.type, "cur", &cur) ||
+        strcmp(cur.type, "float") || cur.size != sizeof(float)) return 0;
+    g_player_health = hp.offset + components.offset + cur.offset;
+    g_player_armor = g_player_health + stride;
+    return 1;
+}
+
+static int player_vitality(const void *player, float *total)
+{
+    const uint8_t *p = (const uint8_t *)player;
+    float health, armor;
+    if (!g_player_armor) return 0;
+    __try {
+        health = *(const float *)(p + g_player_health);
+        armor = *(const float *)(p + g_player_armor);
+    } __except (av_only(GetExceptionCode())) { return 0; }
+    *total = (health > 0 ? health : 0) + (armor > 0 ? armor : 0);
+    return 1;
+}
+
+static void player_damage_detour(void *player, void *inflictor, void *attacker, void *parms, float scale,
+                                 const float *direction, void *hit)
+{
+    typedef void (*player_damage_fn)(void *, void *, void *, void *, float, const float *, void *);
+    player_damage_fn apply = (player_damage_fn)g_ch[CH_PLAYER_DAMAGE].tramp;
+    sh_script_player_hit current = {player, 0, 0, t_player_hit};
+    sh_script_event ev = {0};
+    float after;
+    char *decl = NULL;
+    int source = -1, victim = -1;
+    if (g_routing) {
+        if (attacker) source = sh_script_hit_recipient(spawn_id_of(attacker), &ev.other);
+        ev.self = sh_script_hooks_handle_of(player, &victim);
+    }
+    if ((source < 0 && victim < 0 && !current.outer) || !player_vitality(player, &current.before)) {
+        apply(player, inflictor, attacker, parms, scale, direction, hit);
+        return;
+    }
+    if (source >= 0 || victim >= 0) {
+        if (!ev.self) ev.self = handle_for(player);
+        if (!ev.other) ev.other = handle_for(attacker);
+        ev.third = handle_for(inflictor);
+        decl = decl_name(read_ptr(parms, SH_COMBAT_PARMS_DECL));
+        if (direction) { memcpy(ev.vec, direction, 3 * sizeof(float)); ev.flags |= SH_SCRIPT_EVF_VEC; }
+    }
+    t_player_hit = &current;
+    __try { apply(player, inflictor, attacker, parms, scale, direction, hit); }
+    __finally {
+        t_player_hit = current.outer;
+        if (!AbnormalTermination() && player_vitality(player, &after)) {
+            ev.amount = sh_script_player_hit_loss(&current, after);
+            if (ev.self && ev.amount > 0) sh_script_hooks_queue_damage(victim, source, &ev, decl);
+        }
+        free(decl);
+    }
 }
 
 static void killed_detour(void *ai, void *inflictor, void *attacker, void *parms, uint64_t a5, void *a6, void *a7,
@@ -939,7 +1045,24 @@ static void launch_detour(void *projectile, void *owner, const float *origin, co
     float from[3], heading[9];
     self = owner ? sh_script_hooks_handle_of(owner, &mod) : 0;
     /* a script's ai:fire from a tag: the launch starts there (the engine's event gave the origin) */
-    if (self && mod >= 0 && sh_script_combat_launch_from(self, from, heading)) { origin = from; axis = heading; }
+    if (self && mod >= 0 && sh_script_combat_launch_from(self, from, heading)) {
+        origin = from;
+        axis = heading;
+#ifdef SH_DIAG
+        if (sh_diag_note_listening) {
+            char text[1024];
+            char *actor = engine_dup((const char *)read_ptr(owner, SH_COMBAT_ENT_NAME));
+            char *shot = engine_dup((const char *)read_ptr(projectile, SH_COMBAT_ENT_NAME));
+            int len = _snprintf_s(text, sizeof text, _TRUNCATE,
+                "nativeLaunch\t%s\t%s\t%.7g,%.7g,%.7g\t%.7g,%.7g,%.7g;%.7g,%.7g,%.7g;%.7g,%.7g,%.7g",
+                actor ? actor : "", shot ? shot : "", origin[0], origin[1], origin[2],
+                axis[0], axis[1], axis[2], axis[3], axis[4], axis[5], axis[6], axis[7], axis[8]);
+            if (len > 0) sh_diag_note(sh_script_hooks_mod_salt(mod), text, (size_t)len);
+            free(shot);
+            free(actor);
+        }
+#endif
+    }
     ((launch_fn)g_ch[CH_LAUNCH].tramp)(projectile, owner, origin, axis, a5, a6, a7, a8);
     if (!self || mod < 0) return;
     id = spawn_id_of(projectile);
@@ -981,6 +1104,7 @@ static void commit_combat_hooks(void)
     size_t used = 0;
     if (g_ch_committed) return;
     g_ch_committed = 1;
+    if (!player_vitals_layout()) g_ch[CH_PLAYER_DAMAGE].target = NULL;
     missing[0] = 0;
     for (i = 0; i < CH_COUNT; i++) {
         combat_hook *c = &g_ch[i];
@@ -1032,6 +1156,10 @@ static void resolve_combat_hooks(const sig_result *r, const uint8_t *module_base
     combat_hook_set(CH_DAMAGE_APPLY, "damage details",
                     sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_DAMAGE_APPLY], &s) == SIG_OK ? s.addr : 0,
                     (void *)damage_apply_detour, SH_COMBAT_DAMAGE_APPLY_STOLEN);
+    s.addr = 0;
+    combat_hook_set(CH_PLAYER_DAMAGE, "player damage",
+                    sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_PLAYER_DAMAGE], &s) == SIG_OK ? s.addr : 0,
+                    (void *)player_damage_detour, SH_COMBAT_PLAYER_DAMAGE_STOLEN);
     s.addr = 0;
     combat_hook_set(CH_SET_PAIN, "pain",
                     sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_SET_PAIN], &s) == SIG_OK ? s.addr : 0,

@@ -357,6 +357,12 @@ if (Test-Path (Join-Path $proxyDir 'XINPUT1_4.dll')) {
 }
 
 foreach ($test in $tests) {
+    if ($test.src -match '\\modbundle\.c(?: |$)') {
+        foreach ($file in @('clip_events_rule.c', 'attach_tags_rule.c', 'md6_registry.c')) {
+            $path = "..\src\backend\$file"
+            if ($path -notin ($test.src -split ' ')) { $test.src += " $path" }
+        }
+    }
     if ($test.src -match '\\modserve\.c(?: |$)') { $test.src += ' ..\src\backend\editor_sheets.c' }
 }
 
@@ -521,6 +527,12 @@ if ($fail -gt 0 -or $jsFail -gt 0) { exit 1 }
         if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($scratch)).TrimEnd('\') -ine $root.TrimEnd('\')) {
             throw "Test scratch escaped its parent: $scratch"
         }
-        Remove-RunScratch (Get-Item -LiteralPath $scratch -Force)
+        # Windows PowerShell needs an extended path to traverse deeply nested test fixtures.
+        $cleanupPath = $scratch
+        if (!$cleanupPath.StartsWith('\\?\')) {
+            if ($cleanupPath.StartsWith('\\')) { $cleanupPath = '\\?\UNC\' + $cleanupPath.Substring(2) }
+            else { $cleanupPath = '\\?\' + $cleanupPath }
+        }
+        Remove-RunScratch ([IO.DirectoryInfo]::new($cleanupPath))
     }
 }

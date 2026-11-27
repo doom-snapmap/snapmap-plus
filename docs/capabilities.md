@@ -1001,7 +1001,8 @@ on any entity with a gore component, such as a mod's `idGoreEntity` body), start
 effect when a specific wound opens (`wound_effect(wound, condition)`), opens each
 of a demon's gore wounds on the damage that landed inside that wound's own hit spheres as DOOM
 Eternal does, where the game counts the health the wound's whole damage group has lost so two
-wounds on one group open together (`wound_damage_counts`), reads which sync an entity is
+wounds on one group open together (`wound_damage_counts`), scales a demon's additive hit
+reactions by damage amount or damage name (`twitch_response`), reads which sync an entity is
 bound in and its target, instigator and sync entity (`entity:sync_partner()`), which gore wounds are open
 on an entity (`entity:wounds_open()`, the node names `ae_goreEnableByName` takes, so a body can show the
 wounds its demon had), and removes one named constraint of an entity's articulated figure with the

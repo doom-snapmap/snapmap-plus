@@ -212,6 +212,8 @@ static void test_editor_source(const char *top)
     }
     sh_unit_free(&u); sh_mb_free(&b);
     mt_write(folder, "editor\\groups.json", "{\"tiles\":{\"unknown/unknown\":{\"tab\":\"snapmap-plus/custom\"}}}");
+    mt_write(folder, "editor\\tiles.json", "{\"tiles\":{\"frame\":{\"entity\":\"entities/crate\",\"title\":\"tile\","
+             "\"template\":\"editor/templates/frame.decl\",\"tab\":\"snapmap-plus/custom\",\"order\":21}}}");
     if (build(folder, &b)) {
         CHECK(unit(&b, folder, "mods/" SALT "/frame", &u));
         CHECK(*old_hash && !strcmp(u.hash, old_hash));

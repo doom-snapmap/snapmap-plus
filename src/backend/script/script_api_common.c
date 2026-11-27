@@ -546,6 +546,7 @@ enum { API_SIG_PROCESS, API_SIG_POST, API_SIG_CLEAR, API_SIG_ENTITY, API_SIG_TRA
 #define VSLOT_UPDATE_VISUALS 0x3C0u
 #define PSLOT_GET_ORIGIN    0x80u
 #define PSLOT_GET_AXIS      0x88u
+#define PSLOT_ABS_BOUNDS    0x58u
 #define DECL_NAME           0x08u
 #define DECL_STATE          0x2Cu       /* bit 0 failed to load, bit 1 not loaded */
 /* idAI2 */
@@ -740,14 +741,14 @@ static int e_kind(void *ent)
     return SH_SCRIPT_KIND_OTHER;
 }
 
-static int phys_read(void *ent, size_t slot, float *out, size_t n)
+static int phys_read(void *ent, size_t slot, int body, float *out, size_t n)
 {
     void *phys = read_ptr(ent, ENT_PHYSICS);
     phys_get_fn get = (phys_get_fn)vfn(phys, slot);
     int ok = 0;
     if (!get) return 0;
     __try {
-        const float *v = get(phys, 0);
+        const float *v = get(phys, body);
         if (v) { memcpy(out, v, n * sizeof(float)); ok = 1; }
     } __except (av_only(GetExceptionCode())) { ok = 0; }
     return ok;
@@ -755,12 +756,20 @@ static int phys_read(void *ent, size_t slot, float *out, size_t n)
 
 static int e_origin(void *ent, float out[3])
 {
-    return phys_read(ent, PSLOT_GET_ORIGIN, out, 3);
+    return phys_read(ent, PSLOT_GET_ORIGIN, 0, out, 3);
 }
 
 static int e_axis(void *ent, float out[9])
 {
-    return phys_read(ent, PSLOT_GET_AXIS, out, 9);
+    return phys_read(ent, PSLOT_GET_AXIS, 0, out, 9);
+}
+
+static int e_bounds_center(void *ent, float out[3])
+{
+    float bounds[6];
+    if (!phys_read(ent, PSLOT_ABS_BOUNDS, -1, bounds, 6)) return 0;
+    for (int i = 0; i < 3; i++) out[i] = (bounds[i] + bounds[i + 3]) * 0.5f;
+    return 1;
 }
 
 /* The pair the engine's setOrigin event makes: the entity's SetOrigin /
@@ -1212,7 +1221,7 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
     static const sh_script_engine engine = {
         e_resolve, e_spawn_id, e_slots, e_slot_spawn_id, e_kind, e_origin, e_axis, e_place, e_def_name, e_event,
         e_ai_health, e_ai_heal, e_ai_set_health, e_anim_node, e_spawn, e_trace, e_game_time_ms, e_ground,
-        e_difficulty, e_tag, e_event_format, e_trace_as_demon, e_event_flags, e_decl, sh_script_hud_text
+        e_difficulty, e_tag, e_event_format, e_trace_as_demon, e_event_flags, e_decl, sh_script_hud_text, e_bounds_center
     };
     sig_result own[API_SIG_ALL], lookup;
     int i;

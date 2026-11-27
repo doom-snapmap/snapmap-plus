@@ -200,9 +200,9 @@ function layeredSpec() {
   };
 }
 
-function particlesSpec(extended = true) {
+function particlesSpec(extended = true, erosion = false) {
   return {
-    file: 'particles.rp', name: extended ? 'EP' : 'EP_BASE', extended,
+    file: 'particles.rp', name: erosion ? 'EP_EROSION' : (extended ? 'EP' : 'EP_BASE'), extended, erosion,
     // the shading's samplers and the material textures they are (the first three the program's own)
     samplers: [['ep_trans', 'transmap'], ['ep_depth', 'viewdepthmap'], ['ep_atlas', 'particleslightatlasmap'],
       ['ep_emissive', 'particleemissivemap']],
@@ -228,9 +228,11 @@ function buildProgram(spec) {
   let text = fs.readFileSync(path.join(edir, spec.file), 'utf8').replace(/\r\n/g, '\n');
   if (spec.file === 'particles.rp') {
     // Earlier published units pin the base program's exact bytes.
-    text = text.replace(/^#ifdef PARTICLE_DISTANCE_MASK\n([\s\S]*?)^#endif\n/gm, (_, body) => {
+    const features = { PARTICLE_DISTANCE_MASK: spec.extended, PARTICLE_EROSION: spec.erosion };
+    text = text.replace(/^#ifdef (\w+)\n([\s\S]*?)^#endif\n/gm, (_, name, body) => {
+      if (!(name in features)) throw new Error(`unknown particle feature ${name}`);
       const [extended, base = ''] = body.split(/^#else\n/m);
-      return spec.extended ? extended : base;
+      return features[name] ? extended : base;
     });
   }
   const secs = parseRp(text, spec.file);
@@ -250,7 +252,8 @@ function buildProgram(spec) {
 }
 
 function buildPrograms() {
-  return { layered: buildProgram(layeredSpec()), particles: buildProgram(particlesSpec()), particlesBase: buildProgram(particlesSpec(false)), hair: buildProgram(hairSpec()) };
+  return { layered: buildProgram(layeredSpec()), particles: buildProgram(particlesSpec()),
+    particlesBase: buildProgram(particlesSpec(false)), particlesErosion: buildProgram(particlesSpec(true, true)), hair: buildProgram(hairSpec()) };
 }
 
 function compile(text) {
@@ -320,9 +323,11 @@ function outputs() {
   // each output: its file, the modules it embeds (source text and the C name of its words), its renderer
   return [
     [out, [[progs.layered.spirvSource, 'SH_MODPROG_ML_SPIRV']], (w) => renderProgram(progs.layered, { file: 'layered.c', desc: 'The layered surface', words: w })],
-    [epOut, [[progs.particles.spirvSource, 'SH_MODPROG_EP_SPIRV'], [progs.particlesBase.spirvSource, 'SH_MODPROG_EP_BASE_SPIRV']],
-      (extended, base) => renderProgram(progs.particles, { file: 'particles.c', desc: 'The particle shading', words: extended }) +
-        '\n' + renderProgram(progs.particlesBase, { file: 'particles.c', desc: 'The base particle shading', words: base })],
+    [epOut, [[progs.particles.spirvSource, 'SH_MODPROG_EP_SPIRV'], [progs.particlesBase.spirvSource, 'SH_MODPROG_EP_BASE_SPIRV'],
+      [progs.particlesErosion.spirvSource, 'SH_MODPROG_EP_EROSION_SPIRV']],
+      (extended, base, erosion) => renderProgram(progs.particles, { file: 'particles.c', desc: 'The particle shading', words: extended }) +
+        '\n' + renderProgram(progs.particlesBase, { file: 'particles.c', desc: 'The base particle shading', words: base }) +
+        '\n' + renderProgram(progs.particlesErosion, { file: 'particles.c', desc: 'The erosion particle shading', words: erosion })],
     [hrOut, [[progs.hair.spirvSource, 'SH_MODPROG_HR_SPIRV']], (w) => renderProgram(progs.hair, { file: 'hair.c', desc: 'The hair programs\' death fade', words: w })],
     [fixtureOut, [[fixture, 'MODPROG_FIXTURE_SPIRV'], [epFixture, 'MODPROG_FIXTURE_EP_SPIRV'], [hrFixture, 'MODPROG_FIXTURE_HR_SPIRV']],
       (w, e, h) => renderFixture(fixture, epFixture, hrFixture, w, e, h)],
