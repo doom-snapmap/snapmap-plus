@@ -53,7 +53,7 @@ local function adapter()
     return out
   end
   A.move_to = function(e, pos, flags) moves[#moves + 1] = { e = e, pos = pos } end
-  A.move_to_entity = function(e, t, radius, flags) moves[#moves + 1] = { e = e, target = t } end
+    A.move_to_entity = function(e, t, radius, flags, arrival) moves[#moves + 1] = { e = e, target = t, arrival = arrival } end
   A.encounter_role = function() return "ROLE_NONE" end
   return A
 end
@@ -201,16 +201,39 @@ do
   A.move_to(d, { x = 300, y = 400, z = 0 })
   m = moves[#moves].pos
   check("defend: a move inside its radius is left as it is", m.x == 300 and m.y == 400)
-  A.move_to_entity(d, far, 100)
+  A.move_to_entity(d, far, 100, nil, "continue")
   m = moves[#moves]
   check("defend: chasing an enemy outside the radius stops at the radius", m.pos ~= nil and math.abs(m.pos.x - 512) < 0.01)
-  A.move_to_entity(d, near, 100)
-  check("defend: chasing an enemy inside the radius is the chase itself", moves[#moves].target == near)
+  A.move_to_entity(d, near, 100, nil, "continue")
+  check("defend: chasing an enemy inside the radius preserves the pursuit",
+        moves[#moves].target == near and moves[#moves].arrival == "continue")
   d.t.fields["aiEditable.spawnSettings.initialRole"] = "ROLE_DEFEND"
   check("the FSM reads the role the engine gave the demon", A.encounter_role(d) == "ROLE_DEFEND")
   rel[d] = { row(far) }
   P.acquire(A, d)
   check("defend: it still takes the engine's enemy", enemy[d] == far)
+end
+
+do
+  local P, A, d = scene("DEFEND")
+  local s = P.observe_position(d, A.position(d))
+  local home = s.home
+  local stops, orders = 0, 0
+  A.stop = function() stops = stops + 1 end
+  d.snapmap_order = function() orders = orders + 1 end
+  for i = 1, 8 do
+    d.t.pos = { x = 50 * i, y = 0, z = 0 }
+    P.observe_position(d, A.position(d))
+  end
+  check("native patrol keeps its original defend position", s.home == home)
+  s.order = { kind = "position", pos = home }
+  d.t.pos = { x = 1000, y = 0, z = 0 }
+  P.observe_position(d, A.position(d))
+  check("a teleport updates the defend position without consuming an order or stopping native movement",
+        s.home == d.t.pos and s.order == nil and orders == 0 and stops == 0)
+  d.t.pos = { x = 1600, y = 0, z = 0 }
+  P.think(A, d)
+  check("the scripted brain still stops its move and checks orders on a teleport", stops == 1 and orders == 1)
 end
 
 do

@@ -474,6 +474,15 @@ static void check_image(const char *path)
     }
     if (rva[SH_AI_SIG_PAIN_START]) {
         uint32_t s = rva[SH_AI_SIG_PAIN_START];
+        uint32_t deleted = vk ? 0x5DF550u : 0x5DE820u;
+        uint32_t bind = vk ? 0x3D4EE2u : 0x3D43E2u;
+        /* Native action setup and ActionEntityDeleted use the same entity reference. */
+        CHECK(!memcmp(base + deleted, "\x49\x8D\x88", 3) && base[deleted + 7] == 0xE8);
+        CHECK(*(const uint32_t *)(base + deleted + 3) == SH_AI_OFF_ACTION_ENTITY);
+        CHECK(rel_target(base, deleted + 7, 5, 1) == rva[SH_AI_SIG_ENTITY_PTR_GET]);
+        CHECK(!memcmp(base + bind, "\x48\x8D\x8E", 3) && base[bind + 10] == 0xE8);
+        CHECK(*(const uint32_t *)(base + bind + 3) == SH_AI_OFF_ACTION_ENTITY);
+        CHECK(rel_target(base, bind + 10, 5, 1) == rel_target(base, s + SH_AI_PS_HANDLE_CALL, 5, 1));
         unsigned flags = 0;
         size_t b;
         uint32_t request = rel_target(base, s + SH_AI_PAIN_START_FSM_CALL, 5, 1);

@@ -1352,9 +1352,9 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
     me_reparse *r = (me_reparse *)context;
     char before[ERROR_TEXT_MAX];
     int result = 0;
-    /* A surface is the game's own decl under its own name: never re-parsed
-     * by any pass; the game parses it from these same bytes. */
-    if (request && sh_modserve_is_surface(request)) { r->surfaces++; return 1; }
+    /* An unchanged surface still needs the SDK route if the engine parsed its original graph during startup. */
+    int product_route = sh_overrides_enemy_route_pending(request);
+    if (request && !product_route && sh_modserve_is_surface(request)) { r->surfaces++; return 1; }
     me_error_text(before, sizeof before);
     __try {
         void *decl = NULL;
@@ -1367,7 +1367,7 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
         /* A permanent decl served the game's own bytes: a re-parse would only
          * rebind it to decls a pass may have created at level 1, which the
          * next map unload frees under it (the menu collectibles' unlockModels). */
-        if (lifetime == 4 && sh_modserve_is_restore(request) == 1) {
+        if (lifetime == 4 && !product_route && sh_modserve_is_restore(request) == 1) {
             me_log("reparse: %s '%s' (%s) left as the game parsed it: permanent, and its bundle serves the game's own "
                    "bytes", type, name, bundle_id);
             return 1;
@@ -1449,8 +1449,9 @@ static void me_reparse_early(const char *phase, int in_heap)
         return;
     }
     __try {
+        offered = sh_overrides_repair_enemy_route(me_reparse_default, &r, &r.through_provider);
         if (!strcmp(phase, "editor"))
-            offered = sh_overrides_repair_defaults(me_reparse_default, &r, &r.through_provider);
+            offered += sh_overrides_repair_defaults(me_reparse_default, &r, &r.through_provider);
         offered += sh_modserve_each_unopened_shadow(me_reparse_one, &r);
     }
     __finally {

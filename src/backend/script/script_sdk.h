@@ -6,6 +6,8 @@
 
 #include <stddef.h>
 
+#define SH_SCRIPTED_COMBAT_KEY "smp_scripted_combat"
+
 typedef struct sh_script_sdk_lib {
     const char *name;      /* as required, without ".lua" */
     const char *text;

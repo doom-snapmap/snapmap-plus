@@ -113,6 +113,7 @@ typedef struct sh_script_engine {
     void    *(*decl)(const char *type, const char *name);
     int      (*hud_text)(void *player, const char *name, int slot, const char *text, const float rgba[4]);
     int      (*bounds_center)(void *ent, float out[3]);  /* center used by ae_launchProjectileAtTarget */
+    int      (*body_axis)(void *ent, float out[9]);      /* the axis SetAxis changes on this entity */
 } sh_script_engine;
 
 /* The floor under pos from the world trace: straight down from SH_SCRIPT_GROUND_ABOVE above pos for

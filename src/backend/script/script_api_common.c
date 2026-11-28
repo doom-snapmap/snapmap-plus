@@ -772,6 +772,19 @@ static int e_bounds_center(void *ent, float out[3])
     return 1;
 }
 
+static int e_body_axis(void *ent, float out[9])
+{
+    /* idAI2::SetAxis writes aiVolatile.physics.bodyOrientation.currentAxis on both renderers. */
+    const float *axis;
+    if (e_kind(ent) != SH_SCRIPT_KIND_AI) return e_axis(ent, out);
+    __try {
+        axis = *(const float **)((uint8_t *)ent + 0xDF20);
+        if (!axis) return 0;
+        memcpy(out, axis, 9 * sizeof *out);
+        return 1;
+    } __except (av_only(GetExceptionCode())) { return 0; }
+}
+
 /* The pair the engine's setOrigin event makes: the entity's SetOrigin /
  * SetAxis, then UpdateVisuals. */
 static int e_place(void *ent, const float *origin, const float *axis)
@@ -1221,7 +1234,8 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
     static const sh_script_engine engine = {
         e_resolve, e_spawn_id, e_slots, e_slot_spawn_id, e_kind, e_origin, e_axis, e_place, e_def_name, e_event,
         e_ai_health, e_ai_heal, e_ai_set_health, e_anim_node, e_spawn, e_trace, e_game_time_ms, e_ground,
-        e_difficulty, e_tag, e_event_format, e_trace_as_demon, e_event_flags, e_decl, sh_script_hud_text, e_bounds_center
+        e_difficulty, e_tag, e_event_format, e_trace_as_demon, e_event_flags, e_decl, sh_script_hud_text, e_bounds_center,
+        e_body_axis
     };
     sig_result own[API_SIG_ALL], lookup;
     int i;

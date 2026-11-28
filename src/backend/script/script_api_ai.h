@@ -50,6 +50,7 @@ enum sh_ai_ev {
     SH_AI_EV_ENABLE_BODY_ROTATION,   /* enableBodyRotation         b     */
     SH_AI_EV_ENABLE_HEAD_TRACKING,   /* enableHeadTracking         b     */
     SH_AI_EV_TEMP_MEMORY_REMOVE,     /* tempMemory_Remove          s     */
+    SH_AI_EV_MOVE_TO_ENTITY,         /* ssaction_MoveToEntity      eifbv */
     SH_AI_EV_COUNT
 };
 
@@ -70,6 +71,7 @@ typedef struct sh_ai_order {
 #define SH_AI_OFF_TEMP_MEMORY  0x25B30u
 #define SH_AI_TEMP_SLOTS       256
 #define SH_AI_TEMP_KEYS        0x400u
+int sh_ai_ensure_scripted_combat(void *memory, const char *atom, void (*set)(void *, const void *, int));
 
 typedef struct sh_ai_event_def {
     const char *name;
@@ -78,6 +80,7 @@ typedef struct sh_ai_event_def {
 extern const sh_ai_event_def SH_AI_EVENTS[SH_AI_EV_COUNT];
 
 /* Engine enum values the calls use (13954591 enum tables). */
+#define SH_AI_ARRIVAL_CONTINUE      1
 #define SH_AI_ARRIVAL_STOP          2   /* aiArrivalAction_t AIARRIVAL_STOP */
 #define SH_AI_IDLETURN_COMBAT       1   /* aiIdleTurn_t */
 #define SH_AI_ANIMWEB_BODY          0   /* aiAnimWeb_t */
@@ -177,6 +180,8 @@ typedef struct sh_ai_park_slot {
 int  sh_ai_park_drives(const sh_ai_park_slot *s, uint32_t id_now);
 void sh_ai_park_release(sh_ai_park_slot *s);
 void sh_ai_park_take(sh_ai_park_slot *s);
+/* Prefer the same live actor, then a vacant slot, then unused capacity. */
+int  sh_ai_park_slot_for(const sh_ai_park_slot *slots, int used, int cap, void *ai, uint32_t id);
 /* The alert cycle transition codes a parked demon's park opens for: TRANSCODE_AC_IN_PAIN (232), _IN_PAIN_LIGHT
  * (233), _IN_STAGGER (237), _IN_STAGGER_ONESHOT (238) and _IS_DYING (242). */
 int      sh_ai_fsm_code_yields(int code);
@@ -411,6 +416,8 @@ typedef struct sh_ai_step_state {
 /* 1 when the state says a step animation is in flight. */
 int sh_ai_step_in_flight(const sh_ai_step_state *s);
 
+enum sh_ai_body_query { SH_AI_BODY_BUSY, SH_AI_BODY_PATH, SH_AI_BODY_SCRIPT_READY };
+
 typedef struct sh_script_ai_engine {
     void    *(*entity)(sh_script_handle h);          /* the live entity, NULL when gone */
     sh_script_handle (*handle_of)(void *entity);      /* a handle a script can hold, 0 for none */
@@ -420,7 +427,7 @@ typedef struct sh_script_ai_engine {
     /* Run catalogue event `ev` on `entity`: 1 when it ran, with its int, bool or float return value in *ret when ret
      * is not NULL; 0 when unavailable or faulted. */
     int      (*event)(void *entity, int ev, const sh_ai_arg *args, int n, double *ret);
-    int      (*park)(void *ai);                       /* 1 parked (this call or earlier) */
+    int      (*park)(void *ai, int scripted_combat);   /* 1 parked (this call or earlier) */
     void    *(*enemy)(void *ai);                      /* the current enemy entity, or NULL */
     int      (*awareness)(void *ai, void *target);    /* AIAWARE_ level, -1 unreadable */
     int      (*move_status)(void *ai);                /* move FSM status word, -1 unreadable */
@@ -534,7 +541,7 @@ typedef struct sh_script_ai_engine {
     /* Hand the parked demon back to its own behaviour: IsRunningScript gives the engine's answer again, so its alert
      * cycle leaves ExecuteDoomscript by the NotExecutingScript link until the next command parks it. 1 done (also for a
      * demon not parked), -1 unavailable. */
-    int      (*release)(void *ai);
+    int      (*release)(void *ai, int scripted_combat);
     /* Set the variable `name` of the demon's body anim web to `value` by the engine's set-by-name (the anim web's
      * variables, below): a bound member or the web's scalar memory. 1 set, 0 no such variable, -1 unavailable. */
     int      (*anim_variable)(void *ai, const char *name, float value);
@@ -556,10 +563,12 @@ typedef struct sh_script_ai_engine {
     int      (*request_pain)(void *ai, int reaction, float damage, char *why, size_t cap);
     /* Register one owner FX condition to start when the native wound actually opens. */
     int (*wound_effect)(void *ent, const char *wound, const char *condition);
-    /* Verify the path state before handoff. Then 1 while the native body is busy, 0 when free, -1 unavailable. */
-    int (*native_body_busy)(void *ai, int check_path);
+    /* Query the native alert cycle. A state that cannot be read answers -1. */
+    int (*body_status)(void *ai, enum sh_ai_body_query query);
     int (*reset_motion_correction)(void *ai);
     int (*on_ground)(void *ai);  /* 1 grounded, 0 airborne, -1 when a different physics body is active */
+    /* Exchange the scripted action's entity if it still belongs to this order: 1 changed, 0 another owner, -1 unavailable. */
+    int (*replace_action_entity)(void *ai, void *expected, void *next);
 } sh_script_ai_engine;
 
 int sh_ai_set_wound_effect(void *owner, uint32_t id, void *wound, int condition);
@@ -1112,6 +1121,7 @@ static const uint8_t k_ai_move_prologue[SH_AI_MOVE_STOLEN] = {
 #define SH_AI_OFF_WEAPON_SLOT     0x8D4u    /* weapon: active trigger index */
 #define SH_AI_OFF_WEAPON_TRIGGER  0x8F8u    /* weapon: trigger state per index, 0 = pulled */
 #define SH_AI_OFF_ENEMY           0x25050u  /* idEntityPtr of the current enemy */
+#define SH_AI_OFF_ACTION_ENTITY   0x24528u  /* idAIMemory.actionEntity */
 #define SH_AI_OFF_PERCEPTION      0x29A88u
 #define SH_AI_OFF_PATH_NAME       0x388u    /* the name the path key is built from */
 #define SH_AI_OFF_PHYSICS         0x808u    /* idEntity: physics; vtable +0x80 origin(0), +0x88 axis(0) */

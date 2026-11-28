@@ -20,6 +20,19 @@ P.JUMP = 256            -- a move past this in one think is the engine's (a tele
 
 local records = setmetatable({}, { __mode = "k" })
 
+function P.face_body(e, target, fraction, min_angle)
+  return e:face_body(target, fraction, min_angle)
+end
+
+--- Request the body and wait until DOOM has finished leaving its native behavior.
+function P.reclaim(e)
+  return e:reclaim(true)
+end
+
+function P.pursue(e, target, radius, flags, stop)
+  return e:pursue(target, radius, flags, stop)
+end
+
 function P.finish_native_path(e)
   local s = records[e]
   if s then
@@ -117,18 +130,23 @@ function P.order_goal(A, e)
   return pos
 end
 
---- One think of SnapMap's rules for demon e (call it each think before the brain decides): a new Follow order is
--- taken, a teleport noticed, an order that arrived ended, and 2016's enemy given when it holds none (P.acquire).
-function P.think(A, e)
+--- Track a demon's defend position even while native AI owns its movement and orders.
+function P.observe_position(e, pos)
   local s = P.of(e)
-  local pos = A.position(e)
-  -- a teleport: the engine moved the demon farther than it walked
-  if s.last and pos and dist2d(pos, s.last) > P.JUMP then
+  local jumped = s.last and pos and dist2d(pos, s.last) > P.JUMP
+  s.last = pos
+  if jumped then
     s.order = nil
     s.home = pos
-    if A.stop then A.stop(e) end
   end
-  s.last = pos
+  return s, jumped
+end
+
+--- Process orders, notice teleports and choose a target while the scripted brain owns the demon.
+function P.think(A, e)
+  local pos = A.position(e)
+  local s, jumped = P.observe_position(e, pos)
+  if jumped and A.stop then A.stop(e) end
   if type(e.snapmap_order) == "function" then
     local o = e:snapmap_order()
     if o then s.order = o end
@@ -151,7 +169,7 @@ function P.install(A)
     elseif s.behavior == "defend" and s.home and pos then pos = P.clamp(pos, s.home, P.DEFEND_RADIUS) end
     return move_to(e, pos, flags)
   end
-  A.move_to_entity = function(e, t, radius, flags)
+  A.move_to_entity = function(e, t, radius, flags, arrival)
     local s = P.of(e)
     local goal = P.order_goal(A, e)
     if goal then return move_to(e, goal, flags) end
@@ -162,7 +180,7 @@ function P.install(A)
         if c ~= tp then return move_to(e, c, flags) end
       end
     end
-    return move_to_entity(e, t, radius, flags)
+    return move_to_entity(e, t, radius, flags, arrival)
   end
   A.encounter_role = function(e)
     if e == nil then return "ROLE_NONE" end

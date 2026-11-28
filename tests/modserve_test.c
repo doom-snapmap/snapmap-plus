@@ -517,11 +517,25 @@ static int repair_loaded_unknown(void *context, const char *request)
     return 1;
 }
 
+static int visit_early_enemy_route(void *context, const char *request)
+{
+    int *visits = (int *)context;
+    CHECK(sh_overrides_enemy_route_pending(request));
+    CHECK(!strcmp(request, "generated/decls/aifsmmanager/states/behaviors.decl") ||
+          !strcmp(request, "generated/decls/aifsmmanager/states/alertcycle.decl"));
+    return ++*visits >= 2;
+}
+
 static void test_early_defaults(void)
 {
     int unknown = 0, reads = 0;
+    int visits = 0;
     char text[100];
     CHECK(!sh_modserve_active());
+    CHECK(!sh_overrides_enemy_route_pending(LIFT));
+    CHECK(sh_overrides_repair_enemy_route(visit_early_enemy_route, &visits, &reads) == 2);
+    CHECK(sh_overrides_repair_enemy_route(visit_early_enemy_route, &visits, &reads) == 1);
+    CHECK(sh_overrides_repair_enemy_route(visit_early_enemy_route, &visits, &reads) == 0 && visits == 3 && reads == 0);
     CHECK(provider_text("decltree/snapeditorentitydef/custom/timeline.decl", 0, text, sizeof text));
     CHECK(provider_text("generated/decls/snapEditorEntityDef/volume/blocking.decl", 1, text, sizeof text));
     CHECK(!provider_text("generated/decls/snapEditorEntityDef/unknown/unknown.decl", 2, text, sizeof text));

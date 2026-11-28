@@ -264,8 +264,8 @@ To place a demon directly, select an Unknown in **Entities → Entity State**. S
 name, such as `ai/demon/baron_coop` for the stock Baron or `mods/zjpq12lo/ai/demon/tyrant` for the Eternal Demons
 Tyrant. Set **Classname** to `idAI2` and click **Save**. Position and orientation are enough. The actor definition
 supplies its health, model and behavior. Add an override only for a property you want to change on this placement.
-A Toybox encounter and a direct placement that name the same actor inherit the same demon defaults.
-The encounter also controls when the demon spawns and which encounter events fire.
+Once spawned, the same actor uses the same team relationships, movement and combat behavior through either placement.
+A Toybox encounter also controls when the demon spawns and which encounter events fire.
 A published map that uses this named mod actor can carry its actor slice.
 
 An existing placement can also define its actor inline. Its `edit.aiEditable.behaviors.decl` must identify one

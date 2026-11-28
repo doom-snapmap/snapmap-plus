@@ -17,6 +17,7 @@
 #include "backend_log.h"
 #include "perf.h"
 #include "decl_text.h"
+#include "decl_tree.h"
 #include "grid_room_asset.h"
 #include "navmesh.h"                /* baked AI navigation, served under the module's own names */
 #include "nav_bake.h"           /* navigation baked from the map's own marked volumes */
@@ -392,18 +393,49 @@ static const char *const g_ov_product_decls[] = { "snapeditorentitydef/custom/" 
 
 #define OV_DEFAULT_COUNT (sizeof g_ov_baked_decls / sizeof g_ov_baked_decls[0])
 static volatile LONG g_default_settled[OV_DEFAULT_COUNT];
+static struct {
+    const char *request;
+    int wake_body;
+    volatile LONG settled;
+} g_scripted_graphs[] = {
+    { "generated/decls/aifsmmanager/states/behaviors.decl", 0 },
+    { "generated/decls/aifsmmanager/states/alertcycle.decl", 1 },
+};
+
+static int scripted_graph_index(const char *name)
+{
+    for (int i = 0; name && i < (int)_countof(g_scripted_graphs); i++)
+        if (sh_path_eq(name, g_scripted_graphs[i].request)) return i;
+    return -1;
+}
+
+static int repair_early_decl(const char *request, volatile LONG *settled, int include_mods, int (*visit)(void *, const char *),
+                             void *context, int *reads)
+{
+    if (InterlockedCompareExchange(settled, 0, 0) || (!include_mods && sh_modserve_lookup(request, NULL))) return 0;
+    if (visit(context, request) && InterlockedExchange(settled, 1)) (*reads)++;
+    return 1;
+}
+
+int sh_overrides_repair_enemy_route(int (*visit)(void *, const char *), void *context, int *reads)
+{
+    int offered = 0;
+    for (int i = 0; i < (int)_countof(g_scripted_graphs); i++)
+        offered += repair_early_decl(g_scripted_graphs[i].request, &g_scripted_graphs[i].settled, 1, visit, context, reads);
+    return offered;
+}
+
+int sh_overrides_enemy_route_pending(const char *request)
+{
+    int i = scripted_graph_index(request);
+    return i >= 0 && !InterlockedCompareExchange(&g_scripted_graphs[i].settled, 0, 0);
+}
 
 int sh_overrides_repair_defaults(int (*visit)(void *, const char *), void *context, int *reads)
 {
     int offered = 0;
     for (size_t i = 0; i < OV_DEFAULT_COUNT; i++) {
-        const char *request = g_ov_baked_decls[i].name;
-        if (InterlockedCompareExchange(&g_default_settled[i], 0, 0) || sh_modserve_lookup(request, NULL)) continue;
-        offered++;
-        if (visit(context, request)) {
-            /* The provider marks a successful read during the visit. A failed parse is also tried only once. */
-            if (InterlockedExchange(&g_default_settled[i], 1)) (*reads)++;
-        }
+        offered += repair_early_decl(g_ov_baked_decls[i].name, &g_default_settled[i], 0, visit, context, reads);
     }
     return offered;
 }
@@ -586,12 +618,43 @@ unsigned char *sh_overrides_read_engine_resource(const char *name,size_t *out_le
     free(generated);return copy;
 }
 
+static ov_stream *scripted_graph_stream(const char *name, int graph)
+{
+    unsigned char *bytes = NULL, *copy;
+    size_t length = 0, changed_len = 0;
+    char *changed;
+    ov_stream *stream;
+    if (sh_modserve_active()) sh_modserve_open(name, &bytes, &length);
+    if (!bytes) bytes = read_installed_resource(name, &length);
+    if (!bytes) return NULL;
+    changed = sh_dt_scripted_enemy_route(g_scripted_graphs[graph].wake_body, (const char *)bytes, length, &changed_len);
+    if (changed) {
+        copy = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, changed_len);
+        if (copy) {
+            memcpy(copy, changed, changed_len);
+            HeapFree(GetProcessHeap(), 0, bytes);
+            bytes = copy;
+            length = changed_len;
+        }
+        free(changed);
+    }
+    stream = make_mem_stream(bytes, (long long)length, name, 1);
+    if (!stream) HeapFree(GetProcessHeap(), 0, bytes);
+    else InterlockedExchange(&g_scripted_graphs[graph].settled, 1);
+    return stream;
+}
+
 static void *ov_open_body(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
 {
 #ifndef SH_OVERRIDES_TESTING
     if (g_orig_open == NULL) return NULL;   /* defensive: cannot happen once installed */
 #endif
     if (g_provider_self == NULL) g_provider_self = self;
+    int graph = mode < 2 ? scripted_graph_index(name) : -1;
+    if (graph >= 0) {
+        ov_stream *stream = scripted_graph_stream(name, graph);
+        if (stream) return stream;
+    }
 
     /* The editor's placement grid, cut where marked boxes cut the module floor; only the native surface rebuild
      * asks for these private names. */

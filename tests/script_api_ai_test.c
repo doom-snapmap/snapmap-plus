@@ -71,6 +71,7 @@ typedef struct fent {
     int   enemy;           /* spawn id of the enemy, 0 none */
     int   awareness;
     int   move_status;
+    int   action_entity, refuse_entity_move;
     int   trigger;
     int   visible;         /* isEntityVisible answer */
     int   parked;
@@ -142,6 +143,14 @@ static int f_is_ai(void *e) { return ((fent *)e)->is_ai; }
 static int f_origin(void *e, float out[3]) { memcpy(out, ((fent *)e)->origin, 12); return 1; }
 static int f_yaw(void *e, float *d) { *d = ((fent *)e)->yaw; return 1; }
 
+static int f_replace_action_entity(void *ai, void *expected, void *next)
+{
+    fent *f = ai;
+    if (fake_resolve(f->action_entity) != expected) return 0;
+    f->action_entity = next ? idx_of(next) : 0;
+    return 1;
+}
+
 static void ev_cat(const char *s)
 {
     if (strlen(g_events) + strlen(s) + 2 < sizeof g_events) strcat(g_events, s);
@@ -149,10 +158,15 @@ static void ev_cat(const char *s)
 
 /* The temp memory of every fake demon: the order SnapMap's Follow left (tempMemory_Remove takes it, f_event). */
 static sh_ai_order g_order;
-static int g_native_body_busy, g_no_path_state, g_release_refused, g_order_reads;
+static int g_native_body_busy, g_no_path_state, g_release_refused, g_order_reads, g_script_ready;
 
 static int f_event(void *e, int ev, const sh_ai_arg *args, int n, double *ret)
 {
+    if (ev == SH_AI_EV_MOVE_TO_ENTITY) {
+        fent *f = e;
+        CHECK(fake_resolve(f->action_entity) != NULL);  /* ActionEntityDeleted runs independently of the route. */
+        if (f->refuse_entity_move) return 0;
+    }
     if (ev == SH_AI_EV_GET_MONSTER_TYPE) { if (ret) *ret = ((fent *)e)->monster; return 1; }
     if (ev == SH_AI_EV_TEMP_MEMORY_REMOVE && n == 1 && g_order.kind &&
         !strcmp(args[0].s, SH_AI_ORDER_KEYS[g_order.kind]))
@@ -199,10 +213,17 @@ static int f_event(void *e, int ev, const sh_ai_arg *args, int n, double *ret)
     return 1;
 }
 
-static int f_park(void *e) { if (!((fent *)e)->parked) ev_cat("park\n"); ((fent *)e)->parked = 1; return 1; }
-static int f_release(void *e)
+static int f_park(void *e, int scripted_combat)
+{
+    if (scripted_combat) ev_cat("scripted combat park\n");
+    if (!((fent *)e)->parked) ev_cat("park\n");
+    ((fent *)e)->parked = 1;
+    return 1;
+}
+static int f_release(void *e, int scripted_combat)
 {
     if (g_release_refused) return -1;
+    if (scripted_combat) ev_cat("scripted combat\n");
     ev_cat("release\n");
     ((fent *)e)->parked = 0;
     return 1;
@@ -241,13 +262,42 @@ static void *f_enemy(void *e) { int id = ((fent *)e)->enemy; return id ? &g_ent[
 static int f_awareness(void *ai, void *t) { (void)t; return ((fent *)ai)->awareness; }
 static int f_move_status(void *e) { return ((fent *)e)->move_status; }
 static int f_trigger(void *e, int hand) { ((fent *)e)->asked_hand = hand; return ((fent *)e)->trigger; }
+static struct { int key, pending; uint32_t frame; float goal[3]; } path_jobs[16];
+static int path_job_count, path_polls, consuming_paths;
+
+/* DOOM returns a completed request once. A second native read starts a new one. */
+static int f_query_status(fent *f, int key, const float goal[3], float answer[3])
+{
+    memcpy(answer, goal, sizeof path_jobs[0].goal);
+    if (!consuming_paths) {
+        if (f->path_none) return 2;
+        return ++f->path_calls <= f->path_ready ? 1 : 0;
+    }
+    int i;
+    path_polls++;
+    for (i = 0; i < path_job_count && path_jobs[i].key != key; i++) {}
+    if (i == path_job_count) {
+        if (i >= (int)_countof(path_jobs)) return -1;
+        path_jobs[path_job_count++].key = key;
+    }
+    if (!path_jobs[i].pending || path_jobs[i].frame == g_frame) {
+        path_jobs[i].pending = 1;
+        path_jobs[i].frame = g_frame;
+        memcpy(path_jobs[i].goal, goal, sizeof path_jobs[i].goal);
+        return 1;
+    }
+    path_jobs[i].pending = 0;
+    memcpy(answer, path_jobs[i].goal, sizeof path_jobs[i].goal);
+    return f->path_none ? 2 : 0;
+}
+
 static int f_path(void *ai, const float goal[3], int key, float *len)
 {
     fent *f = (fent *)ai;
-    (void)key;
-    if (f->path_none) return 2;
-    if (++f->path_calls <= f->path_ready) return 1;
-    *len = (float)(fabs(goal[0] - f->origin[0]) + fabs(goal[1] - f->origin[1]));
+    float answer[3];
+    int status = f_query_status(f, key, goal, answer);
+    if (status) return status;
+    *len = (float)(fabs(answer[0] - f->origin[0]) + fabs(answer[1] - f->origin[1]));
     return 0;
 }
 static uint32_t f_frame(void) { return g_frame; }
@@ -452,10 +502,11 @@ static int f_path_points(void *ai, const float goal[3], int key, float (**outp)[
     fent *f = (fent *)ai;
     float (*out)[3];
     int k, count = f->path_long ? f->path_long : 3;
-    (void)key;
     *outp = NULL;
-    if (f->path_none) return 2;
-    if (++f->path_calls <= f->path_ready) return 1;
+    float answer[3];
+    int status = f_query_status(f, key, goal, answer);
+    if (status) return status;
+    goal = answer;
     *length = (float)(fabs(goal[0] - f->origin[0]) + fabs(goal[1] - f->origin[1]));
     out = (float (*)[3])malloc((size_t)count * sizeof *out);   /* as the engine side: the whole path, malloc'd */
     if (!out) return -1;
@@ -517,10 +568,11 @@ static int f_snapmap_order(void *ai, sh_ai_order *out)
     return 1;
 }
 
-static int f_native_body_busy(void *ai, int check_path)
+static int f_body_status(void *ai, enum sh_ai_body_query query)
 {
     (void)ai;
-    return check_path && g_no_path_state ? -1 : g_native_body_busy;
+    if (query == SH_AI_BODY_SCRIPT_READY) return g_script_ready;
+    return query == SH_AI_BODY_PATH && g_no_path_state ? -1 : g_native_body_busy;
 }
 
 static const sh_script_ai_engine g_fake = {
@@ -534,7 +586,7 @@ static const sh_script_ai_engine g_fake = {
     f_step_state, f_step_interrupt, f_gore_init, f_wound_hides, f_held, f_posed_legs, f_fk_reference_pose,
     f_interrupt_blend, f_destructible, f_weapon_use, f_wound_damage_counts, f_snapmap_order,
     f_release, f_anim_variable, f_relations, f_off_limits, f_world_clear, f_world_ground, f_request_pain, f_wound_effect,
-    f_native_body_busy, f_reset_motion_correction, f_on_ground
+    f_body_status, f_reset_motion_correction, f_on_ground, f_replace_action_entity
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -914,6 +966,75 @@ static void test_move_done_and_follow(void)
     g_ent[1].move_status = 7; tick();
     CHECK(strstr(log_of("aaaaaaaa"), "m 1 false false\nm 2 false false\nm 3 true true\n") != NULL);
     sh_script_map_end();
+}
+
+static void test_entity_pursuit_waits_for_native_completion(void)
+{
+    const char *command;
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step == 1 then\n"
+        "    assert(math.abs(self:angle_to(ent(2)) - 109) < 0.1)\n"
+        "    assert(self:pursue(ent(2), 236.22))\n"
+        "  end\n"
+        "  print('pursuit ' .. step .. ' ' .. tostring(self:move_done()))\n"
+        "  if step == 3 then assert(self:pursue(ent(2), 8, nil, true)) end\n"
+        "end)\n"));
+    g_ent[2].origin[0] = -75.64f;
+    g_ent[2].origin[1] = 219.67f;
+    g_ent[2].origin[2] = 0;
+    g_ent[1].move_status = 1;
+    tick();
+    g_ent[2].origin[0] += 125; tick();
+    g_ent[1].move_status = 0; tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "pursuit 1 false\npursuit 2 false\npursuit 3 true\n") != NULL);
+    command = strstr(g_events, "ssaction_MoveToEntity(e2,1,236.22,0,0 0 0)");
+    CHECK(command != NULL && strstr(command + 1, "ssaction_MoveToEntity(e2,2,8,0,0 0 0)") != NULL);
+    CHECK(strstr(g_events, "ssaction_MoveToPoint") == NULL && strstr(g_events, "ssaction_Idle") == NULL);
+    sh_script_map_end();
+}
+
+static void test_pursuit_action_context(void)
+{
+    CHECK(start(
+        "api = 1\nlocal s = 0\non.think('ai/brute', function(self)\n"
+        "  s = s + 1\n"
+        "  if s == 1 or s == 6 or s == 8 or s == 10 then assert(self:pursue(ent(2)))\n"
+        "  elseif s == 2 then assert(not self:pursue(ent(3)))\n"
+        "  elseif s == 3 or s == 7 then assert(self:pursue(ent(3)))\n"
+        "  elseif s == 4 or s == 5 or s == 9 then assert(self:release())\n"
+        "  elseif s == 11 then self:stop() end\n"
+        "end)\n"));
+    tick(); CHECK(g_ent[1].action_entity == 2);
+    g_ent[1].refuse_entity_move = 1;
+    tick(); CHECK(g_ent[1].action_entity == 2);
+    g_ent[1].refuse_entity_move = 0;
+    tick(); CHECK(g_ent[1].action_entity == 3);
+    g_ent[1].action_entity = 4;  /* A native action has taken over. */
+    tick(); CHECK(g_ent[1].action_entity == 4);
+    tick(); CHECK(g_ent[1].action_entity == 4);
+    tick(); CHECK(g_ent[1].action_entity == 4);
+    g_ent[1].action_entity = 0;
+    tick(); CHECK(g_ent[1].action_entity == 3);
+    g_ent[3].live = 0;
+    tick(); CHECK(g_ent[1].action_entity == 2);
+    tick(); CHECK(g_ent[1].action_entity == 0);
+    tick(); CHECK(g_ent[1].action_entity == 2);
+    tick(); CHECK(g_ent[1].action_entity == 0);
+    sh_script_map_end();
+
+    CHECK(start("api = 1\non.think('ai/brute',function(e) assert(e:pursue(ent(2))) end)\n"));
+    tick(); CHECK(g_ent[1].action_entity == 2);
+    sh_script_ai_set_engine(NULL);
+    CHECK(g_ent[1].action_entity == 0);
+    sh_script_ai_reset();
+    sh_script_ai_set_engine(&g_fake);
+    tick(); CHECK(g_ent[1].action_entity == 2);
+    sh_script_map_end();
+    CHECK(g_ent[1].action_entity == 0);
 }
 
 static void test_queries(void)
@@ -1462,6 +1583,46 @@ static void test_face_travel(void)
 }
 
 /* path_points answers every point of a long engine path. */
+static void test_shared_path_reads(void)
+{
+    CHECK(start(
+        "api = 1\n"
+        "local n = 0\n"
+        "on.think('ai/brute', function(e)\n"
+        "  n = n+1\n"
+        "  local a,b={x=10,y=0,z=0},{x=40,y=0,z=0}\n"
+        "  local x,y = a,b; if n%2 == 0 then x,y=b,a end\n"
+        "  local p,l=e:path_points(x,true); local other,m=e:path_points(y,true)\n"
+        "  local ep,el=e:path_points(ent(2),true)\n"
+        "  local copy,again=e:path_points(x,true)\n"
+        "  local len,why=e:path_length(b); local reachable=e:can_reach(b)\n"
+        "  if n==1 or n==3 then\n"
+        "    assert(not p and not other and not ep and not copy and not len and reachable==nil)\n"
+        "    assert(l=='searching' and m==l and el==l and again==l and why==l)\n"
+        "  elseif n==2 then\n"
+        "    assert(l==40 and m==10 and again==l and len==40 and reachable==true)\n"
+        "    assert(ep[#ep].x==100 and el==200)\n"
+        "    p[#p].x=-1; assert(copy[#copy].x==40)\n"
+        "  else\n"
+        "    assert(not p and l=='no path' and again==l and why==l and reachable==false)\n"
+        "  end\n"
+        "  print('path update '..n)\n"
+        "end)\n"));
+    memset(path_jobs, 0, sizeof path_jobs);
+    path_job_count = path_polls = 0;
+    consuming_paths = 1;
+    tick();
+    g_ent[2].origin[0] = 150;   /* The in-flight read belongs to that moving entity. */
+    tick();
+    tick();
+    g_ent[1].path_none = 1;
+    tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "path update 4\n"));
+    CHECK(path_job_count == 4 && path_polls == 16);
+    consuming_paths = 0;
+    sh_script_map_end();
+}
+
 static void test_long_path(void)
 {
     const char *log;
@@ -2704,6 +2865,73 @@ static void test_stationary_enemy_native_path(void)
 
 /* ai:release() hands the demon back to its own behaviour until the next command; ai:anim_variable(name, value)
  * sets a variable of its anim web by name. */
+static int marker_writes;
+static void set_test_marker(void *memory, const void *atom, int value)
+{
+    ((const char **)((uint8_t *)memory + SH_AI_TEMP_KEYS))[1] = *(const char *const *)atom;
+    ((int *)memory)[1] = value;
+    marker_writes++;
+}
+
+static void test_scripted_combat_marker(void)
+{
+    struct { int values[SH_AI_TEMP_SLOTS]; const char *keys[SH_AI_TEMP_SLOTS]; } memory = {0};
+    const char *key = "smp_scripted_combat";
+    memory.keys[0] = "other";
+    memory.values[0] = 9;
+    CHECK(!sh_ai_ensure_scripted_combat(&memory, key, NULL));
+    CHECK(sh_ai_ensure_scripted_combat(&memory, key, set_test_marker) && marker_writes == 1);
+    CHECK(sh_ai_ensure_scripted_combat(&memory, key, set_test_marker) && marker_writes == 1);
+    CHECK(sh_ai_ensure_scripted_combat(&memory, key, NULL) && memory.values[0] == 9);
+}
+
+static void test_park_slot_lifetime(void)
+{
+    sh_ai_park_slot slots[3] = {0};
+    fent gone = {0};
+    g_ent[1].live = g_ent[2].live = 1;
+    slots[0].ai = &gone;
+    slots[0].spawn_id = 1;  /* This ID now resolves to a different actor. */
+    slots[1].ai = &g_ent[2];
+    slots[1].spawn_id = 2;
+    CHECK(sh_ai_park_slot_for(slots, 2, 3, &g_ent[2], 2) == 1);
+    CHECK(sh_ai_park_slot_for(slots, 2, 3, &g_ent[1], 1) == 0);
+    slots[0].ai = &g_ent[1];
+    CHECK(sh_ai_park_slot_for(slots, 2, 3, &gone, 5) == 2);
+    CHECK(sh_ai_park_slot_for(slots, 2, 2, &gone, 5) == -1);
+    g_ent[1].live = 0;
+    CHECK(sh_ai_park_slot_for(slots, 2, 2, &g_ent[1], 6) == 0);
+    slots[0].fsm_busy = 1;
+    CHECK(sh_ai_park_slot_for(slots, 2, 2, &g_ent[1], 6) == -1);
+}
+
+static void test_reclaim(void)
+{
+    CHECK(start(
+        "api = 1\n"
+        "on.think('ai/brute', function(self)\n"
+        "  if self:native_follow_path() then print('native ' .. tostring(self:reclaim())); return end\n"
+        "  print('ready ' .. tostring(require('enemy_snapmap').reclaim(self)))\n"
+        "end)\n"));
+    g_script_ready = 0;
+    g_events[0] = 0;
+    tick();
+    CHECK(g_ent[1].parked && strstr(log_of("aaaaaaaa"), "ready false\n"));
+    CHECK(strstr(g_events, "scripted combat park\n"));   /* A direct actor can acquire before its first release. */
+    g_script_ready = 1;
+    tick();
+    CHECK(strstr(log_of("aaaaaaaa"), "ready true\n") != NULL);
+    g_order.kind = SH_AI_ORDER_PATH;
+    g_events[0] = 0;
+    tick();
+    CHECK(!g_ent[1].parked && strstr(log_of("aaaaaaaa"), "native false\n"));
+    CHECK(!strstr(g_events, "scripted combat park\n"));
+    g_order.kind = SH_AI_ORDER_NONE;
+    g_native_body_busy = 0;
+    g_script_ready = 0;
+    sh_script_map_end();
+}
+
 static void test_release_and_anim_variable(void)
 {
     sh_ai_park_slot s;
@@ -2732,6 +2960,7 @@ static void test_release_and_anim_variable(void)
         "  if n == 2 then print('released ' .. tostring(self:release())) end\n"
         "  if n == 5 then self:move_to({ x = 5, y = 0, z = 0 }) end\n"
         "  if n == 6 then\n"
+        "    self:release(true)\n"
         "    print('var ' .. tostring(self:anim_variable('hangoutIndex', 3)) .. ' ' .. tostring(self:anim_variable('noSuchVar', 1)))\n"
         "  end\n"
         "end)\n"));
@@ -2739,13 +2968,14 @@ static void test_release_and_anim_variable(void)
     tick();                                                     /* the via is forced: parked */
     CHECK(g_ent[1].parked == 1 && strstr(g_events, "ForceAnimState(0,evade/side") != NULL);
     tick();                                                     /* released */
-    CHECK(g_ent[1].parked == 0);
+    CHECK(g_ent[1].parked == 0 && strstr(g_events, "scripted combat") == NULL);
     strcpy(g_ent[1].node, "evade/side"); tick();                /* the via plays, then the web leaves it: */
     strcpy(g_ent[1].node, "evade/side_out"); tick();            /* a via left standing would ask its destination */
     CHECK(strstr(g_events, "ChangeAnimState(0,idle/idle") == NULL && g_ent[1].parked == 0);
     tick();                                                     /* the next command parks it again */
     CHECK(g_ent[1].parked == 1);
     tick();
+    CHECK(strstr(g_events, "scripted combat") != NULL);
     log = log_of("aaaaaaaa");
     CHECK(strstr(log, "released true\n") != NULL);
     CHECK(strstr(log, "var true false\n") != NULL);
@@ -2945,7 +3175,7 @@ int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 64);
+    CHECK(sh_script_ai_register() == 66);
     sh_script_ai_set_engine(&g_fake);
     sh_script_api_set_engine(&g_common);
     sh_script_api_register();
@@ -2955,9 +3185,13 @@ int main(int argc, char **argv)
     test_args();
     test_native_path_child();
     test_move_state();
+    test_park_slot_lifetime();
+    test_reclaim();
     test_geometry();
     test_commands();
     test_move_done_and_follow();
+    test_entity_pursuit_waits_for_native_completion();
+    test_pursuit_action_context();
     test_queries();
     test_refusals();
     test_long_tag_names();
@@ -2966,6 +3200,7 @@ int main(int argc, char **argv)
     test_brain_pure();
     test_compositions();
     test_long_path();
+    test_shared_path_reads();
     test_weapon_hands();
     test_face_travel();
     test_sight_against_a_wall();
@@ -2973,6 +3208,7 @@ int main(int argc, char **argv)
     test_snapmap_order();
     test_stationary_enemy_native_path();
     test_release_and_anim_variable();
+    test_scripted_combat_marker();
     test_relations();
     test_focus_guard();
     test_brain_refusals();

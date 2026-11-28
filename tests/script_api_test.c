@@ -430,6 +430,49 @@ static void refused(const char *body, const char *line, const char *words)
     CHECK(has(g_stop, words));
 }
 
+static int tilted_body_axis(void *ent, float out[9])
+{
+    const float slope[9] = {1,0,0, 0,.8f,.6f, 0,-.6f,.8f};
+    (void)ent;
+    memcpy(out, slope, sizeof slope);
+    return 1;
+}
+
+static void test_face_body(void)
+{
+    sh_script_engine with = k_engine;
+    with.body_axis = f_axis;
+    sh_script_api_set_engine(&with);
+    run("api = 1\non.spawn('ai/brute', function(self)\n"
+        "  local p = ent(2); p:set_position({0,100,0})\n"
+        "  assert(self:face_body(p)); assert(math.abs(self:yaw()-6.340192) < .001)\n"
+        "  assert(not self:face_body(p,1,90)); assert(self:face_body(p,1,45))\n"
+        "  assert(math.abs(self:yaw()-90) < .001)\n"
+        "  assert(not self:face_body({0,0,5})); assert(not self:face_body(self))\n"
+        "  self:set_yaw(0); assert(not self:face_body({-100,0,0},.5))\n"
+        "  assert(self:face_body({-100,.01,0},1)); assert(self:yaw() > 179.9)\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(g_ents[0].pos[0] == 0 && g_ents[0].vel[0] == 5 && !strcmp(g_ents[0].node, "combat/idle"));
+    with.body_axis = tilted_body_axis;
+    sh_script_api_set_engine(&with);
+    run("api = 1\non.spawn('ai/brute', function(self)\n"
+        "  assert(not self:face_body({0,-60,80},1))\n"
+        "  assert(self:face_body({0,80,60},1))\n"
+        "  local a=self:axis(); assert(math.abs(a.forward.y-.8)<.0001 and math.abs(a.forward.z-.6)<.0001)\n"
+        "  assert(math.abs(a.up.z-.8)<.0001 and math.abs(a.up.y+.6)<.0001 and math.abs(a.left.x+1)<.0001)\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(!g_events[0]);
+    refused("api = 1\non.spawn('ai/brute', function(self)\n self:face_body(ent(1),0/0)\nend)",
+            "3", "ordinary number");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n self:face_body(ent(1),1,1/0)\nend)",
+            "3", "ordinary number");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n self:face_body(ent(1),1.1)\nend)",
+            "3", "between 0 and 1");
+    sh_script_api_set_engine(&k_engine);
+}
+
 /* A script is the map's logic: it changes any entity, not only its mod's. */
 static void test_any_entity(void)
 {
@@ -798,6 +841,7 @@ int main(void)
 
     test_reads();
     test_writes();
+    test_face_body();
     test_any_entity();
     test_refusals();
     test_spawn();

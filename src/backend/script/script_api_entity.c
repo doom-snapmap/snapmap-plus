@@ -126,6 +126,51 @@ static int l_axis(lua_State *L)
     return 1;
 }
 
+/* Blend the forward direction in the body's own plane, retaining its up axis on slopes. */
+static int l_face_body(lua_State *L)
+{
+    const sh_script_engine *e = eng();
+    float goal[3], at[3], axis[9];
+    double factor = 0.1, min_angle = 0, forward = 0, left = 0, distance_sq = 0, length;
+    void *ent;
+    int i, wrote = 0;
+    int has_goal = sh_script_api_check_point(L, 2, "face_body", "the target", goal);
+    sh_script_api_opt_number(L, 3, "face_body", "the blend fraction", &factor);
+    sh_script_api_opt_number(L, 4, "face_body", "the minimum angle in degrees", &min_angle);
+    if (factor < 0 || factor > 1)
+        sh_script_refuse(L, "\"face_body\" needs the blend fraction between 0 and 1");
+    ent = sh_script_api_owned(L, 1, "face_body", "turn", NULL);
+    if (!has_goal || !origin_of(ent, at) || !e->body_axis || !e->place || !e->body_axis(ent, axis))
+        goto done;
+    for (i = 0; i < 9; i++) if (!isfinite(axis[i])) goto done;
+    for (i = 0; i < 3; i++) {
+        double delta = (double)goal[i] - at[i];
+        distance_sq += delta * delta;
+        forward += delta * axis[i];
+        left += delta * axis[i + 3];
+    }
+    length = hypot(forward, left);
+    if (!isfinite(length) || !(length > 1e-6 * fmax(1, sqrt(distance_sq)))) goto done;
+    forward /= length;
+    left /= length;
+    if (min_angle > 0 && forward > cos(fmod(min_angle, 360.0) * (PI / 180.0))) goto done;
+    forward = 1 + factor * (forward - 1);
+    left *= factor;
+    length = hypot(forward, left);
+    if (!(length > 1e-12)) goto done;
+    forward /= length;
+    left /= length;
+    for (i = 0; i < 3; i++) {
+        double f = axis[i], l = axis[i + 3];
+        axis[i] = (float)(forward * f + left * l);
+        axis[i + 3] = (float)(forward * l - left * f);
+    }
+    wrote = e->place(ent, NULL, axis);
+done:
+    lua_pushboolean(L, wrote);
+    return 1;
+}
+
 static int l_velocity(lua_State *L)
 {
     sh_script_earg r;
@@ -965,6 +1010,7 @@ void sh_script_api_entity_register(void)
         { SH_SCRIPT_API_METHOD, "set_position", l_set_pos },
         { SH_SCRIPT_API_METHOD, "yaw", l_yaw },
         { SH_SCRIPT_API_METHOD, "set_yaw", l_set_yaw },
+        { SH_SCRIPT_API_METHOD, "face_body", l_face_body },
         { SH_SCRIPT_API_METHOD, "axis", l_axis },
         { SH_SCRIPT_API_METHOD, "velocity", l_velocity },
         { SH_SCRIPT_API_METHOD, "set_velocity", l_set_velocity },

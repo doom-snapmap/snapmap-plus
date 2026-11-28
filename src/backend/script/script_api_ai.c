@@ -33,6 +33,7 @@
 #include <string.h>
 #include "../../common/text.h"
 #include "script_api_ai.h"
+#include "script_sdk.h"
 #include "script_runtime.h"
 #include "script_api_common.h"
 #include "script_api_combat.h"
@@ -74,6 +75,7 @@ const sh_ai_event_def SH_AI_EVENTS[SH_AI_EV_COUNT] = {
     { "enableBodyRotation",          "b" },
     { "enableHeadTracking",          "b" },
     { "tempMemory_Remove",           "s" },
+    { "ssaction_MoveToEntity",       "eifbv" },
 };
 
 /* ------------------------------------------------------------------ pure */
@@ -81,6 +83,25 @@ const sh_ai_event_def SH_AI_EVENTS[SH_AI_EV_COUNT] = {
 const char *const SH_AI_ORDER_KEYS[4] = {
     NULL, "snapmap_forceFollowPath", "snapmap_forceFollowEntity", "snapmap_forceMoveToPosition",
 };
+
+static int has_scripted_combat(const uint8_t *memory, const char *atom)
+{
+    const char *const *keys = (const char *const *)(memory + SH_AI_TEMP_KEYS);
+    const int *values = (const int *)memory;
+    int i;
+    for (i = 0; i < SH_AI_TEMP_SLOTS; ++i)
+        if (keys[i] == atom && values[i] == 1) return 1;
+    return 0;
+}
+
+int sh_ai_ensure_scripted_combat(void *memory, const char *atom, void (*set)(void *, const void *, int))
+{
+    if (!memory || !atom) return 0;
+    if (has_scripted_combat(memory, atom)) return 1;
+    if (!set) return 0;
+    set(memory, &atom, 1);
+    return has_scripted_combat(memory, atom);
+}
 
 int sh_ai_order_find(const char *const *keys, const uint32_t *values, int n, sh_ai_order *out)
 {
@@ -267,6 +288,26 @@ void sh_ai_park_release(sh_ai_park_slot *s)
 
 void sh_ai_park_take(sh_ai_park_slot *s) { InterlockedExchange(&s->released, 0); }
 
+/* A cached address can outlive its actor. Only the engine's current spawn-ID lookup may return it. */
+static void *record_entity(void *address, uint32_t id)
+{
+    const sh_script_engine *e = sh_script_api_engine();
+    void *live;
+    if (!address || id == SH_SCRIPT_SPAWN_ID_NONE || !e || !e->resolve) return NULL;
+    live = e->resolve(id);
+    return live == address ? live : NULL;
+}
+
+int sh_ai_park_slot_for(const sh_ai_park_slot *slots, int used, int cap, void *ai, uint32_t id)
+{
+    int i;
+    for (i = 0; i < used; i++)
+        if (slots[i].ai == ai && (uint32_t)slots[i].spawn_id == id) return i;
+    for (i = 0; i < used; i++)
+        if (!slots[i].fsm_busy && !record_entity(slots[i].ai, (uint32_t)slots[i].spawn_id)) return i;
+    return used < cap ? used : -1;
+}
+
 void sh_ai_move_issue(sh_ai_move *m, uint32_t frame)
 {
     m->state = SH_AI_MOVE_RUNNING;
@@ -375,14 +416,25 @@ int sh_ai_muzzle_mode_parse(const char *word)
 #define AI_ANY         3.0e38f   /* no upper bound: a setting may be as large as the script asks */
 #define AI_FOLLOW_MIN  32.0f     /* move_to_entity re-aims when the target moved this far */
 
+typedef struct {
+    sh_script_handle target;
+    float goal[3], length, (*points)[3];
+    uint32_t round;
+    int key, with_points, status, count;
+} ai_path_read;
+
 typedef struct ai_rec {
     sh_script_handle handle;
+    ai_path_read *paths;
+    int path_count, path_cap;
+    uint32_t path_frame, path_round;
     int        native_path;
     int        empty_order;
     uint32_t   order_frame;
     int        aborts_sent;      /* setScriptAbort 0 0 and setScriptAbortFlags 0 0 posted */
     int        walk;             /* walk state last set, 0 none */
     sh_ai_move move;
+    sh_script_handle pursuit_entity;  /* only the action reference this script supplied */
     int        has_dest;
     float      dest[3];
     float      tolerance;
@@ -406,8 +458,6 @@ typedef struct ai_rec {
 static ai_rec **g_recs;
 static int g_nrecs, g_crecs;
 static const sh_script_ai_engine *g_engine;
-
-void sh_script_ai_set_engine(const sh_script_ai_engine *engine) { g_engine = engine; }
 
 /* ---- posed legs (script_api_ai.h) */
 
@@ -499,7 +549,7 @@ int sh_ai_posed_leg(const sh_ai_leg_pose *p, const sh_ai_leg_joints *j, sh_ai_le
 }
 
 static void force_via_reset(void);
-static void wound_owner_gone(sh_script_handle h, uint32_t spawn_id);
+static void actor_gone(sh_script_handle h, uint32_t spawn_id);
 typedef struct wound_effect_row {
     struct wound_effect_row *next;
     void *owner, *wound;
@@ -568,11 +618,44 @@ static void anim_wait_drop(ai_rec *r)
     r->wait_dest = r->wait_via = NULL;
 }
 
+static void drop_actor_paths(ai_rec *r)
+{
+    for (int i = 0; i < r->path_count; i++) free(r->paths[i].points);
+    free(r->paths);
+    r->paths = NULL;
+    r->path_count = r->path_cap = 0;
+}
+
+static void end_pursuit(void *ai, ai_rec *r)
+{
+    if (r->pursuit_entity) {
+        void *target = g_engine->entity(r->pursuit_entity);
+        if (ai && target) g_engine->replace_action_entity(ai, target, NULL);
+        r->pursuit_entity = 0;
+    }
+}
+
+static void end_pursuits(void)
+{
+    for (int i = 0; i < g_nrecs; i++) {
+        ai_rec *r = g_recs[i];
+        if (r->pursuit_entity) end_pursuit(g_engine->entity(r->handle), r);
+    }
+}
+
+void sh_script_ai_set_engine(const sh_script_ai_engine *engine)
+{
+    if (g_engine != engine) end_pursuits();
+    g_engine = engine;
+}
+
 void sh_script_ai_reset(void)
 {
     int i;
+    end_pursuits();
     for (i = 0; i < g_nrecs; i++) {
         anim_wait_drop(g_recs[i]);
+        drop_actor_paths(g_recs[i]);
         memset(g_recs[i], 0, sizeof *g_recs[i]);
     }
 #ifndef SH_SCRIPT_PURE
@@ -608,6 +691,7 @@ static int rec_slot(sh_script_handle h)
         free_slot = g_nrecs++;
     }
     anim_wait_drop(g_recs[free_slot]);
+    drop_actor_paths(g_recs[free_slot]);
     memset(g_recs[free_slot], 0, sizeof *g_recs[free_slot]);
     g_recs[free_slot]->handle = h;
     return free_slot;
@@ -860,11 +944,11 @@ static int step_in_flight(void *ai, sh_ai_step_state *st)
 /* Park the demon for script control: the engine side marks it, and the
  * abort flags are cleared once. Returns its record, or NULL when the
  * engine refused to park it (the call then does nothing). */
-static ai_rec *park(void *ai, sh_script_handle h)
+static ai_rec *park_body(void *ai, sh_script_handle h, int scripted_combat)
 {
     ai_rec *r = rec_of(h);
     if (!r || r->native_path) return NULL;
-    if (!g_engine->park(ai)) return NULL;
+    if (!g_engine->park(ai, scripted_combat)) return NULL;
     if (!r->aborts_sent) {
         sh_ai_arg a[2];
         a[0] = arg_b(0); a[1] = arg_b(0);
@@ -872,6 +956,11 @@ static ai_rec *park(void *ai, sh_script_handle h)
             r->aborts_sent = 1;
     }
     return r;
+}
+
+static ai_rec *park(void *ai, sh_script_handle h)
+{
+    return park_body(ai, h, 0);
 }
 
 static void set_walk(void *ai, ai_rec *r, int state)
@@ -892,19 +981,48 @@ static void aim_enemy(void *ai)
     run(ai, SH_AI_EV_SET_FOCUS, a, 4, NULL);
 }
 
-static int issue_move(void *ai, ai_rec *r, const float dest[3], float tol, move_flags f)
+/* MoveToEntity checks the action entity independently of its destination. Native sequences supply their own. */
+static int issue_entity_move(void *ai, ai_rec *r, sh_ai_arg args[5])
+{
+    sh_script_handle target = g_engine->handle_of(args[0].ent);
+    void *before = r->pursuit_entity ? g_engine->entity(r->pursuit_entity) : NULL;
+    int bound;
+    if (!target || !g_engine->replace_action_entity) return 0;
+    bound = g_engine->replace_action_entity(ai, before, args[0].ent);
+    if (!bound && before) {
+        r->pursuit_entity = 0;
+        bound = g_engine->replace_action_entity(ai, NULL, args[0].ent);
+    }
+    if (bound < 0) return 0;
+    if (!run(ai, SH_AI_EV_MOVE_TO_ENTITY, args, 5, NULL)) {
+        if (bound && g_engine->entity(r->handle) == ai && g_engine->entity(target) == args[0].ent) {
+            void *previous = r->pursuit_entity ? g_engine->entity(r->pursuit_entity) : NULL;
+            g_engine->replace_action_entity(ai, args[0].ent, previous);
+        }
+        return 0;
+    }
+    r->pursuit_entity = bound ? target : 0;
+    return 1;
+}
+
+static int issue_move(void *ai, ai_rec *r, sh_ai_arg goal, float tol, move_flags f, int arrival)
 {
     sh_ai_arg a[5];
     float zero[3] = { 0, 0, 0 };
+    int point = goal.type == 'v';
     set_walk(ai, r, f.run ? SH_AI_WALKSTATE_RUNNING : SH_AI_WALKSTATE_WALKING);
     if (f.aim) aim_enemy(ai);
-    a[0] = arg_v(dest); a[1] = arg_i(SH_AI_ARRIVAL_STOP); a[2] = arg_f(tol > 0 ? tol : 0.1f);
+    a[0] = goal; a[1] = arg_i(arrival); a[2] = arg_f(tol > 0 ? tol : 0.1f);
     a[3] = arg_b(0); a[4] = arg_v(zero);
-    if (!run(ai, SH_AI_EV_MOVE_TO_POINT, a, 5, NULL)) return 0;
+    if (point) {
+        if (!run(ai, SH_AI_EV_MOVE_TO_POINT, a, 5, NULL)) return 0;
+        end_pursuit(ai, r);
+    } else if (!issue_entity_move(ai, r, a)) return 0;
     anim_wait_drop(r);     /* the move's own animations take the web: an order still held back is over */
     sh_ai_move_issue(&r->move, g_engine->frame());
-    r->has_dest = 1;
-    memcpy(r->dest, dest, sizeof r->dest);
+    /* The entity event tracks its own destination and reached distance. */
+    r->has_dest = point;
+    if (point) memcpy(r->dest, goal.v, sizeof r->dest);
     r->tolerance = tol;
     return 1;
 }
@@ -924,7 +1042,7 @@ static int l_move_to(lua_State *L)
     f = check_flags(L, 4, "move_to");
     ai = self_ai(L, "move_to", &h);
     if (!ai || !(r = park(ai, h))) { lua_pushboolean(L, 0); return 1; }
-    lua_pushboolean(L, issue_move(ai, r, dest, tol, f));
+    lua_pushboolean(L, issue_move(ai, r, arg_v(dest), tol, f, SH_AI_ARRIVAL_STOP));
     return 1;
 }
 
@@ -950,7 +1068,28 @@ static int l_move_to_entity(lua_State *L)
         gap = tol > AI_FOLLOW_MIN ? tol : AI_FOLLOW_MIN;
         if (dx * dx + dy * dy + dz * dz < gap * gap) { lua_pushboolean(L, 1); return 1; }
     }
-    lua_pushboolean(L, issue_move(ai, r, to, tol, f));
+    lua_pushboolean(L, issue_move(ai, r, arg_v(to), tol, f, SH_AI_ARRIVAL_STOP));
+    return 1;
+}
+
+/* ai:pursue(entity, [radius], [flags], [stop_at_target]) follows the engine's moving entity goal. */
+static int l_pursue(lua_State *L)
+{
+    sh_script_handle h = 0;
+    void *ai, *target;
+    ai_rec *r;
+    float tol;
+    move_flags flags;
+    sh_script_check_entity(L, 2, "pursue");
+    tol = opt_tolerance(L, 3, "pursue");
+    flags = check_flags(L, 4, "pursue");
+    if (!lua_isnoneornil(L, 5) && lua_type(L, 5) != LUA_TBOOLEAN)
+        sh_script_refuse(L, "\"pursue\" needs true or false for stop_at_target");
+    ai = self_ai(L, "pursue", &h);
+    target = other_entity(L, 2, "pursue");
+    if (!ai || !target || !(r = park(ai, h))) { lua_pushboolean(L, 0); return 1; }
+    lua_pushboolean(L, issue_move(ai, r, arg_e(target), tol, flags,
+                                 lua_toboolean(L, 5) ? SH_AI_ARRIVAL_STOP : SH_AI_ARRIVAL_CONTINUE));
     return 1;
 }
 
@@ -964,6 +1103,7 @@ static int l_stop(lua_State *L)
     if (!ai || !(r = park(ai, h))) return 0;
     a[0] = arg_i(0); a[1] = arg_i(SH_AI_IDLETURN_COMBAT);
     if (run(ai, SH_AI_EV_IDLE, a, 2, NULL)) {
+        end_pursuit(ai, r);
         r->move.state = SH_AI_MOVE_NONE;
         r->has_dest = 0;
     }
@@ -988,6 +1128,7 @@ static int l_move_done(lua_State *L)
             if (dx * dx + dy * dy <= (double)r->tolerance * r->tolerance) st = r->move.state = SH_AI_MOVE_ARRIVED;
         }
     }
+    if (st != SH_AI_MOVE_RUNNING) end_pursuit(ai, r);
     lua_pushboolean(L, st != SH_AI_MOVE_RUNNING);
     lua_pushboolean(L, st == SH_AI_MOVE_FAILED);
     return 2;
@@ -1056,6 +1197,7 @@ static int l_face(lua_State *L)
         a[0] = arg_v(at); a[1] = arg_i(SH_AI_ARRIVAL_STOP); a[2] = arg_f(travel > 0.1 ? (float)travel : 0.1f);
         a[3] = arg_b(1); a[4] = arg_v(dir);
         if (run(ai, SH_AI_EV_MOVE_TO_POINT, a, 5, NULL)) {
+            end_pursuit(ai, r);
             sh_ai_move_issue(&r->move, g_engine->frame());
             r->has_dest = 1;
             memcpy(r->dest, at, sizeof at);
@@ -1231,20 +1373,88 @@ static int path_of(void *ai, sh_script_handle h, const float goal[3], int n, flo
     return g_engine->path(ai, goal, key, len);
 }
 
-/* ai:path_length(pos) -> inches along the navigation; nil, "searching" while the engine finds the path, nil,
- * "no path" when it cannot get there. */
+static unsigned g_path_sequence;
+#define AI_NATIVE_PATH_RESULTS 32
+
+/* The native queue consumes a completed result. Predicates asking for the same path in one
+ * game update share that observation; concurrent destinations keep distinct native requests. */
+static ai_path_read *read_script_path(void *ai, sh_script_handle actor, sh_script_handle target,
+                                      const float goal[3], int with_points)
+{
+    ai_rec *r = rec_of(actor);
+    ai_path_read *q = NULL, *oldest = NULL;
+    uint32_t frame = g_engine->frame();
+    if (!r) return NULL;
+    if (r->path_frame != frame) {
+        r->path_frame = frame;
+        r->path_round++;
+        for (int i = 0; i < r->path_count; i++) {
+            free(r->paths[i].points);
+            r->paths[i].points = NULL;
+        }
+    }
+    for (int i = 0; i < r->path_count; i++) {
+        ai_path_read *item = &r->paths[i];
+        int same_goal = goal[0] == item->goal[0] && goal[1] == item->goal[1] && goal[2] == item->goal[2];
+        if (item->with_points == with_points && item->target == target && (target || same_goal)) {
+            if (item->round == r->path_round && same_goal) return item;
+            q = item;
+            break;
+        }
+        if (!oldest || r->path_round - item->round > r->path_round - oldest->round) oldest = item;
+    }
+    if (!q) {
+        /* Keep active queries across updates, including when their evaluation order changes.
+         * DOOM can retain 32 completed jobs for callers that poll less often. */
+        if (oldest && r->path_round - oldest->round > 1 && (oldest->status != 1 || r->path_count >= AI_NATIVE_PATH_RESULTS)) {
+            q = oldest;
+        } else {
+            if (r->path_count == SH_AI_KEY_SPAN) return NULL;
+            if (r->path_count == r->path_cap) {
+                int cap = r->path_cap ? r->path_cap * 2 : 4;
+                ai_path_read *rows = (ai_path_read *)realloc(r->paths, cap * sizeof *rows);
+                if (!rows) return NULL;
+                r->paths = rows;
+                r->path_cap = cap;
+            }
+            q = &r->paths[r->path_count++];
+            memset(q, 0, sizeof *q);
+        }
+        q->target = target;
+        q->with_points = with_points;
+        q->key = (int)(0x60000000u | (++g_path_sequence & 0x0fffffffu));
+    }
+    free(q->points);
+    q->points = NULL;
+    q->count = 0;
+    q->length = 0;
+    q->round = r->path_round;
+    memcpy(q->goal, goal, sizeof q->goal);
+    q->status = with_points ? g_engine->path_points(ai, goal, q->key, &q->points, &q->count, &q->length)
+                            : g_engine->path(ai, goal, q->key, &q->length);
+    return q;
+}
+
+static sh_script_handle path_target(lua_State *L, const char *call)
+{
+    return is_entity(L, 2) ? (sh_script_handle)sh_script_check_entity(L, 2, call) : 0;
+}
+
+/* ai:path_length(pos) -> inches along the route, or nil and the native query status. */
 static int l_path_length(lua_State *L)
 {
     sh_script_handle h = 0;
-    float goal[3], len = 0;
+    float goal[3];
+    ai_path_read *q;
     void *ai;
     int st;
     check_target(L, 2, "path_length");
     ai = self_ai(L, "path_length", &h);
     if (!ai) { lua_pushnil(L); return 1; }
     if (!target_point(L, 2, "path_length", goal, NULL)) { lua_pushnil(L); lua_pushstring(L, "no path"); return 2; }
-    st = path_of(ai, h, goal, 0, &len);
-    if (st == 0) { lua_pushnumber(L, len); return 1; }
+    q = read_script_path(ai, h, path_target(L, "path_length"), goal, 0);
+    st = q ? q->status : -1;
+    if (st == 0) { lua_pushnumber(L, q->length); return 1; }
     lua_pushnil(L);
     lua_pushstring(L, st == 1 ? "searching" : st == 2 ? "no path" : "unavailable");
     return 2;
@@ -1254,14 +1464,16 @@ static int l_path_length(lua_State *L)
 static int l_can_reach(lua_State *L)
 {
     sh_script_handle h = 0;
-    float goal[3], len = 0;
+    float goal[3];
+    ai_path_read *q;
     void *ai;
     int st;
     check_target(L, 2, "can_reach");
     ai = self_ai(L, "can_reach", &h);
     if (!ai) { lua_pushnil(L); return 1; }
     if (!target_point(L, 2, "can_reach", goal, NULL)) { lua_pushboolean(L, 0); return 1; }
-    st = path_of(ai, h, goal, 0, &len);
+    q = read_script_path(ai, h, path_target(L, "can_reach"), goal, 0);
+    st = q ? q->status : -1;
     if (st == 1) lua_pushnil(L);
     else lua_pushboolean(L, st == 0);
     return 1;
@@ -1906,9 +2118,10 @@ void sh_wound_count_gone(uint32_t id)
     ReleaseSRWLockExclusive(&g_wcount_lock);
 }
 
-static void wound_owner_gone(sh_script_handle h, uint32_t spawn_id)
+static void actor_gone(sh_script_handle h, uint32_t spawn_id)
 {
-    (void)h;
+    for (int i = 0; i < g_nrecs; i++)
+        if (g_recs[i]->handle == h) { drop_actor_paths(g_recs[i]); break; }
 #ifndef SH_SCRIPT_PURE
     if (spawn_id != SH_SCRIPT_SPAWN_ID_NONE) wound_meshes_remove(spawn_id);
 #endif
@@ -2468,6 +2681,7 @@ static int l_hold(lua_State *L)
         ran = run(ai, SH_AI_EV_IDLE, a, 2, NULL);
     }
     if (ran) {
+        end_pursuit(ai, r);
         r->move.state = SH_AI_MOVE_NONE;
         r->has_dest = 0;
         r->facing = 0;
@@ -2944,29 +3158,26 @@ static void push_points(lua_State *L, float (*p)[3], int n)
 static int l_path_points(lua_State *L)
 {
     sh_script_handle h = 0;
-    float goal[3], length = 0, (*pts)[3] = NULL, (*held)[3];
+    float goal[3];
     void *ai;
-    ai_rec *r;
-    int st, n = 0, with_length = lua_toboolean(L, 3);
+    ai_path_read *q;
+    int st, with_length = lua_toboolean(L, 3);
     check_target(L, 2, "path_points");
     NEED_OP(L, path_points, "path_points");
     ai = self_ai(L, "path_points", &h);
-    if (!ai || !(r = rec_of(h))) { lua_pushnil(L); return 1; }
+    if (!ai) { lua_pushnil(L); return 1; }
     if (!target_point(L, 2, "path_points", goal, NULL)) { lua_pushnil(L); lua_pushstring(L, "no path"); return 2; }
-    st = g_engine->path_points(ai, goal, 0x50000000 | ((rec_index(r) & 0xFFF) << 14), &pts, &n, &length);
+    q = read_script_path(ai, h, path_target(L, "path_points"), goal, 1);
+    st = q ? q->status : -1;
     if (st == 0) {
-        /* every point of the path, held by the collector while they are pushed */
-        held = (float (*)[3])lua_newuserdatauv(L, (size_t)(n > 0 ? n : 1) * sizeof *held, 0);
-        if (n > 0 && pts) memcpy(held, pts, (size_t)n * sizeof *held);
-        free(pts);
-        if (n <= 0) { memcpy(held[0], goal, sizeof held[0]); n = 1; }   /* already there: the goal alone */
-        push_points(L, held, n);
+        float length = q->length;
+        if (q->count > 0) push_points(L, q->points, q->count);
+        else push_points(L, &goal, 1);   /* already there */
         if (with_length) { lua_pushnumber(L, length); return 2; }
         return 1;
     }
-    free(pts);
     lua_pushnil(L);
-    lua_pushstring(L, st == 1 ? "searching" : st == 2 || st == 0 ? "no path" : "unavailable");
+    lua_pushstring(L, st == 1 ? "searching" : st == 2 ? "no path" : "unavailable");
     return 2;
 }
 
@@ -3349,6 +3560,7 @@ static int anim_send(void *ai, ai_rec *r, const char *dest, const char *via, int
         ok = run(ai, SH_AI_EV_CHANGE_ANIM_STATE, a, 3, NULL);
     }
     mode = sh_ai_order_interrupt(kind);
+    if (ok && r) end_pursuit(ai, r);
     if (ok && r && r->eternal_interrupts && mode >= 0 && g_engine->interrupt_blend)
         (void)g_engine->interrupt_blend(ai, mode);
     return ok;
@@ -3723,13 +3935,14 @@ static int l_snapmap_order(lua_State *L)
 
 /* ai:release(): hands the demon back to its own behaviour (the park, above) until the script's next command,
  * dropping any held order, forced via, facing or move. */
-static int release_body(void *ai, sh_script_handle h)
+static int release_body(void *ai, sh_script_handle h, int scripted_combat)
 {
     int i;
-    if (g_engine->release(ai) != 1) return 0;
+    if (g_engine->release(ai, scripted_combat) != 1) return 0;
     for (i = 0; i < g_nrecs; i++) {
         ai_rec *r = g_recs[i];
         if (r->handle != h) continue;
+        end_pursuit(ai, r);
         anim_wait_drop(r);
         r->walk = 0;
         r->facing = 0;
@@ -3747,7 +3960,18 @@ static int l_release(lua_State *L)
     void *ai;
     NEED_OP(L, release, "release");
     ai = self_ai(L, "release", &h);
-    lua_pushboolean(L, ai && release_body(ai, h));
+    lua_pushboolean(L, ai && release_body(ai, h, lua_isboolean(L, 2) && lua_toboolean(L, 2)));
+    return 1;
+}
+
+/* Request script ownership. Initial body commands can be overwritten while native idle is still leaving. */
+static int l_reclaim(lua_State *L)
+{
+    sh_script_handle h = 0;
+    void *ai = self_ai(L, "reclaim", &h);
+    int scripted_combat = lua_isboolean(L, 2) && lua_toboolean(L, 2);
+    lua_pushboolean(L, ai && g_engine && g_engine->body_status && park_body(ai, h, scripted_combat) &&
+                       g_engine->body_status(ai, SH_AI_BODY_SCRIPT_READY) == 1);
     return 1;
 }
 
@@ -3759,7 +3983,7 @@ static int l_native_follow_path(lua_State *L)
     ai_rec *r;
     void *ai;
     int pending;
-    if (!g_engine || !g_engine->snapmap_order || !g_engine->native_body_busy || !g_engine->release) {
+    if (!g_engine || !g_engine->snapmap_order || !g_engine->body_status || !g_engine->release) {
         lua_pushboolean(L, 0);
         return 1;
     }
@@ -3769,9 +3993,9 @@ static int l_native_follow_path(lua_State *L)
     r->empty_order = pending == 0 && g_engine->frame != NULL;
     if (r->empty_order) r->order_frame = g_engine->frame();
     if (pending == 1 && o.kind == SH_AI_ORDER_PATH) {
-        if (!r->native_path && g_engine->native_body_busy(ai, 1) >= 0)
-            r->native_path = release_body(ai, h);
-    } else if (r->native_path && pending >= 0 && g_engine->native_body_busy(ai, 0) == 0) {
+        if (!r->native_path && g_engine->body_status(ai, SH_AI_BODY_PATH) >= 0)
+            r->native_path = release_body(ai, h, 0);
+    } else if (r->native_path && pending >= 0 && g_engine->body_status(ai, SH_AI_BODY_BUSY) == 0) {
         r->native_path = 0;
     }
     lua_pushboolean(L, r->native_path);
@@ -3853,6 +4077,7 @@ static int l_off_limits(lua_State *L)
 
 static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "move_to", l_move_to },           { "move_to_entity", l_move_to_entity },
+    { "pursue", l_pursue },
     { "stop", l_stop },                 { "move_done", l_move_done },
     { "face", l_face },                 { "aim_at", l_aim_at },
     { "set_enemy", l_set_enemy },       { "enemy", l_enemy },
@@ -3887,7 +4112,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "fk_reference_pose", l_fk_reference_pose }, { "eternal_interrupts", l_eternal_interrupts },
     { "wound_damage_counts", l_wound_damage_counts },
     { "snapmap_order", l_snapmap_order }, { "native_follow_path", l_native_follow_path },
-    { "release", l_release },           { "anim_variable", l_anim_variable },
+    { "release", l_release },           { "reclaim", l_reclaim }, { "anim_variable", l_anim_variable },
     { "relations", l_relations },       { "off_limits", l_off_limits },
 };
 
@@ -3906,7 +4131,8 @@ int sh_script_ai_register(void)
     sh_script_api_on_spawn(sh_script_ai_spawned);
     sh_script_api_on_frame(force_via_step);
     sh_script_api_on_frame(anim_wait_step);
-    sh_script_handles_on_gone(wound_owner_gone);
+    sh_script_api_add_closer(end_pursuits);
+    sh_script_handles_on_gone(actor_gone);
     for (i = 0; i < (int)(sizeof k_calls / sizeof k_calls[0]); i++)
         n += sh_script_api_add(SH_SCRIPT_API_METHOD, k_calls[i].name, k_calls[i].fn);
     n += sh_script_api_add(SH_SCRIPT_API_GLOBAL, "destructible", l_destructible);
@@ -4590,9 +4816,10 @@ static int parked_slot_of_fsm(void *fsm)
 {
     int i, used = (int)g_parked_used;
     for (i = 0; i < used; i++) {
-        void *ai = g_parked[i].ai;
-        if (!ai || g_parked[i].released || spawn_id_of(ai) != (uint32_t)g_parked[i].spawn_id) continue;
-        if (alert_fsm_of(ai) == fsm) return i;
+        void *ai;
+        if (g_parked[i].released) continue;
+        ai = record_entity(g_parked[i].ai, (uint32_t)g_parked[i].spawn_id);
+        if (ai && alert_fsm_of(ai) == fsm) return i;
     }
     return -1;
 }
@@ -4681,13 +4908,14 @@ static void dying_note(void *fsm, const char *how, uint8_t taken)
 {
     int i, used = (int)g_parked_used;
     for (i = 0; i < used; i++) {
-        void *ai = g_parked[i].ai;
+        uint32_t id = (uint32_t)g_parked[i].spawn_id;
+        void *ai = record_entity(g_parked[i].ai, id);
         char state[96], ctl[96];
         int drives;
-        if (!ai || spawn_id_of(ai) != (uint32_t)g_parked[i].spawn_id || alert_fsm_of(ai) != fsm) continue;
+        if (!ai || alert_fsm_of(ai) != fsm) continue;
         fsm_state_name(fsm, state, sizeof state);
         fsm_state_name(controlling_fsm_of(ai), ctl, sizeof ctl);
-        drives = sh_ai_park_drives(&g_parked[i], spawn_id_of(ai));
+        drives = sh_ai_park_drives(&g_parked[i], id);
         ai_log("SCRIPTS: dying request on a parked demon (slot %d, released %d): %s, taken %d, alert cycle %d, "
                "state %s, controlling %s, running script %d", i, (int)g_parked[i].released, how, (int)taken,
                alert_cycle_of(ai), state, ctl,
@@ -4724,14 +4952,15 @@ static int has_native_path(const uint8_t *alert)
 }
 
 /* The stock path state returns to ac_default or yields to a native interaction, pain or death. */
-static int e_native_body_busy(void *ai, int check_path)
+static int e_body_status(void *ai, enum sh_ai_body_query query)
 {
     const uint8_t *fsm = (const uint8_t *)alert_fsm_of(ai);
     int busy = -1;
     if (!fsm || !fsm_rf_ready()) return -1;
     __try {
         const char *state = state_name_of(*(const uint8_t *const *)(fsm + g_fsm_o_cur), g_fsm_o_data, g_fsm_o_state);
-        if (state && (!check_path || has_native_path(fsm)))
+        if (state && query == SH_AI_BODY_SCRIPT_READY) busy = !strcmp(state, "ExecuteDoomscript");
+        else if (state && (query != SH_AI_BODY_PATH || has_native_path(fsm)))
             busy = strcmp(state, "ac_default") && strcmp(state, "behaviors") && strcmp(state, "ExecuteDoomscript");
     } __except (av_only(GetExceptionCode())) { busy = -1; }
     return busy;
@@ -4813,12 +5042,13 @@ static void pain_take_step(void)
     int i, used = (int)g_parked_used, now = 0;
     if (!g_fsm_request_orig || !gm_clock(&now)) return;
     for (i = 0; i < used; i++) {
-        void *ai = g_parked[i].ai;
+        void *ai;
         LONG until = g_parked[i].pain_until;
         float health = 0.0f;
         int playing = SH_COMBAT_PAIN_NONE, done = 1;
         if (!until) continue;
-        if (ai && spawn_id_of(ai) == (uint32_t)g_parked[i].spawn_id) {
+        ai = record_entity(g_parked[i].ai, (uint32_t)g_parked[i].spawn_id);
+        if (ai) {
             __try {
                 health = *(const float *)((const uint8_t *)ai + AI_HEALTH_CUR);
                 playing = *(const int *)((const uint8_t *)ai + SH_COMBAT_AI_PAIN);
@@ -4874,6 +5104,17 @@ static struct {
     const void     *key;
     const char     *empty;
 } g_ps;
+
+static int e_replace_action_entity(void *ai, void *expected, void *next)
+{
+    void *slot = (uint8_t *)ai + SH_AI_OFF_ACTION_ENTITY;
+    if (!g_ptr_get || !g_ps.handle_set) return -1;
+    __try {
+        if (g_ptr_get(slot) != expected) return 0;
+        if (expected != next) g_ps.handle_set(slot, next);
+        return 1;
+    } __except (av_only(GetExceptionCode())) { return -1; }
+}
 
 static void ps_resolve(const uint8_t *s)
 {
@@ -5023,21 +5264,20 @@ static int e_request_pain(void *ai, int reaction, float damage, char *why, size_
     return 1;
 }
 
-static int e_park(void *ai)
+static int mark_scripted_combat(void *ai);
+
+static int e_park(void *ai, int scripted_combat)
 {
     uint32_t id = spawn_id_of(ai);
-    int i, free_slot = -1, used = (int)g_parked_used;
+    int free_slot, used = (int)g_parked_used;
     if (id == SH_SCRIPT_SPAWN_ID_NONE || !commit_detour()) return 0;
-    for (i = 0; i < used; i++) {
-        void *p = g_parked[i].ai;
-        if (p == ai && (uint32_t)g_parked[i].spawn_id == id) {
-            sh_ai_park_take(&g_parked[i]);   /* a command after ai:release() takes the demon back */
-            return 1;
-        }
-        if (free_slot < 0 && (!p || spawn_id_of(p) != (uint32_t)g_parked[i].spawn_id)) free_slot = i;
-    }
-    if (free_slot < 0 && used < AI_PARKED_MAX) free_slot = used;
+    if (scripted_combat && !mark_scripted_combat(ai)) return 0;
+    free_slot = sh_ai_park_slot_for(g_parked, used, AI_PARKED_MAX, ai, id);
     if (free_slot < 0) return 0;   /* every entity the game can hold is a parked demon */
+    if (g_parked[free_slot].ai == ai && (uint32_t)g_parked[free_slot].spawn_id == id) {
+        sh_ai_park_take(&g_parked[free_slot]);
+        return 1;
+    }
     g_parked[free_slot].ai = NULL;
     InterlockedExchange(&g_parked[free_slot].pain_until, 0);
     InterlockedExchange(&g_parked[free_slot].released, 0);
@@ -5048,11 +5288,25 @@ static int e_park(void *ai)
     return 1;
 }
 
+static const char *atom_of(const char *text);
+
+/* Direct inline actors can bind the same script without inheriting its declared idle/search marker. */
+static int mark_scripted_combat(void *ai)
+{
+    const char *atom = atom_of(SH_SCRIPTED_COMBAT_KEY);
+    uint8_t *memory = (uint8_t *)ai + SH_AI_OFF_TEMP_MEMORY;
+    __try {
+        return sh_ai_ensure_scripted_combat(memory, atom, g_ps.bb_set);
+    } __except (av_only(GetExceptionCode())) { return 0; }
+}
+
 /* ai:release(): the slot stays the demon's (the next park finds it) and is
  * marked released; a pain the park had opened for is the engine's now. */
-static int e_release(void *ai)
+static int e_release(void *ai, int scripted_combat)
 {
-    int slot = parked_slot(ai);
+    int slot;
+    if (scripted_combat && !mark_scripted_combat(ai)) return -1;
+    slot = parked_slot(ai);
     if (slot >= 0) sh_ai_park_release(&g_parked[slot]);
     return 1;
 }
@@ -5060,7 +5314,6 @@ static int e_release(void *ai)
 /* The anim web's set-variable-by-name (SH_AI_SIG_WEB_SCALAR_SET). */
 typedef uint8_t (*ai_web_scalar_set_fn)(void *animator, const char *const *atom, float value);
 static ai_web_scalar_set_fn g_web_scalar_set;
-static const char *atom_of(const char *text);
 
 static int e_anim_variable(void *ai, const char *name, float value)
 {
@@ -5649,7 +5902,7 @@ static int e_rear_footsteps(void *ai, const char *front, const char *rear)
     for (i = 0; i < used; i++) {
         void *p = g_foot[i].ai;
         if (p == ai && (uint32_t)g_foot[i].spawn_id == id) { slot = i; break; }
-        if (slot < 0 && (!p || spawn_id_of(p) != (uint32_t)g_foot[i].spawn_id)) slot = i;
+        if (slot < 0 && !record_entity(p, (uint32_t)g_foot[i].spawn_id)) slot = i;
     }
     if (i == used && slot < 0 && used < AI_PARKED_MAX) slot = used;
     if (slot < 0) return -1;
@@ -5955,7 +6208,7 @@ static void rig_entry_detour(void *runtime, void *ctx, char align)
             const uint8_t *pose;
             sh_ai_leg_pose p;
             if (g_legs[i].runtime != runtime) continue;
-            ai = g_legs[i].ai;
+            ai = record_entity(g_legs[i].ai, (uint32_t)g_legs[i].spawn_id);
             if (!ai || !ctx || rig_runtime_of(ai) != runtime) break;
             pose = *(const uint8_t * const *)((const uint8_t *)ctx + SH_AI_RIG_CTX_POSE);
             if (!pose) break;
@@ -5980,7 +6233,7 @@ static void posed_legs_step(void)
     for (i = 0; i < used; i++) {
         void *ai = g_legs[i].ai;
         if (!ai) continue;
-        if (spawn_id_of(ai) != (uint32_t)g_legs[i].spawn_id || rig_runtime_of(ai) != g_legs[i].runtime) {
+        if (!record_entity(ai, (uint32_t)g_legs[i].spawn_id) || rig_runtime_of(ai) != g_legs[i].runtime) {
             InterlockedExchangePointer((PVOID volatile *)&g_legs[i].runtime, NULL);
             InterlockedExchangePointer((PVOID volatile *)&g_legs[i].ai, NULL);
         }
@@ -6002,7 +6255,7 @@ static int e_posed_legs(void *ai)
     for (i = 0; i < used; i++) {
         void *p = g_legs[i].ai;
         if (p == ai && (uint32_t)g_legs[i].spawn_id == id) { slot = i; break; }
-        if (slot < 0 && (!p || spawn_id_of(p) != (uint32_t)g_legs[i].spawn_id)) slot = i;
+        if (slot < 0 && !record_entity(p, (uint32_t)g_legs[i].spawn_id)) slot = i;
     }
     if (i == used && slot < 0 && used < AI_PARKED_MAX) slot = used;
     if (slot < 0) return -1;
@@ -6086,7 +6339,7 @@ static int e_fk_reference_pose(void *ai)
     for (i = 0; i < used; i++) {
         void *p = g_fkref[i].ai;
         if (p == ai && (uint32_t)g_fkref[i].spawn_id == id) return 1;
-        if (slot < 0 && (!p || spawn_id_of(p) != (uint32_t)g_fkref[i].spawn_id)) slot = i;
+        if (slot < 0 && !record_entity(p, (uint32_t)g_fkref[i].spawn_id)) slot = i;
     }
     if (slot < 0 && used < AI_PARKED_MAX) slot = used;
     if (slot < 0) return -1;
@@ -6334,7 +6587,7 @@ static const sh_script_ai_engine k_engine = {
     e_step_state, e_step_interrupt, e_gore_init, e_wound_hides, e_held, e_posed_legs, e_fk_reference_pose,
     e_interrupt_blend, e_destructible, e_weapon_use, e_wound_damage_counts, e_snapmap_order,
     e_release, e_anim_variable, e_relations, e_off_limits, e_world_clear, e_world_ground, e_request_pain, e_wound_effect,
-    e_native_body_busy, e_reset_motion_correction, e_on_ground
+    e_body_status, e_reset_motion_correction, e_on_ground, e_replace_action_entity
 };
 /* The table the calls use: k_engine less the calls whose game parts this executable lacks (they then refuse). */
 static sh_script_ai_engine g_live;

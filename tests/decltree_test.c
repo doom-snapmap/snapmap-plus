@@ -363,11 +363,112 @@ static int clips_of(const char *text, int *aliases)
     return c;
 }
 
+static void test_scripted_enemy_route(void)
+{
+    static const char modded[] = "{ edit = { subGraphs = { subGraph = { object = { object = { name = \"fsm_behaviors\"; } } "
+        "nodes = { node = { object = { object = { name = \"behaviors_default\"; } } } } links = { behaviors_default = { "
+        "link = { object = { object = { name = \"other_mod_route\"; orderIndex = 73; } } } } } } } } }";
+    size_t len;
+    char *out = sh_dt_scripted_enemy_route(0, modded, sizeof modded - 1, &len);
+    CHECK(out && strstr(out, "\"other_mod_route\"") && strstr(out, "orderIndex = 74;"));
+    CHECK(out && strstr(out, "childFSMName = \"behavior_shared\";") && strstr(out, "layer = \"common\";"));
+    CHECK(out && strstr(out, "\"idAICondition_Shared_HasTempMemoryKey\"") && strstr(out, "keyName = \"smp_scripted_combat\";") &&
+          strstr(out, "keyValue = 1;") && strstr(out, "acceptGreaterThan = false;"));
+    CHECK(out && !sh_dt_scripted_enemy_route(0, out, len, NULL));
+    CHECK(!sh_dt_scripted_enemy_route(0, "{}", 2, NULL));
+    free(out);
+    {
+        static const char alert[] = "{ edit = { subGraphs = { subGraph = { object = { object = { name = \"FSM_alertCycle\"; } } "
+            "nodes = { node = { object = { object = { name = \"behaviors\"; } } } node = { object = { object = { name = \"ac_default\"; } } } } "
+            "links = { behaviors = { link = { object = { object = { name = \"authored_order\"; orderIndex = 74; } } } } } } } } }";
+        out = sh_dt_scripted_enemy_route(1, alert, sizeof alert - 1, &len);
+        CHECK(out && strstr(out, "\"authored_order\"") && strstr(out, "orderIndex = 75;"));
+        CHECK(out && strstr(out, "endNode = \"ac_default\";") && strstr(out, "startNode = \"behaviors\";"));
+        CHECK(out && strstr(out, "\"Shared_ExecutingScript\"") && strstr(out, "keyName = \"smp_scripted_combat\";"));
+        CHECK(out && !sh_dt_scripted_enemy_route(1, out, len, NULL));
+        CHECK(!sh_dt_scripted_enemy_route(1, modded, sizeof modded - 1, NULL));
+        free(out);
+    }
+}
+
+static void test_enemy_wake_from_game(void)
+{
+    size_t len = 0, changed_len = 0, n;
+    char *stock = stock_text("generated/decls/aifsmmanager/states/alertcycle.decl", &len);
+    char *out = stock ? sh_dt_scripted_enemy_route(1, stock, len, &changed_len) : NULL;
+    sh_dt *tree = out ? sh_dt_parse(out, changed_len, NULL, 0) : NULL;
+    sh_dt_node *graph, *from, *wake;
+    CHECK(out && !sh_dt_scripted_enemy_route(1, out, changed_len, NULL));
+    if (tree && dt_named_member(sh_dt_at(tree->root, "edit/subGraphs"), "subGraph", "FSM_alertCycle", &graph) && graph &&
+        (from = sh_dt_at(graph, "links/behaviors")) && dt_named_member(from, "link", "smp_reclaim_scripted_body", &wake) && wake) {
+        char *original;
+        CHECK(wake == from->kids[from->nkids - 1]);
+        CHECK(strstr(out, "\"Shared_ExecutingScript\";") && strstr(out, "keyName = \"smp_scripted_combat\";"));
+        CHECK(strstr(out, "keyValue = 1;") && strstr(out, "acceptGreaterThan = false;"));
+        CHECK(strstr(out, "orderIndex = 16;"));
+        sh_dt_remove_child(from, from->nkids - 1);
+        original = sh_dt_text(tree, &n);
+        CHECK(original && same_tokens(stock, len, original, n));
+        free(original);
+    } else CHECK(0);
+    sh_dt_free(tree);
+    free(out);
+    free(stock);
+}
+
+static void test_enemy_fallback_from_game(void)
+{
+    size_t len = 0, changed_len = 0;
+    char *stock = stock_text("generated/decls/aifsmmanager/states/behaviors.decl", &len);
+    char *out = stock ? sh_dt_scripted_enemy_route(0, stock, len, &changed_len) : NULL;
+    sh_dt *tree = out ? sh_dt_parse(out, changed_len, NULL, 0) : NULL;
+    sh_dt_node *graph = NULL, *combat = NULL;
+    CHECK(out && strstr(out, "orderIndex = 19;") && strstr(out, "smp_enter_scripted_behaviors"));
+    CHECK(out && !sh_dt_scripted_enemy_route(0, out, changed_len, NULL));
+    if (tree && dt_named_member(sh_dt_at(tree->root, "edit/subGraphs"), "subGraph", "fsm_behaviors", &graph) && graph) {
+        sh_dt_node *nodes = sh_dt_child(graph, "nodes"), *links = sh_dt_child(graph, "links");
+        sh_dt_node *from = sh_dt_child(links, "behaviors_default");
+        char *original;
+        size_t n;
+        /* Removing the new guarded route must recover every effective stock field and transition. */
+        sh_dt_remove_child(nodes, nodes->nkids - 1);
+        sh_dt_remove_child(from, from->nkids - 1);
+        sh_dt_remove_child(links, links->nkids - 1);
+        original = sh_dt_text(tree, &n);
+        CHECK(original && texts_equal(stock, len, original, n));
+        free(original);
+    } else CHECK(0);
+    sh_dt_free(tree);
+    free(out);
+    free(stock);
+    stock = stock_text("generated/decls/aifsmmanager/states/behaviors_combat.decl", &len);
+    tree = stock ? sh_dt_parse(stock, len, NULL, 0) : NULL;
+    if (tree && dt_named_member(sh_dt_at(tree->root, "edit/subGraphs"), "subGraph", "behaviors_combat", &combat) && combat) {
+        sh_dt_node *nodes = sh_dt_child(combat, "nodes");
+        int i, j, active = 0;
+        for (i = 0; i < nodes->nkids; i++) {
+            sh_dt_node *node = nodes->kids[i], *layers = sh_dt_child(node, "layers");
+            for (j = 0; layers && j < layers->nkids; j++) {
+                sh_dt_node *layer = layers->kids[j], *type;
+                if (!layer->val || !dt_ieq(layer->val, layer->val_n, "\"common\"", 8)) continue;
+                type = sh_dt_child(sh_dt_at(node, "object/object/stateType"), "className");
+                CHECK(type && dt_ieq(type->val, type->val_n, "\"idAIState\"", 11));
+                active++;
+            }
+        }
+        CHECK(active == 1);
+    } else CHECK(0);
+    sh_dt_free(tree);
+    free(stock);
+}
+
 static void test_real(const char *const *mods, int nmods)
 {
     static const char *const requests[] = { R_CONDUCTOR, R_BODY, R_COOP, R_SPIDER, R_PISTOL, R_HANDS };
     int r, m, k, copies_seen = 0;
     printf("-- the game's texts of the files mods edit, and the real edited copies\n");
+    test_enemy_fallback_from_game();
+    test_enemy_wake_from_game();
     for (r = 0; r < (int)(sizeof requests / sizeof requests[0]); ++r) {
         size_t sl = 0;
         char *stock = stock_text(requests[r], &sl);
@@ -451,6 +552,7 @@ int main(int argc, char **argv)
     test_grammar();
     test_diff();
     test_apply();
+    test_scripted_enemy_route();
     if (doom) {
         sh_modstock_set_install(doom);
         sh_modstock_register();

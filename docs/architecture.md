@@ -2547,6 +2547,11 @@ Every argument is checked before the engine is touched, and every refusal is
 one plain sentence at the calling script line (it stops the mod's scripts for
 the map, as any error does).
 
+- **Body facing.** `entity:face_body(target, [fraction], [minimum_degrees])` turns toward an
+  entity or position in the body's own plane. Each call blends its forward direction by the
+  given fraction (0 to 1, default 0.1) and preserves its up axis, movement orders and animation.
+  The minimum angle defaults to zero. The call returns true when it applies an orientation.
+
 - **Calls.** `spawn(def, pos, [yaw])` (own entityDefs only; no count or rate
   of its own, only the engine's entity table, Bounds above), `players()`; `entity:position()`, `entity:set_position(v)`, `entity:yaw()`,
   `entity:set_yaw(deg)`, `entity:axis()` (forward, left, up), `entity:velocity()`,
@@ -2676,9 +2681,7 @@ is touched, and a removed demon answers nil.
   `setScriptAbort 0 0` and `setScriptAbortFlags 0 0` once, which keep a demon
   in combat at its commanded point. The script proxy (ai+0x2CDE0) forces the
   alert cycle back into `ExecuteDoomscript` (by its type, VK typeinfo
-  0x145CEDF30) when a command arrives while the demon is elsewhere. No decl
-  is edited and no layers config is named; a demon stays parked for the map
-  unless its script releases it.
+  0x145CEDF30) when a command arrives while the demon is elsewhere.
 - **The release.** `release()` hands a parked demon back to the game's own
   behaviour until the script's next command: its park slot is marked released
   (`sh_ai_park_release`; the pain the park had opened for is the engine's
@@ -2692,17 +2695,26 @@ is touched, and a removed demon answers nil.
   via waiting for its destination, a facing, a move), so nothing of the
   script's takes the demon back by itself. The next command parks it again
   (`sh_ai_park_take` clears the mark at every park) and the script proxy forces
-  the alert cycle back into `ExecuteDoomscript`. The Enemy SDK's brains call it
-  when the demon has lost its enemy, so a ported demon searches as DOOM 2016's
-  demons do.
+  the alert cycle back into `ExecuteDoomscript`. The Enemy SDK releases a demon
+  to search when it loses its enemy. On acquisition the SDK marks the actor for
+  scripted combat, including a directly placed actor that immediately sees an enemy.
+  The effective alert-cycle graph checks the native `Shared_ExecutingScript`
+  transition last in `behaviors` for marked actors, returning to `ac_default`
+  for the game's normal decision. Once DOOM enters `ExecuteDoomscript`,
+  `reclaim()` returns true and the brain can issue its first move or attack.
 - **Commands** are catalogue events (`SH_AI_EVENTS`) run on the demon at once
   through the entity calls' event helper, which checks each one's arguments
   against the game's event:
   `move_to(pos, [tolerance], [flags])` (`ssaction_SetWalkState` walking or
   running, then `ssaction_MoveToPoint`; `strafe` or `aim_while_moving` first
   aims at the enemy with `setFocus`), `move_to_entity(entity)` (the same to the
-  entity's position, given again when it has moved 32 inches; the engine's
-  move-to-entity overshoots), `stop()` (`ssaction_Idle`), `face(entity)`
+  entity's position, given again when it has moved 32 inches), and
+  `pursue(entity, [radius], [flags], [stop_at_target])` (`ssaction_MoveToEntity`).
+  Pursuit tracks the entity through the engine. It continues through the arrival radius
+  unless `stop_at_target` is true. A combat state may interrupt it for an attack.
+  The SDK supplies the action entity that DOOM checks while it follows the destination.
+  It preserves any existing SnapMap action entity and releases its own reference when the order ends.
+  Other commands include `stop()` (`ssaction_Idle`), `face(entity)`
   (`setFocus`), `face(pos, [{ travel = inches }])` (a zero-length
   `ssaction_MoveToPoint` with align; its tolerance is the arrival radius of
   the engine's turn-clip query, which for a turn in place rejects a clip whose
@@ -2985,6 +2997,15 @@ is touched, and a removed demon answers nil.
   The SDK calls it once per handoff. When the path ends, the next `think`
   samples a fresh position and keeps the encounter's defend position.
 - **The Enemy SDK's target rule.** `enemy_target` is DOOM 2016's
+  native relation filter. An imported actor driven by its own combat script uses
+  the `common` native layer and declares `smp_scripted_combat = 1` in
+  `aiEditable.tempMemoryData`. The provider appends a guarded route to the
+  effective `states/behaviors` graph after its existing choices. The route
+  enters the game's shared alert, patrol and search behavior. The common layer
+  also keeps SnapMap orders and leaves species-specific combat to the script.
+  A brain that yields with `ai:release(true)` applies the same marker to its
+  live actor. This includes direct placements with an inline definition.
+  The target filter follows
   `Shared_SocialRelationAvailable` on `relations()`: the condition's respect,
   emotion and awareness bands (by name; its constructor's defaults, VK
   0x141302930: every respect, every emotion, every awareness), playersOnly and
@@ -3085,6 +3106,9 @@ is touched, and a removed demon answers nil.
   true on support, false in the air, and nil while a different body controls the entity.
   `path_points(pos, true)` returns the waypoints and measured length together when the
   pending navigation query completes. `path_points(pos)` returns the waypoints alone.
+  Repeated reads of the same query share its answer for that game frame. Each
+  distinct destination has its own pending request. An entity target retains
+  its request as it moves. A vector requests that exact world position.
   The computed path is read by a detour of
   the path length the query calls with it (VK 0x14050EA60 / GL 0x14050D790,
   14-byte window, segments at +0x90), every point of it (the engine's segment

@@ -38,6 +38,8 @@ sh_dt_node *sh_dt_child(sh_dt_node *n, const char *key);
  * asks only whether the declaration exists; otherwise read supplies a parsed tree the caller owns. */
 typedef int (*sh_dt_enemy_read)(void *context, const char *type, const char *name, sh_dt **body);
 char *sh_dt_enemy_behavior(const char *salt, const char *entitydef, sh_dt_enemy_read read, void *context);
+/* Add the marked enemy's native search or return-to-script transition. NULL keeps the effective graph as supplied. */
+char *sh_dt_scripted_enemy_route(int wake_body, const char *text, size_t len, size_t *out_len);
 /* Read the placed entity and caption tag of a Toybox row. Each returned string is caller-owned. */
 void sh_dt_tile_fields(const char *text, size_t len, char **entity, char **tag);
 void sh_dt_remove_child(sh_dt_node *parent, int index);

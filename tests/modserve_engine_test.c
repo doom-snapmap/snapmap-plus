@@ -72,15 +72,27 @@ void sh_modhud_scene_play_begin(void) {}
 void sh_modscene_place_play_begin(void) {}
 int sh_modstock_exists(const char *request) { (void)request; return 0; }
 unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_len) { (void)name; if (out_len) *out_len = 0; return NULL; }
-static const char *fe_pending_default;
-int sh_overrides_repair_defaults(int (*visit)(void *, const char *), void *context, int *reads)
+static const char *fe_pending_default, *fe_pending_enemy_route;
+static int fe_repair_pending(const char **request, int (*visit)(void *, const char *), void *context, int *reads)
 {
-    if (!fe_pending_default) return 0;
-    if (visit(context, fe_pending_default)) {
-        fe_pending_default = NULL;
+    if (!*request) return 0;
+    if (visit(context, *request)) {
+        *request = NULL;
         (*reads)++;
     }
     return 1;
+}
+int sh_overrides_repair_defaults(int (*visit)(void *, const char *), void *context, int *reads)
+{
+    return fe_repair_pending(&fe_pending_default, visit, context, reads);
+}
+int sh_overrides_repair_enemy_route(int (*visit)(void *, const char *), void *context, int *reads)
+{
+    return fe_repair_pending(&fe_pending_enemy_route, visit, context, reads);
+}
+int sh_overrides_enemy_route_pending(const char *request)
+{
+    return request && fe_pending_enemy_route && !strcmp(request, fe_pending_enemy_route);
 }
 void *sh_prepare_detour_sig(const sig_result *sig, void *detour, size_t stolen) { (void)sig; (void)detour; (void)stolen; return NULL; }
 sh_patch_status sh_commit_detour(void *tramp) { (void)tramp; return (sh_patch_status)0; }
@@ -490,6 +502,18 @@ static void test_palette_repairs_early_default_without_mods(void)
     CHECK(unknown->loads == 1 && unknown->lifetime == 4 && !fe_pending_default);
     sh_modserve_palette_before_build();
     CHECK(unknown->loads == 1);
+    {
+        fe_res *graph = fe_add("states/behaviors", 4, 0);
+        fe_pending_enemy_route = "generated/decls/aifsmmanager/states/behaviors.decl";
+        me_reparse_early("play", 0);
+        CHECK(graph->loads == 1 && graph->lifetime == 4 && !fe_pending_enemy_route);
+        me_reparse_early("play", 0);
+        CHECK(graph->loads == 1);
+        graph = fe_add("states/alertcycle", 4, 0);
+        fe_pending_enemy_route = "generated/decls/aifsmmanager/states/alertcycle.decl";
+        me_reparse_early("play", 0);
+        CHECK(graph->loads == 1 && graph->lifetime == 4 && !fe_pending_enemy_route);
+    }
 }
 
 /* A refresh item of type "model" (a .bmodel) is a static model; a walk holding one begins a static-model reload

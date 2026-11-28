@@ -40,6 +40,8 @@ int sh_overrides_uninstall(void);
 /* Offer built-in decls the game may have parsed before the provider was installed.
  * A visitor returns 0 for a decl still waiting for its first load. */
 int sh_overrides_repair_defaults(int (*visit)(void *, const char *), void *context, int *reads);
+int sh_overrides_repair_enemy_route(int (*visit)(void *, const char *), void *context, int *reads);
+int sh_overrides_enemy_route_pending(const char *request);
 
 /* Runs the install's byte checks (the base idFile helper's prologue at its recorded RVA, the provider vtable
  * decoded from the constructor). Returns NULL when they hold, else the log line naming the failure. */

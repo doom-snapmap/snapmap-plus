@@ -1,8 +1,10 @@
 /* decl_tree.c -- see decl_tree.h. Pure C; no engine or filesystem dependency. */
 #include "../common/text.h"
 #include "decl_tree.h"
+#include "script/script_sdk.h"
 
 #include <stdarg.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1200,6 +1202,88 @@ static char *dt_decl_value(const sh_dt_node *field)
     if (!field || !field->val || field->val_n < 3 || field->val[0] != '"' ||
         field->val[field->val_n - 1] != '"') return NULL;
     return sh_textn(field->val + 1, field->val_n - 2);
+}
+
+static int dt_named_member(sh_dt_node *parent, const char *key, const char *name, sh_dt_node **found)
+{
+    int i;
+    *found = NULL;
+    if (!parent) return 0;
+    for (i = 0; i < parent->nkids; ++i) {
+        sh_dt_node *node = parent->kids[i];
+        const char *field;
+        size_t n;
+        if (!dt_key_is(node, key) || !dt_name_field(node, &field, &n) || !dt_ieq(field, n, name, strlen(name))) continue;
+        if (*found) return 0;
+        *found = node;
+    }
+    return 1;
+}
+
+#define DT_SCRIPTED_ENEMY_CONDITION \
+    "object = { requiredConditions = { num = 1; item[0] = { className = \"idAICondition_Shared_HasTempMemoryKey\"; " \
+    "object = { keyName = \"" SH_SCRIPTED_COMBAT_KEY "\"; keyValue = 1; acceptGreaterThan = false; } } } } "
+
+char *sh_dt_scripted_enemy_route(int wake_body, const char *text, size_t len, size_t *out_len)
+{
+    static const char search[] =
+        "{ node = { object = { className = \"idAIFSMGraphState\"; object = { name = \"smp_scripted_behaviors\"; "
+        "stateType = { className = \"idShared_ExecuteChildFSM\"; } childFSMName = \"behavior_shared\"; isDefault = false; } } "
+        "layers = { layer = \"common\"; } } "
+        "link = { object = { className = \"idAIFSMGraphTransition\"; object = { name = \"smp_enter_scripted_behaviors\"; "
+        "transitionType = { className = \"Shared_DefaultUse\"; " DT_SCRIPTED_ENEMY_CONDITION
+        "} transCode = \"TRANSCODE_NONE\"; transGroup = \"TRANSGROUP_STATE\"; "
+        "orderIndex = 0; } } startNode = \"behaviors_default\"; endNode = \"smp_scripted_behaviors\"; } }";
+    static const char wake[] =
+        "{ link = { object = { className = \"idAIFSMGraphTransition\"; object = { name = \"smp_reclaim_scripted_body\"; "
+        "transitionType = { className = \"Shared_ExecutingScript\"; " DT_SCRIPTED_ENEMY_CONDITION
+        "} transCode = \"TRANSCODE_NONE\"; transGroup = \"TRANSGROUP_STATE\"; orderIndex = 0; } } "
+        "startNode = \"behaviors\"; endNode = \"ac_default\"; } }";
+    sh_dt *tree = sh_dt_parse(text, len, NULL, 0), *patch = NULL;
+    sh_dt_node *graph, *nodes, *links, *from, *start, *end, *existing_edge, *node, *link;
+    const char *origin, *dest, *edge, *additions;
+    long last = -1;
+    char order[32], *out = NULL;
+    int i;
+    if (out_len) *out_len = 0;
+    if (!tree || !dt_named_member(sh_dt_at(tree->root, "edit/subGraphs"), "subGraph",
+                                  wake_body ? "FSM_alertCycle" : "fsm_behaviors", &graph) || !graph) goto done;
+    if (!wake_body) {
+        origin = "behaviors_default"; dest = "smp_scripted_behaviors"; edge = "smp_enter_scripted_behaviors"; additions = search;
+    } else {
+        origin = "behaviors"; dest = "ac_default"; edge = "smp_reclaim_scripted_body"; additions = wake;
+    }
+    nodes = sh_dt_child(graph, "nodes");
+    links = sh_dt_child(graph, "links");
+    from = sh_dt_child(links, origin);
+    if (!from || !dt_named_member(nodes, "node", origin, &start) || !start ||
+        !dt_named_member(nodes, "node", dest, &end) || !dt_named_member(from, "link", edge, &existing_edge)) goto done;
+    if (wake_body && !end) goto done;
+    for (i = 0; i < from->nkids; ++i) {
+        sh_dt_node *slot = from->kids[i], *priority;
+        long value;
+        if (slot == existing_edge || !dt_key_is(slot, "link")) continue;
+        priority = sh_dt_child(sh_dt_at(slot, "object/object"), "orderIndex");
+        value = 0;
+        if (priority && (!priority->val || !dt_int(priority->val, priority->val_n, &value))) goto done;
+        if (value > last) last = value;
+    }
+    if (last == LONG_MAX) goto done;
+    patch = sh_dt_parse(additions, strlen(additions), NULL, 0);
+    if (!patch) goto done;
+    node = sh_dt_child(patch->root, "node");
+    link = sh_dt_child(patch->root, "link");
+    _snprintf_s(order, sizeof order, _TRUNCATE, "%ld", last + 1);
+    if (!sh_dt_set_value(patch, sh_dt_child(sh_dt_at(link, "object/object"), "orderIndex"), order, strlen(order))) goto done;
+    if ((node && end && !dt_same(end, node, 1)) || (existing_edge && !dt_same(existing_edge, link, 1))) goto done;
+    if (end && existing_edge) goto done;
+    if ((!end && !sh_dt_copy_child(tree, nodes, node)) || (!existing_edge && !sh_dt_copy_child(tree, from, link)) ||
+        (node && !sh_dt_ensure_block(tree, links, dest))) goto done;
+    out = sh_dt_text(tree, out_len);
+done:
+    sh_dt_free(patch);
+    sh_dt_free(tree);
+    return out;
 }
 
 void sh_dt_tile_fields(const char *text, size_t len, char **entity, char **tag)
